@@ -259,3 +259,18 @@ Phase 15: Single Binary Assembly completed.
 - Updated run.rs to use Forge::builder().config(config).build()?.run().await
 - Added hostname, reqwest, axum dependencies to forge crate
 - All 240 tests passing
+
+Phase 16: Testing & Validation completed.
+- Created testing module in `crates/forge-runtime/src/testing/`
+- Implemented TestContext for integration testing with transaction-based isolation
+- Added TestContextBuilder with fluent API for test configuration
+- Created MockHttp for mocking external HTTP requests in tests
+- Implemented MockResponse with json(), error(), internal_error(), not_found(), unauthorized() helpers
+- Added request recording for verification (requests(), requests_to(), clear_requests())
+- Created assertions module with assert_ok!, assert_err!, assert_err_variant! macros
+- Added assert_job_dispatched! and assert_workflow_started! macros for job/workflow testing
+- Implemented assert_json_matches() for partial JSON matching
+- Added helper functions: error_contains(), validation_error_for_field(), assert_job_status(), assert_workflow_status()
+- Created DispatchedJob and StartedWorkflow for tracking test dispatches
+- Added regex dependency for URL pattern matching in mocks
+- All 265 tests passing

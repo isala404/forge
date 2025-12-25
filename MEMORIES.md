@@ -29,6 +29,7 @@ Core Components
 - Reactivity: LISTEN/NOTIFY + read set tracking for live queries
 - Runtime: Forge struct in crates/forge/src/runtime.rs wires all components
 - Builder: ForgeBuilder pattern for configuration before run()
+- Testing: TestContext in forge-runtime/src/testing/ for integration tests
 
 Key Patterns
 - Dependency injection via context (QueryContext, MutationContext, JobContext)

@@ -25,6 +25,7 @@ chrono-tz = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+regex = "1.11"
 
 [dev-dependencies]
 tokio-test = { workspace = true }

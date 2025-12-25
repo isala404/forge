@@ -8,6 +8,7 @@ pub mod jobs;
 pub mod migrations;
 pub mod observability;
 pub mod realtime;
+pub mod testing;
 pub mod workflow;
 
 pub use cluster::{
