@@ -17,10 +17,14 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
+chrono = { workspace = true }
 clap = { version = "4.5", features = ["derive"] }
 console = "0.15"
 dialoguer = "0.11"
 indicatif = "0.17"
+hostname = "0.4"
+reqwest = { version = "0.12", features = ["json"] }
+axum = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

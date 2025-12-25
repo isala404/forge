@@ -3,6 +3,8 @@ use clap::Parser;
 use console::style;
 use tracing::info;
 
+use crate::runtime::Forge;
+
 /// Run the FORGE server.
 #[derive(Parser)]
 pub struct RunCommand {
@@ -53,11 +55,15 @@ impl RunCommand {
         info!("Loading configuration from {}", self.config);
 
         // Load configuration
-        let config = forge_core::config::ForgeConfig::from_file(&self.config)?;
+        let mut config = forge_core::config::ForgeConfig::from_file(&self.config)?;
 
         // Apply command-line overrides
-        let port = self.port.unwrap_or(config.gateway.port);
+        if let Some(port) = self.port {
+            config.gateway.port = port;
+        }
+
         let host = self.host.clone().unwrap_or_else(|| "127.0.0.1".to_string());
+        let port = config.gateway.port;
 
         println!(
             "  {} Listening on {}",
@@ -76,21 +82,15 @@ impl RunCommand {
 
         println!();
 
-        // In a real implementation, this would:
-        // 1. Connect to the database
-        // 2. Run any pending migrations
-        // 3. Initialize the runtime (function registry, job queues, etc.)
-        // 4. Start the HTTP gateway
-        // 5. Start the WebSocket server
-        // 6. Start background workers
+        // Build and run the FORGE runtime
+        let forge = Forge::builder()
+            .config(config)
+            .build()
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        info!("FORGE server starting...");
+        // Run the server (blocks until shutdown)
+        forge.run().await.map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        // For now, just run an empty server
-        // In Phase 15, we'll wire everything together
-        tokio::signal::ctrl_c().await?;
-
-        info!("Shutting down...");
         println!("\n  {} Goodbye!", style("👋").bold());
 
         Ok(())

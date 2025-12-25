@@ -27,6 +27,8 @@ Core Components
 - Crons: scheduled tasks via leader-elected scheduler
 - Workflows: multi-step durable processes with compensation
 - Reactivity: LISTEN/NOTIFY + read set tracking for live queries
+- Runtime: Forge struct in crates/forge/src/runtime.rs wires all components
+- Builder: ForgeBuilder pattern for configuration before run()
 
 Key Patterns
 - Dependency injection via context (QueryContext, MutationContext, JobContext)

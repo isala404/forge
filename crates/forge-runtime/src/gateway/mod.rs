@@ -5,7 +5,7 @@ mod rpc;
 mod server;
 mod tracing;
 
-pub use auth::AuthMiddleware;
+pub use auth::{AuthConfig, AuthMiddleware};
 pub use request::RpcRequest;
 pub use response::{RpcError, RpcResponse};
 pub use rpc::RpcHandler;
