@@ -1,6 +1,7 @@
 use proc_macro::TokenStream;
 
 mod action;
+mod cron;
 mod enum_type;
 mod job;
 mod model;
@@ -160,11 +161,37 @@ pub fn job(attr: TokenStream, item: TokenStream) -> TokenStream {
     job::job_impl(attr, item)
 }
 
-/// Marks a function as a cron task.
+/// Marks a function as a scheduled cron task.
+///
+/// Cron jobs run on a schedule and are guaranteed to run exactly once
+/// per scheduled time across the entire cluster.
+///
+/// # Arguments
+/// The cron expression is passed as the first argument:
+/// - `"0 * * * *"` - Every hour
+/// - `"*/5 * * * *"` - Every 5 minutes
+/// - `"0 0 * * *"` - Every day at midnight
+///
+/// # Attributes
+/// - `timezone = "UTC"` - Timezone for the schedule (default: UTC)
+/// - `catch_up` - Run missed executions after downtime
+/// - `catch_up_limit = 10` - Maximum missed runs to catch up
+/// - `timeout = "1h"` - Execution timeout
+///
+/// # Example
+/// ```ignore
+/// #[forge::cron("0 0 * * *")]
+/// #[timezone = "America/New_York"]
+/// #[catch_up]
+/// pub async fn daily_cleanup(ctx: &CronContext) -> Result<()> {
+///     ctx.log.info("Starting cleanup", json!({}));
+///     // Cleanup logic...
+///     Ok(())
+/// }
+/// ```
 #[proc_macro_attribute]
-pub fn cron(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    // TODO: Implement in Phase 6
-    item
+pub fn cron(attr: TokenStream, item: TokenStream) -> TokenStream {
+    cron::cron_impl(attr, item)
 }
 
 /// Marks a function as a workflow.

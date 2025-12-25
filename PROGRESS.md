@@ -75,3 +75,21 @@ Phase 5: Job Queue System completed.
 - Added WorkerConfig with poll_interval, batch_size, max_concurrent, stale_job_timeout
 - Used std::sync::mpsc for progress channel (forge-core has no tokio dependency)
 - All 86 tests passing
+
+Phase 6: Cron Scheduler completed.
+- Created cron module in `crates/forge-core/src/cron/` with traits, context, and schedule
+- Implemented ForgeCron trait for scheduled task handlers
+- Added CronInfo struct with name, schedule, timezone, catch_up, catch_up_limit, timeout
+- Created CronSchedule wrapper around `cron` crate with timezone support via chrono-tz
+- Added 5-part to 6-part cron expression normalization (auto-add seconds)
+- Implemented CronContext with scheduled_time, execution_time, delay calculation
+- Added CronLog for structured logging with cron name context
+- Created #[forge::cron] proc macro parsing schedule, timezone, catch_up, catch_up_limit, timeout
+- Created cron module in `crates/forge-runtime/src/cron/`
+- Built CronRegistry for dynamic cron handler registration
+- Implemented CronRunner with leader-only scheduling loop
+- Added exactly-once execution via UNIQUE constraint on (cron_name, scheduled_time)
+- Created CronRecord with id, cron_name, scheduled_time, status, node_id, timestamps
+- Implemented catch-up logic for missed runs with configurable limit
+- Added workspace dependencies: cron = "0.15", chrono-tz = "0.10"
+- All 102 tests passing

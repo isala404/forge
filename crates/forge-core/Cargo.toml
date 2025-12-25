@@ -10,6 +10,8 @@ serde_json = { workspace = true }
 toml = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
+cron = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 sqlx = { workspace = true }

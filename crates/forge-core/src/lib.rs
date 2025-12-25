@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod config;
+pub mod cron;
 pub mod error;
 pub mod function;
 pub mod job;
@@ -7,6 +8,7 @@ pub mod schema;
 
 pub use auth::{Claims, ClaimsBuilder};
 pub use config::ForgeConfig;
+pub use cron::{CronContext, CronInfo, CronSchedule, ForgeCron};
 pub use error::{ForgeError, Result};
 pub use function::{
     ActionContext, AuthContext, ForgeAction, ForgeMutation, ForgeQuery, FunctionInfo, FunctionKind,
