@@ -208,3 +208,18 @@ Phase 12: Frontend Runtime Library completed.
 - Added localStorage persistence for auth tokens
 - Implemented createQuery, createMutation, createAction API helpers for generated code
 - All 206 Rust tests passing
+
+Phase 13: Dashboard completed.
+- Created dashboard module in `crates/forge-runtime/src/dashboard/`
+- Implemented DashboardConfig with path prefix, auth, and admin user settings
+- Built DashboardApi with REST endpoints for metrics, logs, traces, alerts, jobs, cluster, and system
+- Created response types (MetricSummary, LogEntry, TraceSummary, AlertSummary, JobStats, ClusterHealth)
+- Added TimeRangeQuery, PaginationQuery, LogSearchQuery, TraceSearchQuery for filtering
+- Implemented DashboardPages with HTML rendering for all dashboard views
+- Created base_template function for consistent page layout with navigation sidebar
+- Built pages: Overview, Metrics, Logs, Traces (list and detail), Alerts, Jobs, Workflows, Cluster
+- Implemented DashboardAssets with CSS styles (dark theme, responsive grid layout)
+- Added main.js for dashboard interactivity (auto-refresh, charts, tab switching)
+- Created Chart.js stub for graph rendering (placeholder for real Chart.js)
+- Built create_dashboard_router and create_api_router for route configuration
+- All 213 tests passing

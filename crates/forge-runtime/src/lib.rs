@@ -1,5 +1,6 @@
 pub mod cluster;
 pub mod cron;
+pub mod dashboard;
 pub mod db;
 pub mod function;
 pub mod gateway;
@@ -14,6 +15,10 @@ pub use cluster::{
     LeaderGuard, NodeCounts, NodeRegistry, ShutdownConfig,
 };
 pub use cron::{CronEntry, CronRecord, CronRegistry, CronRunner, CronStatus};
+pub use dashboard::{
+    create_api_router, create_dashboard_router, DashboardApi, DashboardAssets, DashboardConfig,
+    DashboardPages, DashboardState,
+};
 pub use db::Database;
 pub use function::{FunctionExecutor, FunctionRegistry, FunctionRouter, RouteResult};
 pub use gateway::{
