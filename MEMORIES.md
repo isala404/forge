@@ -1,9 +1,10 @@
 Tooling
 - Stack: Rust (backend), Svelte 5 + TypeScript (frontend)
 - Package manager: cargo (backend), bun (frontend)
-- Test command: cargo test
+- Test command: LIBRARY_PATH="/opt/homebrew/opt/libiconv/lib" cargo test
 - Lint command: cargo clippy
 - Format command: cargo fmt
+- macOS: brew install libiconv (required for stringprep/sqlx tests)
 
 Architecture
 - Single binary containing all components (gateway, functions, workers, scheduler)
