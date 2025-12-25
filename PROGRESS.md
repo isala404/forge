@@ -131,3 +131,27 @@ Phase 8: Clustering & Coordination completed.
 - Added LeaderGuard RAII guard for leader-only operations
 - Used broadcast channel for shutdown notification
 - All 133 tests passing
+
+Phase 9: Reactivity System completed.
+- Created realtime module in `crates/forge-core/src/realtime/` with readset, session, and subscription types
+- Implemented ReadSet for tracking tables and rows accessed during query execution
+- Added TrackingMode enum (Table, Row, Adaptive) for configurable invalidation granularity
+- Created Change and ChangeOperation for representing database changes
+- Implemented SessionId and SessionInfo for WebSocket connection tracking
+- Added SessionStatus enum (Connecting, Connected, Reconnecting, Disconnected)
+- Created SubscriptionId and SubscriptionInfo for query subscription management
+- Implemented SubscriptionState with loading, data, error, and stale flags
+- Added Delta<T> generic struct for added/removed/updated incremental updates
+- Created query_hash for subscription deduplication
+- Created realtime module in `crates/forge-runtime/src/realtime/`
+- Implemented SessionManager for WebSocket session lifecycle management
+- Built SubscriptionManager with per-session limits and query hash indexing
+- Created ChangeListener using PostgreSQL PgListener for LISTEN/NOTIFY
+- Implemented notification payload parsing (table:operation:row_id:columns format)
+- Built InvalidationEngine with debounce/coalesce logic for batching changes
+- Created ChangeCoalescer for grouping changes by table
+- Implemented WebSocketServer with connection registration and subscription management
+- Added WebSocketConfig with max subscriptions, rate limits, and reconnect settings
+- Created BackoffStrategy enum (Linear, Exponential, Fixed) for reconnection
+- Added WebSocketMessage enum for protocol messages (Subscribe, Data, DeltaUpdate, etc.)
+- All 171 tests passing

@@ -5,6 +5,7 @@ pub mod cron;
 pub mod error;
 pub mod function;
 pub mod job;
+pub mod realtime;
 pub mod schema;
 pub mod workflow;
 
@@ -18,5 +19,9 @@ pub use function::{
     MutationContext, QueryContext, RequestMetadata,
 };
 pub use job::{ForgeJob, JobContext, JobInfo, JobPriority, JobStatus, RetryConfig};
+pub use realtime::{
+    Change, ChangeOperation, Delta, ReadSet, SessionId, SessionInfo, SessionStatus, SubscriptionId,
+    SubscriptionInfo, SubscriptionState, TrackingMode,
+};
 pub use schema::{FieldDef, ModelMeta, SchemaRegistry, TableDef};
 pub use workflow::{ForgeWorkflow, WorkflowContext, WorkflowInfo, WorkflowStatus};

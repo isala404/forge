@@ -5,6 +5,7 @@ pub mod function;
 pub mod gateway;
 pub mod jobs;
 pub mod migrations;
+pub mod realtime;
 pub mod workflow;
 
 pub use cluster::{
@@ -22,6 +23,10 @@ pub use jobs::{
     JobDispatcher, JobExecutor, JobQueue, JobRecord, JobRegistry, Worker, WorkerConfig,
 };
 pub use migrations::{MigrationExecutor, MigrationGenerator, SchemaDiff};
+pub use realtime::{
+    ChangeListener, InvalidationEngine, SessionManager, SubscriptionManager, WebSocketConfig,
+    WebSocketServer,
+};
 pub use workflow::{
     WorkflowEntry, WorkflowExecutor, WorkflowRecord, WorkflowRegistry, WorkflowStepRecord,
 };
