@@ -2,8 +2,7 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{
-    parse_macro_input, DeriveInput, Data, Fields, Attribute, Meta, Expr, Lit,
-    spanned::Spanned,
+    parse_macro_input, spanned::Spanned, Attribute, Data, DeriveInput, Expr, Fields, Lit, Meta,
 };
 
 /// Expand the #[forge::model] macro.
@@ -25,7 +24,12 @@ fn expand_model_impl(_attr: TokenStream2, input: DeriveInput) -> syn::Result<Tok
     let fields = match &input.data {
         Data::Struct(data) => match &data.fields {
             Fields::Named(fields) => &fields.named,
-            _ => return Err(syn::Error::new(input.span(), "Only named fields are supported")),
+            _ => {
+                return Err(syn::Error::new(
+                    input.span(),
+                    "Only named fields are supported",
+                ))
+            }
         },
         _ => return Err(syn::Error::new(input.span(), "Only structs are supported")),
     };
@@ -70,50 +74,53 @@ fn expand_model_impl(_attr: TokenStream2, input: DeriveInput) -> syn::Result<Tok
     let primary_key_lit = &primary_key;
 
     // Generate field definitions for TableDef
-    let field_tokens: Vec<TokenStream2> = field_defs.iter().map(|f| {
-        let name = &f.name;
-        let column_name = &f.column_name;
-        let rust_type = &f.rust_type;
-        let is_id = f.is_id;
-        let is_indexed = f.is_indexed;
-        let is_unique = f.is_unique;
-        let is_encrypted = f.is_encrypted;
-        let is_updated_at = f.is_updated_at;
+    let field_tokens: Vec<TokenStream2> = field_defs
+        .iter()
+        .map(|f| {
+            let name = &f.name;
+            let column_name = &f.column_name;
+            let rust_type = &f.rust_type;
+            let is_id = f.is_id;
+            let is_indexed = f.is_indexed;
+            let is_unique = f.is_unique;
+            let is_encrypted = f.is_encrypted;
+            let is_updated_at = f.is_updated_at;
 
-        let mut attributes = Vec::new();
-        if is_id {
-            attributes.push(quote!(forge_core::schema::FieldAttribute::Id));
-        }
-        if is_indexed {
-            attributes.push(quote!(forge_core::schema::FieldAttribute::Indexed));
-        }
-        if is_unique {
-            attributes.push(quote!(forge_core::schema::FieldAttribute::Unique));
-        }
-        if is_encrypted {
-            attributes.push(quote!(forge_core::schema::FieldAttribute::Encrypted));
-        }
-        if is_updated_at {
-            attributes.push(quote!(forge_core::schema::FieldAttribute::UpdatedAt));
-        }
-
-        let default_token = if let Some(ref default) = f.default_value {
-            quote!(Some(#default.to_string()))
-        } else {
-            quote!(None)
-        };
-
-        quote! {
-            {
-                let rust_type = forge_core::schema::RustType::from_type_string(#rust_type);
-                let mut field = forge_core::schema::FieldDef::new(#name, rust_type);
-                field.column_name = #column_name.to_string();
-                field.attributes = vec![#(#attributes),*];
-                field.default = #default_token;
-                field
+            let mut attributes = Vec::new();
+            if is_id {
+                attributes.push(quote!(forge_core::schema::FieldAttribute::Id));
             }
-        }
-    }).collect();
+            if is_indexed {
+                attributes.push(quote!(forge_core::schema::FieldAttribute::Indexed));
+            }
+            if is_unique {
+                attributes.push(quote!(forge_core::schema::FieldAttribute::Unique));
+            }
+            if is_encrypted {
+                attributes.push(quote!(forge_core::schema::FieldAttribute::Encrypted));
+            }
+            if is_updated_at {
+                attributes.push(quote!(forge_core::schema::FieldAttribute::UpdatedAt));
+            }
+
+            let default_token = if let Some(ref default) = f.default_value {
+                quote!(Some(#default.to_string()))
+            } else {
+                quote!(None)
+            };
+
+            quote! {
+                {
+                    let rust_type = forge_core::schema::RustType::from_type_string(#rust_type);
+                    let mut field = forge_core::schema::FieldDef::new(#name, rust_type);
+                    field.column_name = #column_name.to_string();
+                    field.attributes = vec![#(#attributes),*];
+                    field.default = #default_token;
+                    field
+                }
+            }
+        })
+        .collect();
 
     // Generate the impl
     let expanded = quote! {
@@ -202,7 +209,7 @@ fn extract_string_value(s: &str) -> Option<String> {
     if parts.len() == 2 {
         let value = parts[1].trim();
         if value.starts_with('"') && value.ends_with('"') {
-            return Some(value[1..value.len()-1].to_string());
+            return Some(value[1..value.len() - 1].to_string());
         }
     }
     None
@@ -225,10 +232,20 @@ fn to_snake_case(s: &str) -> String {
 
 fn pluralize(s: &str) -> String {
     // Simple English pluralization rules
-    if s.ends_with('s') || s.ends_with("sh") || s.ends_with("ch") || s.ends_with('x') || s.ends_with('z') {
+    if s.ends_with('s')
+        || s.ends_with("sh")
+        || s.ends_with("ch")
+        || s.ends_with('x')
+        || s.ends_with('z')
+    {
         format!("{}es", s)
-    } else if s.ends_with('y') && !s.ends_with("ay") && !s.ends_with("ey") && !s.ends_with("oy") && !s.ends_with("uy") {
-        format!("{}ies", &s[..s.len()-1])
+    } else if s.ends_with('y')
+        && !s.ends_with("ay")
+        && !s.ends_with("ey")
+        && !s.ends_with("oy")
+        && !s.ends_with("uy")
+    {
+        format!("{}ies", &s[..s.len() - 1])
     } else {
         format!("{}s", s)
     }

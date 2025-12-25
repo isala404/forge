@@ -1,7 +1,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{parse_macro_input, ItemFn, FnArg, Pat, ReturnType, Type};
+use syn::{parse_macro_input, FnArg, ItemFn, Pat, ReturnType, Type};
 
 /// Expand the #[forge::query] attribute.
 ///
@@ -57,7 +57,13 @@ fn parse_query_attrs(attr: TokenStream) -> QueryAttrs {
         if let Some(eq_pos) = attr_str[timeout_start..].find('=') {
             let remaining = &attr_str[timeout_start + eq_pos + 1..];
             let trimmed = remaining.trim();
-            if let Ok(secs) = trimmed.split(&[',', ')']).next().unwrap_or("").trim().parse::<u64>() {
+            if let Ok(secs) = trimmed
+                .split(&[',', ')'])
+                .next()
+                .unwrap_or("")
+                .trim()
+                .parse::<u64>()
+            {
                 attrs.timeout = Some(secs);
             }
         }
@@ -69,11 +75,11 @@ fn parse_query_attrs(attr: TokenStream) -> QueryAttrs {
 fn parse_duration(s: &str) -> Option<u64> {
     let s = s.trim();
     if s.ends_with('s') {
-        s[..s.len()-1].parse().ok()
+        s[..s.len() - 1].parse().ok()
     } else if s.ends_with('m') {
-        s[..s.len()-1].parse::<u64>().ok().map(|m| m * 60)
+        s[..s.len() - 1].parse::<u64>().ok().map(|m| m * 60)
     } else if s.ends_with('h') {
-        s[..s.len()-1].parse::<u64>().ok().map(|h| h * 3600)
+        s[..s.len() - 1].parse::<u64>().ok().map(|h| h * 3600)
     } else {
         s.parse().ok()
     }
@@ -116,27 +122,33 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
     let arg_params: Vec<_> = params.iter().skip(1).cloned().collect();
 
     // Build args struct fields
-    let args_fields: Vec<TokenStream2> = arg_params.iter().filter_map(|p| {
-        if let FnArg::Typed(pat_type) = p {
-            if let Pat::Ident(pat_ident) = &*pat_type.pat {
-                let name = &pat_ident.ident;
-                let ty = &pat_type.ty;
-                return Some(quote! { pub #name: #ty });
+    let args_fields: Vec<TokenStream2> = arg_params
+        .iter()
+        .filter_map(|p| {
+            if let FnArg::Typed(pat_type) = p {
+                if let Pat::Ident(pat_ident) = &*pat_type.pat {
+                    let name = &pat_ident.ident;
+                    let ty = &pat_type.ty;
+                    return Some(quote! { pub #name: #ty });
+                }
             }
-        }
-        None
-    }).collect();
+            None
+        })
+        .collect();
 
     // Build destructuring for function call
-    let arg_names: Vec<TokenStream2> = arg_params.iter().filter_map(|p| {
-        if let FnArg::Typed(pat_type) = p {
-            if let Pat::Ident(pat_ident) = &*pat_type.pat {
-                let name = &pat_ident.ident;
-                return Some(quote! { #name });
+    let arg_names: Vec<TokenStream2> = arg_params
+        .iter()
+        .filter_map(|p| {
+            if let FnArg::Typed(pat_type) = p {
+                if let Pat::Ident(pat_ident) = &*pat_type.pat {
+                    let name = &pat_ident.ident;
+                    return Some(quote! { #name });
+                }
             }
-        }
-        None
-    }).collect();
+            None
+        })
+        .collect();
 
     // Get return type
     let output_type = match &input.sig.output {
@@ -198,10 +210,7 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
             }
         }
     } else {
-        let args_struct_name = syn::Ident::new(
-            &format!("{}Args", struct_name),
-            fn_name.span(),
-        );
+        let args_struct_name = syn::Ident::new(&format!("{}Args", struct_name), fn_name.span());
         quote! {
             #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
             #vis struct #args_struct_name {
@@ -229,10 +238,7 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
     let args_type = if args_fields.is_empty() {
         quote! { () }
     } else {
-        let args_struct_name = syn::Ident::new(
-            &format!("{}Args", struct_name),
-            fn_name.span(),
-        );
+        let args_struct_name = syn::Ident::new(&format!("{}Args", struct_name), fn_name.span());
         quote! { #args_struct_name }
     };
 

@@ -176,9 +176,10 @@ pub struct CompositeIndexDef {
 impl CompositeIndexDef {
     /// Generate the CREATE INDEX SQL.
     pub fn to_sql(&self, table_name: &str) -> String {
-        let name = self.name.clone().unwrap_or_else(|| {
-            format!("idx_{}_{}", table_name, self.columns.join("_"))
-        });
+        let name = self
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("idx_{}_{}", table_name, self.columns.join("_")));
 
         let columns: Vec<String> = self
             .columns
@@ -238,25 +239,13 @@ pub enum IndexOrder {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RelationType {
     /// Belongs to another model (has foreign key).
-    BelongsTo {
-        target: String,
-        foreign_key: String,
-    },
+    BelongsTo { target: String, foreign_key: String },
     /// Has many of another model.
-    HasMany {
-        target: String,
-        foreign_key: String,
-    },
+    HasMany { target: String, foreign_key: String },
     /// Has one of another model.
-    HasOne {
-        target: String,
-        foreign_key: String,
-    },
+    HasOne { target: String, foreign_key: String },
     /// Many-to-many through a join table.
-    ManyToMany {
-        target: String,
-        through: String,
-    },
+    ManyToMany { target: String, through: String },
 }
 
 #[cfg(test)]

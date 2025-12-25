@@ -3,8 +3,8 @@ use std::pin::Pin;
 
 use serde::{de::DeserializeOwned, Serialize};
 
+use super::context::{ActionContext, MutationContext, QueryContext};
 use crate::error::Result;
-use super::context::{QueryContext, MutationContext, ActionContext};
 
 /// Information about a registered function.
 #[derive(Debug, Clone)]

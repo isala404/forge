@@ -1,5 +1,5 @@
-use sqlx::{PgPool, Row};
 use chrono::{DateTime, Utc};
+use sqlx::{PgPool, Row};
 
 use super::generator::Migration;
 use forge_core::error::{ForgeError, Result};
@@ -49,15 +49,16 @@ impl MigrationExecutor {
         .await
         .map_err(|e| ForgeError::Database(format!("Failed to fetch migrations: {}", e)))?;
 
-        let migrations = rows.iter().map(|row| {
-            AppliedMigration {
+        let migrations = rows
+            .iter()
+            .map(|row| AppliedMigration {
                 version: row.get("version"),
                 name: row.get("name"),
                 applied_at: row.get("applied_at"),
                 checksum: row.get("checksum"),
                 execution_time_ms: row.get("execution_time_ms"),
-            }
-        }).collect();
+            })
+            .collect();
 
         Ok(migrations)
     }
@@ -83,10 +84,12 @@ impl MigrationExecutor {
         sqlx::query(&migration.sql)
             .execute(&self.pool)
             .await
-            .map_err(|e| ForgeError::Database(format!(
-                "Failed to apply migration {}: {}",
-                migration.version, e
-            )))?;
+            .map_err(|e| {
+                ForgeError::Database(format!(
+                    "Failed to apply migration {}: {}",
+                    migration.version, e
+                ))
+            })?;
 
         let elapsed = start.elapsed();
 
@@ -106,10 +109,12 @@ impl MigrationExecutor {
         .bind(elapsed.as_millis() as i32)
         .execute(&self.pool)
         .await
-        .map_err(|e| ForgeError::Database(format!(
-            "Failed to record migration {}: {}",
-            migration.version, e
-        )))?;
+        .map_err(|e| {
+            ForgeError::Database(format!(
+                "Failed to record migration {}: {}",
+                migration.version, e
+            ))
+        })?;
 
         Ok(())
     }
@@ -131,10 +136,9 @@ impl MigrationExecutor {
                     .bind(&version)
                     .execute(&self.pool)
                     .await
-                    .map_err(|e| ForgeError::Database(format!(
-                        "Failed to remove migration record: {}",
-                        e
-                    )))?;
+                    .map_err(|e| {
+                        ForgeError::Database(format!("Failed to remove migration record: {}", e))
+                    })?;
 
                 Ok(Some(version))
             }

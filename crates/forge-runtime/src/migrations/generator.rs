@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use forge_core::schema::TableDef;
 
-use super::diff::{SchemaDiff, DatabaseTable};
+use super::diff::{DatabaseTable, SchemaDiff};
 
 /// Generates SQL migrations from schema changes.
 pub struct MigrationGenerator {
@@ -73,8 +73,7 @@ impl MigrationGenerator {
 
     /// Write migration to disk.
     pub fn write_migration(&self, migration: &Migration) -> Result<(), GeneratorError> {
-        std::fs::create_dir_all(&self.output_dir)
-            .map_err(|e| GeneratorError::Io(e.to_string()))?;
+        std::fs::create_dir_all(&self.output_dir).map_err(|e| GeneratorError::Io(e.to_string()))?;
 
         let content = format!(
             "-- Migration: {}\n-- Generated at: {}\n\n{}\n",
@@ -83,8 +82,7 @@ impl MigrationGenerator {
             migration.sql
         );
 
-        std::fs::write(&migration.path, content)
-            .map_err(|e| GeneratorError::Io(e.to_string()))?;
+        std::fs::write(&migration.path, content).map_err(|e| GeneratorError::Io(e.to_string()))?;
 
         Ok(())
     }
@@ -117,9 +115,9 @@ pub enum GeneratorError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use forge_core::schema::{FieldDef, TableDef};
-    use forge_core::schema::RustType;
     use forge_core::schema::FieldAttribute;
+    use forge_core::schema::RustType;
+    use forge_core::schema::{FieldDef, TableDef};
 
     #[test]
     fn test_generate_migration() {

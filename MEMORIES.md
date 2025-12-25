@@ -1,3 +1,11 @@
+Phase Workflow (CRITICAL - always follow)
+1. Read reference files for the phase
+2. Implement the phase (read more references if needed)
+3. Run: cargo fmt && cargo check && LIBRARY_PATH="/opt/homebrew/opt/libiconv/lib" cargo test
+4. Update MEMORIES.md and PROGRESS.md
+5. Commit with descriptive message (never git push)
+6. Move to next phase
+
 Tooling
 - Stack: Rust (backend), Svelte 5 + TypeScript (frontend)
 - Package manager: cargo (backend), bun (frontend)

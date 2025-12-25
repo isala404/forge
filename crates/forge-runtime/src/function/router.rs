@@ -56,10 +56,9 @@ impl FunctionRouter {
         auth: AuthContext,
         request: RequestMetadata,
     ) -> Result<RouteResult> {
-        let entry = self
-            .registry
-            .get(function_name)
-            .ok_or_else(|| ForgeError::NotFound(format!("Function '{}' not found", function_name)))?;
+        let entry = self.registry.get(function_name).ok_or_else(|| {
+            ForgeError::NotFound(format!("Function '{}' not found", function_name))
+        })?;
 
         // Check authorization
         self.check_auth(entry.info(), &auth)?;
@@ -89,11 +88,7 @@ impl FunctionRouter {
     }
 
     /// Check authorization for a function call.
-    fn check_auth(
-        &self,
-        info: &forge_core::FunctionInfo,
-        auth: &AuthContext,
-    ) -> Result<()> {
+    fn check_auth(&self, info: &forge_core::FunctionInfo, auth: &AuthContext) -> Result<()> {
         // Public functions don't require auth
         if info.is_public {
             return Ok(());
@@ -107,10 +102,7 @@ impl FunctionRouter {
         // Check role requirement
         if let Some(role) = info.required_role {
             if !auth.has_role(role) {
-                return Err(ForgeError::Forbidden(format!(
-                    "Role '{}' required",
-                    role
-                )));
+                return Err(ForgeError::Forbidden(format!("Role '{}' required", role)));
             }
         }
 

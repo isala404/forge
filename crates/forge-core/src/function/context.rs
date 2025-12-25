@@ -27,7 +27,11 @@ impl AuthContext {
     }
 
     /// Create an authenticated context.
-    pub fn authenticated(user_id: Uuid, roles: Vec<String>, claims: HashMap<String, serde_json::Value>) -> Self {
+    pub fn authenticated(
+        user_id: Uuid,
+        roles: Vec<String>,
+        claims: HashMap<String, serde_json::Value>,
+    ) -> Self {
         Self {
             user_id: Some(user_id),
             roles,
@@ -269,10 +273,7 @@ mod tests {
 
         let ctx = AuthContext::authenticated(Uuid::new_v4(), vec![], claims);
 
-        assert_eq!(
-            ctx.claim("org_id"),
-            Some(&serde_json::json!("org-123"))
-        );
+        assert_eq!(ctx.claim("org_id"), Some(&serde_json::json!("org-123")));
         assert!(ctx.claim("nonexistent").is_none());
     }
 

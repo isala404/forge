@@ -2,6 +2,7 @@ use proc_macro::TokenStream;
 
 mod action;
 mod enum_type;
+mod job;
 mod model;
 mod mutation;
 mod query;
@@ -130,10 +131,33 @@ pub fn action(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// Marks a function as a background job.
+///
+/// Jobs are durable background tasks that survive server restarts,
+/// automatically retry on failure, and can be scheduled for the future.
+///
+/// # Attributes
+/// - `timeout = "30m"` - Job timeout (duration like "30s", "5m", "1h")
+/// - `priority = "normal"` - Priority: background, low, normal, high, critical
+/// - `max_attempts = 3` - Maximum retry attempts
+/// - `worker_capability = "general"` - Required worker capability
+/// - `idempotent` - Enable deduplication by key
+///
+/// # Example
+/// ```ignore
+/// #[forge::job]
+/// #[timeout = "30m"]
+/// #[priority = "high"]
+/// #[max_attempts = 5]
+/// pub async fn send_welcome_email(
+///     ctx: &JobContext,
+///     input: SendEmailInput,
+/// ) -> Result<()> {
+///     email::send(&input).await
+/// }
+/// ```
 #[proc_macro_attribute]
-pub fn job(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    // TODO: Implement in Phase 5
-    item
+pub fn job(attr: TokenStream, item: TokenStream) -> TokenStream {
+    job::job_impl(attr, item)
 }
 
 /// Marks a function as a cron task.

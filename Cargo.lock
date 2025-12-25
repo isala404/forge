@@ -577,6 +577,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "thiserror",
+ "tokio",
  "tokio-test",
  "toml",
  "tracing",

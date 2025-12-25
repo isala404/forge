@@ -49,7 +49,11 @@ impl FunctionExecutor {
         let fn_timeout = self.get_function_timeout(function_name);
 
         // Execute with timeout
-        let result = match timeout(fn_timeout, self.router.route(function_name, args, auth, request)).await
+        let result = match timeout(
+            fn_timeout,
+            self.router.route(function_name, args, auth, request),
+        )
+        .await
         {
             Ok(result) => result,
             Err(_) => {

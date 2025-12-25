@@ -71,7 +71,8 @@ impl GatewayServer {
 
     /// Build the Axum router.
     pub fn router(&self) -> Router {
-        let rpc_handler_state = Arc::new(RpcHandler::new(self.registry.clone(), self.db_pool.clone()));
+        let rpc_handler_state =
+            Arc::new(RpcHandler::new(self.registry.clone(), self.db_pool.clone()));
 
         let auth_middleware_state = Arc::new(AuthMiddleware::new(self.config.auth.clone()));
 

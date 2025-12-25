@@ -1,7 +1,7 @@
-mod generator;
 mod diff;
 mod executor;
+mod generator;
 
-pub use generator::MigrationGenerator;
-pub use diff::{SchemaDiff, DiffEntry, DiffAction};
+pub use diff::{DiffAction, DiffEntry, SchemaDiff};
 pub use executor::MigrationExecutor;
+pub use generator::MigrationGenerator;

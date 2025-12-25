@@ -51,27 +51,37 @@ impl FieldDef {
 
     /// Check if this field is a primary key.
     pub fn is_primary_key(&self) -> bool {
-        self.attributes.iter().any(|a| matches!(a, FieldAttribute::Id | FieldAttribute::IdAuto))
+        self.attributes
+            .iter()
+            .any(|a| matches!(a, FieldAttribute::Id | FieldAttribute::IdAuto))
     }
 
     /// Check if this field is indexed.
     pub fn is_indexed(&self) -> bool {
-        self.attributes.iter().any(|a| matches!(a, FieldAttribute::Indexed))
+        self.attributes
+            .iter()
+            .any(|a| matches!(a, FieldAttribute::Indexed))
     }
 
     /// Check if this field is unique.
     pub fn is_unique(&self) -> bool {
-        self.attributes.iter().any(|a| matches!(a, FieldAttribute::Unique))
+        self.attributes
+            .iter()
+            .any(|a| matches!(a, FieldAttribute::Unique))
     }
 
     /// Check if this field is encrypted.
     pub fn is_encrypted(&self) -> bool {
-        self.attributes.iter().any(|a| matches!(a, FieldAttribute::Encrypted))
+        self.attributes
+            .iter()
+            .any(|a| matches!(a, FieldAttribute::Encrypted))
     }
 
     /// Check if this field auto-updates on modification.
     pub fn is_updated_at(&self) -> bool {
-        self.attributes.iter().any(|a| matches!(a, FieldAttribute::UpdatedAt))
+        self.attributes
+            .iter()
+            .any(|a| matches!(a, FieldAttribute::UpdatedAt))
     }
 
     /// Generate SQL column definition.

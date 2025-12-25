@@ -1,4 +1,4 @@
-use forge_core::schema::{TableDef, FieldDef};
+use forge_core::schema::{FieldDef, TableDef};
 
 /// Represents the difference between two schemas.
 #[derive(Debug, Clone)]
@@ -16,10 +16,7 @@ impl SchemaDiff {
     }
 
     /// Compare a Rust schema to a database schema.
-    pub fn from_comparison(
-        rust_tables: &[TableDef],
-        db_tables: &[DatabaseTable],
-    ) -> Self {
+    pub fn from_comparison(rust_tables: &[TableDef], db_tables: &[DatabaseTable]) -> Self {
         let mut entries = Vec::new();
 
         // Find tables to add
@@ -39,7 +36,8 @@ impl SchemaDiff {
                 Some(db) => {
                     // Compare columns
                     for rust_field in &rust_table.fields {
-                        let db_column = db.columns.iter().find(|c| c.name == rust_field.column_name);
+                        let db_column =
+                            db.columns.iter().find(|c| c.name == rust_field.column_name);
 
                         match db_column {
                             None => {
@@ -74,7 +72,9 @@ impl SchemaDiff {
 
                     // Find columns to drop (exist in DB but not in Rust)
                     for db_col in &db.columns {
-                        let exists_in_rust = rust_table.fields.iter()
+                        let exists_in_rust = rust_table
+                            .fields
+                            .iter()
                             .any(|f| f.column_name == db_col.name);
 
                         if !exists_in_rust {
@@ -113,7 +113,9 @@ impl SchemaDiff {
     fn add_column_sql(table_name: &str, field: &FieldDef) -> String {
         let mut sql = format!(
             "ALTER TABLE {} ADD COLUMN {} {}",
-            table_name, field.column_name, field.sql_type.to_sql()
+            table_name,
+            field.column_name,
+            field.sql_type.to_sql()
         );
 
         if !field.nullable {
@@ -121,13 +123,16 @@ impl SchemaDiff {
                 sql.push_str(&format!(" NOT NULL DEFAULT {}", default));
             } else {
                 // For non-nullable columns without default, we need a default value
-                let default_val = match field.sql_type {
-                    forge_core::schema::SqlType::Varchar(_) | forge_core::schema::SqlType::Text => "''",
-                    forge_core::schema::SqlType::Integer | forge_core::schema::SqlType::BigInt => "0",
-                    forge_core::schema::SqlType::Boolean => "false",
-                    forge_core::schema::SqlType::Timestamptz => "NOW()",
-                    _ => "NULL",
-                };
+                let default_val =
+                    match field.sql_type {
+                        forge_core::schema::SqlType::Varchar(_)
+                        | forge_core::schema::SqlType::Text => "''",
+                        forge_core::schema::SqlType::Integer
+                        | forge_core::schema::SqlType::BigInt => "0",
+                        forge_core::schema::SqlType::Boolean => "false",
+                        forge_core::schema::SqlType::Timestamptz => "NOW()",
+                        _ => "NULL",
+                    };
                 sql.push_str(&format!(" NOT NULL DEFAULT {}", default_val));
             }
         }
@@ -199,9 +204,9 @@ pub struct DatabaseColumn {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use forge_core::schema::{FieldDef, TableDef};
-    use forge_core::schema::RustType;
     use forge_core::schema::FieldAttribute;
+    use forge_core::schema::RustType;
+    use forge_core::schema::{FieldDef, TableDef};
 
     #[test]
     fn test_empty_diff() {
@@ -232,14 +237,12 @@ mod tests {
 
         let db_table = DatabaseTable {
             name: "users".to_string(),
-            columns: vec![
-                DatabaseColumn {
-                    name: "id".to_string(),
-                    data_type: "UUID".to_string(),
-                    nullable: false,
-                    default: None,
-                }
-            ],
+            columns: vec![DatabaseColumn {
+                name: "id".to_string(),
+                data_type: "UUID".to_string(),
+                nullable: false,
+                default: None,
+            }],
         };
 
         let diff = SchemaDiff::from_comparison(&[rust_table], &[db_table]);

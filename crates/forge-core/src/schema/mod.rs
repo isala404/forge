@@ -1,9 +1,9 @@
-mod model;
 mod field;
-mod types;
+mod model;
 mod registry;
+mod types;
 
-pub use model::{ModelMeta, TableDef, IndexDef, RelationType};
-pub use field::{FieldDef, FieldType, FieldAttribute};
-pub use types::{SqlType, RustType};
+pub use field::{FieldAttribute, FieldDef, FieldType};
+pub use model::{IndexDef, ModelMeta, RelationType, TableDef};
 pub use registry::SchemaRegistry;
+pub use types::{RustType, SqlType};

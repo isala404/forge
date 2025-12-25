@@ -1,7 +1,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{parse_macro_input, DeriveInput, Data, Attribute, Meta, Expr, Lit};
+use syn::{parse_macro_input, Attribute, Data, DeriveInput, Expr, Lit, Meta};
 
 /// Expand the #[forge::forge_enum] macro.
 pub fn expand_enum(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -21,7 +21,12 @@ fn expand_enum_impl(_attr: TokenStream2, input: DeriveInput) -> syn::Result<Toke
     // Extract variants
     let variants = match &input.data {
         Data::Enum(data) => &data.variants,
-        _ => return Err(syn::Error::new_spanned(&input, "forge_enum can only be used on enums")),
+        _ => {
+            return Err(syn::Error::new_spanned(
+                &input,
+                "forge_enum can only be used on enums",
+            ))
+        }
     };
 
     let mut variant_infos = Vec::new();
@@ -39,32 +44,41 @@ fn expand_enum_impl(_attr: TokenStream2, input: DeriveInput) -> syn::Result<Toke
     }
 
     // Generate variant arms for Display (to SQL string)
-    let to_string_arms: Vec<TokenStream2> = variant_infos.iter().map(|v| {
-        let name = &v.name;
-        let sql_value = &v.sql_value;
-        quote! {
-            Self::#name => #sql_value
-        }
-    }).collect();
+    let to_string_arms: Vec<TokenStream2> = variant_infos
+        .iter()
+        .map(|v| {
+            let name = &v.name;
+            let sql_value = &v.sql_value;
+            quote! {
+                Self::#name => #sql_value
+            }
+        })
+        .collect();
 
     // Generate variant arms for FromStr (from SQL string)
-    let from_string_arms: Vec<TokenStream2> = variant_infos.iter().map(|v| {
-        let name = &v.name;
-        let sql_value = &v.sql_value;
-        quote! {
-            #sql_value => Ok(Self::#name)
-        }
-    }).collect();
+    let from_string_arms: Vec<TokenStream2> = variant_infos
+        .iter()
+        .map(|v| {
+            let name = &v.name;
+            let sql_value = &v.sql_value;
+            quote! {
+                #sql_value => Ok(Self::#name)
+            }
+        })
+        .collect();
 
     // Generate variant definitions for the original enum
-    let variant_defs: Vec<TokenStream2> = variants.iter().map(|v| {
-        let name = &v.ident;
-        let attrs = &v.attrs;
-        quote! {
-            #(#attrs)*
-            #name
-        }
-    }).collect();
+    let variant_defs: Vec<TokenStream2> = variants
+        .iter()
+        .map(|v| {
+            let name = &v.ident;
+            let attrs = &v.attrs;
+            quote! {
+                #(#attrs)*
+                #name
+            }
+        })
+        .collect();
 
     let expanded = quote! {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

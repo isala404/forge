@@ -18,3 +18,4 @@ regex-lite = "0.1"
 
 [dev-dependencies]
 tokio-test = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }

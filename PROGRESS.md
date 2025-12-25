@@ -54,3 +54,24 @@ Phase 4: HTTP Gateway completed.
 - Integrated middleware stack: CORS -> Auth -> Tracing
 - Added FunctionRegistry Clone implementation for server state sharing
 - All 63 tests passing
+
+Phase 5: Job Queue System completed.
+- Created job module in `crates/forge-core/src/job/` with traits and context
+- Implemented ForgeJob trait with Args/Output associated types and execute future
+- Added JobInfo struct with name, timeout, priority, retry config, worker capability
+- Created JobPriority enum (Background=0, Low=25, Normal=50, High=75, Critical=100)
+- Created JobStatus enum (Pending, Claimed, Running, Completed, Retry, Failed, DeadLetter)
+- Implemented RetryConfig with exponential/linear/fixed backoff strategies
+- Created JobContext with db pool, http client, auth, and progress channel
+- Added heartbeat() method for long-running job keep-alive
+- Implemented #[forge::job] proc macro parsing timeout, priority, max_attempts, worker_capability, idempotent, retry attributes
+- Created jobs module in `crates/forge-runtime/src/jobs/`
+- Implemented JobQueue with PostgreSQL SKIP LOCKED pattern for atomic job claiming
+- Added JobRecord with full job metadata (status, priority, attempts, timestamps)
+- Built JobRegistry for dynamic job handler lookup
+- Created JobDispatcher for enqueueing jobs with delay, scheduling, idempotency
+- Implemented JobExecutor with timeout handling and backoff calculation
+- Created Worker with semaphore-based concurrency control and capabilities routing
+- Added WorkerConfig with poll_interval, batch_size, max_concurrent, stale_job_timeout
+- Used std::sync::mpsc for progress channel (forge-core has no tokio dependency)
+- All 86 tests passing
