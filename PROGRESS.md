@@ -155,3 +155,25 @@ Phase 9: Reactivity System completed.
 - Created BackoffStrategy enum (Linear, Exponential, Fixed) for reconnection
 - Added WebSocketMessage enum for protocol messages (Subscribe, Data, DeltaUpdate, etc.)
 - All 171 tests passing
+
+Phase 10: Observability completed.
+- Created observability module in `crates/forge-core/src/observability/` with metrics, logs, traces, and alerts
+- Implemented MetricKind enum (Counter, Gauge, Histogram, Summary)
+- Created MetricValue for scalar, histogram, and summary values
+- Added Metric struct with labels, timestamps, and descriptions
+- Implemented LogLevel enum with ordering (Trace < Debug < Info < Warn < Error)
+- Created LogEntry with structured fields, trace/span context, and level filtering
+- Implemented TraceId and SpanId with W3C traceparent format support
+- Created SpanContext for distributed trace propagation
+- Added SpanKind (Internal, Server, Client, Producer, Consumer)
+- Implemented Span with events, attributes, status, and duration tracking
+- Created AlertSeverity, AlertStatus, AlertCondition, AlertState, Alert types
+- Created observability module in `crates/forge-runtime/src/observability/`
+- Implemented ObservabilityConfig with metrics, logs, traces, export sections
+- Added ExportConfig with OTLP and Prometheus export options
+- Created MetricsCollector with buffering and batch flushing
+- Implemented LogCollector with level filtering and async writes
+- Created TraceCollector with probabilistic sampling and always-trace-errors option
+- Built MetricsStore, LogStore, TraceStore for PostgreSQL persistence
+- Added query, search, and cleanup methods for each store type
+- All 206 tests passing

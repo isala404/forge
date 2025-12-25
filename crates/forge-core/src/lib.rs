@@ -5,6 +5,7 @@ pub mod cron;
 pub mod error;
 pub mod function;
 pub mod job;
+pub mod observability;
 pub mod realtime;
 pub mod schema;
 pub mod workflow;
@@ -19,6 +20,10 @@ pub use function::{
     MutationContext, QueryContext, RequestMetadata,
 };
 pub use job::{ForgeJob, JobContext, JobInfo, JobPriority, JobStatus, RetryConfig};
+pub use observability::{
+    Alert, AlertCondition, AlertSeverity, AlertState, AlertStatus, LogEntry, LogLevel, Metric,
+    MetricKind, MetricLabels, MetricValue, Span, SpanContext, SpanKind, SpanStatus, TraceId,
+};
 pub use realtime::{
     Change, ChangeOperation, Delta, ReadSet, SessionId, SessionInfo, SessionStatus, SubscriptionId,
     SubscriptionInfo, SubscriptionState, TrackingMode,

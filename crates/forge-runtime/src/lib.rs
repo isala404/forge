@@ -5,6 +5,7 @@ pub mod function;
 pub mod gateway;
 pub mod jobs;
 pub mod migrations;
+pub mod observability;
 pub mod realtime;
 pub mod workflow;
 
@@ -23,6 +24,10 @@ pub use jobs::{
     JobDispatcher, JobExecutor, JobQueue, JobRecord, JobRegistry, Worker, WorkerConfig,
 };
 pub use migrations::{MigrationExecutor, MigrationGenerator, SchemaDiff};
+pub use observability::{
+    LogCollector, LogStore, MetricsCollector, MetricsStore, ObservabilityConfig, TraceCollector,
+    TraceStore,
+};
 pub use realtime::{
     ChangeListener, InvalidationEngine, SessionManager, SubscriptionManager, WebSocketConfig,
     WebSocketServer,
