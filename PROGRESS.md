@@ -177,3 +177,18 @@ Phase 10: Observability completed.
 - Built MetricsStore, LogStore, TraceStore for PostgreSQL persistence
 - Added query, search, and cleanup methods for each store type
 - All 206 tests passing
+
+Phase 11: TypeScript Codegen completed.
+- Created typescript module in `crates/forge-codegen/src/typescript/` with generator components
+- Implemented TypeGenerator using SchemaRegistry's all_tables() and all_enums() methods
+- Leveraged existing FieldDef.to_typescript() and EnumDef.to_typescript() for type generation
+- Added common utility types (Paginated, Page, SortOrder, QueryResult, SubscriptionResult, ForgeError)
+- Created ApiGenerator with QueryFn, MutationFn, ActionFn interface types
+- Implemented createQuery, createMutation, createAction factory functions
+- Built ClientGenerator with ForgeClient class for WebSocket and HTTP RPC communication
+- Added connection state management, subscription handling, and automatic reconnection
+- Created StoreGenerator for Svelte 5 integration with reactive stores
+- Implemented query, subscribe, mutate, action functions for component use
+- Added ForgeProviderProps and context management for client access
+- Exported EnumDef and EnumVariant from forge-core schema module for codegen use
+- All 206 tests passing
