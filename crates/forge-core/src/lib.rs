@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod cluster;
 pub mod config;
 pub mod cron;
 pub mod error;
@@ -8,6 +9,7 @@ pub mod schema;
 pub mod workflow;
 
 pub use auth::{Claims, ClaimsBuilder};
+pub use cluster::{ClusterInfo, LeaderInfo, LeaderRole, NodeId, NodeInfo, NodeRole, NodeStatus};
 pub use config::ForgeConfig;
 pub use cron::{CronContext, CronInfo, CronSchedule, ForgeCron};
 pub use error::{ForgeError, Result};

@@ -114,3 +114,20 @@ Phase 7: Workflow Engine completed.
 - Added workflow timeout handling via tokio::time::timeout
 - Used #[from] serde_json::Error for ForgeError::Serialization variant
 - All 118 tests passing
+
+Phase 8: Clustering & Coordination completed.
+- Created cluster module in `crates/forge-core/src/cluster/` with node, roles, and traits
+- Implemented NodeId, NodeInfo, NodeStatus for node identification and state
+- Added NodeRole enum (Gateway, Function, Worker, Scheduler)
+- Created LeaderRole enum (Scheduler, MetricsAggregator, LogCompactor) with unique lock IDs
+- Implemented ClusterInfo and LeaderInfo for cluster state visibility
+- Created cluster module in `crates/forge-runtime/src/cluster/`
+- Built NodeRegistry for node registration with forge_nodes table operations
+- Implemented HeartbeatLoop with configurable interval and dead node detection
+- Created LeaderElection using PostgreSQL advisory locks (pg_try_advisory_lock)
+- Added lease-based leadership with refresh and expiration tracking
+- Implemented GracefulShutdown with drain timeout and in-flight request tracking
+- Created InFlightGuard RAII guard for request tracking during shutdown
+- Added LeaderGuard RAII guard for leader-only operations
+- Used broadcast channel for shutdown notification
+- All 133 tests passing

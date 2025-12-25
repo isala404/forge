@@ -1,3 +1,4 @@
+pub mod cluster;
 pub mod cron;
 pub mod db;
 pub mod function;
@@ -6,6 +7,10 @@ pub mod jobs;
 pub mod migrations;
 pub mod workflow;
 
+pub use cluster::{
+    GracefulShutdown, HeartbeatConfig, HeartbeatLoop, InFlightGuard, LeaderConfig, LeaderElection,
+    LeaderGuard, NodeCounts, NodeRegistry, ShutdownConfig,
+};
 pub use cron::{CronEntry, CronRecord, CronRegistry, CronRunner, CronStatus};
 pub use db::Database;
 pub use function::{FunctionExecutor, FunctionRegistry, FunctionRouter, RouteResult};
