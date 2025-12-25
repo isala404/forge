@@ -5,6 +5,7 @@ pub mod error;
 pub mod function;
 pub mod job;
 pub mod schema;
+pub mod workflow;
 
 pub use auth::{Claims, ClaimsBuilder};
 pub use config::ForgeConfig;
@@ -16,3 +17,4 @@ pub use function::{
 };
 pub use job::{ForgeJob, JobContext, JobInfo, JobPriority, JobStatus, RetryConfig};
 pub use schema::{FieldDef, ModelMeta, SchemaRegistry, TableDef};
+pub use workflow::{ForgeWorkflow, WorkflowContext, WorkflowInfo, WorkflowStatus};

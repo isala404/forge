@@ -93,3 +93,24 @@ Phase 6: Cron Scheduler completed.
 - Implemented catch-up logic for missed runs with configurable limit
 - Added workspace dependencies: cron = "0.15", chrono-tz = "0.10"
 - All 102 tests passing
+
+Phase 7: Workflow Engine completed.
+- Created workflow module in `crates/forge-core/src/workflow/` with traits, context, and step builder
+- Implemented ForgeWorkflow trait with Input/Output associated types and execute future
+- Added WorkflowInfo struct with name, version, timeout, deprecated flag
+- Created WorkflowStatus enum (Created, Running, Waiting, Completed, Compensating, Compensated, Failed)
+- Implemented StepStatus enum (Pending, Running, Completed, Failed, Compensated, Skipped)
+- Created StepBuilder with run(), compensate(), timeout(), retry(), optional() methods
+- Built WorkflowContext with run_id, workflow_name, version, db pool, http client
+- Added deterministic workflow_time for replay consistency
+- Implemented step state tracking with RwLock<HashMap<String, StepState>>
+- Created #[forge::workflow] proc macro parsing version, timeout, deprecated attributes
+- Created workflow module in `crates/forge-runtime/src/workflow/`
+- Built WorkflowRegistry for dynamic workflow handler registration
+- Implemented WorkflowEntry with info and type-erased handler Arc
+- Created WorkflowRecord for full workflow run persistence (id, name, version, input, output, status, steps)
+- Created WorkflowStepRecord for individual step state tracking
+- Implemented WorkflowExecutor with start, resume, cancel, status methods
+- Added workflow timeout handling via tokio::time::timeout
+- Used #[from] serde_json::Error for ForgeError::Serialization variant
+- All 118 tests passing

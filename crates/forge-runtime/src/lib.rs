@@ -4,6 +4,7 @@ pub mod function;
 pub mod gateway;
 pub mod jobs;
 pub mod migrations;
+pub mod workflow;
 
 pub use cron::{CronEntry, CronRecord, CronRegistry, CronRunner, CronStatus};
 pub use db::Database;
@@ -16,3 +17,6 @@ pub use jobs::{
     JobDispatcher, JobExecutor, JobQueue, JobRecord, JobRegistry, Worker, WorkerConfig,
 };
 pub use migrations::{MigrationExecutor, MigrationGenerator, SchemaDiff};
+pub use workflow::{
+    WorkflowEntry, WorkflowExecutor, WorkflowRecord, WorkflowRegistry, WorkflowStepRecord,
+};

@@ -7,6 +7,7 @@ mod job;
 mod model;
 mod mutation;
 mod query;
+mod workflow;
 
 /// Marks a struct as a FORGE model, generating schema metadata and SQL.
 ///
@@ -194,9 +195,41 @@ pub fn cron(attr: TokenStream, item: TokenStream) -> TokenStream {
     cron::cron_impl(attr, item)
 }
 
-/// Marks a function as a workflow.
+/// Marks a function as a durable workflow.
+///
+/// Workflows are multi-step processes that:
+/// - Survive server restarts
+/// - Handle failures with compensation
+/// - Track progress and state
+/// - Can run for hours, days, or longer
+///
+/// # Attributes
+/// - `version = 1` - Workflow version (increment for breaking changes)
+/// - `timeout = "24h"` - Maximum workflow execution time
+/// - `deprecated` - Mark as deprecated
+///
+/// # Example
+/// ```ignore
+/// #[forge::workflow]
+/// #[version = 1]
+/// pub async fn user_onboarding(
+///     ctx: &WorkflowContext,
+///     input: OnboardingInput,
+/// ) -> Result<OnboardingResult> {
+///     let user = ctx.step("create_user")
+///         .run(|| ctx.mutate(create_user, input.clone()))
+///         .compensate(|user| ctx.mutate(delete_user, user.id))
+///         .await?;
+///
+///     ctx.step("send_welcome")
+///         .run(|| send_email(&user.email))
+///         .optional()
+///         .await;
+///
+///     Ok(OnboardingResult { user })
+/// }
+/// ```
 #[proc_macro_attribute]
-pub fn workflow(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    // TODO: Implement in Phase 7
-    item
+pub fn workflow(attr: TokenStream, item: TokenStream) -> TokenStream {
+    workflow::workflow_impl(attr, item)
 }
