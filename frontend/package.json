@@ -1,0 +1,49 @@
+{
+  "name": "@forge/svelte",
+  "version": "0.1.0",
+  "description": "FORGE Svelte 5 runtime library for real-time full-stack applications",
+  "type": "module",
+  "svelte": "./src/lib/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "svelte": "./src/lib/index.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src/lib"
+  ],
+  "scripts": {
+    "build": "svelte-package",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "format": "prettier --write .",
+    "lint": "eslint ."
+  },
+  "peerDependencies": {
+    "svelte": "^5.0.0"
+  },
+  "devDependencies": {
+    "@sveltejs/package": "^2.0.0",
+    "@sveltejs/kit": "^2.0.0",
+    "@types/node": "^20.0.0",
+    "prettier": "^3.0.0",
+    "prettier-plugin-svelte": "^3.0.0",
+    "svelte": "^5.0.0",
+    "svelte-check": "^4.0.0",
+    "typescript": "^5.0.0"
+  },
+  "keywords": [
+    "svelte",
+    "svelte5",
+    "runes",
+    "forge",
+    "real-time",
+    "rpc",
+    "websocket"
+  ],
+  "license": "MIT"
+}

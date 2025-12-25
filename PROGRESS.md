@@ -192,3 +192,19 @@ Phase 11: TypeScript Codegen completed.
 - Added ForgeProviderProps and context management for client access
 - Exported EnumDef and EnumVariant from forge-core schema module for codegen use
 - All 206 tests passing
+
+Phase 12: Frontend Runtime Library completed.
+- Created `frontend/` directory with @forge/svelte NPM package
+- Implemented ForgeClient class in TypeScript with WebSocket and HTTP RPC support
+- Added connection state management with automatic reconnection (exponential backoff)
+- Created ForgeProvider.svelte component for Svelte 5 context injection
+- Implemented context utilities (getForgeClient, setForgeClient, getAuthState, setAuthState)
+- Built reactive store system compatible with Svelte's store contract
+- Created query() store for one-time data fetching with loading/error states
+- Created subscribe() store for real-time subscriptions with automatic cleanup
+- Implemented mutate() and action() functions for mutations and external API calls
+- Added mutateOptimistic() for optimistic UI updates
+- Created auth module with createAuthStore and createPersistentAuthStore
+- Added localStorage persistence for auth tokens
+- Implemented createQuery, createMutation, createAction API helpers for generated code
+- All 206 Rust tests passing
