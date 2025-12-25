@@ -4,8 +4,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use forge_core::{
-    ActionContext, AuthContext, ForgeAction, ForgeMutation, ForgeQuery, FunctionInfo,
-    FunctionKind, MutationContext, QueryContext, RequestMetadata, Result,
+    ActionContext, AuthContext, ForgeAction, ForgeMutation, ForgeQuery, FunctionInfo, FunctionKind,
+    MutationContext, QueryContext, RequestMetadata, Result,
 };
 use serde_json::Value;
 
@@ -63,8 +63,28 @@ impl FunctionEntry {
 }
 
 /// Registry of all FORGE functions.
+#[derive(Clone)]
 pub struct FunctionRegistry {
     functions: HashMap<String, FunctionEntry>,
+}
+
+impl Clone for FunctionEntry {
+    fn clone(&self) -> Self {
+        match self {
+            FunctionEntry::Query { info, handler } => FunctionEntry::Query {
+                info: info.clone(),
+                handler: Arc::clone(handler),
+            },
+            FunctionEntry::Mutation { info, handler } => FunctionEntry::Mutation {
+                info: info.clone(),
+                handler: Arc::clone(handler),
+            },
+            FunctionEntry::Action { info, handler } => FunctionEntry::Action {
+                info: info.clone(),
+                handler: Arc::clone(handler),
+            },
+        }
+    }
 }
 
 impl FunctionRegistry {
@@ -94,10 +114,8 @@ impl FunctionRegistry {
             })
         });
 
-        self.functions.insert(
-            name,
-            FunctionEntry::Query { info, handler },
-        );
+        self.functions
+            .insert(name, FunctionEntry::Query { info, handler });
     }
 
     /// Register a mutation function.
@@ -119,10 +137,8 @@ impl FunctionRegistry {
             })
         });
 
-        self.functions.insert(
-            name,
-            FunctionEntry::Mutation { info, handler },
-        );
+        self.functions
+            .insert(name, FunctionEntry::Mutation { info, handler });
     }
 
     /// Register an action function.
@@ -144,10 +160,8 @@ impl FunctionRegistry {
             })
         });
 
-        self.functions.insert(
-            name,
-            FunctionEntry::Action { info, handler },
-        );
+        self.functions
+            .insert(name, FunctionEntry::Action { info, handler });
     }
 
     /// Get a function by name.

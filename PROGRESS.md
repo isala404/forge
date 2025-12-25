@@ -41,3 +41,16 @@ Phase 3: Function System completed.
 - Added FunctionExecutor with timeout handling and result serialization
 - Added Forbidden, Validation, Timeout error variants to ForgeError
 - All 42 tests passing
+
+Phase 4: HTTP Gateway completed.
+- Created auth module in `crates/forge-core/src/auth/` with Claims and ClaimsBuilder for JWT handling
+- Added gateway module in `crates/forge-runtime/src/gateway/` with full HTTP server implementation
+- Implemented GatewayServer using axum with configurable port, CORS, and auth
+- Created RpcHandler for POST /rpc and POST /rpc/:function endpoints
+- Added RpcRequest/RpcResponse types for JSON-RPC style communication
+- Implemented AuthMiddleware with JWT token validation (base64 decoding, claims extraction)
+- Added TracingState for distributed tracing with X-Trace-Id and X-Request-Id headers
+- Created health check endpoint at GET /health
+- Integrated middleware stack: CORS -> Auth -> Tracing
+- Added FunctionRegistry Clone implementation for server state sharing
+- All 63 tests passing
