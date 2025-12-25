@@ -223,3 +223,20 @@ Phase 13: Dashboard completed.
 - Created Chart.js stub for graph rendering (placeholder for real Chart.js)
 - Built create_dashboard_router and create_api_router for route configuration
 - All 213 tests passing
+
+Phase 14: CLI Tool completed.
+- Created CLI module in `crates/forge/src/cli/` with clap-based command parsing
+- Implemented `forge new <name>` for creating new projects with full scaffolding
+- Added project template with Cargo.toml, forge.toml, main.rs, schema/, functions/
+- Created example User model and users query/mutation functions
+- Implemented frontend scaffolding with SvelteKit, TypeScript, and @forge/svelte
+- Added `forge init` for initializing in existing directories
+- Implemented `forge add model|query|mutation|action|job|cron|workflow <name>`
+- Created boilerplate generators for each component type with proper proc macro attributes
+- Auto-update mod.rs files when adding new components
+- Implemented `forge generate` for TypeScript client code generation
+- Added progress bar display with indicatif during generation
+- Implemented `forge run` with config loading, port override, and dev mode
+- Added console styling with colored output using console crate
+- Created test suite for project creation and name conversion utilities
+- All 221 tests passing
