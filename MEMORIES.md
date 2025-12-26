@@ -28,7 +28,9 @@ Core Components
 - Jobs: background tasks with SKIP LOCKED pattern
 - Crons: scheduled tasks via leader-elected scheduler
 - Workflows: multi-step durable processes with compensation
-- Reactivity: LISTEN/NOTIFY + read set tracking for live queries
+- Reactivity: Reactor orchestrates ChangeListener -> InvalidationEngine -> Query Re-execution -> WebSocket Push
+- Reactivity triggers: forge_enable_reactivity(table_name) creates NOTIFY triggers on tables
+- Reactivity: read set tracking uses query name patterns (get_X/list_X -> table X)
 - Runtime: Forge struct in crates/forge/src/runtime.rs wires all components
 - Builder: ForgeBuilder pattern for configuration before run()
 - Testing: TestContext in forge-runtime/src/testing/ for integration tests
@@ -42,9 +44,12 @@ Key Patterns
 - User functions take &QueryContext and &MutationContext (references)
 - axum 0.7+ route syntax uses {param} not :param
 - Svelte 5: avoid destructuring $props() at module level, access props.* inside closures
+- Svelte 5: ForgeProvider sets context immediately during initialization, not in onMount
+- Svelte 5: use const for $state objects passed to context, mutate properties not reassign
 - Function registration: call builder.function_registry_mut().register_query::<FnQuery>() before .config()
 - Proc macros: query fn → FnQuery struct, mutation fn → FnMutation struct
-- RPC: omit args field for no-arg functions (unit type), response uses `data` field not `result`
+- RPC: client normalizes empty objects {} to null for Rust unit type compatibility
+- RPC: response uses `data` field not `result`
 - Migrations: use migrations/ directory with numbered SQL files (0001_xxx.sql)
 - Migrations: MigrationRunner uses advisory lock for mesh-safe concurrent deploys
 - Migrations: built-in FORGE tables versioned as 0000_forge_internal_v1

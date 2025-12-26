@@ -316,6 +316,14 @@ impl Forge {
             let gateway =
                 GatewayServer::new(gateway_config, self.function_registry.clone(), pool.clone());
 
+            // Start the reactor for real-time updates
+            let reactor = gateway.reactor();
+            if let Err(e) = reactor.start().await {
+                tracing::error!("Failed to start reactor: {}", e);
+            } else {
+                tracing::info!("Reactor started for real-time updates");
+            }
+
             let mut router = gateway.router();
 
             // Mount dashboard at /_dashboard

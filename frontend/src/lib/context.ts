@@ -13,18 +13,33 @@ const FORGE_CLIENT_KEY = Symbol('forge-client');
 const FORGE_AUTH_KEY = Symbol('forge-auth');
 
 /**
- * Get the FORGE client from context.
- * Must be called within a component that is a descendant of ForgeProvider.
+ * Module-level client reference for use outside component initialization.
+ * This is set by ForgeProvider and used by mutate/action functions.
+ */
+let globalClient: ForgeClient | null = null;
+
+/**
+ * Get the FORGE client from context (during component initialization)
+ * or from the global reference (in event handlers).
  */
 export function getForgeClient(): ForgeClient {
-  const client = getContext<ForgeClient>(FORGE_CLIENT_KEY);
-  if (!client) {
-    throw new Error(
-      'FORGE client not found. ' +
-      'Make sure your component is wrapped with ForgeProvider.'
-    );
+  // Try context first (works during component initialization)
+  try {
+    const client = getContext<ForgeClient>(FORGE_CLIENT_KEY);
+    if (client) return client;
+  } catch {
+    // getContext throws outside component initialization, fall through
   }
-  return client;
+
+  // Fall back to global client (works in event handlers)
+  if (globalClient) {
+    return globalClient;
+  }
+
+  throw new Error(
+    'FORGE client not found. ' +
+    'Make sure your component is wrapped with ForgeProvider.'
+  );
 }
 
 /**
@@ -33,6 +48,8 @@ export function getForgeClient(): ForgeClient {
  */
 export function setForgeClient(client: ForgeClient): void {
   setContext(FORGE_CLIENT_KEY, client);
+  // Also set global reference for use in event handlers
+  globalClient = client;
 }
 
 /**

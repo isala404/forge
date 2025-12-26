@@ -89,7 +89,9 @@ impl ChangeListener {
                 notification = listener.recv() => {
                     match notification {
                         Ok(notification) => {
+                            tracing::debug!("Received notification: {}", notification.payload());
                             if let Some(change) = self.parse_notification(notification.payload()) {
+                                tracing::debug!(table = %change.table, op = ?change.operation, "Parsed change");
                                 // Broadcast the change
                                 let _ = self.change_tx.send(change);
                             }

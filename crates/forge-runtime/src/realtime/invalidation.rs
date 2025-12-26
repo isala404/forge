@@ -83,6 +83,12 @@ impl InvalidationEngine {
             return;
         }
 
+        tracing::debug!(
+            table = %change.table,
+            affected_count = affected.len(),
+            "Found affected subscriptions for change"
+        );
+
         let now = Instant::now();
         let mut pending = self.pending.write().await;
 

@@ -3,17 +3,21 @@ use std::sync::Arc;
 
 use axum::{
     middleware,
-    routing::{get, post},
+    routing::{any, get, post},
     Json, Router,
 };
 use serde::Serialize;
 use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
 
+use forge_core::cluster::NodeId;
+
 use super::auth::{auth_middleware, AuthConfig, AuthMiddleware};
 use super::rpc::{rpc_function_handler, rpc_handler, RpcHandler};
 use super::tracing::TracingState;
+use super::websocket::{ws_handler, WsState};
 use crate::function::FunctionRegistry;
+use crate::realtime::{Reactor, ReactorConfig};
 
 /// Gateway server configuration.
 #[derive(Debug, Clone)]
@@ -57,16 +61,31 @@ pub struct GatewayServer {
     config: GatewayConfig,
     registry: FunctionRegistry,
     db_pool: sqlx::PgPool,
+    reactor: Arc<Reactor>,
 }
 
 impl GatewayServer {
     /// Create a new gateway server.
     pub fn new(config: GatewayConfig, registry: FunctionRegistry, db_pool: sqlx::PgPool) -> Self {
+        let node_id = NodeId::new();
+        let reactor = Arc::new(Reactor::new(
+            node_id,
+            db_pool.clone(),
+            registry.clone(),
+            ReactorConfig::default(),
+        ));
+
         Self {
             config,
             registry,
             db_pool,
+            reactor,
         }
+    }
+
+    /// Get a reference to the reactor.
+    pub fn reactor(&self) -> Arc<Reactor> {
+        self.reactor.clone()
     }
 
     /// Build the Axum router.
@@ -99,10 +118,15 @@ impl GatewayServer {
             CorsLayer::new()
         };
 
+        // WebSocket state uses the reactor
+        let ws_state = Arc::new(WsState::new(self.reactor.clone()));
+
         // Build the router
         Router::new()
             // Health check endpoint
             .route("/health", get(health_handler))
+            // WebSocket endpoint (before middleware to allow upgrade)
+            .route("/ws", any(ws_handler).with_state(ws_state))
             // RPC endpoint
             .route("/rpc", post(rpc_handler))
             // REST-style function endpoint
@@ -130,6 +154,13 @@ impl GatewayServer {
     pub async fn run(self) -> Result<(), std::io::Error> {
         let addr = self.addr();
         let router = self.router();
+
+        // Start the reactor for real-time updates
+        if let Err(e) = self.reactor.start().await {
+            tracing::error!("Failed to start reactor: {}", e);
+        } else {
+            tracing::info!("Reactor started for real-time updates");
+        }
 
         tracing::info!("Gateway server listening on {}", addr);
 

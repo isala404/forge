@@ -326,3 +326,47 @@ Implemented 8 critical production fixes across FORGE framework.
 - Fixed AuthMiddleware Debug derive for DecodingKey compatibility
 - Created sample todo-app in `examples/todo-app/` demonstrating queries, mutations, and codegen
 - All 288 tests passing
+
+Fixed ForgeProvider context timing and client argument serialization.
+- ForgeProvider.svelte: Set context immediately during component initialization, not in onMount
+- ForgeProvider.svelte: Use `const` for authState and mutate properties instead of reassigning
+- client.ts: Normalize empty objects `{}` to `null` for Rust unit type compatibility
+- Fixed subscribe() method to also normalize args for WebSocket subscriptions
+
+Fixed mutate/action functions and WebSocket resilience.
+- context.ts: Added global client reference for use in event handlers (getContext only works during init)
+- client.ts: Made WebSocket connection optional - resolves instead of rejects on failure
+- client.ts: Added wsEverConnected flag to prevent retry loops when server doesn't support WebSocket
+- mutate() and action() now work in event handlers, not just during component initialization
+
+Implemented WebSocket endpoint for real-time subscriptions.
+- Added gateway/websocket.rs with WebSocket upgrade handler and message protocol
+- Added /ws route to gateway server for WebSocket connections
+- ClientMessage types: subscribe, unsubscribe, ping, auth
+- ServerMessage types: connected, subscribed, unsubscribed, data, error, pong
+- Updated client.ts handleMessage to handle new server message types
+- Frontend subscribe() function now uses WebSocket for real-time data
+
+Implemented full reactivity pipeline matching REACTIVITY.md proposal.
+- Added PostgreSQL NOTIFY triggers to builtin migrations (forge_notify_change function)
+- Added forge_enable_reactivity(table) and forge_disable_reactivity(table) helper functions
+- Created Reactor in realtime/reactor.rs that orchestrates the full pipeline
+- Reactor connects: ChangeListener -> InvalidationEngine -> Query Re-execution -> WebSocket Push
+- ChangeListener uses PostgreSQL PgListener for LISTEN on forge_changes channel
+- InvalidationEngine debounces and coalesces changes, finds affected subscriptions
+- SubscriptionManager tracks active subscriptions with read set invalidation
+- WebSocketServer manages connections and broadcasts updates to clients
+- Updated gateway/websocket.rs to use Reactor for subscription handling
+- Session registration and subscription lifecycle managed through Reactor
+- Gateway server starts Reactor on startup for real-time updates
+- Read set extraction uses query name patterns (get_X -> table X) for table tracking
+- Sample app migrations now call forge_enable_reactivity('users') for live updates
+- Fixed migration runner to properly handle dollar-quoted PL/pgSQL functions
+- Added split_sql_statements() function that respects $$ delimiters
+- Fixed runtime.rs to start Reactor before gateway server (was only called in gateway.run() which wasn't used)
+- Fixed InvalidationEngine debounce timing - was calling check_pending() immediately after process_change()
+- Changed reactor to use flush_all() for immediate invalidation instead of debounced check_pending()
+- Fixed @forge/svelte client subscription race condition - subscriptions were lost if created before WebSocket connected
+- Added pendingSubscriptions map to client.ts to queue subscriptions created before connection
+- Added flushPendingSubscriptions() method called on WebSocket open to send queued subscriptions
+- Verified full reactivity pipeline: INSERT triggers NOTIFY -> ChangeListener receives -> Reactor processes -> Subscription found -> Query re-executed -> Update pushed to client

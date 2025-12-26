@@ -139,9 +139,10 @@ impl MigrationRunner {
     async fn apply_migration(&self, migration: &Migration) -> Result<()> {
         info!("Applying migration: {}", migration.name);
 
-        // Split migration into individual statements and execute each
-        // Skip empty statements and comments-only statements
-        for statement in migration.sql.split(';') {
+        // Split migration into individual statements, respecting dollar-quoted strings
+        let statements = split_sql_statements(&migration.sql);
+
+        for statement in statements {
             let statement = statement.trim();
 
             // Skip empty statements or comment-only blocks
@@ -180,6 +181,70 @@ impl MigrationRunner {
         info!("Migration applied: {}", migration.name);
         Ok(())
     }
+}
+
+/// Split SQL into individual statements, respecting dollar-quoted strings.
+/// This handles PL/pgSQL functions that contain semicolons inside $$ delimiters.
+fn split_sql_statements(sql: &str) -> Vec<String> {
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut in_dollar_quote = false;
+    let mut dollar_tag = String::new();
+    let mut chars = sql.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        current.push(c);
+
+        // Check for dollar-quoting start/end
+        if c == '$' {
+            // Look for a dollar-quote tag like $$ or $tag$
+            let mut potential_tag = String::from("$");
+
+            // Collect characters until we hit another $ or non-identifier char
+            while let Some(&next_c) = chars.peek() {
+                if next_c == '$' {
+                    potential_tag.push(chars.next().unwrap());
+                    current.push('$');
+                    break;
+                } else if next_c.is_alphanumeric() || next_c == '_' {
+                    potential_tag.push(chars.next().unwrap());
+                    current.push(potential_tag.chars().last().unwrap());
+                } else {
+                    break;
+                }
+            }
+
+            // Check if this is a valid dollar-quote delimiter (ends with $)
+            if potential_tag.len() >= 2 && potential_tag.ends_with('$') {
+                if in_dollar_quote && potential_tag == dollar_tag {
+                    // End of dollar-quoted string
+                    in_dollar_quote = false;
+                    dollar_tag.clear();
+                } else if !in_dollar_quote {
+                    // Start of dollar-quoted string
+                    in_dollar_quote = true;
+                    dollar_tag = potential_tag;
+                }
+            }
+        }
+
+        // Split on semicolon only if not inside a dollar-quoted string
+        if c == ';' && !in_dollar_quote {
+            let stmt = current.trim().trim_end_matches(';').trim().to_string();
+            if !stmt.is_empty() {
+                statements.push(stmt);
+            }
+            current.clear();
+        }
+    }
+
+    // Don't forget the last statement (might not end with ;)
+    let stmt = current.trim().trim_end_matches(';').trim().to_string();
+    if !stmt.is_empty() {
+        statements.push(stmt);
+    }
+
+    statements
 }
 
 /// Load user migrations from a directory.
@@ -276,5 +341,51 @@ mod tests {
         let m = Migration::new("test", "SELECT 1");
         assert_eq!(m.name, "test");
         assert_eq!(m.sql, "SELECT 1");
+    }
+
+    #[test]
+    fn test_split_simple_statements() {
+        let sql = "SELECT 1; SELECT 2; SELECT 3;";
+        let stmts = super::split_sql_statements(sql);
+        assert_eq!(stmts.len(), 3);
+        assert_eq!(stmts[0], "SELECT 1");
+        assert_eq!(stmts[1], "SELECT 2");
+        assert_eq!(stmts[2], "SELECT 3");
+    }
+
+    #[test]
+    fn test_split_with_dollar_quoted_function() {
+        let sql = r#"
+CREATE FUNCTION test() RETURNS void AS $$
+BEGIN
+    SELECT 1;
+    SELECT 2;
+END;
+$$ LANGUAGE plpgsql;
+
+SELECT 3;
+"#;
+        let stmts = super::split_sql_statements(sql);
+        assert_eq!(stmts.len(), 2);
+        assert!(stmts[0].contains("CREATE FUNCTION"));
+        assert!(stmts[0].contains("$$ LANGUAGE plpgsql"));
+        assert!(stmts[1].contains("SELECT 3"));
+    }
+
+    #[test]
+    fn test_split_preserves_dollar_quote_content() {
+        let sql = r#"
+CREATE FUNCTION notify() RETURNS trigger AS $$
+DECLARE
+    row_id TEXT;
+BEGIN
+    row_id := NEW.id::TEXT;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+"#;
+        let stmts = super::split_sql_statements(sql);
+        assert_eq!(stmts.len(), 1);
+        assert!(stmts[0].contains("row_id := NEW.id::TEXT"));
     }
 }

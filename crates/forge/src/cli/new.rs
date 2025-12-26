@@ -260,8 +260,10 @@ fn create_frontend(dir: &Path, name: &str) -> Result<()> {
     let frontend_dir = dir.join("frontend");
     fs::create_dir_all(&frontend_dir)?;
     fs::create_dir_all(frontend_dir.join("src/routes"))?;
+    fs::create_dir_all(frontend_dir.join("src/lib/forge"))?;
 
     // Create package.json
+    // Note: vite-plugin-svelte 6.x and vite 7.x are required for proper Svelte 5 hydration
     let package_json = format!(
         r#"{{
   "name": "{name}-frontend",
@@ -275,12 +277,12 @@ fn create_frontend(dir: &Path, name: &str) -> Result<()> {
   }},
   "devDependencies": {{
     "@sveltejs/adapter-static": "^3.0.0",
-    "@sveltejs/kit": "^2.0.0",
-    "@sveltejs/vite-plugin-svelte": "^4.0.0",
-    "svelte": "^5.0.0",
+    "@sveltejs/kit": "^2.49.0",
+    "@sveltejs/vite-plugin-svelte": "^6.0.0",
+    "svelte": "^5.45.0",
     "svelte-check": "^4.0.0",
     "typescript": "^5.0.0",
-    "vite": "^6.0.0"
+    "vite": "^7.0.0"
   }},
   "dependencies": {{}}
 }}
@@ -344,64 +346,96 @@ export default defineConfig({
 "#;
     fs::write(frontend_dir.join("src/app.html"), app_html)?;
 
-    // Create +layout.svelte
+    // Create +layout.svelte with ForgeProvider
     let layout_svelte = r#"<script lang="ts">
+    import { ForgeProvider } from '@forge/svelte';
+
     let { children } = $props();
 </script>
 
-{@render children()}
+<ForgeProvider url="http://localhost:8080">
+    {@render children()}
+</ForgeProvider>
 "#;
     fs::write(
         frontend_dir.join("src/routes/+layout.svelte"),
         layout_svelte,
     )?;
 
-    // Create +page.svelte
+    // Create +layout.ts to disable SSR (required for ForgeProvider context)
+    let layout_ts = r#"// Disable SSR for the entire app - ForgeProvider requires client-side context
+export const ssr = false;
+export const csr = true;
+"#;
+    fs::write(frontend_dir.join("src/routes/+layout.ts"), layout_ts)?;
+
+    // Create +page.svelte using reactive stores
     let page_svelte = r#"<script lang="ts">
-    import { onMount } from 'svelte';
+    import { query, mutate } from '@forge/svelte';
+    import { getUsers, createUser } from '$lib/forge/api';
+    import type { User } from '$lib/forge/types';
 
-    let users: any[] = $state([]);
-    let loading = $state(true);
-    let error: string | null = $state(null);
+    // Reactive query - automatically fetches and updates
+    const users = query(getUsers, {});
 
-    onMount(async () => {
+    // Form state
+    let name = $state('');
+    let email = $state('');
+    let isSubmitting = $state(false);
+
+    async function handleCreateUser(e: Event) {
+        e.preventDefault();
+        if (!name || !email) return;
+
+        isSubmitting = true;
         try {
-            const response = await fetch('http://localhost:8080/rpc', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ function: 'get_users' })
-            });
-            if (response.ok) {
-                const data = await response.json();
-                users = data.data ?? [];
-            } else {
-                error = 'Failed to load users';
-            }
-        } catch (e: any) {
-            error = e.message;
+            await mutate(createUser, { name, email });
+            // Refetch the users list
+            users.refetch();
+            // Clear form
+            name = '';
+            email = '';
+        } catch (err) {
+            console.error('Failed to create user:', err);
         }
-        loading = false;
-    });
+        isSubmitting = false;
+    }
 </script>
 
 <main>
     <h1>Welcome to FORGE</h1>
     <p>Backend is running at <a href="http://localhost:8080/health" target="_blank">http://localhost:8080</a></p>
 
-    <h2>Users</h2>
-    {#if loading}
-        <p>Loading...</p>
-    {:else if error}
-        <p>Error: {error}</p>
-    {:else if users.length === 0}
-        <p>No users found. The database is empty.</p>
-    {:else}
-        <ul>
-            {#each users as user}
-                <li>{user.name} ({user.email})</li>
-            {/each}
-        </ul>
-    {/if}
+    <section>
+        <h2>Create User</h2>
+        <form onsubmit={handleCreateUser}>
+            <input type="text" placeholder="Name" bind:value={name} required />
+            <input type="email" placeholder="Email" bind:value={email} required />
+            <button type="submit" disabled={isSubmitting}>
+                {isSubmitting ? 'Creating...' : 'Create User'}
+            </button>
+        </form>
+    </section>
+
+    <section>
+        <h2>Users</h2>
+        {#if $users.loading}
+            <p>Loading...</p>
+        {:else if $users.error}
+            <p class="error">Error: {$users.error.message}</p>
+        {:else if !$users.data || $users.data.length === 0}
+            <p>No users found. Create one above!</p>
+        {:else}
+            <ul>
+                {#each $users.data as user (user.id)}
+                    <li>
+                        <strong>{user.name}</strong>
+                        <span class="email">({user.email})</span>
+                    </li>
+                {/each}
+            </ul>
+        {/if}
+    </section>
 </main>
 
 <style>
@@ -411,15 +445,109 @@ export default defineConfig({
         padding: 2rem;
         font-family: system-ui, sans-serif;
     }
-    h1 {
-        color: #333;
+
+    h1 { color: #333; }
+    h2 { color: #555; margin-top: 2rem; }
+
+    a { color: #0066cc; }
+
+    form {
+        display: flex;
+        gap: 0.5rem;
+        margin-bottom: 1rem;
     }
-    a {
-        color: #0066cc;
+
+    input {
+        padding: 0.5rem;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        font-size: 1rem;
+    }
+
+    button {
+        padding: 0.5rem 1rem;
+        background: #0066cc;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 1rem;
+    }
+
+    button:disabled {
+        background: #999;
+        cursor: not-allowed;
+    }
+
+    button:hover:not(:disabled) {
+        background: #0055aa;
+    }
+
+    ul {
+        list-style: none;
+        padding: 0;
+    }
+
+    li {
+        padding: 0.75rem;
+        border-bottom: 1px solid #eee;
+    }
+
+    .email {
+        color: #666;
+        margin-left: 0.5rem;
+    }
+
+    .error {
+        color: #c00;
     }
 </style>
 "#;
     fs::write(frontend_dir.join("src/routes/+page.svelte"), page_svelte)?;
+
+    // Create $lib/forge/types.ts - Generated types from Rust schema
+    let types_ts = r#"// Auto-generated by FORGE - DO NOT EDIT
+// Run `forge generate` to regenerate this file
+
+/** User model */
+export interface User {
+    id: string;
+    email: string;
+    name: string;
+    created_at: string;
+    updated_at: string;
+}
+
+/** Input for creating a user */
+export interface CreateUserInput {
+    email: string;
+    name: string;
+}
+"#;
+    fs::write(frontend_dir.join("src/lib/forge/types.ts"), types_ts)?;
+
+    // Create $lib/forge/api.ts - Type-safe API bindings
+    let api_ts = r#"// Auto-generated by FORGE - DO NOT EDIT
+// Run `forge generate` to regenerate this file
+
+import { createQuery, createMutation } from '@forge/svelte';
+import type { User, CreateUserInput } from './types';
+
+// Queries
+export const getUsers = createQuery<Record<string, never>, User[]>('get_users');
+export const getUser = createQuery<{ id: string }, User | null>('get_user');
+
+// Mutations
+export const createUser = createMutation<CreateUserInput, User>('create_user');
+"#;
+    fs::write(frontend_dir.join("src/lib/forge/api.ts"), api_ts)?;
+
+    // Create $lib/forge/index.ts - Re-export everything
+    let index_ts = r#"// Auto-generated by FORGE - DO NOT EDIT
+export * from './types';
+export * from './api';
+"#;
+    fs::write(frontend_dir.join("src/lib/forge/index.ts"), index_ts)?;
 
     Ok(())
 }
@@ -442,6 +570,9 @@ mod tests {
         assert!(path.join("src/main.rs").exists());
         assert!(path.join("src/schema/mod.rs").exists());
         assert!(path.join("frontend/package.json").exists());
+        assert!(path.join("frontend/src/lib/forge/types.ts").exists());
+        assert!(path.join("frontend/src/lib/forge/api.ts").exists());
+        assert!(path.join("frontend/src/routes/+layout.ts").exists());
         assert!(path.join("migrations/0001_create_users.sql").exists());
     }
 

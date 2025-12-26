@@ -187,3 +187,63 @@ CREATE INDEX IF NOT EXISTS idx_forge_subscriptions_session
 
 CREATE INDEX IF NOT EXISTS idx_forge_subscriptions_query_hash
     ON forge_subscriptions(query_hash);
+
+-- Realtime: Change notification function
+-- This function sends a NOTIFY on the forge_changes channel when data changes.
+-- Format: table_name:operation:row_id
+CREATE OR REPLACE FUNCTION forge_notify_change() RETURNS TRIGGER AS $$
+DECLARE
+    row_id TEXT;
+    payload TEXT;
+BEGIN
+    -- Get the row ID (assumes 'id' column exists, falls back to empty)
+    IF TG_OP = 'DELETE' THEN
+        row_id := COALESCE(OLD.id::TEXT, '');
+    ELSE
+        row_id := COALESCE(NEW.id::TEXT, '');
+    END IF;
+
+    -- Build payload: table:operation:row_id
+    payload := TG_TABLE_NAME || ':' || TG_OP || ':' || row_id;
+
+    -- Send notification
+    PERFORM pg_notify('forge_changes', payload);
+
+    -- Return appropriate row
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    ELSE
+        RETURN NEW;
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Helper function to enable reactivity on a table
+-- Usage: SELECT forge_enable_reactivity('my_table');
+CREATE OR REPLACE FUNCTION forge_enable_reactivity(table_name TEXT) RETURNS VOID AS $$
+DECLARE
+    trigger_name TEXT;
+BEGIN
+    trigger_name := 'forge_notify_' || table_name;
+
+    -- Drop existing trigger if any
+    EXECUTE format('DROP TRIGGER IF EXISTS %I ON %I', trigger_name, table_name);
+
+    -- Create new trigger
+    EXECUTE format('
+        CREATE TRIGGER %I
+        AFTER INSERT OR UPDATE OR DELETE ON %I
+        FOR EACH ROW EXECUTE FUNCTION forge_notify_change()
+    ', trigger_name, table_name);
+END;
+$$ LANGUAGE plpgsql;
+
+-- Helper function to disable reactivity on a table
+CREATE OR REPLACE FUNCTION forge_disable_reactivity(table_name TEXT) RETURNS VOID AS $$
+DECLARE
+    trigger_name TEXT;
+BEGIN
+    trigger_name := 'forge_notify_' || table_name;
+    EXECUTE format('DROP TRIGGER IF EXISTS %I ON %I', trigger_name, table_name);
+END;
+$$ LANGUAGE plpgsql;

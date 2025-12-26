@@ -201,9 +201,7 @@ mod tests {
         // Register a simple table
         let mut table = TableDef::new("todos", "Todo");
         table.fields.push(FieldDef::new("id", RustType::Uuid));
-        table
-            .fields
-            .push(FieldDef::new("title", RustType::String));
+        table.fields.push(FieldDef::new("title", RustType::String));
         table
             .fields
             .push(FieldDef::new("completed", RustType::Bool));

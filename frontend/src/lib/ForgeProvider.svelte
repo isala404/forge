@@ -14,65 +14,53 @@
 
   let props: Props = $props();
 
-  // Create the client lazily to avoid capturing initial values warning
-  let client: ReturnType<typeof createForgeClient> | null = null;
+  // Create the client IMMEDIATELY so it's available for child components
+  // This must happen during component initialization, not in onMount
+  const client = createForgeClient({
+    url: props.url,
+    getToken: props.getToken,
+    onAuthError: props.onAuthError,
+  });
 
-  function getClient() {
-    if (!client) {
-      client = createForgeClient({
-        url: props.url,
-        getToken: props.getToken,
-        onAuthError: props.onAuthError,
-      });
-      setForgeClient(client);
-    }
-    return client;
-  }
+  // Set context immediately so children can access it
+  setForgeClient(client);
 
-  // Initialize auth state
-  let authState: AuthState = $state({
+  // Initialize auth state - use an object that we mutate rather than reassign
+  // This ensures context consumers always have the reactive reference
+  const authState: AuthState = $state({
     user: null,
     token: null,
     loading: true,
   });
+
+  // Set auth state context immediately
+  setAuthState(authState);
 
   // Track connection state
   let connectionState: ConnectionState = $state('disconnected');
 
   // Connect on mount
   onMount(async () => {
-    const forgeClient = getClient();
-
-    // Set auth state in context
-    setAuthState(authState);
-
     // Set up connection state listener
-    const unsubscribe = forgeClient.onConnectionStateChange((state) => {
+    const unsubscribe = client.onConnectionStateChange((state) => {
       connectionState = state;
       props.onConnectionChange?.(state);
     });
 
     // Connect to WebSocket
     try {
-      await forgeClient.connect();
+      await client.connect();
     } catch (e) {
       console.error('Failed to connect to FORGE server:', e);
     }
 
-    // Get initial auth state
+    // Get initial auth state - mutate properties instead of reassigning
     if (props.getToken) {
       const token = await props.getToken();
-      authState = {
-        user: null,
-        token,
-        loading: false,
-      };
+      authState.token = token;
+      authState.loading = false;
     } else {
-      authState = {
-        user: null,
-        token: null,
-        loading: false,
-      };
+      authState.loading = false;
     }
 
     return () => {
@@ -82,7 +70,7 @@
 
   // Disconnect on destroy
   onDestroy(() => {
-    client?.disconnect();
+    client.disconnect();
   });
 </script>
 

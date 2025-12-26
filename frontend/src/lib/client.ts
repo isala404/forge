@@ -34,7 +34,7 @@ interface RpcResponse<T = unknown> {
  * WebSocket message types.
  */
 interface WsMessage {
-  type: 'subscribe' | 'unsubscribe' | 'data' | 'delta' | 'response' | 'error';
+  type: 'subscribe' | 'unsubscribe' | 'data' | 'delta' | 'response' | 'error' | 'connected' | 'subscribed' | 'unsubscribed' | 'pong';
   id?: string;
   subscriptionId?: string;
   requestId?: string;
@@ -43,6 +43,8 @@ interface WsMessage {
   data?: unknown;
   success?: boolean;
   error?: ForgeError;
+  code?: string;
+  message?: string;
 }
 
 /**
@@ -71,7 +73,9 @@ export class ForgeClient implements ForgeClientInterface {
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 10;
   private reconnectDelay = 1000;
+  private wsEverConnected = false; // Only retry if we connected at least once
   private subscriptions = new Map<string, (data: unknown) => void>();
+  private pendingSubscriptions = new Map<string, { functionName: string; args: unknown }>();
   private pendingRequests = new Map<string, {
     resolve: (value: unknown) => void;
     reject: (error: Error) => void;
@@ -103,16 +107,26 @@ export class ForgeClient implements ForgeClientInterface {
 
   /**
    * Connect to the WebSocket server.
+   * This is optional - HTTP RPC will still work even if WebSocket fails.
    */
   async connect(): Promise<void> {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       return;
     }
 
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       const wsUrl = this.config.url.replace(/^http/, 'ws') + '/ws';
-      this.ws = new WebSocket(wsUrl);
       this.setConnectionState('connecting');
+
+      try {
+        this.ws = new WebSocket(wsUrl);
+      } catch {
+        // WebSocket not available, resolve without connection
+        console.warn('WebSocket not available, using HTTP-only mode');
+        this.setConnectionState('disconnected');
+        resolve();
+        return;
+      }
 
       this.ws.onopen = async () => {
         // Authenticate if we have a token
@@ -122,11 +136,19 @@ export class ForgeClient implements ForgeClientInterface {
         }
         this.setConnectionState('connected');
         this.reconnectAttempts = 0;
+        this.wsEverConnected = true; // Mark that we connected at least once
+
+        // Flush pending subscriptions
+        this.flushPendingSubscriptions();
+
         resolve();
       };
 
       this.ws.onerror = () => {
-        reject(new Error('WebSocket connection failed'));
+        // WebSocket failed, but HTTP RPC still works
+        console.warn('WebSocket connection failed, using HTTP-only mode');
+        this.setConnectionState('disconnected');
+        resolve(); // Don't reject - app should still work
       };
 
       this.ws.onclose = () => {
@@ -159,13 +181,18 @@ export class ForgeClient implements ForgeClientInterface {
   async call<T>(functionName: string, args: unknown): Promise<T> {
     const token = await this.getToken();
 
+    // Convert empty object to null for Rust unit type compatibility
+    const normalizedArgs = args !== null && typeof args === 'object' && Object.keys(args).length === 0
+      ? null
+      : args;
+
     const response = await fetch(`${this.config.url}/rpc/${functionName}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
       },
-      body: JSON.stringify({ args }),
+      body: JSON.stringify(normalizedArgs),
     });
 
     const result: RpcResponse<T> = await response.json();
@@ -194,19 +221,28 @@ export class ForgeClient implements ForgeClientInterface {
     // Store the callback
     this.subscriptions.set(subscriptionId, callback as (data: unknown) => void);
 
-    // Send subscription request if connected
+    // Convert empty object to null for Rust unit type compatibility
+    const normalizedArgs = args !== null && typeof args === 'object' && Object.keys(args).length === 0
+      ? null
+      : args;
+
+    // Send subscription request if connected, otherwise queue it
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({
         type: 'subscribe',
         id: subscriptionId,
         function: functionName,
-        args,
+        args: normalizedArgs,
       }));
+    } else {
+      // Queue for later when connection is established
+      this.pendingSubscriptions.set(subscriptionId, { functionName, args: normalizedArgs });
     }
 
     // Return unsubscribe function
     return () => {
       this.subscriptions.delete(subscriptionId);
+      this.pendingSubscriptions.delete(subscriptionId);
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.ws.send(JSON.stringify({
           type: 'unsubscribe',
@@ -214,6 +250,25 @@ export class ForgeClient implements ForgeClientInterface {
         }));
       }
     };
+  }
+
+  /**
+   * Flush pending subscriptions after connection established.
+   */
+  private flushPendingSubscriptions(): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    for (const [subscriptionId, { functionName, args }] of this.pendingSubscriptions) {
+      this.ws.send(JSON.stringify({
+        type: 'subscribe',
+        id: subscriptionId,
+        function: functionName,
+        args,
+      }));
+    }
+    this.pendingSubscriptions.clear();
   }
 
   /**
@@ -242,9 +297,17 @@ export class ForgeClient implements ForgeClientInterface {
       const message: WsMessage = JSON.parse(data);
 
       switch (message.type) {
+        case 'connected':
+          // Server acknowledged connection
+          break;
+        case 'subscribed':
+          // Subscription confirmed
+          break;
         case 'data':
         case 'delta': {
-          const callback = this.subscriptions.get(message.subscriptionId!);
+          // Server uses 'id' for subscription identifier
+          const subId = message.id || message.subscriptionId;
+          const callback = subId ? this.subscriptions.get(subId) : undefined;
           if (callback) {
             callback(message.data);
           }
@@ -280,7 +343,9 @@ export class ForgeClient implements ForgeClientInterface {
    * Handle disconnection with reconnection logic.
    */
   private handleDisconnect(): void {
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+    // Only attempt reconnection if WebSocket ever connected successfully
+    // This prevents infinite retry loops when the server doesn't support WebSocket
+    if (!this.wsEverConnected || this.reconnectAttempts >= this.maxReconnectAttempts) {
       return;
     }
 
