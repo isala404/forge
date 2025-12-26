@@ -755,6 +755,7 @@ dependencies = [
  "dialoguer",
  "forge-codegen",
  "forge-core",
+ "forge-macros",
  "forge-runtime",
  "hostname",
  "indicatif",
@@ -763,6 +764,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -821,6 +823,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "tempfile",
  "thiserror 2.0.17",
  "tokio",
  "tokio-test",

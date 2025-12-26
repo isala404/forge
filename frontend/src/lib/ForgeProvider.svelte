@@ -12,23 +12,22 @@
     children: Snippet;
   }
 
-  let {
-    url,
-    getToken,
-    onAuthError,
-    onConnectionChange,
-    children
-  }: Props = $props();
+  let props: Props = $props();
 
-  // Create the client
-  const client = createForgeClient({
-    url,
-    getToken,
-    onAuthError,
-  });
+  // Create the client lazily to avoid capturing initial values warning
+  let client: ReturnType<typeof createForgeClient> | null = null;
 
-  // Set up context
-  setForgeClient(client);
+  function getClient() {
+    if (!client) {
+      client = createForgeClient({
+        url: props.url,
+        getToken: props.getToken,
+        onAuthError: props.onAuthError,
+      });
+      setForgeClient(client);
+    }
+    return client;
+  }
 
   // Initialize auth state
   let authState: AuthState = $state({
@@ -37,31 +36,34 @@
     loading: true,
   });
 
-  setAuthState(authState);
-
   // Track connection state
   let connectionState: ConnectionState = $state('disconnected');
 
   // Connect on mount
   onMount(async () => {
+    const forgeClient = getClient();
+
+    // Set auth state in context
+    setAuthState(authState);
+
     // Set up connection state listener
-    const unsubscribe = client.onConnectionStateChange((state) => {
+    const unsubscribe = forgeClient.onConnectionStateChange((state) => {
       connectionState = state;
-      onConnectionChange?.(state);
+      props.onConnectionChange?.(state);
     });
 
     // Connect to WebSocket
     try {
-      await client.connect();
+      await forgeClient.connect();
     } catch (e) {
       console.error('Failed to connect to FORGE server:', e);
     }
 
     // Get initial auth state
-    if (getToken) {
-      const token = await getToken();
+    if (props.getToken) {
+      const token = await props.getToken();
       authState = {
-        user: null, // Would be populated from a separate auth endpoint
+        user: null,
         token,
         loading: false,
       };
@@ -80,8 +82,8 @@
 
   // Disconnect on destroy
   onDestroy(() => {
-    client.disconnect();
+    client?.disconnect();
   });
 </script>
 
-{@render children()}
+{@render props.children()}

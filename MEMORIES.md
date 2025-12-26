@@ -13,6 +13,8 @@ Tooling
 - Lint command: cargo clippy
 - Format command: cargo fmt
 - macOS: brew install libiconv (required for stringprep/sqlx tests)
+- Docker: postgres:alpine for local dev database
+- CLI install: cargo install --path crates/forge
 
 Architecture
 - Single binary containing all components (gateway, functions, workers, scheduler)
@@ -36,6 +38,16 @@ Key Patterns
 - PostgreSQL advisory locks for leader election
 - SKIP LOCKED for job claiming (no double-processing)
 - Table partitioning for high-churn tables (jobs, logs, metrics)
+- Proc macros use forge::forge_core:: paths (re-exported from forge crate)
+- User functions take &QueryContext and &MutationContext (references)
+- axum 0.7+ route syntax uses {param} not :param
+- Svelte 5: avoid destructuring $props() at module level, access props.* inside closures
+- Function registration: call builder.function_registry_mut().register_query::<FnQuery>() before .config()
+- Proc macros: query fn → FnQuery struct, mutation fn → FnMutation struct
+- RPC: omit args field for no-arg functions (unit type), response uses `data` field not `result`
+- Migrations: use migrations/ directory with numbered SQL files (0001_xxx.sql)
+- Migrations: MigrationRunner uses advisory lock for mesh-safe concurrent deploys
+- Migrations: built-in FORGE tables versioned as 0000_forge_internal_v1
 
 Frontend
 - Auto-generated TypeScript types from Rust schema

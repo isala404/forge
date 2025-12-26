@@ -29,3 +29,4 @@ regex = "1.11"
 
 [dev-dependencies]
 tokio-test = { workspace = true }
+tempfile = "3.14"

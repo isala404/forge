@@ -274,3 +274,35 @@ Phase 16: Testing & Validation completed.
 - Created DispatchedJob and StartedWorkflow for tracking test dispatches
 - Added regex dependency for URL pattern matching in mocks
 - All 265 tests passing
+
+Fixed framework issues discovered during demo app creation.
+- Added `[lib]` section to `crates/forge/Cargo.toml` - binary crate needed library for user apps
+- Added `pub use forge_core;` to `crates/forge/src/lib.rs` for proc macro path resolution
+- Changed proc macros to use `forge::forge_core::` paths in model.rs, query.rs, mutation.rs
+- Added `Sql(#[from] sqlx::Error)` variant to ForgeError for sqlx error conversion
+- Fixed axum route syntax `:param` to `{param}` in dashboard/mod.rs for axum 0.7+
+- Removed unstable inherent associated types from query.rs and mutation.rs
+- Fixed ForgeProvider.svelte for Svelte 5 - avoid capturing props at initialization
+- Fixed @forge/svelte package.json exports to point to source files for dev
+
+Updated CLI generator templates for working scaffolded projects.
+- Changed +page.svelte to use onMount with $state runes and direct fetch
+- Simplified +layout.svelte to not use ForgeProvider (simpler demo)
+- Changed functions to use `&QueryContext` and `&MutationContext` references
+- Changed schema to use sqlx::FromRow directly instead of #[forge::model]
+- Added sqlx dependency to generated Cargo.toml
+- Removed lib/forge directory creation (not needed for basic demo)
+- Updated main.rs to register functions with ForgeBuilder before running
+- Fixed RPC body format: omit `args` for no-arg functions (unit type)
+- Fixed response field: use `data.data` not `data.result`
+
+Implemented mesh-safe migration system.
+- Created `MigrationRunner` in `crates/forge-runtime/src/migrations/runner.rs` with PostgreSQL advisory lock
+- Migrations tracked in `forge_migrations` table with name and applied_at timestamp
+- Built-in FORGE schema versioned as `0000_forge_internal_v1` in `builtin.rs`
+- User migrations loaded from `migrations/` directory, sorted alphabetically
+- Updated `ForgeBuilder` to use `migrations_dir()` instead of deprecated `init_sql()`
+- Added `migration()` method for programmatic migrations
+- CLI scaffolding creates `migrations/0001_create_users.sql` for user tables
+- Mesh-safe: advisory lock ensures only one node runs migrations during rolling deploys
+- All 272 tests passing

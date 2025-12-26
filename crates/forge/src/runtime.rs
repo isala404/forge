@@ -10,6 +10,7 @@
 //! - Cluster coordination
 
 use std::net::IpAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,6 +19,7 @@ use tokio::sync::broadcast;
 use forge_core::cluster::{LeaderRole, NodeId, NodeInfo, NodeRole, NodeStatus};
 use forge_core::config::{ForgeConfig, NodeRole as ConfigNodeRole};
 use forge_core::error::{ForgeError, Result};
+use forge_runtime::migrations::{load_migrations_from_dir, Migration, MigrationRunner};
 
 use forge_runtime::cluster::{
     GracefulShutdown, HeartbeatConfig, HeartbeatLoop, LeaderConfig, LeaderElection, NodeRegistry,
@@ -36,6 +38,14 @@ use forge_runtime::workflow::WorkflowRegistry;
 
 /// Prelude module for common imports.
 pub mod prelude {
+    // Common types
+    pub use chrono::{DateTime, Utc};
+    pub use uuid::Uuid;
+
+    /// Timestamp type alias for convenience.
+    pub type Timestamp = DateTime<Utc>;
+
+    // Core types
     pub use forge_core::cluster::NodeRole;
     pub use forge_core::config::ForgeConfig;
     pub use forge_core::cron::{CronContext, ForgeCron};
@@ -61,6 +71,10 @@ pub struct Forge {
     cron_registry: Arc<CronRegistry>,
     workflow_registry: WorkflowRegistry,
     shutdown_tx: broadcast::Sender<()>,
+    /// Path to user migrations directory (default: ./migrations).
+    migrations_dir: PathBuf,
+    /// Additional migrations provided programmatically.
+    extra_migrations: Vec<Migration>,
 }
 
 impl Forge {
@@ -124,6 +138,17 @@ impl Forge {
         self.db = Some(db);
 
         tracing::info!("Connected to database");
+
+        // Run migrations with mesh-safe locking
+        // This acquires an advisory lock, so only one node runs migrations at a time
+        let runner = MigrationRunner::new(pool.clone());
+
+        // Load user migrations from directory + any programmatic ones
+        let mut user_migrations = load_migrations_from_dir(&self.migrations_dir)?;
+        user_migrations.extend(self.extra_migrations.clone());
+
+        runner.run(user_migrations).await?;
+        tracing::info!("Migrations completed");
 
         // Get local node info
         let hostname = hostname::get()
@@ -376,6 +401,8 @@ pub struct ForgeBuilder {
     job_registry: JobRegistry,
     cron_registry: CronRegistry,
     workflow_registry: WorkflowRegistry,
+    migrations_dir: PathBuf,
+    extra_migrations: Vec<Migration>,
 }
 
 impl ForgeBuilder {
@@ -387,7 +414,28 @@ impl ForgeBuilder {
             job_registry: JobRegistry::new(),
             cron_registry: CronRegistry::new(),
             workflow_registry: WorkflowRegistry::new(),
+            migrations_dir: PathBuf::from("migrations"),
+            extra_migrations: Vec::new(),
         }
+    }
+
+    /// Set the directory to load migrations from.
+    ///
+    /// Defaults to `./migrations`. Migration files should be named like:
+    /// - `0001_create_users.sql`
+    /// - `0002_add_posts.sql`
+    pub fn migrations_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.migrations_dir = path.into();
+        self
+    }
+
+    /// Add a migration programmatically.
+    ///
+    /// Use this for migrations that need to be generated at runtime,
+    /// or for testing. For most cases, use migration files instead.
+    pub fn migration(mut self, name: impl Into<String>, sql: impl Into<String>) -> Self {
+        self.extra_migrations.push(Migration::new(name, sql));
+        self
     }
 
     /// Set the configuration.
@@ -433,6 +481,8 @@ impl ForgeBuilder {
             cron_registry: Arc::new(self.cron_registry),
             workflow_registry: self.workflow_registry,
             shutdown_tx,
+            migrations_dir: self.migrations_dir,
+            extra_migrations: self.extra_migrations,
         })
     }
 }

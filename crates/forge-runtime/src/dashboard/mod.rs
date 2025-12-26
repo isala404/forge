@@ -55,7 +55,7 @@ pub fn create_dashboard_router(state: DashboardState) -> Router {
         .route("/metrics", get(pages::metrics))
         .route("/logs", get(pages::logs))
         .route("/traces", get(pages::traces))
-        .route("/traces/:trace_id", get(pages::trace_detail))
+        .route("/traces/{trace_id}", get(pages::trace_detail))
         .route("/alerts", get(pages::alerts))
         .route("/jobs", get(pages::jobs))
         .route("/workflows", get(pages::workflows))
@@ -72,14 +72,14 @@ pub fn create_api_router(state: DashboardState) -> Router {
     Router::new()
         // Metrics API
         .route("/metrics", get(api::list_metrics))
-        .route("/metrics/:name", get(api::get_metric))
+        .route("/metrics/{name}", get(api::get_metric))
         .route("/metrics/series", get(api::get_metric_series))
         // Logs API
         .route("/logs", get(api::list_logs))
         .route("/logs/search", get(api::search_logs))
         // Traces API
         .route("/traces", get(api::list_traces))
-        .route("/traces/:trace_id", get(api::get_trace))
+        .route("/traces/{trace_id}", get(api::get_trace))
         // Alerts API
         .route("/alerts", get(api::list_alerts))
         .route("/alerts/active", get(api::get_active_alerts))

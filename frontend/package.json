@@ -4,13 +4,14 @@
   "description": "FORGE Svelte 5 runtime library for real-time full-stack applications",
   "type": "module",
   "svelte": "./src/lib/index.ts",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./src/lib/index.ts",
+  "types": "./src/lib/index.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
+      "types": "./src/lib/index.ts",
       "svelte": "./src/lib/index.ts",
-      "import": "./dist/index.js"
+      "import": "./src/lib/index.ts",
+      "default": "./src/lib/index.ts"
     }
   },
   "files": [

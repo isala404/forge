@@ -24,6 +24,9 @@ pub enum ForgeError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[error("SQL error: {0}")]
+    Sql(#[from] sqlx::Error),
+
     #[error("Invalid argument: {0}")]
     InvalidArgument(String),
 

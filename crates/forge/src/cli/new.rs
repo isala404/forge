@@ -61,6 +61,22 @@ pub fn create_project(dir: &Path, name: &str, minimal: bool) -> Result<()> {
     fs::create_dir_all(dir.join("src/functions"))?;
     fs::create_dir_all(dir.join("migrations"))?;
 
+    // Create first migration (user tables)
+    let migration_0001 = r#"-- Migration: Create users table
+-- This migration is automatically applied on startup.
+
+CREATE TABLE IF NOT EXISTS users (
+    id UUID PRIMARY KEY,
+    email VARCHAR(255) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
+"#;
+    fs::write(dir.join("migrations/0001_create_users.sql"), migration_0001)?;
+
     // Create Cargo.toml
     let cargo_toml = format!(
         r#"[package]
@@ -75,6 +91,7 @@ serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
 uuid = {{ version = "1", features = ["v4", "serde"] }}
 chrono = {{ version = "0.4", features = ["serde"] }}
+sqlx = {{ version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "uuid"] }}
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = {{ version = "0.3", features = ["env-filter"] }}
@@ -117,9 +134,17 @@ async fn main() -> Result<()> {
 
     let config = ForgeConfig::from_file("forge.toml")?;
 
-    Forge::builder()
+    let mut builder = Forge::builder();
+
+    // Register functions
+    builder.function_registry_mut().register_query::<functions::GetUsersQuery>();
+    builder.function_registry_mut().register_query::<functions::GetUserQuery>();
+    builder.function_registry_mut().register_mutation::<functions::CreateUserMutation>();
+
+    // Migrations are loaded from ./migrations directory automatically
+    builder
         .config(config)
-        .build()
+        .build()?
         .run()
         .await
 }
@@ -140,20 +165,12 @@ pub use user::User;
     let user_rs = r#"use forge::prelude::*;
 
 /// User model.
-#[forge::model]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
 pub struct User {
-    #[id]
     pub id: Uuid,
-
-    #[indexed]
     pub email: String,
-
     pub name: String,
-
-    #[default = "now()"]
     pub created_at: Timestamp,
-
-    #[updated_at]
     pub updated_at: Timestamp,
 }
 "#;
@@ -175,32 +192,44 @@ use crate::schema::User;
 
 /// Get all users.
 #[forge::query]
-pub async fn get_users(ctx: QueryContext) -> Result<Vec<User>> {
-    ctx.db.fetch_all("SELECT * FROM users ORDER BY created_at DESC").await
+pub async fn get_users(ctx: &QueryContext) -> Result<Vec<User>> {
+    sqlx::query_as::<_, User>("SELECT * FROM users ORDER BY created_at DESC")
+        .fetch_all(&*ctx.pool)
+        .await
+        .map_err(Into::into)
 }
 
 /// Get a user by ID.
 #[forge::query]
-pub async fn get_user(ctx: QueryContext, id: Uuid) -> Result<Option<User>> {
-    ctx.db.fetch_optional("SELECT * FROM users WHERE id = $1", &[&id]).await
+pub async fn get_user(ctx: &QueryContext, id: Uuid) -> Result<Option<User>> {
+    sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&*ctx.pool)
+        .await
+        .map_err(Into::into)
 }
 
 /// Create a new user.
 #[forge::mutation]
 pub async fn create_user(
-    ctx: MutationContext,
+    ctx: &MutationContext,
     email: String,
     name: String,
 ) -> Result<User> {
-    let user = User {
-        id: Uuid::new_v4(),
-        email,
-        name,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-    };
+    let id = Uuid::new_v4();
+    let now = Utc::now();
 
-    ctx.db.insert("users", &user).await?;
+    let user = sqlx::query_as::<_, User>(
+        "INSERT INTO users (id, email, name, created_at, updated_at) VALUES ($1, $2, $3, $4, $5) RETURNING *"
+    )
+        .bind(id)
+        .bind(&email)
+        .bind(&name)
+        .bind(now)
+        .bind(now)
+        .fetch_one(&*ctx.pool)
+        .await?;
+
     Ok(user)
 }
 "#;
@@ -232,7 +261,6 @@ FORGE_SECRET=your-secret-key-here
 fn create_frontend(dir: &Path, name: &str) -> Result<()> {
     let frontend_dir = dir.join("frontend");
     fs::create_dir_all(&frontend_dir)?;
-    fs::create_dir_all(frontend_dir.join("src/lib/forge"))?;
     fs::create_dir_all(frontend_dir.join("src/routes"))?;
 
     // Create package.json
@@ -256,9 +284,7 @@ fn create_frontend(dir: &Path, name: &str) -> Result<()> {
     "typescript": "^5.0.0",
     "vite": "^6.0.0"
   }},
-  "dependencies": {{
-    "@forge/svelte": "^0.1.0"
-  }}
+  "dependencies": {{}}
 }}
 "#
     );
@@ -322,14 +348,10 @@ export default defineConfig({
 
     // Create +layout.svelte
     let layout_svelte = r#"<script lang="ts">
-    import { ForgeProvider } from '@forge/svelte';
-
     let { children } = $props();
 </script>
 
-<ForgeProvider url="http://localhost:8080">
-    {@render children()}
-</ForgeProvider>
+{@render children()}
 "#;
     fs::write(
         frontend_dir.join("src/routes/+layout.svelte"),
@@ -338,22 +360,46 @@ export default defineConfig({
 
     // Create +page.svelte
     let page_svelte = r#"<script lang="ts">
-    import { query } from '@forge/svelte';
-    import { getUsers } from '$lib/forge/api';
+    import { onMount } from 'svelte';
 
-    const users = query(getUsers, {});
+    let users: any[] = $state([]);
+    let loading = $state(true);
+    let error: string | null = $state(null);
+
+    onMount(async () => {
+        try {
+            const response = await fetch('http://localhost:8080/rpc', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ function: 'get_users' })
+            });
+            if (response.ok) {
+                const data = await response.json();
+                users = data.data ?? [];
+            } else {
+                error = 'Failed to load users';
+            }
+        } catch (e: any) {
+            error = e.message;
+        }
+        loading = false;
+    });
 </script>
 
 <main>
     <h1>Welcome to FORGE</h1>
+    <p>Backend is running at <a href="http://localhost:8080/health" target="_blank">http://localhost:8080</a></p>
 
-    {#if $users.loading}
+    <h2>Users</h2>
+    {#if loading}
         <p>Loading...</p>
-    {:else if $users.error}
-        <p>Error: {$users.error.message}</p>
+    {:else if error}
+        <p>Error: {error}</p>
+    {:else if users.length === 0}
+        <p>No users found. The database is empty.</p>
     {:else}
         <ul>
-            {#each $users.data ?? [] as user}
+            {#each users as user}
                 <li>{user.name} ({user.email})</li>
             {/each}
         </ul>
@@ -365,6 +411,13 @@ export default defineConfig({
         max-width: 800px;
         margin: 0 auto;
         padding: 2rem;
+        font-family: system-ui, sans-serif;
+    }
+    h1 {
+        color: #333;
+    }
+    a {
+        color: #0066cc;
     }
 </style>
 "#;
@@ -391,6 +444,7 @@ mod tests {
         assert!(path.join("src/main.rs").exists());
         assert!(path.join("src/schema/mod.rs").exists());
         assert!(path.join("frontend/package.json").exists());
+        assert!(path.join("migrations/0001_create_users.sql").exists());
     }
 
     #[test]

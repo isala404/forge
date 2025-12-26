@@ -88,19 +88,19 @@ fn expand_model_impl(_attr: TokenStream2, input: DeriveInput) -> syn::Result<Tok
 
             let mut attributes = Vec::new();
             if is_id {
-                attributes.push(quote!(forge_core::schema::FieldAttribute::Id));
+                attributes.push(quote!(forge::forge_core::schema::FieldAttribute::Id));
             }
             if is_indexed {
-                attributes.push(quote!(forge_core::schema::FieldAttribute::Indexed));
+                attributes.push(quote!(forge::forge_core::schema::FieldAttribute::Indexed));
             }
             if is_unique {
-                attributes.push(quote!(forge_core::schema::FieldAttribute::Unique));
+                attributes.push(quote!(forge::forge_core::schema::FieldAttribute::Unique));
             }
             if is_encrypted {
-                attributes.push(quote!(forge_core::schema::FieldAttribute::Encrypted));
+                attributes.push(quote!(forge::forge_core::schema::FieldAttribute::Encrypted));
             }
             if is_updated_at {
-                attributes.push(quote!(forge_core::schema::FieldAttribute::UpdatedAt));
+                attributes.push(quote!(forge::forge_core::schema::FieldAttribute::UpdatedAt));
             }
 
             let default_token = if let Some(ref default) = f.default_value {
@@ -111,8 +111,8 @@ fn expand_model_impl(_attr: TokenStream2, input: DeriveInput) -> syn::Result<Tok
 
             quote! {
                 {
-                    let rust_type = forge_core::schema::RustType::from_type_string(#rust_type);
-                    let mut field = forge_core::schema::FieldDef::new(#name, rust_type);
+                    let rust_type = forge::forge_core::schema::RustType::from_type_string(#rust_type);
+                    let mut field = forge::forge_core::schema::FieldDef::new(#name, rust_type);
                     field.column_name = #column_name.to_string();
                     field.attributes = vec![#(#attributes),*];
                     field.default = #default_token;
@@ -129,11 +129,11 @@ fn expand_model_impl(_attr: TokenStream2, input: DeriveInput) -> syn::Result<Tok
             #fields
         }
 
-        impl forge_core::schema::ModelMeta for #struct_name {
+        impl forge::forge_core::schema::ModelMeta for #struct_name {
             const TABLE_NAME: &'static str = #table_name;
 
-            fn table_def() -> forge_core::schema::TableDef {
-                let mut table = forge_core::schema::TableDef::new(#table_name, stringify!(#struct_name));
+            fn table_def() -> forge::forge_core::schema::TableDef {
+                let mut table = forge::forge_core::schema::TableDef::new(#table_name, stringify!(#struct_name));
                 table.fields = vec![
                     #(#field_tokens),*
                 ];

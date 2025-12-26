@@ -1,3 +1,5 @@
+pub use sqlx;
+
 pub mod cluster;
 pub mod cron;
 pub mod dashboard;
