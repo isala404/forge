@@ -41,17 +41,22 @@
 
   // Connect on mount
   onMount(async () => {
+    console.log('[FORGE] ForgeProvider mounted, connecting to:', props.url);
+
     // Set up connection state listener
     const unsubscribe = client.onConnectionStateChange((state) => {
+      console.log('[FORGE] Connection state changed:', state);
       connectionState = state;
       props.onConnectionChange?.(state);
     });
 
     // Connect to WebSocket
     try {
+      console.log('[FORGE] Calling client.connect()...');
       await client.connect();
+      console.log('[FORGE] client.connect() resolved');
     } catch (e) {
-      console.error('Failed to connect to FORGE server:', e);
+      console.error('[FORGE] Failed to connect to FORGE server:', e);
     }
 
     // Get initial auth state - mutate properties instead of reassigning

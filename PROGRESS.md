@@ -370,3 +370,9 @@ Implemented full reactivity pipeline matching REACTIVITY.md proposal.
 - Added pendingSubscriptions map to client.ts to queue subscriptions created before connection
 - Added flushPendingSubscriptions() method called on WebSocket open to send queued subscriptions
 - Verified full reactivity pipeline: INSERT triggers NOTIFY -> ChangeListener receives -> Reactor processes -> Subscription found -> Query re-executed -> Update pushed to client
+
+Fixed scaffold to enable reactivity on tables by default.
+- Updated `forge new` migration template to include `SELECT forge_enable_reactivity('users');`
+- Separated WebSocket route from auth middleware stack to allow WS upgrades
+- Added comprehensive [FORGE] debug logging to ForgeProvider.svelte, stores.ts, and client.ts
+- Verified reactivity works: bun WebSocket test shows automatic updates on INSERT (6 users -> 7 users)

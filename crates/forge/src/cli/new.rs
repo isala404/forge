@@ -74,6 +74,10 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
+
+-- Enable real-time reactivity for this table
+-- This creates a trigger that notifies the FORGE runtime of changes
+SELECT forge_enable_reactivity('users');
 "#;
     fs::write(dir.join("migrations/0001_create_users.sql"), migration_0001)?;
 

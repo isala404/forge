@@ -121,12 +121,10 @@ impl GatewayServer {
         // WebSocket state uses the reactor
         let ws_state = Arc::new(WsState::new(self.reactor.clone()));
 
-        // Build the router
-        Router::new()
+        // Build the main router with middleware
+        let main_router = Router::new()
             // Health check endpoint
             .route("/health", get(health_handler))
-            // WebSocket endpoint (before middleware to allow upgrade)
-            .route("/ws", any(ws_handler).with_state(ws_state))
             // RPC endpoint
             .route("/rpc", post(rpc_handler))
             // REST-style function endpoint
@@ -136,13 +134,21 @@ impl GatewayServer {
             // Add middleware
             .layer(
                 ServiceBuilder::new()
-                    .layer(cors)
+                    .layer(cors.clone())
                     .layer(middleware::from_fn_with_state(
                         auth_middleware_state,
                         auth_middleware,
                     ))
                     .layer(middleware::from_fn(tracing_middleware)),
-            )
+            );
+
+        // WebSocket router without auth middleware (just CORS)
+        let ws_router = Router::new()
+            .route("/ws", any(ws_handler).with_state(ws_state))
+            .layer(cors);
+
+        // Merge routers - WebSocket route is separate from middleware stack
+        main_router.merge(ws_router)
     }
 
     /// Get the socket address to bind to.
