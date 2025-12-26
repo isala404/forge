@@ -139,16 +139,31 @@ impl MigrationRunner {
     async fn apply_migration(&self, migration: &Migration) -> Result<()> {
         info!("Applying migration: {}", migration.name);
 
-        // Execute the migration SQL
-        sqlx::query(&migration.sql)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| {
-                ForgeError::Database(format!(
-                    "Failed to apply migration '{}': {}",
-                    migration.name, e
-                ))
-            })?;
+        // Split migration into individual statements and execute each
+        // Skip empty statements and comments-only statements
+        for statement in migration.sql.split(';') {
+            let statement = statement.trim();
+
+            // Skip empty statements or comment-only blocks
+            if statement.is_empty()
+                || statement.lines().all(|l| {
+                    let l = l.trim();
+                    l.is_empty() || l.starts_with("--")
+                })
+            {
+                continue;
+            }
+
+            sqlx::query(statement)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| {
+                    ForgeError::Database(format!(
+                        "Failed to apply migration '{}': {}",
+                        migration.name, e
+                    ))
+                })?;
+        }
 
         // Record it as applied
         sqlx::query("INSERT INTO forge_migrations (name) VALUES ($1)")

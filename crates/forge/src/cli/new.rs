@@ -92,7 +92,6 @@ serde_json = "1"
 uuid = {{ version = "1", features = ["v4", "serde"] }}
 chrono = {{ version = "0.4", features = ["serde"] }}
 sqlx = {{ version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "uuid"] }}
-anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = {{ version = "0.3", features = ["env-filter"] }}
 "#
@@ -120,8 +119,7 @@ enabled = true
     fs::write(dir.join("forge.toml"), forge_toml)?;
 
     // Create main.rs
-    let main_rs = r#"use anyhow::Result;
-use forge::prelude::*;
+    let main_rs = r#"use forge::prelude::*;
 
 mod schema;
 mod functions;
@@ -194,7 +192,7 @@ use crate::schema::User;
 #[forge::query]
 pub async fn get_users(ctx: &QueryContext) -> Result<Vec<User>> {
     sqlx::query_as::<_, User>("SELECT * FROM users ORDER BY created_at DESC")
-        .fetch_all(&*ctx.pool)
+        .fetch_all(ctx.db())
         .await
         .map_err(Into::into)
 }
@@ -204,7 +202,7 @@ pub async fn get_users(ctx: &QueryContext) -> Result<Vec<User>> {
 pub async fn get_user(ctx: &QueryContext, id: Uuid) -> Result<Option<User>> {
     sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
         .bind(id)
-        .fetch_optional(&*ctx.pool)
+        .fetch_optional(ctx.db())
         .await
         .map_err(Into::into)
 }
@@ -227,7 +225,7 @@ pub async fn create_user(
         .bind(&name)
         .bind(now)
         .bind(now)
-        .fetch_one(&*ctx.pool)
+        .fetch_one(ctx.db())
         .await?;
 
     Ok(user)
