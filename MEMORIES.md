@@ -48,6 +48,14 @@ Key Patterns
 - Migrations: use migrations/ directory with numbered SQL files (0001_xxx.sql)
 - Migrations: MigrationRunner uses advisory lock for mesh-safe concurrent deploys
 - Migrations: built-in FORGE tables versioned as 0000_forge_internal_v1
+- Migrations: SQL split on semicolons for statement-by-statement execution
+- Context: use ctx.db() accessor, not ctx.pool field (pool is private)
+- JWT: jsonwebtoken v9 uses `validation.insecure_disable_signature_validation()` for dev mode
+- JWT: DecodingKey doesn't impl Debug, use manual Debug impl for structs containing it
+- Observability: use UNNEST pattern for PostgreSQL batch inserts (no ON CONFLICT in array ops)
+- Workflow compensation: store handlers in HashMap, run in reverse order on cancel
+- Source parser: syn crate for parsing Rust source to extract #[model] and #[forge_enum] without compilation
+- Sample apps: place in examples/ directory, add to workspace members in root Cargo.toml
 
 Frontend
 - Auto-generated TypeScript types from Rust schema

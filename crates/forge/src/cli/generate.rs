@@ -16,6 +16,10 @@ pub struct GenerateCommand {
     /// Output directory (defaults to frontend/src/lib/forge).
     #[arg(short, long)]
     pub output: Option<String>,
+
+    /// Source directory to scan for models (defaults to src).
+    #[arg(short, long)]
+    pub src: Option<String>,
 }
 
 impl GenerateCommand {
@@ -26,13 +30,11 @@ impl GenerateCommand {
             .unwrap_or_else(|| "frontend/src/lib/forge".to_string());
         let output_path = Path::new(&output_dir);
 
-        // Create output directory if it doesn't exist
-        if !output_path.exists() {
-            fs::create_dir_all(output_path)?;
-        }
+        let src_dir = self.src.unwrap_or_else(|| "src".to_string());
+        let src_path = Path::new(&src_dir);
 
         // Show progress
-        let pb = ProgressBar::new(4);
+        let pb = ProgressBar::new(5);
         pb.set_style(
             ProgressStyle::default_bar()
                 .template("{spinner:.green} {msg}")
@@ -40,32 +42,68 @@ impl GenerateCommand {
         );
         pb.enable_steady_tick(Duration::from_millis(100));
 
-        // Generate types
-        pb.set_message("Generating types...");
-        generate_types(output_path, self.force)?;
+        // Parse source files
+        pb.set_message("Scanning Rust source files...");
+        let registry = if src_path.exists() {
+            forge_codegen::parse_project(src_path)?
+        } else {
+            pb.set_message("No src directory found, using defaults...");
+            forge_core::schema::SchemaRegistry::new()
+        };
         pb.inc(1);
 
-        // Generate API bindings
-        pb.set_message("Generating API bindings...");
-        generate_api(output_path, self.force)?;
-        pb.inc(1);
+        // Check if we have any schema definitions
+        let has_schema = !registry.all_tables().is_empty() || !registry.all_enums().is_empty();
 
-        // Generate stores
-        pb.set_message("Generating stores...");
-        generate_stores(output_path, self.force)?;
-        pb.inc(1);
+        if has_schema {
+            // Use forge_codegen to generate TypeScript
+            pb.set_message("Generating TypeScript from schema...");
+            let generator = forge_codegen::TypeScriptGenerator::new(&output_dir);
+            generator.generate(&registry)?;
+            pb.inc(4);
+        } else {
+            // Fall back to default templates if no schema found
+            pb.set_message("No schema found, generating defaults...");
 
-        // Generate index
-        pb.set_message("Generating index...");
-        generate_index(output_path)?;
-        pb.inc(1);
+            // Create output directory if it doesn't exist
+            if !output_path.exists() {
+                fs::create_dir_all(output_path)?;
+            }
+
+            // Generate default files
+            pb.set_message("Generating types...");
+            generate_types(output_path, self.force)?;
+            pb.inc(1);
+
+            pb.set_message("Generating API bindings...");
+            generate_api(output_path, self.force)?;
+            pb.inc(1);
+
+            pb.set_message("Generating stores...");
+            generate_stores(output_path, self.force)?;
+            pb.inc(1);
+
+            pb.set_message("Generating index...");
+            generate_index(output_path)?;
+            pb.inc(1);
+        }
 
         pb.finish_with_message("Done!");
 
         println!();
+        if has_schema {
+            let table_count = registry.all_tables().len();
+            let enum_count = registry.all_enums().len();
+            println!(
+                "{} Generated TypeScript from {} models and {} enums",
+                style("✅").green(),
+                style(table_count).cyan(),
+                style(enum_count).cyan()
+            );
+        }
         println!(
-            "{} Generated TypeScript client in {}",
-            style("✅").green(),
+            "{} Output directory: {}",
+            style("📁").dim(),
             style(&output_dir).cyan()
         );
         println!();

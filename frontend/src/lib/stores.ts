@@ -29,6 +29,10 @@ export interface QueryStore<T> extends Readable<QueryResult<T>> {
 export interface SubscriptionStore<T> extends Readable<SubscriptionResult<T>> {
   refetch: () => Promise<void>;
   unsubscribe: () => void;
+  /** Get current value (for optimistic updates) */
+  get: () => SubscriptionResult<T>;
+  /** Set data directly (for optimistic updates) */
+  set: (data: T) => void;
 }
 
 /**
@@ -194,6 +198,11 @@ export function subscribe<TArgs, TResult>(
         unsubscribeFn = null;
       }
     },
+    get: () => state,
+    set: (data: TResult) => {
+      state = { ...state, data };
+      notify();
+    },
   };
 }
 
@@ -285,17 +294,204 @@ export async function mutateOptimistic<TArgs, TResult, TData>(
 ): Promise<TResult> {
   const client = getForgeClient();
 
-  // Note: In a full implementation, we would:
-  // 1. Get current store value
-  // 2. Apply optimistic update
-  // 3. Execute mutation
-  // 4. Apply real result or rollback
-  // This requires internal store access which would need store redesign
+  // 1. Get current store value for potential rollback
+  const previousState = store.get();
+  const previousData = previousState.data;
+
+  // 2. Apply optimistic update immediately
+  if (previousData !== null) {
+    const optimisticData = options.optimistic(previousData);
+    store.set(optimisticData);
+  }
+
+  try {
+    // 3. Execute the actual mutation
+    const result = await fn(client, options.input);
+
+    // 4. Mutation succeeded - the subscription will update with real data
+    // or we can apply the result directly if needed
+    return result;
+  } catch (e) {
+    // 5. Mutation failed - rollback to previous state
+    const error = e as ForgeError;
+
+    if (previousData !== null) {
+      if (options.rollback) {
+        // Use custom rollback function
+        const rolledBackData = options.rollback(previousData, error);
+        store.set(rolledBackData);
+      } else {
+        // Default: restore previous data
+        store.set(previousData);
+      }
+    }
+
+    throw e;
+  }
+}
+
+/**
+ * Execute a mutation with optimistic list update (add item).
+ * Useful for adding items to a list with immediate UI feedback.
+ *
+ * @example
+ * ```svelte
+ * <script>
+ *   import { mutateOptimisticAdd } from '@forge/svelte';
+ *   import { createProject } from '$lib/forge/api';
+ *
+ *   async function handleCreate() {
+ *     await mutateOptimisticAdd(createProject, projectsStore, {
+ *       input: { name: newName },
+ *       optimisticItem: { id: tempId(), name: newName, createdAt: new Date() },
+ *       getId: (item) => item.id,
+ *     });
+ *   }
+ * </script>
+ * ```
+ */
+export async function mutateOptimisticAdd<TArgs, TItem, TResult extends TItem>(
+  fn: MutationFn<TArgs, TResult>,
+  store: SubscriptionStore<TItem[]>,
+  options: {
+    input: TArgs;
+    optimisticItem: TItem;
+    getId: (item: TItem) => string;
+    position?: 'start' | 'end';
+  }
+): Promise<TResult> {
+  const client = getForgeClient();
+  const previousState = store.get();
+  const previousData = previousState.data ?? [];
+
+  // Add optimistic item
+  const optimisticList =
+    options.position === 'start'
+      ? [options.optimisticItem, ...previousData]
+      : [...previousData, options.optimisticItem];
+  store.set(optimisticList);
+
+  try {
+    const result = await fn(client, options.input);
+
+    // Replace optimistic item with real item
+    const optimisticId = options.getId(options.optimisticItem);
+    const updatedList = previousData
+      .filter((item) => options.getId(item) !== optimisticId)
+      .concat([result]);
+    store.set(
+      options.position === 'start' ? [result, ...previousData] : [...previousData, result]
+    );
+
+    return result;
+  } catch (e) {
+    // Rollback: remove optimistic item
+    store.set(previousData);
+    throw e;
+  }
+}
+
+/**
+ * Execute a mutation with optimistic list update (remove item).
+ * Useful for removing items from a list with immediate UI feedback.
+ *
+ * @example
+ * ```svelte
+ * <script>
+ *   import { mutateOptimisticRemove } from '@forge/svelte';
+ *   import { deleteProject } from '$lib/forge/api';
+ *
+ *   async function handleDelete(projectId: string) {
+ *     await mutateOptimisticRemove(deleteProject, projectsStore, {
+ *       input: { id: projectId },
+ *       itemId: projectId,
+ *       getId: (item) => item.id,
+ *     });
+ *   }
+ * </script>
+ * ```
+ */
+export async function mutateOptimisticRemove<TArgs, TItem, TResult>(
+  fn: MutationFn<TArgs, TResult>,
+  store: SubscriptionStore<TItem[]>,
+  options: {
+    input: TArgs;
+    itemId: string;
+    getId: (item: TItem) => string;
+  }
+): Promise<TResult> {
+  const client = getForgeClient();
+  const previousState = store.get();
+  const previousData = previousState.data ?? [];
+
+  // Optimistically remove the item
+  const optimisticList = previousData.filter((item) => options.getId(item) !== options.itemId);
+  store.set(optimisticList);
 
   try {
     const result = await fn(client, options.input);
     return result;
   } catch (e) {
+    // Rollback: restore the item
+    store.set(previousData);
+    throw e;
+  }
+}
+
+/**
+ * Execute a mutation with optimistic list update (update item).
+ * Useful for updating items in a list with immediate UI feedback.
+ *
+ * @example
+ * ```svelte
+ * <script>
+ *   import { mutateOptimisticUpdate } from '@forge/svelte';
+ *   import { updateProject } from '$lib/forge/api';
+ *
+ *   async function handleUpdate(projectId: string, name: string) {
+ *     await mutateOptimisticUpdate(updateProject, projectsStore, {
+ *       input: { id: projectId, name },
+ *       itemId: projectId,
+ *       getId: (item) => item.id,
+ *       update: (item) => ({ ...item, name }),
+ *     });
+ *   }
+ * </script>
+ * ```
+ */
+export async function mutateOptimisticUpdate<TArgs, TItem, TResult extends TItem>(
+  fn: MutationFn<TArgs, TResult>,
+  store: SubscriptionStore<TItem[]>,
+  options: {
+    input: TArgs;
+    itemId: string;
+    getId: (item: TItem) => string;
+    update: (item: TItem) => TItem;
+  }
+): Promise<TResult> {
+  const client = getForgeClient();
+  const previousState = store.get();
+  const previousData = previousState.data ?? [];
+
+  // Optimistically update the item
+  const optimisticList = previousData.map((item) =>
+    options.getId(item) === options.itemId ? options.update(item) : item
+  );
+  store.set(optimisticList);
+
+  try {
+    const result = await fn(client, options.input);
+
+    // Update with real result
+    const updatedList = previousData.map((item) =>
+      options.getId(item) === options.itemId ? result : item
+    );
+    store.set(updatedList);
+
+    return result;
+  } catch (e) {
+    // Rollback: restore original item
+    store.set(previousData);
     throw e;
   }
 }

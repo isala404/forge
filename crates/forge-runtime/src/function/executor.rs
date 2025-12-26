@@ -11,6 +11,7 @@ use super::router::{FunctionRouter, RouteResult};
 /// Executes functions with timeout and error handling.
 pub struct FunctionExecutor {
     router: FunctionRouter,
+    registry: Arc<FunctionRegistry>,
     default_timeout: Duration,
 }
 
@@ -18,7 +19,8 @@ impl FunctionExecutor {
     /// Create a new function executor.
     pub fn new(registry: Arc<FunctionRegistry>, db_pool: sqlx::PgPool) -> Self {
         Self {
-            router: FunctionRouter::new(registry, db_pool),
+            router: FunctionRouter::new(Arc::clone(&registry), db_pool),
+            registry,
             default_timeout: Duration::from_secs(30),
         }
     }
@@ -30,7 +32,8 @@ impl FunctionExecutor {
         default_timeout: Duration,
     ) -> Self {
         Self {
-            router: FunctionRouter::new(registry, db_pool),
+            router: FunctionRouter::new(Arc::clone(&registry), db_pool),
+            registry,
             default_timeout,
         }
     }
@@ -99,9 +102,12 @@ impl FunctionExecutor {
     }
 
     /// Get the timeout for a specific function.
-    fn get_function_timeout(&self, _function_name: &str) -> Duration {
-        // TODO: Look up function-specific timeout from registry
-        self.default_timeout
+    fn get_function_timeout(&self, function_name: &str) -> Duration {
+        self.registry
+            .get(function_name)
+            .and_then(|entry| entry.info().timeout)
+            .map(Duration::from_secs)
+            .unwrap_or(self.default_timeout)
     }
 
     /// Check if a function exists.

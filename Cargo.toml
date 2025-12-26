@@ -6,6 +6,7 @@ members = [
     "crates/forge-macros",
     "crates/forge-runtime",
     "crates/forge-codegen",
+    "examples/todo-app",
 ]
 
 [workspace.package]

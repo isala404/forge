@@ -157,6 +157,18 @@ impl Default for SpanKind {
     }
 }
 
+impl std::fmt::Display for SpanKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Internal => write!(f, "internal"),
+            Self::Server => write!(f, "server"),
+            Self::Client => write!(f, "client"),
+            Self::Producer => write!(f, "producer"),
+            Self::Consumer => write!(f, "consumer"),
+        }
+    }
+}
+
 /// Span status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -172,6 +184,16 @@ pub enum SpanStatus {
 impl Default for SpanStatus {
     fn default() -> Self {
         Self::Unset
+    }
+}
+
+impl std::fmt::Display for SpanStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unset => write!(f, "unset"),
+            Self::Ok => write!(f, "ok"),
+            Self::Error => write!(f, "error"),
+        }
     }
 }
 

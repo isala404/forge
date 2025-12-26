@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 
 use chrono::{DateTime, Utc};
@@ -6,6 +8,12 @@ use uuid::Uuid;
 
 use super::step::StepStatus;
 use crate::function::AuthContext;
+use crate::Result;
+
+/// Type alias for compensation handler function.
+pub type CompensationHandler = Arc<
+    dyn Fn(serde_json::Value) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync,
+>;
 
 /// Step state stored during execution.
 #[derive(Debug, Clone)]
@@ -85,6 +93,8 @@ pub struct WorkflowContext {
     step_states: Arc<RwLock<HashMap<String, StepState>>>,
     /// Completed steps in order (for compensation).
     completed_steps: Arc<RwLock<Vec<String>>>,
+    /// Compensation handlers for completed steps.
+    compensation_handlers: Arc<RwLock<HashMap<String, CompensationHandler>>>,
 }
 
 impl WorkflowContext {
@@ -108,6 +118,7 @@ impl WorkflowContext {
             http_client,
             step_states: Arc::new(RwLock::new(HashMap::new())),
             completed_steps: Arc::new(RwLock::new(Vec::new())),
+            compensation_handlers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -223,6 +234,68 @@ impl WorkflowContext {
     /// Get elapsed time since workflow started.
     pub fn elapsed(&self) -> chrono::Duration {
         Utc::now() - self.started_at
+    }
+
+    /// Register a compensation handler for a step.
+    pub fn register_compensation(&self, step_name: &str, handler: CompensationHandler) {
+        let mut handlers = self.compensation_handlers.write().unwrap();
+        handlers.insert(step_name.to_string(), handler);
+    }
+
+    /// Get compensation handler for a step.
+    pub fn get_compensation_handler(&self, step_name: &str) -> Option<CompensationHandler> {
+        self.compensation_handlers
+            .read()
+            .unwrap()
+            .get(step_name)
+            .cloned()
+    }
+
+    /// Check if a step has a compensation handler.
+    pub fn has_compensation(&self, step_name: &str) -> bool {
+        self.compensation_handlers
+            .read()
+            .unwrap()
+            .contains_key(step_name)
+    }
+
+    /// Run compensation for all completed steps in reverse order.
+    /// Returns a list of (step_name, success) tuples.
+    pub async fn run_compensation(&self) -> Vec<(String, bool)> {
+        let steps = self.completed_steps_reversed();
+        let mut results = Vec::new();
+
+        for step_name in steps {
+            let handler = self.get_compensation_handler(&step_name);
+            let result = self
+                .get_step_state(&step_name)
+                .and_then(|s| s.result.clone());
+
+            if let Some(handler) = handler {
+                let step_result = result.unwrap_or(serde_json::Value::Null);
+                match handler(step_result).await {
+                    Ok(()) => {
+                        self.record_step_compensated(&step_name);
+                        results.push((step_name, true));
+                    }
+                    Err(e) => {
+                        tracing::error!(step = %step_name, error = %e, "Compensation failed");
+                        results.push((step_name, false));
+                    }
+                }
+            } else {
+                // No compensation handler, mark as compensated anyway
+                self.record_step_compensated(&step_name);
+                results.push((step_name, true));
+            }
+        }
+
+        results
+    }
+
+    /// Get compensation handlers (for cloning to executor).
+    pub fn compensation_handlers(&self) -> HashMap<String, CompensationHandler> {
+        self.compensation_handlers.read().unwrap().clone()
     }
 }
 

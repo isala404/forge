@@ -306,3 +306,23 @@ Implemented mesh-safe migration system.
 - CLI scaffolding creates `migrations/0001_create_users.sql` for user tables
 - Mesh-safe: advisory lock ensures only one node runs migrations during rolling deploys
 - All 272 tests passing
+
+Fixed multi-statement migrations and template code generation.
+- Migration runner now splits SQL on semicolons for statement-by-statement execution
+- Fixed template to use `ctx.db()` accessor instead of `ctx.pool` field
+- Removed anyhow dependency from scaffolded projects, use forge's Result type
+- Verified full workflow: scaffold project, build, run, migrations apply, RPC endpoints work
+
+Implemented 8 critical production fixes across FORGE framework.
+- Phase 1: Externalized built-in migrations to SQL files in `crates/forge-runtime/src/migrations/builtin.sql`
+- Phase 2: Implemented JWT signature verification using jsonwebtoken crate v9 with `insecure_disable_signature_validation()` for dev mode
+- Phase 3: Wired CLI codegen to forge-codegen source parser using syn crate in `crates/forge-codegen/src/parser.rs`
+- Phase 4: Implemented PostgreSQL batch persistence for observability using UNNEST pattern in `crates/forge-runtime/src/observability/storage.rs`
+- Phase 5: Dashboard API now queries real data from PostgreSQL with trace aggregation in `crates/forge-runtime/src/dashboard/api.rs`
+- Phase 6: Workflow compensation implemented with saga pattern reversal in `crates/forge-runtime/src/workflow/executor.rs`
+- Phase 7: Function timeout lookup from registry instead of hardcoded defaults in `crates/forge-runtime/src/function/executor.rs`
+- Phase 8: Frontend optimistic updates with rollback in `frontend/src/lib/stores.ts`
+- Added Display impl for SpanKind and SpanStatus in trace.rs
+- Fixed AuthMiddleware Debug derive for DecodingKey compatibility
+- Created sample todo-app in `examples/todo-app/` demonstrating queries, mutations, and codegen
+- All 288 tests passing

@@ -1,10 +1,12 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use super::registry::WorkflowRegistry;
 use super::state::{WorkflowRecord, WorkflowStepRecord};
-use forge_core::workflow::{StepStatus, WorkflowContext, WorkflowStatus};
+use forge_core::workflow::{CompensationHandler, StepStatus, WorkflowContext, WorkflowStatus};
 
 /// Workflow execution result.
 #[derive(Debug)]
@@ -19,11 +21,19 @@ pub enum WorkflowResult {
     Compensated,
 }
 
+/// Compensation state for a running workflow.
+struct CompensationState {
+    handlers: HashMap<String, CompensationHandler>,
+    completed_steps: Vec<String>,
+}
+
 /// Executes workflows.
 pub struct WorkflowExecutor {
     registry: Arc<WorkflowRegistry>,
     pool: sqlx::PgPool,
     http_client: reqwest::Client,
+    /// Compensation state for active workflows (run_id -> state).
+    compensation_state: Arc<RwLock<HashMap<Uuid, CompensationState>>>,
 }
 
 impl WorkflowExecutor {
@@ -37,6 +47,7 @@ impl WorkflowExecutor {
             registry,
             pool,
             http_client,
+            compensation_state: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -88,14 +99,25 @@ impl WorkflowExecutor {
         let handler = entry.handler.clone();
         let result = tokio::time::timeout(entry.info.timeout, handler(&ctx, input)).await;
 
+        // Capture compensation state after execution
+        let compensation_state = CompensationState {
+            handlers: ctx.compensation_handlers(),
+            completed_steps: ctx.completed_steps_reversed().into_iter().rev().collect(),
+        };
+        self.compensation_state
+            .write()
+            .await
+            .insert(run_id, compensation_state);
+
         match result {
             Ok(Ok(output)) => {
-                // Mark as completed
+                // Mark as completed, clean up compensation state
                 self.complete_workflow(run_id, output.clone()).await?;
+                self.compensation_state.write().await.remove(&run_id);
                 Ok(WorkflowResult::Completed(output))
             }
             Ok(Err(e)) => {
-                // Mark as failed and run compensation
+                // Mark as failed - compensation can be triggered via cancel
                 self.fail_workflow(run_id, &e.to_string()).await?;
                 Ok(WorkflowResult::Failed {
                     error: e.to_string(),
@@ -149,10 +171,119 @@ impl WorkflowExecutor {
         self.update_workflow_status(run_id, WorkflowStatus::Compensating)
             .await?;
 
-        // TODO: Run compensation steps in reverse order
+        // Get compensation state
+        let state = self.compensation_state.write().await.remove(&run_id);
+
+        if let Some(state) = state {
+            // Get completed steps with results from database
+            let steps = self.get_workflow_steps(run_id).await?;
+
+            // Run compensation in reverse order
+            for step_name in state.completed_steps.iter().rev() {
+                if let Some(handler) = state.handlers.get(step_name) {
+                    // Find the step result
+                    let step_result = steps
+                        .iter()
+                        .find(|s| &s.step_name == step_name)
+                        .and_then(|s| s.result.clone())
+                        .unwrap_or(serde_json::Value::Null);
+
+                    // Run compensation handler
+                    match handler(step_result).await {
+                        Ok(()) => {
+                            tracing::info!(
+                                workflow_run_id = %run_id,
+                                step = %step_name,
+                                "Compensation completed"
+                            );
+                            self.update_step_status(run_id, step_name, StepStatus::Compensated)
+                                .await?;
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                workflow_run_id = %run_id,
+                                step = %step_name,
+                                error = %e,
+                                "Compensation failed"
+                            );
+                            // Continue with other compensations even if one fails
+                        }
+                    }
+                } else {
+                    // No handler, just mark as compensated
+                    self.update_step_status(run_id, step_name, StepStatus::Compensated)
+                        .await?;
+                }
+            }
+        } else {
+            // No in-memory state, try to compensate from DB state
+            // This handles the case where the server restarted
+            tracing::warn!(
+                workflow_run_id = %run_id,
+                "No compensation state found, marking as compensated without handlers"
+            );
+        }
 
         self.update_workflow_status(run_id, WorkflowStatus::Compensated)
             .await?;
+
+        Ok(())
+    }
+
+    /// Get workflow steps from database.
+    async fn get_workflow_steps(
+        &self,
+        workflow_run_id: Uuid,
+    ) -> forge_core::Result<Vec<WorkflowStepRecord>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, workflow_run_id, step_name, status, result, error, started_at, completed_at
+            FROM forge_workflow_steps
+            WHERE workflow_run_id = $1
+            ORDER BY started_at ASC
+            "#,
+        )
+        .bind(workflow_run_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+
+        use sqlx::Row;
+        Ok(rows
+            .into_iter()
+            .map(|row| WorkflowStepRecord {
+                id: row.get("id"),
+                workflow_run_id: row.get("workflow_run_id"),
+                step_name: row.get("step_name"),
+                status: StepStatus::from_str(row.get("status")),
+                result: row.get("result"),
+                error: row.get("error"),
+                started_at: row.get("started_at"),
+                completed_at: row.get("completed_at"),
+            })
+            .collect())
+    }
+
+    /// Update step status.
+    async fn update_step_status(
+        &self,
+        workflow_run_id: Uuid,
+        step_name: &str,
+        status: StepStatus,
+    ) -> forge_core::Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE forge_workflow_steps
+            SET status = $3
+            WHERE workflow_run_id = $1 AND step_name = $2
+            "#,
+        )
+        .bind(workflow_run_id)
+        .bind(step_name)
+        .bind(status.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
 
         Ok(())
     }

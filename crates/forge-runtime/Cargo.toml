@@ -26,6 +26,7 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 regex = "1.11"
+jsonwebtoken = "9"
 
 [dev-dependencies]
 tokio-test = { workspace = true }
