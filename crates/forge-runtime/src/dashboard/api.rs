@@ -198,6 +198,29 @@ pub struct JobStats {
     pub dead_letter: u64,
 }
 
+/// Workflow stats.
+#[derive(Debug, Serialize)]
+pub struct WorkflowStats {
+    pub running: u64,
+    pub completed: u64,
+    pub waiting: u64,
+    pub failed: u64,
+    pub compensating: u64,
+}
+
+/// Workflow run summary.
+#[derive(Debug, Serialize)]
+pub struct WorkflowRun {
+    pub id: String,
+    pub workflow_name: String,
+    pub version: Option<String>,
+    pub status: String,
+    pub current_step: Option<String>,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub error: Option<String>,
+}
+
 /// Node info.
 #[derive(Debug, Serialize)]
 pub struct NodeInfo {
@@ -519,7 +542,8 @@ pub async fn list_traces(
                 MAX(duration_ms) as duration_ms,
                 COUNT(*) as span_count,
                 BOOL_OR(status = 'error') as has_error,
-                (array_agg(name ORDER BY started_at ASC))[1] as root_span_name
+                (array_agg(name ORDER BY started_at ASC))[1] as root_span_name,
+                (array_agg(attributes->>'service.name' ORDER BY started_at ASC) FILTER (WHERE attributes->>'service.name' IS NOT NULL))[1] as service_name
             FROM forge_traces
             WHERE ($1::TIMESTAMPTZ IS NULL OR started_at >= $1)
               AND ($2::TIMESTAMPTZ IS NULL OR started_at <= $2)
@@ -547,7 +571,9 @@ pub async fn list_traces(
                     root_span_name: row
                         .get::<Option<String>, _>("root_span_name")
                         .unwrap_or_default(),
-                    service: "forge-app".to_string(),
+                    service: row
+                        .get::<Option<String>, _>("service_name")
+                        .unwrap_or_else(|| "unknown".to_string()),
                     duration_ms: row.get::<Option<i32>, _>("duration_ms").unwrap_or(0) as u64,
                     span_count: row.get::<i64, _>("span_count") as u32,
                     error: row.get("has_error"),
@@ -588,11 +614,18 @@ pub async fn get_trace(
                     let end_time: Option<DateTime<Utc>> = row.get("ended_at");
                     let duration: Option<i32> = row.get("duration_ms");
 
+                    // Extract service name from attributes if present
+                    let service = attributes
+                        .get("service.name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+
                     SpanDetail {
                         span_id: row.get("span_id"),
                         parent_span_id: row.get("parent_span_id"),
                         name: row.get("name"),
-                        service: "forge-app".to_string(),
+                        service,
                         kind: row.get("kind"),
                         status: row.get("status"),
                         start_time: row.get("started_at"),
@@ -718,6 +751,86 @@ pub async fn get_job_stats(State(state): State<DashboardState>) -> Json<ApiRespo
 }
 
 // ============================================================================
+// Workflows API
+// ============================================================================
+
+/// List workflow runs.
+pub async fn list_workflows(
+    State(state): State<DashboardState>,
+    Query(query): Query<PaginationQuery>,
+) -> Json<ApiResponse<Vec<WorkflowRun>>> {
+    let limit = query.get_limit();
+    let offset = query.get_offset();
+
+    let result = sqlx::query(
+        r#"
+        SELECT id, workflow_name, version, status, current_step,
+               started_at, completed_at, error
+        FROM forge_workflow_runs
+        ORDER BY started_at DESC
+        LIMIT $1 OFFSET $2
+        "#,
+    )
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(&state.pool)
+    .await;
+
+    match result {
+        Ok(rows) => {
+            let workflows: Vec<WorkflowRun> = rows
+                .into_iter()
+                .map(|row| {
+                    let id: uuid::Uuid = row.get("id");
+                    WorkflowRun {
+                        id: id.to_string(),
+                        workflow_name: row.get("workflow_name"),
+                        version: row.get("version"),
+                        status: row.get("status"),
+                        current_step: row.get("current_step"),
+                        started_at: row.get("started_at"),
+                        completed_at: row.get("completed_at"),
+                        error: row.get("error"),
+                    }
+                })
+                .collect();
+            Json(ApiResponse::success(workflows))
+        }
+        Err(e) => Json(ApiResponse::error(e.to_string())),
+    }
+}
+
+/// Get workflow stats.
+pub async fn get_workflow_stats(
+    State(state): State<DashboardState>,
+) -> Json<ApiResponse<WorkflowStats>> {
+    let result = sqlx::query(
+        r#"
+        SELECT
+            COUNT(*) FILTER (WHERE status = 'running') as running,
+            COUNT(*) FILTER (WHERE status = 'completed') as completed,
+            COUNT(*) FILTER (WHERE status = 'waiting') as waiting,
+            COUNT(*) FILTER (WHERE status = 'failed') as failed,
+            COUNT(*) FILTER (WHERE status = 'compensating') as compensating
+        FROM forge_workflow_runs
+        "#,
+    )
+    .fetch_one(&state.pool)
+    .await;
+
+    match result {
+        Ok(row) => Json(ApiResponse::success(WorkflowStats {
+            running: row.get::<Option<i64>, _>("running").unwrap_or(0) as u64,
+            completed: row.get::<Option<i64>, _>("completed").unwrap_or(0) as u64,
+            waiting: row.get::<Option<i64>, _>("waiting").unwrap_or(0) as u64,
+            failed: row.get::<Option<i64>, _>("failed").unwrap_or(0) as u64,
+            compensating: row.get::<Option<i64>, _>("compensating").unwrap_or(0) as u64,
+        })),
+        Err(e) => Json(ApiResponse::error(e.to_string())),
+    }
+}
+
+// ============================================================================
 // Cluster API
 // ============================================================================
 
@@ -826,14 +939,24 @@ pub async fn get_cluster_health(
 // ============================================================================
 
 /// Get system info.
-pub async fn get_system_info(
-    State(_state): State<DashboardState>,
-) -> Json<ApiResponse<SystemInfo>> {
+pub async fn get_system_info(State(state): State<DashboardState>) -> Json<ApiResponse<SystemInfo>> {
+    // Query the earliest node start time as proxy for system start
+    let started_at = sqlx::query_scalar::<_, DateTime<Utc>>(
+        "SELECT MIN(started_at) FROM forge_nodes WHERE status = 'active'",
+    )
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_else(Utc::now);
+
+    let uptime_seconds = (Utc::now() - started_at).num_seconds().max(0) as u64;
+
     Json(ApiResponse::success(SystemInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
-        rust_version: "1.75.0".to_string(),
-        started_at: Utc::now(), // Would need to store actual start time
-        uptime_seconds: 0,
+        rust_version: env!("CARGO_PKG_RUST_VERSION").to_string(),
+        started_at,
+        uptime_seconds,
     }))
 }
 
@@ -841,13 +964,14 @@ pub async fn get_system_info(
 pub async fn get_system_stats(
     State(state): State<DashboardState>,
 ) -> Json<ApiResponse<SystemStats>> {
-    // Get some basic stats from the database
+    // Get job stats
     let jobs_pending =
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM forge_jobs WHERE status = 'pending'")
             .fetch_one(&state.pool)
             .await
             .unwrap_or(0) as u64;
 
+    // Get active sessions
     let active_sessions = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM forge_sessions WHERE status = 'connected'",
     )
@@ -855,21 +979,60 @@ pub async fn get_system_stats(
     .await
     .unwrap_or(0) as u32;
 
+    // Get active subscriptions
     let active_subscriptions =
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM forge_subscriptions")
             .fetch_one(&state.pool)
             .await
             .unwrap_or(0) as u32;
 
+    // Get HTTP request metrics from forge_metrics table
+    let http_requests_total = sqlx::query_scalar::<_, f64>(
+        "SELECT COALESCE(value, 0) FROM forge_metrics WHERE name = 'forge_http_requests_total' ORDER BY timestamp DESC LIMIT 1",
+    )
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(0.0) as u64;
+
+    // Calculate requests per second from recent metrics (last minute)
+    let http_requests_per_second = sqlx::query_scalar::<_, f64>(
+        r#"
+        SELECT COALESCE(
+            (MAX(value) - MIN(value)) / NULLIF(EXTRACT(EPOCH FROM (MAX(timestamp) - MIN(timestamp))), 0),
+            0
+        )
+        FROM forge_metrics
+        WHERE name = 'forge_http_requests_total'
+        AND timestamp > NOW() - INTERVAL '1 minute'
+        "#,
+    )
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(0.0);
+
+    // Get function calls total
+    let function_calls_total = sqlx::query_scalar::<_, f64>(
+        "SELECT COALESCE(value, 0) FROM forge_metrics WHERE name = 'forge_function_calls_total' ORDER BY timestamp DESC LIMIT 1",
+    )
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(0.0) as u64;
+
     Json(ApiResponse::success(SystemStats {
-        http_requests_total: 0, // Would need request counter
-        http_requests_per_second: 0.0,
-        function_calls_total: 0,
+        http_requests_total,
+        http_requests_per_second,
+        function_calls_total,
         active_connections: active_sessions,
         active_subscriptions,
         jobs_pending,
-        memory_used_mb: 0,
-        cpu_usage_percent: 0.0,
+        memory_used_mb: 0,      // Not tracked in DB - would need OS metrics
+        cpu_usage_percent: 0.0, // Not tracked in DB - would need OS metrics
     }))
 }
 

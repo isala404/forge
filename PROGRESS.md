@@ -376,3 +376,16 @@ Fixed scaffold to enable reactivity on tables by default.
 - Separated WebSocket route from auth middleware stack to allow WS upgrades
 - Added comprehensive [FORGE] debug logging to ForgeProvider.svelte, stores.ts, and client.ts
 - Verified reactivity works: bun WebSocket test shows automatic updates on INSERT (6 users -> 7 users)
+
+Removed all mock/placeholder data from dashboard, wired to real database queries.
+- Fixed `get_system_info()` and `get_system_stats()` in api.rs to query real metrics from forge_metrics
+- Fixed `list_traces()` and `get_trace()` to extract service.name from JSONB attributes
+- Added `WorkflowStats`, `WorkflowRun` types and `/workflows`, `/workflows/stats` API endpoints
+- Removed all hardcoded fake data from pages.rs (metrics cards, sample rows, node cards)
+- Replaced placeholder HTML with dynamic IDs and empty states for JavaScript population
+- Complete rewrite of main_js() in assets.rs (~500 lines) for real data fetching
+- Added page-specific data loaders: loadMetrics(), loadLogs(), loadTraces(), loadTraceDetail(), loadJobs(), loadWorkflows(), loadCluster()
+- Charts now fetch real time-series data from `/_api/metrics/series` endpoint
+- Auto-refresh interval changed from 30s to 5s for responsiveness
+- Added escapeHtml(), formatTime(), formatRelativeTime(), formatMetricValue() utilities
+- All 304 tests passing

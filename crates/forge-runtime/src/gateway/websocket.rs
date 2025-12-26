@@ -56,10 +56,7 @@ pub enum ServerMessage {
     /// Ping response.
     Pong,
     /// Subscription data.
-    Data {
-        id: String,
-        data: serde_json::Value,
-    },
+    Data { id: String, data: serde_json::Value },
     /// Subscription error.
     Error {
         id: Option<String>,
@@ -73,10 +70,7 @@ pub enum ServerMessage {
 }
 
 /// WebSocket upgrade handler.
-pub async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<Arc<WsState>>,
-) -> Response {
+pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<WsState>>) -> Response {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 

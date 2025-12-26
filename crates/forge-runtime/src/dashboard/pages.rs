@@ -191,30 +191,7 @@ pub async fn metrics(State(_state): State<DashboardState>) -> Html<String> {
         </div>
 
         <div class="metrics-grid" id="metrics-list">
-            <div class="metric-card">
-                <h4>forge_http_requests_total</h4>
-                <p class="metric-value">12,345</p>
-                <p class="metric-type">counter</p>
-                <canvas class="metric-sparkline"></canvas>
-            </div>
-            <div class="metric-card">
-                <h4>forge_http_request_duration_seconds</h4>
-                <p class="metric-value">0.045s</p>
-                <p class="metric-type">histogram</p>
-                <canvas class="metric-sparkline"></canvas>
-            </div>
-            <div class="metric-card">
-                <h4>forge_function_calls_total</h4>
-                <p class="metric-value">5,678</p>
-                <p class="metric-type">counter</p>
-                <canvas class="metric-sparkline"></canvas>
-            </div>
-            <div class="metric-card">
-                <h4>forge_websocket_connections</h4>
-                <p class="metric-value">42</p>
-                <p class="metric-type">gauge</p>
-                <canvas class="metric-sparkline"></canvas>
-            </div>
+            <p class="empty-state">Loading metrics...</p>
         </div>
 
         <div class="chart-container full-width">
@@ -251,12 +228,9 @@ pub async fn logs(State(_state): State<DashboardState>) -> Html<String> {
                         <th>Trace</th>
                     </tr>
                 </thead>
-                <tbody>
-                    <tr class="log-row log-info">
-                        <td class="log-time">12:34:56.789</td>
-                        <td class="log-level"><span class="level-badge level-info">INFO</span></td>
-                        <td class="log-message">Request completed successfully</td>
-                        <td class="log-trace"><a href="#">abc123</a></td>
+                <tbody id="logs-tbody">
+                    <tr class="empty-row">
+                        <td colspan="4">Loading logs...</td>
                     </tr>
                 </tbody>
             </table>
@@ -264,7 +238,7 @@ pub async fn logs(State(_state): State<DashboardState>) -> Html<String> {
 
         <div class="logs-pagination">
             <button class="btn btn-secondary" id="logs-prev">← Previous</button>
-            <span id="logs-page-info">Page 1 of 10</span>
+            <span id="logs-page-info">Page 1</span>
             <button class="btn btn-secondary" id="logs-next">Next →</button>
         </div>
     "##;
@@ -296,15 +270,9 @@ pub async fn traces(State(_state): State<DashboardState>) -> Html<String> {
                         <th>Started</th>
                     </tr>
                 </thead>
-                <tbody>
-                    <tr class="trace-row">
-                        <td class="trace-id"><a href="/_dashboard/traces/abc123">abc123</a></td>
-                        <td class="trace-name">HTTP GET /api/projects</td>
-                        <td class="trace-service">forge-app</td>
-                        <td class="trace-duration">45ms</td>
-                        <td class="trace-spans">5</td>
-                        <td class="trace-status"><span class="status-badge status-ok">OK</span></td>
-                        <td class="trace-time">12:34:56</td>
+                <tbody id="traces-tbody">
+                    <tr class="empty-row">
+                        <td colspan="7">Loading traces...</td>
                     </tr>
                 </tbody>
             </table>
@@ -323,8 +291,8 @@ pub async fn trace_detail(
         r#"
         <div class="trace-header">
             <div class="trace-info">
-                <h3>Trace: {}</h3>
-                <p>Started: 12:34:56.789 | Duration: 45ms | 5 spans</p>
+                <h3>Trace: <span id="trace-id-display">{}</span></h3>
+                <p id="trace-summary">Loading trace details...</p>
             </div>
             <button class="btn btn-secondary" onclick="history.back()">← Back to Traces</button>
         </div>
@@ -335,25 +303,8 @@ pub async fn trace_detail(
                 <span>Operation</span>
                 <span class="timeline-bar-header">Duration</span>
             </div>
-            <div class="timeline-row root">
-                <span class="service">forge-app</span>
-                <span class="operation">HTTP GET /api/projects</span>
-                <div class="timeline-bar" style="width: 100%; left: 0%;">45ms</div>
-            </div>
-            <div class="timeline-row child" style="margin-left: 20px;">
-                <span class="service">forge-app</span>
-                <span class="operation">authenticate</span>
-                <div class="timeline-bar" style="width: 10%; left: 0%;">5ms</div>
-            </div>
-            <div class="timeline-row child" style="margin-left: 20px;">
-                <span class="service">forge-app</span>
-                <span class="operation">get_projects</span>
-                <div class="timeline-bar" style="width: 80%; left: 12%;">35ms</div>
-            </div>
-            <div class="timeline-row child" style="margin-left: 40px;">
-                <span class="service">postgres</span>
-                <span class="operation">SELECT * FROM projects</span>
-                <div class="timeline-bar" style="width: 70%; left: 15%;">30ms</div>
+            <div id="trace-spans">
+                <p class="empty-state">Loading spans...</p>
             </div>
         </div>
 
@@ -361,8 +312,15 @@ pub async fn trace_detail(
             <h4>Span Details</h4>
             <p class="empty-state">Click on a span to view details</p>
         </div>
+
+        <script>
+            const traceId = '{}';
+            document.addEventListener('DOMContentLoaded', function() {{
+                loadTraceDetail(traceId);
+            }});
+        </script>
     "#,
-        trace_id
+        trace_id, trace_id
     );
 
     Html(base_template("Trace Detail", &content, "traces"))
@@ -373,15 +331,15 @@ pub async fn alerts(State(_state): State<DashboardState>) -> Html<String> {
     let content = r#"
         <div class="alerts-summary">
             <div class="alert-stat critical">
-                <span class="count">0</span>
+                <span class="count" id="alerts-critical">-</span>
                 <span class="label">Critical</span>
             </div>
             <div class="alert-stat warning">
-                <span class="count">0</span>
+                <span class="count" id="alerts-warning">-</span>
                 <span class="label">Warning</span>
             </div>
             <div class="alert-stat info">
-                <span class="count">0</span>
+                <span class="count" id="alerts-info">-</span>
                 <span class="label">Info</span>
             </div>
         </div>
@@ -394,8 +352,8 @@ pub async fn alerts(State(_state): State<DashboardState>) -> Html<String> {
 
         <div class="tab-content" id="alerts-content">
             <div class="empty-state">
-                <p>🎉 No active alerts</p>
-                <p class="subtitle">Your system is running smoothly</p>
+                <p>Alerts not yet configured</p>
+                <p class="subtitle">Configure alert rules in forge.toml to enable alerting</p>
             </div>
         </div>
     "#;
@@ -408,19 +366,19 @@ pub async fn jobs(State(_state): State<DashboardState>) -> Html<String> {
     let content = r#"
         <div class="jobs-stats">
             <div class="job-stat">
-                <span class="count" id="jobs-pending">0</span>
+                <span class="count" id="jobs-pending">-</span>
                 <span class="label">Pending</span>
             </div>
             <div class="job-stat">
-                <span class="count" id="jobs-running">0</span>
+                <span class="count" id="jobs-running">-</span>
                 <span class="label">Running</span>
             </div>
             <div class="job-stat">
-                <span class="count" id="jobs-completed">0</span>
+                <span class="count" id="jobs-completed">-</span>
                 <span class="label">Completed</span>
             </div>
             <div class="job-stat error">
-                <span class="count" id="jobs-failed">0</span>
+                <span class="count" id="jobs-failed">-</span>
                 <span class="label">Failed</span>
             </div>
         </div>
@@ -442,12 +400,12 @@ pub async fn jobs(State(_state): State<DashboardState>) -> Html<String> {
                         <th>Status</th>
                         <th>Attempts</th>
                         <th>Created</th>
-                        <th>Actions</th>
+                        <th>Error</th>
                     </tr>
                 </thead>
-                <tbody>
+                <tbody id="jobs-tbody">
                     <tr class="empty-row">
-                        <td colspan="7">No jobs in queue</td>
+                        <td colspan="7">Loading jobs...</td>
                     </tr>
                 </tbody>
             </table>
@@ -462,19 +420,19 @@ pub async fn workflows(State(_state): State<DashboardState>) -> Html<String> {
     let content = r#"
         <div class="workflows-stats">
             <div class="workflow-stat">
-                <span class="count">0</span>
+                <span class="count" id="workflows-running">-</span>
                 <span class="label">Running</span>
             </div>
             <div class="workflow-stat">
-                <span class="count">0</span>
+                <span class="count" id="workflows-completed">-</span>
                 <span class="label">Completed</span>
             </div>
             <div class="workflow-stat">
-                <span class="count">0</span>
+                <span class="count" id="workflows-waiting">-</span>
                 <span class="label">Waiting</span>
             </div>
             <div class="workflow-stat error">
-                <span class="count">0</span>
+                <span class="count" id="workflows-failed">-</span>
                 <span class="label">Failed</span>
             </div>
         </div>
@@ -487,14 +445,14 @@ pub async fn workflows(State(_state): State<DashboardState>) -> Html<String> {
                         <th>Workflow</th>
                         <th>Version</th>
                         <th>Status</th>
-                        <th>Steps</th>
+                        <th>Current Step</th>
                         <th>Started</th>
-                        <th>Duration</th>
+                        <th>Error</th>
                     </tr>
                 </thead>
-                <tbody>
+                <tbody id="workflows-tbody">
                     <tr class="empty-row">
-                        <td colspan="7">No workflow runs</td>
+                        <td colspan="7">Loading workflows...</td>
                     </tr>
                 </tbody>
             </table>
@@ -507,44 +465,20 @@ pub async fn workflows(State(_state): State<DashboardState>) -> Html<String> {
 /// Cluster page.
 pub async fn cluster(State(_state): State<DashboardState>) -> Html<String> {
     let content = r#"
-        <div class="cluster-health">
-            <div class="health-indicator healthy">
-                <span class="health-icon">✓</span>
-                <span class="health-text">Cluster Healthy</span>
+        <div class="cluster-health" id="cluster-health-panel">
+            <div class="health-indicator" id="health-indicator">
+                <span class="health-icon" id="health-icon">...</span>
+                <span class="health-text" id="health-text">Loading...</span>
             </div>
             <div class="cluster-info">
-                <span>1 Node</span>
+                <span id="node-count">- Nodes</span>
                 <span>|</span>
-                <span>Leader: node-1</span>
+                <span id="leader-info">Leader: -</span>
             </div>
         </div>
 
         <div class="nodes-grid" id="nodes-grid">
-            <div class="node-card leader">
-                <div class="node-header">
-                    <span class="node-status online"></span>
-                    <h4>node-1</h4>
-                    <span class="leader-badge">Leader</span>
-                </div>
-                <div class="node-details">
-                    <p><strong>Roles:</strong> Gateway, Function, Worker, Scheduler</p>
-                    <p><strong>Version:</strong> 0.1.0</p>
-                    <p><strong>Started:</strong> 12:00:00</p>
-                    <p><strong>Last Heartbeat:</strong> Just now</p>
-                </div>
-                <div class="node-metrics">
-                    <div class="node-metric">
-                        <span class="metric-label">CPU</span>
-                        <div class="metric-bar"><div class="metric-fill" style="width: 25%"></div></div>
-                        <span class="metric-value">25%</span>
-                    </div>
-                    <div class="node-metric">
-                        <span class="metric-label">Memory</span>
-                        <div class="metric-bar"><div class="metric-fill" style="width: 45%"></div></div>
-                        <span class="metric-value">45%</span>
-                    </div>
-                </div>
-            </div>
+            <p class="empty-state">Loading nodes...</p>
         </div>
 
         <div class="panel">
@@ -554,19 +488,11 @@ pub async fn cluster(State(_state): State<DashboardState>) -> Html<String> {
                     <tr>
                         <th>Role</th>
                         <th>Leader Node</th>
-                        <th>Since</th>
                     </tr>
                 </thead>
-                <tbody>
-                    <tr>
-                        <td>Scheduler</td>
-                        <td>node-1</td>
-                        <td>12:00:00</td>
-                    </tr>
-                    <tr>
-                        <td>Metrics Aggregator</td>
-                        <td>node-1</td>
-                        <td>12:00:00</td>
+                <tbody id="leadership-tbody">
+                    <tr class="empty-row">
+                        <td colspan="2">Loading leaders...</td>
                     </tr>
                 </tbody>
             </table>

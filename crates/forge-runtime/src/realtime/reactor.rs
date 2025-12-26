@@ -367,7 +367,9 @@ impl Reactor {
                                 data: new_data,
                             };
 
-                            if let Err(e) = ws_server.send_to_session(active.session_id, message).await {
+                            if let Err(e) =
+                                ws_server.send_to_session(active.session_id, message).await
+                            {
                                 tracing::warn!(?sub_id, "Failed to send update: {}", e);
                             } else {
                                 tracing::debug!(?sub_id, "Pushed update to client");

@@ -86,6 +86,9 @@ pub fn create_api_router(state: DashboardState) -> Router {
         // Jobs API
         .route("/jobs", get(api::list_jobs))
         .route("/jobs/stats", get(api::get_job_stats))
+        // Workflows API
+        .route("/workflows", get(api::list_workflows))
+        .route("/workflows/stats", get(api::get_workflow_stats))
         // Cluster API
         .route("/cluster/nodes", get(api::list_nodes))
         .route("/cluster/health", get(api::get_cluster_health))
