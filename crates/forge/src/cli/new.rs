@@ -371,12 +371,12 @@ export const csr = true;
 
     // Create +page.svelte using reactive stores
     let page_svelte = r#"<script lang="ts">
-    import { query, mutate } from '@forge/svelte';
+    import { subscribe, mutate } from '@forge/svelte';
     import { getUsers, createUser } from '$lib/forge/api';
     import type { User } from '$lib/forge/types';
 
-    // Reactive query - automatically fetches and updates
-    const users = query(getUsers, {});
+    // Real-time subscription - automatically updates when data changes
+    const users = subscribe(getUsers, {});
 
     // Form state
     let name = $state('');
@@ -390,8 +390,7 @@ export const csr = true;
         isSubmitting = true;
         try {
             await mutate(createUser, { name, email });
-            // Refetch the users list
-            users.refetch();
+            // No need to refetch - subscription auto-updates!
             // Clear form
             name = '';
             email = '';
