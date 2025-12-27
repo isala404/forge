@@ -81,12 +81,13 @@ SELECT forge_enable_reactivity('users');
 "#;
     fs::write(dir.join("migrations/0001_create_users.sql"), migration_0001)?;
 
-    // Create Cargo.toml
+    // Create Cargo.toml with dotenvy for .env loading
     let cargo_toml = format!(
         r#"[package]
 name = "{name}"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.75"
 
 [dependencies]
 forge = "0.1"
@@ -98,6 +99,10 @@ chrono = {{ version = "0.4", features = ["serde"] }}
 sqlx = {{ version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "uuid"] }}
 tracing = "0.1"
 tracing-subscriber = {{ version = "0.3", features = ["env-filter"] }}
+dotenvy = "0.15"
+
+# Pin transitive dependency for Rust < 1.88 compatibility
+home = ">=0.5,<0.5.12"
 "#
     );
     fs::write(dir.join("Cargo.toml"), cargo_toml)?;
@@ -130,6 +135,9 @@ mod functions;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load .env file (must be called before ForgeConfig::from_file)
+    dotenvy::dotenv().ok();
+
     tracing_subscriber::fmt()
         .with_env_filter("info")
         .init();
@@ -138,10 +146,14 @@ async fn main() -> Result<()> {
 
     let mut builder = Forge::builder();
 
-    // Register functions
+    // Register queries (read operations, support real-time subscriptions)
     builder.function_registry_mut().register_query::<functions::GetUsersQuery>();
     builder.function_registry_mut().register_query::<functions::GetUserQuery>();
+
+    // Register mutations (write operations, trigger subscription updates)
     builder.function_registry_mut().register_mutation::<functions::CreateUserMutation>();
+    builder.function_registry_mut().register_mutation::<functions::UpdateUserMutation>();
+    builder.function_registry_mut().register_mutation::<functions::DeleteUserMutation>();
 
     // Migrations are loaded from ./migrations directory automatically
     builder
@@ -188,11 +200,16 @@ pub use users::*;
 "#;
     fs::write(dir.join("src/functions/mod.rs"), functions_mod)?;
 
-    // Create functions/users.rs (example functions)
+    // Create functions/users.rs (example functions showing queries and mutations)
     let users_rs = r#"use forge::prelude::*;
 use crate::schema::User;
 
-/// Get all users.
+// ============================================================================
+// QUERIES - Read operations that support real-time subscriptions
+// ============================================================================
+
+/// Get all users (supports real-time subscription).
+/// Frontend can use `subscribe(getUsers, {})` for live updates.
 #[forge::query]
 pub async fn get_users(ctx: &QueryContext) -> Result<Vec<User>> {
     sqlx::query_as::<_, User>("SELECT * FROM users ORDER BY created_at DESC")
@@ -201,7 +218,7 @@ pub async fn get_users(ctx: &QueryContext) -> Result<Vec<User>> {
         .map_err(Into::into)
 }
 
-/// Get a user by ID.
+/// Get a single user by ID.
 #[forge::query]
 pub async fn get_user(ctx: &QueryContext, id: Uuid) -> Result<Option<User>> {
     sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
@@ -211,7 +228,12 @@ pub async fn get_user(ctx: &QueryContext, id: Uuid) -> Result<Option<User>> {
         .map_err(Into::into)
 }
 
+// ============================================================================
+// MUTATIONS - Write operations that trigger subscription updates
+// ============================================================================
+
 /// Create a new user.
+/// After this mutation, all `get_users` subscriptions will automatically refresh.
 #[forge::mutation]
 pub async fn create_user(
     ctx: &MutationContext,
@@ -234,6 +256,45 @@ pub async fn create_user(
 
     Ok(user)
 }
+
+/// Update an existing user.
+#[forge::mutation]
+pub async fn update_user(
+    ctx: &MutationContext,
+    id: Uuid,
+    email: Option<String>,
+    name: Option<String>,
+) -> Result<User> {
+    let now = Utc::now();
+
+    let user = sqlx::query_as::<_, User>(
+        "UPDATE users SET
+            email = COALESCE($2, email),
+            name = COALESCE($3, name),
+            updated_at = $4
+         WHERE id = $1
+         RETURNING *"
+    )
+        .bind(id)
+        .bind(email)
+        .bind(name)
+        .bind(now)
+        .fetch_one(ctx.db())
+        .await?;
+
+    Ok(user)
+}
+
+/// Delete a user by ID.
+#[forge::mutation]
+pub async fn delete_user(ctx: &MutationContext, id: Uuid) -> Result<bool> {
+    let result = sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(id)
+        .execute(ctx.db())
+        .await?;
+
+    Ok(result.rows_affected() > 0)
+}
 "#;
     fs::write(dir.join("src/functions/users.rs"), users_rs)?;
 
@@ -245,11 +306,14 @@ pub async fn create_user(
 "#;
     fs::write(dir.join(".gitignore"), gitignore)?;
 
-    // Create .env.example
-    let env_example = r#"DATABASE_URL=postgres://postgres:postgres@localhost:5432/forge_dev
-FORGE_SECRET=your-secret-key-here
+    // Create .env file with default database URL (ready to run)
+    let env_file = r#"# Database connection string
+DATABASE_URL=postgres://forge:forge@localhost:5432/forge_dev
+
+# Optional: JWT secret for authentication
+# FORGE_SECRET=your-secret-key-here
 "#;
-    fs::write(dir.join(".env.example"), env_example)?;
+    fs::write(dir.join(".env"), env_file)?;
 
     // Create frontend if not minimal
     if !minimal {
@@ -265,6 +329,7 @@ fn create_frontend(dir: &Path, name: &str) -> Result<()> {
     fs::create_dir_all(&frontend_dir)?;
     fs::create_dir_all(frontend_dir.join("src/routes"))?;
     fs::create_dir_all(frontend_dir.join("src/lib/forge"))?;
+    fs::create_dir_all(frontend_dir.join("src/lib/forge/runtime"))?;
 
     // Create package.json
     // Note: vite-plugin-svelte 6.x and vite 7.x are required for proper Svelte 5 hydration
@@ -354,7 +419,7 @@ export default defineConfig({
 
     // Create +layout.svelte with ForgeProvider
     let layout_svelte = r#"<script lang="ts">
-    import { ForgeProvider } from '@forge/svelte';
+    import { ForgeProvider } from '$lib/forge/runtime';
 
     let { children } = $props();
 </script>
@@ -375,20 +440,28 @@ export const csr = true;
 "#;
     fs::write(frontend_dir.join("src/routes/+layout.ts"), layout_ts)?;
 
-    // Create +page.svelte using reactive stores
+    // Create +page.svelte demonstrating all 3 patterns: Query, Mutation, Subscription
     let page_svelte = r#"<script lang="ts">
-    import { subscribe, mutate } from '@forge/svelte';
-    import { getUsers, createUser } from '$lib/forge/api';
+    import { subscribe, mutate, query } from '$lib/forge/runtime';
+    import { getUsers, getUser, createUser, updateUser, deleteUser } from '$lib/forge/api';
     import type { User } from '$lib/forge/types';
 
-    // Real-time subscription - automatically updates when data changes
+    // =========================================================================
+    // SUBSCRIPTION - Real-time updates via WebSocket
+    // The list auto-refreshes when any user is created, updated, or deleted
+    // =========================================================================
     const users = subscribe(getUsers, {});
 
     // Form state
     let name = $state('');
     let email = $state('');
     let isSubmitting = $state(false);
+    let selectedUser = $state<User | null>(null);
 
+    // =========================================================================
+    // MUTATION - Create a new user
+    // After mutation completes, the subscription automatically refreshes
+    // =========================================================================
     async function handleCreateUser(e: Event) {
         e.preventDefault();
         if (!name || !email) return;
@@ -396,8 +469,7 @@ export const csr = true;
         isSubmitting = true;
         try {
             await mutate(createUser, { name, email });
-            // No need to refetch - subscription auto-updates!
-            // Clear form
+            // Subscription auto-updates - no manual refetch needed!
             name = '';
             email = '';
         } catch (err) {
@@ -405,68 +477,169 @@ export const csr = true;
         }
         isSubmitting = false;
     }
+
+    // =========================================================================
+    // QUERY - One-time fetch (for on-demand data)
+    // Use this for data you don't need real-time updates for
+    // =========================================================================
+    async function handleSelectUser(id: string) {
+        const result = await query(getUser, { id });
+        if (result.data) {
+            selectedUser = result.data;
+        }
+    }
+
+    // =========================================================================
+    // MUTATION - Delete a user
+    // =========================================================================
+    async function handleDeleteUser(id: string) {
+        if (!confirm('Delete this user?')) return;
+        await mutate(deleteUser, { id });
+        if (selectedUser?.id === id) {
+            selectedUser = null;
+        }
+    }
 </script>
 
 <main>
-    <h1>Welcome to FORGE</h1>
-    <p>Backend is running at <a href="http://localhost:8080/health" target="_blank">http://localhost:8080</a></p>
+    <h1>🔥 FORGE Demo</h1>
+    <p class="subtitle">
+        Backend: <a href="http://localhost:8080/health" target="_blank">localhost:8080</a> |
+        Dashboard: <a href="http://localhost:8080/_dashboard" target="_blank">/_dashboard</a>
+    </p>
 
-    <section>
-        <h2>Create User</h2>
-        <form onsubmit={handleCreateUser}>
-            <input type="text" placeholder="Name" bind:value={name} required />
-            <input type="email" placeholder="Email" bind:value={email} required />
-            <button type="submit" disabled={isSubmitting}>
-                {isSubmitting ? 'Creating...' : 'Create User'}
-            </button>
-        </form>
-    </section>
+    <div class="grid">
+        <section class="card">
+            <h2>➕ Create User <span class="badge">mutation</span></h2>
+            <form onsubmit={handleCreateUser}>
+                <input type="text" placeholder="Name" bind:value={name} required />
+                <input type="email" placeholder="Email" bind:value={email} required />
+                <button type="submit" disabled={isSubmitting}>
+                    {isSubmitting ? 'Creating...' : 'Create'}
+                </button>
+            </form>
+        </section>
 
-    <section>
-        <h2>Users</h2>
+        <section class="card">
+            <h2>👤 User Detail <span class="badge">query</span></h2>
+            {#if selectedUser}
+                <div class="user-detail">
+                    <p><strong>ID:</strong> {selectedUser.id}</p>
+                    <p><strong>Name:</strong> {selectedUser.name}</p>
+                    <p><strong>Email:</strong> {selectedUser.email}</p>
+                    <p><strong>Created:</strong> {new Date(selectedUser.created_at).toLocaleString()}</p>
+                    <button class="secondary" onclick={() => selectedUser = null}>Close</button>
+                </div>
+            {:else}
+                <p class="muted">Click a user below to view details</p>
+            {/if}
+        </section>
+    </div>
+
+    <section class="card full-width">
+        <h2>📋 Users <span class="badge live">subscription (live)</span></h2>
+        <p class="hint">This list updates automatically when data changes - no refresh needed!</p>
+
         {#if $users.loading}
             <p>Loading...</p>
         {:else if $users.error}
             <p class="error">Error: {$users.error.message}</p>
         {:else if !$users.data || $users.data.length === 0}
-            <p>No users found. Create one above!</p>
+            <p class="muted">No users yet. Create one above!</p>
         {:else}
-            <ul>
-                {#each $users.data as user (user.id)}
-                    <li>
-                        <strong>{user.name}</strong>
-                        <span class="email">({user.email})</span>
-                    </li>
-                {/each}
-            </ul>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Email</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {#each $users.data as user (user.id)}
+                        <tr>
+                            <td>{user.name}</td>
+                            <td>{user.email}</td>
+                            <td>
+                                <button class="small" onclick={() => handleSelectUser(user.id)}>
+                                    View
+                                </button>
+                                <button class="small danger" onclick={() => handleDeleteUser(user.id)}>
+                                    Delete
+                                </button>
+                            </td>
+                        </tr>
+                    {/each}
+                </tbody>
+            </table>
         {/if}
     </section>
 </main>
 
 <style>
     main {
-        max-width: 800px;
+        max-width: 900px;
         margin: 0 auto;
         padding: 2rem;
-        font-family: system-ui, sans-serif;
+        font-family: system-ui, -apple-system, sans-serif;
     }
 
-    h1 { color: #333; }
-    h2 { color: #555; margin-top: 2rem; }
+    h1 { color: #1a1a1a; margin-bottom: 0.25rem; }
+    h2 { color: #333; margin: 0 0 1rem 0; font-size: 1.1rem; }
 
-    a { color: #0066cc; }
+    .subtitle { color: #666; margin-bottom: 2rem; }
+    .subtitle a { color: #0066cc; }
+
+    .grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1.5rem;
+        margin-bottom: 1.5rem;
+    }
+
+    .card {
+        background: #fff;
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        padding: 1.5rem;
+    }
+
+    .full-width { grid-column: 1 / -1; }
+
+    .badge {
+        font-size: 0.7rem;
+        padding: 0.2rem 0.5rem;
+        border-radius: 4px;
+        background: #e0e0e0;
+        color: #666;
+        font-weight: normal;
+        vertical-align: middle;
+    }
+
+    .badge.live {
+        background: #dcfce7;
+        color: #166534;
+    }
+
+    .hint {
+        font-size: 0.85rem;
+        color: #666;
+        margin-bottom: 1rem;
+    }
+
+    .muted { color: #999; font-style: italic; }
 
     form {
         display: flex;
         gap: 0.5rem;
-        margin-bottom: 1rem;
     }
 
     input {
+        flex: 1;
         padding: 0.5rem;
         border: 1px solid #ccc;
         border-radius: 4px;
-        font-size: 1rem;
+        font-size: 0.95rem;
     }
 
     button {
@@ -476,35 +649,46 @@ export const csr = true;
         border: none;
         border-radius: 4px;
         cursor: pointer;
-        font-size: 1rem;
+        font-size: 0.95rem;
     }
 
-    button:disabled {
-        background: #999;
-        cursor: not-allowed;
+    button:hover:not(:disabled) { background: #0055aa; }
+    button:disabled { background: #999; cursor: not-allowed; }
+
+    button.secondary {
+        background: #666;
     }
 
-    button:hover:not(:disabled) {
-        background: #0055aa;
+    button.small {
+        padding: 0.25rem 0.5rem;
+        font-size: 0.85rem;
     }
 
-    ul {
-        list-style: none;
-        padding: 0;
+    button.danger {
+        background: #dc2626;
     }
 
-    li {
+    button.danger:hover { background: #b91c1c; }
+
+    table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+
+    th, td {
+        text-align: left;
         padding: 0.75rem;
         border-bottom: 1px solid #eee;
     }
 
-    .email {
-        color: #666;
-        margin-left: 0.5rem;
-    }
+    th { font-weight: 600; color: #555; }
 
-    .error {
-        color: #c00;
+    .user-detail p { margin: 0.5rem 0; }
+
+    .error { color: #dc2626; }
+
+    @media (max-width: 600px) {
+        .grid { grid-template-columns: 1fr; }
     }
 </style>
 "#;
@@ -528,6 +712,18 @@ export interface CreateUserInput {
     email: string;
     name: string;
 }
+
+/** Input for updating a user */
+export interface UpdateUserInput {
+    id: string;
+    email?: string;
+    name?: string;
+}
+
+/** Input for deleting a user */
+export interface DeleteUserInput {
+    id: string;
+}
 "#;
     fs::write(frontend_dir.join("src/lib/forge/types.ts"), types_ts)?;
 
@@ -535,15 +731,31 @@ export interface CreateUserInput {
     let api_ts = r#"// Auto-generated by FORGE - DO NOT EDIT
 // Run `forge generate` to regenerate this file
 
-import { createQuery, createMutation } from '@forge/svelte';
-import type { User, CreateUserInput } from './types';
+import { createQuery, createMutation } from './runtime';
+import type { User, CreateUserInput, UpdateUserInput, DeleteUserInput } from './types';
 
-// Queries
+// ============================================================================
+// QUERIES - Use with `query()` for one-time fetch or `subscribe()` for real-time
+// ============================================================================
+
+/** Get all users - use subscribe(getUsers, {}) for real-time updates */
 export const getUsers = createQuery<Record<string, never>, User[]>('get_users');
+
+/** Get a single user by ID */
 export const getUser = createQuery<{ id: string }, User | null>('get_user');
 
-// Mutations
+// ============================================================================
+// MUTATIONS - Use with `mutate()` to modify data
+// ============================================================================
+
+/** Create a new user */
 export const createUser = createMutation<CreateUserInput, User>('create_user');
+
+/** Update an existing user */
+export const updateUser = createMutation<UpdateUserInput, User>('update_user');
+
+/** Delete a user */
+export const deleteUser = createMutation<DeleteUserInput, boolean>('delete_user');
 "#;
     fs::write(frontend_dir.join("src/lib/forge/api.ts"), api_ts)?;
 
@@ -553,6 +765,437 @@ export * from './types';
 export * from './api';
 "#;
     fs::write(frontend_dir.join("src/lib/forge/index.ts"), index_ts)?;
+
+    // Create runtime files (embedded @forge/svelte)
+    create_runtime_files(&frontend_dir)?;
+
+    Ok(())
+}
+
+/// Create the embedded runtime files (equivalent to @forge/svelte).
+fn create_runtime_files(frontend_dir: &Path) -> Result<()> {
+    let runtime_dir = frontend_dir.join("src/lib/forge/runtime");
+
+    // runtime/types.ts
+    let types_ts = r#"/** FORGE error type returned from the server. */
+export interface ForgeError {
+  code: string;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+/** Result of a query operation. */
+export interface QueryResult<T> {
+  loading: boolean;
+  data: T | null;
+  error: ForgeError | null;
+}
+
+/** Result of a subscription operation. */
+export interface SubscriptionResult<T> extends QueryResult<T> {
+  stale: boolean;
+}
+
+/** WebSocket connection state. */
+export type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
+
+/** Auth state for the current user. */
+export interface AuthState {
+  user: unknown | null;
+  token: string | null;
+  loading: boolean;
+}
+
+/** Function type definitions for type-safe RPC calls. */
+export interface QueryFn<TArgs, TResult> {
+  (client: ForgeClientInterface, args: TArgs): Promise<TResult>;
+  functionName: string;
+  functionType: 'query';
+}
+
+export interface MutationFn<TArgs, TResult> {
+  (client: ForgeClientInterface, args: TArgs): Promise<TResult>;
+  functionName: string;
+  functionType: 'mutation';
+}
+
+export interface ActionFn<TArgs, TResult> {
+  (client: ForgeClientInterface, args: TArgs): Promise<TResult>;
+  functionName: string;
+  functionType: 'action';
+}
+
+/** FORGE client interface for making RPC calls. */
+export interface ForgeClientInterface {
+  call<T>(functionName: string, args: unknown): Promise<T>;
+  subscribe<T>(functionName: string, args: unknown, callback: (data: T) => void): () => void;
+  getConnectionState(): ConnectionState;
+  connect(): Promise<void>;
+  disconnect(): void;
+}
+"#;
+    fs::write(runtime_dir.join("types.ts"), types_ts)?;
+
+    // runtime/client.ts
+    let client_ts = r#"import type { ForgeError, ConnectionState, ForgeClientInterface } from './types.js';
+
+export interface ForgeClientConfig {
+  url: string;
+  getToken?: () => string | null | Promise<string | null>;
+  onAuthError?: (error: ForgeError) => void;
+  timeout?: number;
+}
+
+interface RpcResponse<T = unknown> {
+  success: boolean;
+  data?: T;
+  error?: ForgeError;
+}
+
+interface WsMessage {
+  type: string;
+  id?: string;
+  data?: unknown;
+  error?: ForgeError;
+}
+
+export class ForgeClientError extends Error {
+  code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = 'ForgeClientError';
+    this.code = code;
+  }
+}
+
+export class ForgeClient implements ForgeClientInterface {
+  private config: ForgeClientConfig;
+  private ws: WebSocket | null = null;
+  private connectionState: ConnectionState = 'disconnected';
+  private subscriptions = new Map<string, (data: unknown) => void>();
+  private pendingSubscriptions = new Map<string, { functionName: string; args: unknown }>();
+  private connectionListeners = new Set<(state: ConnectionState) => void>();
+
+  constructor(config: ForgeClientConfig) {
+    this.config = config;
+  }
+
+  getConnectionState(): ConnectionState {
+    return this.connectionState;
+  }
+
+  onConnectionStateChange(listener: (state: ConnectionState) => void): () => void {
+    this.connectionListeners.add(listener);
+    return () => this.connectionListeners.delete(listener);
+  }
+
+  async connect(): Promise<void> {
+    if (this.ws?.readyState === WebSocket.OPEN) return;
+
+    return new Promise((resolve) => {
+      const wsUrl = this.config.url.replace(/^http/, 'ws') + '/ws';
+      this.setConnectionState('connecting');
+
+      try {
+        this.ws = new WebSocket(wsUrl);
+      } catch {
+        this.setConnectionState('disconnected');
+        resolve();
+        return;
+      }
+
+      this.ws.onopen = async () => {
+        const token = await this.getToken();
+        if (token) this.ws?.send(JSON.stringify({ type: 'auth', token }));
+        this.setConnectionState('connected');
+        this.flushPendingSubscriptions();
+        resolve();
+      };
+
+      this.ws.onerror = () => {
+        this.setConnectionState('disconnected');
+        resolve();
+      };
+
+      this.ws.onclose = () => this.setConnectionState('disconnected');
+      this.ws.onmessage = (event) => this.handleMessage(event.data);
+    });
+  }
+
+  disconnect(): void {
+    this.ws?.close();
+    this.ws = null;
+    this.setConnectionState('disconnected');
+    this.subscriptions.clear();
+  }
+
+  async call<T>(functionName: string, args: unknown): Promise<T> {
+    const token = await this.getToken();
+    const normalizedArgs = args && typeof args === 'object' && Object.keys(args).length === 0 ? null : args;
+
+    const response = await fetch(`${this.config.url}/rpc/${functionName}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(normalizedArgs),
+    });
+
+    const result: RpcResponse<T> = await response.json();
+    if (!result.success || result.error) {
+      const error = result.error || { code: 'UNKNOWN', message: 'Unknown error' };
+      throw new ForgeClientError(error.code, error.message);
+    }
+    return result.data as T;
+  }
+
+  subscribe<T>(functionName: string, args: unknown, callback: (data: T) => void): () => void {
+    const subscriptionId = Math.random().toString(36).substring(2, 15);
+    this.subscriptions.set(subscriptionId, callback as (data: unknown) => void);
+
+    const normalizedArgs = args && typeof args === 'object' && Object.keys(args).length === 0 ? null : args;
+
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: 'subscribe', id: subscriptionId, function: functionName, args: normalizedArgs }));
+    } else {
+      this.pendingSubscriptions.set(subscriptionId, { functionName, args: normalizedArgs });
+    }
+
+    return () => {
+      this.subscriptions.delete(subscriptionId);
+      this.pendingSubscriptions.delete(subscriptionId);
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({ type: 'unsubscribe', id: subscriptionId }));
+      }
+    };
+  }
+
+  private flushPendingSubscriptions(): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    for (const [id, { functionName, args }] of this.pendingSubscriptions) {
+      this.ws.send(JSON.stringify({ type: 'subscribe', id, function: functionName, args }));
+    }
+    this.pendingSubscriptions.clear();
+  }
+
+  private async getToken(): Promise<string | null> {
+    return this.config.getToken?.() ?? null;
+  }
+
+  private setConnectionState(state: ConnectionState): void {
+    this.connectionState = state;
+    this.connectionListeners.forEach(listener => listener(state));
+  }
+
+  private handleMessage(data: string): void {
+    try {
+      const message: WsMessage = JSON.parse(data);
+      if ((message.type === 'data' || message.type === 'delta') && message.id) {
+        const callback = this.subscriptions.get(message.id);
+        if (callback) callback(message.data);
+      }
+    } catch {}
+  }
+}
+
+export function createForgeClient(config: ForgeClientConfig): ForgeClient {
+  return new ForgeClient(config);
+}
+"#;
+    fs::write(runtime_dir.join("client.ts"), client_ts)?;
+
+    // runtime/context.ts
+    let context_ts = r#"import { getContext, setContext } from 'svelte';
+import type { ForgeClient } from './client.js';
+import type { AuthState } from './types.js';
+
+const FORGE_CLIENT_KEY = Symbol('forge-client');
+const FORGE_AUTH_KEY = Symbol('forge-auth');
+let globalClient: ForgeClient | null = null;
+
+export function getForgeClient(): ForgeClient {
+  try {
+    const client = getContext<ForgeClient>(FORGE_CLIENT_KEY);
+    if (client) return client;
+  } catch {}
+  if (globalClient) return globalClient;
+  throw new Error('FORGE client not found. Wrap your component with ForgeProvider.');
+}
+
+export function setForgeClient(client: ForgeClient): void {
+  setContext(FORGE_CLIENT_KEY, client);
+  globalClient = client;
+}
+
+export function getAuthState(): AuthState {
+  const auth = getContext<AuthState>(FORGE_AUTH_KEY);
+  if (!auth) throw new Error('Auth state not found.');
+  return auth;
+}
+
+export function setAuthState(auth: AuthState): void {
+  setContext(FORGE_AUTH_KEY, auth);
+}
+"#;
+    fs::write(runtime_dir.join("context.ts"), context_ts)?;
+
+    // runtime/stores.ts
+    let stores_ts = r#"import { getForgeClient } from './context.js';
+import type { QueryResult, SubscriptionResult, ForgeError, QueryFn, MutationFn } from './types.js';
+
+export interface Readable<T> {
+  subscribe: (run: (value: T) => void) => () => void;
+}
+
+export interface SubscriptionStore<T> extends Readable<SubscriptionResult<T>> {
+  refetch: () => Promise<void>;
+  unsubscribe: () => void;
+}
+
+/** One-time async query - returns a promise with the result */
+export async function query<TArgs, TResult>(fn: QueryFn<TArgs, TResult>, args: TArgs): Promise<QueryResult<TResult>> {
+  const client = getForgeClient();
+  try {
+    const data = await fn(client, args);
+    return { loading: false, data, error: null };
+  } catch (e) {
+    return { loading: false, data: null, error: e as ForgeError };
+  }
+}
+
+export function subscribe<TArgs, TResult>(fn: QueryFn<TArgs, TResult>, args: TArgs): SubscriptionStore<TResult> {
+  const client = getForgeClient();
+  const subscribers = new Set<(value: SubscriptionResult<TResult>) => void>();
+  let unsubscribeFn: (() => void) | null = null;
+  let state: SubscriptionResult<TResult> = { loading: true, data: null, error: null, stale: false };
+
+  const notify = () => subscribers.forEach(run => run(state));
+
+  const startSubscription = async () => {
+    if (unsubscribeFn) { unsubscribeFn(); unsubscribeFn = null; }
+    state = { ...state, loading: true, error: null, stale: false };
+    notify();
+
+    try {
+      const initialData = await fn(client, args);
+      state = { loading: false, data: initialData, error: null, stale: false };
+      notify();
+
+      unsubscribeFn = client.subscribe(fn.functionName, args, (data: TResult) => {
+        state = { loading: false, data, error: null, stale: false };
+        notify();
+      });
+    } catch (e) {
+      state = { loading: false, data: null, error: e as ForgeError, stale: false };
+      notify();
+    }
+  };
+
+  startSubscription();
+
+  return {
+    subscribe(run) {
+      subscribers.add(run);
+      run(state);
+      return () => {
+        subscribers.delete(run);
+        if (subscribers.size === 0 && unsubscribeFn) { unsubscribeFn(); unsubscribeFn = null; }
+      };
+    },
+    refetch: startSubscription,
+    unsubscribe: () => { if (unsubscribeFn) { unsubscribeFn(); unsubscribeFn = null; } },
+  };
+}
+
+export async function mutate<TArgs, TResult>(fn: MutationFn<TArgs, TResult>, args: TArgs): Promise<TResult> {
+  const client = getForgeClient();
+  return fn(client, args);
+}
+"#;
+    fs::write(runtime_dir.join("stores.ts"), stores_ts)?;
+
+    // runtime/api.ts (helpers for generated code)
+    let api_ts = r#"import type { ForgeClientInterface, QueryFn, MutationFn } from './types.js';
+
+export function createQuery<TArgs, TResult>(name: string): QueryFn<TArgs, TResult> {
+  const fn = async (client: ForgeClientInterface, args: TArgs): Promise<TResult> => {
+    return client.call(name, args);
+  };
+  (fn as QueryFn<TArgs, TResult>).functionName = name;
+  (fn as QueryFn<TArgs, TResult>).functionType = 'query';
+  return fn as QueryFn<TArgs, TResult>;
+}
+
+export function createMutation<TArgs, TResult>(name: string): MutationFn<TArgs, TResult> {
+  const fn = async (client: ForgeClientInterface, args: TArgs): Promise<TResult> => {
+    return client.call(name, args);
+  };
+  (fn as MutationFn<TArgs, TResult>).functionName = name;
+  (fn as MutationFn<TArgs, TResult>).functionType = 'mutation';
+  return fn as MutationFn<TArgs, TResult>;
+}
+"#;
+    fs::write(runtime_dir.join("api.ts"), api_ts)?;
+
+    // runtime/ForgeProvider.svelte
+    let provider_svelte = r#"<script lang="ts">
+  import { onMount, onDestroy, type Snippet } from 'svelte';
+  import { createForgeClient } from './client.js';
+  import { setForgeClient, setAuthState } from './context.js';
+  import type { AuthState, ConnectionState } from './types.js';
+
+  interface Props {
+    url: string;
+    getToken?: () => string | null | Promise<string | null>;
+    onConnectionChange?: (state: ConnectionState) => void;
+    children: Snippet;
+  }
+
+  let props: Props = $props();
+
+  const client = createForgeClient({
+    url: props.url,
+    getToken: props.getToken,
+  });
+
+  setForgeClient(client);
+
+  const authState: AuthState = $state({ user: null, token: null, loading: true });
+  setAuthState(authState);
+
+  onMount(() => {
+    const unsubscribe = client.onConnectionStateChange((state) => {
+      props.onConnectionChange?.(state);
+    });
+
+    (async () => {
+      try { await client.connect(); } catch {}
+      if (props.getToken) {
+        authState.token = await props.getToken();
+      }
+      authState.loading = false;
+    })();
+
+    return unsubscribe;
+  });
+
+  onDestroy(() => client.disconnect());
+</script>
+
+{@render props.children()}
+"#;
+    fs::write(runtime_dir.join("ForgeProvider.svelte"), provider_svelte)?;
+
+    // runtime/index.ts - Re-export everything
+    let index_ts = r#"export { default as ForgeProvider } from './ForgeProvider.svelte';
+export { ForgeClient, ForgeClientError, createForgeClient, type ForgeClientConfig } from './client.js';
+export { getForgeClient, setForgeClient, getAuthState, setAuthState } from './context.js';
+export { query, subscribe, mutate, type Readable, type SubscriptionStore } from './stores.js';
+export { createQuery, createMutation } from './api.js';
+export type { ForgeError, QueryResult, SubscriptionResult, ConnectionState, AuthState, QueryFn, MutationFn, ForgeClientInterface } from './types.js';
+"#;
+    fs::write(runtime_dir.join("index.ts"), index_ts)?;
 
     Ok(())
 }

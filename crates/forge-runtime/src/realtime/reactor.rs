@@ -84,6 +84,11 @@ impl Reactor {
         }
     }
 
+    /// Get the node ID.
+    pub fn node_id(&self) -> NodeId {
+        self.node_id
+    }
+
     /// Get the WebSocket server reference.
     pub fn ws_server(&self) -> Arc<WebSocketServer> {
         self.ws_server.clone()

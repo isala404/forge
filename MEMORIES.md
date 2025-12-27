@@ -65,6 +65,8 @@ Key Patterns
 - Workflow compensation: store handlers in HashMap, run in reverse order on cancel
 - Source parser: syn crate for parsing Rust source to extract #[model] and #[forge_enum] without compilation
 - Sample apps: place in examples/ directory, add to workspace members in root Cargo.toml
+- CLI generator: embeds @forge/svelte runtime directly in generated projects (no npm linking)
+- CLI generator: query() is async Promise-based (not store), subscribe() is store-based for real-time
 
 Frontend
 - Auto-generated TypeScript types from Rust schema

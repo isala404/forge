@@ -449,3 +449,40 @@ Implemented production-ready FORGE framework enhancements (PLAN.md execution).
   - Enhanced trace detail page with waterfall visualization, span tree, attribute tabs
   - Added cron API endpoints: list_crons, get_cron_stats, get_cron_history, trigger/pause/resume
 - All changes compile successfully
+
+Updated TESTING.md with comprehensive local development guide.
+- Rewrote documentation with accurate CLI commands and project structure
+- Added CLI reference table with all available commands
+- Added troubleshooting section for common issues
+- Created sample project at ~/Desktop/demo-app linked to local forge source
+
+Fixed CLI generator to produce runnable projects with all 3 patterns working.
+- Changed query() function from store-based to async Promise-based in stores.ts template
+- Removed unused QueryStore interface from generated runtime
+- Fixed generated projects to load DATABASE_URL from .env via dotenvy
+- Added UpdateUser and DeleteUser mutations to demo template
+- Embedded @forge/svelte runtime directly in generated projects (no npm linking needed)
+- Added `home = ">=0.5,<0.5.12"` constraint for Rust 1.85 compatibility
+- Verified all 3 patterns work: query (async fetch), mutation (create/update/delete), subscription (real-time)
+
+Fixed dashboard API to display real HTTP metrics.
+- Changed metric name from `forge_http_requests_total` to `http_requests_total` to match gateway middleware
+- Fixed query to SUM counter values instead of getting latest value
+- Dashboard now shows real request counts, CPU, memory, and cluster node status
+
+Fixed dashboard observability: logs, traces, and latency now working.
+- Added log recording to gateway metrics middleware (LogEntry with method, path, status, duration)
+- Added trace span recording to gateway (Span with http.method, http.url, http.status_code attributes)
+- Added p99 latency calculation using PostgreSQL PERCENTILE_CONT on http_request_duration_seconds
+- Updated dashboard JS to display p99_latency_ms stat
+- Logs page now shows HTTP request logs with level (info/warn/error)
+- Traces page now shows request spans with trace ID, duration, status
+
+Fixed dashboard WebSocket connection tracking and trace detail view.
+- Added database session tracking to WebSocket handler in `gateway/websocket.rs`
+- WsState now includes db_pool and node_id for session management
+- Sessions inserted into forge_sessions table on connect, deleted on disconnect
+- Connections stat now shows real active WebSocket connection count
+- Added node_id() getter to Reactor struct in `realtime/reactor.rs`
+- Fixed trace detail page: changed function call from loadTraceWaterfall to loadTraceDetail
+- Fixed span container ID mismatch: JS now uses correct `waterfall-body` element

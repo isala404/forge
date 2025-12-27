@@ -364,7 +364,7 @@ pub async fn trace_detail(
             }}
 
             document.addEventListener('DOMContentLoaded', function() {{
-                loadTraceWaterfall(traceId);
+                loadTraceDetail(traceId);
             }});
         </script>
     "##,

@@ -1,78 +1,120 @@
 # FORGE Local Testing Guide
 
-This guide explains how to build the FORGE CLI from source, scaffold a test application, and link it back to your local repository to verify functionality end-to-end.
+This guide explains how to build the FORGE CLI from source, scaffold a test application, and link it to your local repository for end-to-end testing.
 
 ## 1. Prerequisites
 
-Ensure you have the following installed:
 - **Rust** (latest stable): `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
 - **Bun** (frontend runtime): `curl -fsSL https://bun.sh/install | bash`
-- **Docker** (for PostgreSQL): Used for the database.
+- **Docker** (for PostgreSQL)
 - **Git**
+- **macOS only**: `brew install libiconv` (required for sqlx tests)
 
 ## 2. Build and Install the CLI
-
-First, we need to compile the `forge` binary from the `crates/forge` directory and install it to your path so you can run the `forge` command globally.
 
 ```bash
 # From the root of the forge repo
 cargo install --path crates/forge
-```
 
-Verify installation:
-```bash
+# Verify installation
 forge --version
 ```
 
-## 3. Create a Test Project
+## 3. Start PostgreSQL
 
-Create a new directory for your test/playground (outside the forge repo to simulate a real user environment).
+Start a PostgreSQL container before creating the project:
 
 ```bash
-cd ..
+docker run -d \
+  --name forge-dev-db \
+  -e POSTGRES_DB=forge_dev \
+  -e POSTGRES_USER=forge \
+  -e POSTGRES_PASSWORD=forge \
+  -p 5432:5432 \
+  postgres:16-alpine
+```
+
+## 4. Create a Test Project
+
+Create a new directory for your test app. For this guide, we'll create it on the Desktop:
+
+```bash
+cd ~/Desktop
 forge new demo-app
 cd demo-app
 ```
 
-## 4. Link Dependencies (Critical for Local Dev)
+This creates:
+```
+demo-app/
+├── Cargo.toml
+├── forge.toml
+├── migrations/
+│   └── 0001_create_users.sql
+├── src/
+│   ├── main.rs
+│   ├── schema/
+│   │   ├── mod.rs
+│   │   └── user.rs
+│   └── functions/
+│       ├── mod.rs
+│       └── users.rs
+└── frontend/
+    ├── package.json
+    ├── svelte.config.js
+    ├── vite.config.ts
+    ├── tsconfig.json
+    └── src/
+        ├── app.html
+        ├── routes/
+        │   ├── +layout.svelte
+        │   ├── +layout.ts
+        │   └── +page.svelte
+        └── lib/forge/
+            ├── types.ts
+            ├── api.ts
+            └── index.ts
+```
 
-Since FORGE isn't published yet, the scaffolded project will try to download dependencies that don't exist. You must patch them to point to your local source code.
+## 5. Link to Local FORGE Source
+
+Since FORGE isn't published yet, you must patch dependencies to use your local source.
 
 ### Backend (`Cargo.toml`)
 
-Open `demo-app/Cargo.toml` and modify the `[dependencies]` section to point to your local `forge` crate path.
-
-*Assuming your source repo is at `../forge`:*
+Open `demo-app/Cargo.toml` and replace the forge dependency:
 
 ```toml
 [dependencies]
-# Replace the version number with a path
-forge = { path = "../forge/crates/forge" }
+# Replace this line:
+# forge = "0.1"
+# With path to your local forge:
+forge = { path = "/Users/YOUR_USERNAME/Projects/forge/crates/forge" }
 
-# Keep other dependencies
+# Keep everything else as-is
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-anyhow = "1"
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "uuid"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ```
 
 ### Frontend (`frontend/package.json`)
 
-Open `demo-app/frontend/package.json` and modify the dependency to point to the local frontend library.
-
-*Assuming your source repo is at `../../forge`:*
+Open `demo-app/frontend/package.json` and add the @forge/svelte dependency:
 
 ```json
-"dependencies": {
-  "@forge/svelte": "file:../../forge/frontend"
+{
+  "dependencies": {
+    "@forge/svelte": "file:/Users/YOUR_USERNAME/Projects/forge/frontend"
+  }
 }
 ```
 
-Then install frontend dependencies:
+### Install Frontend Dependencies
 
 ```bash
 cd frontend
@@ -80,41 +122,33 @@ bun install
 cd ..
 ```
 
-## 5. Start the Database
+## 6. Configure Environment
 
-Start a PostgreSQL instance for your demo app using Docker.
+Create a `.env` file in `demo-app/`:
 
 ```bash
-docker run -d \
-  --name forge-demo-db \
-  -e POSTGRES_DB=forge_dev \
-  -e POSTGRES_USER=forge \
-  -e POSTGRES_PASSWORD=forge \
-  -p 5432:5432 \
-  postgres:16
+echo 'DATABASE_URL=postgres://forge:forge@localhost:5432/forge_dev' > .env
 ```
 
-Ensure your `forge.toml` in `demo-app/` matches these credentials (the default usually does):
+Update `forge.toml` to use the environment variable:
 
 ```toml
 [database]
-url = "postgres://forge:forge@localhost:5432/forge_dev"
+url = "${DATABASE_URL}"
 ```
 
-## 6. Run the Application
+## 7. Run the Application
 
-You will need two terminal windows.
+You need **two terminal windows**.
 
 ### Terminal 1: Backend
 
-Run the Rust server. This will compile your app, apply migrations automatically, and start the server.
-
 ```bash
-# Inside demo-app/
+# In demo-app/
 cargo run
 ```
 
-*Expected output:*
+Expected output:
 ```
   ⚒️  FORGE v0.1.0
 
@@ -122,92 +156,170 @@ cargo run
   📊 Dashboard at http://127.0.0.1:8080/_dashboard
 ```
 
+The backend:
+- Applies migrations automatically from `migrations/` directory
+- Starts the HTTP gateway on port 8080
+- Enables WebSocket for real-time subscriptions
+- Serves the dashboard at `/_dashboard`
+
 ### Terminal 2: Frontend
 
-Start the Svelte development server.
-
 ```bash
-# Inside demo-app/frontend/
+# In demo-app/frontend/
 bun run dev
 ```
 
-*Expected output:*
+Expected output:
 ```
-  VITE v6.0.0  ready in 200 ms
+  VITE v7.x.x  ready in 200 ms
 
   ➜  Local:   http://localhost:5173/
 ```
 
-## 7. Verify End-to-End Functionality
+## 8. Verify Everything Works
 
-### 1. Access the Dashboard
-Open **http://localhost:8080/_dashboard** in your browser.
-- You should see the FORGE dashboard.
-- Go to the **Schema** tab to see the default `User` model.
-- Go to the **Migrations** tab to see that the initial migration was applied.
+### Check the Dashboard
+Open **http://localhost:8080/_dashboard**
+- Overview shows system stats
+- Schema tab shows the `users` table
+- Migrations tab shows applied migrations
 
-### 2. Modify Schema (Hot Reload Test)
-Open `demo-app/src/schema/user.rs` and add a field:
+### Check the Frontend
+Open **http://localhost:5173**
+- You should see the "Welcome to FORGE" page
+- Create a user using the form
+- The user list updates in real-time (WebSocket subscription)
 
-```rust
-#[forge::model]
-pub struct User {
-    #[id]
-    pub id: Uuid,
+### Test the API Directly
+```bash
+# Health check
+curl http://localhost:8080/health
 
-    // ... existing fields ...
+# Call a query
+curl -X POST http://localhost:8080/rpc/get_users \
+  -H "Content-Type: application/json"
 
-    // Add this:
-    pub is_active: bool,
-}
+# Create a user
+curl -X POST http://localhost:8080/rpc/create_user \
+  -H "Content-Type: application/json" \
+  -d '{"email": "test@example.com", "name": "Test User"}'
 ```
 
-Save the file. Watch Terminal 1 (Backend).
-- It should detect the change.
-- It should automatically generate a migration for `is_active`.
-- It should apply the migration.
-- It should regenerate TypeScript types.
+## 9. Development Workflow
 
-### 3. Check Frontend Types
-Open `demo-app/frontend/src/lib/forge/types.ts`.
-- You should see `isActive: boolean;` added to the `User` interface automatically.
+### Adding Components
 
-### 4. Test the App
-Open **http://localhost:5173**.
-- You should see the default Svelte app running.
-- It is fetching data from the backend using the generated RPC client.
+Use the CLI to scaffold new components:
 
-## 8. Development Workflow Commands
-
-While running the app, you can use the CLI to scaffold new features.
-
-**Add a new API Query:**
 ```bash
-forge add query get_active_users
+# Add a new model
+forge add model Product
+
+# Add a query function
+forge add query get_products
+
+# Add a mutation function
+forge add mutation create_product
+
+# Add an action (external API calls)
+forge add action send_notification
+
+# Add a background job
+forge add job process_order
+
+# Add a scheduled task
+forge add cron daily_cleanup
+
+# Add a workflow (multi-step process)
+forge add workflow order_fulfillment
 ```
-*Check `src/functions/get_active_users.rs`.*
 
-**Add a Background Job:**
-```bash
-forge add job send_welcome_email
-```
-*Check `src/functions/send_welcome_email_job.rs`.*
+### Regenerate TypeScript Types
 
-**Generate Client Code Manually:**
-If types get out of sync:
+If schema changes and types get out of sync:
+
 ```bash
-# From demo-app/ root
-# Note: Since you patched Cargo.toml, you might need to run via cargo if the installed CLI differs significantly from source
 forge generate
 ```
 
+This regenerates:
+- `frontend/src/lib/forge/types.ts` - TypeScript interfaces from Rust models
+- `frontend/src/lib/forge/api.ts` - Type-safe API bindings
+
+### Adding a Migration
+
+Create a new SQL file in `migrations/`:
+
+```bash
+cat > migrations/0002_create_products.sql << 'EOF'
+CREATE TABLE IF NOT EXISTS products (
+    id UUID PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    price DECIMAL(10, 2) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+SELECT forge_enable_reactivity('products');
+EOF
+```
+
+Restart the backend to apply the new migration.
+
+## CLI Reference
+
+| Command | Description |
+|---------|-------------|
+| `forge new <name>` | Create a new project |
+| `forge new <name> --minimal` | Create without frontend |
+| `forge init` | Initialize in current directory |
+| `forge add model <name>` | Add a new model |
+| `forge add query <name>` | Add a query function |
+| `forge add mutation <name>` | Add a mutation function |
+| `forge add action <name>` | Add an action |
+| `forge add job <name>` | Add a background job |
+| `forge add cron <name>` | Add a cron task |
+| `forge add workflow <name>` | Add a workflow |
+| `forge generate` | Generate TypeScript client |
+| `forge run` | Run the server |
+| `forge run --port 3000` | Run on custom port |
+
 ## Troubleshooting
 
-**"Dependency not found" errors:**
-Double-check the relative paths in `Cargo.toml` and `package.json`. They must point to the *root* of the crates or package directories in your source repo.
+### "Dependency not found" errors
+Check the paths in `Cargo.toml` and `package.json`. They must point to your local forge source:
+- Backend: `forge = { path = "/absolute/path/to/forge/crates/forge" }`
+- Frontend: `"@forge/svelte": "file:/absolute/path/to/forge/frontend"`
 
-**Database connection refused:**
-Ensure the Docker container is running: `docker ps`. If the port is taken, change it in the docker run command and update `forge.toml`.
+### Database connection refused
+```bash
+# Check if container is running
+docker ps
 
-**Frontend connection error:**
-Ensure `demo-app/frontend/src/routes/+layout.svelte` points to the correct backend URL (default `http://localhost:8080`).
+# Start if not running
+docker start forge-dev-db
+
+# Or recreate
+docker rm -f forge-dev-db
+docker run -d --name forge-dev-db \
+  -e POSTGRES_DB=forge_dev \
+  -e POSTGRES_USER=forge \
+  -e POSTGRES_PASSWORD=forge \
+  -p 5432:5432 postgres:16-alpine
+```
+
+### Frontend WebSocket errors
+The frontend connects to `http://localhost:8080` by default. Make sure:
+1. Backend is running on port 8080
+2. No firewall blocking the connection
+3. Check `+layout.svelte` has correct URL in `ForgeProvider`
+
+### TypeScript errors about @forge/svelte
+Make sure you:
+1. Added the dependency to `package.json`
+2. Ran `bun install` in the frontend directory
+3. Path points to the `frontend` directory of your forge repo (not `frontend/src`)
+
+### Migrations not applying
+- Check `migrations/` directory exists
+- SQL files must be numbered: `0001_xxx.sql`, `0002_xxx.sql`
+- Check backend logs for migration errors

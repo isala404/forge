@@ -10,8 +10,10 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 use tokio::sync::{mpsc, RwLock};
 
+use forge_core::cluster::NodeId;
 use forge_core::realtime::SessionId;
 
 use crate::realtime::{Reactor, WebSocketMessage as ReactorMessage};
@@ -20,11 +22,13 @@ use crate::realtime::{Reactor, WebSocketMessage as ReactorMessage};
 #[derive(Clone)]
 pub struct WsState {
     pub reactor: Arc<Reactor>,
+    pub db_pool: PgPool,
+    pub node_id: NodeId,
 }
 
 impl WsState {
-    pub fn new(reactor: Arc<Reactor>) -> Self {
-        Self { reactor }
+    pub fn new(reactor: Arc<Reactor>, db_pool: PgPool, node_id: NodeId) -> Self {
+        Self { reactor, db_pool, node_id }
     }
 }
 
@@ -85,6 +89,21 @@ async fn handle_socket(socket: WebSocket, state: Arc<WsState>) {
 
     // Create a session for this connection
     let session_id = SessionId::new();
+    let session_uuid = session_id.0;
+    let node_uuid = state.node_id.0;
+
+    // Insert session into database for tracking
+    let _ = sqlx::query(
+        r#"
+        INSERT INTO forge_sessions (id, node_id, status, connected_at, last_activity)
+        VALUES ($1, $2, 'connected', NOW(), NOW())
+        ON CONFLICT (id) DO UPDATE SET status = 'connected', last_activity = NOW()
+        "#
+    )
+    .bind(session_uuid)
+    .bind(node_uuid)
+    .execute(&state.db_pool)
+    .await;
 
     // Create channels for reactor -> websocket communication
     let (reactor_tx, mut reactor_rx) = mpsc::channel::<ReactorMessage>(256);
@@ -296,6 +315,13 @@ async fn handle_socket(socket: WebSocket, state: Arc<WsState>) {
     // Clean up on disconnect
     sender_handle.abort();
     state.reactor.remove_session(session_id).await;
+
+    // Remove session from database
+    let _ = sqlx::query("DELETE FROM forge_sessions WHERE id = $1")
+        .bind(session_uuid)
+        .execute(&state.db_pool)
+        .await;
+
     tracing::debug!(?session_id, "WebSocket connection closed");
 }
 

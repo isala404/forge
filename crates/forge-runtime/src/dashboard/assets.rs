@@ -771,7 +771,7 @@ async function refreshData() {
 function updateStats(data) {
     setText('stat-requests', data.http_requests_per_second?.toFixed(1) || '0');
     setText('stat-connections', data.active_connections || '0');
-    setText('stat-latency', '-');
+    setText('stat-latency', data.p99_latency_ms != null ? data.p99_latency_ms.toFixed(1) : '-');
     setText('stat-errors', '0%');
 }
 
@@ -954,8 +954,9 @@ async function loadTraces() {
 
 // Trace detail page
 async function loadTraceDetail(traceId) {
-    const spansContainer = document.getElementById('trace-spans');
+    const spansContainer = document.getElementById('waterfall-body');
     const summary = document.getElementById('trace-summary');
+    const spanTree = document.getElementById('span-tree');
 
     if (!spansContainer) return;
 
@@ -985,12 +986,23 @@ async function loadTraceDetail(traceId) {
 
             return `
                 <div class="timeline-row ${i === 0 ? 'root' : 'child'} ${statusClass}" style="margin-left: ${indent}px;" onclick="showSpanDetails(${i})">
-                    <span class="service">${escapeHtml(span.service)}</span>
+                    <span class="service">${escapeHtml(span.service || 'unknown')}</span>
                     <span class="operation">${escapeHtml(span.name)}</span>
                     <div class="timeline-bar" style="width: ${Math.max(width, 1)}%; left: ${offset}%;">${span.duration_ms || 0}ms</div>
                 </div>
             `;
         }).join('');
+
+        // Render span tree
+        if (spanTree) {
+            spanTree.innerHTML = spans.map((span, i) => `
+                <div class="span-tree-item ${i === 0 ? 'root' : ''}" onclick="showSpanDetails(${i})" style="padding-left: ${span.parent_span_id ? 20 : 0}px;">
+                    <span class="span-icon">${i === 0 ? '🌳' : '├─'}</span>
+                    <span class="span-name">${escapeHtml(span.name)}</span>
+                    <span class="span-duration">${span.duration_ms || 0}ms</span>
+                </div>
+            `).join('');
+        }
 
         window.traceSpans = spans;
     } catch (e) {

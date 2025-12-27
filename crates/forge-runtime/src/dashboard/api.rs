@@ -312,6 +312,7 @@ pub struct SystemInfo {
 pub struct SystemStats {
     pub http_requests_total: u64,
     pub http_requests_per_second: f64,
+    pub p99_latency_ms: Option<f64>,
     pub function_calls_total: u64,
     pub active_connections: u32,
     pub active_subscriptions: u32,
@@ -1427,9 +1428,9 @@ pub async fn get_system_stats(
             .await
             .unwrap_or(0) as u32;
 
-    // Get HTTP request metrics from forge_metrics table
+    // Get HTTP request metrics from forge_metrics table (sum all counter increments)
     let http_requests_total = sqlx::query_scalar::<_, f64>(
-        "SELECT COALESCE(value, 0) FROM forge_metrics WHERE name = 'forge_http_requests_total' ORDER BY timestamp DESC LIMIT 1",
+        "SELECT COALESCE(SUM(value), 0) FROM forge_metrics WHERE name = 'http_requests_total'",
     )
     .fetch_optional(&state.pool)
     .await
@@ -1440,12 +1441,9 @@ pub async fn get_system_stats(
     // Calculate requests per second from recent metrics (last minute)
     let http_requests_per_second = sqlx::query_scalar::<_, f64>(
         r#"
-        SELECT COALESCE(
-            (MAX(value) - MIN(value)) / NULLIF(EXTRACT(EPOCH FROM (MAX(timestamp) - MIN(timestamp))), 0),
-            0
-        )
+        SELECT COALESCE(SUM(value) / 60.0, 0)
         FROM forge_metrics
-        WHERE name = 'forge_http_requests_total'
+        WHERE name = 'http_requests_total'
         AND timestamp > NOW() - INTERVAL '1 minute'
         "#,
     )
@@ -1486,9 +1484,24 @@ pub async fn get_system_stats(
     .unwrap_or(0.0);
     let memory_used_mb = (memory_used_bytes / 1_048_576.0) as u64; // Convert bytes to MB
 
+    // Calculate p99 latency from duration metrics (last hour to match default dashboard range)
+    let p99_latency_ms: Option<f64> = sqlx::query_scalar::<_, f64>(
+        r#"
+        SELECT PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY value) * 1000
+        FROM forge_metrics
+        WHERE name = 'http_request_duration_seconds'
+        AND timestamp > NOW() - INTERVAL '1 hour'
+        "#,
+    )
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten();
+
     Json(ApiResponse::success(SystemStats {
         http_requests_total,
         http_requests_per_second,
+        p99_latency_ms,
         function_calls_total,
         active_connections: active_sessions,
         active_subscriptions,

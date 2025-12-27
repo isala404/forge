@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{extract::State, middleware::Next, response::Response};
-use forge_core::observability::Metric;
+use forge_core::observability::{LogEntry, LogLevel, Metric, Span, SpanKind};
 
 use crate::observability::ObservabilityState;
 
@@ -74,6 +74,37 @@ pub async fn metrics_middleware(
             .labels
             .insert("path".to_string(), path_clone.clone());
         obs.record_metric(duration_metric).await;
+
+        // Record log entry for each request
+        let log_level = if status.is_server_error() {
+            LogLevel::Error
+        } else if status.is_client_error() {
+            LogLevel::Warn
+        } else {
+            LogLevel::Info
+        };
+        let mut log = LogEntry::new(
+            log_level,
+            format!("{} {} -> {} ({:.2}ms)", method_clone, path_clone, status_clone, duration.as_secs_f64() * 1000.0),
+        );
+        log.fields.insert("method".to_string(), serde_json::Value::String(method_clone.clone()));
+        log.fields.insert("path".to_string(), serde_json::Value::String(path_clone.clone()));
+        log.fields.insert("status".to_string(), serde_json::Value::String(status_clone.clone()));
+        log.fields.insert("duration_ms".to_string(), serde_json::Value::Number(serde_json::Number::from_f64(duration.as_secs_f64() * 1000.0).unwrap_or(serde_json::Number::from(0))));
+        obs.record_log(log).await;
+
+        // Record trace span for each request
+        let mut span = Span::new(format!("{} {}", method_clone, path_clone));
+        span.kind = SpanKind::Server;
+        span.attributes.insert("http.method".to_string(), serde_json::Value::String(method_clone.clone()));
+        span.attributes.insert("http.url".to_string(), serde_json::Value::String(path_clone.clone()));
+        span.attributes.insert("http.status_code".to_string(), serde_json::Value::String(status_clone.clone()));
+        if status.is_server_error() {
+            span.end_error("Server error");
+        } else {
+            span.end_ok();
+        }
+        obs.record_span(span).await;
 
         // Record errors if status >= 400
         if status.is_client_error() || status.is_server_error() {
