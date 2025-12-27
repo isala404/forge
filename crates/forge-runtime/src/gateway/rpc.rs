@@ -40,7 +40,7 @@ impl RpcHandler {
                 "Function '{}' not found",
                 request.function
             )))
-            .with_request_id(&metadata.request_id.to_string());
+            .with_request_id(metadata.request_id.to_string());
         }
 
         // Execute function
@@ -52,18 +52,18 @@ impl RpcHandler {
             Ok(exec_result) => {
                 if exec_result.success {
                     RpcResponse::success(exec_result.result)
-                        .with_request_id(&metadata.request_id.to_string())
+                        .with_request_id(metadata.request_id.to_string())
                 } else {
                     RpcResponse::error(RpcError::internal(
                         exec_result
                             .error
                             .unwrap_or_else(|| "Unknown error".to_string()),
                     ))
-                    .with_request_id(&metadata.request_id.to_string())
+                    .with_request_id(metadata.request_id.to_string())
                 }
             }
             Err(e) => RpcResponse::error(RpcError::from(e))
-                .with_request_id(&metadata.request_id.to_string()),
+                .with_request_id(metadata.request_id.to_string()),
         }
     }
 }

@@ -202,7 +202,7 @@ impl JobQueue {
                     job_type: row.get("job_type"),
                     input: row.get("input"),
                     output: row.get("output"),
-                    status: JobStatus::from_str(row.get("status")),
+                    status: row.get::<String, _>("status").parse().unwrap(),
                     priority: row.get("priority"),
                     attempts: row.get("attempts"),
                     max_attempts: row.get("max_attempts"),

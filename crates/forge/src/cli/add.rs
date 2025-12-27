@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use console::style;
 use std::fs;
@@ -147,7 +147,7 @@ fn add_function(name: &str, fn_type: FunctionType) -> Result<()> {
 
 /// {snake_name} {description}.
 #[forge::{attr}]
-pub async fn {snake_name}(ctx: {ctx_type}) -> Result<()> {{
+pub async fn {snake_name}(_ctx: &{ctx_type}) -> Result<()> {{
     // Add your logic here
     Ok(())
 }}
@@ -196,7 +196,7 @@ pub struct {pascal_name}Args {{
     timeout = "5m",
     max_attempts = 3
 )]
-pub async fn {snake_name}(ctx: JobContext, args: {pascal_name}Args) -> Result<()> {{
+pub async fn {snake_name}(_ctx: &JobContext, _args: {pascal_name}Args) -> Result<()> {{
     // Add your job logic here
     Ok(())
 }}
@@ -234,8 +234,8 @@ fn add_cron(name: &str) -> Result<()> {
 
 /// {snake_name} scheduled task.
 #[forge::cron(schedule = "0 0 * * *")]  // Daily at midnight
-pub async fn {snake_name}(ctx: CronContext) -> Result<()> {{
-    ctx.log.info("Running {snake_name}");
+pub async fn {snake_name}(_ctx: &CronContext) -> Result<()> {{
+    tracing::info!("Running {snake_name}");
 
     // Add your cron logic here
 
@@ -290,9 +290,9 @@ pub struct {pascal_name}Output {{
 
 /// {snake_name} workflow.
 #[forge::workflow(version = 1)]
-pub async fn {snake_name}(ctx: WorkflowContext, input: {pascal_name}Input) -> Result<{pascal_name}Output> {{
+pub async fn {snake_name}(ctx: &WorkflowContext, _input: {pascal_name}Input) -> Result<{pascal_name}Output> {{
     // Step 1: First step
-    let step1_result = ctx.step("step1")
+    let _step1_result = ctx.step("step1")
         .run(|| async {{
             // Add step 1 logic
             Ok(())
@@ -300,7 +300,7 @@ pub async fn {snake_name}(ctx: WorkflowContext, input: {pascal_name}Input) -> Re
         .await?;
 
     // Step 2: Second step
-    let step2_result = ctx.step("step2")
+    let _step2_result = ctx.step("step2")
         .run(|| async {{
             // Add step 2 logic
             Ok(())

@@ -348,7 +348,7 @@ impl LogStore {
                 let timestamp: DateTime<Utc> = row.get("timestamp");
 
                 LogEntry {
-                    level: LogLevel::from_str(&level_str).unwrap_or_default(),
+                    level: level_str.parse().unwrap_or_default(),
                     message,
                     target,
                     fields: serde_json::from_value(fields).unwrap_or_default(),
@@ -495,7 +495,7 @@ impl TraceStore {
             .into_iter()
             .map(|row| {
                 let name: String = row.get("name");
-                let kind_str: String = row.get("kind");
+                let _kind_str: String = row.get("kind");
                 let status_str: String = row.get("status");
                 let start_time: DateTime<Utc> = row.get("started_at");
                 let end_time: Option<DateTime<Utc>> = row.get("ended_at");
@@ -645,7 +645,6 @@ pub struct TraceSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use forge_core::observability::MetricKind;
 
     #[tokio::test]
     async fn test_metrics_store_basic() {

@@ -1,11 +1,15 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{de::DeserializeOwned, Serialize};
 
 use crate::Result;
+
+/// Type alias for compensation function to reduce complexity.
+type CompensateFn<'a, T, C> = Arc<dyn Fn(T) -> Pin<Box<C>> + Send + Sync + 'a>;
 
 /// Step execution status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,10 +40,13 @@ impl StepStatus {
             Self::Skipped => "skipped",
         }
     }
+}
 
-    /// Parse from string.
-    pub fn from_str(s: &str) -> Self {
-        match s {
+impl FromStr for StepStatus {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(match s {
             "pending" => Self::Pending,
             "running" => Self::Running,
             "completed" => Self::Completed,
@@ -47,7 +54,7 @@ impl StepStatus {
             "compensated" => Self::Compensated,
             "skipped" => Self::Skipped,
             _ => Self::Pending,
-        }
+        })
     }
 }
 
@@ -91,7 +98,7 @@ where
 {
     name: String,
     run_fn: Option<Pin<Box<dyn FnOnce() -> F + Send + 'a>>>,
-    compensate_fn: Option<Arc<dyn Fn(T) -> Pin<Box<C>> + Send + Sync + 'a>>,
+    compensate_fn: Option<CompensateFn<'a, T, C>>,
     timeout: Option<Duration>,
     retry_count: u32,
     retry_delay: Duration,
@@ -224,8 +231,8 @@ mod tests {
         assert_eq!(StepStatus::Failed.as_str(), "failed");
         assert_eq!(StepStatus::Compensated.as_str(), "compensated");
 
-        assert_eq!(StepStatus::from_str("pending"), StepStatus::Pending);
-        assert_eq!(StepStatus::from_str("completed"), StepStatus::Completed);
+        assert_eq!("pending".parse::<StepStatus>(), Ok(StepStatus::Pending));
+        assert_eq!("completed".parse::<StepStatus>(), Ok(StepStatus::Completed));
     }
 
     #[test]

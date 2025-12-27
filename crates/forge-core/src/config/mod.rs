@@ -56,11 +56,11 @@ impl ForgeConfig {
         let content = std::fs::read_to_string(path.as_ref())
             .map_err(|e| ForgeError::Config(format!("Failed to read config file: {}", e)))?;
 
-        Self::from_str(&content)
+        Self::parse_toml(&content)
     }
 
     /// Parse configuration from a TOML string.
-    pub fn from_str(content: &str) -> Result<Self> {
+    pub fn parse_toml(content: &str) -> Result<Self> {
         // Substitute environment variables
         let content = substitute_env_vars(content);
 
@@ -342,7 +342,7 @@ mod tests {
             url = "postgres://localhost/myapp"
         "#;
 
-        let config = ForgeConfig::from_str(toml).unwrap();
+        let config = ForgeConfig::parse_toml(toml).unwrap();
         assert_eq!(config.database.url, "postgres://localhost/myapp");
         assert_eq!(config.gateway.port, 8080);
     }
@@ -367,7 +367,7 @@ mod tests {
             grpc_port = 9001
         "#;
 
-        let config = ForgeConfig::from_str(toml).unwrap();
+        let config = ForgeConfig::parse_toml(toml).unwrap();
         assert_eq!(config.project.name, "my-app");
         assert_eq!(config.database.pool_size, 100);
         assert_eq!(config.node.roles.len(), 2);
@@ -383,7 +383,7 @@ mod tests {
             url = "${TEST_DB_URL}"
         "#;
 
-        let config = ForgeConfig::from_str(toml).unwrap();
+        let config = ForgeConfig::parse_toml(toml).unwrap();
         assert_eq!(config.database.url, "postgres://test:test@localhost/test");
 
         std::env::remove_var("TEST_DB_URL");

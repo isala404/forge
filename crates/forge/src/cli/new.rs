@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Parser;
 use console::style;
 use std::fs;
@@ -283,6 +283,7 @@ fn create_frontend(dir: &Path, name: &str) -> Result<()> {
     "@sveltejs/adapter-static": "^3.0.0",
     "@sveltejs/kit": "^2.49.0",
     "@sveltejs/vite-plugin-svelte": "^6.0.0",
+    "@types/node": "^20.0.0",
     "svelte": "^5.45.0",
     "svelte-check": "^4.0.0",
     "typescript": "^5.0.0",
@@ -329,7 +330,8 @@ export default defineConfig({
   "extends": "./.svelte-kit/tsconfig.json",
   "compilerOptions": {
     "strict": true,
-    "moduleResolution": "bundler"
+    "moduleResolution": "bundler",
+    "skipLibCheck": true
   }
 }
 "#;

@@ -137,7 +137,7 @@ mod tests {
             timeout: None,
         };
 
-        let auth = AuthContext::unauthenticated();
+        let _auth = AuthContext::unauthenticated();
 
         // Can't test check_auth directly without a router instance,
         // but we can test the logic

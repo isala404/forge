@@ -108,12 +108,14 @@ pub enum WebSocketMessage {
 #[derive(Debug)]
 pub struct WebSocketConnection {
     /// Session ID for this connection.
+    #[allow(dead_code)]
     pub session_id: SessionId,
     /// Active subscriptions.
     pub subscriptions: Vec<SubscriptionId>,
     /// Sender for outgoing messages.
     pub sender: mpsc::Sender<WebSocketMessage>,
     /// When the connection was established.
+    #[allow(dead_code)]
     pub connected_at: chrono::DateTime<chrono::Utc>,
     /// Last activity time.
     pub last_active: chrono::DateTime<chrono::Utc>,
@@ -155,6 +157,7 @@ impl WebSocketConnection {
 
 /// WebSocket server for managing real-time connections.
 pub struct WebSocketServer {
+    #[allow(dead_code)]
     config: WebSocketConfig,
     node_id: NodeId,
     /// Active connections by session ID.

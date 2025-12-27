@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
@@ -18,16 +19,29 @@ pub enum LogLevel {
     Error,
 }
 
-impl LogLevel {
-    /// Convert from string.
-    pub fn from_str(s: &str) -> Option<Self> {
+/// Error for parsing LogLevel from string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseLogLevelError(pub String);
+
+impl std::fmt::Display for ParseLogLevelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid log level: {}", self.0)
+    }
+}
+
+impl std::error::Error for ParseLogLevelError {}
+
+impl FromStr for LogLevel {
+    type Err = ParseLogLevelError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "trace" => Some(Self::Trace),
-            "debug" => Some(Self::Debug),
-            "info" => Some(Self::Info),
-            "warn" | "warning" => Some(Self::Warn),
-            "error" => Some(Self::Error),
-            _ => None,
+            "trace" => Ok(Self::Trace),
+            "debug" => Ok(Self::Debug),
+            "info" => Ok(Self::Info),
+            "warn" | "warning" => Ok(Self::Warn),
+            "error" => Ok(Self::Error),
+            _ => Err(ParseLogLevelError(s.to_string())),
         }
     }
 }
@@ -161,10 +175,10 @@ mod tests {
 
     #[test]
     fn test_log_level_from_str() {
-        assert_eq!(LogLevel::from_str("info"), Some(LogLevel::Info));
-        assert_eq!(LogLevel::from_str("WARNING"), Some(LogLevel::Warn));
-        assert_eq!(LogLevel::from_str("warn"), Some(LogLevel::Warn));
-        assert_eq!(LogLevel::from_str("unknown"), None);
+        assert_eq!("info".parse::<LogLevel>(), Ok(LogLevel::Info));
+        assert_eq!("WARNING".parse::<LogLevel>(), Ok(LogLevel::Warn));
+        assert_eq!("warn".parse::<LogLevel>(), Ok(LogLevel::Warn));
+        assert!("unknown".parse::<LogLevel>().is_err());
     }
 
     #[test]

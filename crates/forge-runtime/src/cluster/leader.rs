@@ -204,7 +204,7 @@ impl LeaderElection {
             Some(row) => {
                 use sqlx::Row;
                 let role_str: String = row.get("role");
-                let role = LeaderRole::from_str(&role_str).unwrap_or(LeaderRole::Scheduler);
+                let role = role_str.parse().unwrap_or(LeaderRole::Scheduler);
 
                 Ok(Some(LeaderInfo {
                     role,

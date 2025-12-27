@@ -107,13 +107,19 @@ impl RustType {
             "NaiveDate" | "Date" => RustType::Date,
             "Value" | "Json" => RustType::Json,
             "Vec<u8>" => RustType::Bytes,
-            s if s.starts_with("Option<") && s.ends_with('>') => {
-                let inner = &s[7..s.len() - 1];
-                RustType::Option(Box::new(RustType::from_type_string(inner)))
+            s if s.starts_with("Option<") => {
+                if let Some(inner) = s.strip_prefix("Option<").and_then(|t| t.strip_suffix('>')) {
+                    RustType::Option(Box::new(RustType::from_type_string(inner)))
+                } else {
+                    RustType::Custom(s.to_string())
+                }
             }
-            s if s.starts_with("Vec<") && s.ends_with('>') => {
-                let inner = &s[4..s.len() - 1];
-                RustType::Vec(Box::new(RustType::from_type_string(inner)))
+            s if s.starts_with("Vec<") => {
+                if let Some(inner) = s.strip_prefix("Vec<").and_then(|t| t.strip_suffix('>')) {
+                    RustType::Vec(Box::new(RustType::from_type_string(inner)))
+                } else {
+                    RustType::Custom(s.to_string())
+                }
             }
             s => RustType::Custom(s.to_string()),
         }

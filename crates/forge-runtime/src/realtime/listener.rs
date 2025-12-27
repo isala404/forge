@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tokio::sync::{broadcast, watch};
 
-use forge_core::realtime::{Change, ChangeOperation};
+use forge_core::realtime::Change;
 
 /// Change listener configuration.
 #[derive(Debug, Clone)]
@@ -128,7 +128,7 @@ impl ChangeListener {
         }
 
         let table = parts[0].to_string();
-        let operation = ChangeOperation::from_str(parts[1])?;
+        let operation = parts[1].parse().ok()?;
 
         let mut change = Change::new(table, operation);
 
@@ -157,6 +157,7 @@ impl ChangeListener {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use forge_core::realtime::ChangeOperation;
 
     #[test]
     fn test_listener_config_default() {

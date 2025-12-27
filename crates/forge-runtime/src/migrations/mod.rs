@@ -14,4 +14,3 @@ pub use generator::MigrationGenerator;
 pub use runner::{load_migrations_from_dir, Migration, MigrationRunner};
 
 // Re-export for internal use
-pub(crate) use builtin::get_builtin_migrations;

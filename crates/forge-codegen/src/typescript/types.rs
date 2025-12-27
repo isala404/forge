@@ -6,6 +6,7 @@ use super::Error;
 
 /// Generates TypeScript type definitions from Rust schema.
 pub struct TypeGenerator {
+    #[allow(dead_code)]
     output_dir: PathBuf,
 }
 

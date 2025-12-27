@@ -37,6 +37,7 @@ impl Default for InvalidationConfig {
 #[derive(Debug)]
 struct PendingInvalidation {
     /// Subscription ID.
+    #[allow(dead_code)]
     subscription_id: SubscriptionId,
     /// Tables that changed.
     changed_tables: HashSet<String>,
@@ -49,11 +50,14 @@ struct PendingInvalidation {
 /// Engine for determining which subscriptions need re-execution.
 pub struct InvalidationEngine {
     subscription_manager: Arc<SubscriptionManager>,
+    #[allow(dead_code)]
     config: InvalidationConfig,
     /// Pending invalidations per subscription.
     pending: Arc<RwLock<HashMap<SubscriptionId, PendingInvalidation>>>,
     /// Channel for signaling invalidations.
+    #[allow(dead_code)]
     invalidation_tx: mpsc::Sender<Vec<SubscriptionId>>,
+    #[allow(dead_code)]
     invalidation_rx: Arc<RwLock<mpsc::Receiver<Vec<SubscriptionId>>>>,
 }
 
@@ -148,7 +152,7 @@ impl InvalidationEngine {
 
     /// Get the invalidation receiver for consuming invalidation events.
     pub async fn take_receiver(&self) -> Option<mpsc::Receiver<Vec<SubscriptionId>>> {
-        let mut rx_guard = self.invalidation_rx.write().await;
+        let _rx_guard = self.invalidation_rx.write().await;
         // We can only take once, so this is a simple swap
         // In practice, you'd use a different pattern
         None // Simplified - receiver is accessed via run loop
@@ -162,11 +166,9 @@ impl InvalidationEngine {
             tokio::time::sleep(check_interval).await;
 
             let ready = self.check_pending().await;
-            if !ready.is_empty() {
-                if self.invalidation_tx.send(ready).await.is_err() {
-                    // Receiver dropped, stop the loop
-                    break;
-                }
+            if !ready.is_empty() && self.invalidation_tx.send(ready).await.is_err() {
+                // Receiver dropped, stop the loop
+                break;
             }
         }
     }
@@ -202,11 +204,13 @@ pub struct InvalidationStats {
 }
 
 /// Coalesces multiple changes for the same table.
+#[allow(dead_code)]
 pub struct ChangeCoalescer {
     /// Changes grouped by table.
     changes_by_table: HashMap<String, Vec<Change>>,
 }
 
+#[allow(dead_code)]
 impl ChangeCoalescer {
     /// Create a new change coalescer.
     pub fn new() -> Self {

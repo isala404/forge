@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
 
 /// Alert severity level.
@@ -12,14 +14,27 @@ pub enum AlertSeverity {
     Critical,
 }
 
-impl AlertSeverity {
-    /// Convert from string.
-    pub fn from_str(s: &str) -> Option<Self> {
+/// Error for parsing AlertSeverity from string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseAlertSeverityError(pub String);
+
+impl std::fmt::Display for ParseAlertSeverityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid alert severity: {}", self.0)
+    }
+}
+
+impl std::error::Error for ParseAlertSeverityError {}
+
+impl FromStr for AlertSeverity {
+    type Err = ParseAlertSeverityError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "info" | "informational" => Some(Self::Info),
-            "warning" | "warn" => Some(Self::Warning),
-            "critical" | "error" => Some(Self::Critical),
-            _ => None,
+            "info" | "informational" => Ok(Self::Info),
+            "warning" | "warn" => Ok(Self::Warning),
+            "critical" | "error" => Ok(Self::Critical),
+            _ => Err(ParseAlertSeverityError(s.to_string())),
         }
     }
 }

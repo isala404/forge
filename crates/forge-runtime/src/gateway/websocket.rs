@@ -44,7 +44,10 @@ pub enum ClientMessage {
     /// Ping for keepalive.
     Ping,
     /// Authentication.
-    Auth { token: String },
+    Auth {
+        #[allow(dead_code)]
+        token: String,
+    },
 }
 
 /// Outgoing WebSocket message to client.
@@ -64,8 +67,10 @@ pub enum ServerMessage {
         message: String,
     },
     /// Subscription response (success/failure).
+    #[allow(dead_code)]
     Subscribed { id: String },
     /// Unsubscribed confirmation.
+    #[allow(dead_code)]
     Unsubscribed { id: String },
 }
 
@@ -88,6 +93,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<WsState>) {
     state.reactor.register_session(session_id, reactor_tx).await;
 
     // Track client subscription IDs to internal subscription IDs
+    #[allow(clippy::type_complexity)]
     let client_to_internal: Arc<RwLock<HashMap<String, forge_core::realtime::SubscriptionId>>> =
         Arc::new(RwLock::new(HashMap::new()));
     let internal_to_client: Arc<RwLock<HashMap<forge_core::realtime::SubscriptionId, String>>> =

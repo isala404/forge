@@ -1,4 +1,5 @@
 import { getForgeClient } from './context.js';
+import { isForgeDebugEnabled } from './client.js';
 import type {
   QueryResult,
   SubscriptionResult,
@@ -8,6 +9,15 @@ import type {
   ActionFn,
   ForgeClientInterface
 } from './types.js';
+
+/**
+ * Internal debug log function.
+ */
+function debugLog(...args: unknown[]): void {
+  if (isForgeDebugEnabled()) {
+    console.log('[FORGE]', ...args);
+  }
+}
 
 /**
  * Readable store interface compatible with Svelte's store contract.
@@ -143,7 +153,7 @@ export function subscribe<TArgs, TResult>(
   };
 
   const startSubscription = async () => {
-    console.log('[FORGE] Starting subscription for:', fn.functionName);
+    debugLog('Starting subscription for:', fn.functionName);
 
     // Clean up previous subscription
     if (unsubscribeFn) {
@@ -157,24 +167,24 @@ export function subscribe<TArgs, TResult>(
     try {
       // First, get initial data
       const currentArgs = typeof args === 'function' ? (args as () => TArgs)() : args;
-      console.log('[FORGE] Fetching initial data for:', fn.functionName, 'args:', currentArgs);
+      debugLog('Fetching initial data for:', fn.functionName, 'args:', currentArgs);
       const initialData = await fn(client, currentArgs);
-      console.log('[FORGE] Got initial data for:', fn.functionName, 'data:', initialData);
+      debugLog('Got initial data for:', fn.functionName, 'data:', initialData);
       state = { loading: false, data: initialData, error: null, stale: false };
       notify();
 
       // Then subscribe for updates
-      console.log('[FORGE] Setting up WebSocket subscription for:', fn.functionName);
+      debugLog('Setting up WebSocket subscription for:', fn.functionName);
       unsubscribeFn = client.subscribe(
         fn.functionName,
         currentArgs,
         (data: TResult) => {
-          console.log('[FORGE] Received real-time update for:', fn.functionName, 'data:', data);
+          debugLog('Received real-time update for:', fn.functionName, 'data:', data);
           state = { loading: false, data, error: null, stale: false };
           notify();
         }
       );
-      console.log('[FORGE] WebSocket subscription set up for:', fn.functionName);
+      debugLog('WebSocket subscription set up for:', fn.functionName);
     } catch (e) {
       const error = e as ForgeError;
       console.error('[FORGE] Subscription error for:', fn.functionName, error);

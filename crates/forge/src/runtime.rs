@@ -326,13 +326,13 @@ impl Forge {
 
             let mut router = gateway.router();
 
-            // Mount dashboard at /_dashboard
+            // Mount dashboard at /_dashboard and API at /_api
             router = router
                 .nest(
                     "/_dashboard",
                     create_dashboard_router(dashboard_state.clone()),
                 )
-                .nest("/_dashboard/api", create_api_router(dashboard_state));
+                .nest("/_api", create_api_router(dashboard_state));
 
             let addr = gateway.addr();
 
@@ -352,7 +352,7 @@ impl Forge {
         // Start WebSocket server if gateway role
         if roles.contains(&NodeRole::Gateway) {
             let ws_config = WebSocketConfig::default();
-            let ws_server = WebSocketServer::new(node_id, ws_config);
+            let _ws_server = WebSocketServer::new(node_id, ws_config);
 
             // WebSocket upgrade handling would be added to the gateway router
             // For now, we just hold the server state

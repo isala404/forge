@@ -1,3 +1,4 @@
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -31,16 +32,19 @@ impl CronStatus {
             Self::Failed => "failed",
         }
     }
+}
 
-    /// Parse from string.
-    pub fn from_str(s: &str) -> Self {
-        match s {
+impl FromStr for CronStatus {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
             "pending" => Self::Pending,
             "running" => Self::Running,
             "completed" => Self::Completed,
             "failed" => Self::Failed,
             _ => Self::Pending,
-        }
+        })
     }
 }
 
@@ -371,10 +375,10 @@ mod tests {
         assert_eq!(CronStatus::Completed.as_str(), "completed");
         assert_eq!(CronStatus::Failed.as_str(), "failed");
 
-        assert_eq!(CronStatus::from_str("pending"), CronStatus::Pending);
-        assert_eq!(CronStatus::from_str("running"), CronStatus::Running);
-        assert_eq!(CronStatus::from_str("completed"), CronStatus::Completed);
-        assert_eq!(CronStatus::from_str("failed"), CronStatus::Failed);
+        assert_eq!("pending".parse::<CronStatus>(), Ok(CronStatus::Pending));
+        assert_eq!("running".parse::<CronStatus>(), Ok(CronStatus::Running));
+        assert_eq!("completed".parse::<CronStatus>(), Ok(CronStatus::Completed));
+        assert_eq!("failed".parse::<CronStatus>(), Ok(CronStatus::Failed));
     }
 
     #[test]

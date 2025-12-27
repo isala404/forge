@@ -389,3 +389,43 @@ Removed all mock/placeholder data from dashboard, wired to real database queries
 - Auto-refresh interval changed from 30s to 5s for responsiveness
 - Added escapeHtml(), formatTime(), formatRelativeTime(), formatMetricValue() utilities
 - All 304 tests passing
+
+Fixed all clippy warnings across the forge codebase.
+- Implemented `FromStr` trait for 15 enum types replacing inherent `from_str` methods
+- Created `ParseNodeRoleError`, `ParseLeaderRoleError`, `ParseMetricKindError`, etc. error types
+- Used `std::convert::Infallible` for infallible parsing (types with default fallback values)
+- Fixed hex literal groupings (0x464F5247_0001 -> 0x464F_5247_0001) in cluster/roles.rs
+- Created type aliases `BoxedCronHandler` and `BoxedWorkflowHandler` for complex types
+- Added `#[allow(dead_code)]` for output_dir fields in codegen generators (used only in tests)
+- Replaced manual strip patterns with `strip_prefix`/`strip_suffix` in macros and parser
+- Updated all call sites to use `.parse()` instead of `::from_str()` methods
+
+Fixed remaining clippy warnings in forge crates.
+- Added `#[allow(dead_code)]` to `GLOBAL_REGISTRY` and `global_registry()` in schema/registry.rs
+- Renamed `from_str` method to `parse_toml` in ForgeConfig to avoid FromStr trait confusion
+- Created type alias `CompensateFn` for complex compensation function type in workflow/step.rs
+- Removed unused import `ChangeOperation` from realtime/listener.rs
+- Added `#[allow(dead_code)]` for incomplete feature fields across multiple modules:
+  - TracingState fields/methods, header constants, and TracingMiddleware in gateway/tracing.rs
+  - Auth token field and unused enum variants in gateway/websocket.rs
+  - MetricsCollector receiver field in observability/collector.rs
+  - InvalidationEngine config and channel fields, PendingInvalidation subscription_id in realtime/invalidation.rs
+  - ChangeCoalescer struct and impl marked as dead code (not yet integrated)
+  - Reactor node_id and ActiveSubscription fields in realtime/reactor.rs
+  - WebSocketServer config and WebSocketConnection fields in realtime/websocket.rs
+  - TestContext tx and config fields in testing/context.rs
+  - MockHandler pattern field in testing/mock.rs
+  - TraceSearchQuery service/operation/min_duration fields in dashboard/api.rs
+  - duration_millis::deserialize function in function/executor.rs
+- Created type alias `MockHandlerFn` for complex mock handler closure type in testing/mock.rs
+- Added `#[allow(dead_code)]` for parsed-but-not-yet-used attrs in macros: action.rs and mutation.rs
+- All 304 tests passing
+
+Fixed code template issues and TypeScript type checking.
+- Fixed ForgeProvider.svelte: Changed async onMount to sync with IIFE for proper cleanup return
+- Fixed generated Rust templates in CLI: Added `&` prefix to context types, `_` prefix for unused params
+- Updated job, cron, and workflow templates with proper parameter references
+- Added `@types/node` to generated frontend package.json for Node.js type definitions
+- Added `skipLibCheck: true` to generated tsconfig.json to avoid transitive dependency errors
+- Fixed variable naming issues from sed replacements: `\_handler` -> `handler`, `_regex` -> `regex`
+- All svelte-check and clippy passing with 0 warnings

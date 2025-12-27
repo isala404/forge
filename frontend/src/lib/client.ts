@@ -1,6 +1,48 @@
 import type { ForgeError, ConnectionState, ForgeClientInterface } from './types.js';
 
 /**
+ * Global debug flag for FORGE client logging.
+ * Can be toggled via ForgeClient.setDebug(true/false) or setForgeDebug(true/false)
+ */
+let _forgeDebugEnabled = false;
+
+/**
+ * Enable or disable FORGE client debug logging.
+ * @param enabled - Whether debug logging should be enabled
+ */
+export function setForgeDebug(enabled: boolean): void {
+  _forgeDebugEnabled = enabled;
+  if (enabled) {
+    console.log('[FORGE] Debug logging enabled');
+  }
+}
+
+/**
+ * Check if FORGE debug logging is enabled.
+ */
+export function isForgeDebugEnabled(): boolean {
+  return _forgeDebugEnabled;
+}
+
+/**
+ * Internal debug log function that respects the global debug flag.
+ */
+function debugLog(...args: unknown[]): void {
+  if (_forgeDebugEnabled) {
+    console.log('[FORGE]', ...args);
+  }
+}
+
+/**
+ * Internal debug warn function that respects the global debug flag.
+ */
+function debugWarn(...args: unknown[]): void {
+  if (_forgeDebugEnabled) {
+    console.warn('[FORGE]', ...args);
+  }
+}
+
+/**
  * Client configuration options.
  */
 export interface ForgeClientConfig {
@@ -9,6 +51,8 @@ export interface ForgeClientConfig {
   onAuthError?: (error: ForgeError) => void;
   timeout?: number;
   retries?: number;
+  /** Enable debug logging for this client */
+  debug?: boolean;
 }
 
 /**
@@ -88,6 +132,17 @@ export class ForgeClient implements ForgeClientInterface {
       retries: 3,
       ...config,
     };
+    // Enable debug mode if specified in config
+    if (config.debug) {
+      setForgeDebug(true);
+    }
+  }
+
+  /**
+   * Static method to enable/disable debug logging.
+   */
+  static setDebug(enabled: boolean): void {
+    setForgeDebug(enabled);
   }
 
   /**
@@ -116,21 +171,21 @@ export class ForgeClient implements ForgeClientInterface {
 
     return new Promise((resolve) => {
       const wsUrl = this.config.url.replace(/^http/, 'ws') + '/ws';
-      console.log('[FORGE] Connecting to WebSocket:', wsUrl);
+      debugLog('Connecting to WebSocket:', wsUrl);
       this.setConnectionState('connecting');
 
       try {
         this.ws = new WebSocket(wsUrl);
       } catch (e) {
         // WebSocket not available, resolve without connection
-        console.warn('[FORGE] WebSocket not available, using HTTP-only mode', e);
+        debugWarn('WebSocket not available, using HTTP-only mode', e);
         this.setConnectionState('disconnected');
         resolve();
         return;
       }
 
       this.ws.onopen = async () => {
-        console.log('[FORGE] WebSocket connected!');
+        debugLog('WebSocket connected!');
         // Authenticate if we have a token
         const token = await this.getToken();
         if (token) {
@@ -148,7 +203,7 @@ export class ForgeClient implements ForgeClientInterface {
 
       this.ws.onerror = (e) => {
         // WebSocket failed, but HTTP RPC still works
-        console.warn('[FORGE] WebSocket connection failed, using HTTP-only mode', e);
+        debugWarn('WebSocket connection failed, using HTTP-only mode', e);
         this.setConnectionState('disconnected');
         resolve(); // Don't reject - app should still work
       };
@@ -230,7 +285,7 @@ export class ForgeClient implements ForgeClientInterface {
 
     // Send subscription request if connected, otherwise queue it
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      console.log('[FORGE] WebSocket is open, sending subscription:', functionName, subscriptionId);
+      debugLog('WebSocket is open, sending subscription:', functionName, subscriptionId);
       this.ws.send(JSON.stringify({
         type: 'subscribe',
         id: subscriptionId,
@@ -239,7 +294,7 @@ export class ForgeClient implements ForgeClientInterface {
       }));
     } else {
       // Queue for later when connection is established
-      console.log('[FORGE] WebSocket not open (state:', this.ws?.readyState, '), queuing subscription:', functionName, subscriptionId);
+      debugLog('WebSocket not open (state:', this.ws?.readyState, '), queuing subscription:', functionName, subscriptionId);
       this.pendingSubscriptions.set(subscriptionId, { functionName, args: normalizedArgs });
     }
 
@@ -264,9 +319,9 @@ export class ForgeClient implements ForgeClientInterface {
       return;
     }
 
-    console.log('[FORGE] Flushing pending subscriptions:', this.pendingSubscriptions.size);
+    debugLog('Flushing pending subscriptions:', this.pendingSubscriptions.size);
     for (const [subscriptionId, { functionName, args }] of this.pendingSubscriptions) {
-      console.log('[FORGE] Sending subscription:', functionName, subscriptionId);
+      debugLog('Sending subscription:', functionName, subscriptionId);
       this.ws.send(JSON.stringify({
         type: 'subscribe',
         id: subscriptionId,
@@ -299,7 +354,7 @@ export class ForgeClient implements ForgeClientInterface {
    * Handle WebSocket messages.
    */
   private handleMessage(data: string): void {
-    console.log('[FORGE] Received WebSocket message:', data);
+    debugLog('Received WebSocket message:', data);
     try {
       const message: WsMessage = JSON.parse(data);
 

@@ -1,4 +1,5 @@
 use std::net::IpAddr;
+use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -62,20 +63,23 @@ impl NodeStatus {
         }
     }
 
-    /// Parse from string.
-    pub fn from_str(s: &str) -> Self {
-        match s {
+    /// Check if node can accept new work.
+    pub fn can_accept_work(&self) -> bool {
+        matches!(self, Self::Active)
+    }
+}
+
+impl FromStr for NodeStatus {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(match s {
             "joining" => Self::Joining,
             "active" => Self::Active,
             "draining" => Self::Draining,
             "dead" => Self::Dead,
             _ => Self::Dead,
-        }
-    }
-
-    /// Check if node can accept new work.
-    pub fn can_accept_work(&self) -> bool {
-        matches!(self, Self::Active)
+        })
     }
 }
 
@@ -175,8 +179,8 @@ mod tests {
 
     #[test]
     fn test_node_status_conversion() {
-        assert_eq!(NodeStatus::from_str("active"), NodeStatus::Active);
-        assert_eq!(NodeStatus::from_str("draining"), NodeStatus::Draining);
+        assert_eq!("active".parse::<NodeStatus>(), Ok(NodeStatus::Active));
+        assert_eq!("draining".parse::<NodeStatus>(), Ok(NodeStatus::Draining));
         assert_eq!(NodeStatus::Active.as_str(), "active");
     }
 

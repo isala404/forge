@@ -24,7 +24,9 @@ struct MutationAttrs {
     requires_auth: bool,
     required_role: Option<String>,
     timeout: Option<u64>,
+    #[allow(dead_code)]
     retry_on: Vec<String>,
+    #[allow(dead_code)]
     max_retries: Option<u32>,
 }
 

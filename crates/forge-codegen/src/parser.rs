@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use forge_core::schema::{EnumDef, EnumVariant, FieldDef, RustType, SchemaRegistry, TableDef};
-use syn::{Attribute, Data, DeriveInput, Expr, Fields, Lit, Meta};
+use syn::{Attribute, Expr, Fields, Lit, Meta};
 use walkdir::WalkDir;
 
 use crate::Error;
@@ -193,8 +193,10 @@ fn type_to_rust_type(ty: &syn::Type) -> RustType {
         "Vec<u8>" => RustType::Bytes,
         _ => {
             // Handle Option<T>
-            if type_str.starts_with("Option<") && type_str.ends_with('>') {
-                let inner = &type_str[7..type_str.len() - 1];
+            if let Some(inner) = type_str
+                .strip_prefix("Option<")
+                .and_then(|s| s.strip_suffix('>'))
+            {
                 let inner_type = match inner {
                     "String" => RustType::String,
                     "i32" => RustType::I32,
@@ -208,8 +210,10 @@ fn type_to_rust_type(ty: &syn::Type) -> RustType {
             }
 
             // Handle Vec<T>
-            if type_str.starts_with("Vec<") && type_str.ends_with('>') {
-                let inner = &type_str[4..type_str.len() - 1];
+            if let Some(inner) = type_str
+                .strip_prefix("Vec<")
+                .and_then(|s| s.strip_suffix('>'))
+            {
                 let inner_type = match inner {
                     "String" => RustType::String,
                     "i32" => RustType::I32,
@@ -282,8 +286,8 @@ fn extract_name_value(s: &str) -> Option<String> {
     let parts: Vec<&str> = s.splitn(2, '=').collect();
     if parts.len() == 2 {
         let value = parts[1].trim();
-        if value.starts_with('"') && value.ends_with('"') {
-            return Some(value[1..value.len() - 1].to_string());
+        if let Some(stripped) = value.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+            return Some(stripped.to_string());
         }
     }
     None
@@ -314,13 +318,12 @@ fn pluralize(s: &str) -> String {
         || s.ends_with('z')
     {
         format!("{}es", s)
-    } else if s.ends_with('y')
-        && !s.ends_with("ay")
-        && !s.ends_with("ey")
-        && !s.ends_with("oy")
-        && !s.ends_with("uy")
-    {
-        format!("{}ies", &s[..s.len() - 1])
+    } else if let Some(stem) = s.strip_suffix('y') {
+        if !s.ends_with("ay") && !s.ends_with("ey") && !s.ends_with("oy") && !s.ends_with("uy") {
+            format!("{}ies", stem)
+        } else {
+            format!("{}s", s)
+        }
     } else {
         format!("{}s", s)
     }

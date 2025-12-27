@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::str::FromStr;
 use std::time::Duration;
 
 use serde::{de::DeserializeOwned, Serialize};
@@ -81,9 +82,17 @@ impl WorkflowStatus {
         }
     }
 
-    /// Parse from string.
-    pub fn from_str(s: &str) -> Self {
-        match s {
+    /// Check if the workflow is terminal (no longer running).
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Completed | Self::Compensated | Self::Failed)
+    }
+}
+
+impl FromStr for WorkflowStatus {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(match s {
             "created" => Self::Created,
             "running" => Self::Running,
             "waiting" => Self::Waiting,
@@ -92,12 +101,7 @@ impl WorkflowStatus {
             "compensated" => Self::Compensated,
             "failed" => Self::Failed,
             _ => Self::Created,
-        }
-    }
-
-    /// Check if the workflow is terminal (no longer running).
-    pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Completed | Self::Compensated | Self::Failed)
+        })
     }
 }
 
@@ -119,10 +123,13 @@ mod tests {
         assert_eq!(WorkflowStatus::Completed.as_str(), "completed");
         assert_eq!(WorkflowStatus::Compensating.as_str(), "compensating");
 
-        assert_eq!(WorkflowStatus::from_str("running"), WorkflowStatus::Running);
         assert_eq!(
-            WorkflowStatus::from_str("completed"),
-            WorkflowStatus::Completed
+            "running".parse::<WorkflowStatus>(),
+            Ok(WorkflowStatus::Running)
+        );
+        assert_eq!(
+            "completed".parse::<WorkflowStatus>(),
+            Ok(WorkflowStatus::Completed)
         );
     }
 

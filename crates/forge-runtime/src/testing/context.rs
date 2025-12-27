@@ -1,7 +1,6 @@
 //! Test context for integration tests.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -24,12 +23,14 @@ pub struct TestContext {
     /// Database pool (if connected).
     pool: Option<sqlx::PgPool>,
     /// Transaction for isolation.
+    #[allow(dead_code)]
     tx: Option<sqlx::Transaction<'static, sqlx::Postgres>>,
     /// HTTP mock.
     mock_http: MockHttp,
     /// Auth context.
     auth: AuthContext,
     /// Test configuration.
+    #[allow(dead_code)]
     config: TestConfig,
     /// Dispatched jobs for verification.
     dispatched_jobs: Vec<DispatchedJob>,
@@ -257,7 +258,7 @@ impl TestContext {
         self.started_workflows
             .iter()
             .find(|w| w.run_id == run_id)
-            .map(|w| w.status.clone())
+            .map(|w| w.status)
     }
 
     /// Mark a workflow step as completed.

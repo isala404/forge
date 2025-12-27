@@ -4,8 +4,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use forge_core::{
-    ActionContext, AuthContext, ForgeAction, ForgeMutation, ForgeQuery, FunctionInfo, FunctionKind,
-    MutationContext, QueryContext, RequestMetadata, Result,
+    ActionContext, ForgeAction, ForgeMutation, ForgeQuery, FunctionInfo, FunctionKind,
+    MutationContext, QueryContext, Result,
 };
 use serde_json::Value;
 

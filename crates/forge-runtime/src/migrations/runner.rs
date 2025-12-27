@@ -262,10 +262,10 @@ pub fn load_migrations_from_dir(dir: &Path) -> Result<Vec<Migration>> {
 
     let mut migrations = Vec::new();
 
-    let entries = std::fs::read_dir(dir).map_err(|e| ForgeError::Io(e))?;
+    let entries = std::fs::read_dir(dir).map_err(ForgeError::Io)?;
 
     for entry in entries {
-        let entry = entry.map_err(|e| ForgeError::Io(e))?;
+        let entry = entry.map_err(ForgeError::Io)?;
         let path = entry.path();
 
         if path.extension().map(|e| e == "sql").unwrap_or(false) {
@@ -275,7 +275,7 @@ pub fn load_migrations_from_dir(dir: &Path) -> Result<Vec<Migration>> {
                 .ok_or_else(|| ForgeError::Config("Invalid migration filename".into()))?
                 .to_string();
 
-            let sql = std::fs::read_to_string(&path).map_err(|e| ForgeError::Io(e))?;
+            let sql = std::fs::read_to_string(&path).map_err(ForgeError::Io)?;
 
             migrations.push(Migration::new(name, sql));
         }

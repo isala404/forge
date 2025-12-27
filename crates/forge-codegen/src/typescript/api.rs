@@ -6,6 +6,7 @@ use super::Error;
 
 /// Generates TypeScript API bindings.
 pub struct ApiGenerator {
+    #[allow(dead_code)]
     output_dir: PathBuf,
 }
 

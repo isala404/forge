@@ -74,12 +74,12 @@ fn parse_query_attrs(attr: TokenStream) -> QueryAttrs {
 
 fn parse_duration(s: &str) -> Option<u64> {
     let s = s.trim();
-    if s.ends_with('s') {
-        s[..s.len() - 1].parse().ok()
-    } else if s.ends_with('m') {
-        s[..s.len() - 1].parse::<u64>().ok().map(|m| m * 60)
-    } else if s.ends_with('h') {
-        s[..s.len() - 1].parse::<u64>().ok().map(|h| h * 3600)
+    if let Some(num) = s.strip_suffix('s') {
+        num.parse().ok()
+    } else if let Some(num) = s.strip_suffix('m') {
+        num.parse::<u64>().ok().map(|m| m * 60)
+    } else if let Some(num) = s.strip_suffix('h') {
+        num.parse::<u64>().ok().map(|h| h * 3600)
     } else {
         s.parse().ok()
     }

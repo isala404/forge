@@ -255,7 +255,7 @@ impl WorkflowExecutor {
                 id: row.get("id"),
                 workflow_run_id: row.get("workflow_run_id"),
                 step_name: row.get("step_name"),
-                status: StepStatus::from_str(row.get("status")),
+                status: row.get::<String, _>("status").parse().unwrap(),
                 result: row.get("result"),
                 error: row.get("error"),
                 started_at: row.get("started_at"),
@@ -339,7 +339,7 @@ impl WorkflowExecutor {
             version: 1, // TODO: Add version column
             input: row.get("input"),
             output: row.get("output"),
-            status: WorkflowStatus::from_str(row.get("status")),
+            status: row.get::<String, _>("status").parse().unwrap(),
             current_step: row.get("current_step"),
             step_results: row.get("step_results"),
             started_at: row.get("started_at"),
@@ -449,13 +449,13 @@ mod tests {
     #[test]
     fn test_workflow_result_types() {
         let completed = WorkflowResult::Completed(serde_json::json!({}));
-        let waiting = WorkflowResult::Waiting {
+        let _waiting = WorkflowResult::Waiting {
             event_type: "approval".to_string(),
         };
-        let failed = WorkflowResult::Failed {
+        let _failed = WorkflowResult::Failed {
             error: "test".to_string(),
         };
-        let compensated = WorkflowResult::Compensated;
+        let _compensated = WorkflowResult::Compensated;
 
         // Just ensure they can be created
         match completed {

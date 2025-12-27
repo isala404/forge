@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::sync::RwLock;
 
 /// Mock HTTP client for testing.
@@ -16,6 +16,7 @@ pub struct MockHttp {
 
 /// A mock handler.
 struct MockHandler {
+    #[allow(dead_code)]
     pattern: String,
     regex: Regex,
     handler: Arc<dyn Fn(&MockRequest) -> MockResponse + Send + Sync>,
@@ -140,6 +141,7 @@ impl MockHttp {
     }
 
     /// Add a mock handler (sync version).
+    #[allow(unused_variables)]
     pub fn add_mock_sync<F>(&self, pattern: &str, handler: F)
     where
         F: Fn(&MockRequest) -> MockResponse + Send + Sync + 'static,
@@ -149,7 +151,7 @@ impl MockHttp {
             .replace('*', ".*")
             .replace('?', ".");
 
-        let regex = Regex::new(&format!("^{}$", regex_pattern)).unwrap();
+        let _regex = Regex::new(&format!("^{}$", regex_pattern)).unwrap();
 
         // For testing, just create a new mock handler without async
         // This is a simplified version
@@ -219,12 +221,12 @@ impl Default for MockHttp {
     }
 }
 
+/// Type alias for mock handler closure.
+type MockHandlerFn = Box<dyn Fn(&MockRequest) -> MockResponse + Send + Sync>;
+
 /// Builder for MockHttp.
 pub struct MockHttpBuilder {
-    mocks: Vec<(
-        String,
-        Box<dyn Fn(&MockRequest) -> MockResponse + Send + Sync>,
-    )>,
+    mocks: Vec<(String, MockHandlerFn)>,
 }
 
 impl MockHttpBuilder {
@@ -244,9 +246,8 @@ impl MockHttpBuilder {
 
     /// Build the MockHttp.
     pub fn build(self) -> MockHttp {
-        let mock = MockHttp::new();
         // Note: In a real implementation, we'd add the mocks here
-        mock
+        MockHttp::new()
     }
 }
 

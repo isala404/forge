@@ -5,16 +5,19 @@ use std::sync::Arc;
 
 use forge_core::cron::{CronContext, CronInfo, ForgeCron};
 
+/// Type alias for boxed cron handler function.
+pub type BoxedCronHandler = Arc<
+    dyn Fn(&CronContext) -> Pin<Box<dyn Future<Output = forge_core::Result<()>> + Send + '_>>
+        + Send
+        + Sync,
+>;
+
 /// A registered cron entry.
 pub struct CronEntry {
     /// Cron metadata.
     pub info: CronInfo,
     /// Execution handler.
-    pub handler: Arc<
-        dyn Fn(&CronContext) -> Pin<Box<dyn Future<Output = forge_core::Result<()>> + Send + '_>>
-            + Send
-            + Sync,
-    >,
+    pub handler: BoxedCronHandler,
 }
 
 impl CronEntry {

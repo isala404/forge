@@ -1,10 +1,13 @@
 use uuid::Uuid;
 
 /// Header name for trace ID.
+#[allow(dead_code)]
 pub const TRACE_ID_HEADER: &str = "X-Trace-Id";
 /// Header name for request ID.
+#[allow(dead_code)]
 pub const REQUEST_ID_HEADER: &str = "X-Request-Id";
 /// Header name for parent span ID.
+#[allow(dead_code)]
 pub const SPAN_ID_HEADER: &str = "X-Span-Id";
 
 /// Request tracing state.
@@ -15,8 +18,10 @@ pub struct TracingState {
     /// Unique request ID.
     pub request_id: String,
     /// Parent span ID (if propagated).
+    #[allow(dead_code)]
     pub parent_span_id: Option<String>,
     /// When the request started.
+    #[allow(dead_code)]
     pub start_time: std::time::Instant,
 }
 
@@ -42,12 +47,14 @@ impl TracingState {
     }
 
     /// Set parent span ID.
+    #[allow(dead_code)]
     pub fn with_parent_span(mut self, span_id: String) -> Self {
         self.parent_span_id = Some(span_id);
         self
     }
 
     /// Get elapsed time since request start.
+    #[allow(dead_code)]
     pub fn elapsed(&self) -> std::time::Duration {
         self.start_time.elapsed()
     }
@@ -61,6 +68,7 @@ impl Default for TracingState {
 
 /// Tracing middleware marker type.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TracingMiddleware;
 
 #[cfg(test)]

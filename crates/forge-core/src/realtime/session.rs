@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
@@ -50,17 +52,6 @@ pub enum SessionStatus {
 }
 
 impl SessionStatus {
-    /// Parse from string.
-    pub fn from_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "connecting" => Self::Connecting,
-            "connected" => Self::Connected,
-            "reconnecting" => Self::Reconnecting,
-            "disconnected" => Self::Disconnected,
-            _ => Self::Disconnected,
-        }
-    }
-
     /// Convert to string.
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -69,6 +60,20 @@ impl SessionStatus {
             Self::Reconnecting => "reconnecting",
             Self::Disconnected => "disconnected",
         }
+    }
+}
+
+impl FromStr for SessionStatus {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(match s.to_lowercase().as_str() {
+            "connecting" => Self::Connecting,
+            "connected" => Self::Connected,
+            "reconnecting" => Self::Reconnecting,
+            "disconnected" => Self::Disconnected,
+            _ => Self::Disconnected,
+        })
     }
 }
 
@@ -177,12 +182,12 @@ mod tests {
     #[test]
     fn test_session_status_conversion() {
         assert_eq!(
-            SessionStatus::from_str("connected"),
-            SessionStatus::Connected
+            "connected".parse::<SessionStatus>(),
+            Ok(SessionStatus::Connected)
         );
         assert_eq!(
-            SessionStatus::from_str("disconnected"),
-            SessionStatus::Disconnected
+            "disconnected".parse::<SessionStatus>(),
+            Ok(SessionStatus::Disconnected)
         );
         assert_eq!(SessionStatus::Connected.as_str(), "connected");
     }

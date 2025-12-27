@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
 
 use uuid::Uuid;
 
@@ -20,22 +21,37 @@ impl Default for TrackingMode {
 }
 
 impl TrackingMode {
-    /// Parse from string.
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "table" => Some(Self::Table),
-            "row" => Some(Self::Row),
-            "adaptive" => Some(Self::Adaptive),
-            _ => None,
-        }
-    }
-
     /// Convert to string.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Table => "table",
             Self::Row => "row",
             Self::Adaptive => "adaptive",
+        }
+    }
+}
+
+/// Error for parsing TrackingMode from string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseTrackingModeError(pub String);
+
+impl std::fmt::Display for ParseTrackingModeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid tracking mode: {}", self.0)
+    }
+}
+
+impl std::error::Error for ParseTrackingModeError {}
+
+impl FromStr for TrackingMode {
+    type Err = ParseTrackingModeError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "table" => Ok(Self::Table),
+            "row" => Ok(Self::Row),
+            "adaptive" => Ok(Self::Adaptive),
+            _ => Err(ParseTrackingModeError(s.to_string())),
         }
     }
 }
@@ -174,22 +190,37 @@ pub enum ChangeOperation {
 }
 
 impl ChangeOperation {
-    /// Parse from string.
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_uppercase().as_str() {
-            "INSERT" | "I" => Some(Self::Insert),
-            "UPDATE" | "U" => Some(Self::Update),
-            "DELETE" | "D" => Some(Self::Delete),
-            _ => None,
-        }
-    }
-
     /// Convert to string.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Insert => "INSERT",
             Self::Update => "UPDATE",
             Self::Delete => "DELETE",
+        }
+    }
+}
+
+/// Error for parsing ChangeOperation from string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseChangeOperationError(pub String);
+
+impl std::fmt::Display for ParseChangeOperationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid change operation: {}", self.0)
+    }
+}
+
+impl std::error::Error for ParseChangeOperationError {}
+
+impl FromStr for ChangeOperation {
+    type Err = ParseChangeOperationError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_uppercase().as_str() {
+            "INSERT" | "I" => Ok(Self::Insert),
+            "UPDATE" | "U" => Ok(Self::Update),
+            "DELETE" | "D" => Ok(Self::Delete),
+            _ => Err(ParseChangeOperationError(s.to_string())),
         }
     }
 }
@@ -262,13 +293,13 @@ mod tests {
 
     #[test]
     fn test_tracking_mode_conversion() {
-        assert_eq!(TrackingMode::from_str("table"), Some(TrackingMode::Table));
-        assert_eq!(TrackingMode::from_str("row"), Some(TrackingMode::Row));
+        assert_eq!("table".parse::<TrackingMode>(), Ok(TrackingMode::Table));
+        assert_eq!("row".parse::<TrackingMode>(), Ok(TrackingMode::Row));
         assert_eq!(
-            TrackingMode::from_str("adaptive"),
-            Some(TrackingMode::Adaptive)
+            "adaptive".parse::<TrackingMode>(),
+            Ok(TrackingMode::Adaptive)
         );
-        assert_eq!(TrackingMode::from_str("invalid"), None);
+        assert!("invalid".parse::<TrackingMode>().is_err());
     }
 
     #[test]

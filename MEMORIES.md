@@ -43,6 +43,10 @@ Key Patterns
 - Proc macros use forge::forge_core:: paths (re-exported from forge crate)
 - User functions take &QueryContext and &MutationContext (references)
 - axum 0.7+ route syntax uses {param} not :param
+- FromStr trait for parsing enums from strings (not inherent from_str methods)
+- Infallible parsing uses std::convert::Infallible as error type
+- Type aliases for complex boxed function types (BoxedCronHandler, CompensateFn, MockHandlerFn)
+- ForgeConfig uses `parse_toml()` method instead of `from_str()` to avoid clippy warning
 - Svelte 5: avoid destructuring $props() at module level, access props.* inside closures
 - Svelte 5: ForgeProvider sets context immediately during initialization, not in onMount
 - Svelte 5: use const for $state objects passed to context, mutate properties not reassign

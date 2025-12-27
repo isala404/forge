@@ -1,4 +1,4 @@
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use cron::Schedule;
 use std::str::FromStr;
@@ -42,7 +42,7 @@ impl CronSchedule {
     }
 
     /// Get the next scheduled time after the given time.
-    pub fn next_after(&self, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    pub fn next_after(&self, _after: DateTime<Utc>) -> Option<DateTime<Utc>> {
         self.schedule.as_ref()?.upcoming(Utc).next()
     }
 

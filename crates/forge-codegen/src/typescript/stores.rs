@@ -4,6 +4,7 @@ use super::Error;
 
 /// Generates Svelte 5 store integrations.
 pub struct StoreGenerator {
+    #[allow(dead_code)]
     output_dir: PathBuf,
 }
 

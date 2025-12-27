@@ -4,6 +4,7 @@ use super::Error;
 
 /// Generates the TypeScript client.
 pub struct ClientGenerator {
+    #[allow(dead_code)]
     output_dir: PathBuf,
 }
 

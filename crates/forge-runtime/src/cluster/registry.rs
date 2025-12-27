@@ -1,7 +1,6 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use forge_core::cluster::{NodeId, NodeInfo, NodeRole, NodeStatus};
@@ -135,10 +134,7 @@ impl NodeRegistry {
                 .parse()
                 .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)));
             let roles_str: Vec<String> = row.get("roles");
-            let roles: Vec<NodeRole> = roles_str
-                .iter()
-                .filter_map(|s| NodeRole::from_str(s))
-                .collect();
+            let roles: Vec<NodeRole> = roles_str.iter().filter_map(|s| s.parse().ok()).collect();
 
             nodes.push(NodeInfo {
                 id: NodeId::from_uuid(id),
@@ -148,7 +144,7 @@ impl NodeRegistry {
                 grpc_port: row.get::<i32, _>("grpc_port") as u16,
                 roles,
                 worker_capabilities: row.get("worker_capabilities"),
-                status: NodeStatus::from_str(row.get("status")),
+                status: row.get::<String, _>("status").parse().unwrap(),
                 version: row.get("version"),
                 started_at: row.get("started_at"),
                 last_heartbeat: row.get("last_heartbeat"),
@@ -188,10 +184,8 @@ impl NodeRegistry {
                     .parse()
                     .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)));
                 let roles_str: Vec<String> = row.get("roles");
-                let roles: Vec<NodeRole> = roles_str
-                    .iter()
-                    .filter_map(|s| NodeRole::from_str(s))
-                    .collect();
+                let roles: Vec<NodeRole> =
+                    roles_str.iter().filter_map(|s| s.parse().ok()).collect();
 
                 Ok(Some(NodeInfo {
                     id: NodeId::from_uuid(id),
@@ -201,7 +195,7 @@ impl NodeRegistry {
                     grpc_port: row.get::<i32, _>("grpc_port") as u16,
                     roles,
                     worker_capabilities: row.get("worker_capabilities"),
-                    status: NodeStatus::from_str(row.get("status")),
+                    status: row.get::<String, _>("status").parse().unwrap(),
                     version: row.get("version"),
                     started_at: row.get("started_at"),
                     last_heartbeat: row.get("last_heartbeat"),

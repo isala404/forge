@@ -24,10 +24,15 @@ struct ActionAttrs {
     requires_auth: bool,
     required_role: Option<String>,
     timeout: Option<u64>,
+    #[allow(dead_code)]
     rate_limit_requests: Option<u32>,
+    #[allow(dead_code)]
     rate_limit_per: Option<String>,
+    #[allow(dead_code)]
     rate_limit_key: Option<String>,
+    #[allow(dead_code)]
     retry_max_attempts: Option<u32>,
+    #[allow(dead_code)]
     retry_backoff: Option<String>,
 }
 

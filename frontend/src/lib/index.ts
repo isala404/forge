@@ -40,6 +40,8 @@ export {
   ForgeClient,
   ForgeClientError,
   createForgeClient,
+  setForgeDebug,
+  isForgeDebugEnabled,
   type ForgeClientConfig,
 } from './client.js';
 

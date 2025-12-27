@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use forge_core::cluster::NodeStatus;
-use tokio::sync::{broadcast, watch};
+use tokio::sync::broadcast;
 
 use super::leader::LeaderElection;
 use super::registry::NodeRegistry;

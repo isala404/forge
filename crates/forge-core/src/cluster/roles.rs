@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 /// Node role in the cluster.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NodeRole {
@@ -22,20 +24,35 @@ impl NodeRole {
         }
     }
 
-    /// Parse from string.
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "gateway" => Some(Self::Gateway),
-            "function" => Some(Self::Function),
-            "worker" => Some(Self::Worker),
-            "scheduler" => Some(Self::Scheduler),
-            _ => None,
-        }
-    }
-
     /// Get all default roles.
     pub fn all() -> Vec<Self> {
         vec![Self::Gateway, Self::Function, Self::Worker, Self::Scheduler]
+    }
+}
+
+/// Error for parsing NodeRole from string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseNodeRoleError(pub String);
+
+impl std::fmt::Display for ParseNodeRoleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid node role: {}", self.0)
+    }
+}
+
+impl std::error::Error for ParseNodeRoleError {}
+
+impl FromStr for NodeRole {
+    type Err = ParseNodeRoleError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "gateway" => Ok(Self::Gateway),
+            "function" => Ok(Self::Function),
+            "worker" => Ok(Self::Worker),
+            "scheduler" => Ok(Self::Scheduler),
+            _ => Err(ParseNodeRoleError(s.to_string())),
+        }
     }
 }
 
@@ -62,9 +79,9 @@ impl LeaderRole {
         // Use a unique ID based on "FORGE" + role number
         // 0x464F524745 = "FORGE" in hex
         match self {
-            Self::Scheduler => 0x464F5247_0001,
-            Self::MetricsAggregator => 0x464F5247_0002,
-            Self::LogCompactor => 0x464F5247_0003,
+            Self::Scheduler => 0x464F_5247_0001,
+            Self::MetricsAggregator => 0x464F_5247_0002,
+            Self::LogCompactor => 0x464F_5247_0003,
         }
     }
 
@@ -76,14 +93,29 @@ impl LeaderRole {
             Self::LogCompactor => "log_compactor",
         }
     }
+}
 
-    /// Parse from string.
-    pub fn from_str(s: &str) -> Option<Self> {
+/// Error for parsing LeaderRole from string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseLeaderRoleError(pub String);
+
+impl std::fmt::Display for ParseLeaderRoleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid leader role: {}", self.0)
+    }
+}
+
+impl std::error::Error for ParseLeaderRoleError {}
+
+impl FromStr for LeaderRole {
+    type Err = ParseLeaderRoleError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
-            "scheduler" => Some(Self::Scheduler),
-            "metrics_aggregator" => Some(Self::MetricsAggregator),
-            "log_compactor" => Some(Self::LogCompactor),
-            _ => None,
+            "scheduler" => Ok(Self::Scheduler),
+            "metrics_aggregator" => Ok(Self::MetricsAggregator),
+            "log_compactor" => Ok(Self::LogCompactor),
+            _ => Err(ParseLeaderRoleError(s.to_string())),
         }
     }
 }
@@ -94,9 +126,9 @@ mod tests {
 
     #[test]
     fn test_node_role_conversion() {
-        assert_eq!(NodeRole::from_str("gateway"), Some(NodeRole::Gateway));
-        assert_eq!(NodeRole::from_str("worker"), Some(NodeRole::Worker));
-        assert_eq!(NodeRole::from_str("invalid"), None);
+        assert_eq!("gateway".parse::<NodeRole>(), Ok(NodeRole::Gateway));
+        assert_eq!("worker".parse::<NodeRole>(), Ok(NodeRole::Worker));
+        assert!("invalid".parse::<NodeRole>().is_err());
         assert_eq!(NodeRole::Gateway.as_str(), "gateway");
     }
 
@@ -122,11 +154,8 @@ mod tests {
 
     #[test]
     fn test_leader_role_conversion() {
-        assert_eq!(
-            LeaderRole::from_str("scheduler"),
-            Some(LeaderRole::Scheduler)
-        );
-        assert_eq!(LeaderRole::from_str("invalid"), None);
+        assert_eq!("scheduler".parse::<LeaderRole>(), Ok(LeaderRole::Scheduler));
+        assert!("invalid".parse::<LeaderRole>().is_err());
         assert_eq!(LeaderRole::Scheduler.as_str(), "scheduler");
     }
 }

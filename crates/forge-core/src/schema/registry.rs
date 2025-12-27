@@ -171,10 +171,12 @@ fn to_snake_case(s: &str) -> String {
 
 /// Global schema registry instance.
 /// Models register themselves here when their constructors are called.
+#[allow(dead_code)]
 static GLOBAL_REGISTRY: std::sync::LazyLock<SchemaRegistry> =
     std::sync::LazyLock::new(SchemaRegistry::new);
 
 /// Get the global schema registry.
+#[allow(dead_code)]
 pub fn global_registry() -> &'static SchemaRegistry {
     &GLOBAL_REGISTRY
 }

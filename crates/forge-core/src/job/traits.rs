@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::str::FromStr;
 use std::time::Duration;
 
 use serde::{de::DeserializeOwned, Serialize};
@@ -90,17 +91,20 @@ impl JobPriority {
             _ => Self::Critical,
         }
     }
+}
 
-    /// Parse from string.
-    pub fn from_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
+impl FromStr for JobPriority {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(match s.to_lowercase().as_str() {
             "background" => Self::Background,
             "low" => Self::Low,
             "normal" => Self::Normal,
             "high" => Self::High,
             "critical" => Self::Critical,
             _ => Self::Normal,
-        }
+        })
     }
 }
 
@@ -136,10 +140,13 @@ impl JobStatus {
             Self::DeadLetter => "dead_letter",
         }
     }
+}
 
-    /// Parse from database string.
-    pub fn from_str(s: &str) -> Self {
-        match s {
+impl FromStr for JobStatus {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(match s {
             "pending" => Self::Pending,
             "claimed" => Self::Claimed,
             "running" => Self::Running,
@@ -148,7 +155,7 @@ impl JobStatus {
             "failed" => Self::Failed,
             "dead_letter" => Self::DeadLetter,
             _ => Self::Pending,
-        }
+        })
     }
 }
 
@@ -229,9 +236,12 @@ mod tests {
     #[test]
     fn test_status_conversion() {
         assert_eq!(JobStatus::Pending.as_str(), "pending");
-        assert_eq!(JobStatus::from_str("pending"), JobStatus::Pending);
+        assert_eq!("pending".parse::<JobStatus>(), Ok(JobStatus::Pending));
         assert_eq!(JobStatus::DeadLetter.as_str(), "dead_letter");
-        assert_eq!(JobStatus::from_str("dead_letter"), JobStatus::DeadLetter);
+        assert_eq!(
+            "dead_letter".parse::<JobStatus>(),
+            Ok(JobStatus::DeadLetter)
+        );
     }
 
     #[test]

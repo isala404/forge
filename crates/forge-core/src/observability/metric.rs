@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
@@ -16,15 +17,28 @@ pub enum MetricKind {
     Summary,
 }
 
-impl MetricKind {
-    /// Convert from string.
-    pub fn from_str(s: &str) -> Option<Self> {
+/// Error for parsing MetricKind from string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseMetricKindError(pub String);
+
+impl std::fmt::Display for ParseMetricKindError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid metric kind: {}", self.0)
+    }
+}
+
+impl std::error::Error for ParseMetricKindError {}
+
+impl FromStr for MetricKind {
+    type Err = ParseMetricKindError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "counter" => Some(Self::Counter),
-            "gauge" => Some(Self::Gauge),
-            "histogram" => Some(Self::Histogram),
-            "summary" => Some(Self::Summary),
-            _ => None,
+            "counter" => Ok(Self::Counter),
+            "gauge" => Ok(Self::Gauge),
+            "histogram" => Ok(Self::Histogram),
+            "summary" => Ok(Self::Summary),
+            _ => Err(ParseMetricKindError(s.to_string())),
         }
     }
 }
@@ -189,13 +203,10 @@ mod tests {
 
     #[test]
     fn test_metric_kind_from_str() {
-        assert_eq!(MetricKind::from_str("counter"), Some(MetricKind::Counter));
-        assert_eq!(MetricKind::from_str("GAUGE"), Some(MetricKind::Gauge));
-        assert_eq!(
-            MetricKind::from_str("Histogram"),
-            Some(MetricKind::Histogram)
-        );
-        assert_eq!(MetricKind::from_str("unknown"), None);
+        assert_eq!("counter".parse::<MetricKind>(), Ok(MetricKind::Counter));
+        assert_eq!("GAUGE".parse::<MetricKind>(), Ok(MetricKind::Gauge));
+        assert_eq!("Histogram".parse::<MetricKind>(), Ok(MetricKind::Histogram));
+        assert!("unknown".parse::<MetricKind>().is_err());
     }
 
     #[test]

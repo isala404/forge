@@ -1,10 +1,7 @@
 use std::sync::Arc;
-use std::time::Duration;
 
-use forge_core::function::AuthContext;
 use forge_core::job::JobContext;
 use tokio::time::timeout;
-use uuid::Uuid;
 
 use super::queue::{JobQueue, JobRecord};
 use super::registry::{JobEntry, JobRegistry};

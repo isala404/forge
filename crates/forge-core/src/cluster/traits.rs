@@ -1,4 +1,4 @@
-use super::node::{NodeId, NodeInfo};
+use super::node::NodeId;
 use super::roles::LeaderRole;
 
 /// Information about the cluster.

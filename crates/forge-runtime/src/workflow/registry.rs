@@ -5,20 +5,23 @@ use std::sync::Arc;
 
 use forge_core::workflow::{ForgeWorkflow, WorkflowContext, WorkflowInfo};
 
+/// Type alias for boxed workflow handler function.
+pub type BoxedWorkflowHandler = Arc<
+    dyn Fn(
+            &WorkflowContext,
+            serde_json::Value,
+        )
+            -> Pin<Box<dyn Future<Output = forge_core::Result<serde_json::Value>> + Send + '_>>
+        + Send
+        + Sync,
+>;
+
 /// A registered workflow entry.
 pub struct WorkflowEntry {
     /// Workflow metadata.
     pub info: WorkflowInfo,
     /// Execution handler (takes serialized input, returns serialized output).
-    pub handler: Arc<
-        dyn Fn(
-                &WorkflowContext,
-                serde_json::Value,
-            )
-                -> Pin<Box<dyn Future<Output = forge_core::Result<serde_json::Value>> + Send + '_>>
-            + Send
-            + Sync,
-    >,
+    pub handler: BoxedWorkflowHandler,
 }
 
 impl WorkflowEntry {

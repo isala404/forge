@@ -13,38 +13,32 @@ use super::websocket::{WebSocketConfig, WebSocketMessage, WebSocketServer};
 use crate::function::{FunctionEntry, FunctionRegistry};
 
 /// Reactor configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ReactorConfig {
     pub listener: ListenerConfig,
     pub invalidation: InvalidationConfig,
     pub websocket: WebSocketConfig,
 }
 
-impl Default for ReactorConfig {
-    fn default() -> Self {
-        Self {
-            listener: ListenerConfig::default(),
-            invalidation: InvalidationConfig::default(),
-            websocket: WebSocketConfig::default(),
-        }
-    }
-}
-
 /// Active subscription with execution context.
 #[derive(Debug, Clone)]
 pub struct ActiveSubscription {
+    #[allow(dead_code)]
     pub subscription_id: SubscriptionId,
     pub session_id: SessionId,
+    #[allow(dead_code)]
     pub client_sub_id: String,
     pub query_name: String,
     pub args: serde_json::Value,
     pub last_result_hash: Option<String>,
+    #[allow(dead_code)]
     pub read_set: ReadSet,
 }
 
 /// The Reactor orchestrates real-time reactivity.
 /// It connects: ChangeListener -> InvalidationEngine -> Query Re-execution -> WebSocket Push
 pub struct Reactor {
+    #[allow(dead_code)]
     node_id: NodeId,
     db_pool: sqlx::PgPool,
     registry: FunctionRegistry,

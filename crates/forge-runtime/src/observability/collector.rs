@@ -1,7 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::sync::{mpsc, RwLock};
 
@@ -15,6 +14,7 @@ pub struct MetricsCollector {
     config: MetricsConfig,
     buffer: Arc<RwLock<VecDeque<Metric>>>,
     sender: mpsc::Sender<Vec<Metric>>,
+    #[allow(dead_code)]
     receiver: Arc<RwLock<mpsc::Receiver<Vec<Metric>>>>,
     counter: AtomicU64,
 }
@@ -66,7 +66,7 @@ impl MetricsCollector {
 
     /// Get the flush receiver for consuming batches.
     pub fn subscribe(&self) -> mpsc::Receiver<Vec<Metric>> {
-        let (tx, rx) = mpsc::channel(1024);
+        let (_tx, rx) = mpsc::channel(1024);
         // Note: In a real implementation, this would clone the sender
         // For simplicity, we're creating a new channel here
         rx
@@ -280,7 +280,6 @@ impl TraceCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use forge_core::observability::{MetricKind, SpanContext};
 
     #[tokio::test]
     async fn test_metrics_collector_record() {

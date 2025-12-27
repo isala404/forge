@@ -79,10 +79,13 @@ pub struct LogSearchQuery {
 #[derive(Debug, Deserialize)]
 pub struct TraceSearchQuery {
     /// Service filter.
+    #[allow(dead_code)]
     pub service: Option<String>,
     /// Operation filter.
+    #[allow(dead_code)]
     pub operation: Option<String>,
     /// Minimum duration in ms.
+    #[allow(dead_code)]
     pub min_duration: Option<u64>,
     /// Only errors.
     pub errors_only: Option<bool>,
