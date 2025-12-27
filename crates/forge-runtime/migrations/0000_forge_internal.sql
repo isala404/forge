@@ -247,3 +247,52 @@ BEGIN
     EXECUTE format('DROP TRIGGER IF EXISTS %I ON %I', trigger_name, table_name);
 END;
 $$ LANGUAGE plpgsql;
+
+-- Observability: Alert Rules
+CREATE TABLE IF NOT EXISTS forge_alert_rules (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(255) NOT NULL UNIQUE,
+    description TEXT,
+    metric_name VARCHAR(255) NOT NULL,
+    condition VARCHAR(32) NOT NULL,  -- 'gt', 'gte', 'lt', 'lte', 'eq', 'ne'
+    threshold DOUBLE PRECISION NOT NULL,
+    duration_seconds INTEGER NOT NULL DEFAULT 0,  -- Condition must be true for this long
+    severity VARCHAR(32) NOT NULL DEFAULT 'warning',  -- 'info', 'warning', 'critical'
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    labels JSONB DEFAULT '{}',  -- Labels to match on metric
+    notification_channels TEXT[] DEFAULT '{}',  -- ['email', 'slack', 'webhook']
+    cooldown_seconds INTEGER NOT NULL DEFAULT 300,  -- Wait this long before re-alerting
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_forge_alert_rules_enabled
+    ON forge_alert_rules(enabled)
+    WHERE enabled = TRUE;
+
+-- Observability: Active Alerts
+CREATE TABLE IF NOT EXISTS forge_alerts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    rule_id UUID NOT NULL REFERENCES forge_alert_rules(id) ON DELETE CASCADE,
+    rule_name VARCHAR(255) NOT NULL,
+    metric_value DOUBLE PRECISION NOT NULL,
+    threshold DOUBLE PRECISION NOT NULL,
+    severity VARCHAR(32) NOT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'firing',  -- 'firing', 'resolved'
+    triggered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    resolved_at TIMESTAMPTZ,
+    acknowledged_at TIMESTAMPTZ,
+    acknowledged_by VARCHAR(255),
+    labels JSONB DEFAULT '{}',
+    annotations JSONB DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_forge_alerts_status
+    ON forge_alerts(status)
+    WHERE status = 'firing';
+
+CREATE INDEX IF NOT EXISTS idx_forge_alerts_rule_id
+    ON forge_alerts(rule_id);
+
+CREATE INDEX IF NOT EXISTS idx_forge_alerts_triggered_at
+    ON forge_alerts(triggered_at DESC);

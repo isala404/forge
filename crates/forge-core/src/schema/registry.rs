@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
 
+use super::function::FunctionDef;
 use super::model::TableDef;
 
 /// Global registry of all schema definitions.
@@ -11,6 +12,9 @@ pub struct SchemaRegistry {
 
     /// All registered enums by name.
     enums: RwLock<HashMap<String, EnumDef>>,
+
+    /// All registered functions by name.
+    functions: RwLock<HashMap<String, FunctionDef>>,
 }
 
 impl SchemaRegistry {
@@ -19,6 +23,7 @@ impl SchemaRegistry {
         Self {
             tables: RwLock::new(HashMap::new()),
             enums: RwLock::new(HashMap::new()),
+            functions: RwLock::new(HashMap::new()),
         }
     }
 
@@ -34,6 +39,12 @@ impl SchemaRegistry {
         enums.insert(enum_def.name.clone(), enum_def);
     }
 
+    /// Register a function definition.
+    pub fn register_function(&self, func: FunctionDef) {
+        let mut functions = self.functions.write().unwrap();
+        functions.insert(func.name.clone(), func);
+    }
+
     /// Get a table by name.
     pub fn get_table(&self, name: &str) -> Option<TableDef> {
         let tables = self.tables.read().unwrap();
@@ -44,6 +55,12 @@ impl SchemaRegistry {
     pub fn get_enum(&self, name: &str) -> Option<EnumDef> {
         let enums = self.enums.read().unwrap();
         enums.get(name).cloned()
+    }
+
+    /// Get a function by name.
+    pub fn get_function(&self, name: &str) -> Option<FunctionDef> {
+        let functions = self.functions.read().unwrap();
+        functions.get(name).cloned()
     }
 
     /// Get all registered tables.
@@ -58,10 +75,17 @@ impl SchemaRegistry {
         enums.values().cloned().collect()
     }
 
+    /// Get all registered functions.
+    pub fn all_functions(&self) -> Vec<FunctionDef> {
+        let functions = self.functions.read().unwrap();
+        functions.values().cloned().collect()
+    }
+
     /// Clear all registrations (useful for testing).
     pub fn clear(&self) {
         self.tables.write().unwrap().clear();
         self.enums.write().unwrap().clear();
+        self.functions.write().unwrap().clear();
     }
 }
 

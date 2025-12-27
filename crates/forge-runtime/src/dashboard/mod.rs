@@ -6,7 +6,7 @@ pub use api::DashboardApi;
 pub use assets::DashboardAssets;
 pub use pages::DashboardPages;
 
-use axum::{routing::get, Router};
+use axum::{routing::{get, post}, Router};
 use sqlx::PgPool;
 
 /// Dashboard configuration.
@@ -59,6 +59,7 @@ pub fn create_dashboard_router(state: DashboardState) -> Router {
         .route("/alerts", get(pages::alerts))
         .route("/jobs", get(pages::jobs))
         .route("/workflows", get(pages::workflows))
+        .route("/crons", get(pages::crons))
         .route("/cluster", get(pages::cluster))
         // Static assets
         .route("/assets/styles.css", get(assets::styles_css))
@@ -83,12 +84,35 @@ pub fn create_api_router(state: DashboardState) -> Router {
         // Alerts API
         .route("/alerts", get(api::list_alerts))
         .route("/alerts/active", get(api::get_active_alerts))
+        .route(
+            "/alerts/{id}/acknowledge",
+            post(api::acknowledge_alert),
+        )
+        .route("/alerts/{id}/resolve", post(api::resolve_alert))
+        // Alert Rules API
+        .route(
+            "/alerts/rules",
+            get(api::list_alert_rules).post(api::create_alert_rule),
+        )
+        .route(
+            "/alerts/rules/{id}",
+            get(api::get_alert_rule)
+                .put(api::update_alert_rule)
+                .delete(api::delete_alert_rule),
+        )
         // Jobs API
         .route("/jobs", get(api::list_jobs))
         .route("/jobs/stats", get(api::get_job_stats))
         // Workflows API
         .route("/workflows", get(api::list_workflows))
         .route("/workflows/stats", get(api::get_workflow_stats))
+        // Crons API
+        .route("/crons", get(api::list_crons))
+        .route("/crons/stats", get(api::get_cron_stats))
+        .route("/crons/history", get(api::get_cron_history))
+        .route("/crons/{name}/trigger", post(api::trigger_cron))
+        .route("/crons/{name}/pause", post(api::pause_cron))
+        .route("/crons/{name}/resume", post(api::resume_cron))
         // Cluster API
         .route("/cluster/nodes", get(api::list_nodes))
         .route("/cluster/health", get(api::get_cluster_health))

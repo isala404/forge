@@ -1,4 +1,5 @@
 mod auth;
+mod metrics;
 mod request;
 mod response;
 mod rpc;
@@ -7,6 +8,7 @@ mod tracing;
 mod websocket;
 
 pub use auth::{AuthConfig, AuthMiddleware};
+pub use metrics::{metrics_middleware, MetricsState};
 pub use request::RpcRequest;
 pub use response::{RpcError, RpcResponse};
 pub use rpc::RpcHandler;

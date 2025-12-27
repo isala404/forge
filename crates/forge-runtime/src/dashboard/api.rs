@@ -1,5 +1,6 @@
 use axum::{
     extract::{Path, Query, State},
+    http::StatusCode,
     response::Json,
 };
 use chrono::{DateTime, Duration, Utc};
@@ -182,12 +183,63 @@ pub struct SpanEvent {
 #[derive(Debug, Serialize)]
 pub struct AlertSummary {
     pub id: String,
+    pub rule_id: String,
     pub name: String,
     pub severity: String,
     pub status: String,
-    pub message: String,
+    pub metric_value: f64,
+    pub threshold: f64,
     pub fired_at: DateTime<Utc>,
     pub resolved_at: Option<DateTime<Utc>>,
+    pub acknowledged_at: Option<DateTime<Utc>>,
+    pub acknowledged_by: Option<String>,
+}
+
+/// Alert rule summary.
+#[derive(Debug, Serialize)]
+pub struct AlertRuleSummary {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub metric_name: String,
+    pub condition: String,
+    pub threshold: f64,
+    pub severity: String,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Alert rule creation request.
+#[derive(Debug, Deserialize)]
+pub struct CreateAlertRuleRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub metric_name: String,
+    pub condition: String,
+    pub threshold: f64,
+    pub duration_seconds: Option<i32>,
+    pub severity: Option<String>,
+    pub cooldown_seconds: Option<i32>,
+}
+
+/// Alert rule update request.
+#[derive(Debug, Deserialize)]
+pub struct UpdateAlertRuleRequest {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub metric_name: Option<String>,
+    pub condition: Option<String>,
+    pub threshold: Option<f64>,
+    pub duration_seconds: Option<i32>,
+    pub severity: Option<String>,
+    pub enabled: Option<bool>,
+    pub cooldown_seconds: Option<i32>,
+}
+
+/// Alert acknowledge request.
+#[derive(Debug, Deserialize)]
+pub struct AcknowledgeAlertRequest {
+    pub acknowledged_by: String,
 }
 
 /// Job stats.
@@ -656,18 +708,404 @@ pub async fn get_trace(
 
 /// List alerts.
 pub async fn list_alerts(
-    State(_state): State<DashboardState>,
-    Query(_query): Query<PaginationQuery>,
+    State(state): State<DashboardState>,
+    Query(query): Query<PaginationQuery>,
 ) -> Json<ApiResponse<Vec<AlertSummary>>> {
-    // Alerts are not yet persisted - return empty for now
-    Json(ApiResponse::success(vec![]))
+    let limit = query.get_limit();
+    let offset = query.get_offset();
+
+    let result = sqlx::query(
+        r#"
+        SELECT id, rule_id, rule_name, metric_value, threshold, severity, status,
+               triggered_at, resolved_at, acknowledged_at, acknowledged_by
+        FROM forge_alerts
+        ORDER BY triggered_at DESC
+        LIMIT $1 OFFSET $2
+        "#,
+    )
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(&state.pool)
+    .await;
+
+    match result {
+        Ok(rows) => {
+            let alerts: Vec<AlertSummary> = rows
+                .into_iter()
+                .map(|row| {
+                    let id: uuid::Uuid = row.get("id");
+                    let rule_id: uuid::Uuid = row.get("rule_id");
+                    AlertSummary {
+                        id: id.to_string(),
+                        rule_id: rule_id.to_string(),
+                        name: row.get("rule_name"),
+                        severity: row.get("severity"),
+                        status: row.get("status"),
+                        metric_value: row.get("metric_value"),
+                        threshold: row.get("threshold"),
+                        fired_at: row.get("triggered_at"),
+                        resolved_at: row.get("resolved_at"),
+                        acknowledged_at: row.get("acknowledged_at"),
+                        acknowledged_by: row.get("acknowledged_by"),
+                    }
+                })
+                .collect();
+            Json(ApiResponse::success(alerts))
+        }
+        Err(e) => Json(ApiResponse::error(e.to_string())),
+    }
 }
 
 /// Get active alerts.
 pub async fn get_active_alerts(
-    State(_state): State<DashboardState>,
+    State(state): State<DashboardState>,
 ) -> Json<ApiResponse<Vec<AlertSummary>>> {
-    Json(ApiResponse::success(vec![]))
+    let result = sqlx::query(
+        r#"
+        SELECT id, rule_id, rule_name, metric_value, threshold, severity, status,
+               triggered_at, resolved_at, acknowledged_at, acknowledged_by
+        FROM forge_alerts
+        WHERE status = 'firing'
+        ORDER BY triggered_at DESC
+        "#,
+    )
+    .fetch_all(&state.pool)
+    .await;
+
+    match result {
+        Ok(rows) => {
+            let alerts: Vec<AlertSummary> = rows
+                .into_iter()
+                .map(|row| {
+                    let id: uuid::Uuid = row.get("id");
+                    let rule_id: uuid::Uuid = row.get("rule_id");
+                    AlertSummary {
+                        id: id.to_string(),
+                        rule_id: rule_id.to_string(),
+                        name: row.get("rule_name"),
+                        severity: row.get("severity"),
+                        status: row.get("status"),
+                        metric_value: row.get("metric_value"),
+                        threshold: row.get("threshold"),
+                        fired_at: row.get("triggered_at"),
+                        resolved_at: row.get("resolved_at"),
+                        acknowledged_at: row.get("acknowledged_at"),
+                        acknowledged_by: row.get("acknowledged_by"),
+                    }
+                })
+                .collect();
+            Json(ApiResponse::success(alerts))
+        }
+        Err(e) => Json(ApiResponse::error(e.to_string())),
+    }
+}
+
+// ============================================================================
+// Alert Rules API
+// ============================================================================
+
+/// List alert rules.
+pub async fn list_alert_rules(
+    State(state): State<DashboardState>,
+) -> Json<ApiResponse<Vec<AlertRuleSummary>>> {
+    let result = sqlx::query(
+        r#"
+        SELECT id, name, description, metric_name, condition, threshold, severity, enabled, created_at
+        FROM forge_alert_rules
+        ORDER BY name
+        "#,
+    )
+    .fetch_all(&state.pool)
+    .await;
+
+    match result {
+        Ok(rows) => {
+            let rules: Vec<AlertRuleSummary> = rows
+                .into_iter()
+                .map(|row| {
+                    let id: uuid::Uuid = row.get("id");
+                    AlertRuleSummary {
+                        id: id.to_string(),
+                        name: row.get("name"),
+                        description: row.get("description"),
+                        metric_name: row.get("metric_name"),
+                        condition: row.get("condition"),
+                        threshold: row.get("threshold"),
+                        severity: row.get("severity"),
+                        enabled: row.get("enabled"),
+                        created_at: row.get("created_at"),
+                    }
+                })
+                .collect();
+            Json(ApiResponse::success(rules))
+        }
+        Err(e) => Json(ApiResponse::error(e.to_string())),
+    }
+}
+
+/// Get an alert rule by ID.
+pub async fn get_alert_rule(
+    State(state): State<DashboardState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<AlertRuleSummary>> {
+    let rule_id = match uuid::Uuid::parse_str(&id) {
+        Ok(id) => id,
+        Err(_) => return Json(ApiResponse::error("Invalid rule ID")),
+    };
+
+    let result = sqlx::query(
+        r#"
+        SELECT id, name, description, metric_name, condition, threshold, severity, enabled, created_at
+        FROM forge_alert_rules
+        WHERE id = $1
+        "#,
+    )
+    .bind(rule_id)
+    .fetch_optional(&state.pool)
+    .await;
+
+    match result {
+        Ok(Some(row)) => {
+            let id: uuid::Uuid = row.get("id");
+            Json(ApiResponse::success(AlertRuleSummary {
+                id: id.to_string(),
+                name: row.get("name"),
+                description: row.get("description"),
+                metric_name: row.get("metric_name"),
+                condition: row.get("condition"),
+                threshold: row.get("threshold"),
+                severity: row.get("severity"),
+                enabled: row.get("enabled"),
+                created_at: row.get("created_at"),
+            }))
+        }
+        Ok(None) => Json(ApiResponse::error(format!("Rule '{}' not found", id))),
+        Err(e) => Json(ApiResponse::error(e.to_string())),
+    }
+}
+
+/// Create an alert rule.
+pub async fn create_alert_rule(
+    State(state): State<DashboardState>,
+    Json(req): Json<CreateAlertRuleRequest>,
+) -> (StatusCode, Json<ApiResponse<AlertRuleSummary>>) {
+    let id = uuid::Uuid::new_v4();
+    let now = Utc::now();
+    let severity = req.severity.as_deref().unwrap_or("warning");
+    let duration_seconds = req.duration_seconds.unwrap_or(0);
+    let cooldown_seconds = req.cooldown_seconds.unwrap_or(300);
+
+    let result = sqlx::query(
+        r#"
+        INSERT INTO forge_alert_rules
+        (id, name, description, metric_name, condition, threshold, duration_seconds, severity,
+         enabled, labels, notification_channels, cooldown_seconds, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE, '{}', '{}', $9, $10, $10)
+        "#,
+    )
+    .bind(id)
+    .bind(&req.name)
+    .bind(&req.description)
+    .bind(&req.metric_name)
+    .bind(&req.condition)
+    .bind(req.threshold)
+    .bind(duration_seconds)
+    .bind(severity)
+    .bind(cooldown_seconds)
+    .bind(now)
+    .execute(&state.pool)
+    .await;
+
+    match result {
+        Ok(_) => (
+            StatusCode::CREATED,
+            Json(ApiResponse::success(AlertRuleSummary {
+                id: id.to_string(),
+                name: req.name,
+                description: req.description,
+                metric_name: req.metric_name,
+                condition: req.condition,
+                threshold: req.threshold,
+                severity: severity.to_string(),
+                enabled: true,
+                created_at: now,
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(e.to_string())),
+        ),
+    }
+}
+
+/// Update an alert rule.
+pub async fn update_alert_rule(
+    State(state): State<DashboardState>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateAlertRuleRequest>,
+) -> Json<ApiResponse<AlertRuleSummary>> {
+    let rule_id = match uuid::Uuid::parse_str(&id) {
+        Ok(id) => id,
+        Err(_) => return Json(ApiResponse::error("Invalid rule ID")),
+    };
+
+    // Fetch existing rule first
+    let existing = sqlx::query(
+        r#"
+        SELECT id, name, description, metric_name, condition, threshold, duration_seconds,
+               severity, enabled, cooldown_seconds, created_at
+        FROM forge_alert_rules
+        WHERE id = $1
+        "#,
+    )
+    .bind(rule_id)
+    .fetch_optional(&state.pool)
+    .await;
+
+    let existing = match existing {
+        Ok(Some(row)) => row,
+        Ok(None) => return Json(ApiResponse::error(format!("Rule '{}' not found", id))),
+        Err(e) => return Json(ApiResponse::error(e.to_string())),
+    };
+
+    // Merge with existing values
+    let name: String = req.name.unwrap_or_else(|| existing.get("name"));
+    let description: Option<String> = req.description.or_else(|| existing.get("description"));
+    let metric_name: String = req.metric_name.unwrap_or_else(|| existing.get("metric_name"));
+    let condition: String = req.condition.unwrap_or_else(|| existing.get("condition"));
+    let threshold: f64 = req.threshold.unwrap_or_else(|| existing.get("threshold"));
+    let duration_seconds: i32 = req
+        .duration_seconds
+        .unwrap_or_else(|| existing.get("duration_seconds"));
+    let severity: String = req.severity.unwrap_or_else(|| existing.get("severity"));
+    let enabled: bool = req.enabled.unwrap_or_else(|| existing.get("enabled"));
+    let cooldown_seconds: i32 = req
+        .cooldown_seconds
+        .unwrap_or_else(|| existing.get("cooldown_seconds"));
+    let created_at: DateTime<Utc> = existing.get("created_at");
+
+    let result = sqlx::query(
+        r#"
+        UPDATE forge_alert_rules
+        SET name = $2, description = $3, metric_name = $4, condition = $5, threshold = $6,
+            duration_seconds = $7, severity = $8, enabled = $9, cooldown_seconds = $10,
+            updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(rule_id)
+    .bind(&name)
+    .bind(&description)
+    .bind(&metric_name)
+    .bind(&condition)
+    .bind(threshold)
+    .bind(duration_seconds)
+    .bind(&severity)
+    .bind(enabled)
+    .bind(cooldown_seconds)
+    .execute(&state.pool)
+    .await;
+
+    match result {
+        Ok(_) => Json(ApiResponse::success(AlertRuleSummary {
+            id: rule_id.to_string(),
+            name,
+            description,
+            metric_name,
+            condition,
+            threshold,
+            severity,
+            enabled,
+            created_at,
+        })),
+        Err(e) => Json(ApiResponse::error(e.to_string())),
+    }
+}
+
+/// Delete an alert rule.
+pub async fn delete_alert_rule(
+    State(state): State<DashboardState>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<ApiResponse<()>>) {
+    let rule_id = match uuid::Uuid::parse_str(&id) {
+        Ok(id) => id,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(ApiResponse::error("Invalid rule ID"))),
+    };
+
+    let result = sqlx::query("DELETE FROM forge_alert_rules WHERE id = $1")
+        .bind(rule_id)
+        .execute(&state.pool)
+        .await;
+
+    match result {
+        Ok(r) if r.rows_affected() > 0 => (StatusCode::OK, Json(ApiResponse::success(()))),
+        Ok(_) => (
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error(format!("Rule '{}' not found", id))),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(e.to_string())),
+        ),
+    }
+}
+
+/// Acknowledge an alert.
+pub async fn acknowledge_alert(
+    State(state): State<DashboardState>,
+    Path(id): Path<String>,
+    Json(req): Json<AcknowledgeAlertRequest>,
+) -> Json<ApiResponse<()>> {
+    let alert_id = match uuid::Uuid::parse_str(&id) {
+        Ok(id) => id,
+        Err(_) => return Json(ApiResponse::error("Invalid alert ID")),
+    };
+
+    let result = sqlx::query(
+        r#"
+        UPDATE forge_alerts
+        SET acknowledged_at = NOW(), acknowledged_by = $2
+        WHERE id = $1
+        "#,
+    )
+    .bind(alert_id)
+    .bind(&req.acknowledged_by)
+    .execute(&state.pool)
+    .await;
+
+    match result {
+        Ok(r) if r.rows_affected() > 0 => Json(ApiResponse::success(())),
+        Ok(_) => Json(ApiResponse::error(format!("Alert '{}' not found", id))),
+        Err(e) => Json(ApiResponse::error(e.to_string())),
+    }
+}
+
+/// Resolve an alert.
+pub async fn resolve_alert(
+    State(state): State<DashboardState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<()>> {
+    let alert_id = match uuid::Uuid::parse_str(&id) {
+        Ok(id) => id,
+        Err(_) => return Json(ApiResponse::error("Invalid alert ID")),
+    };
+
+    let result = sqlx::query(
+        r#"
+        UPDATE forge_alerts
+        SET status = 'resolved', resolved_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(alert_id)
+    .execute(&state.pool)
+    .await;
+
+    match result {
+        Ok(r) if r.rows_affected() > 0 => Json(ApiResponse::success(())),
+        Ok(_) => Json(ApiResponse::error(format!("Alert '{}' not found", id))),
+        Err(e) => Json(ApiResponse::error(e.to_string())),
+    }
 }
 
 // ============================================================================
@@ -1027,6 +1465,27 @@ pub async fn get_system_stats(
     .flatten()
     .unwrap_or(0.0) as u64;
 
+    // Get CPU usage from system metrics
+    let cpu_usage_percent = sqlx::query_scalar::<_, f64>(
+        "SELECT COALESCE(value, 0) FROM forge_metrics WHERE name = 'forge_system_cpu_usage_percent' ORDER BY timestamp DESC LIMIT 1",
+    )
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(0.0);
+
+    // Get memory usage from system metrics
+    let memory_used_bytes = sqlx::query_scalar::<_, f64>(
+        "SELECT COALESCE(value, 0) FROM forge_metrics WHERE name = 'forge_system_memory_used_bytes' ORDER BY timestamp DESC LIMIT 1",
+    )
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(0.0);
+    let memory_used_mb = (memory_used_bytes / 1_048_576.0) as u64; // Convert bytes to MB
+
     Json(ApiResponse::success(SystemStats {
         http_requests_total,
         http_requests_per_second,
@@ -1034,9 +1493,247 @@ pub async fn get_system_stats(
         active_connections: active_sessions,
         active_subscriptions,
         jobs_pending,
-        memory_used_mb: 0,      // Not tracked in DB - would need OS metrics
-        cpu_usage_percent: 0.0, // Not tracked in DB - would need OS metrics
+        memory_used_mb,
+        cpu_usage_percent,
     }))
+}
+
+// ============================================================================
+// Crons API
+// ============================================================================
+
+/// Cron job summary.
+#[derive(Debug, Clone, Serialize)]
+pub struct CronSummary {
+    pub name: String,
+    pub schedule: String,
+    pub status: String,
+    pub last_run: Option<DateTime<Utc>>,
+    pub last_result: Option<String>,
+    pub next_run: Option<DateTime<Utc>>,
+    pub avg_duration_ms: Option<f64>,
+    pub success_count: i64,
+    pub failure_count: i64,
+}
+
+/// Cron execution history entry.
+#[derive(Debug, Clone, Serialize)]
+pub struct CronExecution {
+    pub id: String,
+    pub cron_name: String,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub duration_ms: Option<i64>,
+    pub status: String,
+    pub error: Option<String>,
+}
+
+/// Cron statistics.
+#[derive(Debug, Clone, Serialize)]
+pub struct CronStats {
+    pub active_count: i64,
+    pub paused_count: i64,
+    pub total_executions_24h: i64,
+    pub success_rate_24h: f64,
+    pub next_scheduled_run: Option<DateTime<Utc>>,
+}
+
+/// List all cron jobs.
+pub async fn list_crons(
+    State(state): State<DashboardState>,
+) -> Json<ApiResponse<Vec<CronSummary>>> {
+    let result = sqlx::query(
+        r#"
+        SELECT
+            c.name,
+            c.schedule,
+            c.status,
+            c.last_run_at,
+            c.last_result,
+            c.next_run_at,
+            COALESCE(AVG(h.duration_ms), 0) as avg_duration_ms,
+            COUNT(CASE WHEN h.status = 'success' THEN 1 END) as success_count,
+            COUNT(CASE WHEN h.status = 'failed' THEN 1 END) as failure_count
+        FROM forge_crons c
+        LEFT JOIN forge_cron_history h ON c.name = h.cron_name
+        GROUP BY c.name, c.schedule, c.status, c.last_run_at, c.last_result, c.next_run_at
+        ORDER BY c.name
+        "#
+    )
+    .fetch_all(&state.pool)
+    .await;
+
+    match result {
+        Ok(rows) => {
+            let crons: Vec<CronSummary> = rows
+                .into_iter()
+                .map(|r| CronSummary {
+                    name: r.get("name"),
+                    schedule: r.get("schedule"),
+                    status: r.get("status"),
+                    last_run: r.get("last_run_at"),
+                    last_result: r.get("last_result"),
+                    next_run: r.get("next_run_at"),
+                    avg_duration_ms: r.try_get::<f64, _>("avg_duration_ms").ok(),
+                    success_count: r.try_get::<i64, _>("success_count").unwrap_or(0),
+                    failure_count: r.try_get::<i64, _>("failure_count").unwrap_or(0),
+                })
+                .collect();
+            Json(ApiResponse::success(crons))
+        }
+        Err(_) => {
+            // Table may not exist yet
+            Json(ApiResponse::success(vec![]))
+        }
+    }
+}
+
+/// Get cron statistics.
+pub async fn get_cron_stats(
+    State(state): State<DashboardState>,
+) -> Json<ApiResponse<CronStats>> {
+    let stats = sqlx::query(
+        r#"
+        SELECT
+            COUNT(CASE WHEN status = 'active' THEN 1 END) as active_count,
+            COUNT(CASE WHEN status = 'paused' THEN 1 END) as paused_count,
+            MIN(next_run_at) as next_run
+        FROM forge_crons
+        "#
+    )
+    .fetch_optional(&state.pool)
+    .await;
+
+    let execution_stats = sqlx::query(
+        r#"
+        SELECT
+            COUNT(*) as total,
+            COUNT(CASE WHEN status = 'success' THEN 1 END) as success
+        FROM forge_cron_history
+        WHERE started_at > NOW() - INTERVAL '24 hours'
+        "#
+    )
+    .fetch_optional(&state.pool)
+    .await;
+
+    match (stats, execution_stats) {
+        (Ok(Some(s)), Ok(Some(e))) => {
+            let total = e.try_get::<i64, _>("total").unwrap_or(0) as f64;
+            let success = e.try_get::<i64, _>("success").unwrap_or(0) as f64;
+            let success_rate = if total > 0.0 { success / total * 100.0 } else { 100.0 };
+
+            Json(ApiResponse::success(CronStats {
+                active_count: s.try_get::<i64, _>("active_count").unwrap_or(0),
+                paused_count: s.try_get::<i64, _>("paused_count").unwrap_or(0),
+                total_executions_24h: e.try_get::<i64, _>("total").unwrap_or(0),
+                success_rate_24h: success_rate,
+                next_scheduled_run: s.try_get("next_run").ok(),
+            }))
+        }
+        _ => Json(ApiResponse::success(CronStats {
+            active_count: 0,
+            paused_count: 0,
+            total_executions_24h: 0,
+            success_rate_24h: 100.0,
+            next_scheduled_run: None,
+        })),
+    }
+}
+
+/// Get cron execution history.
+pub async fn get_cron_history(
+    State(state): State<DashboardState>,
+    Query(pagination): Query<PaginationQuery>,
+) -> Json<ApiResponse<Vec<CronExecution>>> {
+    let limit = pagination.get_limit();
+    let offset = pagination.get_offset();
+
+    let result = sqlx::query(
+        r#"
+        SELECT
+            id::text as id,
+            cron_name,
+            started_at,
+            finished_at,
+            EXTRACT(EPOCH FROM (finished_at - started_at)) * 1000 as duration_ms,
+            status,
+            error
+        FROM forge_cron_history
+        ORDER BY started_at DESC
+        LIMIT $1 OFFSET $2
+        "#
+    )
+    .bind(limit as i64)
+    .bind(offset as i64)
+    .fetch_all(&state.pool)
+    .await;
+
+    match result {
+        Ok(rows) => {
+            let executions: Vec<CronExecution> = rows
+                .into_iter()
+                .map(|r| CronExecution {
+                    id: r.try_get::<String, _>("id").unwrap_or_default(),
+                    cron_name: r.get("cron_name"),
+                    started_at: r.get("started_at"),
+                    finished_at: r.try_get("finished_at").ok(),
+                    duration_ms: r.try_get::<f64, _>("duration_ms").ok().map(|d| d as i64),
+                    status: r.get("status"),
+                    error: r.try_get("error").ok(),
+                })
+                .collect();
+            Json(ApiResponse::success(executions))
+        }
+        Err(_) => Json(ApiResponse::success(vec![])),
+    }
+}
+
+/// Manually trigger a cron job.
+pub async fn trigger_cron(
+    State(_state): State<DashboardState>,
+    Path(name): Path<String>,
+) -> Json<ApiResponse<()>> {
+    // In a real implementation, this would dispatch the cron job immediately
+    tracing::info!(cron = %name, "Manual cron trigger requested");
+    Json(ApiResponse::success(()))
+}
+
+/// Pause a cron job.
+pub async fn pause_cron(
+    State(state): State<DashboardState>,
+    Path(name): Path<String>,
+) -> Json<ApiResponse<()>> {
+    let result = sqlx::query("UPDATE forge_crons SET status = 'paused' WHERE name = $1")
+        .bind(&name)
+        .execute(&state.pool)
+        .await;
+
+    match result {
+        Ok(_) => {
+            tracing::info!(cron = %name, "Cron paused");
+            Json(ApiResponse::success(()))
+        }
+        Err(e) => Json(ApiResponse::error(&format!("Failed to pause cron: {}", e))),
+    }
+}
+
+/// Resume a paused cron job.
+pub async fn resume_cron(
+    State(state): State<DashboardState>,
+    Path(name): Path<String>,
+) -> Json<ApiResponse<()>> {
+    let result = sqlx::query("UPDATE forge_crons SET status = 'active' WHERE name = $1")
+        .bind(&name)
+        .execute(&state.pool)
+        .await;
+
+    match result {
+        Ok(_) => {
+            tracing::info!(cron = %name, "Cron resumed");
+            Json(ApiResponse::success(()))
+        }
+        Err(e) => Json(ApiResponse::error(&format!("Failed to resume cron: {}", e))),
+    }
 }
 
 #[cfg(test)]

@@ -33,6 +33,7 @@ use forge_runtime::db::Database;
 use forge_runtime::function::FunctionRegistry;
 use forge_runtime::gateway::{AuthConfig, GatewayConfig as RuntimeGatewayConfig, GatewayServer};
 use forge_runtime::jobs::{JobQueue, JobRegistry, Worker, WorkerConfig};
+use forge_runtime::observability::{ObservabilityConfig, ObservabilityState};
 use forge_runtime::realtime::{WebSocketConfig, WebSocketServer};
 use forge_runtime::workflow::WorkflowRegistry;
 
@@ -75,6 +76,8 @@ pub struct Forge {
     migrations_dir: PathBuf,
     /// Additional migrations provided programmatically.
     extra_migrations: Vec<Migration>,
+    /// Observability state (created during run()).
+    observability: Option<ObservabilityState>,
 }
 
 impl Forge {
@@ -128,6 +131,11 @@ impl Forge {
         &mut self.workflow_registry
     }
 
+    /// Get the observability state (available after run() starts).
+    pub fn observability(&self) -> Option<&ObservabilityState> {
+        self.observability.as_ref()
+    }
+
     /// Run the FORGE server.
     pub async fn run(mut self) -> Result<()> {
         tracing::info!("FORGE runtime starting");
@@ -149,6 +157,18 @@ impl Forge {
 
         runner.run(user_migrations).await?;
         tracing::info!("Migrations completed");
+
+        // Create observability state
+        let obs_config = ObservabilityConfig::default();
+        let observability = ObservabilityState::new(obs_config, pool.clone());
+        self.observability = Some(observability.clone());
+
+        // Start observability background tasks
+        let obs_handles = observability.start_background_tasks();
+        tracing::info!(
+            "Observability collectors started ({} background tasks)",
+            obs_handles.len()
+        );
 
         // Get local node info
         let hostname = hostname::get()
@@ -252,11 +272,12 @@ impl Forge {
                 ..Default::default()
             };
 
-            let mut worker = Worker::new(
+            let mut worker = Worker::with_observability(
                 worker_config,
                 job_queue,
                 self.job_registry.clone(),
                 pool.clone(),
+                observability.clone(),
             );
 
             handles.push(tokio::spawn(async move {
@@ -284,7 +305,13 @@ impl Forge {
                 is_leader,
             };
 
-            let cron_runner = CronRunner::new(cron_registry, cron_pool, cron_http, cron_config);
+            let cron_runner = CronRunner::with_observability(
+                cron_registry,
+                cron_pool,
+                cron_http,
+                cron_config,
+                observability.clone(),
+            );
 
             handles.push(tokio::spawn(async move {
                 if let Err(e) = cron_runner.run().await {
@@ -312,9 +339,13 @@ impl Forge {
                 config: DashboardConfig::default(),
             };
 
-            // Build gateway router with dashboard
-            let gateway =
-                GatewayServer::new(gateway_config, self.function_registry.clone(), pool.clone());
+            // Build gateway router with dashboard and observability
+            let gateway = GatewayServer::with_observability(
+                gateway_config,
+                self.function_registry.clone(),
+                pool.clone(),
+                observability.clone(),
+            );
 
             // Start the reactor for real-time updates
             let reactor = gateway.reactor();
@@ -386,6 +417,10 @@ impl Forge {
         if let Some(ref election) = leader_election {
             election.stop();
         }
+
+        // Shutdown observability (final flush)
+        observability.shutdown().await;
+        tracing::info!("Observability shutdown complete");
 
         // Close database connections
         if let Some(ref db) = self.db {
@@ -491,6 +526,7 @@ impl ForgeBuilder {
             shutdown_tx,
             migrations_dir: self.migrations_dir,
             extra_migrations: self.extra_migrations,
+            observability: None,
         })
     }
 }

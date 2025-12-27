@@ -13,10 +13,12 @@ use tower_http::cors::{Any, CorsLayer};
 use forge_core::cluster::NodeId;
 
 use super::auth::{auth_middleware, AuthConfig, AuthMiddleware};
+use super::metrics::{metrics_middleware, MetricsState};
 use super::rpc::{rpc_function_handler, rpc_handler, RpcHandler};
 use super::tracing::TracingState;
 use super::websocket::{ws_handler, WsState};
 use crate::function::FunctionRegistry;
+use crate::observability::ObservabilityState;
 use crate::realtime::{Reactor, ReactorConfig};
 
 /// Gateway server configuration.
@@ -62,6 +64,7 @@ pub struct GatewayServer {
     registry: FunctionRegistry,
     db_pool: sqlx::PgPool,
     reactor: Arc<Reactor>,
+    observability: Option<ObservabilityState>,
 }
 
 impl GatewayServer {
@@ -80,6 +83,31 @@ impl GatewayServer {
             registry,
             db_pool,
             reactor,
+            observability: None,
+        }
+    }
+
+    /// Create a new gateway server with observability.
+    pub fn with_observability(
+        config: GatewayConfig,
+        registry: FunctionRegistry,
+        db_pool: sqlx::PgPool,
+        observability: ObservabilityState,
+    ) -> Self {
+        let node_id = NodeId::new();
+        let reactor = Arc::new(Reactor::new(
+            node_id,
+            db_pool.clone(),
+            registry.clone(),
+            ReactorConfig::default(),
+        ));
+
+        Self {
+            config,
+            registry,
+            db_pool,
+            reactor,
+            observability: Some(observability),
         }
     }
 
@@ -122,7 +150,7 @@ impl GatewayServer {
         let ws_state = Arc::new(WsState::new(self.reactor.clone()));
 
         // Build the main router with middleware
-        let main_router = Router::new()
+        let mut main_router = Router::new()
             // Health check endpoint
             .route("/health", get(health_handler))
             // RPC endpoint
@@ -130,17 +158,28 @@ impl GatewayServer {
             // REST-style function endpoint
             .route("/rpc/{function}", post(rpc_function_handler))
             // Add state
-            .with_state(rpc_handler_state)
-            // Add middleware
-            .layer(
-                ServiceBuilder::new()
-                    .layer(cors.clone())
-                    .layer(middleware::from_fn_with_state(
-                        auth_middleware_state,
-                        auth_middleware,
-                    ))
-                    .layer(middleware::from_fn(tracing_middleware)),
-            );
+            .with_state(rpc_handler_state);
+
+        // Build middleware stack
+        let service_builder = ServiceBuilder::new()
+            .layer(cors.clone())
+            .layer(middleware::from_fn_with_state(
+                auth_middleware_state,
+                auth_middleware,
+            ))
+            .layer(middleware::from_fn(tracing_middleware));
+
+        // Add metrics middleware if observability is enabled
+        if let Some(ref observability) = self.observability {
+            let metrics_state = Arc::new(MetricsState::new(observability.clone()));
+            main_router = main_router.layer(middleware::from_fn_with_state(
+                metrics_state,
+                metrics_middleware,
+            ));
+        }
+
+        // Apply the remaining middleware layers
+        main_router = main_router.layer(service_builder);
 
         // WebSocket router without auth middleware (just CORS)
         let ws_router = Router::new()

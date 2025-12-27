@@ -36,6 +36,7 @@ fn base_template(title: &str, content: &str, active_page: &str) -> String {
                 <li><a href="/_dashboard/alerts" class="{alerts_active}">🚨 Alerts</a></li>
                 <li><a href="/_dashboard/jobs" class="{jobs_active}">⚙️ Jobs</a></li>
                 <li><a href="/_dashboard/workflows" class="{workflows_active}">🔄 Workflows</a></li>
+                <li><a href="/_dashboard/crons" class="{crons_active}">⏰ Crons</a></li>
                 <li><a href="/_dashboard/cluster" class="{cluster_active}">🖥️ Cluster</a></li>
             </ul>
             <div class="sidebar-footer">
@@ -90,6 +91,11 @@ fn base_template(title: &str, content: &str, active_page: &str) -> String {
         },
         jobs_active = if active_page == "jobs" { "active" } else { "" },
         workflows_active = if active_page == "workflows" {
+            "active"
+        } else {
+            ""
+        },
+        crons_active = if active_page == "crons" {
             "active"
         } else {
             ""
@@ -282,45 +288,87 @@ pub async fn traces(State(_state): State<DashboardState>) -> Html<String> {
     Html(base_template("Traces", content, "traces"))
 }
 
-/// Trace detail page.
+/// Trace detail page with waterfall visualization.
 pub async fn trace_detail(
     State(_state): State<DashboardState>,
     Path(trace_id): Path<String>,
 ) -> Html<String> {
     let content = format!(
-        r#"
+        r##"
         <div class="trace-header">
             <div class="trace-info">
-                <h3>Trace: <span id="trace-id-display">{}</span></h3>
-                <p id="trace-summary">Loading trace details...</p>
+                <h3>Trace: <code id="trace-id-display">{trace_id}</code></h3>
+                <div id="trace-summary" class="trace-summary">
+                    <span class="summary-item">Loading...</span>
+                </div>
             </div>
-            <button class="btn btn-secondary" onclick="history.back()">← Back to Traces</button>
+            <div class="trace-actions">
+                <button class="btn btn-secondary" onclick="copyTraceId()">📋 Copy ID</button>
+                <button class="btn btn-secondary" onclick="history.back()">← Back</button>
+            </div>
         </div>
 
-        <div class="trace-timeline" id="trace-timeline">
-            <div class="timeline-header">
-                <span>Service</span>
-                <span>Operation</span>
-                <span class="timeline-bar-header">Duration</span>
+        <div class="trace-waterfall-container">
+            <div class="waterfall-header">
+                <div class="waterfall-labels">
+                    <span class="label-service">Service / Operation</span>
+                </div>
+                <div class="waterfall-timeline">
+                    <div class="timeline-ruler" id="timeline-ruler"></div>
+                </div>
             </div>
-            <div id="trace-spans">
+            <div class="waterfall-body" id="waterfall-body">
                 <p class="empty-state">Loading spans...</p>
             </div>
         </div>
 
-        <div class="span-details" id="span-details">
-            <h4>Span Details</h4>
-            <p class="empty-state">Click on a span to view details</p>
+        <div class="trace-details-panel">
+            <div class="panel span-list-panel">
+                <h4>Span Tree</h4>
+                <div id="span-tree" class="span-tree">
+                    <p class="empty-state">Loading...</p>
+                </div>
+            </div>
+            <div class="panel span-details-panel" id="span-details">
+                <h4>Span Details</h4>
+                <p class="empty-state">Select a span to view details</p>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h4>Span Attributes</h4>
+            <div class="tabs">
+                <button class="tab active" data-tab="attributes">Attributes</button>
+                <button class="tab" data-tab="events">Events</button>
+                <button class="tab" data-tab="logs">Logs</button>
+            </div>
+            <div class="tab-content" id="span-attributes-content">
+                <p class="empty-state">Select a span to view attributes</p>
+            </div>
         </div>
 
         <script>
-            const traceId = '{}';
+            const traceId = '{trace_id}';
+
+            function copyTraceId() {{
+                navigator.clipboard.writeText(traceId);
+                showToast('Trace ID copied!');
+            }}
+
+            function showToast(message) {{
+                const toast = document.createElement('div');
+                toast.className = 'toast';
+                toast.textContent = message;
+                document.body.appendChild(toast);
+                setTimeout(() => toast.remove(), 2000);
+            }}
+
             document.addEventListener('DOMContentLoaded', function() {{
-                loadTraceDetail(traceId);
+                loadTraceWaterfall(traceId);
             }});
         </script>
-    "#,
-        trace_id, trace_id
+    "##,
+        trace_id = trace_id
     );
 
     Html(base_template("Trace Detail", &content, "traces"))
@@ -460,6 +508,83 @@ pub async fn workflows(State(_state): State<DashboardState>) -> Html<String> {
     "#;
 
     Html(base_template("Workflows", content, "workflows"))
+}
+
+/// Crons page.
+pub async fn crons(State(_state): State<DashboardState>) -> Html<String> {
+    let content = r#"
+        <div class="crons-stats">
+            <div class="cron-stat">
+                <span class="count" id="crons-active">-</span>
+                <span class="label">Active</span>
+            </div>
+            <div class="cron-stat">
+                <span class="count" id="crons-paused">-</span>
+                <span class="label">Paused</span>
+            </div>
+            <div class="cron-stat success">
+                <span class="count" id="crons-success-rate">-</span>
+                <span class="label">Success Rate</span>
+            </div>
+            <div class="cron-stat">
+                <span class="count" id="crons-next-run">-</span>
+                <span class="label">Next Run</span>
+            </div>
+        </div>
+
+        <div class="crons-table-container">
+            <table class="crons-table">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Schedule</th>
+                        <th>Status</th>
+                        <th>Last Run</th>
+                        <th>Last Result</th>
+                        <th>Next Run</th>
+                        <th>Avg Duration</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="crons-tbody">
+                    <tr class="empty-row">
+                        <td colspan="8">Loading cron jobs...</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="panel">
+            <h3>📊 Recent Executions</h3>
+            <div class="chart-container">
+                <canvas id="cron-executions-chart"></canvas>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h3>📜 Execution History</h3>
+            <div class="cron-history-table-container">
+                <table class="cron-history-table">
+                    <thead>
+                        <tr>
+                            <th>Cron</th>
+                            <th>Started</th>
+                            <th>Duration</th>
+                            <th>Status</th>
+                            <th>Error</th>
+                        </tr>
+                    </thead>
+                    <tbody id="cron-history-tbody">
+                        <tr class="empty-row">
+                            <td colspan="5">Loading history...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    "#;
+
+    Html(base_template("Crons", content, "crons"))
 }
 
 /// Cluster page.

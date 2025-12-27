@@ -1,0 +1,77 @@
+:root {
+	--color-bg: #1a1a1a;
+	--color-surface: #2d2d2d;
+	--color-surface-hover: #3a3a3a;
+	--color-border: #404040;
+	--color-text: #e5e5e5;
+	--color-text-muted: #a0a0a0;
+	--color-primary: #3b82f6;
+	--color-primary-hover: #2563eb;
+	--color-success: #10b981;
+	--color-warning: #f59e0b;
+	--color-danger: #ef4444;
+
+	--radius-sm: 4px;
+	--radius-md: 8px;
+	--radius-lg: 12px;
+
+	--shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+	--shadow-md: 0 4px 6px rgba(0, 0, 0, 0.3);
+}
+
+* {
+	box-sizing: border-box;
+	margin: 0;
+	padding: 0;
+}
+
+html, body {
+	height: 100%;
+	font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+	background: var(--color-bg);
+	color: var(--color-text);
+}
+
+button {
+	cursor: pointer;
+	border: none;
+	border-radius: var(--radius-sm);
+	padding: 0.5rem 1rem;
+	font-size: 0.875rem;
+	font-weight: 500;
+	transition: background-color 0.15s;
+}
+
+button.primary {
+	background: var(--color-primary);
+	color: white;
+}
+
+button.primary:hover {
+	background: var(--color-primary-hover);
+}
+
+button.secondary {
+	background: var(--color-surface);
+	color: var(--color-text);
+	border: 1px solid var(--color-border);
+}
+
+button.secondary:hover {
+	background: var(--color-surface-hover);
+}
+
+input, textarea, select {
+	background: var(--color-surface);
+	border: 1px solid var(--color-border);
+	border-radius: var(--radius-sm);
+	padding: 0.5rem 0.75rem;
+	color: var(--color-text);
+	font-size: 0.875rem;
+	width: 100%;
+}
+
+input:focus, textarea:focus, select:focus {
+	outline: none;
+	border-color: var(--color-primary);
+}

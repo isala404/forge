@@ -136,26 +136,109 @@ fn add_function(name: &str, fn_type: FunctionType) -> Result<()> {
         anyhow::bail!("Function file already exists: {}", file_path.display());
     }
 
-    let (attr, ctx_type, description) = match fn_type {
-        FunctionType::Query => ("query", "QueryContext", "query"),
-        FunctionType::Mutation => ("mutation", "MutationContext", "mutation"),
-        FunctionType::Action => ("action", "ActionContext", "action"),
-    };
+    let content = match fn_type {
+        FunctionType::Query => format!(
+            r#"//! Query: {snake_name}
+//!
+//! Queries are read-only database operations. They support:
+//! - Real-time subscriptions (auto-refresh on data changes)
+//! - Caching and deduplication
+//! - Pagination helpers
 
-    let content = format!(
-        r#"use forge::prelude::*;
+use forge::prelude::*;
 
-/// {snake_name} {description}.
-#[forge::{attr}]
-pub async fn {snake_name}(_ctx: &{ctx_type}) -> Result<()> {{
-    // Add your logic here
+/// {snake_name} query.
+#[forge::query]
+pub async fn {snake_name}(ctx: &QueryContext) -> Result<Vec<()>> {{
+    // Example: Fetch data from database
+    // let items = sqlx::query_as!(
+    //     Item,
+    //     "SELECT * FROM items WHERE deleted_at IS NULL ORDER BY created_at DESC"
+    // )
+    // .fetch_all(ctx.db())
+    // .await?;
+
+    Ok(vec![])
+}}
+"#
+        ),
+        FunctionType::Mutation => format!(
+            r#"//! Mutation: {snake_name}
+//!
+//! Mutations are write operations that modify data. They:
+//! - Automatically invalidate affected subscriptions
+//! - Support optimistic updates on the frontend
+//! - Are wrapped in database transactions
+
+use forge::prelude::*;
+
+/// {snake_name} mutation.
+#[forge::mutation]
+pub async fn {snake_name}(ctx: &MutationContext) -> Result<()> {{
+    // Example: Insert or update data
+    // let id = Uuid::new_v4();
+    // sqlx::query!(
+    //     "INSERT INTO items (id, name) VALUES ($1, $2)",
+    //     id,
+    //     input.name
+    // )
+    // .execute(ctx.db())
+    // .await?;
+
     Ok(())
 }}
 "#
-    );
+        ),
+        FunctionType::Action => format!(
+            r#"//! Action: {snake_name}
+//!
+//! Actions are for external API calls and side effects. They:
+//! - Are NOT wrapped in database transactions
+//! - Should be idempotent when possible
+//! - Can call external services (Stripe, SendGrid, etc.)
+//!
+//! Common use cases:
+//! - Payment processing
+//! - Email/SMS sending
+//! - Third-party API calls
+//! - File uploads to cloud storage
+
+use forge::prelude::*;
+
+/// Result from {snake_name} action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct {pascal_name}Result {{
+    pub success: bool,
+    // Add your result fields here
+}}
+
+/// {snake_name} action.
+#[forge::action]
+pub async fn {snake_name}(ctx: &ActionContext) -> Result<{pascal_name}Result> {{
+    tracing::info!("Executing {snake_name} action");
+
+    // Example: Call external API
+    // let response = ctx.http_client()
+    //     .post("https://api.example.com/endpoint")
+    //     .json(&payload)
+    //     .send()
+    //     .await?;
+
+    Ok({pascal_name}Result {{ success: true }})
+}}
+"#,
+            pascal_name = to_pascal_case(&snake_name)
+        ),
+    };
 
     fs::write(&file_path, content)?;
     update_functions_mod(&snake_name)?;
+
+    let description = match fn_type {
+        FunctionType::Query => "query",
+        FunctionType::Mutation => "mutation",
+        FunctionType::Action => "action",
+    };
 
     println!(
         "{} Created {}: {}",
@@ -183,22 +266,66 @@ fn add_job(name: &str) -> Result<()> {
     }
 
     let content = format!(
-        r#"use forge::prelude::*;
+        r#"//! Background job: {snake_name}
+//!
+//! Jobs are used for async processing with automatic retry logic.
+//! They are ideal for tasks that:
+//! - May take a long time to complete
+//! - May fail and need retry
+//! - Should run in the background
+//!
+//! ## Dispatching this job
+//!
+//! ```rust
+//! ctx.dispatch_job({snake_name}, {pascal_name}Input {{
+//!     // your arguments
+//! }}).await?;
+//! ```
 
-/// {pascal_name} job arguments.
+use forge::prelude::*;
+
+/// Input for the {snake_name} job.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct {pascal_name}Args {{
-    // Add your arguments here
+pub struct {pascal_name}Input {{
+    // Add your input fields here
+    // pub user_id: Uuid,
+    // pub data: String,
 }}
 
-/// {snake_name} background job.
+/// Output from the {snake_name} job.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct {pascal_name}Output {{
+    // Add your output fields here
+    pub success: bool,
+}}
+
+/// {pascal_name} background job.
+///
+/// Configuration options:
+/// - `timeout`: Maximum execution time (default: "5m")
+/// - `max_attempts`: Number of retry attempts (default: 3)
+/// - `backoff`: Retry backoff strategy: "exponential" or "linear" (default: "exponential")
 #[forge::job(
     timeout = "5m",
-    max_attempts = 3
+    max_attempts = 3,
+    backoff = "exponential"
 )]
-pub async fn {snake_name}(_ctx: &JobContext, _args: {pascal_name}Args) -> Result<()> {{
+pub async fn {snake_name}(ctx: &JobContext, input: {pascal_name}Input) -> Result<{pascal_name}Output> {{
+    tracing::info!(job_id = %ctx.job_id(), "Starting {snake_name} job");
+
     // Add your job logic here
-    Ok(())
+    // Example: Process data, call external APIs, etc.
+
+    // Report progress (visible in dashboard)
+    ctx.set_progress(50, "Processing...").await?;
+
+    // Simulate work
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    ctx.set_progress(100, "Complete").await?;
+    tracing::info!(job_id = %ctx.job_id(), "Completed {snake_name} job");
+
+    Ok({pascal_name}Output {{ success: true }})
 }}
 "#
     );
@@ -211,6 +338,7 @@ pub async fn {snake_name}(_ctx: &JobContext, _args: {pascal_name}Args) -> Result
         style("✅").green(),
         style(&file_path.display()).cyan()
     );
+    println!("   Job features: timeout, retry, progress tracking");
 
     Ok(())
 }
@@ -230,14 +358,51 @@ fn add_cron(name: &str) -> Result<()> {
     }
 
     let content = format!(
-        r#"use forge::prelude::*;
+        r#"//! Scheduled task: {snake_name}
+//!
+//! Cron tasks run on a schedule defined by a cron expression.
+//!
+//! ## Common cron schedules
+//!
+//! - `* * * * *`     - Every minute
+//! - `0 * * * *`     - Every hour
+//! - `0 0 * * *`     - Daily at midnight
+//! - `0 9 * * *`     - Daily at 9 AM
+//! - `0 0 * * 0`     - Weekly on Sunday
+//! - `0 0 1 * *`     - Monthly on the 1st
+//! - `0 0 * * 1-5`   - Weekdays at midnight
+//!
+//! Format: `second minute hour day-of-month month day-of-week`
+
+use forge::prelude::*;
 
 /// {snake_name} scheduled task.
-#[forge::cron(schedule = "0 0 * * *")]  // Daily at midnight
-pub async fn {snake_name}(_ctx: &CronContext) -> Result<()> {{
-    tracing::info!("Running {snake_name}");
+///
+/// Configuration options:
+/// - `schedule`: Cron expression (required)
+/// - `timezone`: Timezone for schedule (default: "UTC")
+/// - `overlap`: Allow overlapping runs (default: false)
+#[forge::cron(
+    schedule = "0 0 * * *",  // Daily at midnight UTC
+    timezone = "UTC",
+    overlap = false
+)]
+pub async fn {snake_name}(ctx: &CronContext) -> Result<()> {{
+    tracing::info!(run_id = %ctx.run_id(), "Running {snake_name}");
 
-    // Add your cron logic here
+    // Get database pool for queries
+    let pool = ctx.db();
+
+    // Example: Query data and dispatch jobs
+    // let items = sqlx::query!("SELECT * FROM items WHERE status = 'pending'")
+    //     .fetch_all(pool)
+    //     .await?;
+    //
+    // for item in items {{
+    //     ctx.dispatch_job(process_item, ProcessItemInput {{ id: item.id }}).await?;
+    // }}
+
+    tracing::info!(run_id = %ctx.run_id(), "Completed {snake_name}");
 
     Ok(())
 }}
@@ -252,6 +417,7 @@ pub async fn {snake_name}(_ctx: &CronContext) -> Result<()> {{
         style("✅").green(),
         style(&file_path.display()).cyan()
     );
+    println!("   Schedule: 0 0 * * * (daily at midnight)");
     println!("   Edit the schedule in the #[forge::cron] attribute");
 
     Ok(())
@@ -273,39 +439,92 @@ fn add_workflow(name: &str) -> Result<()> {
     }
 
     let content = format!(
-        r#"use forge::prelude::*;
+        r#"//! Workflow: {snake_name}
+//!
+//! Workflows are multi-step processes with automatic state persistence.
+//! Each step is durable - if the workflow fails, it resumes from the last
+//! completed step. Steps can also define compensation (rollback) logic.
+//!
+//! ## Starting this workflow
+//!
+//! ```rust
+//! let result = ctx.start_workflow({snake_name}, {pascal_name}Input {{
+//!     // your input
+//! }}).await?;
+//! ```
+//!
+//! ## Key concepts
+//!
+//! - Steps are idempotent and re-executable
+//! - Compensation runs in reverse order on failure
+//! - Workflow state persists across restarts
 
-/// {pascal_name} workflow input.
+use forge::prelude::*;
+
+/// Input for the {snake_name} workflow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct {pascal_name}Input {{
     // Add your input fields here
+    // pub user_id: Uuid,
+    // pub order_id: Uuid,
 }}
 
-/// {pascal_name} workflow output.
+/// Output from the {snake_name} workflow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct {pascal_name}Output {{
-    // Add your output fields here
     pub success: bool,
+    // Add your output fields here
+    // pub confirmation_id: String,
 }}
 
-/// {snake_name} workflow.
-#[forge::workflow(version = 1)]
-pub async fn {snake_name}(ctx: &WorkflowContext, _input: {pascal_name}Input) -> Result<{pascal_name}Output> {{
-    // Step 1: First step
-    let _step1_result = ctx.step("step1")
+/// {pascal_name} workflow.
+///
+/// Configuration options:
+/// - `version`: Workflow version for migrations (default: 1)
+/// - `timeout`: Maximum workflow duration (default: "1h")
+#[forge::workflow(version = 1, timeout = "1h")]
+pub async fn {snake_name}(ctx: &WorkflowContext, input: {pascal_name}Input) -> Result<{pascal_name}Output> {{
+    tracing::info!(workflow_id = %ctx.workflow_id(), "Starting {snake_name} workflow");
+
+    // Step 1: First step (with compensation)
+    let step1_result = ctx.step("validate")
         .run(|| async {{
-            // Add step 1 logic
+            tracing::info!("Step 1: Validating input");
+            // Validation logic here
+            Ok("validated")
+        }})
+        .compensate(|_result| async {{
+            tracing::info!("Compensating step 1: Cleanup validation");
+            // Rollback validation side effects if any
             Ok(())
         }})
         .await?;
 
-    // Step 2: Second step
-    let _step2_result = ctx.step("step2")
+    // Step 2: Second step (depends on step 1)
+    let step2_result = ctx.step("process")
         .run(|| async {{
-            // Add step 2 logic
+            tracing::info!("Step 2: Processing");
+            // Main processing logic
+            // This step has access to step1_result
+            Ok("processed")
+        }})
+        .compensate(|_result| async {{
+            tracing::info!("Compensating step 2: Undo processing");
+            // Rollback processing
             Ok(())
         }})
         .await?;
+
+    // Step 3: Final step (no compensation needed)
+    ctx.step("notify")
+        .run(|| async {{
+            tracing::info!("Step 3: Sending notification");
+            // Send confirmation email, webhook, etc.
+            Ok(())
+        }})
+        .await?;
+
+    tracing::info!(workflow_id = %ctx.workflow_id(), "Completed {snake_name} workflow");
 
     Ok({pascal_name}Output {{ success: true }})
 }}
@@ -320,6 +539,7 @@ pub async fn {snake_name}(ctx: &WorkflowContext, _input: {pascal_name}Input) -> 
         style("✅").green(),
         style(&file_path.display()).cyan()
     );
+    println!("   Features: durable steps, compensation, automatic retry");
 
     Ok(())
 }

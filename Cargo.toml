@@ -6,7 +6,6 @@ members = [
     "crates/forge-macros",
     "crates/forge-runtime",
     "crates/forge-codegen",
-    "examples/todo-app",
 ]
 
 [workspace.package]
@@ -47,6 +46,7 @@ thiserror = "2.0"
 anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+sysinfo = "0.32"
 
 # Proc macros
 syn = { version = "2.0", features = ["full", "extra-traits"] }

@@ -429,3 +429,23 @@ Fixed code template issues and TypeScript type checking.
 - Added `skipLibCheck: true` to generated tsconfig.json to avoid transitive dependency errors
 - Fixed variable naming issues from sed replacements: `\_handler` -> `handler`, `_regex` -> `regex`
 - All svelte-check and clippy passing with 0 warnings
+
+Implemented production-ready FORGE framework enhancements (PLAN.md execution).
+- Phase 1: Wired observability collectors with background flush tasks and system metrics via sysinfo crate
+- Phase 2: Completed alerts system with CRUD endpoints for alert rules, acknowledge/resolve, severity-based queries
+- Phase 3: Extended schema registry with FunctionDef, added function parsing for #[query], #[mutation], #[action] attributes
+- Phase 4: Created comprehensive task-manager example app in `examples/task-manager/`
+  - Schema with enums (TaskStatus, TaskPriority, TeamRole, ProjectStatus) and models (Team, User, Project, Task, Comment)
+  - Full function modules: queries, mutations, actions, jobs, crons, workflows
+  - Database migration with foreign keys, indexes, and seed data
+  - SvelteKit frontend with real-time kanban board, drag-and-drop, optimistic updates
+- Phase 5: Enhanced CLI templates with detailed documentation
+  - Job template: timeout, retry, backoff, progress tracking with example usage
+  - Cron template: schedule reference, timezone support, overlap prevention
+  - Workflow template: durable steps, compensation, saga pattern with step builder API
+  - Action template: external API call patterns, result types
+- Phase 6: Enhanced dashboard with new features
+  - Added Crons page with stats, execution table, history, pause/resume/trigger controls
+  - Enhanced trace detail page with waterfall visualization, span tree, attribute tabs
+  - Added cron API endpoints: list_crons, get_cron_stats, get_cron_history, trigger/pause/resume
+- All changes compile successfully

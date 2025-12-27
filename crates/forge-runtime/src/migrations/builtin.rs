@@ -51,5 +51,7 @@ mod tests {
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS forge_traces"));
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS forge_sessions"));
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS forge_subscriptions"));
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS forge_alert_rules"));
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS forge_alerts"));
     }
 }

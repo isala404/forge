@@ -1,12 +1,15 @@
 //! Rust source code parser for extracting FORGE schema definitions.
 //!
-//! This module parses Rust source files to extract model and enum definitions
-//! without requiring compilation.
+//! This module parses Rust source files to extract model, enum, and function
+//! definitions without requiring compilation.
 
 use std::path::Path;
 
-use forge_core::schema::{EnumDef, EnumVariant, FieldDef, RustType, SchemaRegistry, TableDef};
-use syn::{Attribute, Expr, Fields, Lit, Meta};
+use forge_core::schema::{
+    EnumDef, EnumVariant, FieldDef, FunctionArg, FunctionDef, FunctionKind, RustType,
+    SchemaRegistry, TableDef,
+};
+use syn::{Attribute, Expr, Fields, FnArg, Lit, Meta, Pat, ReturnType};
 use walkdir::WalkDir;
 
 use crate::Error;
@@ -47,6 +50,11 @@ fn parse_file(content: &str, registry: &SchemaRegistry) -> Result<(), Error> {
                     if let Some(enum_def) = parse_enum(&item_enum) {
                         registry.register_enum(enum_def);
                     }
+                }
+            }
+            syn::Item::Fn(item_fn) => {
+                if let Some(func) = parse_function(&item_fn) {
+                    registry.register_function(func);
                 }
             }
             _ => {}
@@ -169,6 +177,115 @@ fn parse_enum(item: &syn::ItemEnum) -> Option<EnumDef> {
     }
 
     Some(enum_def)
+}
+
+/// Parse a function with #[query], #[mutation], or #[action] attribute.
+fn parse_function(item: &syn::ItemFn) -> Option<FunctionDef> {
+    let kind = get_function_kind(&item.attrs)?;
+    let func_name = item.sig.ident.to_string();
+
+    // Get return type
+    let return_type = match &item.sig.output {
+        ReturnType::Default => RustType::Custom("()".to_string()),
+        ReturnType::Type(_, ty) => extract_result_type(ty),
+    };
+
+    let mut func = FunctionDef::new(&func_name, kind, return_type);
+    func.doc = get_doc_comment(&item.attrs);
+    func.is_async = item.sig.asyncness.is_some();
+
+    // Parse arguments (skip first arg which is usually context)
+    let mut skip_first = true;
+    for arg in &item.sig.inputs {
+        if let FnArg::Typed(pat_type) = arg {
+            // Skip context argument (usually first)
+            if skip_first {
+                skip_first = false;
+                // Check if it's a context type
+                let type_str = quote::quote!(#pat_type.ty).to_string();
+                if type_str.contains("Context")
+                    || type_str.contains("QueryContext")
+                    || type_str.contains("MutationContext")
+                    || type_str.contains("ActionContext")
+                {
+                    continue;
+                }
+            }
+
+            // Extract argument name
+            if let Pat::Ident(pat_ident) = &*pat_type.pat {
+                let arg_name = pat_ident.ident.to_string();
+                let arg_type = type_to_rust_type(&pat_type.ty);
+                func.args.push(FunctionArg::new(arg_name, arg_type));
+            }
+        }
+    }
+
+    Some(func)
+}
+
+/// Get the function kind from attributes.
+fn get_function_kind(attrs: &[Attribute]) -> Option<FunctionKind> {
+    for attr in attrs {
+        let path = attr.path();
+        if path.is_ident("query")
+            || (path.segments.len() == 2
+                && path.segments[0].ident == "forge"
+                && path.segments[1].ident == "query")
+        {
+            return Some(FunctionKind::Query);
+        }
+        if path.is_ident("mutation")
+            || (path.segments.len() == 2
+                && path.segments[0].ident == "forge"
+                && path.segments[1].ident == "mutation")
+        {
+            return Some(FunctionKind::Mutation);
+        }
+        if path.is_ident("action")
+            || (path.segments.len() == 2
+                && path.segments[0].ident == "forge"
+                && path.segments[1].ident == "action")
+        {
+            return Some(FunctionKind::Action);
+        }
+    }
+    None
+}
+
+/// Extract the inner type from Result<T, E>.
+fn extract_result_type(ty: &syn::Type) -> RustType {
+    let type_str = quote::quote!(#ty).to_string().replace(' ', "");
+
+    // Check for Result<T, _>
+    if let Some(rest) = type_str.strip_prefix("Result<") {
+        // Find the inner type before the comma or angle bracket
+        let mut depth = 0;
+        let mut end_idx = 0;
+        for (i, c) in rest.chars().enumerate() {
+            match c {
+                '<' => depth += 1,
+                '>' => {
+                    if depth == 0 {
+                        end_idx = i;
+                        break;
+                    }
+                    depth -= 1;
+                }
+                ',' if depth == 0 => {
+                    end_idx = i;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let inner = &rest[..end_idx];
+        return type_to_rust_type(&syn::parse_str(inner).unwrap_or_else(|_| {
+            syn::parse_str::<syn::Type>("String").unwrap()
+        }));
+    }
+
+    type_to_rust_type(ty)
 }
 
 /// Convert a syn::Type to RustType.
@@ -386,5 +503,60 @@ mod tests {
         assert_eq!(pluralize("category"), "categories");
         assert_eq!(pluralize("box"), "boxes");
         assert_eq!(pluralize("address"), "addresses");
+    }
+
+    #[test]
+    fn test_parse_query_function() {
+        let source = r#"
+            #[query]
+            async fn get_user(ctx: QueryContext, id: Uuid) -> Result<User> {
+                todo!()
+            }
+        "#;
+
+        let registry = SchemaRegistry::new();
+        parse_file(source, &registry).unwrap();
+
+        let func = registry.get_function("get_user").unwrap();
+        assert_eq!(func.name, "get_user");
+        assert_eq!(func.kind, FunctionKind::Query);
+        assert!(func.is_async);
+    }
+
+    #[test]
+    fn test_parse_mutation_function() {
+        let source = r#"
+            #[mutation]
+            async fn create_user(ctx: MutationContext, name: String, email: String) -> Result<User> {
+                todo!()
+            }
+        "#;
+
+        let registry = SchemaRegistry::new();
+        parse_file(source, &registry).unwrap();
+
+        let func = registry.get_function("create_user").unwrap();
+        assert_eq!(func.name, "create_user");
+        assert_eq!(func.kind, FunctionKind::Mutation);
+        assert_eq!(func.args.len(), 2);
+        assert_eq!(func.args[0].name, "name");
+        assert_eq!(func.args[1].name, "email");
+    }
+
+    #[test]
+    fn test_parse_action_function() {
+        let source = r#"
+            #[action]
+            async fn send_notification(ctx: ActionContext, message: String) -> Result<()> {
+                todo!()
+            }
+        "#;
+
+        let registry = SchemaRegistry::new();
+        parse_file(source, &registry).unwrap();
+
+        let func = registry.get_function("send_notification").unwrap();
+        assert_eq!(func.name, "send_notification");
+        assert_eq!(func.kind, FunctionKind::Action);
     }
 }

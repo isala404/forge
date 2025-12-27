@@ -1,12 +1,14 @@
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
+use forge_core::observability::Metric;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use super::registry::CronRegistry;
+use crate::observability::ObservabilityState;
 use forge_core::cron::CronContext;
 
 /// Cron run status.
@@ -120,6 +122,7 @@ pub struct CronRunner {
     http_client: reqwest::Client,
     config: CronRunnerConfig,
     is_running: Arc<RwLock<bool>>,
+    observability: Option<ObservabilityState>,
 }
 
 impl CronRunner {
@@ -136,6 +139,25 @@ impl CronRunner {
             http_client,
             config,
             is_running: Arc::new(RwLock::new(false)),
+            observability: None,
+        }
+    }
+
+    /// Create a new cron runner with observability.
+    pub fn with_observability(
+        registry: Arc<CronRegistry>,
+        pool: sqlx::PgPool,
+        http_client: reqwest::Client,
+        config: CronRunnerConfig,
+        observability: ObservabilityState,
+    ) -> Self {
+        Self {
+            registry,
+            pool,
+            http_client,
+            config,
+            is_running: Arc::new(RwLock::new(false)),
+            observability: Some(observability),
         }
     }
 
@@ -249,6 +271,7 @@ impl CronRunner {
     ) {
         let info = &entry.info;
         let run_id = Uuid::new_v4();
+        let start = Instant::now();
 
         tracing::info!(
             cron = info.name,
@@ -256,6 +279,18 @@ impl CronRunner {
             is_catch_up = is_catch_up,
             "Executing cron"
         );
+
+        // Record cron run metric
+        if let Some(ref obs) = self.observability {
+            let mut metric = Metric::counter("cron_runs_total", 1.0);
+            metric
+                .labels
+                .insert("cron_name".to_string(), info.name.to_string());
+            metric
+                .labels
+                .insert("is_catch_up".to_string(), is_catch_up.to_string());
+            obs.record_metric(metric).await;
+        }
 
         let ctx = CronContext::new(
             run_id,
@@ -270,21 +305,65 @@ impl CronRunner {
         // Execute with timeout
         let handler = entry.handler.clone();
         let result = tokio::time::timeout(info.timeout, handler(&ctx)).await;
+        let duration = start.elapsed();
+
+        // Record duration metric
+        if let Some(ref obs) = self.observability {
+            let mut duration_metric =
+                Metric::gauge("cron_duration_seconds", duration.as_secs_f64());
+            duration_metric
+                .labels
+                .insert("cron_name".to_string(), info.name.to_string());
+            obs.record_metric(duration_metric).await;
+        }
 
         match result {
             Ok(Ok(())) => {
                 tracing::info!(cron = info.name, "Cron completed successfully");
                 self.mark_completed(info.name, scheduled_time).await;
+
+                // Record success metric
+                if let Some(ref obs) = self.observability {
+                    let mut metric = Metric::counter("cron_success_total", 1.0);
+                    metric
+                        .labels
+                        .insert("cron_name".to_string(), info.name.to_string());
+                    obs.record_metric(metric).await;
+                }
             }
             Ok(Err(e)) => {
                 tracing::error!(cron = info.name, error = %e, "Cron failed");
                 self.mark_failed(info.name, scheduled_time, &e.to_string())
                     .await;
+
+                // Record failure metric
+                if let Some(ref obs) = self.observability {
+                    let mut metric = Metric::counter("cron_failures_total", 1.0);
+                    metric
+                        .labels
+                        .insert("cron_name".to_string(), info.name.to_string());
+                    metric
+                        .labels
+                        .insert("reason".to_string(), "error".to_string());
+                    obs.record_metric(metric).await;
+                }
             }
             Err(_) => {
                 tracing::error!(cron = info.name, "Cron timed out");
                 self.mark_failed(info.name, scheduled_time, "Execution timed out")
                     .await;
+
+                // Record timeout metric
+                if let Some(ref obs) = self.observability {
+                    let mut metric = Metric::counter("cron_failures_total", 1.0);
+                    metric
+                        .labels
+                        .insert("cron_name".to_string(), info.name.to_string());
+                    metric
+                        .labels
+                        .insert("reason".to_string(), "timeout".to_string());
+                    obs.record_metric(metric).await;
+                }
             }
         }
     }

@@ -1,0 +1,32 @@
+[package]
+name = "task-manager"
+version = "0.1.0"
+
+[database]
+url = "postgres://postgres:postgres@localhost:5432/task_manager"
+pool_size = 10
+migrations = "migrations"
+
+[server]
+port = 8080
+host = "0.0.0.0"
+
+[cluster]
+node_id = "node-1"
+roles = ["gateway", "worker", "scheduler"]
+
+[observability]
+enabled = true
+dashboard = true
+
+[observability.metrics]
+enabled = true
+flush_interval = "10s"
+
+[observability.logs]
+enabled = true
+level = "info"
+
+[observability.traces]
+enabled = true
+sample_rate = 1.0

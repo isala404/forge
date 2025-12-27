@@ -64,6 +64,14 @@ impl MetricsCollector {
         }
     }
 
+    /// Drain the buffer and return all metrics.
+    ///
+    /// This is used by the flush loop to get metrics for persistence.
+    pub async fn drain(&self) -> Vec<Metric> {
+        let mut buffer = self.buffer.write().await;
+        buffer.drain(..).collect()
+    }
+
     /// Get the flush receiver for consuming batches.
     pub fn subscribe(&self) -> mpsc::Receiver<Vec<Metric>> {
         let (_tx, rx) = mpsc::channel(1024);
@@ -164,6 +172,14 @@ impl LogCollector {
         }
     }
 
+    /// Drain the buffer and return all logs.
+    ///
+    /// This is used by the flush loop to get logs for persistence.
+    pub async fn drain(&self) -> Vec<LogEntry> {
+        let mut buffer = self.buffer.write().await;
+        buffer.drain(..).collect()
+    }
+
     /// Get collected log count.
     pub fn count(&self) -> u64 {
         self.counter.load(Ordering::Relaxed)
@@ -256,6 +272,14 @@ impl TraceCollector {
         }
     }
 
+    /// Drain the buffer and return all spans.
+    ///
+    /// This is used by the flush loop to get spans for persistence.
+    pub async fn drain(&self) -> Vec<Span> {
+        let mut buffer = self.buffer.write().await;
+        buffer.drain(..).collect()
+    }
+
     /// Get total span count.
     pub fn count(&self) -> u64 {
         self.counter.load(Ordering::Relaxed)
@@ -275,6 +299,172 @@ impl TraceCollector {
     pub fn sample_rate(&self) -> f64 {
         self.config.sample_rate
     }
+}
+
+/// System metrics collector for CPU, memory, disk, and network stats.
+///
+/// This collector periodically samples system metrics and records them
+/// to a MetricsCollector.
+pub struct SystemMetricsCollector {
+    system: RwLock<sysinfo::System>,
+    shutdown: Arc<RwLock<bool>>,
+}
+
+impl SystemMetricsCollector {
+    /// Create a new system metrics collector.
+    pub fn new() -> Self {
+        Self {
+            system: RwLock::new(sysinfo::System::new_all()),
+            shutdown: Arc::new(RwLock::new(false)),
+        }
+    }
+
+    /// Start collecting system metrics.
+    ///
+    /// This spawns a background task that periodically collects system metrics
+    /// and records them to the provided MetricsCollector.
+    pub fn start(&self, metrics: Arc<MetricsCollector>, interval: std::time::Duration) -> tokio::task::JoinHandle<()> {
+        let shutdown = self.shutdown.clone();
+        let system = RwLock::new(sysinfo::System::new_all());
+
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            loop {
+                ticker.tick().await;
+
+                if *shutdown.read().await {
+                    break;
+                }
+
+                // Refresh system info
+                {
+                    let mut sys = system.write().await;
+                    sys.refresh_all();
+
+                    // CPU usage (overall)
+                    let cpu_usage = sys.global_cpu_usage();
+                    metrics.set_gauge("forge_system_cpu_usage_percent", cpu_usage as f64).await;
+
+                    // Memory
+                    let total_memory = sys.total_memory();
+                    let used_memory = sys.used_memory();
+                    let memory_usage_percent = if total_memory > 0 {
+                        (used_memory as f64 / total_memory as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+                    metrics.set_gauge("forge_system_memory_total_bytes", total_memory as f64).await;
+                    metrics.set_gauge("forge_system_memory_used_bytes", used_memory as f64).await;
+                    metrics.set_gauge("forge_system_memory_usage_percent", memory_usage_percent).await;
+
+                    // Swap
+                    let total_swap = sys.total_swap();
+                    let used_swap = sys.used_swap();
+                    metrics.set_gauge("forge_system_swap_total_bytes", total_swap as f64).await;
+                    metrics.set_gauge("forge_system_swap_used_bytes", used_swap as f64).await;
+
+                    // Per-CPU usage
+                    for (i, cpu) in sys.cpus().iter().enumerate() {
+                        let label = format!("cpu{}", i);
+                        let mut metric = Metric::gauge(
+                            "forge_system_cpu_core_usage_percent",
+                            cpu.cpu_usage() as f64,
+                        );
+                        metric.labels.insert("core".to_string(), label);
+                        metrics.record(metric).await;
+                    }
+                }
+
+                // Disk usage
+                let disks = sysinfo::Disks::new_with_refreshed_list();
+                for disk in disks.list() {
+                    let mount = disk.mount_point().to_string_lossy().to_string();
+                    let total = disk.total_space();
+                    let available = disk.available_space();
+                    let used = total.saturating_sub(available);
+                    let usage_percent = if total > 0 {
+                        (used as f64 / total as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+
+                    let mut metric = Metric::gauge("forge_system_disk_total_bytes", total as f64);
+                    metric.labels.insert("mount".to_string(), mount.clone());
+                    metrics.record(metric).await;
+
+                    let mut metric = Metric::gauge("forge_system_disk_used_bytes", used as f64);
+                    metric.labels.insert("mount".to_string(), mount.clone());
+                    metrics.record(metric).await;
+
+                    let mut metric = Metric::gauge("forge_system_disk_usage_percent", usage_percent);
+                    metric.labels.insert("mount".to_string(), mount);
+                    metrics.record(metric).await;
+                }
+
+                // Load average (Unix only)
+                #[cfg(unix)]
+                {
+                    let load_avg = sysinfo::System::load_average();
+                    metrics.set_gauge("forge_system_load_1m", load_avg.one).await;
+                    metrics.set_gauge("forge_system_load_5m", load_avg.five).await;
+                    metrics.set_gauge("forge_system_load_15m", load_avg.fifteen).await;
+                }
+            }
+
+            tracing::info!("System metrics collector stopped");
+        })
+    }
+
+    /// Stop the collector.
+    pub async fn stop(&self) {
+        let mut shutdown = self.shutdown.write().await;
+        *shutdown = true;
+    }
+
+    /// Get current system metrics snapshot.
+    pub async fn snapshot(&self) -> SystemMetricsSnapshot {
+        let mut sys = self.system.write().await;
+        sys.refresh_all();
+
+        let total_memory = sys.total_memory();
+        let used_memory = sys.used_memory();
+
+        SystemMetricsSnapshot {
+            cpu_usage_percent: sys.global_cpu_usage() as f64,
+            memory_total_bytes: total_memory,
+            memory_used_bytes: used_memory,
+            memory_usage_percent: if total_memory > 0 {
+                (used_memory as f64 / total_memory as f64) * 100.0
+            } else {
+                0.0
+            },
+            swap_total_bytes: sys.total_swap(),
+            swap_used_bytes: sys.used_swap(),
+        }
+    }
+}
+
+impl Default for SystemMetricsCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Snapshot of system metrics.
+#[derive(Debug, Clone)]
+pub struct SystemMetricsSnapshot {
+    /// CPU usage percentage (0-100).
+    pub cpu_usage_percent: f64,
+    /// Total memory in bytes.
+    pub memory_total_bytes: u64,
+    /// Used memory in bytes.
+    pub memory_used_bytes: u64,
+    /// Memory usage percentage (0-100).
+    pub memory_usage_percent: f64,
+    /// Total swap in bytes.
+    pub swap_total_bytes: u64,
+    /// Used swap in bytes.
+    pub swap_used_bytes: u64,
 }
 
 #[cfg(test)]
