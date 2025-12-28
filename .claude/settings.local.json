@@ -4,7 +4,9 @@
       "Bash(cargo fmt:*)",
       "Bash(cargo check:*)",
       "Bash(LIBRARY_PATH=\"/opt/homebrew/opt/libiconv/lib\" cargo test:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
     ]
   }
 }
