@@ -199,27 +199,27 @@ pub fn job_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let priority = if let Some(ref p) = attrs.priority {
         let p_lower = p.to_lowercase();
         match p_lower.as_str() {
-            "background" => quote! { forge_core::job::JobPriority::Background },
-            "low" => quote! { forge_core::job::JobPriority::Low },
-            "normal" => quote! { forge_core::job::JobPriority::Normal },
-            "high" => quote! { forge_core::job::JobPriority::High },
-            "critical" => quote! { forge_core::job::JobPriority::Critical },
-            _ => quote! { forge_core::job::JobPriority::Normal },
+            "background" => quote! { forge::forge_core::job::JobPriority::Background },
+            "low" => quote! { forge::forge_core::job::JobPriority::Low },
+            "normal" => quote! { forge::forge_core::job::JobPriority::Normal },
+            "high" => quote! { forge::forge_core::job::JobPriority::High },
+            "critical" => quote! { forge::forge_core::job::JobPriority::Critical },
+            _ => quote! { forge::forge_core::job::JobPriority::Normal },
         }
     } else {
-        quote! { forge_core::job::JobPriority::Normal }
+        quote! { forge::forge_core::job::JobPriority::Normal }
     };
 
     let max_attempts = attrs.max_attempts.unwrap_or(3);
     let backoff = if let Some(ref b) = attrs.backoff {
         match b.as_str() {
-            "fixed" => quote! { forge_core::job::BackoffStrategy::Fixed },
-            "linear" => quote! { forge_core::job::BackoffStrategy::Linear },
-            "exponential" => quote! { forge_core::job::BackoffStrategy::Exponential },
-            _ => quote! { forge_core::job::BackoffStrategy::Exponential },
+            "fixed" => quote! { forge::forge_core::job::BackoffStrategy::Fixed },
+            "linear" => quote! { forge::forge_core::job::BackoffStrategy::Linear },
+            "exponential" => quote! { forge::forge_core::job::BackoffStrategy::Exponential },
+            _ => quote! { forge::forge_core::job::BackoffStrategy::Exponential },
         }
     } else {
-        quote! { forge_core::job::BackoffStrategy::Exponential }
+        quote! { forge::forge_core::job::BackoffStrategy::Exponential }
     };
 
     let max_backoff = if let Some(ref mb) = attrs.max_backoff {
@@ -259,16 +259,16 @@ pub fn job_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         #(#other_attrs)*
         #vis struct #struct_name;
 
-        impl forge_core::job::ForgeJob for #struct_name {
+        impl forge::forge_core::job::ForgeJob for #struct_name {
             type Args = #args_type;
             type Output = #output_type;
 
-            fn info() -> forge_core::job::JobInfo {
-                forge_core::job::JobInfo {
+            fn info() -> forge::forge_core::job::JobInfo {
+                forge::forge_core::job::JobInfo {
                     name: #fn_name_str,
                     timeout: #timeout,
                     priority: #priority,
-                    retry: forge_core::job::RetryConfig {
+                    retry: forge::forge_core::job::RetryConfig {
                         max_attempts: #max_attempts,
                         backoff: #backoff,
                         max_backoff: #max_backoff,
@@ -281,9 +281,9 @@ pub fn job_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
 
             fn execute(
-                ctx: &forge_core::job::JobContext,
+                ctx: &forge::forge_core::job::JobContext,
                 #args_ident: Self::Args,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = forge_core::Result<Self::Output>> + Send + '_>> {
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = forge::forge_core::Result<Self::Output>> + Send + '_>> {
                 Box::pin(async move #block)
             }
         }

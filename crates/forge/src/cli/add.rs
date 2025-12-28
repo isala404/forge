@@ -305,25 +305,23 @@ pub struct {pascal_name}Output {{
 /// - `timeout`: Maximum execution time (default: "5m")
 /// - `max_attempts`: Number of retry attempts (default: 3)
 /// - `backoff`: Retry backoff strategy: "exponential" or "linear" (default: "exponential")
-#[forge::job(
-    timeout = "5m",
-    max_attempts = 3,
-    backoff = "exponential"
-)]
-pub async fn {snake_name}(ctx: &JobContext, input: {pascal_name}Input) -> Result<{pascal_name}Output> {{
-    tracing::info!(job_id = %ctx.job_id(), "Starting {snake_name} job");
+#[forge::job]
+#[timeout = "5m"]
+#[retry(max_attempts = 3, backoff = "exponential")]
+pub async fn {snake_name}(ctx: &JobContext, _input: {pascal_name}Input) -> Result<{pascal_name}Output> {{
+    tracing::info!(job_id = %ctx.job_id, "Starting {snake_name} job");
 
     // Add your job logic here
     // Example: Process data, call external APIs, etc.
 
     // Report progress (visible in dashboard)
-    ctx.set_progress(50, "Processing...").await?;
+    let _ = ctx.progress(50, "Processing...");
 
     // Simulate work
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-    ctx.set_progress(100, "Complete").await?;
-    tracing::info!(job_id = %ctx.job_id(), "Completed {snake_name} job");
+    let _ = ctx.progress(100, "Complete");
+    tracing::info!(job_id = %ctx.job_id, "Completed {snake_name} job");
 
     Ok({pascal_name}Output {{ success: true }})
 }}
@@ -379,30 +377,23 @@ use forge::prelude::*;
 /// {snake_name} scheduled task.
 ///
 /// Configuration options:
-/// - `schedule`: Cron expression (required)
+/// - First argument: Cron expression (required)
 /// - `timezone`: Timezone for schedule (default: "UTC")
-/// - `overlap`: Allow overlapping runs (default: false)
-#[forge::cron(
-    schedule = "0 0 * * *",  // Daily at midnight UTC
-    timezone = "UTC",
-    overlap = false
-)]
+/// - `catch_up`: Run missed executions on startup (default: false)
+#[forge::cron("0 0 * * *")]  // Daily at midnight UTC
+#[timezone = "UTC"]
 pub async fn {snake_name}(ctx: &CronContext) -> Result<()> {{
-    tracing::info!(run_id = %ctx.run_id(), "Running {snake_name}");
+    tracing::info!(run_id = %ctx.run_id, "Running {snake_name}");
 
     // Get database pool for queries
-    let pool = ctx.db();
+    let _pool = ctx.db();
 
     // Example: Query data and dispatch jobs
     // let items = sqlx::query!("SELECT * FROM items WHERE status = 'pending'")
-    //     .fetch_all(pool)
+    //     .fetch_all(ctx.db())
     //     .await?;
-    //
-    // for item in items {{
-    //     ctx.dispatch_job(process_item, ProcessItemInput {{ id: item.id }}).await?;
-    // }}
 
-    tracing::info!(run_id = %ctx.run_id(), "Completed {snake_name}");
+    tracing::info!(run_id = %ctx.run_id, "Completed {snake_name}");
 
     Ok(())
 }}
@@ -482,49 +473,37 @@ pub struct {pascal_name}Output {{
 /// Configuration options:
 /// - `version`: Workflow version for migrations (default: 1)
 /// - `timeout`: Maximum workflow duration (default: "1h")
-#[forge::workflow(version = 1, timeout = "1h")]
-pub async fn {snake_name}(ctx: &WorkflowContext, input: {pascal_name}Input) -> Result<{pascal_name}Output> {{
-    tracing::info!(workflow_id = %ctx.workflow_id(), "Starting {snake_name} workflow");
+#[forge::workflow]
+#[version = 1]
+#[timeout = "1h"]
+pub async fn {snake_name}(ctx: &WorkflowContext, _input: {pascal_name}Input) -> Result<{pascal_name}Output> {{
+    tracing::info!(workflow_id = %ctx.run_id, "Starting {snake_name} workflow");
 
-    // Step 1: First step (with compensation)
-    let step1_result = ctx.step("validate")
-        .run(|| async {{
-            tracing::info!("Step 1: Validating input");
-            // Validation logic here
-            Ok("validated")
-        }})
-        .compensate(|_result| async {{
-            tracing::info!("Compensating step 1: Cleanup validation");
-            // Rollback validation side effects if any
-            Ok(())
-        }})
-        .await?;
+    // Step 1: Validate
+    if !ctx.is_step_completed("validate") {{
+        ctx.record_step_start("validate");
+        tracing::info!("Step 1: Validating input");
+        // Add validation logic here
+        ctx.record_step_complete("validate", serde_json::json!({{"status": "validated"}}));
+    }}
 
-    // Step 2: Second step (depends on step 1)
-    let step2_result = ctx.step("process")
-        .run(|| async {{
-            tracing::info!("Step 2: Processing");
-            // Main processing logic
-            // This step has access to step1_result
-            Ok("processed")
-        }})
-        .compensate(|_result| async {{
-            tracing::info!("Compensating step 2: Undo processing");
-            // Rollback processing
-            Ok(())
-        }})
-        .await?;
+    // Step 2: Process
+    if !ctx.is_step_completed("process") {{
+        ctx.record_step_start("process");
+        tracing::info!("Step 2: Processing");
+        // Add main processing logic here
+        ctx.record_step_complete("process", serde_json::json!({{"status": "processed"}}));
+    }}
 
-    // Step 3: Final step (no compensation needed)
-    ctx.step("notify")
-        .run(|| async {{
-            tracing::info!("Step 3: Sending notification");
-            // Send confirmation email, webhook, etc.
-            Ok(())
-        }})
-        .await?;
+    // Step 3: Notify
+    if !ctx.is_step_completed("notify") {{
+        ctx.record_step_start("notify");
+        tracing::info!("Step 3: Sending notification");
+        // Add notification logic here
+        ctx.record_step_complete("notify", serde_json::json!({{"status": "notified"}}));
+    }}
 
-    tracing::info!(workflow_id = %ctx.workflow_id(), "Completed {snake_name} workflow");
+    tracing::info!(workflow_id = %ctx.run_id, "Completed {snake_name} workflow");
 
     Ok({pascal_name}Output {{ success: true }})
 }}

@@ -502,3 +502,36 @@ Part B - Dashboard Fixes:
 - B.4: Wired traces page filters (search, min duration, errors only)
 - Added debounce utility and setupEventHandlers with all page-specific handlers
 - All 304 tests passing
+
+Fixed proc macro path resolution for job, cron, and workflow macros.
+- Changed `crates/forge-macros/src/job.rs` to use `forge::forge_core::` paths instead of `forge_core::`
+- Changed `crates/forge-macros/src/cron.rs` to use `forge::forge_core::` paths instead of `forge_core::`
+- Changed `crates/forge-macros/src/workflow.rs` to use `forge::forge_core::` paths instead of `forge_core::`
+- Added `BackoffStrategy` export to `crates/forge-core/src/job/mod.rs`
+- Root cause: user projects depend on `forge` crate, not `forge_core` directly; macros must use re-exported paths
+- All 304 tests passing
+
+Fixed CLI templates to use correct context API.
+- Fixed `crates/forge/src/cli/add.rs` job/cron/workflow templates:
+  - Job: `ctx.job_id` (field) instead of `ctx.job_id()` (method), `ctx.progress()` instead of `ctx.set_progress()`
+  - Cron: `ctx.run_id` (field) instead of `ctx.run_id()`, removed unsupported `overlap` attribute
+  - Workflow: `ctx.run_id` (field) instead of `ctx.workflow_id()`, replaced fluent step builder with direct API
+- Fixed `crates/forge/src/cli/new.rs` sample templates with same corrections
+- Added `Serialize`, `Deserialize`, `serde_json` to prelude (`crates/forge/src/runtime.rs`)
+- Added serde dependencies to `crates/forge/Cargo.toml`
+- Scaffolded projects now build successfully with all job/cron/workflow templates
+- All 304 tests passing
+
+Revamped scaffolded app with typesafe job/workflow API and native examples.
+- Added `GET /_api/jobs/{id}` endpoint returning job detail with progress_percent, progress_message
+- Added `GET /_api/workflows/{id}` endpoint returning workflow detail with step progress
+- Added `JobDetail`, `WorkflowDetail`, `WorkflowStepDetail` response types to dashboard API
+- Updated generated types.ts with Job, Workflow, WorkflowStep, JobStats, WorkflowStats types
+- Added `getJobStatus()`, `getWorkflowStatus()`, `getJobStats()`, `getWorkflowStats()` API functions
+- Added `pollJobUntilComplete()`, `pollWorkflowUntilComplete()` helpers for frontend progress tracking
+- Replaced `send_welcome_email` job with `export_users` - CSV export with real progress tracking
+- Replaced `daily_cleanup` cron with `cleanup_inactive_users` - user management native example
+- Replaced `user_onboarding` workflow with `account_verification` - multi-step email verification
+- Updated functions/mod.rs to reference new module names
+- Updated main.rs template comments with frontend API usage hints
+- All 304 tests passing

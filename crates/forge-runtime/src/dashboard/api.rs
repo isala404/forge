@@ -276,6 +276,53 @@ pub struct WorkflowRun {
     pub error: Option<String>,
 }
 
+/// Job detail with progress info.
+#[derive(Debug, Serialize)]
+pub struct JobDetail {
+    pub id: String,
+    pub job_type: String,
+    pub status: String,
+    pub priority: i32,
+    pub attempts: i32,
+    pub max_attempts: i32,
+    pub progress_percent: Option<i32>,
+    pub progress_message: Option<String>,
+    pub input: Option<serde_json::Value>,
+    pub output: Option<serde_json::Value>,
+    pub scheduled_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+}
+
+/// Workflow detail with steps.
+#[derive(Debug, Serialize)]
+pub struct WorkflowDetail {
+    pub id: String,
+    pub workflow_name: String,
+    pub version: Option<String>,
+    pub status: String,
+    pub input: Option<serde_json::Value>,
+    pub output: Option<serde_json::Value>,
+    pub current_step: Option<String>,
+    pub steps: Vec<WorkflowStepDetail>,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub error: Option<String>,
+}
+
+/// Workflow step detail.
+#[derive(Debug, Serialize)]
+pub struct WorkflowStepDetail {
+    pub name: String,
+    pub status: String,
+    pub result: Option<serde_json::Value>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub error: Option<String>,
+}
+
 /// Node info.
 #[derive(Debug, Serialize)]
 pub struct NodeInfo {
@@ -1169,6 +1216,55 @@ pub async fn list_jobs(
     }
 }
 
+/// Get a specific job by ID with full details.
+pub async fn get_job(
+    State(state): State<DashboardState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<JobDetail>> {
+    let job_id = match uuid::Uuid::parse_str(&id) {
+        Ok(id) => id,
+        Err(_) => return Json(ApiResponse::error("Invalid job ID")),
+    };
+
+    let result = sqlx::query(
+        r#"
+        SELECT id, job_type, status, priority, attempts, max_attempts,
+               progress_percent, progress_message, input, output,
+               scheduled_at, created_at, started_at, completed_at, last_error
+        FROM forge_jobs
+        WHERE id = $1
+        "#,
+    )
+    .bind(job_id)
+    .fetch_optional(&state.pool)
+    .await;
+
+    match result {
+        Ok(Some(row)) => {
+            let id: uuid::Uuid = row.get("id");
+            Json(ApiResponse::success(JobDetail {
+                id: id.to_string(),
+                job_type: row.get("job_type"),
+                status: row.get("status"),
+                priority: row.get("priority"),
+                attempts: row.get("attempts"),
+                max_attempts: row.get("max_attempts"),
+                progress_percent: row.get("progress_percent"),
+                progress_message: row.get("progress_message"),
+                input: row.get("input"),
+                output: row.get("output"),
+                scheduled_at: row.get("scheduled_at"),
+                created_at: row.get("created_at"),
+                started_at: row.get("started_at"),
+                completed_at: row.get("completed_at"),
+                last_error: row.get("last_error"),
+            }))
+        }
+        Ok(None) => Json(ApiResponse::error(format!("Job '{}' not found", id))),
+        Err(e) => Json(ApiResponse::error(e.to_string())),
+    }
+}
+
 /// Get job stats.
 pub async fn get_job_stats(State(state): State<DashboardState>) -> Json<ApiResponse<JobStats>> {
     let result = sqlx::query(
@@ -1247,6 +1343,79 @@ pub async fn list_workflows(
         }
         Err(e) => Json(ApiResponse::error(e.to_string())),
     }
+}
+
+/// Get a specific workflow by ID with full details.
+pub async fn get_workflow(
+    State(state): State<DashboardState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<WorkflowDetail>> {
+    let workflow_id = match uuid::Uuid::parse_str(&id) {
+        Ok(id) => id,
+        Err(_) => return Json(ApiResponse::error("Invalid workflow ID")),
+    };
+
+    // Get the workflow run
+    let run_result = sqlx::query(
+        r#"
+        SELECT id, workflow_name, version, status, input, output,
+               current_step, started_at, completed_at, error
+        FROM forge_workflow_runs
+        WHERE id = $1
+        "#,
+    )
+    .bind(workflow_id)
+    .fetch_optional(&state.pool)
+    .await;
+
+    let run = match run_result {
+        Ok(Some(row)) => row,
+        Ok(None) => return Json(ApiResponse::error(format!("Workflow '{}' not found", id))),
+        Err(e) => return Json(ApiResponse::error(e.to_string())),
+    };
+
+    // Get the workflow steps
+    let steps_result = sqlx::query(
+        r#"
+        SELECT step_name, status, result, started_at, completed_at, error
+        FROM forge_workflow_steps
+        WHERE workflow_run_id = $1
+        ORDER BY started_at ASC NULLS LAST
+        "#,
+    )
+    .bind(workflow_id)
+    .fetch_all(&state.pool)
+    .await;
+
+    let steps = match steps_result {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|row| WorkflowStepDetail {
+                name: row.get("step_name"),
+                status: row.get("status"),
+                result: row.get("result"),
+                started_at: row.get("started_at"),
+                completed_at: row.get("completed_at"),
+                error: row.get("error"),
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+
+    let run_id: uuid::Uuid = run.get("id");
+    Json(ApiResponse::success(WorkflowDetail {
+        id: run_id.to_string(),
+        workflow_name: run.get("workflow_name"),
+        version: run.get("version"),
+        status: run.get("status"),
+        input: run.get("input"),
+        output: run.get("output"),
+        current_step: run.get("current_step"),
+        steps,
+        started_at: run.get("started_at"),
+        completed_at: run.get("completed_at"),
+        error: run.get("error"),
+    }))
 }
 
 /// Get workflow stats.
@@ -1756,6 +1925,94 @@ pub async fn resume_cron(
         }
         Err(e) => Json(ApiResponse::error(&format!("Failed to resume cron: {}", e))),
     }
+}
+
+// ============================================================================
+// Registered Types API
+// ============================================================================
+
+/// Registered job type info.
+#[derive(Debug, Clone, Serialize)]
+pub struct RegisteredJob {
+    pub name: String,
+    pub max_attempts: u32,
+    pub priority: String,
+    pub timeout_secs: u64,
+    pub worker_capability: Option<String>,
+}
+
+/// Registered cron type info.
+#[derive(Debug, Clone, Serialize)]
+pub struct RegisteredCron {
+    pub name: String,
+    pub schedule: String,
+    pub timezone: String,
+    pub catch_up: bool,
+    pub timeout_secs: u64,
+}
+
+/// Registered workflow type info.
+#[derive(Debug, Clone, Serialize)]
+pub struct RegisteredWorkflow {
+    pub name: String,
+    pub version: u32,
+    pub timeout_secs: u64,
+    pub deprecated: bool,
+}
+
+/// List registered job types from the registry.
+pub async fn list_registered_jobs(
+    State(state): State<DashboardState>,
+) -> Json<ApiResponse<Vec<RegisteredJob>>> {
+    let jobs: Vec<RegisteredJob> = state
+        .job_registry
+        .jobs()
+        .map(|(_, entry)| RegisteredJob {
+            name: entry.info.name.to_string(),
+            max_attempts: entry.info.retry.max_attempts,
+            priority: format!("{:?}", entry.info.priority),
+            timeout_secs: entry.info.timeout.as_secs(),
+            worker_capability: entry.info.worker_capability.map(|s| s.to_string()),
+        })
+        .collect();
+    Json(ApiResponse::success(jobs))
+}
+
+/// List registered cron types from the registry.
+pub async fn list_registered_crons(
+    State(state): State<DashboardState>,
+) -> Json<ApiResponse<Vec<RegisteredCron>>> {
+    let crons: Vec<RegisteredCron> = state
+        .cron_registry
+        .list()
+        .into_iter()
+        .map(|entry| RegisteredCron {
+            name: entry.info.name.to_string(),
+            schedule: entry.info.schedule.expression().to_string(),
+            timezone: entry.info.timezone.to_string(),
+            catch_up: entry.info.catch_up,
+            timeout_secs: entry.info.timeout.as_secs(),
+        })
+        .collect();
+    Json(ApiResponse::success(crons))
+}
+
+/// List registered workflow types from the registry.
+pub async fn list_registered_workflows(
+    State(state): State<DashboardState>,
+) -> Json<ApiResponse<Vec<RegisteredWorkflow>>> {
+    let workflows: Vec<RegisteredWorkflow> = state
+        .workflow_registry
+        .list()
+        .into_iter()
+        .map(|entry| RegisteredWorkflow {
+            name: entry.info.name.to_string(),
+            version: entry.info.version,
+            timeout_secs: entry.info.timeout.as_secs(),
+            deprecated: entry.info.deprecated,
+        })
+        .collect();
+    Json(ApiResponse::success(workflows))
 }
 
 #[cfg(test)]

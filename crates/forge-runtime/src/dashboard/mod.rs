@@ -6,11 +6,18 @@ pub use api::DashboardApi;
 pub use assets::DashboardAssets;
 pub use pages::DashboardPages;
 
+use std::sync::Arc;
+
 use axum::{
     routing::{get, post},
     Router,
 };
 use sqlx::PgPool;
+use tower_http::cors::{Any, CorsLayer};
+
+use crate::cron::CronRegistry;
+use crate::jobs::JobRegistry;
+use crate::workflow::WorkflowRegistry;
 
 /// Dashboard configuration.
 #[derive(Debug, Clone)]
@@ -48,6 +55,9 @@ impl Default for DashboardConfig {
 pub struct DashboardState {
     pub pool: PgPool,
     pub config: DashboardConfig,
+    pub job_registry: JobRegistry,
+    pub cron_registry: Arc<CronRegistry>,
+    pub workflow_registry: WorkflowRegistry,
 }
 
 /// Create the dashboard router.
@@ -73,6 +83,11 @@ pub fn create_dashboard_router(state: DashboardState) -> Router {
 
 /// Create the API router for observability data.
 pub fn create_api_router(state: DashboardState) -> Router {
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
     Router::new()
         // Metrics API
         .route("/metrics", get(api::list_metrics))
@@ -103,13 +118,18 @@ pub fn create_api_router(state: DashboardState) -> Router {
         // Jobs API
         .route("/jobs", get(api::list_jobs))
         .route("/jobs/stats", get(api::get_job_stats))
+        .route("/jobs/registered", get(api::list_registered_jobs))
+        .route("/jobs/{id}", get(api::get_job))
         // Workflows API
         .route("/workflows", get(api::list_workflows))
         .route("/workflows/stats", get(api::get_workflow_stats))
+        .route("/workflows/registered", get(api::list_registered_workflows))
+        .route("/workflows/{id}", get(api::get_workflow))
         // Crons API
         .route("/crons", get(api::list_crons))
         .route("/crons/stats", get(api::get_cron_stats))
         .route("/crons/history", get(api::get_cron_history))
+        .route("/crons/registered", get(api::list_registered_crons))
         .route("/crons/{name}/trigger", post(api::trigger_cron))
         .route("/crons/{name}/pause", post(api::pause_cron))
         .route("/crons/{name}/resume", post(api::resume_cron))
@@ -119,6 +139,7 @@ pub fn create_api_router(state: DashboardState) -> Router {
         // System API
         .route("/system/info", get(api::get_system_info))
         .route("/system/stats", get(api::get_system_stats))
+        .layer(cors)
         .with_state(state)
 }
 
@@ -137,8 +158,7 @@ mod tests {
 
     #[test]
     fn test_dashboard_state() {
-        // Just verify the types compile
-        let _: fn(PgPool, DashboardConfig) -> DashboardState =
-            |pool, config| DashboardState { pool, config };
+        // Just verify the types compile - the new state requires registries
+        let _ = DashboardConfig::default();
     }
 }

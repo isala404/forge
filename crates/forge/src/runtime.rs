@@ -43,6 +43,10 @@ pub mod prelude {
     pub use chrono::{DateTime, Utc};
     pub use uuid::Uuid;
 
+    // Serde re-exports for user code
+    pub use serde::{Deserialize, Serialize};
+    pub use serde_json;
+
     /// Timestamp type alias for convenience.
     pub type Timestamp = DateTime<Utc>;
 
@@ -333,10 +337,13 @@ impl Forge {
                 auth: AuthConfig::default(),
             };
 
-            // Create dashboard state
+            // Create dashboard state with registries
             let dashboard_state = DashboardState {
                 pool: pool.clone(),
                 config: DashboardConfig::default(),
+                job_registry: self.job_registry.clone(),
+                cron_registry: self.cron_registry.clone(),
+                workflow_registry: self.workflow_registry.clone(),
             };
 
             // Build gateway router with dashboard and observability

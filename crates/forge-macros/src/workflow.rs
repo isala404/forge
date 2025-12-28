@@ -151,12 +151,12 @@ pub fn workflow_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         #(#other_attrs)*
         #vis struct #struct_name;
 
-        impl forge_core::workflow::ForgeWorkflow for #struct_name {
+        impl forge::forge_core::workflow::ForgeWorkflow for #struct_name {
             type Input = #input_type;
             type Output = #output_type;
 
-            fn info() -> forge_core::workflow::WorkflowInfo {
-                forge_core::workflow::WorkflowInfo {
+            fn info() -> forge::forge_core::workflow::WorkflowInfo {
+                forge::forge_core::workflow::WorkflowInfo {
                     name: #fn_name_str,
                     version: #version,
                     timeout: #timeout,
@@ -165,9 +165,9 @@ pub fn workflow_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
 
             fn execute(
-                ctx: &forge_core::workflow::WorkflowContext,
+                ctx: &forge::forge_core::workflow::WorkflowContext,
                 #input_ident: Self::Input,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = forge_core::Result<Self::Output>> + Send + '_>> {
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = forge::forge_core::Result<Self::Output>> + Send + '_>> {
                 Box::pin(async move #block)
             }
         }

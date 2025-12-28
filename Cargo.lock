@@ -788,6 +788,8 @@ dependencies = [
  "hostname",
  "indicatif",
  "reqwest",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",

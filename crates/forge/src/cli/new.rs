@@ -160,19 +160,21 @@ async fn main() -> Result<()> {
     builder.function_registry_mut().register_mutation::<functions::DeleteUserMutation>();
 
     // =========================================================================
-    // JOBS - Background tasks with retry logic (see dashboard for monitoring)
+    // JOBS - Background tasks with progress tracking (see /_dashboard/jobs)
+    // Frontend: Use getJobStatus() or pollJobUntilComplete() to track progress
     // =========================================================================
-    // builder.job_registry_mut().register::<functions::SendWelcomeEmailJob>();
+    // builder.job_registry_mut().register::<functions::ExportUsersJob>();
 
     // =========================================================================
-    // CRONS - Scheduled tasks (see dashboard for execution history)
+    // CRONS - Scheduled tasks (see /_dashboard/crons for history)
     // =========================================================================
-    // builder.cron_registry_mut().register::<functions::DailyCleanupCron>();
+    // builder.cron_registry_mut().register::<functions::CleanupInactiveUsersCron>();
 
     // =========================================================================
-    // WORKFLOWS - Multi-step durable processes (see dashboard for progress)
+    // WORKFLOWS - Multi-step durable processes (see /_dashboard/workflows)
+    // Frontend: Use getWorkflowStatus() or pollWorkflowUntilComplete() to track steps
     // =========================================================================
-    // builder.workflow_registry_mut().register::<functions::UserOnboardingWorkflow>();
+    // builder.workflow_registry_mut().register::<functions::AccountVerificationWorkflow>();
 
     // Migrations are loaded from ./migrations directory automatically
     builder
@@ -216,20 +218,20 @@ pub struct User {
 // User CRUD operations (queries and mutations)
 pub mod users;
 
-// Background job example
-pub mod send_welcome_email_job;
+// Background job example - export users with progress tracking
+pub mod export_users_job;
 
-// Scheduled task example
-pub mod daily_cleanup_cron;
+// Scheduled task example - cleanup inactive users
+pub mod cleanup_inactive_users_cron;
 
-// Durable workflow example
-pub mod user_onboarding_workflow;
+// Durable workflow example - account verification flow
+pub mod account_verification_workflow;
 
 // Re-export all function types
 pub use users::*;
-pub use send_welcome_email_job::*;
-pub use daily_cleanup_cron::*;
-pub use user_onboarding_workflow::*;
+pub use export_users_job::*;
+pub use cleanup_inactive_users_cron::*;
+pub use account_verification_workflow::*;
 "#;
     fs::write(dir.join("src/functions/mod.rs"), functions_mod)?;
 
@@ -331,96 +333,148 @@ pub async fn delete_user(ctx: &MutationContext, id: Uuid) -> Result<bool> {
 "#;
     fs::write(dir.join("src/functions/users.rs"), users_rs)?;
 
-    // Create sample job demonstrating background processing
-    let send_email_job = r#"//! Background Job: Send Welcome Email
+    // Create sample job demonstrating background processing with progress
+    let export_users_job = r#"//! Background Job: Export Users to CSV
 //!
 //! Jobs are used for async processing with automatic retry logic.
-//! This example shows how to dispatch work that may take time or fail.
+//! This example demonstrates real progress tracking - perfect for long-running
+//! operations like data exports, report generation, or bulk operations.
 //!
 //! ## Dispatching this job
 //!
-//! From a mutation:
+//! From a mutation or action:
 //! ```rust
-//! ctx.dispatch_job::<SendWelcomeEmailJob>(SendWelcomeEmailInput {
-//!     user_id: user.id,
-//!     email: user.email.clone(),
+//! let job_id = ctx.dispatch_job::<ExportUsersJob>(ExportUsersInput {
+//!     format: "csv".to_string(),
+//!     include_inactive: false,
 //! }).await?;
+//! // Return the job_id so the frontend can track progress
+//! ```
+//!
+//! ## Tracking Progress in the Frontend
+//!
+//! ```typescript
+//! import { pollJobUntilComplete, getJobStatus } from '$lib/forge/api';
+//!
+//! // Poll until complete with progress updates
+//! const job = await pollJobUntilComplete(jobId, {
+//!     onProgress: (job) => {
+//!         console.log(`${job.progress_percent}% - ${job.progress_message}`);
+//!     }
+//! });
+//!
+//! // Or check status once
+//! const { data: job } = await getJobStatus(jobId);
 //! ```
 
 use forge::prelude::*;
+use crate::schema::User;
 
-/// Input for the send_welcome_email job.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SendWelcomeEmailInput {
-    pub user_id: Uuid,
-    pub email: String,
+/// Input for the export_users job.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportUsersInput {
+    /// Export format: "csv" or "json"
+    pub format: String,
+    /// Whether to include inactive users
+    pub include_inactive: bool,
 }
 
-/// Output from the send_welcome_email job.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SendWelcomeEmailOutput {
-    pub success: bool,
-    pub message_id: Option<String>,
+/// Output from the export_users job.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportUsersOutput {
+    /// Number of users exported
+    pub user_count: usize,
+    /// The exported data as a string
+    pub data: String,
+    /// Format used
+    pub format: String,
 }
 
-/// Send welcome email background job.
+/// Export users background job.
 ///
-/// Features:
-/// - Automatic retry on failure (max 3 attempts)
-/// - Exponential backoff between retries
-/// - Progress tracking visible in dashboard
-#[forge::job(timeout = "5m", max_attempts = 3)]
-pub async fn send_welcome_email(
+/// Demonstrates:
+/// - Real progress tracking visible in dashboard and frontend
+/// - Processing data in batches with percentage updates
+/// - Returning useful output data
+#[forge::job]
+#[timeout = "10m"]
+#[retry(max_attempts = 3)]
+pub async fn export_users(
     ctx: &JobContext,
-    input: SendWelcomeEmailInput,
-) -> Result<SendWelcomeEmailOutput> {
+    input: ExportUsersInput,
+) -> Result<ExportUsersOutput> {
     tracing::info!(
-        job_id = %ctx.job_id(),
-        user_id = %input.user_id,
-        "Sending welcome email"
+        job_id = %ctx.job_id,
+        format = %input.format,
+        "Starting user export"
     );
 
-    // Report progress (visible in dashboard)
-    ctx.set_progress(20, "Preparing email...").await?;
+    // Report progress
+    let _ = ctx.progress(5, "Fetching users from database...");
 
-    // TODO: Integrate with your email provider
-    // Example with SendGrid:
-    // let response = ctx.http_client()
-    //     .post("https://api.sendgrid.com/v3/mail/send")
-    //     .header("Authorization", format!("Bearer {}", api_key))
-    //     .json(&email_payload)
-    //     .send()
-    //     .await?;
+    // Fetch all users
+    let users: Vec<User> = sqlx::query_as::<_, User>(
+        "SELECT * FROM users ORDER BY created_at DESC"
+    )
+    .fetch_all(ctx.db())
+    .await?;
 
-    ctx.set_progress(80, "Sending...").await?;
+    let total = users.len();
+    let _ = ctx.progress(20, &format!("Found {} users, generating export...", total));
 
-    // Simulate email sending
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // Generate export with progress updates
+    let data = match input.format.as_str() {
+        "json" => {
+            let _ = ctx.progress(50, "Serializing to JSON...");
+            serde_json::to_string_pretty(&users)
+                .map_err(|e| forge::ForgeError::Job(e.to_string()))?
+        }
+        _ => {
+            // CSV format (default)
+            let mut csv = String::from("id,email,name,created_at,updated_at\n");
+            for (i, user) in users.iter().enumerate() {
+                csv.push_str(&format!(
+                    "{},{},{},{},{}\n",
+                    user.id, user.email, user.name, user.created_at, user.updated_at
+                ));
+                // Update progress every 10 users
+                if i % 10 == 0 && total > 0 {
+                    let percent = 20 + ((i as f64 / total as f64) * 70.0) as u8;
+                    let _ = ctx.progress(percent, &format!("Processing user {} of {}...", i + 1, total));
+                }
+            }
+            csv
+        }
+    };
 
-    ctx.set_progress(100, "Sent!").await?;
+    let _ = ctx.progress(95, "Finalizing export...");
 
     tracing::info!(
-        job_id = %ctx.job_id(),
-        user_id = %input.user_id,
-        "Welcome email sent successfully"
+        job_id = %ctx.job_id,
+        user_count = total,
+        format = %input.format,
+        "User export completed"
     );
 
-    Ok(SendWelcomeEmailOutput {
-        success: true,
-        message_id: Some(format!("msg_{}", Uuid::new_v4())),
+    let _ = ctx.progress(100, &format!("Export complete! {} users exported.", total));
+
+    Ok(ExportUsersOutput {
+        user_count: total,
+        data,
+        format: input.format,
     })
 }
 "#;
     fs::write(
-        dir.join("src/functions/send_welcome_email_job.rs"),
-        send_email_job,
+        dir.join("src/functions/export_users_job.rs"),
+        export_users_job,
     )?;
 
     // Create sample cron demonstrating scheduled tasks
-    let cleanup_cron = r#"//! Scheduled Task: Daily Cleanup
+    let cleanup_cron = r#"//! Scheduled Task: Cleanup Inactive Users
 //!
 //! Cron tasks run on a schedule defined by a cron expression.
-//! This example shows how to run periodic maintenance tasks.
+//! This example shows how to run periodic maintenance tasks on user data.
 //!
 //! ## Cron Expression Reference
 //!
@@ -429,21 +483,56 @@ pub async fn send_welcome_email(
 //! - `0 0 * * *`     - Daily at midnight
 //! - `0 9 * * 1-5`   - Weekdays at 9 AM
 //! - `0 0 1 * *`     - Monthly on the 1st
+//!
+//! ## Monitoring
+//!
+//! Cron executions are visible in the FORGE dashboard at /_dashboard/crons.
+//! You can see execution history, success/failure rates, and trigger manual runs.
 
 use forge::prelude::*;
 
-/// Daily cleanup scheduled task.
+/// Cleanup inactive users scheduled task.
 ///
-/// Runs every day at midnight UTC.
-/// Cleans up old sessions and temporary data.
-#[forge::cron(schedule = "0 0 * * *", timezone = "UTC")]
-pub async fn daily_cleanup(ctx: &CronContext) -> Result<()> {
-    tracing::info!(run_id = %ctx.run_id(), "Starting daily cleanup");
+/// Runs every day at 2 AM UTC (off-peak hours).
+/// Identifies users who haven't been active in 30 days and logs them.
+/// In production, you might send reminder emails or mark them as inactive.
+#[forge::cron("0 2 * * *")]
+#[timezone = "UTC"]
+pub async fn cleanup_inactive_users(ctx: &CronContext) -> Result<()> {
+    tracing::info!(run_id = %ctx.run_id, "Starting inactive user cleanup");
 
-    // Get database pool for queries
     let pool = ctx.db();
 
-    // Example: Delete old sessions (older than 7 days)
+    // Find users who haven't been updated in 30 days
+    // In a real app, you'd track last_login_at instead of updated_at
+    let inactive_count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM users WHERE updated_at < NOW() - INTERVAL '30 days'"
+    )
+    .fetch_one(pool)
+    .await?;
+
+    tracing::info!(
+        run_id = %ctx.run_id,
+        inactive_users = inactive_count.0,
+        "Found inactive users"
+    );
+
+    // Example: Send reminder emails to inactive users
+    // let inactive_users = sqlx::query_as::<_, User>(
+    //     "SELECT * FROM users WHERE updated_at < NOW() - INTERVAL '30 days'"
+    // )
+    // .fetch_all(pool)
+    // .await?;
+    //
+    // for user in inactive_users {
+    //     // Dispatch a job to send a "we miss you" email
+    //     ctx.dispatch_job::<SendReminderEmailJob>(SendReminderEmailInput {
+    //         user_id: user.id,
+    //         email: user.email,
+    //     }).await?;
+    // }
+
+    // Example: Clean up old sessions for better performance
     let deleted_sessions = sqlx::query(
         "DELETE FROM forge_sessions WHERE last_active_at < NOW() - INTERVAL '7 days'"
     )
@@ -452,41 +541,55 @@ pub async fn daily_cleanup(ctx: &CronContext) -> Result<()> {
     .rows_affected();
 
     tracing::info!(
-        run_id = %ctx.run_id(),
-        deleted_sessions = %deleted_sessions,
-        "Cleaned up old sessions"
+        run_id = %ctx.run_id,
+        deleted_sessions = deleted_sessions,
+        inactive_users = inactive_count.0,
+        "Cleanup completed"
     );
-
-    // Example: Archive old logs
-    // let archived_logs = sqlx::query(
-    //     "INSERT INTO forge_logs_archive SELECT * FROM forge_logs WHERE timestamp < NOW() - INTERVAL '30 days'"
-    // )
-    // .execute(pool)
-    // .await?
-    // .rows_affected();
-
-    tracing::info!(run_id = %ctx.run_id(), "Daily cleanup completed");
 
     Ok(())
 }
 "#;
     fs::write(
-        dir.join("src/functions/daily_cleanup_cron.rs"),
+        dir.join("src/functions/cleanup_inactive_users_cron.rs"),
         cleanup_cron,
     )?;
 
     // Create sample workflow demonstrating durable multi-step processes
-    let onboarding_workflow = r#"//! Workflow: User Onboarding
+    let verification_workflow = r#"//! Workflow: Account Verification
 //!
 //! Workflows are durable multi-step processes with automatic state persistence.
 //! Each step is checkpointed - if the workflow fails, it resumes from where it left off.
 //!
+//! This example shows a real-world email verification flow with steps that can
+//! be tracked in the frontend.
+//!
 //! ## Starting this workflow
 //!
 //! ```rust
-//! let result = ctx.start_workflow::<UserOnboardingWorkflow>(
-//!     UserOnboardingInput { user_id, plan: "pro".to_string() }
+//! let workflow_id = ctx.start_workflow::<AccountVerificationWorkflow>(
+//!     AccountVerificationInput { user_id, email: user.email.clone() }
 //! ).await?;
+//! // Return the workflow_id so frontend can track progress
+//! ```
+//!
+//! ## Tracking Progress in the Frontend
+//!
+//! ```typescript
+//! import { pollWorkflowUntilComplete, getWorkflowStatus } from '$lib/forge/api';
+//!
+//! // Poll until complete with step updates
+//! const workflow = await pollWorkflowUntilComplete(workflowId, {
+//!     onStepChange: (workflow) => {
+//!         console.log(`Current step: ${workflow.current_step}`);
+//!         workflow.steps.forEach(step =>
+//!             console.log(`  ${step.name}: ${step.status}`)
+//!         );
+//!     }
+//! });
+//!
+//! // Or check status once
+//! const { data: workflow } = await getWorkflowStatus(workflowId);
 //! ```
 //!
 //! ## Key Concepts
@@ -497,95 +600,139 @@ pub async fn daily_cleanup(ctx: &CronContext) -> Result<()> {
 
 use forge::prelude::*;
 
-/// Input for the user onboarding workflow.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct UserOnboardingInput {
+/// Input for the account verification workflow.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountVerificationInput {
     pub user_id: Uuid,
-    pub plan: String,
+    pub email: String,
 }
 
-/// Output from the user onboarding workflow.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct UserOnboardingOutput {
-    pub success: bool,
-    pub welcome_email_sent: bool,
-    pub trial_started: bool,
+/// Output from the account verification workflow.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountVerificationOutput {
+    pub verified: bool,
+    pub verification_token: Option<String>,
+    pub verified_at: Option<String>,
 }
 
-/// User onboarding workflow.
+/// Account verification workflow.
 ///
-/// Multi-step process for new user setup:
-/// 1. Initialize user profile
-/// 2. Start trial period
-/// 3. Send welcome email
-#[forge::workflow(version = 1, timeout = "1h")]
-pub async fn user_onboarding(
+/// Multi-step process for verifying a user's email:
+/// 1. Generate verification token
+/// 2. Store token in database
+/// 3. Send verification email (simulated)
+/// 4. Mark account as verified (in real app, this waits for user click)
+#[forge::workflow]
+#[version = 1]
+#[timeout = "24h"]
+pub async fn account_verification(
     ctx: &WorkflowContext,
-    input: UserOnboardingInput,
-) -> Result<UserOnboardingOutput> {
+    input: AccountVerificationInput,
+) -> Result<AccountVerificationOutput> {
     tracing::info!(
-        workflow_id = %ctx.workflow_id(),
+        workflow_id = %ctx.run_id,
         user_id = %input.user_id,
-        "Starting user onboarding workflow"
+        email = %input.email,
+        "Starting account verification workflow"
     );
 
-    // Step 1: Initialize user profile
-    ctx.step("init_profile")
-        .run(|| async {
-            tracing::info!("Step 1: Initializing user profile");
-            // Set up user preferences, default settings, etc.
-            Ok(())
-        })
-        .compensate(|_| async {
-            tracing::info!("Compensating: Rolling back profile initialization");
-            // Clean up any partial profile data
-            Ok(())
-        })
-        .await?;
+    // Step 1: Generate verification token
+    let token = if !ctx.is_step_completed("generate_token") {
+        ctx.record_step_start("generate_token");
+        tracing::info!("Step 1: Generating verification token");
 
-    // Step 2: Start trial period
-    let trial_started = ctx.step("start_trial")
-        .run(|| async {
-            tracing::info!("Step 2: Starting trial period");
-            // Create trial subscription record
-            // Example: Insert trial record into database
-            Ok(true)
-        })
-        .compensate(|_| async {
-            tracing::info!("Compensating: Canceling trial");
-            // Cancel trial if workflow fails later
-            Ok(())
-        })
-        .await?;
+        let token = format!("verify_{}", Uuid::new_v4());
+        ctx.record_step_complete("generate_token", serde_json::json!({
+            "token": token,
+            "generated_at": chrono::Utc::now().to_rfc3339()
+        }));
+        token
+    } else {
+        ctx.get_step_result::<serde_json::Value>("generate_token")
+            .and_then(|v| v.get("token").and_then(|t| t.as_str()).map(String::from))
+            .unwrap_or_default()
+    };
 
-    // Step 3: Send welcome email (optional - won't fail workflow)
-    let welcome_email_sent = ctx.step("send_welcome")
-        .run(|| async {
-            tracing::info!("Step 3: Dispatching welcome email job");
-            // In a real app, dispatch the job here:
-            // ctx.dispatch_job::<SendWelcomeEmailJob>(...).await?;
-            Ok(true)
-        })
-        .optional() // Won't trigger compensation if this fails
-        .await
-        .unwrap_or(false);
+    // Step 2: Store token in database
+    if !ctx.is_step_completed("store_token") {
+        ctx.record_step_start("store_token");
+        tracing::info!("Step 2: Storing verification token");
+
+        // In a real app, you'd store this in a verification_tokens table:
+        // sqlx::query(
+        //     "INSERT INTO verification_tokens (user_id, token, expires_at) VALUES ($1, $2, NOW() + INTERVAL '24 hours')"
+        // )
+        // .bind(input.user_id)
+        // .bind(&token)
+        // .execute(ctx.db())
+        // .await?;
+
+        ctx.record_step_complete("store_token", serde_json::json!({
+            "stored": true,
+            "user_id": input.user_id.to_string()
+        }));
+    }
+
+    // Step 3: Send verification email
+    if !ctx.is_step_completed("send_email") {
+        ctx.record_step_start("send_email");
+        tracing::info!("Step 3: Sending verification email to {}", input.email);
+
+        // In a real app, dispatch an email job:
+        // ctx.dispatch_job::<SendEmailJob>(SendEmailInput {
+        //     to: input.email.clone(),
+        //     subject: "Verify your account".to_string(),
+        //     body: format!("Click here to verify: https://app.example.com/verify?token={}", token),
+        // }).await?;
+
+        // Simulate email sending
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        ctx.record_step_complete("send_email", serde_json::json!({
+            "sent_to": input.email,
+            "sent_at": chrono::Utc::now().to_rfc3339()
+        }));
+    }
+
+    // Step 4: Mark as verified (in a real app, this would wait for the user to click the link)
+    // For demo purposes, we auto-verify
+    let verified_at = if !ctx.is_step_completed("mark_verified") {
+        ctx.record_step_start("mark_verified");
+        tracing::info!("Step 4: Marking account as verified");
+
+        // In a real app, you'd update the user record:
+        // sqlx::query("UPDATE users SET verified = true, verified_at = NOW() WHERE id = $1")
+        //     .bind(input.user_id)
+        //     .execute(ctx.db())
+        //     .await?;
+
+        let now = chrono::Utc::now().to_rfc3339();
+        ctx.record_step_complete("mark_verified", serde_json::json!({
+            "verified": true,
+            "verified_at": now
+        }));
+        Some(now)
+    } else {
+        ctx.get_step_result::<serde_json::Value>("mark_verified")
+            .and_then(|v| v.get("verified_at").and_then(|t| t.as_str()).map(String::from))
+    };
 
     tracing::info!(
-        workflow_id = %ctx.workflow_id(),
+        workflow_id = %ctx.run_id,
         user_id = %input.user_id,
-        "User onboarding workflow completed"
+        "Account verification workflow completed"
     );
 
-    Ok(UserOnboardingOutput {
-        success: true,
-        welcome_email_sent,
-        trial_started,
+    Ok(AccountVerificationOutput {
+        verified: true,
+        verification_token: Some(token),
+        verified_at,
     })
 }
 "#;
     fs::write(
-        dir.join("src/functions/user_onboarding_workflow.rs"),
-        onboarding_workflow,
+        dir.join("src/functions/account_verification_workflow.rs"),
+        verification_workflow,
     )?;
 
     // Create .gitignore
@@ -1048,6 +1195,79 @@ export interface UpdateUserInput {
 export interface DeleteUserInput {
     id: string;
 }
+
+// ============================================================================
+// FORGE System Types - Job, Workflow, and Progress tracking
+// ============================================================================
+
+/** Job status enum */
+export type JobStatus = 'pending' | 'claimed' | 'running' | 'completed' | 'retry' | 'failed' | 'dead_letter';
+
+/** Job detail with progress info */
+export interface Job {
+    id: string;
+    job_type: string;
+    status: JobStatus;
+    priority: number;
+    attempts: number;
+    max_attempts: number;
+    progress_percent: number | null;
+    progress_message: string | null;
+    input: unknown;
+    output: unknown;
+    scheduled_at: string;
+    created_at: string;
+    started_at: string | null;
+    completed_at: string | null;
+    last_error: string | null;
+}
+
+/** Workflow status enum */
+export type WorkflowStatus = 'created' | 'running' | 'waiting' | 'completed' | 'compensating' | 'compensated' | 'failed';
+
+/** Workflow step detail */
+export interface WorkflowStep {
+    name: string;
+    status: string;
+    result: unknown;
+    started_at: string | null;
+    completed_at: string | null;
+    error: string | null;
+}
+
+/** Workflow detail with steps */
+export interface Workflow {
+    id: string;
+    workflow_name: string;
+    version: string | null;
+    status: WorkflowStatus;
+    input: unknown;
+    output: unknown;
+    current_step: string | null;
+    steps: WorkflowStep[];
+    started_at: string;
+    completed_at: string | null;
+    error: string | null;
+}
+
+/** Job stats summary */
+export interface JobStats {
+    pending: number;
+    running: number;
+    completed: number;
+    failed: number;
+    retrying: number;
+    dead_letter: number;
+}
+
+/** Workflow stats summary */
+export interface WorkflowStats {
+    running: number;
+    completed: number;
+    waiting: number;
+    failed: number;
+    compensating: number;
+}
 "#;
     fs::write(frontend_dir.join("src/lib/forge/types.ts"), types_ts)?;
 
@@ -1056,7 +1276,7 @@ export interface DeleteUserInput {
 // Run `forge generate` to regenerate this file
 
 import { createQuery, createMutation } from './runtime';
-import type { User, CreateUserInput, UpdateUserInput, DeleteUserInput } from './types';
+import type { User, CreateUserInput, UpdateUserInput, DeleteUserInput, Job, Workflow, JobStats, WorkflowStats } from './types';
 
 // ============================================================================
 // QUERIES - Use with `query()` for one-time fetch or `subscribe()` for real-time
@@ -1080,6 +1300,136 @@ export const updateUser = createMutation<UpdateUserInput, User>('update_user');
 
 /** Delete a user */
 export const deleteUser = createMutation<DeleteUserInput, boolean>('delete_user');
+
+// ============================================================================
+// FORGE SYSTEM API - Job and Workflow monitoring
+// These functions fetch data from the FORGE system API (/_api/*)
+// ============================================================================
+
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080';
+
+interface ApiResponse<T> {
+    success: boolean;
+    data?: T;
+    error?: string;
+}
+
+/**
+ * Get job status and progress by ID.
+ * Useful for tracking background job progress in the UI.
+ *
+ * @example
+ * const { data: job } = await getJobStatus('job-uuid');
+ * console.log(`Progress: ${job?.progress_percent}% - ${job?.progress_message}`);
+ */
+export async function getJobStatus(jobId: string): Promise<ApiResponse<Job>> {
+    const response = await fetch(`${API_URL}/_api/jobs/${jobId}`);
+    return response.json();
+}
+
+/**
+ * Get workflow status and steps by ID.
+ * Useful for tracking multi-step workflow progress in the UI.
+ *
+ * @example
+ * const { data: workflow } = await getWorkflowStatus('workflow-uuid');
+ * console.log(`Current step: ${workflow?.current_step}`);
+ * workflow?.steps.forEach(step => console.log(`${step.name}: ${step.status}`));
+ */
+export async function getWorkflowStatus(workflowId: string): Promise<ApiResponse<Workflow>> {
+    const response = await fetch(`${API_URL}/_api/workflows/${workflowId}`);
+    return response.json();
+}
+
+/**
+ * Get job statistics (counts by status).
+ * Useful for dashboard summaries.
+ */
+export async function getJobStats(): Promise<ApiResponse<JobStats>> {
+    const response = await fetch(`${API_URL}/_api/jobs/stats`);
+    return response.json();
+}
+
+/**
+ * Get workflow statistics (counts by status).
+ * Useful for dashboard summaries.
+ */
+export async function getWorkflowStats(): Promise<ApiResponse<WorkflowStats>> {
+    const response = await fetch(`${API_URL}/_api/workflows/stats`);
+    return response.json();
+}
+
+/**
+ * Poll a job until it completes or fails.
+ * Returns the final job state.
+ *
+ * @example
+ * const job = await pollJobUntilComplete('job-uuid', {
+ *   onProgress: (job) => console.log(`${job.progress_percent}%`),
+ *   pollInterval: 1000
+ * });
+ */
+export async function pollJobUntilComplete(
+    jobId: string,
+    options?: {
+        onProgress?: (job: Job) => void;
+        pollInterval?: number;
+        timeout?: number;
+    }
+): Promise<Job | null> {
+    const { onProgress, pollInterval = 1000, timeout = 300000 } = options || {};
+    const startTime = Date.now();
+
+    while (Date.now() - startTime < timeout) {
+        const { data: job } = await getJobStatus(jobId);
+        if (!job) return null;
+
+        onProgress?.(job);
+
+        if (job.status === 'completed' || job.status === 'failed' || job.status === 'dead_letter') {
+            return job;
+        }
+
+        await new Promise(resolve => setTimeout(resolve, pollInterval));
+    }
+
+    return null;
+}
+
+/**
+ * Poll a workflow until it completes or fails.
+ * Returns the final workflow state.
+ */
+export async function pollWorkflowUntilComplete(
+    workflowId: string,
+    options?: {
+        onStepChange?: (workflow: Workflow) => void;
+        pollInterval?: number;
+        timeout?: number;
+    }
+): Promise<Workflow | null> {
+    const { onStepChange, pollInterval = 1000, timeout = 300000 } = options || {};
+    const startTime = Date.now();
+    let lastStep: string | null = null;
+
+    while (Date.now() - startTime < timeout) {
+        const { data: workflow } = await getWorkflowStatus(workflowId);
+        if (!workflow) return null;
+
+        if (workflow.current_step !== lastStep) {
+            lastStep = workflow.current_step;
+            onStepChange?.(workflow);
+        }
+
+        if (workflow.status === 'completed' || workflow.status === 'failed' || workflow.status === 'compensated') {
+            return workflow;
+        }
+
+        await new Promise(resolve => setTimeout(resolve, pollInterval));
+    }
+
+    return null;
+}
 "#;
     fs::write(frontend_dir.join("src/lib/forge/api.ts"), api_ts)?;
 

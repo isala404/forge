@@ -24,6 +24,8 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 clap = { version = "4.5", features = ["derive"] }
 console = "0.15"
 dialoguer = "0.11"
