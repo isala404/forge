@@ -535,3 +535,14 @@ Revamped scaffolded app with typesafe job/workflow API and native examples.
 - Updated functions/mod.rs to reference new module names
 - Updated main.rs template comments with frontend API usage hints
 - All 304 tests passing
+
+Fixed dashboard to display job/workflow status with progress and step details.
+- Added `progress_percent`, `progress_message` fields to `/_api/jobs` list endpoint in `crates/forge-runtime/src/dashboard/api.rs`
+- Added Progress column to jobs table in `crates/forge-runtime/src/dashboard/pages.rs`
+- Added clickable rows that open detail modals for jobs and workflows
+- Added job detail modal showing full progress bar, input/output, error details
+- Added workflow detail modal showing step-by-step progress with status icons
+- Added modal CSS styles (`.modal`, `.progress-bar`, `.step-item`) in `crates/forge-runtime/src/dashboard/assets.rs`
+- Added `openJobModal()`, `openWorkflowModal()`, `closeJobModal()`, `closeWorkflowModal()` JS functions
+- Added `renderJobProgress()` helper for inline progress bar display
+- Modal closes on background click or Escape key

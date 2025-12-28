@@ -442,6 +442,7 @@ pub async fn jobs(State(_state): State<DashboardState>) -> Html<String> {
                         <th>Type</th>
                         <th>Priority</th>
                         <th>Status</th>
+                        <th>Progress</th>
                         <th>Attempts</th>
                         <th>Created</th>
                         <th>Error</th>
@@ -449,10 +450,23 @@ pub async fn jobs(State(_state): State<DashboardState>) -> Html<String> {
                 </thead>
                 <tbody id="jobs-tbody">
                     <tr class="empty-row">
-                        <td colspan="7">Loading jobs...</td>
+                        <td colspan="8">Loading jobs...</td>
                     </tr>
                 </tbody>
             </table>
+        </div>
+
+        <!-- Job Detail Modal -->
+        <div id="job-modal" class="modal" style="display:none;">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>Job Details</h3>
+                    <button class="modal-close" onclick="closeJobModal()">&times;</button>
+                </div>
+                <div class="modal-body" id="job-modal-body">
+                    Loading...
+                </div>
+            </div>
         </div>
     "#;
 
@@ -500,6 +514,19 @@ pub async fn workflows(State(_state): State<DashboardState>) -> Html<String> {
                     </tr>
                 </tbody>
             </table>
+        </div>
+
+        <!-- Workflow Detail Modal -->
+        <div id="workflow-modal" class="modal" style="display:none;">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>Workflow Details</h3>
+                    <button class="modal-close" onclick="closeWorkflowModal()">&times;</button>
+                </div>
+                <div class="modal-body" id="workflow-modal-body">
+                    Loading...
+                </div>
+            </div>
         </div>
     "#;
 

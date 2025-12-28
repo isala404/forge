@@ -427,7 +427,7 @@ pub async fn export_users(
         "json" => {
             let _ = ctx.progress(50, "Serializing to JSON...");
             serde_json::to_string_pretty(&users)
-                .map_err(|e| forge::ForgeError::Job(e.to_string()))?
+                .map_err(|e| ForgeError::Job(e.to_string()))?
         }
         _ => {
             // CSV format (default)

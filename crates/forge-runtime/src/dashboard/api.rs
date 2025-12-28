@@ -1178,6 +1178,7 @@ pub async fn list_jobs(
     let result = sqlx::query(
         r#"
         SELECT id, job_type, status, priority, attempts, max_attempts,
+               progress_percent, progress_message,
                scheduled_at, created_at, started_at, completed_at, last_error
         FROM forge_jobs
         ORDER BY created_at DESC
@@ -1202,6 +1203,8 @@ pub async fn list_jobs(
                         "priority": row.get::<i32, _>("priority"),
                         "attempts": row.get::<i32, _>("attempts"),
                         "max_attempts": row.get::<i32, _>("max_attempts"),
+                        "progress_percent": row.get::<Option<i32>, _>("progress_percent"),
+                        "progress_message": row.get::<Option<String>, _>("progress_message"),
                         "scheduled_at": row.get::<DateTime<Utc>, _>("scheduled_at"),
                         "created_at": row.get::<DateTime<Utc>, _>("created_at"),
                         "started_at": row.get::<Option<DateTime<Utc>>, _>("started_at"),

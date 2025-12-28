@@ -664,6 +664,184 @@ tbody tr:hover {
     padding: 40px;
 }
 
+/* Modal */
+.modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.7);
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.modal-content {
+    background: var(--bg-secondary);
+    border-radius: 8px;
+    width: 90%;
+    max-width: 700px;
+    max-height: 80vh;
+    overflow: hidden;
+    box-shadow: var(--shadow);
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+}
+
+.modal-header h3 {
+    margin: 0;
+    font-size: 1.1rem;
+}
+
+.modal-close {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 1.5rem;
+    cursor: pointer;
+    padding: 0;
+    line-height: 1;
+}
+
+.modal-close:hover {
+    color: var(--text-primary);
+}
+
+.modal-body {
+    padding: 20px;
+    overflow-y: auto;
+    max-height: calc(80vh - 60px);
+}
+
+.detail-grid {
+    display: grid;
+    grid-template-columns: 140px 1fr;
+    gap: 12px;
+}
+
+.detail-label {
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+.detail-value {
+    color: var(--text-primary);
+}
+
+.detail-value.error {
+    color: var(--error);
+}
+
+/* Progress bar */
+.progress-bar {
+    width: 100%;
+    height: 20px;
+    background: var(--bg-tertiary);
+    border-radius: 4px;
+    overflow: hidden;
+    position: relative;
+}
+
+.progress-bar-fill {
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.3s ease;
+}
+
+.progress-bar-text {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 0.75rem;
+    color: var(--text-primary);
+}
+
+.progress-inline {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.progress-inline .progress-bar {
+    width: 80px;
+    height: 8px;
+}
+
+.progress-inline .progress-percent {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    min-width: 35px;
+}
+
+/* Clickable rows */
+.clickable-row {
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.clickable-row:hover {
+    background: var(--bg-tertiary);
+}
+
+/* Workflow steps */
+.workflow-steps {
+    margin-top: 20px;
+}
+
+.workflow-steps h4 {
+    margin-bottom: 12px;
+    color: var(--text-secondary);
+}
+
+.step-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+    background: var(--bg-tertiary);
+    border-radius: 4px;
+    margin-bottom: 8px;
+}
+
+.step-icon {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+}
+
+.step-icon.completed { background: var(--success); color: white; }
+.step-icon.running { background: var(--accent); color: white; }
+.step-icon.pending { background: var(--bg-secondary); color: var(--text-secondary); border: 1px solid var(--border); }
+.step-icon.failed { background: var(--error); color: white; }
+
+.step-name {
+    flex: 1;
+    font-weight: 500;
+}
+
+.step-status {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+.step-time {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
 /* Responsive */
 @media (max-width: 768px) {
     .sidebar {
@@ -774,6 +952,21 @@ function setupEventHandlers() {
     if (errorsOnly) {
         errorsOnly.addEventListener('change', () => loadTraces());
     }
+
+    // Modal handlers - close on background click or escape key
+    document.addEventListener('click', function(e) {
+        if (e.target.classList.contains('modal')) {
+            e.target.style.display = 'none';
+        }
+    });
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') {
+            const jobModal = document.getElementById('job-modal');
+            const workflowModal = document.getElementById('workflow-modal');
+            if (jobModal) jobModal.style.display = 'none';
+            if (workflowModal) workflowModal.style.display = 'none';
+        }
+    });
 }
 
 // Utility: debounce for search inputs
@@ -1224,24 +1417,113 @@ async function loadJobs() {
         }
 
         if (!jobsRes.success || !jobsRes.data || jobsRes.data.length === 0) {
-            tbody.innerHTML = '<tr class="empty-row"><td colspan="7">No jobs found</td></tr>';
+            tbody.innerHTML = '<tr class="empty-row"><td colspan="8">No jobs found</td></tr>';
             return;
         }
 
         tbody.innerHTML = jobsRes.data.map(job => `
-            <tr>
+            <tr class="clickable-row" onclick="openJobModal('${job.id}')">
                 <td>${job.id.substring(0, 8)}</td>
                 <td>${escapeHtml(job.job_type)}</td>
                 <td>${job.priority}</td>
                 <td><span class="status-badge status-${job.status}">${job.status}</span></td>
+                <td>${renderJobProgress(job)}</td>
                 <td>${job.attempts}/${job.max_attempts}</td>
                 <td>${formatTime(job.created_at)}</td>
                 <td>${job.last_error ? escapeHtml(job.last_error.substring(0, 30)) : '-'}</td>
             </tr>
         `).join('');
     } catch (e) {
-        tbody.innerHTML = '<tr class="empty-row"><td colspan="7">Failed to load jobs</td></tr>';
+        tbody.innerHTML = '<tr class="empty-row"><td colspan="8">Failed to load jobs</td></tr>';
     }
+}
+
+function renderJobProgress(job) {
+    const percent = job.progress_percent;
+    if (percent === null || percent === undefined) {
+        if (job.status === 'completed') return '<span class="status-badge status-completed">Done</span>';
+        if (job.status === 'pending') return '-';
+        return '-';
+    }
+    return `
+        <div class="progress-inline">
+            <div class="progress-bar">
+                <div class="progress-bar-fill" style="width: ${percent}%"></div>
+            </div>
+            <span class="progress-percent">${percent}%</span>
+        </div>
+    `;
+}
+
+async function openJobModal(jobId) {
+    const modal = document.getElementById('job-modal');
+    const body = document.getElementById('job-modal-body');
+    if (!modal || !body) return;
+
+    modal.style.display = 'flex';
+    body.innerHTML = 'Loading...';
+
+    try {
+        const res = await fetch(`/_api/jobs/${jobId}`).then(r => r.json());
+        if (!res.success) {
+            body.innerHTML = `<p class="error">Failed to load job: ${escapeHtml(res.error || 'Unknown error')}</p>`;
+            return;
+        }
+
+        const job = res.data;
+        const progressBar = job.progress_percent !== null ? `
+            <div class="progress-bar" style="margin-top: 8px;">
+                <div class="progress-bar-fill" style="width: ${job.progress_percent}%"></div>
+                <span class="progress-bar-text">${job.progress_percent}%</span>
+            </div>
+        ` : '';
+
+        body.innerHTML = `
+            <div class="detail-grid">
+                <span class="detail-label">Job ID</span>
+                <span class="detail-value">${escapeHtml(job.id)}</span>
+
+                <span class="detail-label">Type</span>
+                <span class="detail-value">${escapeHtml(job.job_type)}</span>
+
+                <span class="detail-label">Status</span>
+                <span class="detail-value"><span class="status-badge status-${job.status}">${job.status}</span></span>
+
+                <span class="detail-label">Priority</span>
+                <span class="detail-value">${job.priority}</span>
+
+                <span class="detail-label">Attempts</span>
+                <span class="detail-value">${job.attempts} / ${job.max_attempts}</span>
+
+                <span class="detail-label">Progress</span>
+                <span class="detail-value">${job.progress_percent !== null ? job.progress_percent + '%' : '-'}${job.progress_message ? ' - ' + escapeHtml(job.progress_message) : ''}</span>
+
+                <span class="detail-label">Created</span>
+                <span class="detail-value">${formatTime(job.created_at)}</span>
+
+                <span class="detail-label">Started</span>
+                <span class="detail-value">${job.started_at ? formatTime(job.started_at) : '-'}</span>
+
+                <span class="detail-label">Completed</span>
+                <span class="detail-value">${job.completed_at ? formatTime(job.completed_at) : '-'}</span>
+
+                ${job.last_error ? `
+                <span class="detail-label">Error</span>
+                <span class="detail-value error">${escapeHtml(job.last_error)}</span>
+                ` : ''}
+            </div>
+            ${progressBar}
+            ${job.input ? `<h4 style="margin-top: 16px;">Input</h4><pre style="background: var(--bg-tertiary); padding: 12px; border-radius: 4px; overflow-x: auto;">${JSON.stringify(job.input, null, 2)}</pre>` : ''}
+            ${job.output ? `<h4 style="margin-top: 16px;">Output</h4><pre style="background: var(--bg-tertiary); padding: 12px; border-radius: 4px; overflow-x: auto;">${JSON.stringify(job.output, null, 2)}</pre>` : ''}
+        `;
+    } catch (e) {
+        body.innerHTML = `<p class="error">Failed to load job details</p>`;
+    }
+}
+
+function closeJobModal() {
+    const modal = document.getElementById('job-modal');
+    if (modal) modal.style.display = 'none';
 }
 
 // Workflows page
@@ -1269,12 +1551,12 @@ async function loadWorkflows() {
         }
 
         tbody.innerHTML = workflowsRes.data.map(w => `
-            <tr>
+            <tr class="clickable-row" onclick="openWorkflowModal('${w.id}')">
                 <td>${w.id.substring(0, 8)}</td>
                 <td>${escapeHtml(w.workflow_name)}</td>
                 <td>${w.version || '-'}</td>
                 <td><span class="status-badge status-${w.status}">${w.status}</span></td>
-                <td>${w.current_step || '-'}</td>
+                <td>${w.current_step ? escapeHtml(w.current_step) : '-'}</td>
                 <td>${formatTime(w.started_at)}</td>
                 <td>${w.error ? escapeHtml(w.error.substring(0, 30)) : '-'}</td>
             </tr>
@@ -1282,6 +1564,80 @@ async function loadWorkflows() {
     } catch (e) {
         tbody.innerHTML = '<tr class="empty-row"><td colspan="7">Failed to load workflows</td></tr>';
     }
+}
+
+async function openWorkflowModal(workflowId) {
+    const modal = document.getElementById('workflow-modal');
+    const body = document.getElementById('workflow-modal-body');
+    if (!modal || !body) return;
+
+    modal.style.display = 'flex';
+    body.innerHTML = 'Loading...';
+
+    try {
+        const res = await fetch(`/_api/workflows/${workflowId}`).then(r => r.json());
+        if (!res.success) {
+            body.innerHTML = `<p class="error">Failed to load workflow: ${escapeHtml(res.error || 'Unknown error')}</p>`;
+            return;
+        }
+
+        const wf = res.data;
+        const stepIcons = { completed: '✓', running: '▶', pending: '○', failed: '✗', compensated: '↩' };
+
+        const stepsHtml = wf.steps && wf.steps.length > 0 ? `
+            <div class="workflow-steps">
+                <h4>Steps</h4>
+                ${wf.steps.map(step => `
+                    <div class="step-item">
+                        <div class="step-icon ${step.status}">${stepIcons[step.status] || '○'}</div>
+                        <span class="step-name">${escapeHtml(step.name)}</span>
+                        <span class="step-status">${step.status}</span>
+                        ${step.started_at ? `<span class="step-time">${formatRelativeTime(step.started_at)}</span>` : ''}
+                    </div>
+                `).join('')}
+            </div>
+        ` : '';
+
+        body.innerHTML = `
+            <div class="detail-grid">
+                <span class="detail-label">Run ID</span>
+                <span class="detail-value">${escapeHtml(wf.id)}</span>
+
+                <span class="detail-label">Workflow</span>
+                <span class="detail-value">${escapeHtml(wf.workflow_name)}</span>
+
+                <span class="detail-label">Version</span>
+                <span class="detail-value">${wf.version || '-'}</span>
+
+                <span class="detail-label">Status</span>
+                <span class="detail-value"><span class="status-badge status-${wf.status}">${wf.status}</span></span>
+
+                <span class="detail-label">Current Step</span>
+                <span class="detail-value">${wf.current_step ? escapeHtml(wf.current_step) : '-'}</span>
+
+                <span class="detail-label">Started</span>
+                <span class="detail-value">${wf.started_at ? formatTime(wf.started_at) : '-'}</span>
+
+                <span class="detail-label">Completed</span>
+                <span class="detail-value">${wf.completed_at ? formatTime(wf.completed_at) : '-'}</span>
+
+                ${wf.error ? `
+                <span class="detail-label">Error</span>
+                <span class="detail-value error">${escapeHtml(wf.error)}</span>
+                ` : ''}
+            </div>
+            ${stepsHtml}
+            ${wf.input ? `<h4 style="margin-top: 16px;">Input</h4><pre style="background: var(--bg-tertiary); padding: 12px; border-radius: 4px; overflow-x: auto;">${JSON.stringify(wf.input, null, 2)}</pre>` : ''}
+            ${wf.output ? `<h4 style="margin-top: 16px;">Output</h4><pre style="background: var(--bg-tertiary); padding: 12px; border-radius: 4px; overflow-x: auto;">${JSON.stringify(wf.output, null, 2)}</pre>` : ''}
+        `;
+    } catch (e) {
+        body.innerHTML = `<p class="error">Failed to load workflow details</p>`;
+    }
+}
+
+function closeWorkflowModal() {
+    const modal = document.getElementById('workflow-modal');
+    if (modal) modal.style.display = 'none';
 }
 
 // Cluster page

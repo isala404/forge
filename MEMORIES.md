@@ -71,6 +71,8 @@ Key Patterns
 - Chart.js: CDN load with fallback pattern for offline/firewall environments
 - Dashboard JS: debounce utility for search inputs, setupEventHandlers() for page-specific handlers
 - SSE streams: EventSource API for live log streaming with auto-reconnect pattern
+- Dashboard modals: clickable table rows open detail modals, close on background click or Escape key
+- Job progress: list endpoint includes progress_percent/progress_message, detail modal shows full progress bar
 
 Frontend
 - Auto-generated TypeScript types from Rust schema
