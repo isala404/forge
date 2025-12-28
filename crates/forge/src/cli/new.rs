@@ -146,14 +146,33 @@ async fn main() -> Result<()> {
 
     let mut builder = Forge::builder();
 
-    // Register queries (read operations, support real-time subscriptions)
+    // =========================================================================
+    // QUERIES - Read operations that support real-time subscriptions
+    // =========================================================================
     builder.function_registry_mut().register_query::<functions::GetUsersQuery>();
     builder.function_registry_mut().register_query::<functions::GetUserQuery>();
 
-    // Register mutations (write operations, trigger subscription updates)
+    // =========================================================================
+    // MUTATIONS - Write operations that trigger subscription updates
+    // =========================================================================
     builder.function_registry_mut().register_mutation::<functions::CreateUserMutation>();
     builder.function_registry_mut().register_mutation::<functions::UpdateUserMutation>();
     builder.function_registry_mut().register_mutation::<functions::DeleteUserMutation>();
+
+    // =========================================================================
+    // JOBS - Background tasks with retry logic (see dashboard for monitoring)
+    // =========================================================================
+    // builder.job_registry_mut().register::<functions::SendWelcomeEmailJob>();
+
+    // =========================================================================
+    // CRONS - Scheduled tasks (see dashboard for execution history)
+    // =========================================================================
+    // builder.cron_registry_mut().register::<functions::DailyCleanupCron>();
+
+    // =========================================================================
+    // WORKFLOWS - Multi-step durable processes (see dashboard for progress)
+    // =========================================================================
+    // builder.workflow_registry_mut().register::<functions::UserOnboardingWorkflow>();
 
     // Migrations are loaded from ./migrations directory automatically
     builder
@@ -192,11 +211,25 @@ pub struct User {
 
     // Create functions/mod.rs
     let functions_mod = r#"// Function definitions
-// Use `forge add query|mutation|action <name>` to add new functions
+// Use `forge add query|mutation|action|job|cron|workflow <name>` to add new functions
 
+// User CRUD operations (queries and mutations)
 pub mod users;
 
+// Background job example
+pub mod send_welcome_email_job;
+
+// Scheduled task example
+pub mod daily_cleanup_cron;
+
+// Durable workflow example
+pub mod user_onboarding_workflow;
+
+// Re-export all function types
 pub use users::*;
+pub use send_welcome_email_job::*;
+pub use daily_cleanup_cron::*;
+pub use user_onboarding_workflow::*;
 "#;
     fs::write(dir.join("src/functions/mod.rs"), functions_mod)?;
 
@@ -298,11 +331,292 @@ pub async fn delete_user(ctx: &MutationContext, id: Uuid) -> Result<bool> {
 "#;
     fs::write(dir.join("src/functions/users.rs"), users_rs)?;
 
+    // Create sample job demonstrating background processing
+    let send_email_job = r#"//! Background Job: Send Welcome Email
+//!
+//! Jobs are used for async processing with automatic retry logic.
+//! This example shows how to dispatch work that may take time or fail.
+//!
+//! ## Dispatching this job
+//!
+//! From a mutation:
+//! ```rust
+//! ctx.dispatch_job::<SendWelcomeEmailJob>(SendWelcomeEmailInput {
+//!     user_id: user.id,
+//!     email: user.email.clone(),
+//! }).await?;
+//! ```
+
+use forge::prelude::*;
+
+/// Input for the send_welcome_email job.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SendWelcomeEmailInput {
+    pub user_id: Uuid,
+    pub email: String,
+}
+
+/// Output from the send_welcome_email job.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SendWelcomeEmailOutput {
+    pub success: bool,
+    pub message_id: Option<String>,
+}
+
+/// Send welcome email background job.
+///
+/// Features:
+/// - Automatic retry on failure (max 3 attempts)
+/// - Exponential backoff between retries
+/// - Progress tracking visible in dashboard
+#[forge::job(timeout = "5m", max_attempts = 3)]
+pub async fn send_welcome_email(
+    ctx: &JobContext,
+    input: SendWelcomeEmailInput,
+) -> Result<SendWelcomeEmailOutput> {
+    tracing::info!(
+        job_id = %ctx.job_id(),
+        user_id = %input.user_id,
+        "Sending welcome email"
+    );
+
+    // Report progress (visible in dashboard)
+    ctx.set_progress(20, "Preparing email...").await?;
+
+    // TODO: Integrate with your email provider
+    // Example with SendGrid:
+    // let response = ctx.http_client()
+    //     .post("https://api.sendgrid.com/v3/mail/send")
+    //     .header("Authorization", format!("Bearer {}", api_key))
+    //     .json(&email_payload)
+    //     .send()
+    //     .await?;
+
+    ctx.set_progress(80, "Sending...").await?;
+
+    // Simulate email sending
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    ctx.set_progress(100, "Sent!").await?;
+
+    tracing::info!(
+        job_id = %ctx.job_id(),
+        user_id = %input.user_id,
+        "Welcome email sent successfully"
+    );
+
+    Ok(SendWelcomeEmailOutput {
+        success: true,
+        message_id: Some(format!("msg_{}", Uuid::new_v4())),
+    })
+}
+"#;
+    fs::write(
+        dir.join("src/functions/send_welcome_email_job.rs"),
+        send_email_job,
+    )?;
+
+    // Create sample cron demonstrating scheduled tasks
+    let cleanup_cron = r#"//! Scheduled Task: Daily Cleanup
+//!
+//! Cron tasks run on a schedule defined by a cron expression.
+//! This example shows how to run periodic maintenance tasks.
+//!
+//! ## Cron Expression Reference
+//!
+//! - `* * * * *`     - Every minute
+//! - `0 * * * *`     - Every hour at :00
+//! - `0 0 * * *`     - Daily at midnight
+//! - `0 9 * * 1-5`   - Weekdays at 9 AM
+//! - `0 0 1 * *`     - Monthly on the 1st
+
+use forge::prelude::*;
+
+/// Daily cleanup scheduled task.
+///
+/// Runs every day at midnight UTC.
+/// Cleans up old sessions and temporary data.
+#[forge::cron(schedule = "0 0 * * *", timezone = "UTC")]
+pub async fn daily_cleanup(ctx: &CronContext) -> Result<()> {
+    tracing::info!(run_id = %ctx.run_id(), "Starting daily cleanup");
+
+    // Get database pool for queries
+    let pool = ctx.db();
+
+    // Example: Delete old sessions (older than 7 days)
+    let deleted_sessions = sqlx::query(
+        "DELETE FROM forge_sessions WHERE last_active_at < NOW() - INTERVAL '7 days'"
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+
+    tracing::info!(
+        run_id = %ctx.run_id(),
+        deleted_sessions = %deleted_sessions,
+        "Cleaned up old sessions"
+    );
+
+    // Example: Archive old logs
+    // let archived_logs = sqlx::query(
+    //     "INSERT INTO forge_logs_archive SELECT * FROM forge_logs WHERE timestamp < NOW() - INTERVAL '30 days'"
+    // )
+    // .execute(pool)
+    // .await?
+    // .rows_affected();
+
+    tracing::info!(run_id = %ctx.run_id(), "Daily cleanup completed");
+
+    Ok(())
+}
+"#;
+    fs::write(
+        dir.join("src/functions/daily_cleanup_cron.rs"),
+        cleanup_cron,
+    )?;
+
+    // Create sample workflow demonstrating durable multi-step processes
+    let onboarding_workflow = r#"//! Workflow: User Onboarding
+//!
+//! Workflows are durable multi-step processes with automatic state persistence.
+//! Each step is checkpointed - if the workflow fails, it resumes from where it left off.
+//!
+//! ## Starting this workflow
+//!
+//! ```rust
+//! let result = ctx.start_workflow::<UserOnboardingWorkflow>(
+//!     UserOnboardingInput { user_id, plan: "pro".to_string() }
+//! ).await?;
+//! ```
+//!
+//! ## Key Concepts
+//!
+//! - **Steps**: Each step runs exactly once (idempotent)
+//! - **Compensation**: Steps can define rollback logic for failures
+//! - **Durability**: Workflow state survives restarts
+
+use forge::prelude::*;
+
+/// Input for the user onboarding workflow.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UserOnboardingInput {
+    pub user_id: Uuid,
+    pub plan: String,
+}
+
+/// Output from the user onboarding workflow.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UserOnboardingOutput {
+    pub success: bool,
+    pub welcome_email_sent: bool,
+    pub trial_started: bool,
+}
+
+/// User onboarding workflow.
+///
+/// Multi-step process for new user setup:
+/// 1. Initialize user profile
+/// 2. Start trial period
+/// 3. Send welcome email
+#[forge::workflow(version = 1, timeout = "1h")]
+pub async fn user_onboarding(
+    ctx: &WorkflowContext,
+    input: UserOnboardingInput,
+) -> Result<UserOnboardingOutput> {
+    tracing::info!(
+        workflow_id = %ctx.workflow_id(),
+        user_id = %input.user_id,
+        "Starting user onboarding workflow"
+    );
+
+    // Step 1: Initialize user profile
+    ctx.step("init_profile")
+        .run(|| async {
+            tracing::info!("Step 1: Initializing user profile");
+            // Set up user preferences, default settings, etc.
+            Ok(())
+        })
+        .compensate(|_| async {
+            tracing::info!("Compensating: Rolling back profile initialization");
+            // Clean up any partial profile data
+            Ok(())
+        })
+        .await?;
+
+    // Step 2: Start trial period
+    let trial_started = ctx.step("start_trial")
+        .run(|| async {
+            tracing::info!("Step 2: Starting trial period");
+            // Create trial subscription record
+            // Example: Insert trial record into database
+            Ok(true)
+        })
+        .compensate(|_| async {
+            tracing::info!("Compensating: Canceling trial");
+            // Cancel trial if workflow fails later
+            Ok(())
+        })
+        .await?;
+
+    // Step 3: Send welcome email (optional - won't fail workflow)
+    let welcome_email_sent = ctx.step("send_welcome")
+        .run(|| async {
+            tracing::info!("Step 3: Dispatching welcome email job");
+            // In a real app, dispatch the job here:
+            // ctx.dispatch_job::<SendWelcomeEmailJob>(...).await?;
+            Ok(true)
+        })
+        .optional() // Won't trigger compensation if this fails
+        .await
+        .unwrap_or(false);
+
+    tracing::info!(
+        workflow_id = %ctx.workflow_id(),
+        user_id = %input.user_id,
+        "User onboarding workflow completed"
+    );
+
+    Ok(UserOnboardingOutput {
+        success: true,
+        welcome_email_sent,
+        trial_started,
+    })
+}
+"#;
+    fs::write(
+        dir.join("src/functions/user_onboarding_workflow.rs"),
+        onboarding_workflow,
+    )?;
+
     // Create .gitignore
-    let gitignore = r#"/target
-/node_modules
-/.env
+    let gitignore = r#"# Rust
+/target
+Cargo.lock
+
+# Node/Frontend
+node_modules/
+.svelte-kit/
 /frontend/dist
+/frontend/build
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
 "#;
     fs::write(dir.join(".gitignore"), gitignore)?;
 
@@ -417,14 +731,21 @@ export default defineConfig({
 "#;
     fs::write(frontend_dir.join("src/app.html"), app_html)?;
 
-    // Create +layout.svelte with ForgeProvider
+    // Create +layout.svelte with ForgeProvider (reads URL from env)
     let layout_svelte = r#"<script lang="ts">
     import { ForgeProvider } from '$lib/forge/runtime';
 
-    let { children } = $props();
+    interface Props {
+        children: import('svelte').Snippet;
+    }
+
+    let { children }: Props = $props();
+
+    // Read API URL from environment or use default
+    const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8080';
 </script>
 
-<ForgeProvider url="http://localhost:8080">
+<ForgeProvider url={apiUrl}>
     {@render children()}
 </ForgeProvider>
 "#;
@@ -445,6 +766,9 @@ export const csr = true;
     import { subscribe, mutate, query } from '$lib/forge/runtime';
     import { getUsers, getUser, createUser, updateUser, deleteUser } from '$lib/forge/api';
     import type { User } from '$lib/forge/types';
+
+    // Read API URL from environment (same as layout)
+    const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8080';
 
     // =========================================================================
     // SUBSCRIPTION - Real-time updates via WebSocket
@@ -504,8 +828,8 @@ export const csr = true;
 <main>
     <h1>🔥 FORGE Demo</h1>
     <p class="subtitle">
-        Backend: <a href="http://localhost:8080/health" target="_blank">localhost:8080</a> |
-        Dashboard: <a href="http://localhost:8080/_dashboard" target="_blank">/_dashboard</a>
+        Backend: <a href="{apiUrl}/health" target="_blank">{apiUrl}</a> |
+        Dashboard: <a href="{apiUrl}/_dashboard" target="_blank">/_dashboard</a>
     </p>
 
     <div class="grid">
@@ -765,6 +1089,17 @@ export * from './types';
 export * from './api';
 "#;
     fs::write(frontend_dir.join("src/lib/forge/index.ts"), index_ts)?;
+
+    // Create .env.example for frontend configuration
+    let env_example = r#"# FORGE Frontend Environment Variables
+# Copy this file to .env and adjust values as needed
+
+# API URL for the FORGE backend
+VITE_API_URL=http://localhost:8080
+
+# Add your environment-specific variables below
+"#;
+    fs::write(frontend_dir.join(".env.example"), env_example)?;
 
     // Create runtime files (embedded @forge/svelte)
     create_runtime_files(&frontend_dir)?;

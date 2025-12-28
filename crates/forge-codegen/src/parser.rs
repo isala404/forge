@@ -228,26 +228,27 @@ fn parse_function(item: &syn::ItemFn) -> Option<FunctionDef> {
 fn get_function_kind(attrs: &[Attribute]) -> Option<FunctionKind> {
     for attr in attrs {
         let path = attr.path();
-        if path.is_ident("query")
-            || (path.segments.len() == 2
-                && path.segments[0].ident == "forge"
-                && path.segments[1].ident == "query")
-        {
-            return Some(FunctionKind::Query);
-        }
-        if path.is_ident("mutation")
-            || (path.segments.len() == 2
-                && path.segments[0].ident == "forge"
-                && path.segments[1].ident == "mutation")
-        {
-            return Some(FunctionKind::Mutation);
-        }
-        if path.is_ident("action")
-            || (path.segments.len() == 2
-                && path.segments[0].ident == "forge"
-                && path.segments[1].ident == "action")
-        {
-            return Some(FunctionKind::Action);
+        let segments: Vec<_> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+
+        // Check for #[forge::X] or #[X] patterns
+        let kind_str = if segments.len() == 2 && segments[0] == "forge" {
+            Some(segments[1].as_str())
+        } else if segments.len() == 1 {
+            Some(segments[0].as_str())
+        } else {
+            None
+        };
+
+        if let Some(kind) = kind_str {
+            match kind {
+                "query" => return Some(FunctionKind::Query),
+                "mutation" => return Some(FunctionKind::Mutation),
+                "action" => return Some(FunctionKind::Action),
+                "job" => return Some(FunctionKind::Job),
+                "cron" => return Some(FunctionKind::Cron),
+                "workflow" => return Some(FunctionKind::Workflow),
+                _ => {}
+            }
         }
     }
     None
@@ -280,9 +281,10 @@ fn extract_result_type(ty: &syn::Type) -> RustType {
             }
         }
         let inner = &rest[..end_idx];
-        return type_to_rust_type(&syn::parse_str(inner).unwrap_or_else(|_| {
-            syn::parse_str::<syn::Type>("String").unwrap()
-        }));
+        return type_to_rust_type(
+            &syn::parse_str(inner)
+                .unwrap_or_else(|_| syn::parse_str::<syn::Type>("String").unwrap()),
+        );
     }
 
     type_to_rust_type(ty)

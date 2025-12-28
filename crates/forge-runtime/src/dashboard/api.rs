@@ -972,7 +972,9 @@ pub async fn update_alert_rule(
     // Merge with existing values
     let name: String = req.name.unwrap_or_else(|| existing.get("name"));
     let description: Option<String> = req.description.or_else(|| existing.get("description"));
-    let metric_name: String = req.metric_name.unwrap_or_else(|| existing.get("metric_name"));
+    let metric_name: String = req
+        .metric_name
+        .unwrap_or_else(|| existing.get("metric_name"));
     let condition: String = req.condition.unwrap_or_else(|| existing.get("condition"));
     let threshold: f64 = req.threshold.unwrap_or_else(|| existing.get("threshold"));
     let duration_seconds: i32 = req
@@ -1030,7 +1032,12 @@ pub async fn delete_alert_rule(
 ) -> (StatusCode, Json<ApiResponse<()>>) {
     let rule_id = match uuid::Uuid::parse_str(&id) {
         Ok(id) => id,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(ApiResponse::error("Invalid rule ID"))),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error("Invalid rule ID")),
+            )
+        }
     };
 
     let result = sqlx::query("DELETE FROM forge_alert_rules WHERE id = $1")
@@ -1571,7 +1578,7 @@ pub async fn list_crons(
         LEFT JOIN forge_cron_history h ON c.name = h.cron_name
         GROUP BY c.name, c.schedule, c.status, c.last_run_at, c.last_result, c.next_run_at
         ORDER BY c.name
-        "#
+        "#,
     )
     .fetch_all(&state.pool)
     .await;
@@ -1602,9 +1609,7 @@ pub async fn list_crons(
 }
 
 /// Get cron statistics.
-pub async fn get_cron_stats(
-    State(state): State<DashboardState>,
-) -> Json<ApiResponse<CronStats>> {
+pub async fn get_cron_stats(State(state): State<DashboardState>) -> Json<ApiResponse<CronStats>> {
     let stats = sqlx::query(
         r#"
         SELECT
@@ -1612,7 +1617,7 @@ pub async fn get_cron_stats(
             COUNT(CASE WHEN status = 'paused' THEN 1 END) as paused_count,
             MIN(next_run_at) as next_run
         FROM forge_crons
-        "#
+        "#,
     )
     .fetch_optional(&state.pool)
     .await;
@@ -1624,7 +1629,7 @@ pub async fn get_cron_stats(
             COUNT(CASE WHEN status = 'success' THEN 1 END) as success
         FROM forge_cron_history
         WHERE started_at > NOW() - INTERVAL '24 hours'
-        "#
+        "#,
     )
     .fetch_optional(&state.pool)
     .await;
@@ -1633,7 +1638,11 @@ pub async fn get_cron_stats(
         (Ok(Some(s)), Ok(Some(e))) => {
             let total = e.try_get::<i64, _>("total").unwrap_or(0) as f64;
             let success = e.try_get::<i64, _>("success").unwrap_or(0) as f64;
-            let success_rate = if total > 0.0 { success / total * 100.0 } else { 100.0 };
+            let success_rate = if total > 0.0 {
+                success / total * 100.0
+            } else {
+                100.0
+            };
 
             Json(ApiResponse::success(CronStats {
                 active_count: s.try_get::<i64, _>("active_count").unwrap_or(0),
@@ -1674,7 +1683,7 @@ pub async fn get_cron_history(
         FROM forge_cron_history
         ORDER BY started_at DESC
         LIMIT $1 OFFSET $2
-        "#
+        "#,
     )
     .bind(limit as i64)
     .bind(offset as i64)

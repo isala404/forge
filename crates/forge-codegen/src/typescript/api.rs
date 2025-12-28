@@ -47,12 +47,19 @@ impl ApiGenerator {
                     output.push_str(" */\n");
                 }
 
+                // Skip non-client-callable functions (jobs, crons, workflows)
+                if !func.kind.is_client_callable() {
+                    continue;
+                }
+
                 // Generate the binding
                 let ts_name = to_camel_case(&func.name);
                 let creator = match func.kind {
                     FunctionKind::Query => "createQuery",
                     FunctionKind::Mutation => "createMutation",
                     FunctionKind::Action => "createAction",
+                    // Jobs, crons, and workflows are not callable from frontend
+                    FunctionKind::Job | FunctionKind::Cron | FunctionKind::Workflow => continue,
                 };
 
                 // Build args type
@@ -268,10 +275,7 @@ mod tests {
             rust_type_to_ts(&RustType::Vec(Box::new(RustType::I32))),
             "number[]"
         );
-        assert_eq!(
-            rust_type_to_ts(&RustType::Custom("()".to_string())),
-            "void"
-        );
+        assert_eq!(rust_type_to_ts(&RustType::Custom("()".to_string())), "void");
     }
 
     #[test]

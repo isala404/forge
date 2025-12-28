@@ -7,7 +7,9 @@ mod tracing_layer;
 pub use alerts::{
     Alert, AlertCondition, AlertEvaluator, AlertRule, AlertSeverity, AlertStatus, AlertStore,
 };
-pub use collector::{LogCollector, MetricsCollector, SystemMetricsCollector, SystemMetricsSnapshot, TraceCollector};
+pub use collector::{
+    LogCollector, MetricsCollector, SystemMetricsCollector, SystemMetricsSnapshot, TraceCollector,
+};
 pub use config::{LogsConfig, MetricsConfig, ObservabilityConfig, TracesConfig};
 pub use storage::{LogStore, MetricsStore, TraceStore, TraceSummary};
 pub use tracing_layer::ForgeTracingLayer;
@@ -254,10 +256,9 @@ impl ObservabilityState {
 
         // System metrics collection loop (every 15 seconds)
         {
-            let handle = self.system_metrics.start(
-                self.metrics_collector.clone(),
-                Duration::from_secs(15),
-            );
+            let handle = self
+                .system_metrics
+                .start(self.metrics_collector.clone(), Duration::from_secs(15));
             handles.push(handle);
         }
 

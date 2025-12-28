@@ -28,7 +28,11 @@ pub struct WsState {
 
 impl WsState {
     pub fn new(reactor: Arc<Reactor>, db_pool: PgPool, node_id: NodeId) -> Self {
-        Self { reactor, db_pool, node_id }
+        Self {
+            reactor,
+            db_pool,
+            node_id,
+        }
     }
 }
 
@@ -98,7 +102,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<WsState>) {
         INSERT INTO forge_sessions (id, node_id, status, connected_at, last_activity)
         VALUES ($1, $2, 'connected', NOW(), NOW())
         ON CONFLICT (id) DO UPDATE SET status = 'connected', last_activity = NOW()
-        "#
+        "#,
     )
     .bind(session_uuid)
     .bind(node_uuid)

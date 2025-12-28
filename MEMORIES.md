@@ -67,6 +67,10 @@ Key Patterns
 - Sample apps: place in examples/ directory, add to workspace members in root Cargo.toml
 - CLI generator: embeds @forge/svelte runtime directly in generated projects (no npm linking)
 - CLI generator: query() is async Promise-based (not store), subscribe() is store-based for real-time
+- FunctionKind: is_client_callable() method returns true for Query/Mutation/Action (not Job/Cron/Workflow)
+- Chart.js: CDN load with fallback pattern for offline/firewall environments
+- Dashboard JS: debounce utility for search inputs, setupEventHandlers() for page-specific handlers
+- SSE streams: EventSource API for live log streaming with auto-reconnect pattern
 
 Frontend
 - Auto-generated TypeScript types from Rust schema

@@ -95,11 +95,7 @@ fn base_template(title: &str, content: &str, active_page: &str) -> String {
         } else {
             ""
         },
-        crons_active = if active_page == "crons" {
-            "active"
-        } else {
-            ""
-        },
+        crons_active = if active_page == "crons" { "active" } else { "" },
         cluster_active = if active_page == "cluster" {
             "active"
         } else {

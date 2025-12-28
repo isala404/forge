@@ -549,10 +549,26 @@ fn update_schema_mod(snake_name: &str, pascal_name: &str) -> Result<()> {
     let mod_path = Path::new("src/schema/mod.rs");
     let content = fs::read_to_string(mod_path).unwrap_or_default();
 
-    let new_content = format!(
-        "{}pub mod {};\n\npub use {}::{};\n",
-        content, snake_name, snake_name, pascal_name
-    );
+    let mod_decl = format!("pub mod {};", snake_name);
+
+    // Check if already declared
+    if content.contains(&mod_decl) {
+        println!(
+            "  {} {} already declared in mod.rs",
+            style("ℹ").blue(),
+            snake_name
+        );
+        return Ok(());
+    }
+
+    // Build new content without extra blank lines
+    let mut new_content = content.trim_end().to_string();
+    if !new_content.is_empty() {
+        new_content.push('\n');
+    }
+    new_content.push_str(&mod_decl);
+    new_content.push('\n');
+    new_content.push_str(&format!("pub use {}::{};\n", snake_name, pascal_name));
 
     fs::write(mod_path, new_content)?;
     Ok(())
@@ -563,10 +579,26 @@ fn update_functions_mod(snake_name: &str) -> Result<()> {
     let mod_path = Path::new("src/functions/mod.rs");
     let content = fs::read_to_string(mod_path).unwrap_or_default();
 
-    let new_content = format!(
-        "{}pub mod {};\n\npub use {}::*;\n",
-        content, snake_name, snake_name
-    );
+    let mod_decl = format!("pub mod {};", snake_name);
+
+    // Check if already declared
+    if content.contains(&mod_decl) {
+        println!(
+            "  {} {} already declared in mod.rs",
+            style("ℹ").blue(),
+            snake_name
+        );
+        return Ok(());
+    }
+
+    // Build new content without extra blank lines
+    let mut new_content = content.trim_end().to_string();
+    if !new_content.is_empty() {
+        new_content.push('\n');
+    }
+    new_content.push_str(&mod_decl);
+    new_content.push('\n');
+    new_content.push_str(&format!("pub use {}::*;\n", snake_name));
 
     fs::write(mod_path, new_content)?;
     Ok(())

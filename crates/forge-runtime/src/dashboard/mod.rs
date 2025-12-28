@@ -6,7 +6,10 @@ pub use api::DashboardApi;
 pub use assets::DashboardAssets;
 pub use pages::DashboardPages;
 
-use axum::{routing::{get, post}, Router};
+use axum::{
+    routing::{get, post},
+    Router,
+};
 use sqlx::PgPool;
 
 /// Dashboard configuration.
@@ -84,10 +87,7 @@ pub fn create_api_router(state: DashboardState) -> Router {
         // Alerts API
         .route("/alerts", get(api::list_alerts))
         .route("/alerts/active", get(api::get_active_alerts))
-        .route(
-            "/alerts/{id}/acknowledge",
-            post(api::acknowledge_alert),
-        )
+        .route("/alerts/{id}/acknowledge", post(api::acknowledge_alert))
         .route("/alerts/{id}/resolve", post(api::resolve_alert))
         // Alert Rules API
         .route(

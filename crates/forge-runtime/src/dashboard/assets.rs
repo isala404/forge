@@ -736,6 +736,53 @@ function setupEventHandlers() {
             this.classList.add('active');
         });
     });
+
+    // Metrics page handlers
+    const metricSearch = document.getElementById('metric-search');
+    const metricType = document.getElementById('metric-type');
+    if (metricSearch) {
+        metricSearch.addEventListener('input', debounce(() => loadMetrics(), 300));
+    }
+    if (metricType) {
+        metricType.addEventListener('change', () => loadMetrics());
+    }
+
+    // Logs page handlers
+    const logSearch = document.getElementById('log-search');
+    const logLevel = document.getElementById('log-level');
+    const liveStreamBtn = document.getElementById('live-stream-btn');
+    if (logSearch) {
+        logSearch.addEventListener('input', debounce(() => loadLogs(), 300));
+    }
+    if (logLevel) {
+        logLevel.addEventListener('change', () => loadLogs());
+    }
+    if (liveStreamBtn) {
+        liveStreamBtn.addEventListener('click', toggleLiveStream);
+    }
+
+    // Traces page handlers
+    const traceSearch = document.getElementById('trace-search');
+    const minDuration = document.getElementById('min-duration');
+    const errorsOnly = document.getElementById('errors-only');
+    if (traceSearch) {
+        traceSearch.addEventListener('input', debounce(() => loadTraces(), 300));
+    }
+    if (minDuration) {
+        minDuration.addEventListener('input', debounce(() => loadTraces(), 300));
+    }
+    if (errorsOnly) {
+        errorsOnly.addEventListener('change', () => loadTraces());
+    }
+}
+
+// Utility: debounce for search inputs
+function debounce(fn, delay) {
+    let timeout;
+    return function(...args) {
+        clearTimeout(timeout);
+        timeout = setTimeout(() => fn.apply(this, args), delay);
+    };
 }
 
 function loadPageSpecificData() {
@@ -862,13 +909,32 @@ async function loadMetrics() {
     const container = document.getElementById('metrics-list');
     if (!container) return;
 
+    // Get filter values
+    const searchQuery = document.getElementById('metric-search')?.value?.toLowerCase() || '';
+    const typeFilter = document.getElementById('metric-type')?.value || '';
+
     try {
         const res = await fetch('/_api/metrics').then(r => r.json());
         if (!res.success || !res.data || res.data.length === 0) {
             container.innerHTML = '<p class="empty-state">No metrics recorded yet</p>';
             return;
         }
-        container.innerHTML = res.data.map(m => `
+
+        // Apply filters
+        let metrics = res.data;
+        if (searchQuery) {
+            metrics = metrics.filter(m => m.name.toLowerCase().includes(searchQuery));
+        }
+        if (typeFilter) {
+            metrics = metrics.filter(m => m.kind === typeFilter);
+        }
+
+        if (metrics.length === 0) {
+            container.innerHTML = '<p class="empty-state">No metrics match your filters</p>';
+            return;
+        }
+
+        container.innerHTML = metrics.map(m => `
             <div class="metric-card" onclick="selectMetric('${escapeHtml(m.name)}')">
                 <h4>${escapeHtml(m.name)}</h4>
                 <p class="metric-value">${formatMetricValue(m.current_value, m.kind)}</p>
@@ -892,10 +958,14 @@ function selectMetric(name) {
 }
 
 // Logs page
+let logStreamEventSource = null;
+
 async function loadLogs() {
     const tbody = document.getElementById('logs-tbody');
     if (!tbody) return;
 
+    // Get filter values
+    const searchQuery = document.getElementById('log-search')?.value?.toLowerCase() || '';
     const level = document.getElementById('log-level')?.value || '';
     const period = getTimeRange();
 
@@ -907,7 +977,22 @@ async function loadLogs() {
             tbody.innerHTML = '<tr class="empty-row"><td colspan="4">No logs found</td></tr>';
             return;
         }
-        tbody.innerHTML = res.data.map(log => `
+
+        // Apply search filter client-side
+        let logs = res.data;
+        if (searchQuery) {
+            logs = logs.filter(log =>
+                log.message?.toLowerCase().includes(searchQuery) ||
+                log.trace_id?.toLowerCase().includes(searchQuery)
+            );
+        }
+
+        if (logs.length === 0) {
+            tbody.innerHTML = '<tr class="empty-row"><td colspan="4">No logs match your search</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = logs.map(log => `
             <tr class="log-row log-${log.level}">
                 <td class="log-time">${formatTime(log.timestamp)}</td>
                 <td class="log-level"><span class="level-badge level-${log.level}">${log.level.toUpperCase()}</span></td>
@@ -920,11 +1005,78 @@ async function loadLogs() {
     }
 }
 
+function toggleLiveStream() {
+    const btn = document.getElementById('live-stream-btn');
+    const tbody = document.getElementById('logs-tbody');
+
+    if (logStreamEventSource) {
+        // Stop streaming
+        logStreamEventSource.close();
+        logStreamEventSource = null;
+        if (btn) {
+            btn.textContent = 'Start Live Stream';
+            btn.classList.remove('streaming');
+        }
+        return;
+    }
+
+    // Start streaming via SSE
+    if (btn) {
+        btn.textContent = 'Stop Live Stream';
+        btn.classList.add('streaming');
+    }
+
+    const level = document.getElementById('log-level')?.value || '';
+    const url = '/_api/logs/stream' + (level ? `?level=${level}` : '');
+
+    logStreamEventSource = new EventSource(url);
+
+    logStreamEventSource.onmessage = function(event) {
+        try {
+            const log = JSON.parse(event.data);
+            if (!tbody) return;
+
+            const row = document.createElement('tr');
+            row.className = `log-row log-${log.level}`;
+            row.innerHTML = `
+                <td class="log-time">${formatTime(log.timestamp)}</td>
+                <td class="log-level"><span class="level-badge level-${log.level}">${log.level.toUpperCase()}</span></td>
+                <td class="log-message">${escapeHtml(log.message)}</td>
+                <td class="log-trace">${log.trace_id ? `<a href="/_dashboard/traces/${log.trace_id}">${log.trace_id.substring(0, 8)}</a>` : '-'}</td>
+            `;
+
+            // Insert at top (newest first)
+            tbody.insertBefore(row, tbody.firstChild);
+
+            // Limit displayed rows
+            while (tbody.children.length > 100) {
+                tbody.removeChild(tbody.lastChild);
+            }
+        } catch (e) {
+            console.error('Failed to parse log event:', e);
+        }
+    };
+
+    logStreamEventSource.onerror = function(e) {
+        console.error('Log stream error:', e);
+        // Auto-reconnect after 3 seconds
+        setTimeout(() => {
+            if (logStreamEventSource && logStreamEventSource.readyState === EventSource.CLOSED) {
+                toggleLiveStream(); // Stop
+                toggleLiveStream(); // Restart
+            }
+        }, 3000);
+    };
+}
+
 // Traces page
 async function loadTraces() {
     const tbody = document.getElementById('traces-tbody');
     if (!tbody) return;
 
+    // Get filter values
+    const searchQuery = document.getElementById('trace-search')?.value?.toLowerCase() || '';
+    const minDuration = parseInt(document.getElementById('min-duration')?.value) || 0;
     const errorsOnly = document.getElementById('errors-only')?.checked || false;
     const period = getTimeRange();
 
@@ -936,8 +1088,29 @@ async function loadTraces() {
             tbody.innerHTML = '<tr class="empty-row"><td colspan="7">No traces found</td></tr>';
             return;
         }
-        tbody.innerHTML = res.data.map(t => `
-            <tr class="trace-row">
+
+        // Apply filters client-side
+        let traces = res.data;
+
+        if (searchQuery) {
+            traces = traces.filter(t =>
+                t.trace_id?.toLowerCase().includes(searchQuery) ||
+                t.service?.toLowerCase().includes(searchQuery) ||
+                t.root_span_name?.toLowerCase().includes(searchQuery)
+            );
+        }
+
+        if (minDuration > 0) {
+            traces = traces.filter(t => t.duration_ms >= minDuration);
+        }
+
+        if (traces.length === 0) {
+            tbody.innerHTML = '<tr class="empty-row"><td colspan="7">No traces match your filters</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = traces.map(t => `
+            <tr class="trace-row ${t.error ? 'trace-error' : ''}">
                 <td class="trace-id"><a href="/_dashboard/traces/${t.trace_id}">${t.trace_id.substring(0, 12)}</a></td>
                 <td class="trace-name">${escapeHtml(t.root_span_name || 'Unknown')}</td>
                 <td class="trace-service">${escapeHtml(t.service)}</td>
@@ -1146,7 +1319,18 @@ async function initCharts() {
 
 function renderChart(canvasId, points, color, label) {
     const canvas = document.getElementById(canvasId);
-    if (!canvas || !window.Chart) return;
+    if (!canvas) return;
+
+    // Wait for Chart.js to load if not ready
+    if (!window.Chart) {
+        window.addEventListener('chartjs-ready', () => renderChart(canvasId, points, color, label), { once: true });
+        return;
+    }
+
+    // Destroy existing chart to prevent memory leaks
+    if (canvas._chart) {
+        canvas._chart.destroy();
+    }
 
     const labels = points.length > 0
         ? points.map(p => formatTime(p.timestamp))
@@ -1156,7 +1340,7 @@ function renderChart(canvasId, points, color, label) {
         : Array.from({length: 20}, () => 0);
 
     const ctx = canvas.getContext('2d');
-    new Chart(ctx, {
+    const chart = new Chart(ctx, {
         type: 'line',
         data: {
             labels: labels.slice(-60),
@@ -1167,18 +1351,65 @@ function renderChart(canvasId, points, color, label) {
                 backgroundColor: color + '20',
                 fill: true,
                 tension: 0.4,
+                pointRadius: 2,
+                pointHoverRadius: 6,
             }]
         },
         options: {
             responsive: true,
             maintainAspectRatio: false,
-            plugins: { legend: { display: false } },
+            interaction: {
+                intersect: false,
+                mode: 'index',
+            },
+            plugins: {
+                legend: { display: true, position: 'top', labels: { color: '#9ca3af' } },
+                tooltip: {
+                    enabled: true,
+                    backgroundColor: '#1f2937',
+                    titleColor: '#f9fafb',
+                    bodyColor: '#d1d5db',
+                    borderColor: '#374151',
+                    borderWidth: 1,
+                    callbacks: {
+                        label: (ctx) => ctx.dataset.label + ': ' + ctx.formattedValue
+                    }
+                },
+                zoom: {
+                    zoom: {
+                        wheel: { enabled: true },
+                        pinch: { enabled: true },
+                        mode: 'x',
+                    },
+                    pan: {
+                        enabled: true,
+                        mode: 'x',
+                    }
+                }
+            },
             scales: {
-                x: { grid: { color: '#333' }, display: false },
-                y: { grid: { color: '#333' }, beginAtZero: true }
+                x: {
+                    grid: { color: '#333' },
+                    ticks: { color: '#9ca3af', maxRotation: 0 }
+                },
+                y: {
+                    grid: { color: '#333' },
+                    ticks: { color: '#9ca3af' },
+                    beginAtZero: true
+                }
+            },
+            onClick: (event, elements) => {
+                if (elements.length > 0) {
+                    const idx = elements[0].index;
+                    const point = points[idx];
+                    console.log('Chart clicked:', label, point);
+                }
             }
         }
     });
+
+    // Store reference for cleanup
+    canvas._chart = chart;
 }
 
 // Utility functions
@@ -1215,69 +1446,124 @@ function formatRelativeTime(timestamp) {
         .into_response()
 }
 
-/// Chart.js library (minified placeholder).
+/// Chart.js library loader (loads from CDN).
 pub async fn chart_js() -> Response {
-    // In production, this would be the actual Chart.js library
-    // For now, we provide a minimal stub that allows the dashboard to render
+    // Load Chart.js from CDN with zoom plugin for interactive charts
     let js = r#"
-// Chart.js stub - in production, replace with actual Chart.js library
+// Chart.js CDN Loader
+// Loads Chart.js and zoom plugin dynamically for interactive charts
 (function(global) {
-    function Chart(ctx, config) {
-        this.ctx = ctx;
-        this.config = config;
-        this.render();
+    // Check if already loaded
+    if (global.Chart && global.Chart.version) {
+        global.dispatchEvent(new Event('chartjs-ready'));
+        return;
     }
 
-    Chart.prototype.render = function() {
-        // Minimal placeholder rendering
-        const ctx = this.ctx;
-        const canvas = ctx.canvas;
-        const data = this.config.data.datasets[0].data;
-        const color = this.config.data.datasets[0].borderColor || '#3b82f6';
+    // Chart.js CDN URL
+    const CHARTJS_URL = 'https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js';
+    const ZOOM_PLUGIN_URL = 'https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.1.0/dist/chartjs-plugin-zoom.min.js';
 
-        // Clear canvas
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // Load script from URL
+    function loadScript(url) {
+        return new Promise((resolve, reject) => {
+            const script = document.createElement('script');
+            script.src = url;
+            script.onload = resolve;
+            script.onerror = reject;
+            document.head.appendChild(script);
+        });
+    }
 
-        // Draw simple line chart
-        const width = canvas.width;
-        const height = canvas.height;
-        const padding = 20;
-        const chartWidth = width - 2 * padding;
-        const chartHeight = height - 2 * padding;
-
-        const max = Math.max(...data) * 1.1;
-        const min = Math.min(...data) * 0.9;
-        const range = max - min;
-
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-
-        data.forEach((value, i) => {
-            const x = padding + (i / (data.length - 1)) * chartWidth;
-            const y = height - padding - ((value - min) / range) * chartHeight;
-
-            if (i === 0) {
-                ctx.moveTo(x, y);
-            } else {
-                ctx.lineTo(x, y);
+    // Load Chart.js first, then zoom plugin
+    loadScript(CHARTJS_URL)
+        .then(() => loadScript(ZOOM_PLUGIN_URL))
+        .then(() => {
+            if (global.Chart) {
+                // Register zoom plugin
+                try {
+                    global.Chart.register(global['chartjs-plugin-zoom']);
+                } catch (e) {
+                    console.warn('Could not register zoom plugin:', e);
+                }
+                global.dispatchEvent(new Event('chartjs-ready'));
+                console.log('Chart.js loaded with zoom plugin');
             }
+        })
+        .catch(err => {
+            console.error('Failed to load Chart.js from CDN:', err);
+            // Provide minimal fallback
+            global.Chart = createFallbackChart();
+            global.dispatchEvent(new Event('chartjs-ready'));
         });
 
-        ctx.stroke();
+    // Fallback chart implementation (used when CDN fails)
+    function createFallbackChart() {
+        function FallbackChart(ctx, config) {
+            this.ctx = ctx;
+            this.config = config;
+            this.render();
+        }
 
-        // Fill area
-        ctx.lineTo(padding + chartWidth, height - padding);
-        ctx.lineTo(padding, height - padding);
-        ctx.closePath();
-        ctx.fillStyle = this.config.data.datasets[0].backgroundColor || 'rgba(59, 130, 246, 0.1)';
-        ctx.fill();
-    };
+        FallbackChart.prototype.render = function() {
+            const ctx = this.ctx;
+            const canvas = ctx.canvas;
+            const data = this.config.data?.datasets?.[0]?.data || [];
+            const color = this.config.data?.datasets?.[0]?.borderColor || '#3b82f6';
 
-    Chart.prototype.destroy = function() {};
-    Chart.prototype.update = function() { this.render(); };
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    global.Chart = Chart;
+            if (data.length < 2) return;
+
+            const width = canvas.width;
+            const height = canvas.height;
+            const padding = 30;
+            const chartWidth = width - 2 * padding;
+            const chartHeight = height - 2 * padding;
+
+            const max = Math.max(...data) * 1.1 || 1;
+            const min = Math.min(...data) * 0.9 || 0;
+            const range = max - min || 1;
+
+            // Draw grid
+            ctx.strokeStyle = '#333';
+            ctx.lineWidth = 0.5;
+            for (let i = 0; i <= 4; i++) {
+                const y = padding + (i / 4) * chartHeight;
+                ctx.beginPath();
+                ctx.moveTo(padding, y);
+                ctx.lineTo(width - padding, y);
+                ctx.stroke();
+            }
+
+            // Draw line
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+
+            data.forEach((value, i) => {
+                const x = padding + (i / (data.length - 1)) * chartWidth;
+                const y = height - padding - ((value - min) / range) * chartHeight;
+                i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+            });
+
+            ctx.stroke();
+
+            // Fill area
+            const lastX = padding + chartWidth;
+            const lastY = height - padding - ((data[data.length - 1] - min) / range) * chartHeight;
+            ctx.lineTo(lastX, height - padding);
+            ctx.lineTo(padding, height - padding);
+            ctx.closePath();
+            ctx.fillStyle = this.config.data?.datasets?.[0]?.backgroundColor || 'rgba(59, 130, 246, 0.1)';
+            ctx.fill();
+        };
+
+        FallbackChart.prototype.destroy = function() { this.ctx.clearRect(0, 0, this.ctx.canvas.width, this.ctx.canvas.height); };
+        FallbackChart.prototype.update = function() { this.render(); };
+        FallbackChart.version = 'fallback';
+
+        return FallbackChart;
+    }
 })(window);
 "#;
 

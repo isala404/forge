@@ -5,7 +5,7 @@
 
 use super::types::RustType;
 
-/// Function kind (query, mutation, action).
+/// Function kind (query, mutation, action, job, cron, workflow).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FunctionKind {
     /// Read-only database query.
@@ -14,6 +14,12 @@ pub enum FunctionKind {
     Mutation,
     /// External API call or side-effect.
     Action,
+    /// Background job with retry logic.
+    Job,
+    /// Scheduled cron task.
+    Cron,
+    /// Multi-step durable workflow.
+    Workflow,
 }
 
 impl FunctionKind {
@@ -23,7 +29,18 @@ impl FunctionKind {
             FunctionKind::Query => "query",
             FunctionKind::Mutation => "mutation",
             FunctionKind::Action => "action",
+            FunctionKind::Job => "job",
+            FunctionKind::Cron => "cron",
+            FunctionKind::Workflow => "workflow",
         }
+    }
+
+    /// Check if this function kind is callable from the frontend.
+    pub fn is_client_callable(&self) -> bool {
+        matches!(
+            self,
+            FunctionKind::Query | FunctionKind::Mutation | FunctionKind::Action
+        )
     }
 }
 

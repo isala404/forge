@@ -323,7 +323,11 @@ impl SystemMetricsCollector {
     ///
     /// This spawns a background task that periodically collects system metrics
     /// and records them to the provided MetricsCollector.
-    pub fn start(&self, metrics: Arc<MetricsCollector>, interval: std::time::Duration) -> tokio::task::JoinHandle<()> {
+    pub fn start(
+        &self,
+        metrics: Arc<MetricsCollector>,
+        interval: std::time::Duration,
+    ) -> tokio::task::JoinHandle<()> {
         let shutdown = self.shutdown.clone();
         let system = RwLock::new(sysinfo::System::new_all());
 
@@ -343,7 +347,9 @@ impl SystemMetricsCollector {
 
                     // CPU usage (overall)
                     let cpu_usage = sys.global_cpu_usage();
-                    metrics.set_gauge("forge_system_cpu_usage_percent", cpu_usage as f64).await;
+                    metrics
+                        .set_gauge("forge_system_cpu_usage_percent", cpu_usage as f64)
+                        .await;
 
                     // Memory
                     let total_memory = sys.total_memory();
@@ -353,15 +359,25 @@ impl SystemMetricsCollector {
                     } else {
                         0.0
                     };
-                    metrics.set_gauge("forge_system_memory_total_bytes", total_memory as f64).await;
-                    metrics.set_gauge("forge_system_memory_used_bytes", used_memory as f64).await;
-                    metrics.set_gauge("forge_system_memory_usage_percent", memory_usage_percent).await;
+                    metrics
+                        .set_gauge("forge_system_memory_total_bytes", total_memory as f64)
+                        .await;
+                    metrics
+                        .set_gauge("forge_system_memory_used_bytes", used_memory as f64)
+                        .await;
+                    metrics
+                        .set_gauge("forge_system_memory_usage_percent", memory_usage_percent)
+                        .await;
 
                     // Swap
                     let total_swap = sys.total_swap();
                     let used_swap = sys.used_swap();
-                    metrics.set_gauge("forge_system_swap_total_bytes", total_swap as f64).await;
-                    metrics.set_gauge("forge_system_swap_used_bytes", used_swap as f64).await;
+                    metrics
+                        .set_gauge("forge_system_swap_total_bytes", total_swap as f64)
+                        .await;
+                    metrics
+                        .set_gauge("forge_system_swap_used_bytes", used_swap as f64)
+                        .await;
 
                     // Per-CPU usage
                     for (i, cpu) in sys.cpus().iter().enumerate() {
@@ -396,7 +412,8 @@ impl SystemMetricsCollector {
                     metric.labels.insert("mount".to_string(), mount.clone());
                     metrics.record(metric).await;
 
-                    let mut metric = Metric::gauge("forge_system_disk_usage_percent", usage_percent);
+                    let mut metric =
+                        Metric::gauge("forge_system_disk_usage_percent", usage_percent);
                     metric.labels.insert("mount".to_string(), mount);
                     metrics.record(metric).await;
                 }
@@ -405,9 +422,15 @@ impl SystemMetricsCollector {
                 #[cfg(unix)]
                 {
                     let load_avg = sysinfo::System::load_average();
-                    metrics.set_gauge("forge_system_load_1m", load_avg.one).await;
-                    metrics.set_gauge("forge_system_load_5m", load_avg.five).await;
-                    metrics.set_gauge("forge_system_load_15m", load_avg.fifteen).await;
+                    metrics
+                        .set_gauge("forge_system_load_1m", load_avg.one)
+                        .await;
+                    metrics
+                        .set_gauge("forge_system_load_5m", load_avg.five)
+                        .await;
+                    metrics
+                        .set_gauge("forge_system_load_15m", load_avg.fifteen)
+                        .await;
                 }
             }
 

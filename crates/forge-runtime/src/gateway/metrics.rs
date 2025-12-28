@@ -85,20 +85,50 @@ pub async fn metrics_middleware(
         };
         let mut log = LogEntry::new(
             log_level,
-            format!("{} {} -> {} ({:.2}ms)", method_clone, path_clone, status_clone, duration.as_secs_f64() * 1000.0),
+            format!(
+                "{} {} -> {} ({:.2}ms)",
+                method_clone,
+                path_clone,
+                status_clone,
+                duration.as_secs_f64() * 1000.0
+            ),
         );
-        log.fields.insert("method".to_string(), serde_json::Value::String(method_clone.clone()));
-        log.fields.insert("path".to_string(), serde_json::Value::String(path_clone.clone()));
-        log.fields.insert("status".to_string(), serde_json::Value::String(status_clone.clone()));
-        log.fields.insert("duration_ms".to_string(), serde_json::Value::Number(serde_json::Number::from_f64(duration.as_secs_f64() * 1000.0).unwrap_or(serde_json::Number::from(0))));
+        log.fields.insert(
+            "method".to_string(),
+            serde_json::Value::String(method_clone.clone()),
+        );
+        log.fields.insert(
+            "path".to_string(),
+            serde_json::Value::String(path_clone.clone()),
+        );
+        log.fields.insert(
+            "status".to_string(),
+            serde_json::Value::String(status_clone.clone()),
+        );
+        log.fields.insert(
+            "duration_ms".to_string(),
+            serde_json::Value::Number(
+                serde_json::Number::from_f64(duration.as_secs_f64() * 1000.0)
+                    .unwrap_or(serde_json::Number::from(0)),
+            ),
+        );
         obs.record_log(log).await;
 
         // Record trace span for each request
         let mut span = Span::new(format!("{} {}", method_clone, path_clone));
         span.kind = SpanKind::Server;
-        span.attributes.insert("http.method".to_string(), serde_json::Value::String(method_clone.clone()));
-        span.attributes.insert("http.url".to_string(), serde_json::Value::String(path_clone.clone()));
-        span.attributes.insert("http.status_code".to_string(), serde_json::Value::String(status_clone.clone()));
+        span.attributes.insert(
+            "http.method".to_string(),
+            serde_json::Value::String(method_clone.clone()),
+        );
+        span.attributes.insert(
+            "http.url".to_string(),
+            serde_json::Value::String(path_clone.clone()),
+        );
+        span.attributes.insert(
+            "http.status_code".to_string(),
+            serde_json::Value::String(status_clone.clone()),
+        );
         if status.is_server_error() {
             span.end_error("Server error");
         } else {

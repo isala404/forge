@@ -148,7 +148,11 @@ impl GatewayServer {
 
         // WebSocket state uses the reactor and db_pool for session tracking
         let node_id = self.reactor.node_id();
-        let ws_state = Arc::new(WsState::new(self.reactor.clone(), self.db_pool.clone(), node_id));
+        let ws_state = Arc::new(WsState::new(
+            self.reactor.clone(),
+            self.db_pool.clone(),
+            node_id,
+        ));
 
         // Build the main router with middleware
         let mut main_router = Router::new()

@@ -486,3 +486,19 @@ Fixed dashboard WebSocket connection tracking and trace detail view.
 - Added node_id() getter to Reactor struct in `realtime/reactor.rs`
 - Fixed trace detail page: changed function call from loadTraceWaterfall to loadTraceDetail
 - Fixed span container ID mismatch: JS now uses correct `waterfall-body` element
+
+Implemented comprehensive generated code and dashboard fixes.
+Part C - Generated Code Fixes:
+- C.1: Enhanced .gitignore template with .svelte-kit/, IDE files, and common ignores
+- C.2: Added VITE_API_URL env support in ForgeProvider and +page.svelte with .env.example
+- C.3: Fixed duplicate mod.rs entries by checking if module already declared before appending
+- C.4: Extended FunctionKind enum with Job, Cron, Workflow variants and updated parser
+- C.5: Verified delete subscription UI handling (empty state check already correct)
+- C.6: Added sample job (send_welcome_email), cron (daily_cleanup), workflow (user_onboarding)
+Part B - Dashboard Fixes:
+- B.1: Replaced Chart.js stub with CDN loader (Chart.js 4.4.0 + zoom plugin) with fallback
+- B.2: Wired metrics page search/filter with debounced search and type filter
+- B.3: Wired logs page search and SSE-based live stream with toggleLiveStream()
+- B.4: Wired traces page filters (search, min duration, errors only)
+- Added debounce utility and setupEventHandlers with all page-specific handlers
+- All 304 tests passing
