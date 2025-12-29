@@ -11,6 +11,7 @@ use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
 
 use forge_core::cluster::NodeId;
+use forge_core::function::{JobDispatch, WorkflowDispatch};
 
 use super::auth::{auth_middleware, AuthConfig, AuthMiddleware};
 use super::metrics::{metrics_middleware, MetricsState};
@@ -65,6 +66,8 @@ pub struct GatewayServer {
     db_pool: sqlx::PgPool,
     reactor: Arc<Reactor>,
     observability: Option<ObservabilityState>,
+    job_dispatcher: Option<Arc<dyn JobDispatch>>,
+    workflow_dispatcher: Option<Arc<dyn WorkflowDispatch>>,
 }
 
 impl GatewayServer {
@@ -84,6 +87,8 @@ impl GatewayServer {
             db_pool,
             reactor,
             observability: None,
+            job_dispatcher: None,
+            workflow_dispatcher: None,
         }
     }
 
@@ -108,7 +113,21 @@ impl GatewayServer {
             db_pool,
             reactor,
             observability: Some(observability),
+            job_dispatcher: None,
+            workflow_dispatcher: None,
         }
+    }
+
+    /// Set the job dispatcher.
+    pub fn with_job_dispatcher(mut self, dispatcher: Arc<dyn JobDispatch>) -> Self {
+        self.job_dispatcher = Some(dispatcher);
+        self
+    }
+
+    /// Set the workflow dispatcher.
+    pub fn with_workflow_dispatcher(mut self, dispatcher: Arc<dyn WorkflowDispatch>) -> Self {
+        self.workflow_dispatcher = Some(dispatcher);
+        self
     }
 
     /// Get a reference to the reactor.
@@ -118,8 +137,12 @@ impl GatewayServer {
 
     /// Build the Axum router.
     pub fn router(&self) -> Router {
-        let rpc_handler_state =
-            Arc::new(RpcHandler::new(self.registry.clone(), self.db_pool.clone()));
+        let rpc_handler_state = Arc::new(RpcHandler::with_dispatch(
+            self.registry.clone(),
+            self.db_pool.clone(),
+            self.job_dispatcher.clone(),
+            self.workflow_dispatcher.clone(),
+        ));
 
         let auth_middleware_state = Arc::new(AuthMiddleware::new(self.config.auth.clone()));
 

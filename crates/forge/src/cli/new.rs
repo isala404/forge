@@ -1064,7 +1064,10 @@ export const csr = true;
     // Plus: System Status (cron-driven), Job Demo (progress), Workflow Demo (steps)
     let page_svelte = r#"<script lang="ts">
     import { subscribe, mutate, query } from '$lib/forge/runtime';
-    import { getUsers, getUser, createUser, updateUser, deleteUser, getAppStats } from '$lib/forge/api';
+    import {
+        getUsers, getUser, createUser, updateUser, deleteUser, getAppStats,
+        dispatchJob, startWorkflow, pollJobUntilComplete, pollWorkflowUntilComplete
+    } from '$lib/forge/api';
     import type { User } from '$lib/forge/types';
 
     // Read API URL from environment (same as layout)
@@ -1139,16 +1142,34 @@ export const csr = true;
     // JOB DEMO - Dispatch a job and track progress
     // =========================================================================
     async function startExportJob() {
-        jobProgress = { percent: 0, message: 'Starting...' };
+        jobProgress = { percent: 0, message: 'Dispatching job...' };
 
-        // Simulate job progress (in real app, use dispatchExportJob mutation)
-        // and poll getJobStatus or use pollJobUntilComplete
-        for (let i = 0; i <= 100; i += 10) {
-            jobProgress = { percent: i, message: i < 100 ? `Processing ${i}%...` : 'Complete!' };
-            await new Promise(r => setTimeout(r, 300));
+        // Try to dispatch real job via API
+        const { data, error } = await dispatchJob('export_users', {
+            format: 'csv',
+            include_inactive: false
+        });
+
+        if (data?.job_id) {
+            // Real job dispatched - poll for progress
+            await pollJobUntilComplete(data.job_id, {
+                onProgress: (job) => {
+                    jobProgress = {
+                        percent: job.progress_percent || 0,
+                        message: job.progress_message || job.status
+                    };
+                }
+            });
+            setTimeout(() => { jobProgress = null; }, 2000);
+        } else {
+            // Job not registered - simulate for demo
+            console.log('Job dispatch failed (job may not be registered):', error);
+            for (let i = 0; i <= 100; i += 10) {
+                jobProgress = { percent: i, message: i < 100 ? `Processing ${i}%...` : 'Complete!' };
+                await new Promise(r => setTimeout(r, 300));
+            }
+            setTimeout(() => { jobProgress = null; }, 2000);
         }
-
-        setTimeout(() => { jobProgress = null; }, 2000);
     }
 
     // =========================================================================
@@ -1162,18 +1183,37 @@ export const csr = true;
             { name: 'Verify Account', status: 'pending' },
         ];
 
-        // Simulate workflow steps (in real app, use startWorkflow mutation
-        // and poll getWorkflowStatus or use pollWorkflowUntilComplete)
-        for (let i = 0; i < workflowSteps.length; i++) {
-            await new Promise(r => setTimeout(r, 800));
-            workflowSteps[i].status = 'completed';
-            if (i + 1 < workflowSteps.length) {
-                workflowSteps[i + 1].status = 'running';
-            }
-            workflowSteps = [...workflowSteps]; // Trigger reactivity
-        }
+        // Try to start real workflow via API
+        const { data, error } = await startWorkflow('account_verification', {
+            user_id: selectedUser?.id || 'demo-user'
+        });
 
-        setTimeout(() => { workflowSteps = []; }, 2000);
+        if (data?.workflow_id) {
+            // Real workflow started - poll for step progress
+            await pollWorkflowUntilComplete(data.workflow_id, {
+                onStepChange: (workflow) => {
+                    if (workflow.steps) {
+                        workflowSteps = workflow.steps.map((step: { name: string; status: string }) => ({
+                            name: step.name,
+                            status: step.status
+                        }));
+                    }
+                }
+            });
+            setTimeout(() => { workflowSteps = []; }, 2000);
+        } else {
+            // Workflow not registered - simulate for demo
+            console.log('Workflow dispatch failed (workflow may not be registered):', error);
+            for (let i = 0; i < workflowSteps.length; i++) {
+                await new Promise(r => setTimeout(r, 800));
+                workflowSteps[i].status = 'completed';
+                if (i + 1 < workflowSteps.length) {
+                    workflowSteps[i + 1].status = 'running';
+                }
+                workflowSteps = [...workflowSteps]; // Trigger reactivity
+            }
+            setTimeout(() => { workflowSteps = []; }, 2000);
+        }
     }
 
     // Format timestamp
@@ -1806,6 +1846,58 @@ export async function pollWorkflowUntilComplete(
     }
 
     return null;
+}
+
+// ============================================================================
+// JOB & WORKFLOW DISPATCH FUNCTIONS
+// ============================================================================
+
+/**
+ * Dispatch a background job by type.
+ * Returns the job ID that can be used with getJobStatus or pollJobUntilComplete.
+ *
+ * @example
+ * const { data } = await dispatchJob('export_users', { format: 'csv' });
+ * if (data) {
+ *   const job = await pollJobUntilComplete(data.job_id, {
+ *     onProgress: (j) => console.log(`${j.progress_percent}%`)
+ *   });
+ * }
+ */
+export async function dispatchJob<T = Record<string, unknown>>(
+    jobType: string,
+    args?: T
+): Promise<ApiResponse<{ job_id: string }>> {
+    const response = await fetch(`${API_URL}/_api/jobs/${jobType}/dispatch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ args: args || {} }),
+    });
+    return response.json();
+}
+
+/**
+ * Start a workflow by name.
+ * Returns the workflow ID that can be used with getWorkflowStatus or pollWorkflowUntilComplete.
+ *
+ * @example
+ * const { data } = await startWorkflow('account_verification', { user_id: '...' });
+ * if (data) {
+ *   const workflow = await pollWorkflowUntilComplete(data.workflow_id, {
+ *     onStepChange: (w) => console.log(`Step: ${w.current_step}`)
+ *   });
+ * }
+ */
+export async function startWorkflow<T = Record<string, unknown>>(
+    workflowName: string,
+    input?: T
+): Promise<ApiResponse<{ workflow_id: string }>> {
+    const response = await fetch(`${API_URL}/_api/workflows/${workflowName}/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input: input || {} }),
+    });
+    return response.json();
 }
 "#;
     fs::write(frontend_dir.join("src/lib/forge/api.ts"), api_ts)?;

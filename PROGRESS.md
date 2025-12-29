@@ -578,3 +578,15 @@ Fixed dashboard cron page and scheduler bugs.
 - Added `loadCrons()` function in `crates/forge-runtime/src/dashboard/assets.rs` with API calls to `/_api/crons`, `/_api/crons/stats`, `/_api/crons/history`
 - Fixed stats field mappings (`active_count`, `success_rate_24h`, `next_scheduled_run`)
 - Added `loadCrons()` call to `loadPageSpecificData()` for `/crons` route
+
+Implemented job/workflow dispatch from frontend and dashboard.
+- Created `crates/forge-core/src/function/dispatch.rs` with JobDispatch and WorkflowDispatch traits
+- Added `dispatch_job()` and `start_workflow()` methods to MutationContext and ActionContext
+- Implemented JobDispatch for JobDispatcher in `crates/forge-runtime/src/jobs/dispatcher.rs`
+- Implemented WorkflowDispatch for WorkflowExecutor in `crates/forge-runtime/src/workflow/executor.rs`
+- Added dispatch builder methods to FunctionRouter, FunctionExecutor, RpcHandler, GatewayServer
+- Added `POST /_api/jobs/{job_type}/dispatch` and `POST /_api/workflows/{workflow_name}/start` endpoints
+- Updated DashboardState with job_dispatcher and workflow_executor fields
+- Wired dispatchers in Forge runtime during gateway startup
+- Added `dispatchJob()` and `startWorkflow()` to scaffolded frontend api.ts
+- Updated demo page to use real dispatch with fallback to simulation

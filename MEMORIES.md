@@ -68,6 +68,9 @@ Key Patterns
 - CLI generator: embeds @forge/svelte runtime directly in generated projects (no npm linking)
 - CLI generator: query() is async Promise-based (not store), subscribe() is store-based for real-time
 - FunctionKind: is_client_callable() method returns true for Query/Mutation/Action (not Job/Cron/Workflow)
+- Context dispatch: MutationContext/ActionContext have dispatch_job() and start_workflow() methods
+- Dispatch traits: JobDispatch and WorkflowDispatch in forge-core/src/function/dispatch.rs
+- Dashboard dispatch: POST /_api/jobs/{job_type}/dispatch, POST /_api/workflows/{workflow_name}/start
 - Chart.js: CDN load with fallback pattern for offline/firewall environments
 - Dashboard JS: debounce utility for search inputs, setupEventHandlers() for page-specific handlers
 - SSE streams: EventSource API for live log streaming with auto-reconnect pattern

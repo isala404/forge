@@ -16,8 +16,8 @@ use sqlx::PgPool;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::cron::CronRegistry;
-use crate::jobs::JobRegistry;
-use crate::workflow::WorkflowRegistry;
+use crate::jobs::{JobDispatcher, JobRegistry};
+use crate::workflow::{WorkflowExecutor, WorkflowRegistry};
 
 /// Dashboard configuration.
 #[derive(Debug, Clone)]
@@ -58,6 +58,10 @@ pub struct DashboardState {
     pub job_registry: JobRegistry,
     pub cron_registry: Arc<CronRegistry>,
     pub workflow_registry: WorkflowRegistry,
+    /// Optional job dispatcher for dispatching jobs from dashboard.
+    pub job_dispatcher: Option<Arc<JobDispatcher>>,
+    /// Optional workflow executor for starting workflows from dashboard.
+    pub workflow_executor: Option<Arc<WorkflowExecutor>>,
 }
 
 /// Create the dashboard router.
@@ -120,11 +124,16 @@ pub fn create_api_router(state: DashboardState) -> Router {
         .route("/jobs/stats", get(api::get_job_stats))
         .route("/jobs/registered", get(api::list_registered_jobs))
         .route("/jobs/{id}", get(api::get_job))
+        .route("/jobs/{job_type}/dispatch", post(api::dispatch_job))
         // Workflows API
         .route("/workflows", get(api::list_workflows))
         .route("/workflows/stats", get(api::get_workflow_stats))
         .route("/workflows/registered", get(api::list_registered_workflows))
         .route("/workflows/{id}", get(api::get_workflow))
+        .route(
+            "/workflows/{workflow_name}/start",
+            post(api::start_workflow),
+        )
         // Crons API
         .route("/crons", get(api::list_crons))
         .route("/crons/stats", get(api::get_cron_stats))

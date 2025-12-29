@@ -1,6 +1,9 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use forge_core::function::JobDispatch;
 use forge_core::job::{ForgeJob, JobInfo, JobPriority};
 use uuid::Uuid;
 
@@ -173,6 +176,17 @@ impl JobDispatcher {
             .enqueue(job)
             .await
             .map_err(|e| forge_core::ForgeError::Database(e.to_string()))
+    }
+}
+
+impl JobDispatch for JobDispatcher {
+    fn dispatch_by_name(
+        &self,
+        job_type: &str,
+        args: serde_json::Value,
+    ) -> Pin<Box<dyn Future<Output = forge_core::Result<Uuid>> + Send + '_>> {
+        let job_type = job_type.to_string();
+        Box::pin(async move { self.dispatch_by_name(&job_type, args).await })
     }
 }
 

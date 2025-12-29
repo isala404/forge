@@ -1,6 +1,9 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use uuid::Uuid;
+
+use super::dispatch::{JobDispatch, WorkflowDispatch};
 
 /// Authentication context available to all functions.
 #[derive(Debug, Clone)]
@@ -168,6 +171,10 @@ pub struct MutationContext {
     pub request: RequestMetadata,
     /// Database pool for transactional operations.
     db_pool: sqlx::PgPool,
+    /// Optional job dispatcher for dispatching background jobs.
+    job_dispatch: Option<Arc<dyn JobDispatch>>,
+    /// Optional workflow dispatcher for starting workflows.
+    workflow_dispatch: Option<Arc<dyn WorkflowDispatch>>,
 }
 
 impl MutationContext {
@@ -177,6 +184,25 @@ impl MutationContext {
             auth,
             request,
             db_pool,
+            job_dispatch: None,
+            workflow_dispatch: None,
+        }
+    }
+
+    /// Create a mutation context with dispatch capabilities.
+    pub fn with_dispatch(
+        db_pool: sqlx::PgPool,
+        auth: AuthContext,
+        request: RequestMetadata,
+        job_dispatch: Option<Arc<dyn JobDispatch>>,
+        workflow_dispatch: Option<Arc<dyn WorkflowDispatch>>,
+    ) -> Self {
+        Self {
+            auth,
+            request,
+            db_pool,
+            job_dispatch,
+            workflow_dispatch,
         }
     }
 
@@ -188,6 +214,46 @@ impl MutationContext {
     /// Get the authenticated user ID or return an error.
     pub fn require_user_id(&self) -> crate::error::Result<Uuid> {
         self.auth.require_user_id()
+    }
+
+    /// Dispatch a background job.
+    ///
+    /// # Arguments
+    /// * `job_type` - The registered name of the job type
+    /// * `args` - The arguments for the job (will be serialized to JSON)
+    ///
+    /// # Returns
+    /// The UUID of the dispatched job, or an error if dispatch is not available.
+    pub async fn dispatch_job<T: serde::Serialize>(
+        &self,
+        job_type: &str,
+        args: T,
+    ) -> crate::error::Result<Uuid> {
+        let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
+            crate::error::ForgeError::Internal("Job dispatch not available".into())
+        })?;
+        let args_json = serde_json::to_value(args)?;
+        dispatcher.dispatch_by_name(job_type, args_json).await
+    }
+
+    /// Start a workflow.
+    ///
+    /// # Arguments
+    /// * `workflow_name` - The registered name of the workflow
+    /// * `input` - The input for the workflow (will be serialized to JSON)
+    ///
+    /// # Returns
+    /// The UUID of the started workflow run, or an error if dispatch is not available.
+    pub async fn start_workflow<T: serde::Serialize>(
+        &self,
+        workflow_name: &str,
+        input: T,
+    ) -> crate::error::Result<Uuid> {
+        let dispatcher = self.workflow_dispatch.as_ref().ok_or_else(|| {
+            crate::error::ForgeError::Internal("Workflow dispatch not available".into())
+        })?;
+        let input_json = serde_json::to_value(input)?;
+        dispatcher.start_by_name(workflow_name, input_json).await
     }
 }
 
@@ -201,6 +267,10 @@ pub struct ActionContext {
     db_pool: sqlx::PgPool,
     /// HTTP client for external requests.
     http_client: reqwest::Client,
+    /// Optional job dispatcher for dispatching background jobs.
+    job_dispatch: Option<Arc<dyn JobDispatch>>,
+    /// Optional workflow dispatcher for starting workflows.
+    workflow_dispatch: Option<Arc<dyn WorkflowDispatch>>,
 }
 
 impl ActionContext {
@@ -216,6 +286,27 @@ impl ActionContext {
             request,
             db_pool,
             http_client,
+            job_dispatch: None,
+            workflow_dispatch: None,
+        }
+    }
+
+    /// Create an action context with dispatch capabilities.
+    pub fn with_dispatch(
+        db_pool: sqlx::PgPool,
+        auth: AuthContext,
+        request: RequestMetadata,
+        http_client: reqwest::Client,
+        job_dispatch: Option<Arc<dyn JobDispatch>>,
+        workflow_dispatch: Option<Arc<dyn WorkflowDispatch>>,
+    ) -> Self {
+        Self {
+            auth,
+            request,
+            db_pool,
+            http_client,
+            job_dispatch,
+            workflow_dispatch,
         }
     }
 
@@ -232,6 +323,46 @@ impl ActionContext {
     /// Get the authenticated user ID or return an error.
     pub fn require_user_id(&self) -> crate::error::Result<Uuid> {
         self.auth.require_user_id()
+    }
+
+    /// Dispatch a background job.
+    ///
+    /// # Arguments
+    /// * `job_type` - The registered name of the job type
+    /// * `args` - The arguments for the job (will be serialized to JSON)
+    ///
+    /// # Returns
+    /// The UUID of the dispatched job, or an error if dispatch is not available.
+    pub async fn dispatch_job<T: serde::Serialize>(
+        &self,
+        job_type: &str,
+        args: T,
+    ) -> crate::error::Result<Uuid> {
+        let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
+            crate::error::ForgeError::Internal("Job dispatch not available".into())
+        })?;
+        let args_json = serde_json::to_value(args)?;
+        dispatcher.dispatch_by_name(job_type, args_json).await
+    }
+
+    /// Start a workflow.
+    ///
+    /// # Arguments
+    /// * `workflow_name` - The registered name of the workflow
+    /// * `input` - The input for the workflow (will be serialized to JSON)
+    ///
+    /// # Returns
+    /// The UUID of the started workflow run, or an error if dispatch is not available.
+    pub async fn start_workflow<T: serde::Serialize>(
+        &self,
+        workflow_name: &str,
+        input: T,
+    ) -> crate::error::Result<Uuid> {
+        let dispatcher = self.workflow_dispatch.as_ref().ok_or_else(|| {
+            crate::error::ForgeError::Internal("Workflow dispatch not available".into())
+        })?;
+        let input_json = serde_json::to_value(input)?;
+        dispatcher.start_by_name(workflow_name, input_json).await
     }
 }
 

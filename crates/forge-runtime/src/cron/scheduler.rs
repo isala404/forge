@@ -201,7 +201,9 @@ impl CronRunner {
     async fn tick(&self) -> forge_core::Result<()> {
         let now = Utc::now();
         // Look back 2x poll interval to catch any scheduled times we might have missed
-        let window_start = now - chrono::Duration::from_std(self.config.poll_interval * 2).unwrap_or(chrono::Duration::seconds(2));
+        let window_start = now
+            - chrono::Duration::from_std(self.config.poll_interval * 2)
+                .unwrap_or(chrono::Duration::seconds(2));
 
         let cron_list = self.registry.list();
 
@@ -218,7 +220,9 @@ impl CronRunner {
         for entry in cron_list {
             let info = &entry.info;
 
-            let scheduled_times = info.schedule.between_in_tz(window_start, now, info.timezone);
+            let scheduled_times = info
+                .schedule
+                .between_in_tz(window_start, now, info.timezone);
             if scheduled_times.is_empty() {
                 tracing::debug!(
                     cron = info.name,

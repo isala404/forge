@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use forge_core::{AuthContext, ForgeError, RequestMetadata, Result};
+use forge_core::{AuthContext, ForgeError, JobDispatch, RequestMetadata, Result, WorkflowDispatch};
 use serde_json::Value;
 use tokio::time::timeout;
 
@@ -35,6 +35,27 @@ impl FunctionExecutor {
             router: FunctionRouter::new(Arc::clone(&registry), db_pool),
             registry,
             default_timeout,
+        }
+    }
+
+    /// Create a new function executor with dispatch capabilities.
+    pub fn with_dispatch(
+        registry: Arc<FunctionRegistry>,
+        db_pool: sqlx::PgPool,
+        job_dispatcher: Option<Arc<dyn JobDispatch>>,
+        workflow_dispatcher: Option<Arc<dyn WorkflowDispatch>>,
+    ) -> Self {
+        let mut router = FunctionRouter::new(Arc::clone(&registry), db_pool);
+        if let Some(jd) = job_dispatcher {
+            router = router.with_job_dispatcher(jd);
+        }
+        if let Some(wd) = workflow_dispatcher {
+            router = router.with_workflow_dispatcher(wd);
+        }
+        Self {
+            router,
+            registry,
+            default_timeout: Duration::from_secs(30),
         }
     }
 

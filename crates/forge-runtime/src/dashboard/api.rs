@@ -2053,6 +2053,94 @@ pub async fn list_registered_workflows(
     Json(ApiResponse::success(workflows))
 }
 
+// ============== Job/Workflow Dispatch ==============
+
+/// Request body for dispatching a job.
+#[derive(Debug, Deserialize)]
+pub struct DispatchJobRequest {
+    /// Arguments for the job (JSON).
+    #[serde(default)]
+    pub args: serde_json::Value,
+}
+
+/// Response body for dispatching a job.
+#[derive(Debug, Serialize)]
+pub struct DispatchJobResponse {
+    /// The ID of the dispatched job.
+    pub job_id: uuid::Uuid,
+}
+
+/// Request body for starting a workflow.
+#[derive(Debug, Deserialize)]
+pub struct StartWorkflowRequest {
+    /// Input for the workflow (JSON).
+    #[serde(default)]
+    pub input: serde_json::Value,
+}
+
+/// Response body for starting a workflow.
+#[derive(Debug, Serialize)]
+pub struct StartWorkflowResponse {
+    /// The ID of the started workflow run.
+    pub workflow_id: uuid::Uuid,
+}
+
+/// Dispatch a job by type.
+pub async fn dispatch_job(
+    State(state): State<DashboardState>,
+    Path(job_type): Path<String>,
+    Json(request): Json<DispatchJobRequest>,
+) -> (StatusCode, Json<ApiResponse<DispatchJobResponse>>) {
+    let dispatcher = match &state.job_dispatcher {
+        Some(d) => d,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ApiResponse::error("Job dispatcher not available")),
+            );
+        }
+    };
+
+    match dispatcher.dispatch_by_name(&job_type, request.args).await {
+        Ok(job_id) => (
+            StatusCode::OK,
+            Json(ApiResponse::success(DispatchJobResponse { job_id })),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(&e.to_string())),
+        ),
+    }
+}
+
+/// Start a workflow by name.
+pub async fn start_workflow(
+    State(state): State<DashboardState>,
+    Path(workflow_name): Path<String>,
+    Json(request): Json<StartWorkflowRequest>,
+) -> (StatusCode, Json<ApiResponse<StartWorkflowResponse>>) {
+    let executor = match &state.workflow_executor {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ApiResponse::error("Workflow executor not available")),
+            );
+        }
+    };
+
+    match executor.start_by_name(&workflow_name, request.input).await {
+        Ok(workflow_id) => (
+            StatusCode::OK,
+            Json(ApiResponse::success(StartWorkflowResponse { workflow_id })),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(&e.to_string())),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use forge_core::{
-    ActionContext, AuthContext, ForgeError, FunctionKind, MutationContext, QueryContext,
-    RequestMetadata, Result,
+    ActionContext, AuthContext, ForgeError, FunctionKind, JobDispatch, MutationContext,
+    QueryContext, RequestMetadata, Result, WorkflowDispatch,
 };
 use serde_json::Value;
 
@@ -23,6 +23,8 @@ pub struct FunctionRouter {
     registry: Arc<FunctionRegistry>,
     db_pool: sqlx::PgPool,
     http_client: reqwest::Client,
+    job_dispatcher: Option<Arc<dyn JobDispatch>>,
+    workflow_dispatcher: Option<Arc<dyn WorkflowDispatch>>,
 }
 
 impl FunctionRouter {
@@ -32,6 +34,8 @@ impl FunctionRouter {
             registry,
             db_pool,
             http_client: reqwest::Client::new(),
+            job_dispatcher: None,
+            workflow_dispatcher: None,
         }
     }
 
@@ -45,7 +49,21 @@ impl FunctionRouter {
             registry,
             db_pool,
             http_client,
+            job_dispatcher: None,
+            workflow_dispatcher: None,
         }
+    }
+
+    /// Set the job dispatcher for this router.
+    pub fn with_job_dispatcher(mut self, dispatcher: Arc<dyn JobDispatch>) -> Self {
+        self.job_dispatcher = Some(dispatcher);
+        self
+    }
+
+    /// Set the workflow dispatcher for this router.
+    pub fn with_workflow_dispatcher(mut self, dispatcher: Arc<dyn WorkflowDispatch>) -> Self {
+        self.workflow_dispatcher = Some(dispatcher);
+        self
     }
 
     /// Route and execute a function call.
@@ -70,16 +88,24 @@ impl FunctionRouter {
                 Ok(RouteResult::Query(result))
             }
             FunctionEntry::Mutation { handler, .. } => {
-                let ctx = MutationContext::new(self.db_pool.clone(), auth, request);
+                let ctx = MutationContext::with_dispatch(
+                    self.db_pool.clone(),
+                    auth,
+                    request,
+                    self.job_dispatcher.clone(),
+                    self.workflow_dispatcher.clone(),
+                );
                 let result = handler(&ctx, args).await?;
                 Ok(RouteResult::Mutation(result))
             }
             FunctionEntry::Action { handler, .. } => {
-                let ctx = ActionContext::new(
+                let ctx = ActionContext::with_dispatch(
                     self.db_pool.clone(),
                     auth,
                     request,
                     self.http_client.clone(),
+                    self.job_dispatcher.clone(),
+                    self.workflow_dispatcher.clone(),
                 );
                 let result = handler(&ctx, args).await?;
                 Ok(RouteResult::Action(result))

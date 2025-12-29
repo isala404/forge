@@ -17,7 +17,7 @@ pub use cron::{CronContext, CronInfo, CronSchedule, ForgeCron};
 pub use error::{ForgeError, Result};
 pub use function::{
     ActionContext, AuthContext, ForgeAction, ForgeMutation, ForgeQuery, FunctionInfo, FunctionKind,
-    MutationContext, QueryContext, RequestMetadata,
+    JobDispatch, MutationContext, QueryContext, RequestMetadata, WorkflowDispatch,
 };
 pub use job::{ForgeJob, JobContext, JobInfo, JobPriority, JobStatus, RetryConfig};
 pub use observability::{

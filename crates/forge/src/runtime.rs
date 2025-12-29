@@ -32,10 +32,10 @@ use forge_runtime::dashboard::{
 use forge_runtime::db::Database;
 use forge_runtime::function::FunctionRegistry;
 use forge_runtime::gateway::{AuthConfig, GatewayConfig as RuntimeGatewayConfig, GatewayServer};
-use forge_runtime::jobs::{JobQueue, JobRegistry, Worker, WorkerConfig};
+use forge_runtime::jobs::{JobDispatcher, JobQueue, JobRegistry, Worker, WorkerConfig};
 use forge_runtime::observability::{ObservabilityConfig, ObservabilityState};
 use forge_runtime::realtime::{WebSocketConfig, WebSocketServer};
-use forge_runtime::workflow::WorkflowRegistry;
+use forge_runtime::workflow::{WorkflowExecutor, WorkflowRegistry};
 
 /// Prelude module for common imports.
 pub mod prelude {
@@ -329,6 +329,15 @@ impl Forge {
         // Reactor handle for shutdown
         let mut reactor_handle = None;
 
+        // Create job dispatcher and workflow executor for dispatch capabilities
+        let job_queue = JobQueue::new(pool.clone());
+        let job_dispatcher = Arc::new(JobDispatcher::new(job_queue, self.job_registry.clone()));
+        let workflow_executor = Arc::new(WorkflowExecutor::new(
+            Arc::new(self.workflow_registry.clone()),
+            pool.clone(),
+            http_client.clone(),
+        ));
+
         // Start HTTP gateway if gateway role
         if roles.contains(&NodeRole::Gateway) {
             let gateway_config = RuntimeGatewayConfig {
@@ -340,13 +349,15 @@ impl Forge {
                 auth: AuthConfig::default(),
             };
 
-            // Create dashboard state with registries
+            // Create dashboard state with registries and dispatchers
             let dashboard_state = DashboardState {
                 pool: pool.clone(),
                 config: DashboardConfig::default(),
                 job_registry: self.job_registry.clone(),
                 cron_registry: self.cron_registry.clone(),
                 workflow_registry: self.workflow_registry.clone(),
+                job_dispatcher: Some(job_dispatcher.clone()),
+                workflow_executor: Some(workflow_executor.clone()),
             };
 
             // Build gateway router with dashboard and observability
@@ -355,7 +366,9 @@ impl Forge {
                 self.function_registry.clone(),
                 pool.clone(),
                 observability.clone(),
-            );
+            )
+            .with_job_dispatcher(job_dispatcher.clone())
+            .with_workflow_dispatcher(workflow_executor.clone());
 
             // Start the reactor for real-time updates
             let reactor = gateway.reactor();

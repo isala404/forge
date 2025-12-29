@@ -4,7 +4,7 @@ use axum::{
     extract::{Extension, State},
     Json,
 };
-use forge_core::function::{AuthContext, RequestMetadata};
+use forge_core::function::{AuthContext, JobDispatch, RequestMetadata, WorkflowDispatch};
 
 use super::request::RpcRequest;
 use super::response::{RpcError, RpcResponse};
@@ -22,6 +22,24 @@ impl RpcHandler {
     /// Create a new RPC handler.
     pub fn new(registry: FunctionRegistry, db_pool: sqlx::PgPool) -> Self {
         let executor = FunctionExecutor::new(Arc::new(registry), db_pool);
+        Self {
+            executor: Arc::new(executor),
+        }
+    }
+
+    /// Create a new RPC handler with dispatch capabilities.
+    pub fn with_dispatch(
+        registry: FunctionRegistry,
+        db_pool: sqlx::PgPool,
+        job_dispatcher: Option<Arc<dyn JobDispatch>>,
+        workflow_dispatcher: Option<Arc<dyn WorkflowDispatch>>,
+    ) -> Self {
+        let executor = FunctionExecutor::with_dispatch(
+            Arc::new(registry),
+            db_pool,
+            job_dispatcher,
+            workflow_dispatcher,
+        );
         Self {
             executor: Arc::new(executor),
         }

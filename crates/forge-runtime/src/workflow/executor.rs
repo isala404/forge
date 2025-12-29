@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
@@ -6,6 +8,7 @@ use uuid::Uuid;
 
 use super::registry::WorkflowRegistry;
 use super::state::{WorkflowRecord, WorkflowStepRecord};
+use forge_core::function::WorkflowDispatch;
 use forge_core::workflow::{CompensationHandler, StepStatus, WorkflowContext, WorkflowStatus};
 
 /// Workflow execution result.
@@ -439,6 +442,26 @@ impl WorkflowExecutor {
         .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
 
         Ok(())
+    }
+
+    /// Start a workflow by its registered name with JSON input.
+    pub async fn start_by_name(
+        &self,
+        workflow_name: &str,
+        input: serde_json::Value,
+    ) -> forge_core::Result<Uuid> {
+        self.start(workflow_name, input).await
+    }
+}
+
+impl WorkflowDispatch for WorkflowExecutor {
+    fn start_by_name(
+        &self,
+        workflow_name: &str,
+        input: serde_json::Value,
+    ) -> Pin<Box<dyn Future<Output = forge_core::Result<Uuid>> + Send + '_>> {
+        let workflow_name = workflow_name.to_string();
+        Box::pin(async move { self.start_by_name(&workflow_name, input).await })
     }
 }
 
