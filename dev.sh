@@ -74,14 +74,8 @@ build_cli() {
 # Scaffold app
 scaffold_app() {
     if [ -d "$APP_DIR" ]; then
-        warn "App already exists at $APP_DIR"
-        read -p "Delete and recreate? [y/N] " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            rm -rf "$APP_DIR"
-        else
-            return 0
-        fi
+        warn "Removing existing app at $APP_DIR"
+        rm -rf "$APP_DIR"
     fi
 
     log "Scaffolding app at $APP_DIR..."

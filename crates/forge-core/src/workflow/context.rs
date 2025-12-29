@@ -429,6 +429,68 @@ impl WorkflowContext {
     pub fn compensation_handlers(&self) -> HashMap<String, CompensationHandler> {
         self.compensation_handlers.read().unwrap().clone()
     }
+
+    // =========================================================================
+    // FLUENT STEP API
+    // =========================================================================
+
+    /// Create a step runner for executing a workflow step.
+    ///
+    /// This provides a fluent API for defining steps with retry, compensation,
+    /// timeout, and optional behavior.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use std::time::Duration;
+    ///
+    /// // Simple step
+    /// let data = ctx.step("fetch_data", || async {
+    ///     Ok(fetch_from_api().await?)
+    /// }).run().await?;
+    ///
+    /// // Step with retry (3 attempts, 2 second delay)
+    /// ctx.step("send_email", || async {
+    ///     send_verification_email(&user.email).await
+    /// })
+    /// .retry(3, Duration::from_secs(2))
+    /// .run()
+    /// .await?;
+    ///
+    /// // Step with compensation (rollback on later failure)
+    /// let charge = ctx.step("charge_card", || async {
+    ///     charge_credit_card(&card).await
+    /// })
+    /// .compensate(|charge_result| async move {
+    ///     refund_charge(&charge_result.charge_id).await
+    /// })
+    /// .run()
+    /// .await?;
+    ///
+    /// // Optional step (failure won't trigger compensation)
+    /// ctx.step("notify_slack", || async {
+    ///     post_to_slack("User signed up!").await
+    /// })
+    /// .optional()
+    /// .run()
+    /// .await?;
+    ///
+    /// // Step with timeout
+    /// ctx.step("slow_operation", || async {
+    ///     process_large_file().await
+    /// })
+    /// .timeout(Duration::from_secs(60))
+    /// .run()
+    /// .await?;
+    /// ```
+    pub fn step<T, F, Fut>(&self, name: impl Into<String>, f: F) -> super::StepRunner<'_, T>
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = crate::Result<T>> + Send + 'static,
+    {
+        super::StepRunner::new(self, name, f)
+    }
 }
 
 #[cfg(test)]

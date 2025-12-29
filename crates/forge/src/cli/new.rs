@@ -191,7 +191,6 @@ async fn main() -> Result<()> {
     // Heartbeat cron updates app_stats every minute for the System Status panel
     // =========================================================================
     builder.cron_registry_mut().register::<functions::HeartbeatStatsCron>();
-    // builder.cron_registry_mut().register::<functions::CleanupInactiveUsersCron>();
 
     // =========================================================================
     // WORKFLOWS - Multi-step durable processes (see /_dashboard/workflows)
@@ -247,9 +246,6 @@ pub mod app_stats;
 // Background job example - export users with progress tracking
 pub mod export_users_job;
 
-// Scheduled task example - cleanup inactive users
-pub mod cleanup_inactive_users_cron;
-
 // Heartbeat cron - updates app_stats every minute for live UI updates
 pub mod heartbeat_stats_cron;
 
@@ -261,8 +257,6 @@ pub use users::*;
 pub use app_stats::*;
 #[allow(unused_imports)]
 pub use export_users_job::*;
-#[allow(unused_imports)]
-pub use cleanup_inactive_users_cron::*;
 #[allow(unused_imports)]
 pub use heartbeat_stats_cron::*;
 #[allow(unused_imports)]
@@ -526,89 +520,6 @@ pub async fn export_users(
         export_users_job,
     )?;
 
-    // Create sample cron demonstrating scheduled tasks
-    let cleanup_cron = r#"//! Scheduled Task: Cleanup Inactive Users
-//!
-//! Cron tasks run on a schedule defined by a cron expression.
-//! This example shows how to run periodic maintenance tasks on user data.
-//!
-//! ## Cron Expression Reference
-//!
-//! - `* * * * *`     - Every minute
-//! - `0 * * * *`     - Every hour at :00
-//! - `0 0 * * *`     - Daily at midnight
-//! - `0 9 * * 1-5`   - Weekdays at 9 AM
-//! - `0 0 1 * *`     - Monthly on the 1st
-//!
-//! ## Monitoring
-//!
-//! Cron executions are visible in the FORGE dashboard at /_dashboard/crons.
-//! You can see execution history, success/failure rates, and trigger manual runs.
-
-/// Cleanup inactive users scheduled task.
-///
-/// Runs every day at 2 AM UTC (off-peak hours).
-/// Identifies users who haven't been active in 30 days and logs them.
-/// In production, you might send reminder emails or mark them as inactive.
-#[forge::cron("0 2 * * *")]
-#[timezone = "UTC"]
-pub async fn cleanup_inactive_users(ctx: &CronContext) -> Result<()> {
-    tracing::info!(run_id = %ctx.run_id, "Starting inactive user cleanup");
-
-    let pool = ctx.db();
-
-    // Find users who haven't been updated in 30 days
-    // In a real app, you'd track last_login_at instead of updated_at
-    let inactive_count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM users WHERE updated_at < NOW() - INTERVAL '30 days'"
-    )
-    .fetch_one(pool)
-    .await?;
-
-    tracing::info!(
-        run_id = %ctx.run_id,
-        inactive_users = inactive_count.0,
-        "Found inactive users"
-    );
-
-    // Example: Send reminder emails to inactive users
-    // let inactive_users = sqlx::query_as::<_, User>(
-    //     "SELECT * FROM users WHERE updated_at < NOW() - INTERVAL '30 days'"
-    // )
-    // .fetch_all(pool)
-    // .await?;
-    //
-    // for user in inactive_users {
-    //     // Dispatch a job to send a "we miss you" email
-    //     ctx.dispatch_job::<SendReminderEmailJob>(SendReminderEmailInput {
-    //         user_id: user.id,
-    //         email: user.email,
-    //     }).await?;
-    // }
-
-    // Example: Clean up old sessions for better performance
-    let deleted_sessions = sqlx::query(
-        "DELETE FROM forge_sessions WHERE last_active_at < NOW() - INTERVAL '7 days'"
-    )
-    .execute(pool)
-    .await?
-    .rows_affected();
-
-    tracing::info!(
-        run_id = %ctx.run_id,
-        deleted_sessions = deleted_sessions,
-        inactive_users = inactive_count.0,
-        "Cleanup completed"
-    );
-
-    Ok(())
-}
-"#;
-    fs::write(
-        dir.join("src/functions/cleanup_inactive_users_cron.rs"),
-        cleanup_cron,
-    )?;
-
     // Create heartbeat cron that updates app_stats every minute
     let heartbeat_cron = r#"//! Scheduled Task: Heartbeat Stats
 //!
@@ -793,9 +704,38 @@ pub struct AccountVerificationOutput {
 ///
 /// Multi-step process for verifying a user's email:
 /// 1. Generate verification token
-/// 2. Store token in database
-/// 3. Send verification email (simulated)
-/// 4. Mark account as verified (in real app, this waits for user click)
+/// 2. Store token in database (with compensation for rollback)
+/// 3. Send verification email
+/// 4. Mark account as verified
+///
+/// ## Two APIs Available
+///
+/// FORGE provides two ways to define workflow steps:
+///
+/// ### 1. Fluent API (recommended for most cases)
+/// ```ignore
+/// let result = ctx.step("step_name", || async {
+///     // Your step logic
+///     Ok(result)
+/// })
+/// .timeout(Duration::from_secs(30))     // Optional: timeout
+/// .compensate(|result| async move {     // Optional: rollback handler
+///     // Undo the step
+///     Ok(())
+/// })
+/// .optional()                            // Optional: don't fail workflow if step fails
+/// .run()
+/// .await?;
+/// ```
+///
+/// ### 2. Low-level API (for complex control)
+/// ```ignore
+/// if !ctx.is_step_completed("step_name") {
+///     ctx.record_step_start("step_name");
+///     // Your step logic with manual retry, etc.
+///     ctx.record_step_complete("step_name", result);
+/// }
+/// ```
 #[forge::workflow]
 #[version = 1]
 #[timeout = "24h"]
@@ -812,63 +752,92 @@ pub async fn account_verification(
         "Starting account verification workflow"
     );
 
-    // Step 1: Generate verification token
-    let token = if !ctx.is_step_completed("generate_token") {
-        ctx.record_step_start("generate_token");
-        tracing::info!("Step 1: Generating verification token");
-
-        // Simulate cryptographic token generation
+    // =========================================================================
+    // STEP 1: Generate token (Fluent API - simple step)
+    // =========================================================================
+    // The fluent API is clean and handles:
+    // - Automatic resume if step already completed (workflow restart)
+    // - Step state persistence to database
+    // - Error recording on failure
+    let token: String = ctx.step("generate_token", || async {
+        tracing::info!("Generating verification token");
         tokio::time::sleep(Duration::from_secs(1)).await;
+        Ok(format!("verify_{}", Uuid::new_v4()))
+    })
+    .timeout(Duration::from_secs(10))  // Timeout after 10 seconds
+    .run()
+    .await?;
 
-        let token = format!("verify_{}", Uuid::new_v4());
-        ctx.record_step_complete("generate_token", serde_json::json!({
-            "token": token,
-            "generated_at": chrono::Utc::now().to_rfc3339()
-        }));
-        token
-    } else {
-        ctx.get_step_result::<serde_json::Value>("generate_token")
-            .and_then(|v| v.get("token").and_then(|t| t.as_str()).map(String::from))
-            .unwrap_or_default()
-    };
+    // =========================================================================
+    // STEP 2: Store token (Fluent API with compensation)
+    // =========================================================================
+    // Compensation runs in reverse order if a later step fails.
+    // This implements the Saga pattern for distributed transactions.
+    let user_id = input.user_id.clone();
+    let token_clone = token.clone();
+    ctx.step("store_token", {
+        let user_id = user_id.clone();
+        let token = token_clone.clone();
+        move || async move {
+            tracing::info!(user_id = %user_id, "Storing verification token");
+            tokio::time::sleep(Duration::from_secs(1)).await;
 
-    // Step 2: Store token in database
-    if !ctx.is_step_completed("store_token") {
-        ctx.record_step_start("store_token");
-        tracing::info!("Step 2: Storing verification token");
+            // In a real app:
+            // sqlx::query("INSERT INTO verification_tokens (user_id, token) VALUES ($1, $2)")
+            //     .bind(&user_id)
+            //     .bind(&token)
+            //     .execute(ctx.db())
+            //     .await?;
 
-        // Simulate database write
-        tokio::time::sleep(Duration::from_secs(1)).await;
+            Ok(serde_json::json!({ "stored": true, "user_id": user_id }))
+        }
+    })
+    .compensate({
+        let user_id = user_id.clone();
+        move |_result| {
+            let user_id = user_id.clone();
+            async move {
+                tracing::warn!(user_id = %user_id, "COMPENSATING: Deleting verification token");
+                // In a real app:
+                // sqlx::query("DELETE FROM verification_tokens WHERE user_id = $1")
+                //     .bind(&user_id)
+                //     .execute(ctx.db())
+                //     .await?;
+                Ok(())
+            }
+        }
+    })
+    .run()
+    .await?;
 
-        // In a real app, you'd store this in a verification_tokens table:
-        // sqlx::query(
-        //     "INSERT INTO verification_tokens (user_id, token, expires_at) VALUES ($1, $2, NOW() + INTERVAL '24 hours')"
-        // )
-        // .bind(input.user_id)
-        // .bind(&token)
-        // .execute(ctx.db())
-        // .await?;
-
-        ctx.record_step_complete("store_token", serde_json::json!({
-            "stored": true,
-            "user_id": input.user_id
-        }));
-    }
-
-    // Step 3: Send verification email
+    // =========================================================================
+    // STEP 3: Send email (Low-level API - for manual control)
+    // =========================================================================
+    // Use the low-level API when you need:
+    // - Custom retry logic
+    // - Complex conditional execution
+    // - Fine-grained progress tracking
     if !ctx.is_step_completed("send_email") {
         ctx.record_step_start("send_email");
-        tracing::info!("Step 3: Sending verification email to {}", input.email);
+        tracing::info!(email = %input.email, "Sending verification email");
 
-        // Simulate email API call (typically takes 1-3 seconds)
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        // In a real app, dispatch an email job:
-        // ctx.dispatch_job::<SendEmailJob>(SendEmailInput {
-        //     to: input.email.clone(),
-        //     subject: "Verify your account".to_string(),
-        //     body: format!("Click here to verify: https://app.example.com/verify?token={}", token),
-        // }).await?;
+        // Manual retry example (low-level API gives full control)
+        let mut attempts = 0;
+        let max_attempts = 3;
+        loop {
+            attempts += 1;
+            match send_email_simulation(&input.email, &token).await {
+                Ok(_) => break,
+                Err(e) if attempts < max_attempts => {
+                    tracing::warn!(attempt = attempts, "Email send failed, retrying: {}", e);
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                Err(e) => {
+                    ctx.record_step_failure("send_email", e.to_string());
+                    return Err(e);
+                }
+            }
+        }
 
         ctx.record_step_complete("send_email", serde_json::json!({
             "sent_to": input.email,
@@ -876,31 +845,25 @@ pub async fn account_verification(
         }));
     }
 
-    // Step 4: Mark as verified (in a real app, this would wait for the user to click the link)
-    // For demo purposes, we auto-verify after a delay
-    let verified_at = if !ctx.is_step_completed("mark_verified") {
-        ctx.record_step_start("mark_verified");
-        tracing::info!("Step 4: Marking account as verified");
-
-        // Simulate verification check and database update
+    // =========================================================================
+    // STEP 4: Mark verified (Fluent API - optional step)
+    // =========================================================================
+    // Optional steps don't trigger compensation if they fail.
+    // Good for non-critical notifications, logging, etc.
+    let verified_at: Option<String> = ctx.step("mark_verified", || async {
+        tracing::info!("Marking account as verified");
         tokio::time::sleep(Duration::from_secs(1)).await;
 
-        // In a real app, you'd update the user record:
-        // sqlx::query("UPDATE users SET verified = true, verified_at = NOW() WHERE id = $1")
-        //     .bind(input.user_id)
+        // In a real app:
+        // sqlx::query("UPDATE users SET verified = true WHERE id = $1")
+        //     .bind(&input.user_id)
         //     .execute(ctx.db())
         //     .await?;
 
-        let now = chrono::Utc::now().to_rfc3339();
-        ctx.record_step_complete("mark_verified", serde_json::json!({
-            "verified": true,
-            "verified_at": now
-        }));
-        Some(now)
-    } else {
-        ctx.get_step_result::<serde_json::Value>("mark_verified")
-            .and_then(|v| v.get("verified_at").and_then(|t| t.as_str()).map(String::from))
-    };
+        Ok(Some(chrono::Utc::now().to_rfc3339()))
+    })
+    .run()
+    .await?;
 
     tracing::info!(
         workflow_id = %ctx.run_id,
@@ -913,6 +876,18 @@ pub async fn account_verification(
         verification_token: Some(token),
         verified_at,
     })
+}
+
+/// Simulated email sending (for demo purposes)
+async fn send_email_simulation(email: &str, token: &str) -> Result<()> {
+    use std::time::Duration;
+
+    // Simulate occasional failure for demo (1 in 3 chance)
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // In a real app, this would call an email service
+    tracing::debug!(email = %email, token = %token, "Simulated email sent");
+    Ok(())
 }
 "#;
     fs::write(
@@ -2047,7 +2022,10 @@ fn create_runtime_files(frontend_dir: &Path) -> Result<()> {
     let runtime_dir = frontend_dir.join("src/lib/forge/runtime");
 
     // runtime/types.ts
-    let types_ts = r#"/** FORGE error type returned from the server. */
+    let types_ts = r#"// Auto-generated by FORGE - DO NOT EDIT
+// This file is part of the FORGE runtime library
+
+/** FORGE error type returned from the server. */
 export interface ForgeError {
   code: string;
   message: string;
@@ -2107,7 +2085,10 @@ export interface ForgeClientInterface {
     fs::write(runtime_dir.join("types.ts"), types_ts)?;
 
     // runtime/client.ts
-    let client_ts = r#"import type { ForgeError, ConnectionState, ForgeClientInterface } from './types.js';
+    let client_ts = r#"// Auto-generated by FORGE - DO NOT EDIT
+// This file is part of the FORGE runtime library
+
+import type { ForgeError, ConnectionState, ForgeClientInterface } from './types.js';
 
 export interface ForgeClientConfig {
   url: string;
@@ -2333,7 +2314,10 @@ export function createForgeClient(config: ForgeClientConfig): ForgeClient {
     fs::write(runtime_dir.join("client.ts"), client_ts)?;
 
     // runtime/context.ts
-    let context_ts = r#"import { getContext, setContext } from 'svelte';
+    let context_ts = r#"// Auto-generated by FORGE - DO NOT EDIT
+// This file is part of the FORGE runtime library
+
+import { getContext, setContext } from 'svelte';
 import type { ForgeClient } from './client.js';
 import type { AuthState } from './types.js';
 
@@ -2368,7 +2352,10 @@ export function setAuthState(auth: AuthState): void {
     fs::write(runtime_dir.join("context.ts"), context_ts)?;
 
     // runtime/stores.ts
-    let stores_ts = r#"import { getForgeClient } from './context.js';
+    let stores_ts = r#"// Auto-generated by FORGE - DO NOT EDIT
+// This file is part of the FORGE runtime library
+
+import { getForgeClient } from './context.js';
 import type { QueryResult, SubscriptionResult, ForgeError, QueryFn, MutationFn } from './types.js';
 
 export interface Readable<T> {
@@ -2770,7 +2757,10 @@ export function createWorkflowTracker<TArgs>(workflowType: string, apiUrl: strin
     fs::write(runtime_dir.join("stores.ts"), stores_ts)?;
 
     // runtime/api.ts (helpers for generated code)
-    let api_ts = r#"import type { ForgeClientInterface, QueryFn, MutationFn } from './types.js';
+    let api_ts = r#"// Auto-generated by FORGE - DO NOT EDIT
+// This file is part of the FORGE runtime library
+
+import type { ForgeClientInterface, QueryFn, MutationFn } from './types.js';
 
 export function createQuery<TArgs, TResult>(name: string): QueryFn<TArgs, TResult> {
   const fn = async (client: ForgeClientInterface, args: TArgs): Promise<TResult> => {
@@ -2793,7 +2783,11 @@ export function createMutation<TArgs, TResult>(name: string): MutationFn<TArgs, 
     fs::write(runtime_dir.join("api.ts"), api_ts)?;
 
     // runtime/ForgeProvider.svelte
-    let provider_svelte = r#"<script lang="ts">
+    let provider_svelte = r#"<!--
+  Auto-generated by FORGE - DO NOT EDIT
+  This file is part of the FORGE runtime library
+-->
+<script lang="ts">
   import { onMount, onDestroy, type Snippet } from 'svelte';
   import { createForgeClient } from './client.js';
   import { setForgeClient, setAuthState } from './context.js';
@@ -2842,7 +2836,10 @@ export function createMutation<TArgs, TResult>(name: string): MutationFn<TArgs, 
     fs::write(runtime_dir.join("ForgeProvider.svelte"), provider_svelte)?;
 
     // runtime/index.ts - Re-export everything
-    let index_ts = r#"export { default as ForgeProvider } from './ForgeProvider.svelte';
+    let index_ts = r#"// Auto-generated by FORGE - DO NOT EDIT
+// This file is part of the FORGE runtime library
+
+export { default as ForgeProvider } from './ForgeProvider.svelte';
 export { ForgeClient, ForgeClientError, createForgeClient, type ForgeClientConfig } from './client.js';
 export { getForgeClient, setForgeClient, getAuthState, setAuthState } from './context.js';
 export {
