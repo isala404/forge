@@ -644,5 +644,24 @@ Implemented WebSocket-based reactive job/workflow subscriptions.
 - Added pendingJobSubscriptions/pendingWorkflowSubscriptions for reconnect resilience
 - Created subscribeJob() and subscribeWorkflow() store functions in stores.ts
 - Updated demo page to use reactive stores instead of polling
+- Added localStorage persistence for job/workflow IDs to survive page refresh
+- Added $effect watchers to auto-clear localStorage after job/workflow completion
 - Frontend job/workflow updates now push via WebSocket in real-time
 - All 304 tests passing
+
+Simplified frontend job/workflow API with tracker pattern.
+- Added createJobTracker() and createWorkflowTracker() factory functions to stores.ts template
+- JobTracker/WorkflowTracker interfaces: Svelte store with .start(args), .resume(id), .cleanup() methods
+- Trackers handle subscription lifecycle internally - no manual localStorage or $effect required
+- Added createExportUsersJob() and createAccountVerificationWorkflow() typed helper functions in api.ts
+- Updated $lib/forge/index.ts to export tracker factories and types
+- Simplified demo page: removed 30+ lines of boilerplate (localStorage, $effect watchers, manual store management)
+- New API: `const job = createExportUsersJob(); onDestroy(job.cleanup); await job.start({format:'csv'})`
+- Resume from URL params: `job.resume(jobIdFromUrl)` - Forge handles WebSocket subscription
+- Template usage: `{#if $job}{$job.progress_percent}%{/if}` - it's a standard Svelte store
+
+Fixed workflow tracker and session cleanup bugs.
+- Fixed createWorkflowTracker to send `{ input: ... }` instead of `{ args: ... }` to match backend API
+- Fixed Reactor.remove_session() to also clean up job/workflow subscriptions when session disconnects
+- Downgraded "Failed to send job/workflow update" from WARN to DEBUG (expected during page refresh)
+- Session cleanup now removes subscriptions for: queries, jobs, and workflows

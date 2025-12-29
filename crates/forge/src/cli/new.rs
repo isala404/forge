@@ -1096,13 +1096,17 @@ export const csr = true;
     // Create +page.svelte demonstrating all 3 patterns: Query, Mutation, Subscription
     // Plus: System Status (cron-driven), Job Demo (progress), Workflow Demo (steps)
     let page_svelte = r#"<script lang="ts">
-    import { subscribe, mutate, query, subscribeJob, subscribeWorkflow, type JobStore, type WorkflowStore } from '$lib/forge/runtime';
+    import { subscribe, mutate, query } from '$lib/forge/runtime';
     import {
         getUsers, getUser, createUser, updateUser, deleteUser, getAppStats,
-        dispatchJob, startWorkflow
-    } from '$lib/forge/api';
+        createExportUsersJob, createAccountVerificationWorkflow
+    } from '$lib/forge';
     import type { User } from '$lib/forge/types';
-    import { onDestroy } from 'svelte';
+    import { onMount, onDestroy } from 'svelte';
+
+    // localStorage keys for persisting active subscriptions across page refresh
+    const ACTIVE_JOB_KEY = 'forge_active_job_id';
+    const ACTIVE_WORKFLOW_KEY = 'forge_active_workflow_id';
 
     // Read API URL from environment (same as layout)
     const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8080';
@@ -1122,16 +1126,30 @@ export const csr = true;
     let isSubmitting = $state(false);
     let selectedUser = $state<User | null>(null);
 
-    // Job demo state - using WebSocket subscriptions for real-time updates
-    let jobStore = $state<JobStore | null>(null);
+    // =========================================================================
+    // JOB & WORKFLOW TRACKERS - Simplified reactive API
+    // Create trackers once, use .start() or .resume(), and cleanup on destroy
+    // =========================================================================
+    const exportUsersJob = createExportUsersJob();
+    const verifyAccountWorkflow = createAccountVerificationWorkflow();
 
-    // Workflow demo state - using WebSocket subscriptions for real-time updates
-    let workflowStore = $state<WorkflowStore | null>(null);
+    // Restore subscriptions from localStorage on mount (survives page refresh)
+    onMount(() => {
+        const savedJobId = localStorage.getItem(ACTIVE_JOB_KEY);
+        if (savedJobId) {
+            exportUsersJob.resume(savedJobId);
+        }
+
+        const savedWorkflowId = localStorage.getItem(ACTIVE_WORKFLOW_KEY);
+        if (savedWorkflowId) {
+            verifyAccountWorkflow.resume(savedWorkflowId);
+        }
+    });
 
     // Cleanup subscriptions on destroy
     onDestroy(() => {
-        jobStore?.unsubscribe();
-        workflowStore?.unsubscribe();
+        exportUsersJob.cleanup();
+        verifyAccountWorkflow.cleanup();
     });
 
     // =========================================================================
@@ -1177,44 +1195,29 @@ export const csr = true;
     }
 
     // =========================================================================
-    // JOB DEMO - Dispatch a job and subscribe to real-time progress
+    // JOB DEMO - Start job and subscribe to real-time progress
     // =========================================================================
     async function startExportJob() {
-        // Clean up previous subscription
-        jobStore?.unsubscribe();
-
-        const { data, error } = await dispatchJob('export_users', {
-            format: 'csv',
-            include_inactive: false
-        });
-
-        if (error || !data?.job_id) {
-            console.error('Failed to dispatch job:', error);
-            return;
+        try {
+            const jobId = await exportUsersJob.start({ format: 'csv', include_inactive: false });
+            localStorage.setItem(ACTIVE_JOB_KEY, jobId);
+        } catch (err) {
+            console.error('Failed to start job:', err);
         }
-
-        // Subscribe to job progress - store auto-updates via WebSocket!
-        jobStore = subscribeJob(data.job_id);
     }
 
     // =========================================================================
-    // WORKFLOW DEMO - Start a workflow and subscribe to real-time steps
+    // WORKFLOW DEMO - Start workflow and subscribe to real-time steps
     // =========================================================================
     async function startVerificationWorkflow() {
-        // Clean up previous subscription
-        workflowStore?.unsubscribe();
-
-        const { data, error } = await startWorkflow('account_verification', {
-            user_id: selectedUser?.id || 'demo-user'
-        });
-
-        if (error || !data?.workflow_id) {
-            console.error('Failed to start workflow:', error);
-            return;
+        try {
+            const workflowId = await verifyAccountWorkflow.start({
+                user_id: selectedUser?.id || 'demo-user'
+            });
+            localStorage.setItem(ACTIVE_WORKFLOW_KEY, workflowId);
+        } catch (err) {
+            console.error('Failed to start workflow:', err);
         }
-
-        // Subscribe to workflow progress - store auto-updates via WebSocket!
-        workflowStore = subscribeWorkflow(data.workflow_id);
     }
 
     // Format timestamp
@@ -1270,20 +1273,16 @@ export const csr = true;
             <h2>Background Job <span class="badge">demo</span></h2>
             <p class="hint">Export users to CSV with real-time progress tracking via WebSocket</p>
 
-            {#if jobStore}
-                {#if $jobStore.loading}
-                    <p>Loading...</p>
-                {:else}
-                    <div class="progress-container">
-                        <div class="progress-bar">
-                            <div class="progress-fill" style="width: {$jobStore.progress_percent || 0}%"></div>
-                        </div>
-                        <p class="progress-text">{$jobStore.progress_percent || 0}% - {$jobStore.progress_message || $jobStore.status}</p>
-                        {#if $jobStore.status === 'completed' || $jobStore.status === 'failed'}
-                            <button onclick={startExportJob} style="margin-top: 0.5rem;">Start New Job</button>
-                        {/if}
+            {#if $exportUsersJob}
+                <div class="progress-container">
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width: {$exportUsersJob.progress_percent || 0}%"></div>
                     </div>
-                {/if}
+                    <p class="progress-text">{$exportUsersJob.progress_percent || 0}% - {$exportUsersJob.progress_message || $exportUsersJob.status}</p>
+                    {#if $exportUsersJob.status === 'completed' || $exportUsersJob.status === 'failed'}
+                        <button onclick={startExportJob} style="margin-top: 0.5rem;">Start New Job</button>
+                    {/if}
+                </div>
             {:else}
                 <button onclick={startExportJob}>Start Export Job</button>
             {/if}
@@ -1294,22 +1293,18 @@ export const csr = true;
             <h2>Workflow <span class="badge">demo</span></h2>
             <p class="hint">Multi-step account verification with step tracking via WebSocket</p>
 
-            {#if workflowStore}
-                {#if $workflowStore.loading}
-                    <p>Loading...</p>
-                {:else}
-                    <div class="steps-list">
-                        {#each $workflowStore.steps as step}
-                            <div class="step-item {step.status}">
-                                <span class="step-icon">{stepIcon(step.status)}</span>
-                                <span class="step-name">{step.name}</span>
-                                <span class="step-status">{step.status}</span>
-                            </div>
-                        {/each}
-                    </div>
-                    {#if $workflowStore.status === 'completed' || $workflowStore.status === 'failed'}
-                        <button onclick={startVerificationWorkflow} style="margin-top: 0.5rem;">Start New Workflow</button>
-                    {/if}
+            {#if $verifyAccountWorkflow}
+                <div class="steps-list">
+                    {#each $verifyAccountWorkflow.steps as step}
+                        <div class="step-item {step.status}">
+                            <span class="step-icon">{stepIcon(step.status)}</span>
+                            <span class="step-name">{step.name}</span>
+                            <span class="step-status">{step.status}</span>
+                        </div>
+                    {/each}
+                </div>
+                {#if $verifyAccountWorkflow.status === 'completed' || $verifyAccountWorkflow.status === 'failed'}
+                    <button onclick={startVerificationWorkflow} style="margin-top: 0.5rem;">Start New Workflow</button>
                 {/if}
             {:else}
                 <button onclick={startVerificationWorkflow}>Start Verification</button>
@@ -1940,6 +1935,83 @@ export async function startWorkflow<T = Record<string, unknown>>(
     });
     return response.json();
 }
+
+// ============================================================================
+// TYPED JOB & WORKFLOW TRACKERS - Simplified reactive API
+// Use these for real-time job/workflow progress tracking in Svelte components
+// ============================================================================
+
+import { createJobTracker, createWorkflowTracker, type JobTracker, type WorkflowTracker } from './runtime';
+
+/** Args for the export_users job */
+export interface ExportUsersJobArgs {
+    format: 'csv' | 'json';
+    include_inactive?: boolean;
+}
+
+/** Args for the account_verification workflow */
+export interface AccountVerificationWorkflowArgs {
+    user_id: string;
+}
+
+/**
+ * Create a tracker for the export_users job.
+ *
+ * @example
+ * ```svelte
+ * <script lang="ts">
+ *   import { createExportUsersJob } from '$lib/forge';
+ *   import { onDestroy } from 'svelte';
+ *
+ *   const exportUsersJob = createExportUsersJob();
+ *   onDestroy(exportUsersJob.cleanup);
+ *
+ *   async function handleExport() {
+ *     const jobId = await exportUsersJob.start({ format: 'csv' });
+ *     console.log('Started job:', jobId);
+ *   }
+ *
+ *   // Or resume from URL param:
+ *   // exportUsersJob.resume(jobIdFromUrl);
+ * </script>
+ *
+ * {#if $exportUsersJob}
+ *   <p>Progress: {$exportUsersJob.progress_percent ?? 0}%</p>
+ *   <p>Status: {$exportUsersJob.status}</p>
+ * {/if}
+ * ```
+ */
+export function createExportUsersJob(): JobTracker<ExportUsersJobArgs> {
+    return createJobTracker<ExportUsersJobArgs>('export_users', API_URL);
+}
+
+/**
+ * Create a tracker for the account_verification workflow.
+ *
+ * @example
+ * ```svelte
+ * <script lang="ts">
+ *   import { createAccountVerificationWorkflow } from '$lib/forge';
+ *   import { onDestroy } from 'svelte';
+ *
+ *   const verifyAccount = createAccountVerificationWorkflow();
+ *   onDestroy(verifyAccount.cleanup);
+ *
+ *   async function handleVerify(userId: string) {
+ *     const workflowId = await verifyAccount.start({ user_id: userId });
+ *     console.log('Started workflow:', workflowId);
+ *   }
+ * </script>
+ *
+ * {#if $verifyAccount}
+ *   <p>Step: {$verifyAccount.current_step}</p>
+ *   <p>Status: {$verifyAccount.status}</p>
+ * {/if}
+ * ```
+ */
+export function createAccountVerificationWorkflow(): WorkflowTracker<AccountVerificationWorkflowArgs> {
+    return createWorkflowTracker<AccountVerificationWorkflowArgs>('account_verification', API_URL);
+}
 "#;
     fs::write(frontend_dir.join("src/lib/forge/api.ts"), api_ts)?;
 
@@ -1947,6 +2019,9 @@ export async function startWorkflow<T = Record<string, unknown>>(
     let index_ts = r#"// Auto-generated by FORGE - DO NOT EDIT
 export * from './types';
 export * from './api';
+// Re-export commonly used runtime utilities
+export { ForgeProvider, createJobTracker, createWorkflowTracker } from './runtime';
+export type { JobTracker, WorkflowTracker, JobProgress, WorkflowProgress } from './runtime';
 "#;
     fs::write(frontend_dir.join("src/lib/forge/index.ts"), index_ts)?;
 
@@ -2462,6 +2537,235 @@ export function subscribeWorkflow(workflowId: string): WorkflowStore {
     unsubscribe: unsubscribeFn,
   };
 }
+
+// =============================================================================
+// JOB & WORKFLOW TRACKERS - Simplified API for tracking jobs and workflows
+// =============================================================================
+
+/** Job tracker store - a Svelte store with start/resume/cleanup methods */
+export interface JobTracker<TArgs> extends Readable<JobProgress | null> {
+  /** Dispatch a new job and subscribe to its progress. Returns the job ID. */
+  start: (args: TArgs) => Promise<string>;
+  /** Resume tracking an existing job by ID (e.g., from URL params). */
+  resume: (jobId: string) => void;
+  /** Cleanup subscription - call in onDestroy. */
+  cleanup: () => void;
+}
+
+/** Workflow tracker store - a Svelte store with start/resume/cleanup methods */
+export interface WorkflowTracker<TArgs> extends Readable<WorkflowProgress | null> {
+  /** Start a new workflow and subscribe to its progress. Returns the workflow ID. */
+  start: (args: TArgs) => Promise<string>;
+  /** Resume tracking an existing workflow by ID (e.g., from URL params). */
+  resume: (workflowId: string) => void;
+  /** Cleanup subscription - call in onDestroy. */
+  cleanup: () => void;
+}
+
+const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Create a job tracker for a specific job type.
+ * Returns a Svelte store that can be used directly in templates.
+ *
+ * @example
+ * ```typescript
+ * // In your component setup
+ * const exportUsersJob = createJobTracker<{ format: string }>('export_users', API_URL);
+ * onDestroy(exportUsersJob.cleanup);
+ *
+ * // Start a new job
+ * const jobId = await exportUsersJob.start({ format: 'csv' });
+ *
+ * // Or resume an existing job (e.g., from URL params)
+ * exportUsersJob.resume(jobIdFromUrl);
+ *
+ * // In your template - it's a store!
+ * {#if $exportUsersJob}
+ *   <p>Progress: {$exportUsersJob.progress_percent ?? 0}%</p>
+ *   <p>Status: {$exportUsersJob.status}</p>
+ * {/if}
+ * ```
+ */
+export function createJobTracker<TArgs>(jobType: string, apiUrl: string): JobTracker<TArgs> {
+  const client = getForgeClient();
+  const subscribers = new Set<(value: JobProgress | null) => void>();
+  let state: JobProgress | null = null;
+  let unsubscribeFn: (() => void) | null = null;
+
+  const notify = () => subscribers.forEach(run => run(state));
+
+  const subscribeToJob = (jobId: string) => {
+    if (!uuidRegex.test(jobId)) {
+      throw new Error('Invalid job ID: must be a valid UUID');
+    }
+
+    // Cleanup existing subscription if any
+    if (unsubscribeFn) {
+      unsubscribeFn();
+      unsubscribeFn = null;
+    }
+
+    // Set initial loading state
+    state = {
+      job_id: jobId,
+      status: 'pending' as JobStatus,
+      progress_percent: null,
+      progress_message: null,
+      output: null,
+      error: null,
+    };
+    notify();
+
+    // Subscribe to updates
+    unsubscribeFn = client.subscribeJob(jobId, (data: JobProgress) => {
+      state = data;
+      notify();
+    });
+  };
+
+  return {
+    subscribe(run) {
+      subscribers.add(run);
+      run(state);
+      return () => {
+        subscribers.delete(run);
+        // Don't auto-cleanup on last unsubscribe - user controls via cleanup()
+      };
+    },
+
+    async start(args: TArgs): Promise<string> {
+      const response = await fetch(`${apiUrl}/_api/jobs/${jobType}/dispatch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ args: args || {} }),
+      });
+
+      const result = await response.json();
+      if (result.error || !result.data?.job_id) {
+        throw new Error(result.error?.message || 'Failed to dispatch job');
+      }
+
+      const jobId = result.data.job_id;
+      subscribeToJob(jobId);
+      return jobId;
+    },
+
+    resume(jobId: string) {
+      subscribeToJob(jobId);
+    },
+
+    cleanup() {
+      if (unsubscribeFn) {
+        unsubscribeFn();
+        unsubscribeFn = null;
+      }
+      state = null;
+      notify();
+    },
+  };
+}
+
+/**
+ * Create a workflow tracker for a specific workflow type.
+ * Returns a Svelte store that can be used directly in templates.
+ *
+ * @example
+ * ```typescript
+ * // In your component setup
+ * const verifyAccount = createWorkflowTracker<{ user_id: string }>('account_verification', API_URL);
+ * onDestroy(verifyAccount.cleanup);
+ *
+ * // Start a new workflow
+ * const workflowId = await verifyAccount.start({ user_id: '...' });
+ *
+ * // Or resume an existing workflow
+ * verifyAccount.resume(workflowIdFromUrl);
+ *
+ * // In your template
+ * {#if $verifyAccount}
+ *   <p>Step: {$verifyAccount.current_step}</p>
+ *   <p>Status: {$verifyAccount.status}</p>
+ * {/if}
+ * ```
+ */
+export function createWorkflowTracker<TArgs>(workflowType: string, apiUrl: string): WorkflowTracker<TArgs> {
+  const client = getForgeClient();
+  const subscribers = new Set<(value: WorkflowProgress | null) => void>();
+  let state: WorkflowProgress | null = null;
+  let unsubscribeFn: (() => void) | null = null;
+
+  const notify = () => subscribers.forEach(run => run(state));
+
+  const subscribeToWorkflow = (workflowId: string) => {
+    if (!uuidRegex.test(workflowId)) {
+      throw new Error('Invalid workflow ID: must be a valid UUID');
+    }
+
+    // Cleanup existing subscription if any
+    if (unsubscribeFn) {
+      unsubscribeFn();
+      unsubscribeFn = null;
+    }
+
+    // Set initial loading state
+    state = {
+      workflow_id: workflowId,
+      status: 'created' as WorkflowStatus,
+      current_step: null,
+      steps: [],
+      output: null,
+      error: null,
+    };
+    notify();
+
+    // Subscribe to updates
+    unsubscribeFn = client.subscribeWorkflow(workflowId, (data: WorkflowProgress) => {
+      state = data;
+      notify();
+    });
+  };
+
+  return {
+    subscribe(run) {
+      subscribers.add(run);
+      run(state);
+      return () => {
+        subscribers.delete(run);
+      };
+    },
+
+    async start(args: TArgs): Promise<string> {
+      const response = await fetch(`${apiUrl}/_api/workflows/${workflowType}/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input: args || {} }),
+      });
+
+      const result = await response.json();
+      if (result.error || !result.data?.workflow_id) {
+        throw new Error(result.error?.message || 'Failed to start workflow');
+      }
+
+      const workflowId = result.data.workflow_id;
+      subscribeToWorkflow(workflowId);
+      return workflowId;
+    },
+
+    resume(workflowId: string) {
+      subscribeToWorkflow(workflowId);
+    },
+
+    cleanup() {
+      if (unsubscribeFn) {
+        unsubscribeFn();
+        unsubscribeFn = null;
+      }
+      state = null;
+      notify();
+    },
+  };
+}
 "#;
     fs::write(runtime_dir.join("stores.ts"), stores_ts)?;
 
@@ -2541,7 +2845,13 @@ export function createMutation<TArgs, TResult>(name: string): MutationFn<TArgs, 
     let index_ts = r#"export { default as ForgeProvider } from './ForgeProvider.svelte';
 export { ForgeClient, ForgeClientError, createForgeClient, type ForgeClientConfig } from './client.js';
 export { getForgeClient, setForgeClient, getAuthState, setAuthState } from './context.js';
-export { query, subscribe, mutate, subscribeJob, subscribeWorkflow, type Readable, type SubscriptionStore, type JobStore, type WorkflowStore } from './stores.js';
+export {
+  query, subscribe, mutate,
+  subscribeJob, subscribeWorkflow,
+  createJobTracker, createWorkflowTracker,
+  type Readable, type SubscriptionStore, type JobStore, type WorkflowStore,
+  type JobTracker, type WorkflowTracker,
+} from './stores.js';
 export { createQuery, createMutation } from './api.js';
 export type { ForgeError, QueryResult, SubscriptionResult, ConnectionState, AuthState, QueryFn, MutationFn, ForgeClientInterface, JobProgress, WorkflowProgress } from './types.js';
 "#;

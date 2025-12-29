@@ -147,12 +147,33 @@ impl Reactor {
     /// Remove a session and all its subscriptions.
     pub async fn remove_session(&self, session_id: SessionId) {
         if let Some(subscription_ids) = self.ws_server.remove_connection(session_id).await {
-            // Clean up subscriptions
+            // Clean up query subscriptions
             for sub_id in subscription_ids {
                 self.subscription_manager.remove_subscription(sub_id).await;
                 self.active_subscriptions.write().await.remove(&sub_id);
             }
         }
+
+        // Clean up job subscriptions for this session
+        {
+            let mut job_subs = self.job_subscriptions.write().await;
+            for subscribers in job_subs.values_mut() {
+                subscribers.retain(|s| s.session_id != session_id);
+            }
+            // Remove empty entries
+            job_subs.retain(|_, v| !v.is_empty());
+        }
+
+        // Clean up workflow subscriptions for this session
+        {
+            let mut workflow_subs = self.workflow_subscriptions.write().await;
+            for subscribers in workflow_subs.values_mut() {
+                subscribers.retain(|s| s.session_id != session_id);
+            }
+            // Remove empty entries
+            workflow_subs.retain(|_, v| !v.is_empty());
+        }
+
         tracing::debug!(?session_id, "Session removed from reactor");
     }
 
@@ -682,10 +703,11 @@ impl Reactor {
             };
 
             if let Err(e) = ws_server.send_to_session(sub.session_id, message).await {
-                tracing::warn!(
+                // Debug level because this commonly happens when session disconnects (page refresh)
+                tracing::debug!(
                     %job_id,
                     client_id = %sub.client_sub_id,
-                    "Failed to send job update: {}",
+                    "Failed to send job update (session likely disconnected): {}",
                     e
                 );
             } else {
@@ -729,10 +751,11 @@ impl Reactor {
             };
 
             if let Err(e) = ws_server.send_to_session(sub.session_id, message).await {
-                tracing::warn!(
+                // Debug level because this commonly happens when session disconnects (page refresh)
+                tracing::debug!(
                     %workflow_id,
                     client_id = %sub.client_sub_id,
-                    "Failed to send workflow update: {}",
+                    "Failed to send workflow update (session likely disconnected): {}",
                     e
                 );
             } else {
