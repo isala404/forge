@@ -55,6 +55,7 @@ impl WorkflowExecutor {
     }
 
     /// Start a new workflow.
+    /// Returns immediately with the run_id; workflow executes in the background.
     pub async fn start<I: serde::Serialize>(
         &self,
         workflow_name: &str,
@@ -69,11 +70,38 @@ impl WorkflowExecutor {
         let record = WorkflowRecord::new(workflow_name, entry.info.version, input_value.clone());
         let run_id = record.id;
 
+        // Clone entry data for background execution
+        let entry_info = entry.info.clone();
+        let entry_handler = entry.handler.clone();
+
         // Persist workflow record
         self.save_workflow(&record).await?;
 
-        // Execute workflow
-        self.execute_workflow(run_id, entry, input_value).await?;
+        // Execute workflow in background
+        let registry = self.registry.clone();
+        let pool = self.pool.clone();
+        let http_client = self.http_client.clone();
+        let compensation_state = self.compensation_state.clone();
+
+        tokio::spawn(async move {
+            let executor = WorkflowExecutor {
+                registry,
+                pool,
+                http_client,
+                compensation_state,
+            };
+            let entry = super::registry::WorkflowEntry {
+                info: entry_info,
+                handler: entry_handler,
+            };
+            if let Err(e) = executor.execute_workflow(run_id, &entry, input_value).await {
+                tracing::error!(
+                    workflow_run_id = %run_id,
+                    error = %e,
+                    "Workflow execution failed"
+                );
+            }
+        });
 
         Ok(run_id)
     }

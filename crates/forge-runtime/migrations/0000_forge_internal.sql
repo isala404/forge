@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS forge_jobs (
     attempts INTEGER NOT NULL DEFAULT 0,
     max_attempts INTEGER NOT NULL DEFAULT 3,
     last_error TEXT,
+    progress_percent INTEGER DEFAULT 0,
+    progress_message TEXT,
     worker_capability VARCHAR(255),
     worker_id UUID,
     idempotency_key VARCHAR(255),

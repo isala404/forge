@@ -590,3 +590,44 @@ Implemented job/workflow dispatch from frontend and dashboard.
 - Wired dispatchers in Forge runtime during gateway startup
 - Added `dispatchJob()` and `startWorkflow()` to scaffolded frontend api.ts
 - Updated demo page to use real dispatch with fallback to simulation
+
+Replaced TESTING.md and USAGE.md with unified dev.sh script.
+- Created `dev.sh` with commands: setup, start, db, logs, clean, all
+- Compiles CLI, scaffolds app, fixes deps, starts DB/backend/frontend
+- Logs written to .logs/ directory for easy tailing
+- Graceful shutdown on Ctrl+C
+- Deleted TESTING.md and USAGE.md (content consolidated into script)
+
+Fixed scaffolded apps to have working job/workflow by default.
+- Uncommented `ExportUsersJob` and `AccountVerificationWorkflow` registrations in generated main.rs
+- Removed frontend simulation fallbacks from +page.svelte template
+- Frontend now shows real backend errors instead of fake progress simulation
+- Job and workflow demos are now fully backend-driven with real progress tracking
+
+Fixed job progress tracking and workflow input validation.
+- Added `progress_percent` and `progress_message` columns to `forge_jobs` table in builtin migrations
+- Wired progress channel in JobExecutor to save progress updates to database
+- Exported `ProgressUpdate` from `forge_core::job` module
+- Added `update_progress()` method to JobQueue for database persistence
+- Changed workflow `AccountVerificationInput.user_id` from `Uuid` to `String` to accept any identifier
+- Made `email` field optional with `#[serde(default)]` for demo compatibility
+
+Added realistic delays to job and workflow demos for visible progress tracking.
+- Job: ~5 seconds total with progress updates at 0%, 10%, 30%, 50-80% (per user), 85%, 95%, 100%
+- Workflow: ~5 seconds total with 1s delays between steps (generate_token, store_token, send_email, mark_verified)
+
+Fixed blocking issues in job and workflow execution.
+- Changed job progress channel from blocking `recv()` to non-blocking `try_recv()` with async sleep
+- Changed workflow `start()` to spawn execution in background instead of blocking until completion
+- Both job dispatch and workflow start now return immediately, execution happens asynchronously
+
+Added workflow step persistence to database.
+- Modified `record_step_start/complete/failure/compensated` methods in WorkflowContext to persist to `forge_workflow_steps` table
+- Steps are persisted in background via `tokio::spawn` to keep API synchronous
+- Added tokio dependency to forge-core for spawning persistence tasks
+- Dashboard API now returns actual step data from database instead of empty array
+
+Fixed frontend workflow polling to detect step changes.
+- `pollWorkflowUntilComplete` was only checking `current_step` changes (always null)
+- Changed to detect changes in `steps` array by comparing JSON serialization
+- Reduced poll interval from 1000ms to 500ms for more responsive UI updates

@@ -184,7 +184,7 @@ async fn main() -> Result<()> {
     // JOBS - Background tasks with progress tracking (see /_dashboard/jobs)
     // Frontend: Use getJobStatus() or pollJobUntilComplete() to track progress
     // =========================================================================
-    // builder.job_registry_mut().register::<functions::ExportUsersJob>();
+    builder.job_registry_mut().register::<functions::ExportUsersJob>();
 
     // =========================================================================
     // CRONS - Scheduled tasks (see /_dashboard/crons for history)
@@ -197,7 +197,7 @@ async fn main() -> Result<()> {
     // WORKFLOWS - Multi-step durable processes (see /_dashboard/workflows)
     // Frontend: Use getWorkflowStatus() or pollWorkflowUntilComplete() to track steps
     // =========================================================================
-    // builder.workflow_registry_mut().register::<functions::AccountVerificationWorkflow>();
+    builder.workflow_registry_mut().register::<functions::AccountVerificationWorkflow>();
 
     // Migrations are loaded from ./migrations directory automatically
     builder
@@ -440,16 +440,22 @@ pub async fn export_users(
     ctx: &JobContext,
     input: ExportUsersInput,
 ) -> Result<ExportUsersOutput> {
+    use std::time::Duration;
+
     tracing::info!(
         job_id = %ctx.job_id,
         format = %input.format,
         "Starting user export"
     );
 
-    // Report progress
-    let _ = ctx.progress(5, "Fetching users from database...");
+    // Step 1: Initialize (0-10%)
+    let _ = ctx.progress(0, "Initializing export...");
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Fetch all users
+    let _ = ctx.progress(10, "Fetching users from database...");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Step 2: Fetch users (10-30%)
     let users: Vec<User> = sqlx::query_as::<_, User>(
         "SELECT * FROM users ORDER BY created_at DESC"
     )
@@ -457,34 +463,48 @@ pub async fn export_users(
     .await?;
 
     let total = users.len();
-    let _ = ctx.progress(20, &format!("Found {} users, generating export...", total));
+    let _ = ctx.progress(30, &format!("Found {} users, preparing export...", total));
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Generate export with progress updates
+    // Step 3: Generate export with progress updates (30-80%)
     let data = match input.format.as_str() {
         "json" => {
             let _ = ctx.progress(50, "Serializing to JSON...");
+            tokio::time::sleep(Duration::from_millis(800)).await;
+            let _ = ctx.progress(70, "Formatting JSON output...");
+            tokio::time::sleep(Duration::from_millis(500)).await;
             serde_json::to_string_pretty(&users)
                 .map_err(|e| ForgeError::Job(e.to_string()))?
         }
         _ => {
-            // CSV format (default)
+            // CSV format (default) - simulate processing each user
             let mut csv = String::from("id,email,name,created_at,updated_at\n");
+            let step_count = 5; // Report progress in 5 steps
+            let users_per_step = (total / step_count).max(1);
+
             for (i, user) in users.iter().enumerate() {
                 csv.push_str(&format!(
                     "{},{},{},{},{}\n",
                     user.id, user.email, user.name, user.created_at, user.updated_at
                 ));
-                // Update progress every 10 users
-                if i % 10 == 0 && total > 0 {
-                    let percent = 20 + ((i as f64 / total as f64) * 70.0) as u8;
+
+                // Update progress at each step
+                if total > 0 && (i + 1) % users_per_step == 0 {
+                    let percent = 30 + ((i as f64 / total as f64) * 50.0) as u8;
                     let _ = ctx.progress(percent, &format!("Processing user {} of {}...", i + 1, total));
+                    tokio::time::sleep(Duration::from_millis(600)).await;
                 }
             }
             csv
         }
     };
 
+    // Step 4: Finalize (80-100%)
+    let _ = ctx.progress(85, "Validating export data...");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
     let _ = ctx.progress(95, "Finalizing export...");
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     tracing::info!(
         job_id = %ctx.job_id,
@@ -754,7 +774,10 @@ use forge::prelude::*;
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountVerificationInput {
-    pub user_id: Uuid,
+    /// User ID (can be UUID string or any identifier)
+    pub user_id: String,
+    /// Email to send verification to (optional for demo)
+    #[serde(default)]
     pub email: String,
 }
 
@@ -781,6 +804,8 @@ pub async fn account_verification(
     ctx: &WorkflowContext,
     input: AccountVerificationInput,
 ) -> Result<AccountVerificationOutput> {
+    use std::time::Duration;
+
     tracing::info!(
         workflow_id = %ctx.run_id,
         user_id = %input.user_id,
@@ -792,6 +817,9 @@ pub async fn account_verification(
     let token = if !ctx.is_step_completed("generate_token") {
         ctx.record_step_start("generate_token");
         tracing::info!("Step 1: Generating verification token");
+
+        // Simulate cryptographic token generation
+        tokio::time::sleep(Duration::from_secs(1)).await;
 
         let token = format!("verify_{}", Uuid::new_v4());
         ctx.record_step_complete("generate_token", serde_json::json!({
@@ -810,6 +838,9 @@ pub async fn account_verification(
         ctx.record_step_start("store_token");
         tracing::info!("Step 2: Storing verification token");
 
+        // Simulate database write
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
         // In a real app, you'd store this in a verification_tokens table:
         // sqlx::query(
         //     "INSERT INTO verification_tokens (user_id, token, expires_at) VALUES ($1, $2, NOW() + INTERVAL '24 hours')"
@@ -821,7 +852,7 @@ pub async fn account_verification(
 
         ctx.record_step_complete("store_token", serde_json::json!({
             "stored": true,
-            "user_id": input.user_id.to_string()
+            "user_id": input.user_id
         }));
     }
 
@@ -830,15 +861,15 @@ pub async fn account_verification(
         ctx.record_step_start("send_email");
         tracing::info!("Step 3: Sending verification email to {}", input.email);
 
+        // Simulate email API call (typically takes 1-3 seconds)
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
         // In a real app, dispatch an email job:
         // ctx.dispatch_job::<SendEmailJob>(SendEmailInput {
         //     to: input.email.clone(),
         //     subject: "Verify your account".to_string(),
         //     body: format!("Click here to verify: https://app.example.com/verify?token={}", token),
         // }).await?;
-
-        // Simulate email sending
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         ctx.record_step_complete("send_email", serde_json::json!({
             "sent_to": input.email,
@@ -847,10 +878,13 @@ pub async fn account_verification(
     }
 
     // Step 4: Mark as verified (in a real app, this would wait for the user to click the link)
-    // For demo purposes, we auto-verify
+    // For demo purposes, we auto-verify after a delay
     let verified_at = if !ctx.is_step_completed("mark_verified") {
         ctx.record_step_start("mark_verified");
         tracing::info!("Step 4: Marking account as verified");
+
+        // Simulate verification check and database update
+        tokio::time::sleep(Duration::from_secs(1)).await;
 
         // In a real app, you'd update the user record:
         // sqlx::query("UPDATE users SET verified = true, verified_at = NOW() WHERE id = $1")
@@ -1144,76 +1178,65 @@ export const csr = true;
     async function startExportJob() {
         jobProgress = { percent: 0, message: 'Dispatching job...' };
 
-        // Try to dispatch real job via API
         const { data, error } = await dispatchJob('export_users', {
             format: 'csv',
             include_inactive: false
         });
 
-        if (data?.job_id) {
-            // Real job dispatched - poll for progress
-            await pollJobUntilComplete(data.job_id, {
-                onProgress: (job) => {
-                    jobProgress = {
-                        percent: job.progress_percent || 0,
-                        message: job.progress_message || job.status
-                    };
-                }
-            });
-            setTimeout(() => { jobProgress = null; }, 2000);
-        } else {
-            // Job not registered - simulate for demo
-            console.log('Job dispatch failed (job may not be registered):', error);
-            for (let i = 0; i <= 100; i += 10) {
-                jobProgress = { percent: i, message: i < 100 ? `Processing ${i}%...` : 'Complete!' };
-                await new Promise(r => setTimeout(r, 300));
-            }
-            setTimeout(() => { jobProgress = null; }, 2000);
+        if (error || !data?.job_id) {
+            jobProgress = { percent: 0, message: `Error: ${error || 'Failed to dispatch job'}` };
+            setTimeout(() => { jobProgress = null; }, 3000);
+            return;
         }
+
+        // Poll for progress updates from backend
+        const finalJob = await pollJobUntilComplete(data.job_id, {
+            onProgress: (job) => {
+                jobProgress = {
+                    percent: job.progress_percent || 0,
+                    message: job.progress_message || job.status
+                };
+            }
+        });
+
+        if (finalJob?.status === 'failed') {
+            jobProgress = { percent: 0, message: `Failed: ${finalJob.error || 'Unknown error'}` };
+        }
+        setTimeout(() => { jobProgress = null; }, 2000);
     }
 
     // =========================================================================
     // WORKFLOW DEMO - Start a workflow and track steps
     // =========================================================================
     async function startVerificationWorkflow() {
-        workflowSteps = [
-            { name: 'Generate Token', status: 'running' },
-            { name: 'Store Token', status: 'pending' },
-            { name: 'Send Email', status: 'pending' },
-            { name: 'Verify Account', status: 'pending' },
-        ];
+        workflowSteps = [{ name: 'Starting...', status: 'running' }];
 
-        // Try to start real workflow via API
         const { data, error } = await startWorkflow('account_verification', {
             user_id: selectedUser?.id || 'demo-user'
         });
 
-        if (data?.workflow_id) {
-            // Real workflow started - poll for step progress
-            await pollWorkflowUntilComplete(data.workflow_id, {
-                onStepChange: (workflow) => {
-                    if (workflow.steps) {
-                        workflowSteps = workflow.steps.map((step: { name: string; status: string }) => ({
-                            name: step.name,
-                            status: step.status
-                        }));
-                    }
-                }
-            });
-            setTimeout(() => { workflowSteps = []; }, 2000);
-        } else {
-            // Workflow not registered - simulate for demo
-            console.log('Workflow dispatch failed (workflow may not be registered):', error);
-            for (let i = 0; i < workflowSteps.length; i++) {
-                await new Promise(r => setTimeout(r, 800));
-                workflowSteps[i].status = 'completed';
-                if (i + 1 < workflowSteps.length) {
-                    workflowSteps[i + 1].status = 'running';
-                }
-                workflowSteps = [...workflowSteps]; // Trigger reactivity
-            }
-            setTimeout(() => { workflowSteps = []; }, 2000);
+        if (error || !data?.workflow_id) {
+            workflowSteps = [{ name: `Error: ${error || 'Failed to start workflow'}`, status: 'failed' }];
+            setTimeout(() => { workflowSteps = []; }, 3000);
+            return;
         }
+
+        // Poll for step progress from backend
+        const finalWorkflow = await pollWorkflowUntilComplete(data.workflow_id, {
+            onStepChange: (workflow) => {
+                if (workflow.steps && workflow.steps.length > 0) {
+                    workflowSteps = workflow.steps.map((step: { name: string; status: string }) => ({
+                        name: step.name,
+                        status: step.status
+                    }));
+                }
+            }
+        });
+
+        if (finalWorkflow?.status === 'failed') {
+            workflowSteps = [...workflowSteps, { name: `Error: ${finalWorkflow.error || 'Workflow failed'}`, status: 'failed' }];
+        }
+        setTimeout(() => { workflowSteps = []; }, 2000);
     }
 
     // Format timestamp
@@ -1794,7 +1817,7 @@ export async function pollJobUntilComplete(
         timeout?: number;
     }
 ): Promise<Job | null> {
-    const { onProgress, pollInterval = 1000, timeout = 300000 } = options || {};
+    const { onProgress, pollInterval = 500, timeout = 300000 } = options || {};
     const startTime = Date.now();
 
     while (Date.now() - startTime < timeout) {
@@ -1825,20 +1848,24 @@ export async function pollWorkflowUntilComplete(
         timeout?: number;
     }
 ): Promise<Workflow | null> {
-    const { onStepChange, pollInterval = 1000, timeout = 300000 } = options || {};
+    const { onStepChange, pollInterval = 500, timeout = 300000 } = options || {};
     const startTime = Date.now();
-    let lastStep: string | null = null;
+    let lastStepsJson = '';
 
     while (Date.now() - startTime < timeout) {
         const { data: workflow } = await getWorkflowStatus(workflowId);
         if (!workflow) return null;
 
-        if (workflow.current_step !== lastStep) {
-            lastStep = workflow.current_step;
+        // Call onStepChange whenever steps array changes
+        const stepsJson = JSON.stringify(workflow.steps?.map(s => ({ name: s.name, status: s.status })) || []);
+        if (stepsJson !== lastStepsJson) {
+            lastStepsJson = stepsJson;
             onStepChange?.(workflow);
         }
 
         if (workflow.status === 'completed' || workflow.status === 'failed' || workflow.status === 'compensated') {
+            // Final callback with completed state
+            onStepChange?.(workflow);
             return workflow;
         }
 

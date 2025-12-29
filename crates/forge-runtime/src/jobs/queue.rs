@@ -328,6 +328,29 @@ impl JobQueue {
         Ok(())
     }
 
+    /// Update job progress.
+    pub async fn update_progress(
+        &self,
+        job_id: Uuid,
+        percent: i32,
+        message: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            UPDATE forge_jobs
+            SET progress_percent = $2, progress_message = $3, last_heartbeat = NOW()
+            WHERE id = $1
+            "#,
+        )
+        .bind(job_id)
+        .bind(percent)
+        .bind(message)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
     /// Release stale jobs back to pending.
     pub async fn release_stale(
         &self,

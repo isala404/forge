@@ -188,27 +188,128 @@ impl WorkflowContext {
             .entry(name.to_string())
             .or_insert_with(|| StepState::new(name));
         state.start();
+        let state_clone = state.clone();
+        drop(states);
+
+        // Persist to database in background
+        let pool = self.db_pool.clone();
+        let run_id = self.run_id;
+        let step_name = name.to_string();
+        tokio::spawn(async move {
+            let step_id = Uuid::new_v4();
+            if let Err(e) = sqlx::query(
+                r#"
+                INSERT INTO forge_workflow_steps (id, workflow_run_id, step_name, status, started_at)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (workflow_run_id, step_name) DO UPDATE SET
+                    status = EXCLUDED.status,
+                    started_at = COALESCE(forge_workflow_steps.started_at, EXCLUDED.started_at)
+                "#,
+            )
+            .bind(step_id)
+            .bind(run_id)
+            .bind(&step_name)
+            .bind(state_clone.status.as_str())
+            .bind(state_clone.started_at)
+            .execute(&pool)
+            .await
+            {
+                tracing::warn!(
+                    workflow_run_id = %run_id,
+                    step = %step_name,
+                    "Failed to persist step start: {}",
+                    e
+                );
+            }
+        });
     }
 
     /// Record step completion.
     pub fn record_step_complete(&self, name: &str, result: serde_json::Value) {
         let mut states = self.step_states.write().unwrap();
         if let Some(state) = states.get_mut(name) {
-            state.complete(result);
+            state.complete(result.clone());
         }
+        let state_clone = states.get(name).cloned();
         drop(states);
 
         let mut completed = self.completed_steps.write().unwrap();
         if !completed.contains(&name.to_string()) {
             completed.push(name.to_string());
         }
+        drop(completed);
+
+        // Persist to database in background
+        if let Some(state) = state_clone {
+            let pool = self.db_pool.clone();
+            let run_id = self.run_id;
+            let step_name = name.to_string();
+            tokio::spawn(async move {
+                if let Err(e) = sqlx::query(
+                    r#"
+                    UPDATE forge_workflow_steps
+                    SET status = $3, result = $4, completed_at = $5
+                    WHERE workflow_run_id = $1 AND step_name = $2
+                    "#,
+                )
+                .bind(run_id)
+                .bind(&step_name)
+                .bind(state.status.as_str())
+                .bind(&state.result)
+                .bind(state.completed_at)
+                .execute(&pool)
+                .await
+                {
+                    tracing::warn!(
+                        workflow_run_id = %run_id,
+                        step = %step_name,
+                        "Failed to persist step completion: {}",
+                        e
+                    );
+                }
+            });
+        }
     }
 
     /// Record step failure.
     pub fn record_step_failure(&self, name: &str, error: impl Into<String>) {
+        let error_str = error.into();
         let mut states = self.step_states.write().unwrap();
         if let Some(state) = states.get_mut(name) {
-            state.fail(error);
+            state.fail(error_str.clone());
+        }
+        let state_clone = states.get(name).cloned();
+        drop(states);
+
+        // Persist to database in background
+        if let Some(state) = state_clone {
+            let pool = self.db_pool.clone();
+            let run_id = self.run_id;
+            let step_name = name.to_string();
+            tokio::spawn(async move {
+                if let Err(e) = sqlx::query(
+                    r#"
+                    UPDATE forge_workflow_steps
+                    SET status = $3, error = $4, completed_at = $5
+                    WHERE workflow_run_id = $1 AND step_name = $2
+                    "#,
+                )
+                .bind(run_id)
+                .bind(&step_name)
+                .bind(state.status.as_str())
+                .bind(&state.error)
+                .bind(state.completed_at)
+                .execute(&pool)
+                .await
+                {
+                    tracing::warn!(
+                        workflow_run_id = %run_id,
+                        step = %step_name,
+                        "Failed to persist step failure: {}",
+                        e
+                    );
+                }
+            });
         }
     }
 
@@ -217,6 +318,37 @@ impl WorkflowContext {
         let mut states = self.step_states.write().unwrap();
         if let Some(state) = states.get_mut(name) {
             state.compensate();
+        }
+        let state_clone = states.get(name).cloned();
+        drop(states);
+
+        // Persist to database in background
+        if let Some(state) = state_clone {
+            let pool = self.db_pool.clone();
+            let run_id = self.run_id;
+            let step_name = name.to_string();
+            tokio::spawn(async move {
+                if let Err(e) = sqlx::query(
+                    r#"
+                    UPDATE forge_workflow_steps
+                    SET status = $3
+                    WHERE workflow_run_id = $1 AND step_name = $2
+                    "#,
+                )
+                .bind(run_id)
+                .bind(&step_name)
+                .bind(state.status.as_str())
+                .execute(&pool)
+                .await
+                {
+                    tracing::warn!(
+                        workflow_run_id = %run_id,
+                        step = %step_name,
+                        "Failed to persist step compensation: {}",
+                        e
+                    );
+                }
+            });
         }
     }
 

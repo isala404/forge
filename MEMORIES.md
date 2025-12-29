@@ -15,6 +15,8 @@ Tooling
 - macOS: brew install libiconv (required for stringprep/sqlx tests)
 - Docker: postgres:alpine for local dev database
 - CLI install: cargo install --path crates/forge
+- Dev script: ./dev.sh [setup|start|db|logs|clean|all]
+- Dev app location: ~/Desktop/forge-dev-app (configurable via APP_DIR env)
 
 Architecture
 - Single binary containing all components (gateway, functions, workers, scheduler)

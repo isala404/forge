@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use forge_core::job::JobContext;
+use forge_core::job::{JobContext, ProgressUpdate};
 use tokio::time::timeout;
 
 use super::queue::{JobQueue, JobRecord};
@@ -45,7 +45,45 @@ impl JobExecutor {
             };
         }
 
-        // Create job context
+        // Set up progress channel
+        let (progress_tx, progress_rx) = std::sync::mpsc::channel::<ProgressUpdate>();
+
+        // Spawn task to consume progress updates and save to database
+        // Use try_recv() with async sleep to avoid blocking the tokio runtime
+        let progress_queue = self.queue.clone();
+        let progress_job_id = job.id;
+        tokio::spawn(async move {
+            loop {
+                match progress_rx.try_recv() {
+                    Ok(update) => {
+                        if let Err(e) = progress_queue
+                            .update_progress(
+                                progress_job_id,
+                                update.percentage as i32,
+                                &update.message,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                job_id = %progress_job_id,
+                                "Failed to update job progress: {}",
+                                e
+                            );
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        // No message yet, sleep briefly and check again
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        // Sender dropped (job finished), exit loop
+                        break;
+                    }
+                }
+            }
+        });
+
+        // Create job context with progress channel
         let ctx = JobContext::new(
             job.id,
             job.job_type.clone(),
@@ -53,7 +91,8 @@ impl JobExecutor {
             job.max_attempts as u32,
             self.db_pool.clone(),
             self.http_client.clone(),
-        );
+        )
+        .with_progress(progress_tx);
 
         // Execute with timeout
         let job_timeout = entry.info.timeout;
