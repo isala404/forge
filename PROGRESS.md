@@ -631,3 +631,18 @@ Fixed frontend workflow polling to detect step changes.
 - `pollWorkflowUntilComplete` was only checking `current_step` changes (always null)
 - Changed to detect changes in `steps` array by comparing JSON serialization
 - Reduced poll interval from 1000ms to 500ms for more responsive UI updates
+
+Implemented WebSocket-based reactive job/workflow subscriptions.
+- Added NOTIFY triggers on forge_jobs, forge_workflow_runs, forge_workflow_steps tables
+- Extended ClientMessage enum with SubscribeJob, UnsubscribeJob, SubscribeWorkflow, UnsubscribeWorkflow variants
+- Added UUID validation helper and MAX_CLIENT_SUB_ID_LEN constant for input security
+- Extended Reactor with job_subscriptions and workflow_subscriptions maps
+- Added subscribe_job(), unsubscribe_job(), subscribe_workflow(), unsubscribe_workflow() methods
+- Handle job/workflow table changes in Reactor via handle_change with table routing
+- Added JobUpdate and WorkflowUpdate variants to both ServerMessage and WebSocketMessage
+- Extended ForgeClient with subscribeJob() and subscribeWorkflow() methods for WebSocket subscriptions
+- Added pendingJobSubscriptions/pendingWorkflowSubscriptions for reconnect resilience
+- Created subscribeJob() and subscribeWorkflow() store functions in stores.ts
+- Updated demo page to use reactive stores instead of polling
+- Frontend job/workflow updates now push via WebSocket in real-time
+- All 304 tests passing

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::{broadcast, mpsc, RwLock};
+use uuid::Uuid;
 
 use forge_core::cluster::NodeId;
 use forge_core::realtime::{Change, ReadSet, SessionId, SubscriptionId};
@@ -11,6 +12,7 @@ use super::listener::{ChangeListener, ListenerConfig};
 use super::manager::SubscriptionManager;
 use super::websocket::{WebSocketConfig, WebSocketMessage, WebSocketServer};
 use crate::function::{FunctionEntry, FunctionRegistry};
+use crate::gateway::websocket::{JobData, WorkflowData, WorkflowStepData};
 
 /// Reactor configuration.
 #[derive(Debug, Clone, Default)]
@@ -35,6 +37,28 @@ pub struct ActiveSubscription {
     pub read_set: ReadSet,
 }
 
+/// Job subscription tracking.
+#[derive(Debug, Clone)]
+pub struct JobSubscription {
+    #[allow(dead_code)]
+    pub subscription_id: SubscriptionId,
+    pub session_id: SessionId,
+    pub client_sub_id: String,
+    #[allow(dead_code)]
+    pub job_id: Uuid, // Validated UUID, not String
+}
+
+/// Workflow subscription tracking.
+#[derive(Debug, Clone)]
+pub struct WorkflowSubscription {
+    #[allow(dead_code)]
+    pub subscription_id: SubscriptionId,
+    pub session_id: SessionId,
+    pub client_sub_id: String,
+    #[allow(dead_code)]
+    pub workflow_id: Uuid, // Validated UUID, not String
+}
+
 /// The Reactor orchestrates real-time reactivity.
 /// It connects: ChangeListener -> InvalidationEngine -> Query Re-execution -> WebSocket Push
 pub struct Reactor {
@@ -48,6 +72,10 @@ pub struct Reactor {
     invalidation_engine: Arc<InvalidationEngine>,
     /// Active subscriptions with their execution context.
     active_subscriptions: Arc<RwLock<HashMap<SubscriptionId, ActiveSubscription>>>,
+    /// Job subscriptions: job_id -> list of subscribers.
+    job_subscriptions: Arc<RwLock<HashMap<Uuid, Vec<JobSubscription>>>>,
+    /// Workflow subscriptions: workflow_id -> list of subscribers.
+    workflow_subscriptions: Arc<RwLock<HashMap<Uuid, Vec<WorkflowSubscription>>>>,
     /// Shutdown signal.
     shutdown_tx: broadcast::Sender<()>,
 }
@@ -80,6 +108,8 @@ impl Reactor {
             change_listener,
             invalidation_engine,
             active_subscriptions: Arc::new(RwLock::new(HashMap::new())),
+            job_subscriptions: Arc::new(RwLock::new(HashMap::new())),
+            workflow_subscriptions: Arc::new(RwLock::new(HashMap::new())),
             shutdown_tx,
         }
     }
@@ -199,6 +229,201 @@ impl Reactor {
         tracing::debug!(?subscription_id, "Subscription removed");
     }
 
+    /// Subscribe to job progress updates.
+    pub async fn subscribe_job(
+        &self,
+        session_id: SessionId,
+        client_sub_id: String,
+        job_id: Uuid, // Pre-validated UUID
+    ) -> forge_core::Result<JobData> {
+        let subscription_id = SubscriptionId::new();
+
+        // Fetch current job state from database
+        let job_data = self.fetch_job_data(job_id).await?;
+
+        // Register subscription
+        let subscription = JobSubscription {
+            subscription_id,
+            session_id,
+            client_sub_id: client_sub_id.clone(),
+            job_id,
+        };
+
+        let mut subs = self.job_subscriptions.write().await;
+        subs.entry(job_id).or_default().push(subscription);
+
+        tracing::debug!(
+            ?subscription_id,
+            client_id = %client_sub_id,
+            %job_id,
+            "Job subscription created"
+        );
+
+        Ok(job_data)
+    }
+
+    /// Unsubscribe from job updates.
+    pub async fn unsubscribe_job(&self, session_id: SessionId, client_sub_id: &str) {
+        let mut subs = self.job_subscriptions.write().await;
+
+        // Find and remove the subscription
+        for subscribers in subs.values_mut() {
+            subscribers
+                .retain(|s| !(s.session_id == session_id && s.client_sub_id == client_sub_id));
+        }
+
+        // Remove empty entries
+        subs.retain(|_, v| !v.is_empty());
+
+        tracing::debug!(client_id = %client_sub_id, "Job subscription removed");
+    }
+
+    /// Subscribe to workflow progress updates.
+    pub async fn subscribe_workflow(
+        &self,
+        session_id: SessionId,
+        client_sub_id: String,
+        workflow_id: Uuid, // Pre-validated UUID
+    ) -> forge_core::Result<WorkflowData> {
+        let subscription_id = SubscriptionId::new();
+
+        // Fetch current workflow + steps from database
+        let workflow_data = self.fetch_workflow_data(workflow_id).await?;
+
+        // Register subscription
+        let subscription = WorkflowSubscription {
+            subscription_id,
+            session_id,
+            client_sub_id: client_sub_id.clone(),
+            workflow_id,
+        };
+
+        let mut subs = self.workflow_subscriptions.write().await;
+        subs.entry(workflow_id).or_default().push(subscription);
+
+        tracing::debug!(
+            ?subscription_id,
+            client_id = %client_sub_id,
+            %workflow_id,
+            "Workflow subscription created"
+        );
+
+        Ok(workflow_data)
+    }
+
+    /// Unsubscribe from workflow updates.
+    pub async fn unsubscribe_workflow(&self, session_id: SessionId, client_sub_id: &str) {
+        let mut subs = self.workflow_subscriptions.write().await;
+
+        // Find and remove the subscription
+        for subscribers in subs.values_mut() {
+            subscribers
+                .retain(|s| !(s.session_id == session_id && s.client_sub_id == client_sub_id));
+        }
+
+        // Remove empty entries
+        subs.retain(|_, v| !v.is_empty());
+
+        tracing::debug!(client_id = %client_sub_id, "Workflow subscription removed");
+    }
+
+    /// Fetch current job data from database.
+    async fn fetch_job_data(&self, job_id: Uuid) -> forge_core::Result<JobData> {
+        let row: Option<(
+            String,
+            Option<i32>,
+            Option<String>,
+            Option<serde_json::Value>,
+            Option<String>,
+        )> = sqlx::query_as(
+            r#"
+                SELECT status, progress_percent, progress_message, output, last_error
+                FROM forge_jobs WHERE id = $1
+                "#,
+        )
+        .bind(job_id)
+        .fetch_optional(&self.db_pool)
+        .await
+        .map_err(|e| forge_core::ForgeError::Sql(e))?;
+
+        match row {
+            Some((status, progress_percent, progress_message, output, error)) => Ok(JobData {
+                job_id: job_id.to_string(),
+                status,
+                progress_percent,
+                progress_message,
+                output,
+                error,
+            }),
+            None => Err(forge_core::ForgeError::NotFound(format!(
+                "Job {} not found",
+                job_id
+            ))),
+        }
+    }
+
+    /// Fetch current workflow + steps from database.
+    async fn fetch_workflow_data(&self, workflow_id: Uuid) -> forge_core::Result<WorkflowData> {
+        // Fetch workflow run
+        let row: Option<(
+            String,
+            Option<String>,
+            Option<serde_json::Value>,
+            Option<String>,
+        )> = sqlx::query_as(
+            r#"
+                SELECT status, current_step, output, error
+                FROM forge_workflow_runs WHERE id = $1
+                "#,
+        )
+        .bind(workflow_id)
+        .fetch_optional(&self.db_pool)
+        .await
+        .map_err(|e| forge_core::ForgeError::Sql(e))?;
+
+        let (status, current_step, output, error) = match row {
+            Some(r) => r,
+            None => {
+                return Err(forge_core::ForgeError::NotFound(format!(
+                    "Workflow {} not found",
+                    workflow_id
+                )));
+            }
+        };
+
+        // Fetch workflow steps
+        let step_rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+            r#"
+            SELECT step_name, status, error
+            FROM forge_workflow_steps
+            WHERE workflow_run_id = $1
+            ORDER BY started_at ASC NULLS LAST
+            "#,
+        )
+        .bind(workflow_id)
+        .fetch_all(&self.db_pool)
+        .await
+        .map_err(|e| forge_core::ForgeError::Sql(e))?;
+
+        let steps = step_rows
+            .into_iter()
+            .map(|(name, status, error)| WorkflowStepData {
+                name,
+                status,
+                error,
+            })
+            .collect();
+
+        Ok(WorkflowData {
+            workflow_id: workflow_id.to_string(),
+            status,
+            current_step,
+            steps,
+            output,
+            error,
+        })
+    }
+
     /// Execute a query and return data with read set.
     async fn execute_query(
         &self,
@@ -258,6 +483,8 @@ impl Reactor {
         let listener = self.change_listener.clone();
         let invalidation_engine = self.invalidation_engine.clone();
         let active_subscriptions = self.active_subscriptions.clone();
+        let job_subscriptions = self.job_subscriptions.clone();
+        let workflow_subscriptions = self.workflow_subscriptions.clone();
         let ws_server = self.ws_server.clone();
         let registry = self.registry.clone();
         let db_pool = self.db_pool.clone();
@@ -288,6 +515,8 @@ impl Reactor {
                                     &change,
                                     &invalidation_engine,
                                     &active_subscriptions,
+                                    &job_subscriptions,
+                                    &workflow_subscriptions,
                                     &ws_server,
                                     &registry,
                                     &db_pool,
@@ -317,17 +546,56 @@ impl Reactor {
     }
 
     /// Handle a database change event.
+    #[allow(clippy::too_many_arguments)]
     async fn handle_change(
         change: &Change,
         invalidation_engine: &Arc<InvalidationEngine>,
         active_subscriptions: &Arc<RwLock<HashMap<SubscriptionId, ActiveSubscription>>>,
+        job_subscriptions: &Arc<RwLock<HashMap<Uuid, Vec<JobSubscription>>>>,
+        workflow_subscriptions: &Arc<RwLock<HashMap<Uuid, Vec<WorkflowSubscription>>>>,
         ws_server: &Arc<WebSocketServer>,
         registry: &FunctionRegistry,
         db_pool: &sqlx::PgPool,
     ) {
-        tracing::debug!(table = %change.table, op = ?change.operation, "Processing change");
+        tracing::debug!(table = %change.table, op = ?change.operation, row_id = ?change.row_id, "Processing change");
 
-        // Process change through invalidation engine
+        // Handle job/workflow table changes first
+        match change.table.as_str() {
+            "forge_jobs" => {
+                if let Some(job_id) = change.row_id {
+                    Self::handle_job_change(job_id, job_subscriptions, ws_server, db_pool).await;
+                }
+                return; // Don't process through query invalidation
+            }
+            "forge_workflow_runs" => {
+                if let Some(workflow_id) = change.row_id {
+                    Self::handle_workflow_change(
+                        workflow_id,
+                        workflow_subscriptions,
+                        ws_server,
+                        db_pool,
+                    )
+                    .await;
+                }
+                return; // Don't process through query invalidation
+            }
+            "forge_workflow_steps" => {
+                // For step changes, need to look up the parent workflow_id
+                if let Some(step_id) = change.row_id {
+                    Self::handle_workflow_step_change(
+                        step_id,
+                        workflow_subscriptions,
+                        ws_server,
+                        db_pool,
+                    )
+                    .await;
+                }
+                return; // Don't process through query invalidation
+            }
+            _ => {}
+        }
+
+        // Process change through invalidation engine for query subscriptions
         invalidation_engine.process_change(change.clone()).await;
 
         // Flush all pending invalidations immediately for real-time updates
@@ -381,6 +649,223 @@ impl Reactor {
                 }
             }
         }
+    }
+
+    /// Handle a job table change event.
+    async fn handle_job_change(
+        job_id: Uuid,
+        job_subscriptions: &Arc<RwLock<HashMap<Uuid, Vec<JobSubscription>>>>,
+        ws_server: &Arc<WebSocketServer>,
+        db_pool: &sqlx::PgPool,
+    ) {
+        let subs = job_subscriptions.read().await;
+        let subscribers = match subs.get(&job_id) {
+            Some(s) if !s.is_empty() => s.clone(),
+            _ => return, // No subscribers for this job
+        };
+        drop(subs); // Release lock before async operations
+
+        // Fetch latest job state
+        let job_data = match Self::fetch_job_data_static(job_id, db_pool).await {
+            Ok(data) => data,
+            Err(e) => {
+                tracing::warn!(%job_id, "Failed to fetch job data: {}", e);
+                return;
+            }
+        };
+
+        // Push to all subscribers
+        for sub in subscribers {
+            let message = WebSocketMessage::JobUpdate {
+                client_sub_id: sub.client_sub_id.clone(),
+                job: job_data.clone(),
+            };
+
+            if let Err(e) = ws_server.send_to_session(sub.session_id, message).await {
+                tracing::warn!(
+                    %job_id,
+                    client_id = %sub.client_sub_id,
+                    "Failed to send job update: {}",
+                    e
+                );
+            } else {
+                tracing::debug!(
+                    %job_id,
+                    client_id = %sub.client_sub_id,
+                    "Pushed job update to client"
+                );
+            }
+        }
+    }
+
+    /// Handle a workflow table change event.
+    async fn handle_workflow_change(
+        workflow_id: Uuid,
+        workflow_subscriptions: &Arc<RwLock<HashMap<Uuid, Vec<WorkflowSubscription>>>>,
+        ws_server: &Arc<WebSocketServer>,
+        db_pool: &sqlx::PgPool,
+    ) {
+        let subs = workflow_subscriptions.read().await;
+        let subscribers = match subs.get(&workflow_id) {
+            Some(s) if !s.is_empty() => s.clone(),
+            _ => return, // No subscribers for this workflow
+        };
+        drop(subs); // Release lock before async operations
+
+        // Fetch latest workflow + steps state
+        let workflow_data = match Self::fetch_workflow_data_static(workflow_id, db_pool).await {
+            Ok(data) => data,
+            Err(e) => {
+                tracing::warn!(%workflow_id, "Failed to fetch workflow data: {}", e);
+                return;
+            }
+        };
+
+        // Push to all subscribers
+        for sub in subscribers {
+            let message = WebSocketMessage::WorkflowUpdate {
+                client_sub_id: sub.client_sub_id.clone(),
+                workflow: workflow_data.clone(),
+            };
+
+            if let Err(e) = ws_server.send_to_session(sub.session_id, message).await {
+                tracing::warn!(
+                    %workflow_id,
+                    client_id = %sub.client_sub_id,
+                    "Failed to send workflow update: {}",
+                    e
+                );
+            } else {
+                tracing::debug!(
+                    %workflow_id,
+                    client_id = %sub.client_sub_id,
+                    "Pushed workflow update to client"
+                );
+            }
+        }
+    }
+
+    /// Handle a workflow step change event.
+    async fn handle_workflow_step_change(
+        step_id: Uuid,
+        workflow_subscriptions: &Arc<RwLock<HashMap<Uuid, Vec<WorkflowSubscription>>>>,
+        ws_server: &Arc<WebSocketServer>,
+        db_pool: &sqlx::PgPool,
+    ) {
+        // Look up the workflow_run_id for this step
+        let workflow_id: Option<Uuid> =
+            sqlx::query_scalar("SELECT workflow_run_id FROM forge_workflow_steps WHERE id = $1")
+                .bind(step_id)
+                .fetch_optional(db_pool)
+                .await
+                .ok()
+                .flatten();
+
+        if let Some(wf_id) = workflow_id {
+            // Delegate to workflow change handler
+            Self::handle_workflow_change(wf_id, workflow_subscriptions, ws_server, db_pool).await;
+        }
+    }
+
+    /// Static version of fetch_job_data for use in handle_change.
+    async fn fetch_job_data_static(
+        job_id: Uuid,
+        db_pool: &sqlx::PgPool,
+    ) -> forge_core::Result<JobData> {
+        let row: Option<(
+            String,
+            Option<i32>,
+            Option<String>,
+            Option<serde_json::Value>,
+            Option<String>,
+        )> = sqlx::query_as(
+            r#"
+                SELECT status, progress_percent, progress_message, output, last_error
+                FROM forge_jobs WHERE id = $1
+                "#,
+        )
+        .bind(job_id)
+        .fetch_optional(db_pool)
+        .await
+        .map_err(|e| forge_core::ForgeError::Sql(e))?;
+
+        match row {
+            Some((status, progress_percent, progress_message, output, error)) => Ok(JobData {
+                job_id: job_id.to_string(),
+                status,
+                progress_percent,
+                progress_message,
+                output,
+                error,
+            }),
+            None => Err(forge_core::ForgeError::NotFound(format!(
+                "Job {} not found",
+                job_id
+            ))),
+        }
+    }
+
+    /// Static version of fetch_workflow_data for use in handle_change.
+    async fn fetch_workflow_data_static(
+        workflow_id: Uuid,
+        db_pool: &sqlx::PgPool,
+    ) -> forge_core::Result<WorkflowData> {
+        let row: Option<(
+            String,
+            Option<String>,
+            Option<serde_json::Value>,
+            Option<String>,
+        )> = sqlx::query_as(
+            r#"
+                SELECT status, current_step, output, error
+                FROM forge_workflow_runs WHERE id = $1
+                "#,
+        )
+        .bind(workflow_id)
+        .fetch_optional(db_pool)
+        .await
+        .map_err(|e| forge_core::ForgeError::Sql(e))?;
+
+        let (status, current_step, output, error) = match row {
+            Some(r) => r,
+            None => {
+                return Err(forge_core::ForgeError::NotFound(format!(
+                    "Workflow {} not found",
+                    workflow_id
+                )));
+            }
+        };
+
+        let step_rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+            r#"
+            SELECT step_name, status, error
+            FROM forge_workflow_steps
+            WHERE workflow_run_id = $1
+            ORDER BY started_at ASC NULLS LAST
+            "#,
+        )
+        .bind(workflow_id)
+        .fetch_all(db_pool)
+        .await
+        .map_err(|e| forge_core::ForgeError::Sql(e))?;
+
+        let steps = step_rows
+            .into_iter()
+            .map(|(name, status, error)| WorkflowStepData {
+                name,
+                status,
+                error,
+            })
+            .collect();
+
+        Ok(WorkflowData {
+            workflow_id: workflow_id.to_string(),
+            status,
+            current_step,
+            steps,
+            output,
+            error,
+        })
     }
 
     /// Static version of execute_query for use in async context.

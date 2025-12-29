@@ -182,7 +182,7 @@ async fn main() -> Result<()> {
 
     // =========================================================================
     // JOBS - Background tasks with progress tracking (see /_dashboard/jobs)
-    // Frontend: Use getJobStatus() or pollJobUntilComplete() to track progress
+    // Frontend: Use subscribeJob() for real-time progress via WebSocket
     // =========================================================================
     builder.job_registry_mut().register::<functions::ExportUsersJob>();
 
@@ -195,7 +195,7 @@ async fn main() -> Result<()> {
 
     // =========================================================================
     // WORKFLOWS - Multi-step durable processes (see /_dashboard/workflows)
-    // Frontend: Use getWorkflowStatus() or pollWorkflowUntilComplete() to track steps
+    // Frontend: Use subscribeWorkflow() for real-time step updates via WebSocket
     // =========================================================================
     builder.workflow_registry_mut().register::<functions::AccountVerificationWorkflow>();
 
@@ -389,17 +389,16 @@ pub async fn delete_user(ctx: &MutationContext, id: Uuid) -> Result<bool> {
 //! ## Tracking Progress in the Frontend
 //!
 //! ```typescript
-//! import { pollJobUntilComplete, getJobStatus } from '$lib/forge/api';
+//! import { subscribeJob } from '$lib/forge/runtime';
+//! import { dispatchJob } from '$lib/forge/api';
 //!
-//! // Poll until complete with progress updates
-//! const job = await pollJobUntilComplete(jobId, {
-//!     onProgress: (job) => {
-//!         console.log(`${job.progress_percent}% - ${job.progress_message}`);
-//!     }
-//! });
-//!
-//! // Or check status once
-//! const { data: job } = await getJobStatus(jobId);
+//! // Dispatch and subscribe to real-time updates
+//! const { data } = await dispatchJob('export_users', { format: 'csv' });
+//! if (data?.job_id) {
+//!     const jobStore = subscribeJob(data.job_id);
+//!     // Store auto-updates via WebSocket - use in Svelte template:
+//!     // {#if $jobStore.loading}...{:else}{$jobStore.progress_percent}%{/if}
+//! }
 //! ```
 
 use forge::prelude::*;
@@ -1097,12 +1096,13 @@ export const csr = true;
     // Create +page.svelte demonstrating all 3 patterns: Query, Mutation, Subscription
     // Plus: System Status (cron-driven), Job Demo (progress), Workflow Demo (steps)
     let page_svelte = r#"<script lang="ts">
-    import { subscribe, mutate, query } from '$lib/forge/runtime';
+    import { subscribe, mutate, query, subscribeJob, subscribeWorkflow, type JobStore, type WorkflowStore } from '$lib/forge/runtime';
     import {
         getUsers, getUser, createUser, updateUser, deleteUser, getAppStats,
-        dispatchJob, startWorkflow, pollJobUntilComplete, pollWorkflowUntilComplete
+        dispatchJob, startWorkflow
     } from '$lib/forge/api';
     import type { User } from '$lib/forge/types';
+    import { onDestroy } from 'svelte';
 
     // Read API URL from environment (same as layout)
     const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8080';
@@ -1122,13 +1122,17 @@ export const csr = true;
     let isSubmitting = $state(false);
     let selectedUser = $state<User | null>(null);
 
-    // Job demo state
-    let jobProgress = $state<{ percent: number; message: string } | null>(null);
-    let jobId = $state<string | null>(null);
+    // Job demo state - using WebSocket subscriptions for real-time updates
+    let jobStore = $state<JobStore | null>(null);
 
-    // Workflow demo state
-    let workflowSteps = $state<Array<{ name: string; status: string }>>([]);
-    let workflowId = $state<string | null>(null);
+    // Workflow demo state - using WebSocket subscriptions for real-time updates
+    let workflowStore = $state<WorkflowStore | null>(null);
+
+    // Cleanup subscriptions on destroy
+    onDestroy(() => {
+        jobStore?.unsubscribe();
+        workflowStore?.unsubscribe();
+    });
 
     // =========================================================================
     // MUTATION - Create a new user
@@ -1173,10 +1177,11 @@ export const csr = true;
     }
 
     // =========================================================================
-    // JOB DEMO - Dispatch a job and track progress
+    // JOB DEMO - Dispatch a job and subscribe to real-time progress
     // =========================================================================
     async function startExportJob() {
-        jobProgress = { percent: 0, message: 'Dispatching job...' };
+        // Clean up previous subscription
+        jobStore?.unsubscribe();
 
         const { data, error } = await dispatchJob('export_users', {
             format: 'csv',
@@ -1184,59 +1189,32 @@ export const csr = true;
         });
 
         if (error || !data?.job_id) {
-            jobProgress = { percent: 0, message: `Error: ${error || 'Failed to dispatch job'}` };
-            setTimeout(() => { jobProgress = null; }, 3000);
+            console.error('Failed to dispatch job:', error);
             return;
         }
 
-        // Poll for progress updates from backend
-        const finalJob = await pollJobUntilComplete(data.job_id, {
-            onProgress: (job) => {
-                jobProgress = {
-                    percent: job.progress_percent || 0,
-                    message: job.progress_message || job.status
-                };
-            }
-        });
-
-        if (finalJob?.status === 'failed') {
-            jobProgress = { percent: 0, message: `Failed: ${finalJob.error || 'Unknown error'}` };
-        }
-        setTimeout(() => { jobProgress = null; }, 2000);
+        // Subscribe to job progress - store auto-updates via WebSocket!
+        jobStore = subscribeJob(data.job_id);
     }
 
     // =========================================================================
-    // WORKFLOW DEMO - Start a workflow and track steps
+    // WORKFLOW DEMO - Start a workflow and subscribe to real-time steps
     // =========================================================================
     async function startVerificationWorkflow() {
-        workflowSteps = [{ name: 'Starting...', status: 'running' }];
+        // Clean up previous subscription
+        workflowStore?.unsubscribe();
 
         const { data, error } = await startWorkflow('account_verification', {
             user_id: selectedUser?.id || 'demo-user'
         });
 
         if (error || !data?.workflow_id) {
-            workflowSteps = [{ name: `Error: ${error || 'Failed to start workflow'}`, status: 'failed' }];
-            setTimeout(() => { workflowSteps = []; }, 3000);
+            console.error('Failed to start workflow:', error);
             return;
         }
 
-        // Poll for step progress from backend
-        const finalWorkflow = await pollWorkflowUntilComplete(data.workflow_id, {
-            onStepChange: (workflow) => {
-                if (workflow.steps && workflow.steps.length > 0) {
-                    workflowSteps = workflow.steps.map((step: { name: string; status: string }) => ({
-                        name: step.name,
-                        status: step.status
-                    }));
-                }
-            }
-        });
-
-        if (finalWorkflow?.status === 'failed') {
-            workflowSteps = [...workflowSteps, { name: `Error: ${finalWorkflow.error || 'Workflow failed'}`, status: 'failed' }];
-        }
-        setTimeout(() => { workflowSteps = []; }, 2000);
+        // Subscribe to workflow progress - store auto-updates via WebSocket!
+        workflowStore = subscribeWorkflow(data.workflow_id);
     }
 
     // Format timestamp
@@ -1290,15 +1268,22 @@ export const csr = true;
         <!-- Job Demo Panel -->
         <section class="card">
             <h2>Background Job <span class="badge">demo</span></h2>
-            <p class="hint">Export users to CSV with real-time progress tracking</p>
+            <p class="hint">Export users to CSV with real-time progress tracking via WebSocket</p>
 
-            {#if jobProgress}
-                <div class="progress-container">
-                    <div class="progress-bar">
-                        <div class="progress-fill" style="width: {jobProgress.percent}%"></div>
+            {#if jobStore}
+                {#if $jobStore.loading}
+                    <p>Loading...</p>
+                {:else}
+                    <div class="progress-container">
+                        <div class="progress-bar">
+                            <div class="progress-fill" style="width: {$jobStore.progress_percent || 0}%"></div>
+                        </div>
+                        <p class="progress-text">{$jobStore.progress_percent || 0}% - {$jobStore.progress_message || $jobStore.status}</p>
+                        {#if $jobStore.status === 'completed' || $jobStore.status === 'failed'}
+                            <button onclick={startExportJob} style="margin-top: 0.5rem;">Start New Job</button>
+                        {/if}
                     </div>
-                    <p class="progress-text">{jobProgress.percent}% - {jobProgress.message}</p>
-                </div>
+                {/if}
             {:else}
                 <button onclick={startExportJob}>Start Export Job</button>
             {/if}
@@ -1307,18 +1292,25 @@ export const csr = true;
         <!-- Workflow Demo Panel -->
         <section class="card">
             <h2>Workflow <span class="badge">demo</span></h2>
-            <p class="hint">Multi-step account verification with step tracking</p>
+            <p class="hint">Multi-step account verification with step tracking via WebSocket</p>
 
-            {#if workflowSteps.length > 0}
-                <div class="steps-list">
-                    {#each workflowSteps as step}
-                        <div class="step-item {step.status}">
-                            <span class="step-icon">{stepIcon(step.status)}</span>
-                            <span class="step-name">{step.name}</span>
-                            <span class="step-status">{step.status}</span>
-                        </div>
-                    {/each}
-                </div>
+            {#if workflowStore}
+                {#if $workflowStore.loading}
+                    <p>Loading...</p>
+                {:else}
+                    <div class="steps-list">
+                        {#each $workflowStore.steps as step}
+                            <div class="step-item {step.status}">
+                                <span class="step-icon">{stepIcon(step.status)}</span>
+                                <span class="step-name">{step.name}</span>
+                                <span class="step-status">{step.status}</span>
+                            </div>
+                        {/each}
+                    </div>
+                    {#if $workflowStore.status === 'completed' || $workflowStore.status === 'failed'}
+                        <button onclick={startVerificationWorkflow} style="margin-top: 0.5rem;">Start New Workflow</button>
+                    {/if}
+                {/if}
             {:else}
                 <button onclick={startVerificationWorkflow}>Start Verification</button>
             {/if}
@@ -1687,6 +1679,26 @@ export interface Workflow {
     error: string | null;
 }
 
+/** Job progress data from WebSocket subscription */
+export interface JobProgress {
+    job_id: string;
+    status: JobStatus;
+    progress_percent: number | null;
+    progress_message: string | null;
+    output: unknown;
+    error: string | null;
+}
+
+/** Workflow progress data from WebSocket subscription */
+export interface WorkflowProgress {
+    workflow_id: string;
+    status: WorkflowStatus;
+    current_step: string | null;
+    steps: Array<{ name: string; status: string; error: string | null }>;
+    output: unknown;
+    error: string | null;
+}
+
 /** Job stats summary */
 export interface JobStats {
     pending: number;
@@ -1881,14 +1893,15 @@ export async function pollWorkflowUntilComplete(
 
 /**
  * Dispatch a background job by type.
- * Returns the job ID that can be used with getJobStatus or pollJobUntilComplete.
+ * Returns the job ID that can be used with subscribeJob() for real-time progress.
  *
  * @example
+ * import { subscribeJob } from '$lib/forge/runtime';
+ *
  * const { data } = await dispatchJob('export_users', { format: 'csv' });
- * if (data) {
- *   const job = await pollJobUntilComplete(data.job_id, {
- *     onProgress: (j) => console.log(`${j.progress_percent}%`)
- *   });
+ * if (data?.job_id) {
+ *   const jobStore = subscribeJob(data.job_id);
+ *   // Store auto-updates via WebSocket
  * }
  */
 export async function dispatchJob<T = Record<string, unknown>>(
@@ -1905,14 +1918,15 @@ export async function dispatchJob<T = Record<string, unknown>>(
 
 /**
  * Start a workflow by name.
- * Returns the workflow ID that can be used with getWorkflowStatus or pollWorkflowUntilComplete.
+ * Returns the workflow ID that can be used with subscribeWorkflow() for real-time step updates.
  *
  * @example
+ * import { subscribeWorkflow } from '$lib/forge/runtime';
+ *
  * const { data } = await startWorkflow('account_verification', { user_id: '...' });
- * if (data) {
- *   const workflow = await pollWorkflowUntilComplete(data.workflow_id, {
- *     onStepChange: (w) => console.log(`Step: ${w.current_step}`)
- *   });
+ * if (data?.workflow_id) {
+ *   const workflowStore = subscribeWorkflow(data.workflow_id);
+ *   // Store auto-updates via WebSocket
  * }
  */
 export async function startWorkflow<T = Record<string, unknown>>(
@@ -2056,6 +2070,11 @@ export class ForgeClient implements ForgeClientInterface {
   private subscriptions = new Map<string, (data: unknown) => void>();
   private pendingSubscriptions = new Map<string, { functionName: string; args: unknown }>();
   private connectionListeners = new Set<(state: ConnectionState) => void>();
+  // Job/Workflow subscription tracking
+  private jobCallbacks = new Map<string, (data: JobProgress) => void>();
+  private workflowCallbacks = new Map<string, (data: WorkflowProgress) => void>();
+  private pendingJobSubscriptions = new Map<string, string>(); // subId -> jobId
+  private pendingWorkflowSubscriptions = new Map<string, string>(); // subId -> workflowId
 
   constructor(config: ForgeClientConfig) {
     this.config = config;
@@ -2152,12 +2171,58 @@ export class ForgeClient implements ForgeClientInterface {
     };
   }
 
+  /** Subscribe to job progress updates. */
+  subscribeJob(jobId: string, callback: (data: JobProgress) => void): () => void {
+    const subId = `job_${jobId}_${Date.now()}`;
+    this.jobCallbacks.set(subId, callback);
+    this.pendingJobSubscriptions.set(subId, jobId);
+
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: 'subscribe_job', id: subId, job_id: jobId }));
+    }
+
+    return () => {
+      this.jobCallbacks.delete(subId);
+      this.pendingJobSubscriptions.delete(subId);
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({ type: 'unsubscribe_job', id: subId }));
+      }
+    };
+  }
+
+  /** Subscribe to workflow progress updates. */
+  subscribeWorkflow(workflowId: string, callback: (data: WorkflowProgress) => void): () => void {
+    const subId = `workflow_${workflowId}_${Date.now()}`;
+    this.workflowCallbacks.set(subId, callback);
+    this.pendingWorkflowSubscriptions.set(subId, workflowId);
+
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: 'subscribe_workflow', id: subId, workflow_id: workflowId }));
+    }
+
+    return () => {
+      this.workflowCallbacks.delete(subId);
+      this.pendingWorkflowSubscriptions.delete(subId);
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({ type: 'unsubscribe_workflow', id: subId }));
+      }
+    };
+  }
+
   private flushPendingSubscriptions(): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     for (const [id, { functionName, args }] of this.pendingSubscriptions) {
       this.ws.send(JSON.stringify({ type: 'subscribe', id, function: functionName, args }));
     }
     this.pendingSubscriptions.clear();
+    // Re-subscribe job subscriptions
+    for (const [subId, jobId] of this.pendingJobSubscriptions) {
+      this.ws.send(JSON.stringify({ type: 'subscribe_job', id: subId, job_id: jobId }));
+    }
+    // Re-subscribe workflow subscriptions
+    for (const [subId, workflowId] of this.pendingWorkflowSubscriptions) {
+      this.ws.send(JSON.stringify({ type: 'subscribe_workflow', id: subId, workflow_id: workflowId }));
+    }
   }
 
   private async getToken(): Promise<string | null> {
@@ -2171,10 +2236,16 @@ export class ForgeClient implements ForgeClientInterface {
 
   private handleMessage(data: string): void {
     try {
-      const message: WsMessage = JSON.parse(data);
+      const message = JSON.parse(data) as WsMessage & { job?: JobProgress; workflow?: WorkflowProgress };
       if ((message.type === 'data' || message.type === 'delta') && message.id) {
         const callback = this.subscriptions.get(message.id);
         if (callback) callback(message.data);
+      } else if (message.type === 'job_update' && message.id && message.job) {
+        const callback = this.jobCallbacks.get(message.id);
+        if (callback) callback(message.job);
+      } else if (message.type === 'workflow_update' && message.id && message.workflow) {
+        const callback = this.workflowCallbacks.get(message.id);
+        if (callback) callback(message.workflow);
       }
     } catch {}
   }
@@ -2293,6 +2364,104 @@ export async function mutate<TArgs, TResult>(fn: MutationFn<TArgs, TResult>, arg
   const client = getForgeClient();
   return fn(client, args);
 }
+
+/** Job subscription store interface */
+export interface JobStore extends Readable<JobProgress & { loading: boolean }> {
+  unsubscribe: () => void;
+}
+
+/** Workflow subscription store interface */
+export interface WorkflowStore extends Readable<WorkflowProgress & { loading: boolean }> {
+  unsubscribe: () => void;
+}
+
+import type { JobProgress, WorkflowProgress, JobStatus, WorkflowStatus } from './types.js';
+
+/**
+ * Subscribe to job progress updates via WebSocket.
+ * Returns a Svelte store that auto-updates when job state changes.
+ * Safe for page refresh - just re-subscribe with same job_id.
+ */
+export function subscribeJob(jobId: string): JobStore {
+  // Client-side UUID validation (defense in depth)
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (!uuidRegex.test(jobId)) {
+    throw new Error('Invalid job ID: must be a valid UUID');
+  }
+
+  const client = getForgeClient();
+  const subscribers = new Set<(value: JobProgress & { loading: boolean }) => void>();
+  let state: JobProgress & { loading: boolean } = {
+    job_id: jobId,
+    status: 'pending' as JobStatus,
+    progress_percent: null,
+    progress_message: null,
+    output: null,
+    error: null,
+    loading: true,
+  };
+
+  const notify = () => subscribers.forEach(run => run(state));
+
+  const unsubscribeFn = client.subscribeJob(jobId, (data: JobProgress) => {
+    state = { ...data, loading: false };
+    notify();
+  });
+
+  return {
+    subscribe(run) {
+      subscribers.add(run);
+      run(state);
+      return () => {
+        subscribers.delete(run);
+        if (subscribers.size === 0) unsubscribeFn();
+      };
+    },
+    unsubscribe: unsubscribeFn,
+  };
+}
+
+/**
+ * Subscribe to workflow progress updates via WebSocket.
+ * Returns a Svelte store that auto-updates when workflow/steps change.
+ */
+export function subscribeWorkflow(workflowId: string): WorkflowStore {
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (!uuidRegex.test(workflowId)) {
+    throw new Error('Invalid workflow ID: must be a valid UUID');
+  }
+
+  const client = getForgeClient();
+  const subscribers = new Set<(value: WorkflowProgress & { loading: boolean }) => void>();
+  let state: WorkflowProgress & { loading: boolean } = {
+    workflow_id: workflowId,
+    status: 'created' as WorkflowStatus,
+    current_step: null,
+    steps: [],
+    output: null,
+    error: null,
+    loading: true,
+  };
+
+  const notify = () => subscribers.forEach(run => run(state));
+
+  const unsubscribeFn = client.subscribeWorkflow(workflowId, (data: WorkflowProgress) => {
+    state = { ...data, loading: false };
+    notify();
+  });
+
+  return {
+    subscribe(run) {
+      subscribers.add(run);
+      run(state);
+      return () => {
+        subscribers.delete(run);
+        if (subscribers.size === 0) unsubscribeFn();
+      };
+    },
+    unsubscribe: unsubscribeFn,
+  };
+}
 "#;
     fs::write(runtime_dir.join("stores.ts"), stores_ts)?;
 
@@ -2372,9 +2541,9 @@ export function createMutation<TArgs, TResult>(name: string): MutationFn<TArgs, 
     let index_ts = r#"export { default as ForgeProvider } from './ForgeProvider.svelte';
 export { ForgeClient, ForgeClientError, createForgeClient, type ForgeClientConfig } from './client.js';
 export { getForgeClient, setForgeClient, getAuthState, setAuthState } from './context.js';
-export { query, subscribe, mutate, type Readable, type SubscriptionStore } from './stores.js';
+export { query, subscribe, mutate, subscribeJob, subscribeWorkflow, type Readable, type SubscriptionStore, type JobStore, type WorkflowStore } from './stores.js';
 export { createQuery, createMutation } from './api.js';
-export type { ForgeError, QueryResult, SubscriptionResult, ConnectionState, AuthState, QueryFn, MutationFn, ForgeClientInterface } from './types.js';
+export type { ForgeError, QueryResult, SubscriptionResult, ConnectionState, AuthState, QueryFn, MutationFn, ForgeClientInterface, JobProgress, WorkflowProgress } from './types.js';
 "#;
     fs::write(runtime_dir.join("index.ts"), index_ts)?;
 

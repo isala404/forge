@@ -12,11 +12,25 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use tokio::sync::{mpsc, RwLock};
+use uuid::Uuid;
 
 use forge_core::cluster::NodeId;
 use forge_core::realtime::SessionId;
 
 use crate::realtime::{Reactor, WebSocketMessage as ReactorMessage};
+
+/// Validate and parse a string as UUID.
+/// Returns error message suitable for client display (no internal details).
+fn parse_uuid(s: &str, field_name: &str) -> Result<Uuid, String> {
+    // Limit length to prevent DoS via huge strings
+    if s.len() > 36 {
+        return Err(format!("Invalid {}: too long", field_name));
+    }
+    Uuid::parse_str(s).map_err(|_| format!("Invalid {}: must be a valid UUID", field_name))
+}
+
+/// Maximum length for client subscription IDs
+const MAX_CLIENT_SUB_ID_LEN: usize = 255;
 
 /// WebSocket connection state shared across the gateway.
 #[derive(Clone)]
@@ -49,6 +63,24 @@ pub enum ClientMessage {
     },
     /// Unsubscribe from a subscription.
     Unsubscribe { id: String },
+    /// Subscribe to job progress updates.
+    SubscribeJob {
+        /// Client-provided subscription ID (for correlation)
+        id: String,
+        /// Job UUID - MUST be validated as UUID
+        job_id: String,
+    },
+    /// Unsubscribe from job updates.
+    UnsubscribeJob { id: String },
+    /// Subscribe to workflow progress updates.
+    SubscribeWorkflow {
+        /// Client-provided subscription ID (for correlation)
+        id: String,
+        /// Workflow run UUID - MUST be validated as UUID
+        workflow_id: String,
+    },
+    /// Unsubscribe from workflow updates.
+    UnsubscribeWorkflow { id: String },
     /// Ping for keepalive.
     Ping,
     /// Authentication.
@@ -68,6 +100,10 @@ pub enum ServerMessage {
     Pong,
     /// Subscription data.
     Data { id: String, data: serde_json::Value },
+    /// Job progress update.
+    JobUpdate { id: String, job: JobData },
+    /// Workflow progress update.
+    WorkflowUpdate { id: String, workflow: WorkflowData },
     /// Subscription error.
     Error {
         id: Option<String>,
@@ -80,6 +116,36 @@ pub enum ServerMessage {
     /// Unsubscribed confirmation.
     #[allow(dead_code)]
     Unsubscribed { id: String },
+}
+
+/// Job data sent to client (subset of internal JobRecord).
+#[derive(Debug, Clone, Serialize)]
+pub struct JobData {
+    pub job_id: String,
+    pub status: String,
+    pub progress_percent: Option<i32>,
+    pub progress_message: Option<String>,
+    pub output: Option<serde_json::Value>,
+    pub error: Option<String>,
+}
+
+/// Workflow data sent to client.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkflowData {
+    pub workflow_id: String,
+    pub status: String,
+    pub current_step: Option<String>,
+    pub steps: Vec<WorkflowStepData>,
+    pub output: Option<serde_json::Value>,
+    pub error: Option<String>,
+}
+
+/// Workflow step data sent to client.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkflowStepData {
+    pub name: String,
+    pub status: String,
+    pub error: Option<String>,
 }
 
 /// WebSocket upgrade handler.
@@ -179,6 +245,17 @@ async fn handle_socket(socket: WebSocket, state: Arc<WsState>) {
                         continue;
                     }
                 }
+                ReactorMessage::JobUpdate { client_sub_id, job } => ServerMessage::JobUpdate {
+                    id: client_sub_id,
+                    job,
+                },
+                ReactorMessage::WorkflowUpdate {
+                    client_sub_id,
+                    workflow,
+                } => ServerMessage::WorkflowUpdate {
+                    id: client_sub_id,
+                    workflow,
+                },
                 ReactorMessage::Error { code, message } => ServerMessage::Error {
                     id: None,
                     code,
@@ -312,6 +389,158 @@ async fn handle_socket(socket: WebSocket, state: Arc<WsState>) {
 
                     tracing::debug!(?sub_id, client_id = %id, "Subscription removed");
                 }
+            }
+            ClientMessage::SubscribeJob { id, job_id } => {
+                // SECURITY: Validate UUID BEFORE any processing
+                let job_uuid = match parse_uuid(&job_id, "job_id") {
+                    Ok(uuid) => uuid,
+                    Err(msg) => {
+                        // Send error to client, do NOT log the invalid input
+                        let _ = state
+                            .reactor
+                            .ws_server()
+                            .send_to_session(
+                                session_id,
+                                ReactorMessage::Error {
+                                    code: "INVALID_JOB_ID".to_string(),
+                                    message: msg,
+                                },
+                            )
+                            .await;
+                        continue;
+                    }
+                };
+
+                // SECURITY: Limit client_sub_id length
+                if id.len() > MAX_CLIENT_SUB_ID_LEN {
+                    let _ = state
+                        .reactor
+                        .ws_server()
+                        .send_to_session(
+                            session_id,
+                            ReactorMessage::Error {
+                                code: "INVALID_ID".to_string(),
+                                message: "Subscription ID too long".to_string(),
+                            },
+                        )
+                        .await;
+                    continue;
+                }
+
+                match state
+                    .reactor
+                    .subscribe_job(session_id, id.clone(), job_uuid)
+                    .await
+                {
+                    Ok(job_data) => {
+                        // Send current job state immediately
+                        let _ = state
+                            .reactor
+                            .ws_server()
+                            .send_to_session(
+                                session_id,
+                                ReactorMessage::JobUpdate {
+                                    client_sub_id: id,
+                                    job: job_data,
+                                },
+                            )
+                            .await;
+                    }
+                    Err(e) => {
+                        // Generic error - don't expose internal details
+                        let _ = state
+                            .reactor
+                            .ws_server()
+                            .send_to_session(
+                                session_id,
+                                ReactorMessage::Error {
+                                    code: "SUBSCRIBE_ERROR".to_string(),
+                                    message: "Failed to subscribe to job".to_string(),
+                                },
+                            )
+                            .await;
+                        tracing::warn!(job_id = %job_uuid, "Job subscription failed: {}", e);
+                    }
+                }
+            }
+            ClientMessage::UnsubscribeJob { id } => {
+                state.reactor.unsubscribe_job(session_id, &id).await;
+                tracing::debug!(client_id = %id, "Job subscription removed");
+            }
+            ClientMessage::SubscribeWorkflow { id, workflow_id } => {
+                // SECURITY: Validate UUID BEFORE any processing
+                let workflow_uuid = match parse_uuid(&workflow_id, "workflow_id") {
+                    Ok(uuid) => uuid,
+                    Err(msg) => {
+                        let _ = state
+                            .reactor
+                            .ws_server()
+                            .send_to_session(
+                                session_id,
+                                ReactorMessage::Error {
+                                    code: "INVALID_WORKFLOW_ID".to_string(),
+                                    message: msg,
+                                },
+                            )
+                            .await;
+                        continue;
+                    }
+                };
+
+                // SECURITY: Limit client_sub_id length
+                if id.len() > MAX_CLIENT_SUB_ID_LEN {
+                    let _ = state
+                        .reactor
+                        .ws_server()
+                        .send_to_session(
+                            session_id,
+                            ReactorMessage::Error {
+                                code: "INVALID_ID".to_string(),
+                                message: "Subscription ID too long".to_string(),
+                            },
+                        )
+                        .await;
+                    continue;
+                }
+
+                match state
+                    .reactor
+                    .subscribe_workflow(session_id, id.clone(), workflow_uuid)
+                    .await
+                {
+                    Ok(workflow_data) => {
+                        // Send current workflow state immediately
+                        let _ = state
+                            .reactor
+                            .ws_server()
+                            .send_to_session(
+                                session_id,
+                                ReactorMessage::WorkflowUpdate {
+                                    client_sub_id: id,
+                                    workflow: workflow_data,
+                                },
+                            )
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = state
+                            .reactor
+                            .ws_server()
+                            .send_to_session(
+                                session_id,
+                                ReactorMessage::Error {
+                                    code: "SUBSCRIBE_ERROR".to_string(),
+                                    message: "Failed to subscribe to workflow".to_string(),
+                                },
+                            )
+                            .await;
+                        tracing::warn!(workflow_id = %workflow_uuid, "Workflow subscription failed: {}", e);
+                    }
+                }
+            }
+            ClientMessage::UnsubscribeWorkflow { id } => {
+                state.reactor.unsubscribe_workflow(session_id, &id).await;
+                tracing::debug!(client_id = %id, "Workflow subscription removed");
             }
         }
     }

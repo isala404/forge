@@ -298,3 +298,8 @@ CREATE INDEX IF NOT EXISTS idx_forge_alerts_rule_id
 
 CREATE INDEX IF NOT EXISTS idx_forge_alerts_triggered_at
     ON forge_alerts(triggered_at DESC);
+
+-- Enable reactivity on job/workflow tables for WebSocket subscriptions
+SELECT forge_enable_reactivity('forge_jobs');
+SELECT forge_enable_reactivity('forge_workflow_runs');
+SELECT forge_enable_reactivity('forge_workflow_steps');

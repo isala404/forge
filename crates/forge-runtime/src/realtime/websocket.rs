@@ -7,6 +7,8 @@ use tokio::sync::{mpsc, RwLock};
 use forge_core::cluster::NodeId;
 use forge_core::realtime::{Delta, SessionId, SubscriptionId};
 
+use crate::gateway::websocket::{JobData, WorkflowData};
+
 /// WebSocket server configuration.
 #[derive(Debug, Clone)]
 pub struct WebSocketConfig {
@@ -99,6 +101,13 @@ pub enum WebSocketMessage {
     DeltaUpdate {
         subscription_id: SubscriptionId,
         delta: Delta<serde_json::Value>,
+    },
+    /// Job progress update.
+    JobUpdate { client_sub_id: String, job: JobData },
+    /// Workflow progress update.
+    WorkflowUpdate {
+        client_sub_id: String,
+        workflow: WorkflowData,
     },
     /// Error message.
     Error { code: String, message: String },
