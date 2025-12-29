@@ -326,6 +326,9 @@ impl Forge {
             tracing::info!("Cron scheduler started");
         }
 
+        // Reactor handle for shutdown
+        let mut reactor_handle = None;
+
         // Start HTTP gateway if gateway role
         if roles.contains(&NodeRole::Gateway) {
             let gateway_config = RuntimeGatewayConfig {
@@ -360,6 +363,7 @@ impl Forge {
                 tracing::error!("Failed to start reactor: {}", e);
             } else {
                 tracing::info!("Reactor started for real-time updates");
+                reactor_handle = Some(reactor);
             }
 
             let mut router = gateway.router();
@@ -423,6 +427,12 @@ impl Forge {
         // Stop leader election
         if let Some(ref election) = leader_election {
             election.stop();
+        }
+
+        // Stop reactor before closing database
+        if let Some(ref reactor) = reactor_handle {
+            reactor.stop();
+            tracing::info!("Reactor stopped");
         }
 
         // Shutdown observability (final flush)

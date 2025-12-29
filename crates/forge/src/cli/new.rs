@@ -81,6 +81,26 @@ SELECT forge_enable_reactivity('users');
 "#;
     fs::write(dir.join("migrations/0001_create_users.sql"), migration_0001)?;
 
+    // Create app_stats table for cron-driven live stats
+    let migration_0002 = r#"-- Migration: Create app_stats table for system status
+-- This table stores stats updated by the heartbeat cron job.
+-- The frontend can subscribe to this for live system updates.
+
+CREATE TABLE IF NOT EXISTS app_stats (
+    id VARCHAR(64) PRIMARY KEY,
+    stat_name VARCHAR(128) NOT NULL,
+    stat_value TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Enable real-time reactivity so frontend subscriptions auto-update
+SELECT forge_enable_reactivity('app_stats');
+"#;
+    fs::write(
+        dir.join("migrations/0002_create_app_stats.sql"),
+        migration_0002,
+    )?;
+
     // Create Cargo.toml with dotenvy for .env loading
     let cargo_toml = format!(
         r#"[package]
@@ -151,6 +171,7 @@ async fn main() -> Result<()> {
     // =========================================================================
     builder.function_registry_mut().register_query::<functions::GetUsersQuery>();
     builder.function_registry_mut().register_query::<functions::GetUserQuery>();
+    builder.function_registry_mut().register_query::<functions::GetAppStatsQuery>();
 
     // =========================================================================
     // MUTATIONS - Write operations that trigger subscription updates
@@ -167,7 +188,9 @@ async fn main() -> Result<()> {
 
     // =========================================================================
     // CRONS - Scheduled tasks (see /_dashboard/crons for history)
+    // Heartbeat cron updates app_stats every minute for the System Status panel
     // =========================================================================
+    builder.cron_registry_mut().register::<functions::HeartbeatStatsCron>();
     // builder.cron_registry_mut().register::<functions::CleanupInactiveUsersCron>();
 
     // =========================================================================
@@ -218,19 +241,31 @@ pub struct User {
 // User CRUD operations (queries and mutations)
 pub mod users;
 
+// App stats query for real-time system status
+pub mod app_stats;
+
 // Background job example - export users with progress tracking
 pub mod export_users_job;
 
 // Scheduled task example - cleanup inactive users
 pub mod cleanup_inactive_users_cron;
 
+// Heartbeat cron - updates app_stats every minute for live UI updates
+pub mod heartbeat_stats_cron;
+
 // Durable workflow example - account verification flow
 pub mod account_verification_workflow;
 
 // Re-export all function types
 pub use users::*;
+pub use app_stats::*;
+#[allow(unused_imports)]
 pub use export_users_job::*;
+#[allow(unused_imports)]
 pub use cleanup_inactive_users_cron::*;
+#[allow(unused_imports)]
+pub use heartbeat_stats_cron::*;
+#[allow(unused_imports)]
 pub use account_verification_workflow::*;
 "#;
     fs::write(dir.join("src/functions/mod.rs"), functions_mod)?;
@@ -371,6 +406,7 @@ use forge::prelude::*;
 use crate::schema::User;
 
 /// Input for the export_users job.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportUsersInput {
     /// Export format: "csv" or "json"
@@ -380,6 +416,7 @@ pub struct ExportUsersInput {
 }
 
 /// Output from the export_users job.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportUsersOutput {
     /// Number of users exported
@@ -489,8 +526,6 @@ pub async fn export_users(
 //! Cron executions are visible in the FORGE dashboard at /_dashboard/crons.
 //! You can see execution history, success/failure rates, and trigger manual runs.
 
-use forge::prelude::*;
-
 /// Cleanup inactive users scheduled task.
 ///
 /// Runs every day at 2 AM UTC (off-peak hours).
@@ -555,6 +590,121 @@ pub async fn cleanup_inactive_users(ctx: &CronContext) -> Result<()> {
         cleanup_cron,
     )?;
 
+    // Create heartbeat cron that updates app_stats every minute
+    let heartbeat_cron = r#"//! Scheduled Task: Heartbeat Stats
+//!
+//! This cron runs every minute and updates the app_stats table with current
+//! system statistics. Since app_stats has reactivity enabled, any frontend
+//! subscriptions to get_app_stats will automatically receive updates.
+//!
+//! ## Monitoring
+//!
+//! This cron is visible in the FORGE dashboard at /_dashboard/crons.
+//! The live stats it produces are shown in the frontend System Status panel.
+
+/// Heartbeat stats cron - runs every minute to update live stats.
+///
+/// Updates app_stats table with:
+/// - last_heartbeat: Current timestamp (proves cron is running)
+/// - user_count: Total number of users
+///
+/// The frontend subscribes to app_stats for real-time updates.
+#[forge::cron("* * * * *")]
+#[timezone = "UTC"]
+pub async fn heartbeat_stats(ctx: &CronContext) -> Result<()> {
+    let now = chrono::Utc::now();
+    tracing::debug!(run_id = %ctx.run_id, "Running heartbeat stats cron");
+
+    // Update last heartbeat timestamp - this triggers reactivity for subscribers
+    sqlx::query(
+        "INSERT INTO app_stats (id, stat_name, stat_value, updated_at)
+         VALUES ('heartbeat', 'last_heartbeat', $1, NOW())
+         ON CONFLICT (id) DO UPDATE SET stat_value = $1, updated_at = NOW()"
+    )
+    .bind(now.to_rfc3339())
+    .execute(ctx.db())
+    .await?;
+
+    // Count users and store
+    let user_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
+        .fetch_one(ctx.db())
+        .await?;
+
+    sqlx::query(
+        "INSERT INTO app_stats (id, stat_name, stat_value, updated_at)
+         VALUES ('user_count', 'total_users', $1, NOW())
+         ON CONFLICT (id) DO UPDATE SET stat_value = $1, updated_at = NOW()"
+    )
+    .bind(user_count.0.to_string())
+    .execute(ctx.db())
+    .await?;
+
+    tracing::debug!(
+        run_id = %ctx.run_id,
+        user_count = user_count.0,
+        "Heartbeat stats updated"
+    );
+
+    Ok(())
+}
+"#;
+    fs::write(
+        dir.join("src/functions/heartbeat_stats_cron.rs"),
+        heartbeat_cron,
+    )?;
+
+    // Create app_stats query for frontend subscription
+    let app_stats_query = r#"//! App Stats Query
+//!
+//! This query returns the current app statistics from the app_stats table.
+//! The heartbeat_stats cron updates these values every minute.
+//!
+//! ## Usage in Frontend
+//!
+//! ```typescript
+//! // Subscribe for real-time updates
+//! const stats = subscribe(getAppStats, {});
+//!
+//! // Use in component
+//! {#if $stats.data}
+//!     <p>Last Heartbeat: {$stats.data.last_heartbeat}</p>
+//!     <p>Total Users: {$stats.data.user_count}</p>
+//! {/if}
+//! ```
+
+use forge::prelude::*;
+use std::collections::HashMap;
+
+/// App stat entry from the database.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
+pub struct AppStat {
+    pub id: String,
+    pub stat_name: String,
+    pub stat_value: String,
+    pub updated_at: Timestamp,
+}
+
+/// Get all app stats as a map.
+/// Returns stats like last_heartbeat, user_count, etc.
+/// Subscribe to this query for real-time system status updates.
+#[forge::query]
+pub async fn get_app_stats(ctx: &QueryContext) -> Result<HashMap<String, String>> {
+    let stats: Vec<AppStat> = sqlx::query_as(
+        "SELECT id, stat_name, stat_value, updated_at FROM app_stats ORDER BY stat_name"
+    )
+    .fetch_all(ctx.db())
+    .await?;
+
+    let map: HashMap<String, String> = stats
+        .into_iter()
+        .map(|s| (s.id, s.stat_value))
+        .collect();
+
+    Ok(map)
+}
+"#;
+    fs::write(dir.join("src/functions/app_stats.rs"), app_stats_query)?;
+
     // Create sample workflow demonstrating durable multi-step processes
     let verification_workflow = r#"//! Workflow: Account Verification
 //!
@@ -601,6 +751,7 @@ pub async fn cleanup_inactive_users(ctx: &CronContext) -> Result<()> {
 use forge::prelude::*;
 
 /// Input for the account verification workflow.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountVerificationInput {
     pub user_id: Uuid,
@@ -608,6 +759,7 @@ pub struct AccountVerificationInput {
 }
 
 /// Output from the account verification workflow.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountVerificationOutput {
     pub verified: bool,
@@ -909,9 +1061,10 @@ export const csr = true;
     fs::write(frontend_dir.join("src/routes/+layout.ts"), layout_ts)?;
 
     // Create +page.svelte demonstrating all 3 patterns: Query, Mutation, Subscription
+    // Plus: System Status (cron-driven), Job Demo (progress), Workflow Demo (steps)
     let page_svelte = r#"<script lang="ts">
     import { subscribe, mutate, query } from '$lib/forge/runtime';
-    import { getUsers, getUser, createUser, updateUser, deleteUser } from '$lib/forge/api';
+    import { getUsers, getUser, createUser, updateUser, deleteUser, getAppStats } from '$lib/forge/api';
     import type { User } from '$lib/forge/types';
 
     // Read API URL from environment (same as layout)
@@ -923,11 +1076,22 @@ export const csr = true;
     // =========================================================================
     const users = subscribe(getUsers, {});
 
+    // App stats subscription - updated by heartbeat cron every minute
+    const stats = subscribe(getAppStats, {});
+
     // Form state
     let name = $state('');
     let email = $state('');
     let isSubmitting = $state(false);
     let selectedUser = $state<User | null>(null);
+
+    // Job demo state
+    let jobProgress = $state<{ percent: number; message: string } | null>(null);
+    let jobId = $state<string | null>(null);
+
+    // Workflow demo state
+    let workflowSteps = $state<Array<{ name: string; status: string }>>([]);
+    let workflowId = $state<string | null>(null);
 
     // =========================================================================
     // MUTATION - Create a new user
@@ -970,18 +1134,137 @@ export const csr = true;
             selectedUser = null;
         }
     }
+
+    // =========================================================================
+    // JOB DEMO - Dispatch a job and track progress
+    // =========================================================================
+    async function startExportJob() {
+        jobProgress = { percent: 0, message: 'Starting...' };
+
+        // Simulate job progress (in real app, use dispatchExportJob mutation)
+        // and poll getJobStatus or use pollJobUntilComplete
+        for (let i = 0; i <= 100; i += 10) {
+            jobProgress = { percent: i, message: i < 100 ? `Processing ${i}%...` : 'Complete!' };
+            await new Promise(r => setTimeout(r, 300));
+        }
+
+        setTimeout(() => { jobProgress = null; }, 2000);
+    }
+
+    // =========================================================================
+    // WORKFLOW DEMO - Start a workflow and track steps
+    // =========================================================================
+    async function startVerificationWorkflow() {
+        workflowSteps = [
+            { name: 'Generate Token', status: 'running' },
+            { name: 'Store Token', status: 'pending' },
+            { name: 'Send Email', status: 'pending' },
+            { name: 'Verify Account', status: 'pending' },
+        ];
+
+        // Simulate workflow steps (in real app, use startWorkflow mutation
+        // and poll getWorkflowStatus or use pollWorkflowUntilComplete)
+        for (let i = 0; i < workflowSteps.length; i++) {
+            await new Promise(r => setTimeout(r, 800));
+            workflowSteps[i].status = 'completed';
+            if (i + 1 < workflowSteps.length) {
+                workflowSteps[i + 1].status = 'running';
+            }
+            workflowSteps = [...workflowSteps]; // Trigger reactivity
+        }
+
+        setTimeout(() => { workflowSteps = []; }, 2000);
+    }
+
+    // Format timestamp
+    function formatTime(timestamp: string) {
+        if (!timestamp) return '-';
+        const date = new Date(timestamp);
+        return date.toLocaleTimeString();
+    }
+
+    function stepIcon(status: string) {
+        switch (status) {
+            case 'completed': return '\u2713';
+            case 'running': return '\u25B6';
+            case 'failed': return '\u2717';
+            default: return '\u25CB';
+        }
+    }
 </script>
 
 <main>
-    <h1>🔥 FORGE Demo</h1>
+    <h1>FORGE Demo</h1>
     <p class="subtitle">
         Backend: <a href="{apiUrl}/health" target="_blank">{apiUrl}</a> |
         Dashboard: <a href="{apiUrl}/_dashboard" target="_blank">/_dashboard</a>
     </p>
 
+    <!-- System Status Panel - Shows live stats from heartbeat cron -->
+    <section class="card full-width status-panel">
+        <h2>System Status <span class="badge live">live</span></h2>
+        <p class="hint">Updated every minute by heartbeat cron. Subscribe to get real-time updates!</p>
+
+        {#if $stats.loading}
+            <p>Loading stats...</p>
+        {:else if $stats.data}
+            <div class="stats-grid">
+                <div class="stat-item">
+                    <span class="stat-label">Last Heartbeat</span>
+                    <span class="stat-value">{formatTime($stats.data.heartbeat || '')}</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Total Users</span>
+                    <span class="stat-value">{$stats.data.user_count || '0'}</span>
+                </div>
+            </div>
+        {:else}
+            <p class="muted">Stats will appear after first cron run (up to 1 minute)</p>
+        {/if}
+    </section>
+
+    <div class="grid">
+        <!-- Job Demo Panel -->
+        <section class="card">
+            <h2>Background Job <span class="badge">demo</span></h2>
+            <p class="hint">Export users to CSV with real-time progress tracking</p>
+
+            {#if jobProgress}
+                <div class="progress-container">
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width: {jobProgress.percent}%"></div>
+                    </div>
+                    <p class="progress-text">{jobProgress.percent}% - {jobProgress.message}</p>
+                </div>
+            {:else}
+                <button onclick={startExportJob}>Start Export Job</button>
+            {/if}
+        </section>
+
+        <!-- Workflow Demo Panel -->
+        <section class="card">
+            <h2>Workflow <span class="badge">demo</span></h2>
+            <p class="hint">Multi-step account verification with step tracking</p>
+
+            {#if workflowSteps.length > 0}
+                <div class="steps-list">
+                    {#each workflowSteps as step}
+                        <div class="step-item {step.status}">
+                            <span class="step-icon">{stepIcon(step.status)}</span>
+                            <span class="step-name">{step.name}</span>
+                            <span class="step-status">{step.status}</span>
+                        </div>
+                    {/each}
+                </div>
+            {:else}
+                <button onclick={startVerificationWorkflow}>Start Verification</button>
+            {/if}
+        </section>
+    </div>
+
     <div class="grid">
         <section class="card">
-            <h2>➕ Create User <span class="badge">mutation</span></h2>
+            <h2>Create User <span class="badge">mutation</span></h2>
             <form onsubmit={handleCreateUser}>
                 <input type="text" placeholder="Name" bind:value={name} required />
                 <input type="email" placeholder="Email" bind:value={email} required />
@@ -992,7 +1275,7 @@ export const csr = true;
         </section>
 
         <section class="card">
-            <h2>👤 User Detail <span class="badge">query</span></h2>
+            <h2>User Detail <span class="badge">query</span></h2>
             {#if selectedUser}
                 <div class="user-detail">
                     <p><strong>ID:</strong> {selectedUser.id}</p>
@@ -1008,7 +1291,7 @@ export const csr = true;
     </div>
 
     <section class="card full-width">
-        <h2>📋 Users <span class="badge live">subscription (live)</span></h2>
+        <h2>Users <span class="badge live">subscription (live)</span></h2>
         <p class="hint">This list updates automatically when data changes - no refresh needed!</p>
 
         {#if $users.loading}
@@ -1077,6 +1360,33 @@ export const csr = true;
 
     .full-width { grid-column: 1 / -1; }
 
+    .status-panel {
+        background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+        border-color: #bae6fd;
+    }
+
+    .stats-grid {
+        display: flex;
+        gap: 2rem;
+    }
+
+    .stat-item {
+        display: flex;
+        flex-direction: column;
+    }
+
+    .stat-label {
+        font-size: 0.8rem;
+        color: #666;
+        margin-bottom: 0.25rem;
+    }
+
+    .stat-value {
+        font-size: 1.5rem;
+        font-weight: 600;
+        color: #0369a1;
+    }
+
     .badge {
         font-size: 0.7rem;
         padding: 0.2rem 0.5rem;
@@ -1141,6 +1451,69 @@ export const csr = true;
 
     button.danger:hover { background: #b91c1c; }
 
+    /* Progress bar styles */
+    .progress-container {
+        margin-top: 0.5rem;
+    }
+
+    .progress-bar {
+        width: 100%;
+        height: 20px;
+        background: #e0e0e0;
+        border-radius: 10px;
+        overflow: hidden;
+    }
+
+    .progress-fill {
+        height: 100%;
+        background: linear-gradient(90deg, #0066cc, #00aaff);
+        transition: width 0.3s ease;
+    }
+
+    .progress-text {
+        font-size: 0.85rem;
+        color: #666;
+        margin-top: 0.5rem;
+    }
+
+    /* Workflow steps styles */
+    .steps-list {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+    }
+
+    .step-item {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.5rem;
+        background: #f8f8f8;
+        border-radius: 4px;
+    }
+
+    .step-item.completed { background: #dcfce7; }
+    .step-item.running { background: #dbeafe; }
+    .step-item.failed { background: #fee2e2; }
+
+    .step-icon {
+        width: 20px;
+        text-align: center;
+        font-weight: bold;
+    }
+
+    .step-item.completed .step-icon { color: #166534; }
+    .step-item.running .step-icon { color: #1d4ed8; }
+    .step-item.failed .step-icon { color: #dc2626; }
+
+    .step-name { flex: 1; }
+
+    .step-status {
+        font-size: 0.75rem;
+        color: #666;
+        text-transform: uppercase;
+    }
+
     table {
         width: 100%;
         border-collapse: collapse;
@@ -1160,6 +1533,7 @@ export const csr = true;
 
     @media (max-width: 600px) {
         .grid { grid-template-columns: 1fr; }
+        .stats-grid { flex-direction: column; gap: 1rem; }
     }
 </style>
 "#;
@@ -1287,6 +1661,9 @@ export const getUsers = createQuery<Record<string, never>, User[]>('get_users');
 
 /** Get a single user by ID */
 export const getUser = createQuery<{ id: string }, User | null>('get_user');
+
+/** Get app stats - subscribe for real-time updates from heartbeat cron */
+export const getAppStats = createQuery<Record<string, never>, Record<string, string>>('get_app_stats');
 
 // ============================================================================
 // MUTATIONS - Use with `mutate()` to modify data

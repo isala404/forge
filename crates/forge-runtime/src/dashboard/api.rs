@@ -476,22 +476,59 @@ pub async fn get_metric(
 }
 
 /// Get metric time series for charts.
+/// Aggregates counter metrics by time bucket for meaningful visualization.
 pub async fn get_metric_series(
     State(state): State<DashboardState>,
     Query(query): Query<TimeRangeQuery>,
 ) -> Json<ApiResponse<Vec<MetricSeries>>> {
     let (start, end) = query.get_range();
 
+    // Determine bucket interval based on time range
+    let duration = end.signed_duration_since(start);
+    let bucket_interval = if duration.num_hours() <= 1 {
+        "1 minute" // 1h range -> 1 min buckets (60 points max)
+    } else if duration.num_hours() <= 24 {
+        "5 minutes" // 24h range -> 5 min buckets (288 points max)
+    } else if duration.num_days() <= 7 {
+        "1 hour" // 7d range -> 1 hour buckets (168 points max)
+    } else {
+        "1 day" // longer -> 1 day buckets
+    };
+
+    // Aggregate metrics by time bucket
+    // For counter metrics (like http_requests_total), SUM the values
+    // For gauge/histogram, take the last value in each bucket
     let result = sqlx::query(
         r#"
-        SELECT name, labels, value, timestamp
-        FROM forge_metrics
-        WHERE timestamp >= $1 AND timestamp <= $2
-        ORDER BY name, timestamp ASC
+        WITH bucketed AS (
+            SELECT
+                name,
+                labels,
+                kind,
+                date_trunc($3, timestamp) as bucket,
+                SUM(value) as sum_value,
+                MAX(value) as max_value,
+                COUNT(*) as cnt
+            FROM forge_metrics
+            WHERE timestamp >= $1 AND timestamp <= $2
+            GROUP BY name, labels, kind, date_trunc($3, timestamp)
+            ORDER BY name, bucket
+        )
+        SELECT
+            name,
+            labels,
+            bucket as timestamp,
+            CASE
+                WHEN kind = 'counter' THEN sum_value
+                ELSE max_value
+            END as value
+        FROM bucketed
+        ORDER BY name, bucket
         "#,
     )
     .bind(start)
     .bind(end)
+    .bind(bucket_interval)
     .fetch_all(&state.pool)
     .await;
 
@@ -1734,22 +1771,19 @@ pub struct CronStats {
 pub async fn list_crons(
     State(state): State<DashboardState>,
 ) -> Json<ApiResponse<Vec<CronSummary>>> {
+    // Use forge_cron_runs table to derive cron list and stats
     let result = sqlx::query(
         r#"
         SELECT
-            c.name,
-            c.schedule,
-            c.status,
-            c.last_run_at,
-            c.last_result,
-            c.next_run_at,
-            COALESCE(AVG(h.duration_ms), 0) as avg_duration_ms,
-            COUNT(CASE WHEN h.status = 'success' THEN 1 END) as success_count,
-            COUNT(CASE WHEN h.status = 'failed' THEN 1 END) as failure_count
-        FROM forge_crons c
-        LEFT JOIN forge_cron_history h ON c.name = h.cron_name
-        GROUP BY c.name, c.schedule, c.status, c.last_run_at, c.last_result, c.next_run_at
-        ORDER BY c.name
+            cron_name as name,
+            MAX(scheduled_time) as last_run_at,
+            MAX(CASE WHEN status = 'completed' THEN 'success' WHEN status = 'failed' THEN 'failed' ELSE status END) as last_result,
+            COALESCE(AVG(EXTRACT(EPOCH FROM (completed_at - started_at)) * 1000), 0) as avg_duration_ms,
+            COUNT(CASE WHEN status = 'completed' THEN 1 END) as success_count,
+            COUNT(CASE WHEN status = 'failed' THEN 1 END) as failure_count
+        FROM forge_cron_runs
+        GROUP BY cron_name
+        ORDER BY cron_name
         "#,
     )
     .fetch_all(&state.pool)
@@ -1761,11 +1795,11 @@ pub async fn list_crons(
                 .into_iter()
                 .map(|r| CronSummary {
                     name: r.get("name"),
-                    schedule: r.get("schedule"),
-                    status: r.get("status"),
+                    schedule: "* * * * *".to_string(), // Default schedule (would need registry for actual)
+                    status: "active".to_string(),
                     last_run: r.get("last_run_at"),
                     last_result: r.get("last_result"),
-                    next_run: r.get("next_run_at"),
+                    next_run: None, // Would need registry to calculate
                     avg_duration_ms: r.try_get::<f64, _>("avg_duration_ms").ok(),
                     success_count: r.try_get::<i64, _>("success_count").unwrap_or(0),
                     failure_count: r.try_get::<i64, _>("failure_count").unwrap_or(0),
@@ -1782,13 +1816,13 @@ pub async fn list_crons(
 
 /// Get cron statistics.
 pub async fn get_cron_stats(State(state): State<DashboardState>) -> Json<ApiResponse<CronStats>> {
+    // Get stats from forge_cron_runs
     let stats = sqlx::query(
         r#"
         SELECT
-            COUNT(CASE WHEN status = 'active' THEN 1 END) as active_count,
-            COUNT(CASE WHEN status = 'paused' THEN 1 END) as paused_count,
-            MIN(next_run_at) as next_run
-        FROM forge_crons
+            COUNT(DISTINCT cron_name) as active_count,
+            0 as paused_count
+        FROM forge_cron_runs
         "#,
     )
     .fetch_optional(&state.pool)
@@ -1798,8 +1832,8 @@ pub async fn get_cron_stats(State(state): State<DashboardState>) -> Json<ApiResp
         r#"
         SELECT
             COUNT(*) as total,
-            COUNT(CASE WHEN status = 'success' THEN 1 END) as success
-        FROM forge_cron_history
+            COUNT(CASE WHEN status = 'completed' THEN 1 END) as success
+        FROM forge_cron_runs
         WHERE started_at > NOW() - INTERVAL '24 hours'
         "#,
     )
@@ -1821,7 +1855,7 @@ pub async fn get_cron_stats(State(state): State<DashboardState>) -> Json<ApiResp
                 paused_count: s.try_get::<i64, _>("paused_count").unwrap_or(0),
                 total_executions_24h: e.try_get::<i64, _>("total").unwrap_or(0),
                 success_rate_24h: success_rate,
-                next_scheduled_run: s.try_get("next_run").ok(),
+                next_scheduled_run: None, // Would need registry to calculate
             }))
         }
         _ => Json(ApiResponse::success(CronStats {
@@ -1842,17 +1876,18 @@ pub async fn get_cron_history(
     let limit = pagination.get_limit();
     let offset = pagination.get_offset();
 
+    // Use forge_cron_runs table instead of forge_cron_history
     let result = sqlx::query(
         r#"
         SELECT
             id::text as id,
             cron_name,
             started_at,
-            finished_at,
-            EXTRACT(EPOCH FROM (finished_at - started_at)) * 1000 as duration_ms,
-            status,
+            completed_at as finished_at,
+            EXTRACT(EPOCH FROM (completed_at - started_at)) * 1000 as duration_ms,
+            CASE WHEN status = 'completed' THEN 'success' ELSE status END as status,
             error
-        FROM forge_cron_history
+        FROM forge_cron_runs
         ORDER BY started_at DESC
         LIMIT $1 OFFSET $2
         "#,

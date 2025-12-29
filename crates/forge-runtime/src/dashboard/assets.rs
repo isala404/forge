@@ -963,8 +963,10 @@ function setupEventHandlers() {
         if (e.key === 'Escape') {
             const jobModal = document.getElementById('job-modal');
             const workflowModal = document.getElementById('workflow-modal');
+            const metricModal = document.getElementById('metric-modal');
             if (jobModal) jobModal.style.display = 'none';
             if (workflowModal) workflowModal.style.display = 'none';
+            if (metricModal) metricModal.style.display = 'none';
         }
     });
 }
@@ -985,6 +987,7 @@ function loadPageSpecificData() {
     else if (path.includes('/traces') && !path.includes('/traces/')) loadTraces();
     else if (path.includes('/jobs')) loadJobs();
     else if (path.includes('/workflows')) loadWorkflows();
+    else if (path.includes('/crons')) loadCrons();
     else if (path.includes('/cluster')) loadCluster();
 }
 
@@ -1146,8 +1149,65 @@ function formatMetricValue(value, kind) {
     return value.toFixed(value % 1 === 0 ? 0 : 2);
 }
 
-function selectMetric(name) {
-    console.log('Selected metric:', name);
+async function selectMetric(name) {
+    const modal = document.getElementById('metric-modal');
+    const title = document.getElementById('metric-modal-title');
+    const body = document.getElementById('metric-modal-body');
+
+    if (!modal || !body) return;
+
+    modal.style.display = 'flex';
+    title.textContent = name;
+    body.innerHTML = 'Loading...';
+
+    try {
+        // Fetch metric details
+        const res = await fetch(`/_api/metrics/${encodeURIComponent(name)}`).then(r => r.json());
+        if (!res.success) {
+            body.innerHTML = `<p class="error">Failed to load metric: ${escapeHtml(res.error || 'Unknown error')}</p>`;
+            return;
+        }
+
+        const metric = res.data;
+        body.innerHTML = `
+            <div id="metric-detail-chart-container" style="height: 200px; margin-bottom: 16px;">
+                <canvas id="metric-detail-chart"></canvas>
+            </div>
+            <div class="detail-grid">
+                <span class="detail-label">Name</span>
+                <span class="detail-value">${escapeHtml(metric.name)}</span>
+
+                <span class="detail-label">Type</span>
+                <span class="detail-value">${metric.kind || 'counter'}</span>
+
+                <span class="detail-label">Current Value</span>
+                <span class="detail-value">${formatMetricValue(metric.current_value || 0, metric.kind)}</span>
+
+                <span class="detail-label">Last Updated</span>
+                <span class="detail-value">${metric.timestamp ? formatTime(metric.timestamp) : '-'}</span>
+            </div>
+            ${Object.keys(metric.labels || {}).length > 0 ? `
+                <h4 style="margin-top: 16px;">Labels</h4>
+                <pre style="background: var(--bg-tertiary); padding: 12px; border-radius: 4px; overflow-x: auto;">${JSON.stringify(metric.labels, null, 2)}</pre>
+            ` : ''}
+        `;
+
+        // Load time series for this metric
+        const seriesRes = await fetch(`/_api/metrics/series?name=${encodeURIComponent(name)}&period=${getTimeRange()}`).then(r => r.json());
+        if (seriesRes.success && seriesRes.data && seriesRes.data.length > 0) {
+            const metricSeries = seriesRes.data.find(s => s.name === name) || seriesRes.data[0];
+            if (metricSeries && metricSeries.points && metricSeries.points.length > 0) {
+                renderChart('metric-detail-chart', metricSeries.points, '#3b82f6', name);
+            }
+        }
+    } catch (e) {
+        body.innerHTML = `<p class="error">Failed to load metric details: ${escapeHtml(e.message)}</p>`;
+    }
+}
+
+function closeMetricModal() {
+    const modal = document.getElementById('metric-modal');
+    if (modal) modal.style.display = 'none';
 }
 
 // Logs page
@@ -1638,6 +1698,69 @@ async function openWorkflowModal(workflowId) {
 function closeWorkflowModal() {
     const modal = document.getElementById('workflow-modal');
     if (modal) modal.style.display = 'none';
+}
+
+// Crons page
+async function loadCrons() {
+    const tbody = document.getElementById('crons-tbody');
+    const historyTbody = document.getElementById('cron-history-tbody');
+    if (!tbody) return;
+
+    try {
+        const [cronsRes, statsRes, historyRes] = await Promise.all([
+            fetch('/_api/crons').then(r => r.json()),
+            fetch('/_api/crons/stats').then(r => r.json()),
+            fetch('/_api/crons/history?limit=50').then(r => r.json()),
+        ]);
+
+        if (statsRes.success) {
+            const s = statsRes.data;
+            setText('crons-active', s.active_count || 0);
+            setText('crons-paused', s.paused_count || 0);
+            setText('crons-success-rate', s.success_rate_24h !== null ? s.success_rate_24h.toFixed(1) + '%' : '-');
+            setText('crons-next-run', s.next_scheduled_run ? formatTime(s.next_scheduled_run) : '-');
+        }
+
+        if (!cronsRes.success || !cronsRes.data || cronsRes.data.length === 0) {
+            tbody.innerHTML = '<tr class="empty-row"><td colspan="8">No cron jobs found</td></tr>';
+        } else {
+            tbody.innerHTML = cronsRes.data.map(cron => `
+                <tr>
+                    <td>${escapeHtml(cron.name)}</td>
+                    <td><code>${escapeHtml(cron.schedule || '* * * * *')}</code></td>
+                    <td><span class="status-badge status-${cron.status || 'active'}">${cron.status || 'active'}</span></td>
+                    <td>${cron.last_run ? formatTime(cron.last_run) : '-'}</td>
+                    <td>${cron.last_result ? `<span class="status-badge status-${cron.last_result}">${cron.last_result}</span>` : '-'}</td>
+                    <td>${cron.next_run ? formatTime(cron.next_run) : '-'}</td>
+                    <td>${cron.avg_duration_ms ? cron.avg_duration_ms.toFixed(0) + 'ms' : '-'}</td>
+                    <td>-</td>
+                </tr>
+            `).join('');
+        }
+
+        // Load history
+        if (historyTbody) {
+            if (!historyRes.success || !historyRes.data || historyRes.data.length === 0) {
+                historyTbody.innerHTML = '<tr class="empty-row"><td colspan="5">No execution history found</td></tr>';
+            } else {
+                historyTbody.innerHTML = historyRes.data.map(h => `
+                    <tr>
+                        <td>${escapeHtml(h.cron_name)}</td>
+                        <td>${h.started_at ? formatTime(h.started_at) : '-'}</td>
+                        <td>${h.duration_ms ? h.duration_ms.toFixed(0) + 'ms' : '-'}</td>
+                        <td><span class="status-badge status-${h.status}">${h.status}</span></td>
+                        <td>${h.error ? escapeHtml(h.error.substring(0, 50)) : '-'}</td>
+                    </tr>
+                `).join('');
+            }
+        }
+    } catch (e) {
+        console.error('Failed to load crons:', e);
+        tbody.innerHTML = '<tr class="empty-row"><td colspan="8">Failed to load cron jobs</td></tr>';
+        if (historyTbody) {
+            historyTbody.innerHTML = '<tr class="empty-row"><td colspan="5">Failed to load history</td></tr>';
+        }
+    }
 }
 
 // Cluster page

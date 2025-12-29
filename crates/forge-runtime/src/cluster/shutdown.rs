@@ -29,6 +29,7 @@ impl Default for ShutdownConfig {
 /// Graceful shutdown coordinator.
 pub struct GracefulShutdown {
     registry: Arc<NodeRegistry>,
+    #[allow(dead_code)]
     leader_election: Option<Arc<LeaderElection>>,
     config: ShutdownConfig,
     shutdown_requested: Arc<AtomicBool>,
@@ -113,12 +114,7 @@ impl GracefulShutdown {
             }
         }
 
-        // 3. Release any leader locks
-        if let Some(ref election) = self.leader_election {
-            if let Err(e) = election.release_leadership().await {
-                tracing::warn!("Failed to release leadership: {}", e);
-            }
-        }
+        // 3. Leader lock release is handled by LeaderElection::run() on shutdown signal
 
         // 4. Deregister from cluster
         if let Err(e) = self.registry.deregister().await {

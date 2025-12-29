@@ -65,7 +65,7 @@ impl CronSchedule {
             return vec![];
         };
 
-        schedule.after(&start).take_while(|dt| *dt < end).collect()
+        schedule.after(&start).take_while(|dt| *dt <= end).collect()
     }
 
     /// Get all scheduled times between two times in a specific timezone.
@@ -88,7 +88,7 @@ impl CronSchedule {
 
         schedule
             .after(&local_start)
-            .take_while(|dt| *dt < local_end)
+            .take_while(|dt| *dt <= local_end)
             .map(|dt| dt.with_timezone(&Utc))
             .collect()
     }

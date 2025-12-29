@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use forge_core::observability::Metric;
+use forge_core::observability::{Metric, Span, SpanKind};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -200,22 +200,46 @@ impl CronRunner {
     /// Execute one tick of the scheduler.
     async fn tick(&self) -> forge_core::Result<()> {
         let now = Utc::now();
+        // Look back 2x poll interval to catch any scheduled times we might have missed
+        let window_start = now - chrono::Duration::from_std(self.config.poll_interval * 2).unwrap_or(chrono::Duration::seconds(2));
 
-        for entry in self.registry.list() {
+        let cron_list = self.registry.list();
+
+        if cron_list.is_empty() {
+            tracing::debug!("Cron tick: no crons registered");
+        } else {
+            tracing::debug!(
+                cron_count = cron_list.len(),
+                "Cron tick checking {} registered crons",
+                cron_list.len()
+            );
+        }
+
+        for entry in cron_list {
             let info = &entry.info;
 
-            // Get next scheduled time
-            let next_time = info.schedule.next_after_in_tz(now, info.timezone);
+            let scheduled_times = info.schedule.between_in_tz(window_start, now, info.timezone);
+            if scheduled_times.is_empty() {
+                tracing::debug!(
+                    cron = info.name,
+                    schedule = info.schedule.expression(),
+                    "No scheduled runs in window"
+                );
+            } else {
+                tracing::info!(
+                    cron = info.name,
+                    schedule = info.schedule.expression(),
+                    scheduled_count = scheduled_times.len(),
+                    "Found scheduled cron runs"
+                );
+            }
 
-            if let Some(scheduled) = next_time {
-                // Check if this time is due (within poll interval)
-                if scheduled <= now {
-                    // Try to claim this cron run
-                    if let Ok(claimed) = self.try_claim(info.name, scheduled, info.timezone).await {
-                        if claimed {
-                            // Execute the cron
-                            self.execute_cron(entry, scheduled, false).await;
-                        }
+            for scheduled in scheduled_times {
+                // Try to claim this cron run (database ensures exactly-once execution)
+                if let Ok(claimed) = self.try_claim(info.name, scheduled, info.timezone).await {
+                    if claimed {
+                        // Execute the cron
+                        self.execute_cron(entry, scheduled, false).await;
                     }
                 }
             }
@@ -240,20 +264,19 @@ impl CronRunner {
         &self,
         cron_name: &str,
         scheduled_time: DateTime<Utc>,
-        timezone: &str,
+        _timezone: &str,
     ) -> forge_core::Result<bool> {
         // Insert with ON CONFLICT DO NOTHING to ensure exactly-once execution
         let result = sqlx::query(
             r#"
-            INSERT INTO forge_cron_runs (id, cron_name, scheduled_time, timezone, status, node_id, started_at)
-            VALUES ($1, $2, $3, $4, 'running', $5, NOW())
+            INSERT INTO forge_cron_runs (id, cron_name, scheduled_time, status, node_id, started_at)
+            VALUES ($1, $2, $3, 'running', $4, NOW())
             ON CONFLICT (cron_name, scheduled_time) DO NOTHING
             "#,
         )
         .bind(Uuid::new_v4())
         .bind(cron_name)
         .bind(scheduled_time)
-        .bind(timezone)
         .bind(self.config.node_id)
         .execute(&self.pool)
         .await
@@ -315,6 +338,46 @@ impl CronRunner {
                 .labels
                 .insert("cron_name".to_string(), info.name.to_string());
             obs.record_metric(duration_metric).await;
+        }
+
+        // Record cron execution span
+        if let Some(ref obs) = self.observability {
+            let mut span = Span::new(format!("cron.{}", info.name));
+            span.kind = SpanKind::Internal;
+            span.attributes.insert(
+                "cron.name".to_string(),
+                serde_json::Value::String(info.name.to_string()),
+            );
+            span.attributes.insert(
+                "cron.run_id".to_string(),
+                serde_json::Value::String(run_id.to_string()),
+            );
+            span.attributes.insert(
+                "cron.scheduled_time".to_string(),
+                serde_json::Value::String(scheduled_time.to_rfc3339()),
+            );
+            span.attributes.insert(
+                "cron.is_catch_up".to_string(),
+                serde_json::Value::Bool(is_catch_up),
+            );
+            span.attributes.insert(
+                "cron.duration_ms".to_string(),
+                serde_json::Value::Number(serde_json::Number::from(duration.as_millis() as u64)),
+            );
+
+            match &result {
+                Ok(Ok(())) => {
+                    span.end_ok();
+                }
+                Ok(Err(e)) => {
+                    span.end_error(&e.to_string());
+                }
+                Err(_) => {
+                    span.end_error("Cron timed out");
+                }
+            }
+
+            obs.record_span(span).await;
         }
 
         match result {

@@ -196,9 +196,17 @@ pub async fn metrics(State(_state): State<DashboardState>) -> Html<String> {
             <p class="empty-state">Loading metrics...</p>
         </div>
 
-        <div class="chart-container full-width">
-            <h3>Selected Metric</h3>
-            <canvas id="metric-detail-chart"></canvas>
+        <!-- Metric Detail Modal -->
+        <div id="metric-modal" class="modal" style="display: none;">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3 id="metric-modal-title">Metric Detail</h3>
+                    <button class="modal-close" onclick="closeMetricModal()">×</button>
+                </div>
+                <div class="modal-body" id="metric-modal-body">
+                    <p>Loading...</p>
+                </div>
+            </div>
         </div>
     "#;
 

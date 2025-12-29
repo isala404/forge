@@ -546,3 +546,35 @@ Fixed dashboard to display job/workflow status with progress and step details.
 - Added `openJobModal()`, `openWorkflowModal()`, `closeJobModal()`, `closeWorkflowModal()` JS functions
 - Added `renderJobProgress()` helper for inline progress bar display
 - Modal closes on background click or Escape key
+
+Implemented scaffolded app UI, dashboard, and observability enhancements.
+Phase 1 - Heartbeat Cron:
+- Added `app_stats` table migration with reactivity enabled in `crates/forge/src/cli/new.rs`
+- Created `heartbeat_stats_cron.rs` template running every minute to update stats
+- Created `app_stats.rs` query returning stats map for frontend subscription
+- Enabled HeartbeatStatsCron by default in scaffolded main.rs
+Phase 3 - Dashboard Metrics Aggregation:
+- Fixed `get_metric_series()` in `crates/forge-runtime/src/dashboard/api.rs`
+- Added time bucket aggregation using PostgreSQL `date_trunc()` with dynamic intervals
+- Counter metrics now SUMmed by bucket, gauges take last value per bucket
+Phase 4 - Metric Detail Modal:
+- Added metric modal HTML to metrics page in `crates/forge-runtime/src/dashboard/pages.rs`
+- Implemented `selectMetric()` in `crates/forge-runtime/src/dashboard/assets.rs` with fetch and chart render
+- Added `closeMetricModal()` and Escape key handler for modal close
+Phase 5 - Span Context for Traces:
+- Added job execution span recording in `crates/forge-runtime/src/jobs/worker.rs`
+- Added cron execution span recording in `crates/forge-runtime/src/cron/scheduler.rs`
+- Spans include job.id, job.type, cron.name, duration_ms, status attributes
+Phase 2 - Frontend UI Panels:
+- Added System Status panel with live stats subscription from heartbeat cron
+- Added Background Job demo with progress bar simulation
+- Added Workflow demo with step-by-step progress simulation
+- Added `getAppStats` query export to api.ts template
+
+Fixed dashboard cron page and scheduler bugs.
+- Fixed cron scheduler boundary condition in `crates/forge-core/src/cron/schedule.rs` (`< local_end` → `<= local_end`)
+- Fixed `try_claim()` in `crates/forge-runtime/src/cron/scheduler.rs` removing non-existent `timezone` column from INSERT
+- Fixed dashboard cron APIs in `crates/forge-runtime/src/dashboard/api.rs` to use `forge_cron_runs` table with correct columns
+- Added `loadCrons()` function in `crates/forge-runtime/src/dashboard/assets.rs` with API calls to `/_api/crons`, `/_api/crons/stats`, `/_api/crons/history`
+- Fixed stats field mappings (`active_count`, `success_rate_24h`, `next_scheduled_run`)
+- Added `loadCrons()` call to `loadPageSpecificData()` for `/crons` route

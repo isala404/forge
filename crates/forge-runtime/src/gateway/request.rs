@@ -21,6 +21,7 @@ impl RpcRequest {
 }
 
 /// Batch RPC request containing multiple function calls.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchRpcRequest {
     /// List of requests to execute.

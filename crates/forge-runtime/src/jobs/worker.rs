@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use forge_core::observability::Metric;
+use forge_core::observability::{Metric, Span, SpanKind};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -197,6 +197,42 @@ impl Worker {
                                 duration_metric.labels.insert("job_type".to_string(), job_type.clone());
                                 duration_metric.labels.insert("worker_id".to_string(), worker_id.to_string());
                                 obs.record_metric(duration_metric).await;
+                            }
+
+                            // Record job execution span
+                            if let Some(ref obs) = observability {
+                                let mut span = Span::new(format!("job.{}", job_type));
+                                span.kind = SpanKind::Consumer;
+                                span.attributes.insert(
+                                    "job.id".to_string(),
+                                    serde_json::Value::String(job_id.to_string()),
+                                );
+                                span.attributes.insert(
+                                    "job.type".to_string(),
+                                    serde_json::Value::String(job_type.clone()),
+                                );
+                                span.attributes.insert(
+                                    "job.worker_id".to_string(),
+                                    serde_json::Value::String(worker_id.to_string()),
+                                );
+                                span.attributes.insert(
+                                    "job.duration_ms".to_string(),
+                                    serde_json::Value::Number(serde_json::Number::from(duration.as_millis() as u64)),
+                                );
+
+                                match &result {
+                                    super::executor::ExecutionResult::Completed { .. } => {
+                                        span.end_ok();
+                                    }
+                                    super::executor::ExecutionResult::Failed { error, .. } => {
+                                        span.end_error(error);
+                                    }
+                                    super::executor::ExecutionResult::TimedOut { .. } => {
+                                        span.end_error("Job timed out");
+                                    }
+                                }
+
+                                obs.record_span(span).await;
                             }
 
                             match &result {
