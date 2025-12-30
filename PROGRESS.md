@@ -1,3 +1,13 @@
+Created SCHEMA.md documentation for the actual schema system implementation.
+- Added `docs/core/SCHEMA.md` documenting #[forge::model] and #[forge::forge_enum] proc macros
+- Documented field attributes: #[id], #[indexed], #[unique], #[encrypted], #[updated_at], #[default]
+- Documented Rust to SQL type mappings (String->VARCHAR, Uuid->UUID, etc.)
+- Documented Rust to TypeScript type mappings
+- Documented SchemaRegistry, TableDef, FieldDef, FieldAttribute structures
+- Documented enum generation and SQL/TypeScript output
+- Documented composite indexes and ModelMeta trait
+- Noted current practical usage pattern with sqlx::FromRow
+
 Created comprehensive proposal documentation for FORGE framework.
 - Added `proposal/PROPOSAL.md` with high-level overview
 - Added `proposal/architecture/` with system design docs (OVERVIEW, DATA_FLOW, RESILIENCE, SINGLE_BINARY)
@@ -709,3 +719,86 @@ Implemented up/down migration system with CLI commands.
 - Created `forge migrate` CLI command with subcommands: up, down, status
 - Updated scaffolded migration template with `-- @up` and `-- @down` markers
 - Added dotenvy loading to migrate command for .env support
+
+Created jobs system documentation at docs/core/JOBS.md.
+- Documents #[forge::job] macro with all supported attributes (timeout, priority, retry, worker_capability, idempotent)
+- Documents JobContext fields (job_id, job_type, attempt, max_attempts, auth) and methods (db, http, progress, heartbeat, is_retry, is_last_attempt)
+- Documents JobPriority levels (critical=100, high=75, normal=50, low=25, background=0)
+- Documents RetryConfig with backoff strategies (fixed, linear, exponential)
+- Documents SKIP LOCKED pattern for safe concurrent job claiming
+- Documents JobStatus lifecycle (pending -> claimed -> running -> completed/failed/dead_letter)
+- Documents progress tracking with progress_percent/progress_message columns
+- Includes frontend integration with job tracker pattern and WebSocket subscriptions
+- Based on actual implementation in crates/forge-core/src/job/ and crates/forge-runtime/src/jobs/
+
+Created CLI reference documentation at docs/reference/CLI.md.
+- Documented all 6 CLI commands: new, init, add, generate, run, migrate
+- Included generated project structure for `forge new`
+- Documented all 7 add component types with example templates
+- Added migration file format with up/down markers
+- Included common workflows and troubleshooting section
+
+Created observability system documentation at docs/observability/.
+- docs/observability/OBSERVABILITY.md: Core types (MetricKind, LogLevel, LogEntry, TraceId, SpanId, SpanContext, Span)
+- Documents W3C traceparent format for distributed trace propagation
+- Documents collectors (MetricsCollector, LogCollector, TraceCollector) with background flush
+- Documents SystemMetricsCollector using sysinfo crate for CPU, memory, disk metrics
+- Documents storage layer with PostgreSQL batch persistence using UNNEST pattern
+- Documents alerts system (AlertSeverity, AlertStatus, AlertCondition, AlertState, Alert)
+- docs/observability/DASHBOARD.md: Built-in web dashboard at /_dashboard/
+- Documents 9 pages: Overview, Metrics, Logs, Traces, Alerts, Jobs, Workflows, Crons, Cluster
+- Documents REST API at /_api/ with all endpoints for each resource
+- Documents real-time features: job/workflow progress modals, live log streaming
+- Documents response types for all API endpoints
+- Based on actual implementation in crates/forge-core/src/observability/ and crates/forge-runtime/src/dashboard/
+
+Created cron system documentation at docs/core/CRONS.md.
+- Documents #[forge::cron] macro with all attributes (schedule, timezone, catch_up, catch_up_limit, timeout)
+- Documents CronContext fields (run_id, cron_name, scheduled_time, execution_time, timezone, is_catch_up)
+- Documents CronContext methods (db, http, delay, is_late) and CronLog for structured logging
+- Explains 5-part to 6-part cron expression normalization (prepends "0" for seconds)
+- Documents timezone support via chrono-tz with IANA timezone names (America/New_York, etc)
+- Explains leader-only execution with UNIQUE constraint on (cron_name, scheduled_time) for exactly-once semantics
+- Documents CronRunner tick loop, CronRegistry, CronStatus, CronRecord database schema
+- Documents ForgeCron trait and CronInfo struct with all metadata fields
+- Documents catch-up behavior for missed runs with configurable limit
+- Documents duration format for timeout (ms, s, m, h suffixes)
+- Includes practical code examples (heartbeat stats, nightly cleanup, business hours sync)
+- Documents differences from proposal (ctx.mutate/dispatch_job/overlap not implemented)
+- Based on actual implementation in crates/forge-core/src/cron/, crates/forge-macros/src/cron.rs, crates/forge-runtime/src/cron/
+
+Created database documentation at docs/database/.
+- docs/database/POSTGRES_SCHEMA.md: Documents all 14 forge_* system tables
+  - Cluster tables: forge_nodes, forge_leaders
+  - Job queue: forge_jobs with SKIP LOCKED pattern
+  - Cron: forge_cron_runs with unique constraint for exactly-once
+  - Workflows: forge_workflow_runs, forge_workflow_steps with cascade delete
+  - Realtime: forge_sessions, forge_subscriptions
+  - Observability: forge_metrics, forge_logs, forge_traces
+  - Alerts: forge_alert_rules, forge_alerts
+  - Migration tracking: forge_migrations
+  - Reactivity functions: forge_notify_change(), forge_enable_reactivity(), forge_disable_reactivity()
+- docs/database/MIGRATIONS.md: Documents migration system
+  - Up/down migration syntax with `-- @up` and `-- @down` markers
+  - CLI commands: forge migrate up/down/status
+  - MigrationRunner with advisory lock (0x464F524745) for mesh-safe deploys
+  - Built-in FORGE schema versioned as 0000_forge_internal
+  - SQL statement splitting respects dollar-quoted PL/pgSQL functions
+  - ForgeBuilder integration with migrations_dir()
+
+Completed comprehensive FORGE documentation reflecting actual implementation.
+- docs/DOCUMENTATION.md: Main overview with quick start, project structure, architecture
+- docs/core/SCHEMA.md: #[forge::model], #[forge::forge_enum] macros, type mappings
+- docs/core/FUNCTIONS.md: Queries, Mutations, Actions with context objects
+- docs/core/JOBS.md: Background jobs with SKIP LOCKED, retry, progress tracking
+- docs/core/CRONS.md: Scheduled tasks with timezone support, exactly-once semantics
+- docs/core/WORKFLOWS.md: Durable processes with saga pattern compensation
+- docs/core/REACTIVITY.md: Real-time subscriptions via PostgreSQL NOTIFY/LISTEN
+- docs/architecture/OVERVIEW.md: Single binary design, component interactions
+- docs/database/POSTGRES_SCHEMA.md: All forge_* tables with indexes
+- docs/database/MIGRATIONS.md: Up/down migrations with advisory locks
+- docs/cluster/CLUSTERING.md: Node registry, leader election, heartbeats
+- docs/frontend/FRONTEND.md: TypeScript client, Svelte stores, job/workflow trackers
+- docs/observability/OBSERVABILITY.md: Metrics, logs, traces, alerts
+- docs/observability/DASHBOARD.md: Built-in dashboard pages and REST API
+- docs/reference/CLI.md: All CLI commands with examples
