@@ -1,10 +1,13 @@
 mod add;
 mod generate;
+mod migrate;
 mod new;
 mod run;
+mod runtime_generator;
 
 pub use add::AddCommand;
 pub use generate::GenerateCommand;
+pub use migrate::MigrateCommand;
 pub use new::NewCommand;
 pub use run::RunCommand;
 
@@ -37,6 +40,9 @@ pub enum Commands {
 
     /// Run the FORGE server.
     Run(RunCommand),
+
+    /// Manage database migrations.
+    Migrate(MigrateCommand),
 }
 
 /// Initialize in existing directory.
@@ -60,6 +66,7 @@ impl Cli {
             Commands::Add(cmd) => cmd.execute().await,
             Commands::Generate(cmd) => cmd.execute().await,
             Commands::Run(cmd) => cmd.execute().await,
+            Commands::Migrate(cmd) => cmd.execute().await,
         }
     }
 }

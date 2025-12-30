@@ -11,6 +11,8 @@ mod runner;
 pub use diff::{DiffAction, DiffEntry, SchemaDiff};
 pub use executor::MigrationExecutor;
 pub use generator::MigrationGenerator;
-pub use runner::{load_migrations_from_dir, Migration, MigrationRunner};
+pub use runner::{
+    load_migrations_from_dir, AppliedMigration, Migration, MigrationRunner, MigrationStatus,
+};
 
 // Re-export for internal use

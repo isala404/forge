@@ -34,6 +34,7 @@ usage() {
     echo "  db        Start/restart PostgreSQL container only"
     echo "  logs      Tail backend and frontend logs"
     echo "  clean     Remove dev app and stop DB"
+    echo "  check     Run quality checks (clippy, svelte-check, prettier)"
     echo "  all       Run setup + start (default)"
     echo ""
     echo "Environment:"
@@ -148,6 +149,31 @@ clean() {
     fi
 }
 
+# Quality checks
+check_quality() {
+    [ ! -d "$APP_DIR" ] && err "App not found. Run '$0 setup' first."
+
+    log "Running quality checks..."
+
+    # Backend checks
+    cd "$APP_DIR"
+    log "Checking Rust formatting..."
+    cargo fmt --check || err "cargo fmt failed - run 'cargo fmt' to fix"
+
+    log "Running clippy..."
+    LIBRARY_PATH="/opt/homebrew/opt/libiconv/lib" cargo clippy -- -D warnings || err "clippy failed"
+
+    # Frontend checks
+    cd "$APP_DIR/frontend"
+    log "Running svelte-check..."
+    bun run check || err "svelte-check failed"
+
+    log "Running prettier..."
+    bunx prettier --check . 2>/dev/null || warn "prettier check failed - run 'bunx prettier --write .' to fix"
+
+    log "All quality checks passed!"
+}
+
 # Main
 case "${1:-all}" in
     setup)
@@ -179,6 +205,9 @@ case "${1:-all}" in
         ;;
     clean)
         clean
+        ;;
+    check)
+        check_quality
         ;;
     all)
         start_db

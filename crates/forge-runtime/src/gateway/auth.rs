@@ -9,7 +9,7 @@ use axum::{
 };
 use forge_core::auth::Claims;
 use forge_core::function::AuthContext;
-use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{dangerous, decode, Algorithm, DecodingKey, Validation};
 use uuid::Uuid;
 
 /// Authentication configuration.
@@ -175,19 +175,8 @@ impl AuthMiddleware {
     /// Decode JWT token without signature verification (DEV MODE ONLY).
     /// This parses the token structure but does not validate the signature.
     fn decode_without_verification(&self, token: &str) -> Result<Claims, AuthError> {
-        // Create validation that skips signature verification
-        let mut validation = Validation::new(Algorithm::HS256);
-        validation.insecure_disable_signature_validation();
-        validation.validate_exp = false; // We'll check expiration manually
-        validation.validate_nbf = false;
-        validation.validate_aud = false;
-        validation.required_spec_claims.clear();
-
-        // Use a dummy key since we're not validating signature
-        let dummy_key = DecodingKey::from_secret(b"dummy");
-
         let token_data =
-            decode::<Claims>(token, &dummy_key, &validation).map_err(|e| match e.kind() {
+            dangerous::insecure_decode::<Claims>(token).map_err(|e| match e.kind() {
                 jsonwebtoken::errors::ErrorKind::InvalidToken => {
                     AuthError::InvalidToken("Invalid token format".to_string())
                 }

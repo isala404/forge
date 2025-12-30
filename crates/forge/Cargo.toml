@@ -27,9 +27,10 @@ uuid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 clap = { version = "4.5", features = ["derive"] }
-console = "0.15"
-dialoguer = "0.11"
-indicatif = "0.17"
+console = "0.16"
+dialoguer = "0.12"
+dotenvy = "0.15"
+indicatif = "0.18"
 hostname = "0.4"
 reqwest = { version = "0.12", features = ["json"] }
 axum = { workspace = true }

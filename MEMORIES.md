@@ -60,6 +60,9 @@ Key Patterns
 - Migrations: MigrationRunner uses advisory lock for mesh-safe concurrent deploys
 - Migrations: built-in FORGE tables versioned as 0000_forge_internal_v1
 - Migrations: SQL split on semicolons for statement-by-statement execution
+- Migrations: up/down support via `-- @up` and `-- @down` markers in SQL files
+- Migrations: down_sql stored in forge_migrations table for rollback execution
+- Migrations CLI: `forge migrate up` (apply pending), `forge migrate down [N]` (rollback), `forge migrate status`
 - Context: use ctx.db() accessor, not ctx.pool field (pool is private)
 - JWT: jsonwebtoken v9 uses `validation.insecure_disable_signature_validation()` for dev mode
 - JWT: DecodingKey doesn't impl Debug, use manual Debug impl for structs containing it

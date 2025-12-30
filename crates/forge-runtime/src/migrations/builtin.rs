@@ -30,14 +30,14 @@ mod tests {
     fn test_migration_sql_not_empty() {
         let migrations = get_builtin_migrations();
         for m in migrations {
-            assert!(!m.sql.is_empty(), "Migration {} has empty SQL", m.name);
+            assert!(!m.up_sql.is_empty(), "Migration {} has empty SQL", m.name);
         }
     }
 
     #[test]
     fn test_migration_sql_contains_tables() {
         let migrations = get_builtin_migrations();
-        let sql = &migrations[0].sql;
+        let sql = &migrations[0].up_sql;
 
         // Verify all core tables are defined
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS forge_nodes"));

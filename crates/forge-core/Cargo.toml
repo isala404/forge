@@ -17,7 +17,7 @@ tracing = { workspace = true }
 sqlx = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
-regex-lite = "0.1"
+regex-lite = "0.1.8"
 
 [dev-dependencies]
 tokio-test = { workspace = true }

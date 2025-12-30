@@ -27,8 +27,8 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 sysinfo = { workspace = true }
-regex = "1.11"
-jsonwebtoken = "9"
+regex = "1.12"
+jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
 futures-util = "0.3"
 
 [dev-dependencies]
