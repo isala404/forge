@@ -1,105 +1,57 @@
-Phase Workflow (CRITICAL - always follow)
-1. Read reference files for the phase
-2. Implement the phase (read more references if needed)
-3. Run: cargo fmt && cargo check && LIBRARY_PATH="/opt/homebrew/opt/libiconv/lib" cargo test
-4. Update MEMORIES.md and PROGRESS.md
-5. Commit with descriptive message (never git push)
-6. Move to next phase
-
 Tooling
-- Stack: Rust (backend), Svelte 5 + TypeScript (frontend)
+- Stack: Rust (backend), Svelte 5 + TypeScript (frontend), PostgreSQL
 - Package manager: cargo (backend), bun (frontend)
-- Test command: LIBRARY_PATH="/opt/homebrew/opt/libiconv/lib" cargo test
-- Lint command: cargo clippy
-- Format command: cargo fmt
-- macOS: brew install libiconv (required for stringprep/sqlx tests)
-- Docker: postgres:alpine for local dev database
+- Test: LIBRARY_PATH="/opt/homebrew/opt/libiconv/lib" cargo test
+- Lint: cargo clippy | Format: cargo fmt
+- Dev: ./dev.sh [setup|start|db|logs|clean|all]
 - CLI install: cargo install --path crates/forge
-- Dev script: ./dev.sh [setup|start|db|logs|clean|all]
-- Dev app location: ~/Desktop/forge-dev-app (configurable via APP_DIR env)
+- Docs: cd website && bun run start (Docusaurus 3.9.2)
 
 Architecture
-- Single binary containing all components (gateway, functions, workers, scheduler)
-- PostgreSQL as sole database and coordination layer (no Redis/Kafka required)
-- gRPC mesh for inter-node communication
-- WebSocket for real-time client subscriptions
+- Single binary: gateway + functions + workers + scheduler
+- PostgreSQL only (no Redis/Kafka) for data + coordination
+- WebSocket for real-time, gRPC for inter-node mesh
 
-Core Components
-- Schema: Rust structs with proc macros (#[forge::model], #[forge::enum])
-- Functions: query (read), mutation (write), action (side effects)
-- Jobs: background tasks with SKIP LOCKED pattern
-- Crons: scheduled tasks via leader-elected scheduler
-- Workflows: multi-step durable processes with compensation
-- Reactivity: Reactor orchestrates ChangeListener -> InvalidationEngine -> Query Re-execution -> WebSocket Push
-- Reactivity triggers: forge_enable_reactivity(table_name) creates NOTIFY triggers on tables
-- Reactivity: read set tracking uses query name patterns (get_X/list_X -> table X)
-- Runtime: Forge struct in crates/forge/src/runtime.rs wires all components
-- Builder: ForgeBuilder pattern for configuration before run()
-- Testing: TestContext in forge-runtime/src/testing/ for integration tests
+Crates
+- forge: CLI + runtime (ForgeBuilder pattern)
+- forge-core: traits, types, contexts (no tokio dep except spawn)
+- forge-macros: proc macros (#[forge::model], #[query], #[mutation], etc.)
+- forge-runtime: executors, registries, gateway, dashboard
+- forge-codegen: TypeScript generator, source parser (syn)
 
 Key Patterns
-- Dependency injection via context (QueryContext, MutationContext, JobContext)
-- PostgreSQL advisory locks for leader election
-- SKIP LOCKED for job claiming (no double-processing)
-- Table partitioning for high-churn tables (jobs, logs, metrics)
-- Proc macros use forge::forge_core:: paths (re-exported from forge crate)
-- User functions take &QueryContext and &MutationContext (references)
-- axum 0.7+ route syntax uses {param} not :param
-- FromStr trait for parsing enums from strings (not inherent from_str methods)
-- Infallible parsing uses std::convert::Infallible as error type
-- Type aliases for complex boxed function types (BoxedCronHandler, CompensateFn, MockHandlerFn)
-- ForgeConfig uses `parse_toml()` method instead of `from_str()` to avoid clippy warning
-- Svelte 5: avoid destructuring $props() at module level, access props.* inside closures
-- Svelte 5: ForgeProvider sets context immediately during initialization, not in onMount
-- Svelte 5: use const for $state objects passed to context, mutate properties not reassign
-- Function registration: call builder.function_registry_mut().register_query::<FnQuery>() before .config()
-- Proc macros: query fn → FnQuery struct, mutation fn → FnMutation struct
-- RPC: client normalizes empty objects {} to null for Rust unit type compatibility
-- RPC: response uses `data` field not `result`
-- Migrations: use migrations/ directory with numbered SQL files (0001_xxx.sql)
-- Migrations: MigrationRunner uses advisory lock for mesh-safe concurrent deploys
-- Migrations: built-in FORGE tables versioned as 0000_forge_internal_v1
-- Migrations: SQL split on semicolons for statement-by-statement execution
-- Migrations: up/down support via `-- @up` and `-- @down` markers in SQL files
-- Migrations: down_sql stored in forge_migrations table for rollback execution
-- Migrations CLI: `forge migrate up` (apply pending), `forge migrate down [N]` (rollback), `forge migrate status`
-- Context: use ctx.db() accessor, not ctx.pool field (pool is private)
-- JWT: jsonwebtoken v9 uses `validation.insecure_disable_signature_validation()` for dev mode
-- JWT: DecodingKey doesn't impl Debug, use manual Debug impl for structs containing it
-- Observability: use UNNEST pattern for PostgreSQL batch inserts (no ON CONFLICT in array ops)
-- Workflow compensation: store handlers in HashMap, run in reverse order on cancel
-- Source parser: syn crate for parsing Rust source to extract #[model] and #[forge_enum] without compilation
-- Sample apps: place in examples/ directory, add to workspace members in root Cargo.toml
-- CLI generator: embeds @forge/svelte runtime directly in generated projects (no npm linking)
-- CLI generator: query() is async Promise-based (not store), subscribe() is store-based for real-time
-- FunctionKind: is_client_callable() method returns true for Query/Mutation/Action (not Job/Cron/Workflow)
-- Context dispatch: MutationContext/ActionContext have dispatch_job() and start_workflow() methods
-- Dispatch traits: JobDispatch and WorkflowDispatch in forge-core/src/function/dispatch.rs
-- Dashboard dispatch: POST /_api/jobs/{job_type}/dispatch, POST /_api/workflows/{workflow_name}/start
-- Chart.js: CDN load with fallback pattern for offline/firewall environments
-- Dashboard JS: debounce utility for search inputs, setupEventHandlers() for page-specific handlers
-- SSE streams: EventSource API for live log streaming with auto-reconnect pattern
-- Dashboard modals: clickable table rows open detail modals, close on background click or Escape key
-- Job progress: list endpoint includes progress_percent/progress_message, detail modal shows full progress bar
+- Proc macros use forge::forge_core:: paths (re-exported)
+- User functions take &QueryContext, &MutationContext (references)
+- axum 0.7+ routes: {param} not :param
+- FromStr trait for enum parsing (not inherent from_str)
+- ForgeConfig.parse_toml() not from_str() (clippy)
+- Context: ctx.db() accessor, not ctx.pool
+- RPC: {} normalized to null, response uses `data` field
+
+Database
+- Advisory locks: leader election (0x464F5247 prefix), migrations (0x464F524745)
+- SKIP LOCKED: job claiming without double-processing
+- Tables: forge_nodes, forge_leaders, forge_jobs, forge_cron_runs, forge_workflow_runs/steps, forge_sessions/subscriptions, forge_metrics/logs/traces, forge_migrations
+
+Migrations
+- Directory: migrations/ with 0001_xxx.sql files
+- Up/down markers: `-- @up` and `-- @down`
+- MigrationRunner: advisory lock for mesh-safe deploys
+- Built-in: 0000_forge_internal (system tables)
+
+Reactivity
+- Pipeline: ChangeListener -> InvalidationEngine -> Reactor -> WebSocket
+- Triggers: forge_enable_reactivity(table) creates NOTIFY triggers
+- Read set: query name patterns (get_X/list_X -> table X)
 
 Frontend
-- Auto-generated TypeScript types from Rust schema
-- Svelte 5 runes integration for reactivity
-- WebSocket subscriptions with automatic reconnect
+- Generated runtime in $lib/forge/ (types, client, stores, api)
+- query(): async Promise | subscribe(): Svelte store
+- Job/Workflow trackers: createJobTracker(), createWorkflowTracker()
+- Svelte 5: no props destructuring at module level, use props.* in closures
+- ForgeProvider: set context immediately (not onMount), const for $state objects
 
-Documentation Website (website/)
-- Docusaurus 3.9.2 with bun, TypeScript
-- Dark mode default, docs-only site (routeBasePath: '/')
-- Start: cd website && bun run start
-- Structure: docs/{concepts,tutorials,background,frontend,api,cli}/
-- MDX files with Rust/TypeScript syntax highlighting via prism
-
-Database Tables
-- forge_nodes: cluster membership
-- forge_leaders: leader election state
-- forge_jobs: job queue
-- forge_cron_runs: cron execution history
-- forge_workflow_runs/steps: workflow state
-- forge_events: change tracking
-- forge_metrics/logs/traces: observability
-- forge_sessions/subscriptions: WebSocket state
+Dashboard
+- Routes: /_dashboard/ (pages), /_api/ (REST)
+- Dispatch: POST /_api/jobs/{type}/dispatch, /_api/workflows/{name}/start
+- Chart.js via CDN with fallback
