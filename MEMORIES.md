@@ -103,3 +103,10 @@ Adaptive Tracking
 - AdaptiveTracker switches Row↔Table based on subscription counts
 - row_threshold, table_threshold for hysteresis
 - TrackingMode: None, Table, Row, Adaptive
+
+CLI Scaffolding
+
+- Templates in crates/forge/templates/ with .tmpl extension
+- template::render() for {{var}} replacement, template_vars! macro
+- include_str!() embeds templates at compile time
+- Directories: project/, frontend/, runtime/

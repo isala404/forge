@@ -1,0 +1,23 @@
+use forge::prelude::*;
+use std::collections::HashMap;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
+pub struct AppStat {
+    pub id: String,
+    pub stat_name: String,
+    pub stat_value: String,
+    pub updated_at: Timestamp,
+}
+
+#[forge::query]
+pub async fn get_app_stats(ctx: &QueryContext) -> Result<HashMap<String, String>> {
+    let stats: Vec<AppStat> = sqlx::query_as(
+        "SELECT id, stat_name, stat_value, updated_at FROM app_stats ORDER BY stat_name",
+    )
+    .fetch_all(ctx.db())
+    .await?;
+
+    let map: HashMap<String, String> = stats.into_iter().map(|s| (s.id, s.stat_value)).collect();
+
+    Ok(map)
+}

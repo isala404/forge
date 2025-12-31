@@ -1,0 +1,76 @@
+use crate::schema::User;
+use forge::prelude::*;
+
+#[forge::query]
+pub async fn get_users(ctx: &QueryContext) -> Result<Vec<User>> {
+    sqlx::query_as::<_, User>("SELECT * FROM users ORDER BY created_at DESC")
+        .fetch_all(ctx.db())
+        .await
+        .map_err(Into::into)
+}
+
+#[forge::query]
+pub async fn get_user(ctx: &QueryContext, id: Uuid) -> Result<Option<User>> {
+    sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
+        .bind(id)
+        .fetch_optional(ctx.db())
+        .await
+        .map_err(Into::into)
+}
+
+#[forge::mutation]
+pub async fn create_user(ctx: &MutationContext, email: String, name: String) -> Result<User> {
+    let id = Uuid::new_v4();
+    let now = Utc::now();
+
+    let user = sqlx::query_as::<_, User>(
+        "INSERT INTO users (id, email, name, created_at, updated_at) \
+         VALUES ($1, $2, $3, $4, $5) RETURNING *",
+    )
+    .bind(id)
+    .bind(&email)
+    .bind(&name)
+    .bind(now)
+    .bind(now)
+    .fetch_one(ctx.db())
+    .await?;
+
+    Ok(user)
+}
+
+#[forge::mutation]
+pub async fn update_user(
+    ctx: &MutationContext,
+    id: Uuid,
+    email: Option<String>,
+    name: Option<String>,
+) -> Result<User> {
+    let now = Utc::now();
+
+    let user = sqlx::query_as::<_, User>(
+        "UPDATE users SET \
+         email = COALESCE($2, email), \
+         name = COALESCE($3, name), \
+         updated_at = $4 \
+         WHERE id = $1 \
+         RETURNING *",
+    )
+    .bind(id)
+    .bind(email)
+    .bind(name)
+    .bind(now)
+    .fetch_one(ctx.db())
+    .await?;
+
+    Ok(user)
+}
+
+#[forge::mutation]
+pub async fn delete_user(ctx: &MutationContext, id: Uuid) -> Result<bool> {
+    let result = sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(id)
+        .execute(ctx.db())
+        .await?;
+
+    Ok(result.rows_affected() > 0)
+}

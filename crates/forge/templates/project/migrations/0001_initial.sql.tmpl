@@ -1,0 +1,27 @@
+-- @up
+CREATE TABLE IF NOT EXISTS users (
+    id UUID PRIMARY KEY,
+    email VARCHAR(255) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
+
+CREATE TABLE IF NOT EXISTS app_stats (
+    id VARCHAR(64) PRIMARY KEY,
+    stat_name VARCHAR(128) NOT NULL,
+    stat_value TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+SELECT forge_enable_reactivity('users');
+SELECT forge_enable_reactivity('app_stats');
+
+-- @down
+SELECT forge_disable_reactivity('app_stats');
+SELECT forge_disable_reactivity('users');
+DROP TABLE IF EXISTS app_stats;
+DROP INDEX IF EXISTS idx_users_email;
+DROP TABLE IF EXISTS users;

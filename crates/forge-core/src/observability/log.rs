@@ -4,7 +4,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 /// Log level.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
     /// Trace level (most verbose).
@@ -12,6 +12,7 @@ pub enum LogLevel {
     /// Debug level.
     Debug,
     /// Info level.
+    #[default]
     Info,
     /// Warning level.
     Warn,
@@ -55,12 +56,6 @@ impl std::fmt::Display for LogLevel {
             Self::Warn => write!(f, "warn"),
             Self::Error => write!(f, "error"),
         }
-    }
-}
-
-impl Default for LogLevel {
-    fn default() -> Self {
-        Self::Info
     }
 }
 

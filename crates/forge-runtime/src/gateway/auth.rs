@@ -59,17 +59,12 @@ impl AuthConfig {
 }
 
 /// Supported JWT algorithms.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum JwtAlgorithm {
+    #[default]
     HS256,
     HS384,
     HS512,
-}
-
-impl Default for JwtAlgorithm {
-    fn default() -> Self {
-        Self::HS256
-    }
 }
 
 impl From<JwtAlgorithm> for Algorithm {

@@ -60,19 +60,14 @@ impl Default for JobInfo {
 }
 
 /// Job priority levels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum JobPriority {
     Background = 0,
     Low = 25,
+    #[default]
     Normal = 50,
     High = 75,
     Critical = 100,
-}
-
-impl Default for JobPriority {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 impl JobPriority {
@@ -197,20 +192,15 @@ impl RetryConfig {
 }
 
 /// Backoff strategy for retries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BackoffStrategy {
     /// Same delay each time.
     Fixed,
     /// Delay increases linearly.
     Linear,
     /// Delay doubles each time.
+    #[default]
     Exponential,
-}
-
-impl Default for BackoffStrategy {
-    fn default() -> Self {
-        Self::Exponential
-    }
 }
 
 #[cfg(test)]

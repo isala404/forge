@@ -1892,8 +1892,8 @@ pub async fn get_cron_history(
         LIMIT $1 OFFSET $2
         "#,
     )
-    .bind(limit as i64)
-    .bind(offset as i64)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&state.pool)
     .await;
 
@@ -1942,7 +1942,7 @@ pub async fn pause_cron(
             tracing::info!(cron = %name, "Cron paused");
             Json(ApiResponse::success(()))
         }
-        Err(e) => Json(ApiResponse::error(&format!("Failed to pause cron: {}", e))),
+        Err(e) => Json(ApiResponse::error(format!("Failed to pause cron: {}", e))),
     }
 }
 
@@ -1961,7 +1961,7 @@ pub async fn resume_cron(
             tracing::info!(cron = %name, "Cron resumed");
             Json(ApiResponse::success(()))
         }
-        Err(e) => Json(ApiResponse::error(&format!("Failed to resume cron: {}", e))),
+        Err(e) => Json(ApiResponse::error(format!("Failed to resume cron: {}", e))),
     }
 }
 
@@ -2108,7 +2108,7 @@ pub async fn dispatch_job(
         ),
         Err(e) => (
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error(&e.to_string())),
+            Json(ApiResponse::error(e.to_string())),
         ),
     }
 }
@@ -2136,7 +2136,7 @@ pub async fn start_workflow(
         ),
         Err(e) => (
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error(&e.to_string())),
+            Json(ApiResponse::error(e.to_string())),
         ),
     }
 }

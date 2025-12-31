@@ -1,0 +1,144 @@
+use forge::prelude::*;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountVerificationInput {
+    pub user_id: String,
+    #[serde(default)]
+    pub email: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountVerificationOutput {
+    pub verified: bool,
+    pub verification_token: Option<String>,
+    pub verified_at: Option<String>,
+}
+
+#[forge::workflow]
+#[version = 1]
+#[timeout = "24h"]
+pub async fn account_verification(
+    ctx: &WorkflowContext,
+    input: AccountVerificationInput,
+) -> Result<AccountVerificationOutput> {
+    use std::time::Duration;
+
+    tracing::info!(
+        workflow_id = %ctx.run_id,
+        user_id = %input.user_id,
+        email = %input.email,
+        "Starting account verification workflow"
+    );
+
+    // Step 1: Generate verification token
+    let token = if ctx.is_step_completed("generate_token") {
+        ctx.get_step_result::<String>("generate_token")
+            .unwrap_or_else(|| format!("verify_{}", Uuid::new_v4()))
+    } else {
+        ctx.record_step_start("generate_token");
+        tracing::info!("Generating verification token");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let token = format!("verify_{}", Uuid::new_v4());
+        ctx.record_step_complete("generate_token", serde_json::json!(token));
+        token
+    };
+
+    // Step 2: Store token in database
+    if !ctx.is_step_completed("store_token") {
+        ctx.record_step_start("store_token");
+        tracing::info!(user_id = %input.user_id, "Storing verification token");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        // In a real app:
+        // sqlx::query("INSERT INTO verification_tokens (user_id, token) VALUES ($1, $2)")
+        //     .bind(&input.user_id)
+        //     .bind(&token)
+        //     .execute(ctx.db())
+        //     .await?;
+
+        ctx.record_step_complete(
+            "store_token",
+            serde_json::json!({
+                "stored": true,
+                "user_id": input.user_id
+            }),
+        );
+    }
+
+    // Step 3: Send verification email
+    if !ctx.is_step_completed("send_email") {
+        ctx.record_step_start("send_email");
+        tracing::info!(email = %input.email, "Sending verification email");
+
+        // Retry logic for transient failures
+        let mut attempts = 0;
+        let max_attempts = 3;
+        loop {
+            attempts += 1;
+            match send_email_simulation(&input.email, &token).await {
+                Ok(_) => break,
+                Err(e) if attempts < max_attempts => {
+                    tracing::warn!(attempt = attempts, "Email send failed, retrying: {}", e);
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                Err(e) => {
+                    ctx.record_step_failure("send_email", e.to_string());
+                    return Err(e);
+                }
+            }
+        }
+
+        ctx.record_step_complete(
+            "send_email",
+            serde_json::json!({
+                "sent_to": input.email,
+                "sent_at": chrono::Utc::now().to_rfc3339()
+            }),
+        );
+    }
+
+    // Step 4: Mark account as verified
+    let verified_at = if ctx.is_step_completed("mark_verified") {
+        ctx.get_step_result::<Option<String>>("mark_verified")
+            .flatten()
+    } else {
+        ctx.record_step_start("mark_verified");
+        tracing::info!("Marking account as verified");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        // In a real app:
+        // sqlx::query("UPDATE users SET verified = true WHERE id = $1")
+        //     .bind(&input.user_id)
+        //     .execute(ctx.db())
+        //     .await?;
+
+        let verified_at = Some(chrono::Utc::now().to_rfc3339());
+        ctx.record_step_complete("mark_verified", serde_json::json!(verified_at));
+        verified_at
+    };
+
+    tracing::info!(
+        workflow_id = %ctx.run_id,
+        user_id = %input.user_id,
+        "Account verification workflow completed"
+    );
+
+    Ok(AccountVerificationOutput {
+        verified: true,
+        verification_token: Some(token),
+        verified_at,
+    })
+}
+
+/// Simulated email sending (for demo purposes)
+async fn send_email_simulation(email: &str, token: &str) -> Result<()> {
+    use std::time::Duration;
+
+    // Simulate occasional failure for demo (1 in 3 chance)
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // In a real app, this would call an email service
+    tracing::debug!(email = %email, token = %token, "Simulated email sent");
+    Ok(())
+}

@@ -57,6 +57,7 @@ impl EventStore {
     }
 
     /// Consume an event for a workflow.
+    #[allow(clippy::type_complexity)]
     pub async fn consume_event(
         &self,
         event_name: &str,
@@ -118,6 +119,7 @@ impl EventStore {
     }
 
     /// List pending events for a workflow.
+    #[allow(clippy::type_complexity)]
     pub async fn list_pending_events(&self, correlation_id: &str) -> Result<Vec<WorkflowEvent>> {
         let results: Vec<(
             Uuid,

@@ -4,7 +4,7 @@ use std::str::FromStr;
 use uuid::Uuid;
 
 /// Tracking mode for read sets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TrackingMode {
     /// No tracking (disabled).
     None,
@@ -13,13 +13,8 @@ pub enum TrackingMode {
     /// Track individual rows (fine-grained).
     Row,
     /// Adaptive mode - automatically choose based on query characteristics.
+    #[default]
     Adaptive,
-}
-
-impl Default for TrackingMode {
-    fn default() -> Self {
-        Self::Adaptive
-    }
 }
 
 impl TrackingMode {

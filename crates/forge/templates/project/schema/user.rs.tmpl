@@ -1,0 +1,10 @@
+use forge::prelude::*;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
+pub struct User {
+    pub id: Uuid,
+    pub email: String,
+    pub name: String,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}

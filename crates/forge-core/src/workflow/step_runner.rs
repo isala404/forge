@@ -157,7 +157,7 @@ where
             Ok(value) => {
                 // Success - record completion
                 let json_value =
-                    serde_json::to_value(&value).unwrap_or_else(|_| serde_json::Value::Null);
+                    serde_json::to_value(&value).unwrap_or(serde_json::Value::Null);
                 self.ctx.record_step_complete(&self.name, json_value);
 
                 // Register compensation handler if provided

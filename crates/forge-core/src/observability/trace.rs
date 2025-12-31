@@ -136,10 +136,11 @@ impl SpanContext {
 }
 
 /// Span kind indicating the relationship.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SpanKind {
     /// Internal operation.
+    #[default]
     Internal,
     /// Server handling a request.
     Server,
@@ -149,12 +150,6 @@ pub enum SpanKind {
     Producer,
     /// Consumer receiving a message.
     Consumer,
-}
-
-impl Default for SpanKind {
-    fn default() -> Self {
-        Self::Internal
-    }
 }
 
 impl std::fmt::Display for SpanKind {
@@ -170,21 +165,16 @@ impl std::fmt::Display for SpanKind {
 }
 
 /// Span status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SpanStatus {
     /// Unset status.
+    #[default]
     Unset,
     /// Operation completed successfully.
     Ok,
     /// Operation failed with an error.
     Error,
-}
-
-impl Default for SpanStatus {
-    fn default() -> Self {
-        Self::Unset
-    }
 }
 
 impl std::fmt::Display for SpanStatus {

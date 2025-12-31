@@ -374,7 +374,7 @@ impl CronRunner {
                     span.end_ok();
                 }
                 Ok(Err(e)) => {
-                    span.end_error(&e.to_string());
+                    span.end_error(e.to_string());
                 }
                 Err(_) => {
                     span.end_error("Cron timed out");

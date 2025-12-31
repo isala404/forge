@@ -1,0 +1,448 @@
+<script lang="ts">
+    import { subscribe, mutate, query } from '@forge/svelte';
+    import {
+        getUsers, getUser, createUser, updateUser, deleteUser, getAppStats,
+        createExportUsersJob, createAccountVerificationWorkflow
+    } from '$lib/forge';
+    import type { User } from '$lib/forge/types';
+    import { onMount, onDestroy } from 'svelte';
+
+    const ACTIVE_JOB_KEY = 'forge_active_job_id';
+    const ACTIVE_WORKFLOW_KEY = 'forge_active_workflow_id';
+    const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8080';
+
+    const users = subscribe(getUsers, {});
+    const stats = subscribe(getAppStats, {});
+
+    let name = $state('');
+    let email = $state('');
+    let isSubmitting = $state(false);
+    let selectedUser = $state<User | null>(null);
+
+    const exportUsersJob = createExportUsersJob();
+    const verifyAccountWorkflow = createAccountVerificationWorkflow();
+
+    onMount(() => {
+        const savedJobId = localStorage.getItem(ACTIVE_JOB_KEY);
+        if (savedJobId) exportUsersJob.resume(savedJobId);
+
+        const savedWorkflowId = localStorage.getItem(ACTIVE_WORKFLOW_KEY);
+        if (savedWorkflowId) verifyAccountWorkflow.resume(savedWorkflowId);
+    });
+
+    onDestroy(() => {
+        exportUsersJob.cleanup();
+        verifyAccountWorkflow.cleanup();
+    });
+
+    async function handleCreateUser(e: Event) {
+        e.preventDefault();
+        if (!name || !email) return;
+
+        isSubmitting = true;
+        try {
+            await mutate(createUser, { name, email });
+            name = '';
+            email = '';
+        } catch (err) {
+            console.error('Failed to create user:', err);
+        }
+        isSubmitting = false;
+    }
+
+    async function handleSelectUser(id: string) {
+        const result = await query(getUser, { id });
+        if (result.data) selectedUser = result.data;
+    }
+
+    async function handleDeleteUser(id: string) {
+        if (!confirm('Delete this user?')) return;
+        await mutate(deleteUser, { id });
+        if (selectedUser?.id === id) selectedUser = null;
+    }
+
+    async function startExportJob() {
+        try {
+            const jobId = await exportUsersJob.start({ format: 'csv', include_inactive: false });
+            localStorage.setItem(ACTIVE_JOB_KEY, jobId);
+        } catch (err) {
+            console.error('Failed to start job:', err);
+        }
+    }
+
+    async function startVerificationWorkflow() {
+        try {
+            const workflowId = await verifyAccountWorkflow.start({
+                user_id: selectedUser?.id || 'demo-user'
+            });
+            localStorage.setItem(ACTIVE_WORKFLOW_KEY, workflowId);
+        } catch (err) {
+            console.error('Failed to start workflow:', err);
+        }
+    }
+
+    function formatTime(timestamp: string) {
+        if (!timestamp) return '-';
+        const date = new Date(timestamp);
+        return date.toLocaleTimeString();
+    }
+
+    function stepIcon(status: string) {
+        switch (status) {
+            case 'completed': return '\u2713';
+            case 'running': return '\u25B6';
+            case 'failed': return '\u2717';
+            default: return '\u25CB';
+        }
+    }
+</script>
+
+<main>
+    <h1>FORGE Demo</h1>
+    <p class="subtitle">
+        Backend: <a href="{apiUrl}/health" target="_blank">{apiUrl}</a> |
+        Dashboard: <a href="{apiUrl}/_dashboard" target="_blank">/_dashboard</a>
+    </p>
+
+    <!-- System Status Panel - Shows live stats from heartbeat cron -->
+    <section class="card full-width status-panel">
+        <h2>System Status <span class="badge live">live</span></h2>
+        <p class="hint">Updated every minute by heartbeat cron. Subscribe to get real-time updates!</p>
+
+        {#if $stats.loading}
+            <p>Loading stats...</p>
+        {:else if $stats.data}
+            <div class="stats-grid">
+                <div class="stat-item">
+                    <span class="stat-label">Last Heartbeat</span>
+                    <span class="stat-value">{formatTime($stats.data.heartbeat || '')}</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Total Users</span>
+                    <span class="stat-value">{$stats.data.user_count || '0'}</span>
+                </div>
+            </div>
+        {:else}
+            <p class="muted">Stats will appear after first cron run (up to 1 minute)</p>
+        {/if}
+    </section>
+
+    <div class="grid">
+        <!-- Job Demo Panel -->
+        <section class="card">
+            <h2>Background Job <span class="badge">demo</span></h2>
+            <p class="hint">Export users to CSV with real-time progress tracking via WebSocket</p>
+
+            {#if $exportUsersJob}
+                <div class="progress-container">
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width: {$exportUsersJob.progress_percent || 0}%"></div>
+                    </div>
+                    <p class="progress-text">{$exportUsersJob.progress_percent || 0}% - {$exportUsersJob.progress_message || $exportUsersJob.status}</p>
+                    {#if $exportUsersJob.status === 'completed' || $exportUsersJob.status === 'failed' || $exportUsersJob.status === 'pending'}
+                        <button onclick={startExportJob} style="margin-top: 0.5rem;">Start New Job</button>
+                    {/if}
+                </div>
+            {:else}
+                <button onclick={startExportJob}>Start Export Job</button>
+            {/if}
+        </section>
+
+        <!-- Workflow Demo Panel -->
+        <section class="card">
+            <h2>Workflow <span class="badge">demo</span></h2>
+            <p class="hint">Multi-step account verification with step tracking via WebSocket</p>
+
+            {#if $verifyAccountWorkflow}
+                <div class="steps-list">
+                    {#each $verifyAccountWorkflow.steps as step}
+                        <div class="step-item {step.status}">
+                            <span class="step-icon">{stepIcon(step.status)}</span>
+                            <span class="step-name">{step.name}</span>
+                            <span class="step-status">{step.status}</span>
+                        </div>
+                    {/each}
+                </div>
+                {#if $verifyAccountWorkflow.status === 'completed' || $verifyAccountWorkflow.status === 'failed' || $verifyAccountWorkflow.status === 'compensated'}
+                    <button onclick={startVerificationWorkflow} style="margin-top: 0.5rem;">Start New Workflow</button>
+                {/if}
+            {:else}
+                <button onclick={startVerificationWorkflow}>Start Verification</button>
+            {/if}
+        </section>
+    </div>
+
+    <div class="grid">
+        <section class="card">
+            <h2>Create User <span class="badge">mutation</span></h2>
+            <form onsubmit={handleCreateUser}>
+                <input type="text" placeholder="Name" bind:value={name} required />
+                <input type="email" placeholder="Email" bind:value={email} required />
+                <button type="submit" disabled={isSubmitting}>
+                    {isSubmitting ? 'Creating...' : 'Create'}
+                </button>
+            </form>
+        </section>
+
+        <section class="card">
+            <h2>User Detail <span class="badge">query</span></h2>
+            {#if selectedUser}
+                <div class="user-detail">
+                    <p><strong>ID:</strong> {selectedUser.id}</p>
+                    <p><strong>Name:</strong> {selectedUser.name}</p>
+                    <p><strong>Email:</strong> {selectedUser.email}</p>
+                    <p><strong>Created:</strong> {new Date(selectedUser.created_at).toLocaleString()}</p>
+                    <button class="secondary" onclick={() => selectedUser = null}>Close</button>
+                </div>
+            {:else}
+                <p class="muted">Click a user below to view details</p>
+            {/if}
+        </section>
+    </div>
+
+    <section class="card full-width">
+        <h2>Users <span class="badge live">subscription (live)</span></h2>
+        <p class="hint">This list updates automatically when data changes - no refresh needed!</p>
+
+        {#if $users.loading}
+            <p>Loading...</p>
+        {:else if $users.error}
+            <p class="error">Error: {$users.error.message}</p>
+        {:else if !$users.data || $users.data.length === 0}
+            <p class="muted">No users yet. Create one above!</p>
+        {:else}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Email</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {#each $users.data as user (user.id)}
+                        <tr>
+                            <td>{user.name}</td>
+                            <td>{user.email}</td>
+                            <td>
+                                <button class="small" onclick={() => handleSelectUser(user.id)}>
+                                    View
+                                </button>
+                                <button class="small danger" onclick={() => handleDeleteUser(user.id)}>
+                                    Delete
+                                </button>
+                            </td>
+                        </tr>
+                    {/each}
+                </tbody>
+            </table>
+        {/if}
+    </section>
+</main>
+
+<style>
+    main {
+        max-width: 900px;
+        margin: 0 auto;
+        padding: 2rem;
+        font-family: system-ui, -apple-system, sans-serif;
+    }
+
+    h1 { color: #1a1a1a; margin-bottom: 0.25rem; }
+    h2 { color: #333; margin: 0 0 1rem 0; font-size: 1.1rem; }
+
+    .subtitle { color: #666; margin-bottom: 2rem; }
+    .subtitle a { color: #0066cc; }
+
+    .grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1.5rem;
+        margin-bottom: 1.5rem;
+    }
+
+    .card {
+        background: #fff;
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        padding: 1.5rem;
+    }
+
+    .full-width { grid-column: 1 / -1; }
+
+    .status-panel {
+        background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+        border-color: #bae6fd;
+    }
+
+    .stats-grid {
+        display: flex;
+        gap: 2rem;
+    }
+
+    .stat-item {
+        display: flex;
+        flex-direction: column;
+    }
+
+    .stat-label {
+        font-size: 0.8rem;
+        color: #666;
+        margin-bottom: 0.25rem;
+    }
+
+    .stat-value {
+        font-size: 1.5rem;
+        font-weight: 600;
+        color: #0369a1;
+    }
+
+    .badge {
+        font-size: 0.7rem;
+        padding: 0.2rem 0.5rem;
+        border-radius: 4px;
+        background: #e0e0e0;
+        color: #666;
+        font-weight: normal;
+        vertical-align: middle;
+    }
+
+    .badge.live {
+        background: #dcfce7;
+        color: #166534;
+    }
+
+    .hint {
+        font-size: 0.85rem;
+        color: #666;
+        margin-bottom: 1rem;
+    }
+
+    .muted { color: #999; font-style: italic; }
+
+    form {
+        display: flex;
+        gap: 0.5rem;
+    }
+
+    input {
+        flex: 1;
+        padding: 0.5rem;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        font-size: 0.95rem;
+    }
+
+    button {
+        padding: 0.5rem 1rem;
+        background: #0066cc;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 0.95rem;
+    }
+
+    button:hover:not(:disabled) { background: #0055aa; }
+    button:disabled { background: #999; cursor: not-allowed; }
+
+    button.secondary {
+        background: #666;
+    }
+
+    button.small {
+        padding: 0.25rem 0.5rem;
+        font-size: 0.85rem;
+    }
+
+    button.danger {
+        background: #dc2626;
+    }
+
+    button.danger:hover { background: #b91c1c; }
+
+    /* Progress bar styles */
+    .progress-container {
+        margin-top: 0.5rem;
+    }
+
+    .progress-bar {
+        width: 100%;
+        height: 20px;
+        background: #e0e0e0;
+        border-radius: 10px;
+        overflow: hidden;
+    }
+
+    .progress-fill {
+        height: 100%;
+        background: linear-gradient(90deg, #0066cc, #00aaff);
+        transition: width 0.3s ease;
+    }
+
+    .progress-text {
+        font-size: 0.85rem;
+        color: #666;
+        margin-top: 0.5rem;
+    }
+
+    /* Workflow steps styles */
+    .steps-list {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+    }
+
+    .step-item {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.5rem;
+        background: #f8f8f8;
+        border-radius: 4px;
+    }
+
+    .step-item.completed { background: #dcfce7; }
+    .step-item.running { background: #dbeafe; }
+    .step-item.failed { background: #fee2e2; }
+
+    .step-icon {
+        width: 20px;
+        text-align: center;
+        font-weight: bold;
+    }
+
+    .step-item.completed .step-icon { color: #166534; }
+    .step-item.running .step-icon { color: #1d4ed8; }
+    .step-item.failed .step-icon { color: #dc2626; }
+
+    .step-name { flex: 1; }
+
+    .step-status {
+        font-size: 0.75rem;
+        color: #666;
+        text-transform: uppercase;
+    }
+
+    table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+
+    th, td {
+        text-align: left;
+        padding: 0.75rem;
+        border-bottom: 1px solid #eee;
+    }
+
+    th { font-weight: 600; color: #555; }
+
+    .user-detail p { margin: 0.5rem 0; }
+
+    .error { color: #dc2626; }
+
+    @media (max-width: 600px) {
+        .grid { grid-template-columns: 1fr; }
+        .stats-grid { flex-direction: column; gap: 1rem; }
+    }
+</style>

@@ -581,12 +581,12 @@ impl WorkflowContext {
         self.try_consume_event(event_name, &correlation_id)
             .await?
             .and_then(|e| e.payload)
-            .map(|p| serde_json::from_value(p).ok())
-            .flatten()
+            .and_then(|p| serde_json::from_value(p).ok())
             .ok_or_else(|| ForgeError::Timeout(format!("Event '{}' timed out", event_name)))
     }
 
     /// Try to consume an event from the database.
+    #[allow(clippy::type_complexity)]
     async fn try_consume_event(
         &self,
         event_name: &str,

@@ -357,3 +357,10 @@ Updated documentation for new features.
 - `docs/concepts/rate-limiting.mdx`: New file documenting token bucket rate limiter
 - `docs/concepts/observability.mdx`: New file with metrics, logs, traces, partitioning, alerts
 - `docs/concepts/realtime.mdx`: Updated TrackingMode table, added Adaptive Tracking section
+
+Refactored CLI scaffolding to use template files.
+- Created `crates/forge/templates/` with 26 template files for project, frontend, and runtime
+- Added `crates/forge/src/cli/template.rs` with render() and template_vars! macro
+- Rewrote `crates/forge/src/cli/new.rs`: 1500 lines → 200 lines using include_str!
+- Rewrote `crates/forge/src/cli/runtime_generator.rs`: 1000 lines → 200 lines using include_str!
+- Templates use simple `{{var}}` placeholder replacement

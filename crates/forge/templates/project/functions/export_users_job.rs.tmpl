@@ -1,0 +1,103 @@
+use crate::schema::User;
+use forge::prelude::*;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportUsersInput {
+    pub format: String,
+    #[allow(dead_code)]
+    pub include_inactive: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportUsersOutput {
+    pub user_count: usize,
+    pub data: String,
+    pub format: String,
+}
+
+#[forge::job]
+#[timeout = "10m"]
+#[retry(max_attempts = 3)]
+pub async fn export_users(ctx: &JobContext, input: ExportUsersInput) -> Result<ExportUsersOutput> {
+    use std::time::Duration;
+
+    tracing::info!(
+        job_id = %ctx.job_id,
+        format = %input.format,
+        "Starting user export"
+    );
+
+    // Step 1: Initialize (0-10%)
+    let _ = ctx.progress(0, "Initializing export...");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let _ = ctx.progress(10, "Fetching users from database...");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Step 2: Fetch users (10-30%)
+    let users: Vec<User> =
+        sqlx::query_as::<_, User>("SELECT * FROM users ORDER BY created_at DESC")
+            .fetch_all(ctx.db())
+            .await?;
+
+    let total = users.len();
+    let _ = ctx.progress(30, format!("Found {} users, preparing export...", total));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Step 3: Generate export with progress updates (30-80%)
+    let data = match input.format.as_str() {
+        "json" => {
+            let _ = ctx.progress(50, "Serializing to JSON...");
+            tokio::time::sleep(Duration::from_millis(800)).await;
+            let _ = ctx.progress(70, "Formatting JSON output...");
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            serde_json::to_string_pretty(&users).map_err(|e| ForgeError::Job(e.to_string()))?
+        }
+        _ => {
+            // CSV format (default) - simulate processing each user
+            let mut csv = String::from("id,email,name,created_at,updated_at\n");
+            let step_count = 5; // Report progress in 5 steps
+            let users_per_step = (total / step_count).max(1);
+
+            for (i, user) in users.iter().enumerate() {
+                csv.push_str(&format!(
+                    "{},{},{},{},{}\n",
+                    user.id, user.email, user.name, user.created_at, user.updated_at
+                ));
+
+                // Update progress at each step
+                if total > 0 && (i + 1) % users_per_step == 0 {
+                    let percent = 30 + ((i as f64 / total as f64) * 50.0) as u8;
+                    let _ = ctx.progress(
+                        percent,
+                        format!("Processing user {} of {}...", i + 1, total),
+                    );
+                    tokio::time::sleep(Duration::from_millis(600)).await;
+                }
+            }
+            csv
+        }
+    };
+
+    // Finalize
+    let _ = ctx.progress(85, "Validating export data...");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let _ = ctx.progress(95, "Finalizing export...");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    tracing::info!(
+        job_id = %ctx.job_id,
+        user_count = total,
+        format = %input.format,
+        "User export completed"
+    );
+
+    let _ = ctx.progress(100, format!("Export complete! {} users exported.", total));
+
+    Ok(ExportUsersOutput {
+        user_count: total,
+        data,
+        format: input.format,
+    })
+}

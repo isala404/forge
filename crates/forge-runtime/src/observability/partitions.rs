@@ -259,7 +259,7 @@ impl PartitionManager {
     fn parse_partition_end(&self, partition_name: &str) -> Option<DateTime<Utc>> {
         // Try to extract date from partition name like "forge_metrics_20250101"
         let parts: Vec<&str> = partition_name.rsplitn(2, '_').collect();
-        if parts.len() < 1 {
+        if parts.is_empty() {
             return None;
         }
 

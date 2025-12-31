@@ -349,6 +349,7 @@ impl Reactor {
     }
 
     /// Fetch current job data from database.
+    #[allow(clippy::type_complexity)]
     async fn fetch_job_data(&self, job_id: Uuid) -> forge_core::Result<JobData> {
         let row: Option<(
             String,
@@ -365,7 +366,7 @@ impl Reactor {
         .bind(job_id)
         .fetch_optional(&self.db_pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Sql(e))?;
+        .map_err(forge_core::ForgeError::Sql)?;
 
         match row {
             Some((status, progress_percent, progress_message, output, error)) => Ok(JobData {
@@ -384,6 +385,7 @@ impl Reactor {
     }
 
     /// Fetch current workflow + steps from database.
+    #[allow(clippy::type_complexity)]
     async fn fetch_workflow_data(&self, workflow_id: Uuid) -> forge_core::Result<WorkflowData> {
         // Fetch workflow run
         let row: Option<(
@@ -400,7 +402,7 @@ impl Reactor {
         .bind(workflow_id)
         .fetch_optional(&self.db_pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Sql(e))?;
+        .map_err(forge_core::ForgeError::Sql)?;
 
         let (status, current_step, output, error) = match row {
             Some(r) => r,
@@ -424,7 +426,7 @@ impl Reactor {
         .bind(workflow_id)
         .fetch_all(&self.db_pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Sql(e))?;
+        .map_err(forge_core::ForgeError::Sql)?;
 
         let steps = step_rows
             .into_iter()
@@ -791,6 +793,7 @@ impl Reactor {
     }
 
     /// Static version of fetch_job_data for use in handle_change.
+    #[allow(clippy::type_complexity)]
     async fn fetch_job_data_static(
         job_id: Uuid,
         db_pool: &sqlx::PgPool,
@@ -810,7 +813,7 @@ impl Reactor {
         .bind(job_id)
         .fetch_optional(db_pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Sql(e))?;
+        .map_err(forge_core::ForgeError::Sql)?;
 
         match row {
             Some((status, progress_percent, progress_message, output, error)) => Ok(JobData {
@@ -829,6 +832,7 @@ impl Reactor {
     }
 
     /// Static version of fetch_workflow_data for use in handle_change.
+    #[allow(clippy::type_complexity)]
     async fn fetch_workflow_data_static(
         workflow_id: Uuid,
         db_pool: &sqlx::PgPool,
@@ -847,7 +851,7 @@ impl Reactor {
         .bind(workflow_id)
         .fetch_optional(db_pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Sql(e))?;
+        .map_err(forge_core::ForgeError::Sql)?;
 
         let (status, current_step, output, error) = match row {
             Some(r) => r,
@@ -870,7 +874,7 @@ impl Reactor {
         .bind(workflow_id)
         .fetch_all(db_pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Sql(e))?;
+        .map_err(forge_core::ForgeError::Sql)?;
 
         let steps = step_rows
             .into_iter()

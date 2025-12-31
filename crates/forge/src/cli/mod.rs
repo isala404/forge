@@ -4,6 +4,7 @@ mod migrate;
 mod new;
 mod run;
 mod runtime_generator;
+mod template;
 
 pub use add::AddCommand;
 pub use generate::GenerateCommand;

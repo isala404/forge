@@ -1,0 +1,52 @@
+use forge::prelude::*;
+
+mod functions;
+mod schema;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    dotenvy::dotenv().ok();
+    tracing_subscriber::fmt().with_env_filter("info").init();
+
+    let config = ForgeConfig::from_file("forge.toml")?;
+    let mut builder = Forge::builder();
+
+    // Queries
+    builder
+        .function_registry_mut()
+        .register_query::<functions::GetUsersQuery>();
+    builder
+        .function_registry_mut()
+        .register_query::<functions::GetUserQuery>();
+    builder
+        .function_registry_mut()
+        .register_query::<functions::GetAppStatsQuery>();
+
+    // Mutations
+    builder
+        .function_registry_mut()
+        .register_mutation::<functions::CreateUserMutation>();
+    builder
+        .function_registry_mut()
+        .register_mutation::<functions::UpdateUserMutation>();
+    builder
+        .function_registry_mut()
+        .register_mutation::<functions::DeleteUserMutation>();
+
+    // Jobs
+    builder
+        .job_registry_mut()
+        .register::<functions::ExportUsersJob>();
+
+    // Crons
+    builder
+        .cron_registry_mut()
+        .register::<functions::HeartbeatStatsCron>();
+
+    // Workflows
+    builder
+        .workflow_registry_mut()
+        .register::<functions::AccountVerificationWorkflow>();
+
+    builder.config(config).build()?.run().await
+}

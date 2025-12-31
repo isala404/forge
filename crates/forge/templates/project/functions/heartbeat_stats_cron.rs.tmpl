@@ -1,0 +1,37 @@
+/// Updates app_stats every minute for frontend live updates
+#[forge::cron("* * * * *")]
+#[timezone = "UTC"]
+pub async fn heartbeat_stats(ctx: &forge::prelude::CronContext) -> forge::prelude::Result<()> {
+    let now = chrono::Utc::now();
+    tracing::debug!(run_id = %ctx.run_id, "Running heartbeat stats cron");
+
+    sqlx::query(
+        "INSERT INTO app_stats (id, stat_name, stat_value, updated_at)
+         VALUES ('heartbeat', 'last_heartbeat', $1, NOW())
+         ON CONFLICT (id) DO UPDATE SET stat_value = $1, updated_at = NOW()",
+    )
+    .bind(now.to_rfc3339())
+    .execute(ctx.db())
+    .await?;
+
+    let user_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
+        .fetch_one(ctx.db())
+        .await?;
+
+    sqlx::query(
+        "INSERT INTO app_stats (id, stat_name, stat_value, updated_at)
+         VALUES ('user_count', 'total_users', $1, NOW())
+         ON CONFLICT (id) DO UPDATE SET stat_value = $1, updated_at = NOW()",
+    )
+    .bind(user_count.0.to_string())
+    .execute(ctx.db())
+    .await?;
+
+    tracing::debug!(
+        run_id = %ctx.run_id,
+        user_count = user_count.0,
+        "Heartbeat stats updated"
+    );
+
+    Ok(())
+}
