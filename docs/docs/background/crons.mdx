@@ -1,7 +1,7 @@
 ---
 sidebar_position: 2
 title: Cron Jobs
-description: Scheduled recurring tasks with timezone support and monitoring
+description: Scheduled recurring tasks with timezone support, catch-up runs, and structured logging
 ---
 
 # Cron Jobs
@@ -53,6 +53,8 @@ The macro generates `DailySummaryCron` which implements the `ForgeCron` trait.
 | `timezone` | `#[timezone = "America/New_York"]` | Timezone for schedule |
 | `timeout` | `#[timeout = "10m"]` | Max execution time |
 | `enabled` | `#[enabled = false]` | Disable without removing |
+| `catch_up` | `#[catch_up]` | Enable catching up missed runs |
+| `catch_up_limit` | `#[catch_up_limit = 5]` | Max number of catch-up runs (default: 10) |
 
 ## Schedule Expressions
 
@@ -83,13 +85,17 @@ FORGE uses standard cron expressions:
 
 ## CronContext
 
-The context provides access to execution info:
+The context provides access to execution info and utilities:
 
 ```rust
 pub struct CronContext {
-    pub cron_name: String,     // Name of this cron
-    pub scheduled_at: DateTime<Utc>,  // When it was scheduled
-    pub started_at: DateTime<Utc>,    // When it started
+    pub run_id: Uuid,                      // Unique run ID
+    pub cron_name: String,                 // Name of this cron
+    pub scheduled_time: DateTime<Utc>,     // When it was scheduled to run
+    pub execution_time: DateTime<Utc>,     // When execution actually started
+    pub timezone: String,                  // Timezone of the cron
+    pub is_catch_up: bool,                 // Whether this is a catch-up run
+    pub log: CronLog,                      // Structured logger
 }
 
 impl CronContext {
@@ -98,8 +104,130 @@ impl CronContext {
 
     // HTTP client for external APIs
     fn http(&self) -> &Client;
+
+    // Get the delay between scheduled and actual execution time
+    fn delay(&self) -> chrono::Duration;
+
+    // Check if execution is late (more than 1 minute delay)
+    fn is_late(&self) -> bool;
 }
 ```
+
+### Execution Timing
+
+Use `delay()` and `is_late()` to monitor execution timing:
+
+```rust
+#[forge::cron]
+#[schedule = "0 * * * *"]
+pub async fn hourly_task(ctx: &CronContext) -> Result<()> {
+    if ctx.is_late() {
+        ctx.log.warn(
+            "Cron running late",
+            serde_json::json!({
+                "delay_seconds": ctx.delay().num_seconds()
+            })
+        );
+    }
+
+    // Your logic here
+    Ok(())
+}
+```
+
+## Catch-Up Runs
+
+When your application is down or a cron cannot run at its scheduled time, you can configure catch-up behavior to process missed runs:
+
+```rust
+#[forge::cron]
+#[schedule = "0 * * * *"]  // Every hour
+#[catch_up]                 // Enable catch-up for missed runs
+#[catch_up_limit = 5]       // Process at most 5 missed runs
+pub async fn hourly_report(ctx: &CronContext) -> Result<()> {
+    if ctx.is_catch_up {
+        ctx.log.info(
+            "Processing missed run",
+            serde_json::json!({
+                "scheduled_for": ctx.scheduled_time.to_rfc3339(),
+                "running_at": ctx.execution_time.to_rfc3339()
+            })
+        );
+    }
+
+    // Generate report for the scheduled time, not current time
+    let report_time = ctx.scheduled_time;
+    generate_hourly_report(ctx.db(), report_time).await?;
+
+    Ok(())
+}
+```
+
+### How Catch-Up Works
+
+1. When a cron with `#[catch_up]` starts, FORGE checks for missed scheduled times
+2. Up to `catch_up_limit` missed runs are queued (default: 10)
+3. Each catch-up run has `ctx.is_catch_up = true`
+4. Use `ctx.scheduled_time` for time-sensitive logic, not `Utc::now()`
+
+### When to Use Catch-Up
+
+| Use Case | Catch-Up | Reason |
+|----------|----------|--------|
+| Billing calculations | Yes | Every period must be processed |
+| Daily reports | Yes | Historical data matters |
+| Health checks | No | Only current state matters |
+| Cache warming | No | Stale cache not useful |
+| Notifications | Maybe | Depends on urgency |
+
+## Structured Logging
+
+`CronLog` provides structured logging with automatic cron context:
+
+```rust
+#[forge::cron]
+#[schedule = "0 * * * *"]
+pub async fn process_queue(ctx: &CronContext) -> Result<()> {
+    let items = fetch_pending_items(ctx.db()).await?;
+
+    ctx.log.info("Processing queue", serde_json::json!({
+        "item_count": items.len()
+    }));
+
+    for item in &items {
+        match process_item(item).await {
+            Ok(_) => {
+                ctx.log.debug("Item processed", serde_json::json!({
+                    "item_id": item.id
+                }));
+            }
+            Err(e) => {
+                ctx.log.error("Item failed", serde_json::json!({
+                    "item_id": item.id,
+                    "error": e.to_string()
+                }));
+            }
+        }
+    }
+
+    ctx.log.info("Queue processing complete", serde_json::json!({
+        "processed": items.len()
+    }));
+
+    Ok(())
+}
+```
+
+### CronLog Methods
+
+| Method | Level | Use Case |
+|--------|-------|----------|
+| `log.debug()` | DEBUG | Detailed diagnostic info |
+| `log.info()` | INFO | Normal operations |
+| `log.warn()` | WARN | Potential issues, handled errors |
+| `log.error()` | ERROR | Failures requiring attention |
+
+All log methods automatically include `cron_name` in the structured output.
 
 ## Timezone Support
 

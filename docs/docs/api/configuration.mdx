@@ -1,0 +1,551 @@
+---
+sidebar_position: 10
+title: Configuration Reference
+description: Complete reference for forge.toml configuration options
+---
+
+# Configuration Reference
+
+FORGE is configured using a `forge.toml` file in your project root. This document covers all configuration options, their types, and default values.
+
+## Environment Variable Substitution
+
+All string values support environment variable substitution using the `${VAR_NAME}` syntax:
+
+```toml
+[database]
+url = "${DATABASE_URL}"
+
+[security]
+secret_key = "${SECRET_KEY}"
+```
+
+Variables must match the pattern `[A-Z_][A-Z0-9_]*`. If a variable is not set, the placeholder remains unchanged.
+
+---
+
+## Minimal Configuration
+
+The only required field is `database.url`:
+
+```toml
+[database]
+url = "postgres://localhost/myapp"
+```
+
+All other sections have sensible defaults.
+
+---
+
+## Complete Configuration Example
+
+```toml
+[project]
+name = "my-forge-app"
+version = "1.0.0"
+
+[database]
+url = "${DATABASE_URL}"
+pool_size = 50
+pool_timeout_secs = 30
+statement_timeout_secs = 30
+replica_urls = []
+read_from_replica = false
+
+[database.pools.default]
+size = 30
+timeout_secs = 30
+
+[database.pools.jobs]
+size = 10
+timeout_secs = 60
+
+[database.pools.observability]
+size = 5
+timeout_secs = 10
+
+[node]
+roles = ["gateway", "function", "worker", "scheduler"]
+worker_capabilities = ["general"]
+
+[gateway]
+port = 8080
+grpc_port = 9000
+max_connections = 10000
+request_timeout_secs = 30
+
+[function]
+max_concurrent = 1000
+timeout_secs = 30
+memory_limit = 536870912  # 512 MiB
+
+[worker]
+max_concurrent_jobs = 50
+job_timeout_secs = 3600
+poll_interval_ms = 100
+
+[cluster]
+name = "default"
+discovery = "postgres"
+heartbeat_interval_secs = 5
+dead_threshold_secs = 15
+seed_nodes = []
+
+[observability]
+metrics_enabled = true
+logging_enabled = true
+tracing_enabled = true
+dashboard_enabled = true
+
+[observability.logging]
+level = "info"
+slow_query_threshold_ms = 100
+json_format = false
+
+[observability.metrics]
+flush_interval_secs = 10
+prometheus_enabled = false
+prometheus_path = "/metrics"
+
+[observability.tracing]
+sample_rate = 1.0
+
+[observability.retention]
+metrics_days = 30
+logs_days = 7
+traces_days = 7
+completed_jobs_days = 7
+
+[security]
+secret_key = "${SECRET_KEY}"
+
+[security.auth]
+jwt_secret = "${JWT_SECRET}"
+session_ttl_secs = 604800  # 7 days
+```
+
+---
+
+## Configuration Sections
+
+### [project]
+
+Project metadata.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `name` | string | `"forge-app"` | Project name, used in logs and cluster identification |
+| `version` | string | `"0.1.0"` | Project version |
+
+```toml
+[project]
+name = "my-app"
+version = "1.0.0"
+```
+
+---
+
+### [database]
+
+Database connection and pool configuration.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `url` | string | **required** | PostgreSQL connection URL |
+| `pool_size` | u32 | `50` | Maximum connections in the main pool |
+| `pool_timeout_secs` | u64 | `30` | Connection checkout timeout in seconds |
+| `statement_timeout_secs` | u64 | `30` | SQL statement timeout in seconds |
+| `replica_urls` | string[] | `[]` | Read replica connection URLs |
+| `read_from_replica` | bool | `false` | Route read queries to replicas |
+
+```toml
+[database]
+url = "postgres://user:pass@localhost:5432/myapp"
+pool_size = 100
+pool_timeout_secs = 30
+statement_timeout_secs = 30
+replica_urls = [
+    "postgres://replica1.internal:5432/myapp",
+    "postgres://replica2.internal:5432/myapp"
+]
+read_from_replica = true
+```
+
+#### [database.pools]
+
+Isolated connection pools for different workloads. Each pool can have its own size and timeout.
+
+| Sub-section | Description |
+|-------------|-------------|
+| `[database.pools.default]` | Pool for queries and mutations |
+| `[database.pools.jobs]` | Pool for background job processing |
+| `[database.pools.observability]` | Pool for metrics/logs/traces writes |
+| `[database.pools.analytics]` | Pool for long-running analytics queries |
+
+Each pool accepts:
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `size` | u32 | (inherited) | Pool size |
+| `timeout_secs` | u64 | `30` | Checkout timeout |
+| `statement_timeout_secs` | u64 | (optional) | Override statement timeout |
+
+```toml
+[database.pools.jobs]
+size = 10
+timeout_secs = 60
+statement_timeout_secs = 3600  # Allow long-running jobs
+```
+
+---
+
+### [node]
+
+Node role and capability configuration.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `roles` | string[] | `["gateway", "function", "worker", "scheduler"]` | Roles this node should assume |
+| `worker_capabilities` | string[] | `["general"]` | Capabilities for job routing |
+
+#### Node Roles
+
+| Role | Description |
+|------|-------------|
+| `gateway` | HTTP/WebSocket server handling client requests |
+| `function` | Function execution (queries, mutations, actions) |
+| `worker` | Background job processing |
+| `scheduler` | Cron scheduling and leader election |
+
+```toml
+# Gateway-only node
+[node]
+roles = ["gateway"]
+
+# Worker node with GPU capability
+[node]
+roles = ["worker"]
+worker_capabilities = ["general", "gpu", "ml"]
+```
+
+---
+
+### [gateway]
+
+HTTP gateway configuration.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `port` | u16 | `8080` | HTTP server port |
+| `grpc_port` | u16 | `9000` | gRPC port for inter-node communication |
+| `max_connections` | usize | `10000` | Maximum concurrent HTTP connections |
+| `request_timeout_secs` | u64 | `30` | Request timeout in seconds |
+
+```toml
+[gateway]
+port = 3000
+grpc_port = 9001
+max_connections = 50000
+request_timeout_secs = 60
+```
+
+---
+
+### [function]
+
+Function execution configuration.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `max_concurrent` | usize | `1000` | Maximum concurrent function executions |
+| `timeout_secs` | u64 | `30` | Default function timeout in seconds |
+| `memory_limit` | usize | `536870912` (512 MiB) | Memory limit per function in bytes |
+
+```toml
+[function]
+max_concurrent = 500
+timeout_secs = 60
+memory_limit = 268435456  # 256 MiB
+```
+
+---
+
+### [worker]
+
+Background job processing configuration.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `max_concurrent_jobs` | usize | `50` | Maximum jobs running simultaneously |
+| `job_timeout_secs` | u64 | `3600` (1 hour) | Default job timeout |
+| `poll_interval_ms` | u64 | `100` | Interval between job queue polls |
+
+```toml
+[worker]
+max_concurrent_jobs = 100
+job_timeout_secs = 7200  # 2 hours
+poll_interval_ms = 50
+```
+
+---
+
+### [cluster]
+
+Cluster coordination configuration.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `name` | string | `"default"` | Cluster name for identification |
+| `discovery` | string | `"postgres"` | Discovery method |
+| `heartbeat_interval_secs` | u64 | `5` | Heartbeat interval in seconds |
+| `dead_threshold_secs` | u64 | `15` | Time before marking node as dead |
+| `seed_nodes` | string[] | `[]` | Static seed nodes (for static discovery) |
+| `dns_name` | string | (optional) | DNS name for DNS discovery |
+
+#### Discovery Methods
+
+| Method | Description |
+|--------|-------------|
+| `postgres` | Query `forge_nodes` table for peer discovery |
+| `dns` | DNS SRV record lookup |
+| `kubernetes` | Kubernetes endpoints API |
+| `static` | Static seed node list |
+
+```toml
+# PostgreSQL discovery (default)
+[cluster]
+name = "production"
+discovery = "postgres"
+heartbeat_interval_secs = 5
+dead_threshold_secs = 15
+
+# Kubernetes discovery
+[cluster]
+name = "production"
+discovery = "kubernetes"
+
+# Static seed nodes
+[cluster]
+name = "production"
+discovery = "static"
+seed_nodes = [
+    "forge-1.internal:9000",
+    "forge-2.internal:9000",
+    "forge-3.internal:9000"
+]
+```
+
+---
+
+### [observability]
+
+Observability feature toggles.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `metrics_enabled` | bool | `true` | Enable metrics collection |
+| `logging_enabled` | bool | `true` | Enable log collection |
+| `tracing_enabled` | bool | `true` | Enable distributed tracing |
+| `dashboard_enabled` | bool | `true` | Enable built-in dashboard at `/_dashboard/` |
+
+```toml
+[observability]
+metrics_enabled = true
+logging_enabled = true
+tracing_enabled = true
+dashboard_enabled = true
+```
+
+#### [observability.logging]
+
+Logging configuration.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `level` | string | `"info"` | Log level: `trace`, `debug`, `info`, `warn`, `error` |
+| `slow_query_threshold_ms` | u64 | `100` | Threshold for logging slow queries |
+| `json_format` | bool | `false` | Output logs in JSON format |
+
+```toml
+[observability.logging]
+level = "debug"
+slow_query_threshold_ms = 50
+json_format = true
+```
+
+#### [observability.metrics]
+
+Metrics collection configuration.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `flush_interval_secs` | u64 | `10` | Interval for flushing metrics to storage |
+| `prometheus_enabled` | bool | `false` | Enable Prometheus metrics endpoint |
+| `prometheus_path` | string | `"/metrics"` | Prometheus endpoint path |
+
+```toml
+[observability.metrics]
+flush_interval_secs = 5
+prometheus_enabled = true
+prometheus_path = "/metrics"
+```
+
+#### [observability.tracing]
+
+Distributed tracing configuration.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `sample_rate` | f64 | `1.0` | Trace sampling rate (0.0 to 1.0) |
+| `otlp_endpoint` | string | (optional) | OTLP exporter endpoint URL |
+
+```toml
+[observability.tracing]
+sample_rate = 0.1  # Sample 10% of traces
+otlp_endpoint = "http://jaeger:4317"
+```
+
+#### [observability.retention]
+
+Data retention configuration.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `metrics_days` | u32 | `30` | Metrics retention in days |
+| `logs_days` | u32 | `7` | Logs retention in days |
+| `traces_days` | u32 | `7` | Traces retention in days |
+| `completed_jobs_days` | u32 | `7` | Completed jobs retention in days |
+
+```toml
+[observability.retention]
+metrics_days = 90
+logs_days = 14
+traces_days = 14
+completed_jobs_days = 30
+```
+
+---
+
+### [security]
+
+Security and authentication configuration.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `secret_key` | string | (optional) | Secret key for signing tokens |
+
+```toml
+[security]
+secret_key = "${SECRET_KEY}"
+```
+
+#### [security.auth]
+
+JWT authentication configuration.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `jwt_secret` | string | (optional) | JWT secret for token validation |
+| `session_ttl_secs` | u64 | `604800` (7 days) | Session token TTL in seconds |
+
+```toml
+[security.auth]
+jwt_secret = "${JWT_SECRET}"
+session_ttl_secs = 86400  # 1 day
+```
+
+---
+
+## Loading Configuration
+
+### From File
+
+```rust
+use forge::prelude::*;
+
+let config = ForgeConfig::from_file("forge.toml")?;
+```
+
+### From String
+
+```rust
+let toml = r#"
+[database]
+url = "postgres://localhost/myapp"
+"#;
+
+let config = ForgeConfig::parse_toml(toml)?;
+```
+
+### Programmatic Defaults
+
+```rust
+let config = ForgeConfig::default_with_database_url("postgres://localhost/myapp");
+```
+
+---
+
+## Environment-Specific Configurations
+
+A common pattern is to have base configuration with environment overrides:
+
+**forge.toml** (base):
+```toml
+[project]
+name = "my-app"
+
+[database]
+url = "${DATABASE_URL}"
+
+[gateway]
+port = 8080
+```
+
+**.env.development**:
+```bash
+DATABASE_URL=postgres://localhost/myapp_dev
+```
+
+**.env.production**:
+```bash
+DATABASE_URL=postgres://prod-host/myapp
+SECRET_KEY=your-production-secret
+JWT_SECRET=your-jwt-secret
+```
+
+Load environment variables before starting your application:
+
+```rust
+dotenvy::dotenv().ok();
+let config = ForgeConfig::from_file("forge.toml")?;
+```
+
+---
+
+## Type Reference
+
+### Duration Values
+
+All timeout and interval fields accept values in seconds (suffixed with `_secs`) or milliseconds (suffixed with `_ms`).
+
+### Size Values
+
+Memory limits are specified in bytes. Common values:
+
+| Size | Bytes |
+|------|-------|
+| 64 MiB | `67108864` |
+| 128 MiB | `134217728` |
+| 256 MiB | `268435456` |
+| 512 MiB | `536870912` |
+| 1 GiB | `1073741824` |
+
+### Log Levels
+
+| Level | Description |
+|-------|-------------|
+| `trace` | Very verbose debugging |
+| `debug` | Debugging information |
+| `info` | General information |
+| `warn` | Warning messages |
+| `error` | Error messages only |

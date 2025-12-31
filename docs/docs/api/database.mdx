@@ -1,0 +1,774 @@
+---
+sidebar_position: 7
+title: Database Reference
+description: Complete reference for FORGE's PostgreSQL schema, system tables, and database patterns
+---
+
+# Database Reference
+
+FORGE uses PostgreSQL as its sole database backend. All system state, job queues, observability data, and coordination are stored in PostgreSQL. This reference documents the internal schema and patterns used by the runtime.
+
+## System Tables Overview
+
+FORGE creates 14 system tables automatically on startup:
+
+| Table | Purpose |
+|-------|---------|
+| `forge_nodes` | Cluster node registry |
+| `forge_leaders` | Leader election state |
+| `forge_jobs` | Background job queue |
+| `forge_cron_runs` | Cron execution history |
+| `forge_workflow_runs` | Workflow run state |
+| `forge_workflow_steps` | Individual workflow step state |
+| `forge_sessions` | WebSocket session tracking |
+| `forge_subscriptions` | Real-time query subscriptions |
+| `forge_metrics` | Time-series metrics |
+| `forge_logs` | Structured log entries |
+| `forge_traces` | Distributed trace spans |
+| `forge_alert_rules` | Alert rule definitions |
+| `forge_alerts` | Active and historical alerts |
+| `forge_migrations` | Migration tracking |
+
+---
+
+## Cluster Tables
+
+### forge_nodes
+
+Tracks all FORGE nodes in the cluster.
+
+```sql
+CREATE TABLE forge_nodes (
+    id UUID PRIMARY KEY,
+    hostname VARCHAR(255) NOT NULL,
+    ip_address VARCHAR(64) NOT NULL,
+    http_port INTEGER NOT NULL,
+    grpc_port INTEGER NOT NULL,
+    roles TEXT[] NOT NULL DEFAULT '{}',
+    worker_capabilities TEXT[] NOT NULL DEFAULT '{}',
+    status VARCHAR(32) NOT NULL DEFAULT 'starting',
+    version VARCHAR(64),
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_heartbeat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID | Unique node identifier |
+| `hostname` | VARCHAR(255) | Node's hostname |
+| `ip_address` | VARCHAR(64) | Node's IP address |
+| `http_port` | INTEGER | HTTP gateway port |
+| `grpc_port` | INTEGER | gRPC port (reserved) |
+| `roles` | TEXT[] | Node roles: `gateway`, `function`, `worker`, `scheduler` |
+| `worker_capabilities` | TEXT[] | Worker capabilities: `general`, `media`, `ml`, etc. |
+| `status` | VARCHAR(32) | Status: `starting`, `running`, `draining`, `stopped` |
+| `version` | VARCHAR(64) | FORGE version |
+| `started_at` | TIMESTAMPTZ | When node started |
+| `last_heartbeat` | TIMESTAMPTZ | Last heartbeat timestamp |
+
+**Heartbeat Pattern**: Nodes update `last_heartbeat` every 5 seconds. Nodes with heartbeats older than 15 seconds are considered dead and removed from the cluster.
+
+### forge_leaders
+
+Tracks leader election state for singleton roles.
+
+```sql
+CREATE TABLE forge_leaders (
+    role VARCHAR(64) PRIMARY KEY,
+    node_id UUID NOT NULL,
+    acquired_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    lease_until TIMESTAMPTZ NOT NULL
+);
+```
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `role` | VARCHAR(64) | Leader role: `scheduler`, `metrics_aggregator`, `log_compactor` |
+| `node_id` | UUID | Node holding the leadership |
+| `acquired_at` | TIMESTAMPTZ | When leadership was acquired |
+| `lease_until` | TIMESTAMPTZ | Lease expiration (must refresh before this) |
+
+**Advisory Lock Pattern**: FORGE uses PostgreSQL advisory locks for leader election:
+
+```sql
+-- Try to acquire leadership
+SELECT pg_try_advisory_lock(0x464F_5247_0001);  -- Lock ID derived from role
+
+-- Release leadership
+SELECT pg_advisory_unlock(0x464F_5247_0001);
+```
+
+---
+
+## Job Queue
+
+### forge_jobs
+
+The main job queue table using the SKIP LOCKED pattern for safe concurrent job claiming.
+
+```sql
+CREATE TABLE forge_jobs (
+    id UUID PRIMARY KEY,
+    job_type VARCHAR(255) NOT NULL,
+    input JSONB NOT NULL DEFAULT '{}',
+    output JSONB,
+    status VARCHAR(32) NOT NULL DEFAULT 'pending',
+    priority INTEGER NOT NULL DEFAULT 50,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 3,
+    last_error TEXT,
+    progress_percent INTEGER DEFAULT 0,
+    progress_message TEXT,
+    worker_capability VARCHAR(255),
+    worker_id UUID,
+    idempotency_key VARCHAR(255),
+    scheduled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    claimed_at TIMESTAMPTZ,
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    failed_at TIMESTAMPTZ,
+    last_heartbeat TIMESTAMPTZ
+);
+```
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID | Unique job identifier |
+| `job_type` | VARCHAR(255) | Job handler name (e.g., `send_email`) |
+| `input` | JSONB | Job input arguments |
+| `output` | JSONB | Job result (when completed) |
+| `status` | VARCHAR(32) | Current status (see below) |
+| `priority` | INTEGER | Priority 0-100 (higher = more urgent) |
+| `attempts` | INTEGER | Current attempt number |
+| `max_attempts` | INTEGER | Maximum retry attempts |
+| `last_error` | TEXT | Error message from last failure |
+| `progress_percent` | INTEGER | Progress percentage 0-100 |
+| `progress_message` | TEXT | Human-readable progress message |
+| `worker_capability` | VARCHAR(255) | Required worker capability |
+| `worker_id` | UUID | Worker that claimed this job |
+| `idempotency_key` | VARCHAR(255) | Deduplication key |
+| `scheduled_at` | TIMESTAMPTZ | When job should run |
+| `created_at` | TIMESTAMPTZ | When job was created |
+| `claimed_at` | TIMESTAMPTZ | When worker claimed job |
+| `started_at` | TIMESTAMPTZ | When execution started |
+| `completed_at` | TIMESTAMPTZ | When job completed |
+| `failed_at` | TIMESTAMPTZ | When job moved to dead letter |
+| `last_heartbeat` | TIMESTAMPTZ | Last heartbeat from worker |
+
+**Job Status Values**:
+
+| Status | Description |
+|--------|-------------|
+| `pending` | Waiting to be claimed |
+| `claimed` | Claimed by a worker |
+| `running` | Currently executing |
+| `completed` | Finished successfully |
+| `failed` | Failed, may be retried |
+| `dead_letter` | Exhausted all retries |
+
+**Priority Levels**:
+
+| Priority | Value | Use Case |
+|----------|-------|----------|
+| Critical | 100 | Payment processing, alerts |
+| High | 75 | User-facing operations |
+| Normal | 50 | Default priority |
+| Low | 25 | Reports, analytics |
+| Background | 0 | Cleanup, maintenance |
+
+### Indexes
+
+```sql
+-- Fast lookup of claimable jobs (most important for performance)
+CREATE INDEX idx_forge_jobs_status_scheduled
+    ON forge_jobs(status, scheduled_at)
+    WHERE status = 'pending';
+
+-- Idempotency key lookup for deduplication
+CREATE INDEX idx_forge_jobs_idempotency
+    ON forge_jobs(idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
+```
+
+### SKIP LOCKED Pattern
+
+FORGE uses PostgreSQL's `SKIP LOCKED` feature to safely claim jobs without blocking or double-processing:
+
+```sql
+WITH claimable AS (
+    SELECT id
+    FROM forge_jobs
+    WHERE status = 'pending'
+      AND scheduled_at <= NOW()
+      AND (worker_capability = ANY($2) OR worker_capability IS NULL)
+    ORDER BY priority DESC, scheduled_at ASC
+    LIMIT $3
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE forge_jobs
+SET
+    status = 'claimed',
+    worker_id = $1,
+    claimed_at = NOW(),
+    attempts = attempts + 1
+WHERE id IN (SELECT id FROM claimable)
+RETURNING *;
+```
+
+**How it works**:
+
+1. `FOR UPDATE` locks selected rows for the transaction
+2. `SKIP LOCKED` skips any rows already locked by other workers
+3. This ensures each job is claimed by exactly one worker
+4. No race conditions, no duplicate processing
+5. Workers can poll concurrently without contention
+
+---
+
+## Cron Tables
+
+### forge_cron_runs
+
+Tracks cron job execution history.
+
+```sql
+CREATE TABLE forge_cron_runs (
+    id UUID PRIMARY KEY,
+    cron_name VARCHAR(255) NOT NULL,
+    scheduled_time TIMESTAMPTZ NOT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'pending',
+    node_id UUID,
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    error TEXT,
+    UNIQUE(cron_name, scheduled_time)
+);
+
+CREATE INDEX idx_forge_cron_runs_name_time
+    ON forge_cron_runs(cron_name, scheduled_time DESC);
+```
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID | Unique run identifier |
+| `cron_name` | VARCHAR(255) | Cron job name |
+| `scheduled_time` | TIMESTAMPTZ | When the cron was scheduled to run |
+| `status` | VARCHAR(32) | Status: `pending`, `running`, `completed`, `failed` |
+| `node_id` | UUID | Node that executed the cron |
+| `started_at` | TIMESTAMPTZ | When execution started |
+| `completed_at` | TIMESTAMPTZ | When execution completed |
+| `error` | TEXT | Error message if failed |
+
+**Exactly-Once Guarantee**: The `UNIQUE(cron_name, scheduled_time)` constraint ensures each cron tick executes exactly once, even with multiple nodes racing to claim it.
+
+---
+
+## Workflow Tables
+
+### forge_workflow_runs
+
+Tracks workflow execution state.
+
+```sql
+CREATE TABLE forge_workflow_runs (
+    id UUID PRIMARY KEY,
+    workflow_name VARCHAR(255) NOT NULL,
+    version VARCHAR(64),
+    input JSONB NOT NULL DEFAULT '{}',
+    output JSONB,
+    status VARCHAR(32) NOT NULL DEFAULT 'created',
+    current_step VARCHAR(255),
+    step_results JSONB DEFAULT '{}',
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ,
+    error TEXT,
+    trace_id VARCHAR(64)
+);
+
+CREATE INDEX idx_forge_workflow_runs_status
+    ON forge_workflow_runs(status);
+```
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID | Unique workflow run identifier |
+| `workflow_name` | VARCHAR(255) | Workflow definition name |
+| `version` | VARCHAR(64) | Workflow version |
+| `input` | JSONB | Workflow input |
+| `output` | JSONB | Workflow output (when completed) |
+| `status` | VARCHAR(32) | Current status (see below) |
+| `current_step` | VARCHAR(255) | Currently executing step |
+| `step_results` | JSONB | Results from completed steps |
+| `started_at` | TIMESTAMPTZ | When workflow started |
+| `completed_at` | TIMESTAMPTZ | When workflow completed |
+| `error` | TEXT | Error message if failed |
+| `trace_id` | VARCHAR(64) | Distributed trace ID |
+
+**Workflow Status Values**:
+
+| Status | Description |
+|--------|-------------|
+| `created` | Workflow created, not yet started |
+| `running` | Currently executing steps |
+| `waiting` | Waiting for external event |
+| `completed` | All steps finished successfully |
+| `compensating` | Running compensation (rollback) |
+| `compensated` | Compensation complete |
+| `failed` | Failed without compensation |
+
+### forge_workflow_steps
+
+Tracks individual step execution within a workflow.
+
+```sql
+CREATE TABLE forge_workflow_steps (
+    id UUID PRIMARY KEY,
+    workflow_run_id UUID NOT NULL REFERENCES forge_workflow_runs(id) ON DELETE CASCADE,
+    step_name VARCHAR(255) NOT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'pending',
+    input JSONB,
+    result JSONB,
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    error TEXT,
+    UNIQUE(workflow_run_id, step_name)
+);
+```
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID | Unique step identifier |
+| `workflow_run_id` | UUID | Parent workflow run |
+| `step_name` | VARCHAR(255) | Step name |
+| `status` | VARCHAR(32) | Status: `pending`, `running`, `completed`, `failed`, `compensated`, `skipped` |
+| `input` | JSONB | Step input |
+| `result` | JSONB | Step result |
+| `started_at` | TIMESTAMPTZ | When step started |
+| `completed_at` | TIMESTAMPTZ | When step completed |
+| `error` | TEXT | Error message if failed |
+
+**CASCADE Delete**: Steps are automatically deleted when their parent workflow is deleted.
+
+---
+
+## Realtime Tables
+
+### forge_sessions
+
+Tracks active WebSocket connections.
+
+```sql
+CREATE TABLE forge_sessions (
+    id UUID PRIMARY KEY,
+    node_id UUID NOT NULL,
+    user_id VARCHAR(255),
+    connected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_activity TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    status VARCHAR(32) NOT NULL DEFAULT 'connected'
+);
+
+CREATE INDEX idx_forge_sessions_node
+    ON forge_sessions(node_id);
+```
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID | Session identifier |
+| `node_id` | UUID | Node handling this connection |
+| `user_id` | VARCHAR(255) | Authenticated user ID (optional) |
+| `connected_at` | TIMESTAMPTZ | When connection was established |
+| `last_activity` | TIMESTAMPTZ | Last activity timestamp |
+| `status` | VARCHAR(32) | Status: `connecting`, `connected`, `reconnecting`, `disconnected` |
+
+### forge_subscriptions
+
+Tracks active real-time subscriptions.
+
+```sql
+CREATE TABLE forge_subscriptions (
+    id UUID PRIMARY KEY,
+    session_id UUID NOT NULL REFERENCES forge_sessions(id) ON DELETE CASCADE,
+    query_name VARCHAR(255) NOT NULL,
+    query_hash VARCHAR(64) NOT NULL,
+    args JSONB DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_forge_subscriptions_session
+    ON forge_subscriptions(session_id);
+
+CREATE INDEX idx_forge_subscriptions_query_hash
+    ON forge_subscriptions(query_hash);
+```
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID | Subscription identifier |
+| `session_id` | UUID | Parent WebSocket session |
+| `query_name` | VARCHAR(255) | Subscribed query name |
+| `query_hash` | VARCHAR(64) | Hash of query + args for deduplication |
+| `args` | JSONB | Query arguments |
+| `created_at` | TIMESTAMPTZ | When subscription was created |
+
+---
+
+## Observability Tables
+
+### forge_metrics
+
+Time-series metrics storage.
+
+```sql
+CREATE TABLE forge_metrics (
+    id BIGSERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    kind VARCHAR(32) NOT NULL,
+    value DOUBLE PRECISION NOT NULL,
+    labels JSONB DEFAULT '{}',
+    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_forge_metrics_name_time
+    ON forge_metrics(name, timestamp DESC);
+```
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | BIGSERIAL | Auto-incrementing ID |
+| `name` | VARCHAR(255) | Metric name (e.g., `http_requests_total`) |
+| `kind` | VARCHAR(32) | Metric type: `counter`, `gauge`, `histogram`, `summary` |
+| `value` | DOUBLE PRECISION | Metric value |
+| `labels` | JSONB | Metric labels |
+| `timestamp` | TIMESTAMPTZ | When metric was recorded |
+
+### forge_logs
+
+Structured log storage.
+
+```sql
+CREATE TABLE forge_logs (
+    id BIGSERIAL PRIMARY KEY,
+    level VARCHAR(16) NOT NULL,
+    message TEXT NOT NULL,
+    target VARCHAR(255),
+    fields JSONB DEFAULT '{}',
+    trace_id VARCHAR(64),
+    span_id VARCHAR(32),
+    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_forge_logs_level_time
+    ON forge_logs(level, timestamp DESC);
+
+CREATE INDEX idx_forge_logs_trace_id
+    ON forge_logs(trace_id)
+    WHERE trace_id IS NOT NULL;
+```
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | BIGSERIAL | Auto-incrementing ID |
+| `level` | VARCHAR(16) | Log level: `error`, `warn`, `info`, `debug`, `trace` |
+| `message` | TEXT | Log message |
+| `target` | VARCHAR(255) | Log target/source |
+| `fields` | JSONB | Structured fields |
+| `trace_id` | VARCHAR(64) | Trace ID for correlation |
+| `span_id` | VARCHAR(32) | Span ID for correlation |
+| `timestamp` | TIMESTAMPTZ | When log was recorded |
+
+### forge_traces
+
+Distributed trace spans.
+
+```sql
+CREATE TABLE forge_traces (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    trace_id VARCHAR(64) NOT NULL,
+    span_id VARCHAR(32) NOT NULL,
+    parent_span_id VARCHAR(32),
+    name VARCHAR(255) NOT NULL,
+    kind VARCHAR(32) NOT NULL DEFAULT 'internal',
+    status VARCHAR(32) NOT NULL DEFAULT 'unset',
+    attributes JSONB DEFAULT '{}',
+    events JSONB DEFAULT '[]',
+    started_at TIMESTAMPTZ NOT NULL,
+    ended_at TIMESTAMPTZ,
+    duration_ms INTEGER
+);
+
+CREATE INDEX idx_forge_traces_trace_id
+    ON forge_traces(trace_id);
+
+CREATE INDEX idx_forge_traces_started_at
+    ON forge_traces(started_at DESC);
+```
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID | Span identifier |
+| `trace_id` | VARCHAR(64) | W3C trace ID (32 hex chars) |
+| `span_id` | VARCHAR(32) | Span ID (16 hex chars) |
+| `parent_span_id` | VARCHAR(32) | Parent span ID |
+| `name` | VARCHAR(255) | Span name |
+| `kind` | VARCHAR(32) | Kind: `internal`, `server`, `client`, `producer`, `consumer` |
+| `status` | VARCHAR(32) | Status: `unset`, `ok`, `error` |
+| `attributes` | JSONB | Span attributes |
+| `events` | JSONB | Span events |
+| `started_at` | TIMESTAMPTZ | When span started |
+| `ended_at` | TIMESTAMPTZ | When span ended |
+| `duration_ms` | INTEGER | Duration in milliseconds |
+
+---
+
+## Alert Tables
+
+### forge_alert_rules
+
+Alert rule definitions.
+
+```sql
+CREATE TABLE forge_alert_rules (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(255) NOT NULL UNIQUE,
+    description TEXT,
+    metric_name VARCHAR(255) NOT NULL,
+    condition VARCHAR(32) NOT NULL,
+    threshold DOUBLE PRECISION NOT NULL,
+    duration_seconds INTEGER NOT NULL DEFAULT 0,
+    severity VARCHAR(32) NOT NULL DEFAULT 'warning',
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    labels JSONB DEFAULT '{}',
+    notification_channels TEXT[] DEFAULT '{}',
+    cooldown_seconds INTEGER NOT NULL DEFAULT 300,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_forge_alert_rules_enabled
+    ON forge_alert_rules(enabled)
+    WHERE enabled = TRUE;
+```
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID | Rule identifier |
+| `name` | VARCHAR(255) | Rule name (unique) |
+| `description` | TEXT | Rule description |
+| `metric_name` | VARCHAR(255) | Metric to monitor |
+| `condition` | VARCHAR(32) | Condition: `gt`, `gte`, `lt`, `lte`, `eq`, `ne` |
+| `threshold` | DOUBLE PRECISION | Threshold value |
+| `duration_seconds` | INTEGER | Condition must be true for this long |
+| `severity` | VARCHAR(32) | Severity: `info`, `warning`, `critical` |
+| `enabled` | BOOLEAN | Whether rule is active |
+| `labels` | JSONB | Labels to match on metric |
+| `notification_channels` | TEXT[] | Channels: `email`, `slack`, `webhook` |
+| `cooldown_seconds` | INTEGER | Wait before re-alerting |
+| `created_at` | TIMESTAMPTZ | When rule was created |
+| `updated_at` | TIMESTAMPTZ | When rule was last updated |
+
+### forge_alerts
+
+Active and historical alerts.
+
+```sql
+CREATE TABLE forge_alerts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    rule_id UUID NOT NULL REFERENCES forge_alert_rules(id) ON DELETE CASCADE,
+    rule_name VARCHAR(255) NOT NULL,
+    metric_value DOUBLE PRECISION NOT NULL,
+    threshold DOUBLE PRECISION NOT NULL,
+    severity VARCHAR(32) NOT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'firing',
+    triggered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    resolved_at TIMESTAMPTZ,
+    acknowledged_at TIMESTAMPTZ,
+    acknowledged_by VARCHAR(255),
+    labels JSONB DEFAULT '{}',
+    annotations JSONB DEFAULT '{}'
+);
+
+CREATE INDEX idx_forge_alerts_status
+    ON forge_alerts(status)
+    WHERE status = 'firing';
+
+CREATE INDEX idx_forge_alerts_rule_id
+    ON forge_alerts(rule_id);
+
+CREATE INDEX idx_forge_alerts_triggered_at
+    ON forge_alerts(triggered_at DESC);
+```
+
+---
+
+## Migration Tracking
+
+### forge_migrations
+
+Tracks which migrations have been applied.
+
+```sql
+CREATE TABLE forge_migrations (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) UNIQUE NOT NULL,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    down_sql TEXT
+);
+```
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | SERIAL | Auto-incrementing ID |
+| `name` | VARCHAR(255) | Migration name (e.g., `0001_create_users`) |
+| `applied_at` | TIMESTAMPTZ | When migration was applied |
+| `down_sql` | TEXT | SQL for rollback (stored for rollback execution) |
+
+**Advisory Lock for Migrations**: FORGE uses advisory lock `0x464F524745` ("FORGE" in hex) to ensure only one node runs migrations at a time during rolling deploys:
+
+```sql
+-- Acquire exclusive lock before running migrations
+SELECT pg_advisory_lock(0x464F524745);
+
+-- Run migrations...
+
+-- Release lock
+SELECT pg_advisory_unlock(0x464F524745);
+```
+
+---
+
+## Reactivity Functions
+
+FORGE provides helper functions for enabling real-time updates on your tables.
+
+### forge_notify_change()
+
+Trigger function that sends notifications when rows change.
+
+```sql
+CREATE OR REPLACE FUNCTION forge_notify_change() RETURNS TRIGGER AS $$
+DECLARE
+    row_id TEXT;
+    payload TEXT;
+BEGIN
+    -- Get the row ID (assumes 'id' column exists)
+    IF TG_OP = 'DELETE' THEN
+        row_id := COALESCE(OLD.id::TEXT, '');
+    ELSE
+        row_id := COALESCE(NEW.id::TEXT, '');
+    END IF;
+
+    -- Build payload: table:operation:row_id
+    payload := TG_TABLE_NAME || ':' || TG_OP || ':' || row_id;
+
+    -- Send notification
+    PERFORM pg_notify('forge_changes', payload);
+
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    ELSE
+        RETURN NEW;
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+```
+
+**Payload Format**: `table_name:operation:row_id`
+
+Examples:
+- `users:INSERT:550e8400-e29b-41d4-a716-446655440000`
+- `users:UPDATE:550e8400-e29b-41d4-a716-446655440000`
+- `users:DELETE:550e8400-e29b-41d4-a716-446655440000`
+
+### forge_enable_reactivity(table_name)
+
+Enables real-time updates for a table.
+
+```sql
+-- Enable reactivity on your users table
+SELECT forge_enable_reactivity('users');
+```
+
+This creates a trigger that fires `forge_notify_change()` on INSERT, UPDATE, or DELETE.
+
+### forge_disable_reactivity(table_name)
+
+Disables real-time updates for a table.
+
+```sql
+-- Disable reactivity on users table
+SELECT forge_disable_reactivity('users');
+```
+
+### Usage in Migrations
+
+```sql
+-- @up
+CREATE TABLE users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email VARCHAR(255) NOT NULL UNIQUE,
+    name VARCHAR(255)
+);
+
+-- Enable real-time updates
+SELECT forge_enable_reactivity('users');
+
+-- @down
+SELECT forge_disable_reactivity('users');
+DROP TABLE users;
+```
+
+---
+
+## Best Practices
+
+### Connection Pool Sizing
+
+For a FORGE node handling mixed workloads:
+
+```toml
+[database]
+pool_size = 20        # Connections per node
+pool_timeout = 30     # Seconds to wait for connection
+```
+
+Rule of thumb: `pool_size = (CPU cores * 2) + effective_spindle_count`
+
+### Index Strategy
+
+FORGE creates essential indexes automatically. For your tables:
+
+```sql
+-- Primary key (automatic)
+id UUID PRIMARY KEY
+
+-- Frequently filtered columns
+CREATE INDEX idx_users_email ON users(email);
+
+-- Composite indexes for common queries
+CREATE INDEX idx_orders_user_status ON orders(user_id, status);
+
+-- Partial indexes for status columns
+CREATE INDEX idx_orders_pending ON orders(created_at)
+    WHERE status = 'pending';
+```
+
+### Vacuuming
+
+For high-churn tables like jobs, configure aggressive autovacuum:
+
+```sql
+ALTER TABLE forge_jobs SET (
+    autovacuum_vacuum_scale_factor = 0.01,
+    autovacuum_analyze_scale_factor = 0.005
+);
+```
+
+---
+
+## Related Documentation
+
+- [Migration System](/cli#migrate) - CLI commands for migrations
+- [Job System](/background/jobs) - Background job patterns
+- [Reactivity](/concepts/realtime) - Real-time subscriptions

@@ -248,6 +248,249 @@ CREATE TRIGGER tasks_notify_changes
     FOR EACH ROW EXECUTE FUNCTION forge_notify_change();
 ```
 
+## Architecture Deep Dive
+
+This section explains the internal components that power FORGE's reactivity system.
+
+### The Reactivity Pipeline
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         PostgreSQL Database                              │
+│                                                                          │
+│  INSERT/UPDATE/DELETE ──► Trigger ──► NOTIFY 'forge_changes'            │
+│                          (forge_notify_change)                          │
+└───────────────────────────────────┬─────────────────────────────────────┘
+                                    │
+                                    ▼
+┌───────────────────────────────────────────────────────────────────────┐
+│                         ChangeListener                                 │
+│                                                                        │
+│  • PostgreSQL PgListener on 'forge_changes' channel                   │
+│  • Parses notification payload: "table:operation:row_id:columns"      │
+│  • Converts to Change struct and broadcasts to Reactor                │
+└───────────────────────────────────┬───────────────────────────────────┘
+                                    │
+                                    ▼
+┌───────────────────────────────────────────────────────────────────────┐
+│                      InvalidationEngine                                │
+│                                                                        │
+│  • Receives Change events                                              │
+│  • Finds affected subscriptions via SubscriptionManager               │
+│  • Debounces rapid changes (50ms window, 200ms max wait)              │
+│  • Coalesces multiple changes to same table                           │
+│  • Returns list of SubscriptionIds to invalidate                      │
+└───────────────────────────────────┬───────────────────────────────────┘
+                                    │
+                                    ▼
+┌───────────────────────────────────────────────────────────────────────┐
+│                            Reactor                                     │
+│                                                                        │
+│  • Main orchestrator connecting all components                        │
+│  • Re-executes queries for invalidated subscriptions                  │
+│  • Compares result hash to detect actual data changes                 │
+│  • Pushes updates only when data differs                              │
+└───────────────────────────────────┬───────────────────────────────────┘
+                                    │
+                                    ▼
+┌───────────────────────────────────────────────────────────────────────┐
+│                        WebSocketServer                                 │
+│                                                                        │
+│  • Manages client connections and subscriptions                       │
+│  • Routes data updates to correct sessions                           │
+│  • Handles subscribe/unsubscribe messages                             │
+└───────────────────────────────────┬───────────────────────────────────┘
+                                    │
+                                    ▼
+                          Your Svelte Component
+```
+
+### Core Types
+
+#### ReadSet
+
+Tracks which tables (and optionally rows) a query accesses. Used to determine if a change should invalidate a subscription.
+
+```rust
+pub struct ReadSet {
+    /// Tables accessed by the query
+    pub tables: HashSet<String>,
+    /// Specific rows read per table (for row-level tracking)
+    pub rows: HashMap<String, HashSet<Uuid>>,
+    /// Tracking granularity
+    pub mode: TrackingMode,
+}
+```
+
+#### TrackingMode
+
+Controls invalidation granularity:
+
+| Mode | Description | Status |
+|------|-------------|--------|
+| `Table` | Invalidate when any row in the table changes | Fully implemented |
+| `Row` | Invalidate only when specific read rows change | Defined, not active |
+| `Adaptive` | Auto-select based on query characteristics | Planned |
+
+Currently, FORGE uses table-level tracking. This means if your query reads from the `tasks` table, any INSERT/UPDATE/DELETE on `tasks` will trigger a re-query.
+
+#### Delta&lt;T&gt;
+
+Represents incremental changes for subscription updates:
+
+```rust
+pub struct Delta<T> {
+    /// New items added
+    pub added: Vec<T>,
+    /// IDs of removed items
+    pub removed: Vec<String>,
+    /// Updated items
+    pub updated: Vec<T>,
+}
+```
+
+While the `Delta<T>` struct exists, FORGE currently sends full query results rather than incremental deltas. This may change in future versions.
+
+### Component Details
+
+#### ChangeListener
+
+Listens for PostgreSQL NOTIFY events on the `forge_changes` channel.
+
+```rust
+pub struct ChangeListener {
+    pool: sqlx::PgPool,
+    config: ListenerConfig,  // channel name, buffer size
+    change_tx: broadcast::Sender<Change>,
+}
+```
+
+**Notification format:** `table:operation:row_id:columns`
+
+Examples:
+- `tasks:INSERT:550e8400-e29b-41d4-a716-446655440000`
+- `tasks:UPDATE:550e8400-e29b-41d4-a716-446655440000:title,completed`
+- `tasks:DELETE:550e8400-e29b-41d4-a716-446655440000`
+
+#### InvalidationEngine
+
+Determines which subscriptions need re-execution when data changes.
+
+```rust
+pub struct InvalidationConfig {
+    /// Debounce window (default: 50ms)
+    pub debounce_ms: u64,
+    /// Max wait before forcing flush (default: 200ms)
+    pub max_debounce_ms: u64,
+    /// Group changes by table (default: true)
+    pub coalesce_by_table: bool,
+    /// Force flush threshold (default: 1000)
+    pub max_buffer_size: usize,
+}
+```
+
+The debounce logic prevents overwhelming the system during bulk operations:
+- Multiple rapid changes to the same table are coalesced
+- Subscriptions are invalidated after the debounce window closes
+- Maximum wait prevents starvation during continuous writes
+
+#### Reactor
+
+The central coordinator that wires everything together:
+
+```rust
+pub struct Reactor {
+    db_pool: sqlx::PgPool,
+    registry: FunctionRegistry,
+    subscription_manager: Arc<SubscriptionManager>,
+    ws_server: Arc<WebSocketServer>,
+    change_listener: Arc<ChangeListener>,
+    invalidation_engine: Arc<InvalidationEngine>,
+    active_subscriptions: Arc<RwLock<HashMap<SubscriptionId, ActiveSubscription>>>,
+}
+```
+
+**Key responsibilities:**
+1. Register/unregister WebSocket sessions
+2. Handle subscribe/unsubscribe requests
+3. Execute queries and track their read sets
+4. Process changes and push updates
+
+**Read set extraction:** The Reactor infers which tables a query touches from the query name:
+- `get_users` → tracks `users` table
+- `list_tasks` → tracks `tasks` table
+- `find_projects` → tracks `projects` table
+- `fetch_orders` → tracks `orders` table
+
+### Enabling and Disabling Reactivity
+
+#### forge_enable_reactivity(table_name)
+
+Creates a trigger on the specified table that fires NOTIFY on changes:
+
+```sql
+SELECT forge_enable_reactivity('tasks');
+-- Creates: tasks_forge_notify trigger
+```
+
+What it does internally:
+1. Creates a trigger named `{table}_forge_notify`
+2. Trigger fires AFTER INSERT, UPDATE, or DELETE
+3. Calls `forge_notify_change()` function
+4. Function sends NOTIFY with change details
+
+#### forge_disable_reactivity(table_name)
+
+Removes the trigger to stop change notifications:
+
+```sql
+SELECT forge_disable_reactivity('tasks');
+-- Drops: tasks_forge_notify trigger
+```
+
+#### forge_notify_change()
+
+The trigger function that constructs and sends notifications:
+
+```sql
+CREATE OR REPLACE FUNCTION forge_notify_change()
+RETURNS TRIGGER AS $$
+BEGIN
+    PERFORM pg_notify('forge_changes',
+        TG_TABLE_NAME || ':' || TG_OP || ':' ||
+        COALESCE(NEW.id::text, OLD.id::text, '')
+    );
+    RETURN COALESCE(NEW, OLD);
+END;
+$$ LANGUAGE plpgsql;
+```
+
+### Subscription Lifecycle
+
+1. **Client subscribes:** WebSocket message `{ type: "subscribe", query: "list_tasks", args: {} }`
+2. **Reactor processes:** Creates `SubscriptionInfo`, executes query, stores read set
+3. **Initial data sent:** `{ type: "data", subscriptionId: "...", data: [...] }`
+4. **Change occurs:** INSERT/UPDATE/DELETE on tasks table
+5. **Trigger fires:** NOTIFY sent to `forge_changes` channel
+6. **ChangeListener receives:** Parses notification, broadcasts Change
+7. **InvalidationEngine processes:** Finds subscriptions watching `tasks` table
+8. **Reactor re-executes:** Runs query again, compares result hash
+9. **Update pushed (if changed):** `{ type: "data", subscriptionId: "...", data: [...] }`
+
+### Implementation Notes
+
+**Current limitations:**
+- Table-level tracking only (row-level tracking is defined but not active)
+- Full result replacement (no delta updates yet)
+- Read set inference from query names (explicit tracking attributes planned)
+- Debounce timings are hardcoded (configuration planned)
+
+**What is implemented:**
+- Full ChangeListener → InvalidationEngine → Reactor → WebSocket pipeline
+- Debounce and coalesce logic for high-frequency changes
+- Result hash comparison to avoid redundant updates
+- Job and workflow subscriptions (bonus feature beyond queries)
+
 ## Performance Tips
 
 ### 1. Subscribe to Specific Data

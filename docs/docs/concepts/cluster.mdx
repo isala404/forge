@@ -1,0 +1,480 @@
+---
+sidebar_position: 5
+title: Clustering
+description: Multi-node deployment with leader election, heartbeats, and graceful shutdown
+---
+
+# Clustering
+
+FORGE can run as a cluster of multiple nodes sharing a single PostgreSQL database. All coordination happens through PostgreSQL - no Redis, Kafka, or other services required.
+
+## Architecture Overview
+
+```
+                    Load Balancer
+                         |
+         +---------------+---------------+
+         v               v               v
+    +---------+    +---------+    +---------+
+    | Node 1  |    | Node 2  |    | Node 3  |
+    | gateway |    | gateway |    | worker  |
+    | worker  |    | function|    | scheduler|
+    +---------+    +---------+    +---------+
+         |               |               |
+         +---------------+---------------+
+                         |
+                         v
+                    PostgreSQL
+                         |
+    +--------------------+--------------------+
+    |        |           |          |         |
+ forge_nodes  forge_leaders  forge_jobs  forge_*
+```
+
+Each node:
+- Registers itself in `forge_nodes`
+- Sends heartbeats to prove it's alive
+- Competes for leader roles via advisory locks
+- Processes work based on its assigned roles
+
+## Node Roles
+
+Each node can have one or more roles:
+
+| Role | Description |
+|------|-------------|
+| `gateway` | HTTP/WebSocket server for client requests |
+| `function` | Executes queries, mutations, and actions |
+| `worker` | Processes background jobs from the queue |
+| `scheduler` | Runs cron jobs (leader-only) |
+
+By default, a single node runs all roles. In production, you might specialize:
+
+```rust
+// Gateway-only node
+let node = NodeInfo::new_local(
+    hostname,
+    ip,
+    8080,
+    9000,
+    vec![NodeRole::Gateway, NodeRole::Function],
+    vec![],
+    version,
+);
+
+// Worker-only node
+let node = NodeInfo::new_local(
+    hostname,
+    ip,
+    8080,
+    9000,
+    vec![NodeRole::Worker],
+    vec!["gpu".to_string(), "high-memory".to_string()],
+    version,
+);
+```
+
+## Node Discovery
+
+Nodes discover each other through PostgreSQL. When a node starts:
+
+```
+1. Generate unique NodeId (UUID)
+2. INSERT into forge_nodes
+3. Query forge_nodes for other active nodes
+```
+
+### Registration
+
+```rust
+// NodeRegistry handles all registration
+let registry = NodeRegistry::new(pool, local_node);
+
+// Register this node
+registry.register().await?;
+
+// Find other active nodes
+let peers = registry.get_active_nodes().await?;
+```
+
+### The `forge_nodes` Table
+
+```sql
+CREATE TABLE forge_nodes (
+    id UUID PRIMARY KEY,
+    hostname VARCHAR(255) NOT NULL,
+    ip_address VARCHAR(45) NOT NULL,
+    http_port INTEGER NOT NULL,
+    grpc_port INTEGER NOT NULL,
+    roles TEXT[] NOT NULL,
+    worker_capabilities TEXT[] NOT NULL DEFAULT '{}',
+    status VARCHAR(32) NOT NULL DEFAULT 'joining',
+    version VARCHAR(50) NOT NULL,
+    started_at TIMESTAMPTZ NOT NULL,
+    last_heartbeat TIMESTAMPTZ NOT NULL,
+    current_connections INTEGER NOT NULL DEFAULT 0,
+    current_jobs INTEGER NOT NULL DEFAULT 0,
+    cpu_usage REAL NOT NULL DEFAULT 0,
+    memory_usage REAL NOT NULL DEFAULT 0
+);
+```
+
+## Node Status Lifecycle
+
+```
+JOINING -----> ACTIVE -----> DRAINING -----> (deleted)
+                  |
+                  +-----> DEAD
+```
+
+| Status | Description |
+|--------|-------------|
+| `joining` | Node is starting up |
+| `active` | Node is healthy and accepting work |
+| `draining` | Node is shutting down gracefully |
+| `dead` | Node stopped sending heartbeats |
+
+## Heartbeat System
+
+Nodes send heartbeats to prove they're alive:
+
+```
+Every 5 seconds:
+    UPDATE forge_nodes
+    SET last_heartbeat = NOW()
+    WHERE id = $node_id
+```
+
+### Configuration
+
+```rust
+let config = HeartbeatConfig {
+    interval: Duration::from_secs(5),       // How often to heartbeat
+    dead_threshold: Duration::from_secs(15), // When to mark nodes dead
+    mark_dead_nodes: true,                   // Auto-mark dead nodes
+};
+
+let heartbeat = HeartbeatLoop::new(pool, node_id, config);
+heartbeat.run().await;
+```
+
+### Dead Node Detection
+
+The heartbeat loop also detects dead nodes:
+
+```sql
+UPDATE forge_nodes
+SET status = 'dead'
+WHERE status = 'active'
+  AND last_heartbeat < NOW() - INTERVAL '15 seconds'
+```
+
+Nodes marked as dead:
+- Are no longer considered for work distribution
+- Can be cleaned up after a retention period
+- Will be replaced by standby nodes for leader roles
+
+## Leader Election
+
+Some tasks must run on only one node. FORGE uses PostgreSQL advisory locks for leader election.
+
+### Leader Roles
+
+| Role | Lock ID | Description |
+|------|---------|-------------|
+| `Scheduler` | `0x464F52470001` | Runs cron jobs, assigns work |
+| `MetricsAggregator` | `0x464F52470002` | Aggregates metrics |
+| `LogCompactor` | `0x464F52470003` | Compacts old logs |
+
+The lock IDs are derived from "FORGE" in hex plus a role number.
+
+### How It Works
+
+```
+Node 1                     Node 2
+   |                          |
+   +-- pg_try_advisory_lock --+
+   |    (returns true)        |
+   |                          +-- pg_try_advisory_lock
+   |                          |   (returns false)
+   |                          |
+   v                          v
+  LEADER                   STANDBY
+   |                          |
+   +-- refresh lease ------>  |
+   |   every 30s              |
+   |                          +-- check leader health
+   |                          |   every 5s
+```
+
+### Acquiring Leadership
+
+```rust
+let election = LeaderElection::new(
+    pool,
+    node_id,
+    LeaderRole::Scheduler,
+    LeaderConfig::default(),
+);
+
+// Try to become leader (non-blocking)
+if election.try_become_leader().await? {
+    println!("This node is now the Scheduler leader");
+}
+
+// Check current status
+if election.is_leader() {
+    // Run leader-only tasks
+}
+```
+
+### Lease Management
+
+Leaders must refresh their lease to stay leader:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `lease_duration` | 60s | How long a lease is valid |
+| `refresh_interval` | 30s | How often to refresh |
+| `check_interval` | 5s | How often standbys check leader health |
+
+If a leader fails to refresh (crash, network issue), standbys detect the expired lease and compete for leadership.
+
+### The `forge_leaders` Table
+
+```sql
+CREATE TABLE forge_leaders (
+    role VARCHAR(50) PRIMARY KEY,
+    node_id UUID NOT NULL REFERENCES forge_nodes(id),
+    acquired_at TIMESTAMPTZ NOT NULL,
+    lease_until TIMESTAMPTZ NOT NULL
+);
+```
+
+### Leader Guard Pattern
+
+For leader-only operations, use the guard pattern:
+
+```rust
+// Only proceeds if we're the leader
+if let Some(guard) = LeaderGuard::try_new(&election) {
+    // Safe to run leader-only code
+    run_scheduler_tick().await?;
+
+    // Double-check we're still leader before committing
+    if guard.is_leader() {
+        commit_results().await?;
+    }
+}
+```
+
+## Graceful Shutdown
+
+When a node shuts down (SIGTERM, ctrl+c), it:
+
+1. Sets status to `draining`
+2. Stops accepting new work
+3. Waits for in-flight requests to complete
+4. Releases any held leader locks
+5. Deregisters from the cluster
+
+### Configuration
+
+```rust
+let config = ShutdownConfig {
+    drain_timeout: Duration::from_secs(30),  // Max wait for in-flight requests
+    poll_interval: Duration::from_millis(100), // Check frequency
+};
+```
+
+### In-Flight Request Tracking
+
+Track requests with the `InFlightGuard`:
+
+```rust
+// In your request handler
+let Some(guard) = InFlightGuard::try_new(shutdown.clone()) else {
+    return Err("Server is shutting down");
+};
+
+// Process request
+// Guard automatically decrements counter when dropped
+```
+
+During shutdown:
+
+```
+1. shutdown_requested = true
+2. New InFlightGuard::try_new() returns None
+3. Wait for in_flight_count to reach 0 (or timeout)
+4. Proceed with deregistration
+```
+
+### Shutdown Sequence
+
+```
+SIGTERM received
+    |
+    v
+Set status = 'draining'
+    |
+    v
+Stop accepting new requests
+    |
+    v
+Wait for in-flight (max 30s)
+    |
+    +-- All completed? --> Release leader locks
+    |       |                    |
+    +-- Timeout? --------> Log warning, continue
+                                 |
+                                 v
+                          DELETE from forge_nodes
+                                 |
+                                 v
+                          Process exits
+```
+
+## Cluster Health Monitoring
+
+Query cluster health through the dashboard API:
+
+```bash
+curl http://localhost:8080/_api/cluster/health
+```
+
+```json
+{
+  "nodes": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "hostname": "forge-1",
+      "status": "active",
+      "roles": ["gateway", "worker"],
+      "cpu_usage": 25.5,
+      "memory_usage": 42.1,
+      "current_jobs": 3,
+      "last_heartbeat": "2024-01-15T10:30:00Z"
+    }
+  ],
+  "leaders": {
+    "scheduler": "550e8400-e29b-41d4-a716-446655440000"
+  }
+}
+```
+
+Or use `NodeRegistry` directly:
+
+```rust
+let counts = registry.count_by_status().await?;
+println!("Active: {}, Dead: {}", counts.active, counts.dead);
+```
+
+## Database Schema Summary
+
+| Table | Purpose |
+|-------|---------|
+| `forge_nodes` | Node registry and health status |
+| `forge_leaders` | Current leader assignments |
+
+## Complete Example
+
+```rust
+use forge::prelude::*;
+use forge_runtime::cluster::*;
+
+async fn start_cluster_node() -> Result<()> {
+    let pool = Database::connect(&config.database).await?;
+
+    // Create node info
+    let node = NodeInfo::new_local(
+        hostname::get()?.to_string_lossy().into(),
+        local_ip()?,
+        config.gateway.port,
+        config.gateway.grpc_port,
+        NodeRole::all(),
+        config.worker.capabilities.clone(),
+        env!("CARGO_PKG_VERSION").to_string(),
+    );
+
+    let registry = Arc::new(NodeRegistry::new(pool.clone(), node));
+
+    // Register with cluster
+    registry.register().await?;
+    registry.set_status(NodeStatus::Active).await?;
+
+    // Start heartbeat
+    let heartbeat = HeartbeatLoop::new(
+        pool.clone(),
+        registry.local_id(),
+        HeartbeatConfig::default(),
+    );
+    tokio::spawn(async move { heartbeat.run().await });
+
+    // Start leader election for scheduler
+    let election = Arc::new(LeaderElection::new(
+        pool.clone(),
+        registry.local_id(),
+        LeaderRole::Scheduler,
+        LeaderConfig::default(),
+    ));
+
+    // Try to become leader on startup
+    election.try_become_leader().await?;
+
+    // Run election loop in background
+    let election_clone = election.clone();
+    tokio::spawn(async move { election_clone.run().await });
+
+    // Setup graceful shutdown
+    let shutdown = Arc::new(GracefulShutdown::new(
+        registry.clone(),
+        Some(election.clone()),
+        ShutdownConfig::default(),
+    ));
+
+    // Wait for shutdown signal
+    tokio::signal::ctrl_c().await?;
+
+    // Graceful shutdown
+    election.stop();
+    shutdown.shutdown().await?;
+
+    Ok(())
+}
+```
+
+## What's Next?
+
+<div className="row">
+  <div className="col col--4">
+    <a className="card" href="/background/jobs">
+      <div className="card__header">
+        <h3>Background Jobs</h3>
+      </div>
+      <div className="card__body">
+        Distributed job processing
+      </div>
+    </a>
+  </div>
+  <div className="col col--4">
+    <a className="card" href="/background/crons">
+      <div className="card__header">
+        <h3>Cron Jobs</h3>
+      </div>
+      <div className="card__body">
+        Leader-elected scheduling
+      </div>
+    </a>
+  </div>
+  <div className="col col--4">
+    <a className="card" href="/concepts/realtime">
+      <div className="card__header">
+        <h3>Real-Time</h3>
+      </div>
+      <div className="card__body">
+        Cluster-wide subscriptions
+      </div>
+    </a>
+  </div>
+</div>

@@ -6,9 +6,9 @@ description: Define your data models in Rust and let FORGE do the rest
 
 # Schema & Data Models
 
-In FORGE, you define your data models as Rust structs. These become:
-- Database tables
-- TypeScript types
+In FORGE, you define your data models as Rust structs using the `#[forge::model]` proc macro. These become:
+- Database tables with proper indexes and constraints
+- TypeScript types for the frontend
 - API request/response types
 
 Write once, use everywhere.
@@ -18,20 +18,207 @@ Write once, use everywhere.
 ```rust title="src/schema/mod.rs"
 use forge::prelude::*;
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[forge::model]
 pub struct User {
+    #[id]
     pub id: Uuid,
+
+    #[indexed]
+    #[unique]
     pub email: String,
+
     pub name: String,
+
     pub created_at: DateTime<Utc>,
+
+    #[updated_at]
     pub updated_at: DateTime<Utc>,
 }
 ```
 
-That's it! This struct:
-- Works with `sqlx::query_as` for database queries
-- Serializes to JSON for API responses
+The `#[forge::model]` macro automatically:
+- Derives `Debug`, `Clone`, `Serialize`, `Deserialize`
+- Generates `ModelMeta` trait implementation for schema introspection
+- Creates table definition with proper SQL types
 - Generates TypeScript types for the frontend
+
+## Field Attributes
+
+FORGE provides several field attributes to control database behavior:
+
+### `#[id]` - Primary Key
+
+Marks a field as the primary key. For `Uuid` fields, automatically adds `DEFAULT gen_random_uuid()`.
+
+```rust
+#[forge::model]
+pub struct Task {
+    #[id]
+    pub id: Uuid,  // PRIMARY KEY DEFAULT gen_random_uuid()
+    // ...
+}
+```
+
+### `#[indexed]` - Database Index
+
+Creates a B-tree index on the field for faster lookups.
+
+```rust
+#[forge::model]
+pub struct Task {
+    #[id]
+    pub id: Uuid,
+
+    #[indexed]
+    pub user_id: Uuid,  // Creates idx_tasks_user_id
+
+    #[indexed]
+    pub status: TaskStatus,
+    // ...
+}
+```
+
+### `#[unique]` - Unique Constraint
+
+Adds a UNIQUE constraint to prevent duplicate values.
+
+```rust
+#[forge::model]
+pub struct User {
+    #[id]
+    pub id: Uuid,
+
+    #[unique]
+    pub email: String,  // UNIQUE NOT NULL
+
+    #[unique]
+    pub username: String,
+    // ...
+}
+```
+
+### `#[encrypted]` - Encrypted Field
+
+Marks a field for encryption at rest. The value is encrypted before storage and decrypted on retrieval.
+
+```rust
+#[forge::model]
+pub struct UserSecret {
+    #[id]
+    pub id: Uuid,
+
+    pub user_id: Uuid,
+
+    #[encrypted]
+    pub api_key: String,  // Encrypted in database
+
+    #[encrypted]
+    pub refresh_token: Option<String>,
+}
+```
+
+### `#[updated_at]` - Auto-Update Timestamp
+
+Marks a timestamp field to be automatically updated on every modification.
+
+```rust
+#[forge::model]
+pub struct Document {
+    #[id]
+    pub id: Uuid,
+
+    pub content: String,
+
+    pub created_at: DateTime<Utc>,
+
+    #[updated_at]
+    pub updated_at: DateTime<Utc>,  // Auto-updates on every save
+}
+```
+
+### `#[default = "..."]` - Default Value
+
+Sets a SQL default value expression for the field.
+
+```rust
+#[forge::model]
+pub struct Task {
+    #[id]
+    pub id: Uuid,
+
+    pub title: String,
+
+    #[default = "'pending'"]
+    pub status: String,
+
+    #[default = "0"]
+    pub retry_count: i32,
+
+    #[default = "NOW()"]
+    pub created_at: DateTime<Utc>,
+}
+```
+
+## Table Name Configuration
+
+By default, the table name is derived from the struct name (pluralized and snake_cased).
+Use `#[table(name = "...")]` to customize:
+
+```rust
+#[forge::model]
+#[table(name = "user_accounts")]
+pub struct User {
+    #[id]
+    pub id: Uuid,
+    pub email: String,
+}
+// Table name: user_accounts (not "users")
+```
+
+## Composite Indexes
+
+For indexes spanning multiple columns, define them at the table level:
+
+```rust
+#[forge::model]
+pub struct Task {
+    #[id]
+    pub id: Uuid,
+
+    #[indexed]
+    pub user_id: Uuid,
+
+    pub status: TaskStatus,
+
+    pub priority: i32,
+
+    pub created_at: DateTime<Utc>,
+}
+```
+
+In your migration, add composite indexes:
+
+```sql title="migrations/0001_tasks.sql"
+-- @up
+CREATE TABLE tasks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL,
+    status task_status NOT NULL DEFAULT 'pending',
+    priority INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Composite index for querying user tasks by status
+CREATE INDEX idx_tasks_user_status ON tasks(user_id, status);
+
+-- Composite index for priority queue
+CREATE INDEX idx_tasks_status_priority ON tasks(status, priority DESC);
+
+SELECT forge_enable_reactivity('tasks');
+
+-- @down
+DROP TABLE tasks;
+```
 
 ## Migration for Your Model
 
@@ -66,26 +253,53 @@ The `-- @down` marker starts the "down" migration (rollback).
 | `String` | `VARCHAR(255)` | `string` |
 | `i32` | `INTEGER` | `number` |
 | `i64` | `BIGINT` | `number` |
+| `f32` | `REAL` | `number` |
 | `f64` | `DOUBLE PRECISION` | `number` |
 | `bool` | `BOOLEAN` | `boolean` |
 | `Uuid` | `UUID` | `string` |
-| `DateTime<Utc>` | `TIMESTAMPTZ` | `string` |
+| `DateTime<Utc>` | `TIMESTAMPTZ` | `Date` |
+| `NaiveDate` | `DATE` | `Date` |
 | `Option<T>` | Nullable | `T \| null` |
 | `Vec<T>` | `T[]` | `T[]` |
+| `Vec<u8>` | `BYTEA` | `Uint8Array` |
 | `serde_json::Value` | `JSONB` | `unknown` |
+| Custom enum | Custom ENUM | Union type |
 
 ## Enums
 
-Define enums for type-safe status fields:
+Use `#[forge::forge_enum]` to define type-safe enum fields that map to PostgreSQL ENUM types:
 
 ```rust title="src/schema/mod.rs"
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, sqlx::Type)]
-#[sqlx(type_name = "task_status", rename_all = "snake_case")]
+#[forge::forge_enum]
 pub enum TaskStatus {
     Pending,
     InProgress,
     Completed,
     Cancelled,
+}
+```
+
+The `#[forge::forge_enum]` macro automatically:
+- Derives `Debug`, `Clone`, `Copy`, `PartialEq`, `Eq`, `Hash`, `Serialize`, `Deserialize`
+- Implements `Display` and `FromStr` for string conversion
+- Implements sqlx `Encode`, `Decode`, and `Type` traits for database operations
+- Converts variants to snake_case for SQL (e.g., `InProgress` -> `in_progress`)
+
+Use the enum in your models:
+
+```rust
+#[forge::model]
+pub struct Task {
+    #[id]
+    pub id: Uuid,
+
+    pub title: String,
+
+    pub status: TaskStatus,  // Uses the PostgreSQL task_status ENUM
+
+    pub user_id: Uuid,
+
+    pub created_at: DateTime<Utc>,
 }
 ```
 
@@ -110,21 +324,48 @@ DROP TABLE tasks;
 DROP TYPE task_status;
 ```
 
+### Enum Methods
+
+The generated enum has these methods:
+
+```rust
+// Get SQL string representation
+let status = TaskStatus::InProgress;
+assert_eq!(status.as_sql_str(), "in_progress");
+
+// Get PostgreSQL type name
+assert_eq!(TaskStatus::sql_type_name(), "task_status");
+
+// Parse from string
+let status: TaskStatus = "completed".parse().unwrap();
+assert_eq!(status, TaskStatus::Completed);
+
+// Display
+println!("{}", TaskStatus::Pending);  // Prints: pending
+```
+
 ## Relationships
 
 Model relationships through foreign keys:
 
 ```rust title="src/schema/mod.rs"
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[forge::model]
 pub struct Task {
+    #[id]
     pub id: Uuid,
+
     pub title: String,
+
     pub status: TaskStatus,
+
+    #[indexed]
     pub user_id: Uuid,  // Foreign key to users
+
     pub created_at: DateTime<Utc>,
 }
 
 // For queries that need user data, create a joined struct
+// This doesn't need #[forge::model] since it's a query result, not a table
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct TaskWithUser {
     pub id: Uuid,
@@ -199,12 +440,18 @@ pub async fn create_user(ctx: &MutationContext, input: CreateUserInput) -> Resul
 Use `Option<T>` for nullable fields:
 
 ```rust
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[forge::model]
 pub struct User {
+    #[id]
     pub id: Uuid,
+
+    #[unique]
     pub email: String,
+
     pub name: String,
+
     pub avatar_url: Option<String>,  // Nullable
+
     pub bio: Option<String>,         // Nullable
 }
 ```
@@ -216,10 +463,12 @@ Store flexible data with JSONB:
 ```rust
 use serde_json::Value;
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[forge::model]
 pub struct UserSettings {
+    #[id]
     pub user_id: Uuid,
-    pub preferences: Value,  // JSONB
+
+    pub preferences: Value,  // Stored as JSONB
 }
 ```
 
@@ -233,11 +482,13 @@ pub struct Preferences {
     pub language: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[forge::model]
 pub struct UserSettings {
+    #[id]
     pub user_id: Uuid,
+
     #[sqlx(json)]
-    pub preferences: Preferences,  // Stored as JSONB
+    pub preferences: Preferences,  // Stored as JSONB, typed in Rust
 }
 ```
 
@@ -248,21 +499,26 @@ FORGE uses `chrono` for timestamps:
 ```rust
 use chrono::{DateTime, Utc};
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[forge::model]
 pub struct Article {
+    #[id]
     pub id: Uuid,
+
     pub title: String,
+
+    #[default = "NOW()"]
     pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+
+    #[updated_at]
+    pub updated_at: DateTime<Utc>,  // Auto-updates on every save
+
     pub published_at: Option<DateTime<Utc>>,  // Nullable timestamp
 }
 ```
 
 :::tip Auto-Update Timestamps
-FORGE doesn't auto-update `updated_at`. Set it manually in mutations:
-```rust
-.bind(Utc::now())  // Set updated_at
-```
+Use the `#[updated_at]` attribute to mark a field for automatic updates.
+The field will be set to `NOW()` on every INSERT and UPDATE.
 :::
 
 ## Project Structure
@@ -294,59 +550,74 @@ pub use inputs::*;
 
 ```rust
 // Good: Simple, focused model
+#[forge::model]
 pub struct User {
+    #[id]
     pub id: Uuid,
+    #[unique]
     pub email: String,
     pub name: String,
 }
 
 // Avoid: Too many fields, do everything model
-pub struct User {
-    pub id: Uuid,
-    pub email: String,
-    // 50 more fields...
-}
+// Split into multiple related tables instead
 ```
 
 ### 2. Use Specific Types
 
 ```rust
-// Good: UUID for IDs
+// Good: UUID for IDs, enums for status
+#[id]
 pub id: Uuid,
+pub status: TaskStatus,
 
-// Avoid: String for IDs
+// Avoid: String for IDs and magic strings
 pub id: String,
+pub status: String,
 ```
 
 ### 3. Separate Input from Output
 
 ```rust
-// Input type (what the client sends)
+// Input type (what the client sends) - no #[forge::model] needed
+#[derive(Debug, Clone, Deserialize)]
 pub struct CreateTaskInput {
     pub title: String,
     pub user_id: Uuid,
 }
 
 // Output type (what the database returns)
+#[forge::model]
 pub struct Task {
+    #[id]
     pub id: Uuid,
     pub title: String,
+    #[indexed]
     pub user_id: Uuid,
     pub created_at: DateTime<Utc>,
 }
 ```
 
-### 4. Derive What You Need
+### 4. Use Appropriate Attributes
 
 ```rust
-#[derive(
-    Debug,       // For logging
-    Clone,       // For passing around
-    Serialize,   // For JSON responses
-    Deserialize, // For JSON requests
-    sqlx::FromRow // For database queries
-)]
-pub struct User { ... }
+#[forge::model]
+pub struct User {
+    #[id]                    // Primary key
+    pub id: Uuid,
+
+    #[unique]                // Prevent duplicates
+    pub email: String,
+
+    #[indexed]               // Speed up lookups
+    pub created_at: DateTime<Utc>,
+
+    #[updated_at]            // Auto-update on changes
+    pub updated_at: DateTime<Utc>,
+
+    #[encrypted]             // Sensitive data
+    pub phone_number: Option<String>,
+}
 ```
 
 ## What's Next?

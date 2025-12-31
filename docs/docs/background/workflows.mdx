@@ -44,27 +44,41 @@ If step 3 fails, you need to manually undo steps 1 and 2. This is error-prone an
 #[forge::workflow]
 pub async fn process_order(ctx: &WorkflowContext, order: Order) -> Result<()> {
     // Step 1: Charge payment
-    ctx.step("charge_payment")
-        .run(|| charge_payment(&order))
-        .compensate(|| refund_payment(&order))
-        .await?;
+    let payment = ctx.step("charge_payment", || async {
+        charge_payment(&order).await
+    })
+    .compensate(|payment| async move {
+        refund_payment(&payment.id).await
+    })
+    .run()
+    .await?;
 
     // Step 2: Reserve inventory
-    ctx.step("reserve_inventory")
-        .run(|| reserve_inventory(&order))
-        .compensate(|| release_inventory(&order))
-        .await?;
+    ctx.step("reserve_inventory", || async {
+        reserve_inventory(&order).await
+    })
+    .compensate(|_| async {
+        release_inventory(&order.id).await
+    })
+    .run()
+    .await?;
 
     // Step 3: Notify warehouse
-    ctx.step("notify_warehouse")
-        .run(|| notify_warehouse(&order))
-        .compensate(|| cancel_warehouse_notification(&order))
-        .await?;
+    ctx.step("notify_warehouse", || async {
+        notify_warehouse(&order).await
+    })
+    .compensate(|_| async {
+        cancel_warehouse_notification(&order.id).await
+    })
+    .run()
+    .await?;
 
     // Step 4: Send confirmation (no compensation needed)
-    ctx.step("send_confirmation")
-        .run(|| send_confirmation(&order))
-        .await?;
+    ctx.step("send_confirmation", || async {
+        send_confirmation(&order).await
+    })
+    .run()
+    .await?;
 
     Ok(())
 }
@@ -90,32 +104,48 @@ pub struct OnboardUserInput {
 #[timeout = "1h"]
 pub async fn onboard_user(ctx: &WorkflowContext, input: OnboardUserInput) -> Result<()> {
     // Step 1: Create Stripe customer
-    let customer_id = ctx.step("create_stripe_customer")
-        .run(|| create_stripe_customer(&input.email))
-        .compensate(|customer_id| delete_stripe_customer(customer_id))
-        .await?;
+    let customer_id = ctx.step("create_stripe_customer", || async {
+        create_stripe_customer(&input.email).await
+    })
+    .compensate(|customer_id| async move {
+        delete_stripe_customer(&customer_id).await
+    })
+    .run()
+    .await?;
 
     // Step 2: Create subscription
-    let subscription_id = ctx.step("create_subscription")
-        .run(|| create_subscription(&customer_id, &input.plan))
-        .compensate(|sub_id| cancel_subscription(sub_id))
-        .await?;
+    let subscription_id = ctx.step("create_subscription", || async {
+        create_subscription(&customer_id, &input.plan).await
+    })
+    .compensate(|sub_id| async move {
+        cancel_subscription(&sub_id).await
+    })
+    .run()
+    .await?;
 
     // Step 3: Provision resources
-    ctx.step("provision_resources")
-        .run(|| provision_user_resources(&input.user_id))
-        .compensate(|| deprovision_user_resources(&input.user_id))
-        .await?;
+    ctx.step("provision_resources", || async {
+        provision_user_resources(&input.user_id).await
+    })
+    .compensate(|_| async {
+        deprovision_user_resources(&input.user_id).await
+    })
+    .run()
+    .await?;
 
     // Step 4: Send welcome email (no undo needed)
-    ctx.step("send_welcome")
-        .run(|| send_welcome_email(&input.email))
-        .await?;
+    ctx.step("send_welcome", || async {
+        send_welcome_email(&input.email).await
+    })
+    .run()
+    .await?;
 
     // Step 5: Update user status
-    ctx.step("activate_user")
-        .run(|| activate_user(&input.user_id))
-        .await?;
+    ctx.step("activate_user", || async {
+        activate_user(&input.user_id).await
+    })
+    .run()
+    .await?;
 
     Ok(())
 }
@@ -126,46 +156,221 @@ pub async fn onboard_user(ctx: &WorkflowContext, input: OnboardUserInput) -> Res
 | Attribute | Example | Description |
 |-----------|---------|-------------|
 | `timeout` | `#[timeout = "2h"]` | Max total workflow duration |
-| `retry` | `#[retry(max_attempts = 3)]` | Retry failed steps |
+| `version` | `#[version = 2]` | Workflow version for safe evolution |
+| `deprecated` | `#[deprecated]` | Mark workflow as deprecated |
+
+### Workflow Versioning
+
+Use the `#[version]` attribute to track workflow versions. This is essential for safe workflow evolution:
+
+```rust
+#[forge::workflow]
+#[version = 2]
+#[timeout = "1h"]
+pub async fn process_order(ctx: &WorkflowContext, input: OrderInput) -> Result<()> {
+    // Version 2 adds new steps
+    ctx.step("validate_fraud", || async {
+        check_fraud_score(&input).await
+    }).run().await?;
+
+    // ... existing steps
+    Ok(())
+}
+```
+
+When you change a workflow's structure (add/remove steps, change compensation logic), increment the version. This allows:
+- In-flight workflows to complete with their original version
+- New workflows to use the updated version
+- Debugging and auditing by version
+
+### Deprecating Workflows
+
+Mark workflows as deprecated when they should no longer accept new executions:
+
+```rust
+#[forge::workflow]
+#[deprecated]
+#[version = 1]
+pub async fn legacy_onboarding(ctx: &WorkflowContext, input: LegacyInput) -> Result<()> {
+    // Old implementation - use new_onboarding instead
+    Ok(())
+}
+```
+
+Deprecated workflows:
+- Can still complete in-flight executions
+- Will log warnings when started
+- Should be migrated to newer versions
 
 ## Step Configuration
 
-Each step can be configured:
+Each step can be configured using the fluent step API:
 
 ```rust
-ctx.step("risky_operation")
-    .timeout(Duration::from_secs(30))  // Step timeout
-    .retries(5)                        // Max retries for this step
-    .backoff(BackoffStrategy::Exponential)
-    .run(|| do_risky_thing())
-    .compensate(|| undo_risky_thing())
-    .await?;
+use std::time::Duration;
+
+// Step with timeout
+ctx.step("slow_operation", || async {
+    process_large_file().await
+})
+.timeout(Duration::from_secs(60))
+.run()
+.await?;
+
+// Step with compensation (rollback on later failure)
+let charge = ctx.step("charge_card", || async {
+    charge_credit_card(&card).await
+})
+.compensate(|charge_result| async move {
+    refund_charge(&charge_result.charge_id).await
+})
+.run()
+.await?;
+
+// Optional step - failure won't trigger compensation
+ctx.step("notify_slack", || async {
+    post_to_slack("User signed up!").await
+})
+.optional()
+.run()
+.await?;
 ```
+
+### The `.optional()` Modifier
+
+By default, if a step fails, the workflow triggers compensation of all previously completed steps. The `.optional()` modifier changes this behavior:
+
+```rust
+// Required step - failure triggers compensation
+ctx.step("charge_payment", || async {
+    charge_card(&card).await
+})
+.compensate(|payment| async move { refund(payment.id).await })
+.run()
+.await?;
+
+// Optional step - failure is logged but workflow continues
+ctx.step("send_notification", || async {
+    send_push_notification(&user).await
+})
+.optional()
+.run()
+.await?;  // Even if this fails, workflow continues without compensating charge_payment
+
+// Next step runs regardless of notification success
+ctx.step("update_status", || async {
+    mark_order_complete(&order_id).await
+})
+.run()
+.await?;
+```
+
+Use `.optional()` for:
+- Non-critical notifications (email, push, SMS)
+- Analytics and logging steps
+- Cache warming operations
+- Any step where failure shouldn't abort the workflow
 
 ## WorkflowContext
 
+The `WorkflowContext` provides access to workflow state and utilities:
+
 ```rust
 pub struct WorkflowContext {
-    pub workflow_id: Uuid,
-    pub workflow_type: String,
+    pub run_id: Uuid,           // Unique execution ID
+    pub workflow_name: String,  // Workflow type name
+    pub version: u32,           // Workflow version
     pub started_at: DateTime<Utc>,
+    pub auth: AuthContext,      // Authentication context
 }
 
 impl WorkflowContext {
-    // Create a step builder
-    fn step(&self, name: &str) -> StepBuilder;
+    // Create a step runner (fluent API)
+    fn step<T, F, Fut>(&self, name: &str, f: F) -> StepRunner<T>;
 
     // Database access
     fn db(&self) -> &PgPool;
 
     // HTTP client
-    fn http(&self) -> &Client;
+    fn http(&self) -> &reqwest::Client;
 
-    // Get data from a previous step
-    fn get_step_output<T: DeserializeOwned>(&self, step_name: &str) -> Option<T>;
+    // Deterministic time for replay consistency
+    fn workflow_time(&self) -> DateTime<Utc>;
 
-    // Dispatch a job from within the workflow
-    async fn dispatch_job(&self, job_type: &str, input: Value) -> Result<Uuid>;
+    // Check if a step is already completed (for resumption)
+    fn is_step_completed(&self, name: &str) -> bool;
+
+    // Get result from a completed step
+    fn get_step_result<T: DeserializeOwned>(&self, name: &str) -> Option<T>;
+
+    // Get elapsed time since workflow started
+    fn elapsed(&self) -> chrono::Duration;
+}
+```
+
+### Deterministic Time with `workflow_time()`
+
+For replay consistency, use `ctx.workflow_time()` instead of `Utc::now()`:
+
+```rust
+#[forge::workflow]
+pub async fn schedule_reminder(ctx: &WorkflowContext, input: ReminderInput) -> Result<()> {
+    // GOOD: Deterministic - same value on replay
+    let scheduled_at = ctx.workflow_time() + Duration::hours(24);
+
+    ctx.step("create_reminder", || async {
+        create_reminder(&input.user_id, scheduled_at).await
+    }).run().await?;
+
+    Ok(())
+}
+```
+
+Why this matters:
+- Workflows can be replayed (resumed after crash, retried)
+- `Utc::now()` returns different values on each replay
+- `workflow_time()` returns the time when the workflow originally started
+- This ensures idempotent behavior during replays
+
+### Workflow Resumption
+
+When a workflow resumes after a crash or server restart, completed steps are automatically skipped:
+
+```rust
+#[forge::workflow]
+pub async fn long_process(ctx: &WorkflowContext, input: Input) -> Result<()> {
+    // If workflow resumes here, step1 won't re-run if already completed
+    ctx.step("step1", || async {
+        expensive_operation_1().await
+    }).run().await?;
+
+    // Same for step2 - automatic skip if completed
+    ctx.step("step2", || async {
+        expensive_operation_2().await
+    }).run().await?;
+
+    Ok(())
+}
+```
+
+The step runner automatically:
+1. Checks `ctx.is_step_completed(name)` before executing
+2. Returns cached result if step was previously completed
+3. Only executes steps that haven't run yet
+
+For advanced use cases, you can manually check step completion:
+
+```rust
+// Manual step completion check (low-level API)
+if !ctx.is_step_completed("custom_step") {
+    ctx.record_step_start("custom_step");
+    let result = do_custom_work().await?;
+    ctx.record_step_complete("custom_step", serde_json::to_value(&result)?);
+}
+
+// Retrieve result from any completed step
+if let Some(previous_result) = ctx.get_step_result::<MyType>("step1") {
+    // Use previous_result
 }
 ```
 
@@ -187,48 +392,68 @@ pub struct OrderInput {
 #[timeout = "30m"]
 pub async fn process_order(ctx: &WorkflowContext, input: OrderInput) -> Result<OrderResult> {
     // Step 1: Validate inventory
-    let inventory_check = ctx.step("check_inventory")
-        .run(|| check_inventory_available(&input.items))
-        .await?;
+    let inventory_check = ctx.step("check_inventory", || async {
+        check_inventory_available(&input.items).await
+    })
+    .run()
+    .await?;
 
     if !inventory_check.all_available {
         return Err(ForgeError::Validation("Some items out of stock".into()));
     }
 
     // Step 2: Reserve inventory
-    ctx.step("reserve_inventory")
-        .run(|| reserve_inventory(&input.order_id, &input.items))
-        .compensate(|| release_inventory(&input.order_id))
-        .await?;
+    ctx.step("reserve_inventory", || async {
+        reserve_inventory(&input.order_id, &input.items).await
+    })
+    .compensate(|_| async {
+        release_inventory(&input.order_id).await
+    })
+    .run()
+    .await?;
 
     // Step 3: Calculate totals
-    let totals = ctx.step("calculate_totals")
-        .run(|| calculate_order_totals(&input.items, &input.shipping_address))
-        .await?;
+    let totals = ctx.step("calculate_totals", || async {
+        calculate_order_totals(&input.items, &input.shipping_address).await
+    })
+    .run()
+    .await?;
 
-    // Step 4: Charge payment
-    let payment = ctx.step("charge_payment")
-        .timeout(Duration::from_secs(30))
-        .retries(3)
-        .run(|| charge_payment(&input.payment_method_id, totals.total))
-        .compensate(|payment| refund_payment(payment.id))
-        .await?;
+    // Step 4: Charge payment with timeout
+    let payment = ctx.step("charge_payment", || async {
+        charge_payment(&input.payment_method_id, totals.total).await
+    })
+    .timeout(Duration::from_secs(30))
+    .compensate(|payment| async move {
+        refund_payment(payment.id).await
+    })
+    .run()
+    .await?;
 
     // Step 5: Create shipment
-    let shipment = ctx.step("create_shipment")
-        .run(|| create_shipment(&input.order_id, &input.shipping_address))
-        .compensate(|shipment| cancel_shipment(shipment.id))
-        .await?;
+    let shipment = ctx.step("create_shipment", || async {
+        create_shipment(&input.order_id, &input.shipping_address).await
+    })
+    .compensate(|shipment| async move {
+        cancel_shipment(shipment.id).await
+    })
+    .run()
+    .await?;
 
     // Step 6: Update order status
-    ctx.step("update_order")
-        .run(|| update_order_status(&input.order_id, OrderStatus::Processing))
-        .await?;
+    ctx.step("update_order", || async {
+        update_order_status(&input.order_id, OrderStatus::Processing).await
+    })
+    .run()
+    .await?;
 
-    // Step 7: Send confirmation
-    ctx.step("send_confirmation")
-        .run(|| send_order_confirmation(&input.user_id, &input.order_id))
-        .await?;
+    // Step 7: Send confirmation (optional - failure won't rollback order)
+    ctx.step("send_confirmation", || async {
+        send_order_confirmation(&input.user_id, &input.order_id).await
+    })
+    .optional()
+    .run()
+    .await?;
 
     Ok(OrderResult {
         order_id: input.order_id,
@@ -246,78 +471,113 @@ pub async fn process_order(ctx: &WorkflowContext, input: OrderInput) -> Result<O
 #[timeout = "15m"]
 pub async fn setup_organization(ctx: &WorkflowContext, input: OrgInput) -> Result<Organization> {
     // Step 1: Create org in database
-    let org = ctx.step("create_org")
-        .run(|| create_organization(&input))
-        .compensate(|org| delete_organization(org.id))
-        .await?;
+    let org = ctx.step("create_org", || async {
+        create_organization(&input).await
+    })
+    .compensate(|org| async move {
+        delete_organization(org.id).await
+    })
+    .run()
+    .await?;
 
     // Step 2: Create GitHub team
-    let github_team = ctx.step("create_github_team")
-        .run(|| create_github_team(&org.slug))
-        .compensate(|team| delete_github_team(team.id))
-        .await?;
+    let github_team = ctx.step("create_github_team", || async {
+        create_github_team(&org.slug).await
+    })
+    .compensate(|team| async move {
+        delete_github_team(team.id).await
+    })
+    .run()
+    .await?;
 
     // Step 3: Create Slack channel
-    let slack_channel = ctx.step("create_slack_channel")
-        .run(|| create_slack_channel(&org.slug))
-        .compensate(|channel| archive_slack_channel(channel.id))
-        .await?;
+    let slack_channel = ctx.step("create_slack_channel", || async {
+        create_slack_channel(&org.slug).await
+    })
+    .compensate(|channel| async move {
+        archive_slack_channel(channel.id).await
+    })
+    .run()
+    .await?;
 
-    // Step 4: Provision cloud resources
-    ctx.step("provision_cloud")
-        .timeout(Duration::from_secs(300))
-        .run(|| provision_cloud_resources(&org.id))
-        .compensate(|| destroy_cloud_resources(&org.id))
-        .await?;
+    // Step 4: Provision cloud resources (with timeout)
+    ctx.step("provision_cloud", || async {
+        provision_cloud_resources(&org.id).await
+    })
+    .timeout(Duration::from_secs(300))
+    .compensate(|_| async {
+        destroy_cloud_resources(&org.id).await
+    })
+    .run()
+    .await?;
 
     // Step 5: Configure SSO
-    ctx.step("configure_sso")
-        .run(|| configure_sso(&org.id, &input.sso_config))
-        .compensate(|| remove_sso_config(&org.id))
-        .await?;
+    ctx.step("configure_sso", || async {
+        configure_sso(&org.id, &input.sso_config).await
+    })
+    .compensate(|_| async {
+        remove_sso_config(&org.id).await
+    })
+    .run()
+    .await?;
 
-    // Step 6: Send invites (no compensation - emails already sent)
-    ctx.step("send_invites")
-        .run(|| send_org_invites(&org.id, &input.admin_emails))
-        .await?;
+    // Step 6: Send invites (optional - no compensation needed)
+    ctx.step("send_invites", || async {
+        send_org_invites(&org.id, &input.admin_emails).await
+    })
+    .optional()
+    .run()
+    .await?;
 
     Ok(org)
 }
 ```
 
-### Payment with Retry Logic
+### Payment with Timeout
 
 ```rust
 #[forge::workflow]
 #[timeout = "5m"]
 pub async fn process_payment(ctx: &WorkflowContext, input: PaymentInput) -> Result<PaymentResult> {
     // Step 1: Validate payment method
-    ctx.step("validate_payment_method")
-        .run(|| validate_payment_method(&input.payment_method_id))
-        .await?;
+    ctx.step("validate_payment_method", || async {
+        validate_payment_method(&input.payment_method_id).await
+    })
+    .run()
+    .await?;
 
     // Step 2: Create payment intent
-    let intent = ctx.step("create_intent")
-        .run(|| create_payment_intent(&input))
-        .compensate(|intent| cancel_payment_intent(intent.id))
-        .await?;
+    let intent = ctx.step("create_intent", || async {
+        create_payment_intent(&input).await
+    })
+    .compensate(|intent| async move {
+        cancel_payment_intent(intent.id).await
+    })
+    .run()
+    .await?;
 
     // Step 3: Confirm payment (may require 3DS)
-    let confirmation = ctx.step("confirm_payment")
-        .timeout(Duration::from_secs(60))  // Allow time for 3DS
-        .retries(1)  // Only 1 retry for payments
-        .run(|| confirm_payment(&intent.id))
-        .await?;
+    let confirmation = ctx.step("confirm_payment", || async {
+        confirm_payment(&intent.id).await
+    })
+    .timeout(Duration::from_secs(60))  // Allow time for 3DS
+    .run()
+    .await?;
 
     // Step 4: Record in ledger
-    ctx.step("record_transaction")
-        .run(|| record_transaction(&input.user_id, &confirmation))
-        .await?;
+    ctx.step("record_transaction", || async {
+        record_transaction(&input.user_id, &confirmation).await
+    })
+    .run()
+    .await?;
 
-    // Step 5: Send receipt
-    ctx.step("send_receipt")
-        .run(|| send_payment_receipt(&input.email, &confirmation))
-        .await?;
+    // Step 5: Send receipt (optional)
+    ctx.step("send_receipt", || async {
+        send_payment_receipt(&input.email, &confirmation).await
+    })
+    .optional()
+    .run()
+    .await?;
 
     Ok(PaymentResult {
         transaction_id: confirmation.id,
@@ -330,21 +590,36 @@ pub async fn process_payment(ctx: &WorkflowContext, input: PaymentInput) -> Resu
 ## Workflow States
 
 ```
-PENDING → RUNNING → COMPLETED
-    ↓         ↓
-    └── COMPENSATING → COMPENSATED
-                ↓
-              FAILED
+CREATED → RUNNING → COMPLETED
+             ↓
+          WAITING
+             ↓
+    ┌────────┴────────┐
+    ▼                 ▼
+COMPENSATING     (continue)
+    │
+    ├──► COMPENSATED
+    │
+    └──► FAILED
 ```
 
 | State | Description |
 |-------|-------------|
-| `pending` | Waiting to start |
-| `running` | Executing steps |
+| `created` | Workflow created but not yet started |
+| `running` | Actively executing steps |
+| `waiting` | Waiting for external event (future use) |
 | `completed` | All steps succeeded |
-| `compensating` | Running compensation |
-| `compensated` | Compensation complete |
-| `failed` | Compensation failed (needs manual intervention) |
+| `compensating` | Running compensation handlers |
+| `compensated` | Compensation completed successfully |
+| `failed` | Workflow or compensation failed (needs manual intervention) |
+
+Check terminal states with `is_terminal()`:
+
+```rust
+if workflow_status.is_terminal() {
+    // Workflow is done (completed, compensated, or failed)
+}
+```
 
 ## How Compensation Works
 
@@ -485,20 +760,24 @@ CREATE TABLE forge_workflow_steps (
 
 ### 1. Make Steps Idempotent
 
-Steps may be retried. Design them to be safe to run multiple times:
+Steps may be retried or replayed. Design them to be safe to run multiple times:
 
 ```rust
-// Good: Idempotent
-ctx.step("create_user")
-    .run(|| {
-        sqlx::query(r#"
-            INSERT INTO users (id, email)
-            VALUES ($1, $2)
-            ON CONFLICT (email) DO NOTHING
-            RETURNING *
-        "#)
-    })
-    .await?;
+// Good: Idempotent - uses ON CONFLICT
+ctx.step("create_user", || async {
+    sqlx::query(r#"
+        INSERT INTO users (id, email)
+        VALUES ($1, $2)
+        ON CONFLICT (email) DO NOTHING
+        RETURNING *
+    "#)
+    .bind(&user_id)
+    .bind(&email)
+    .fetch_optional(ctx.db())
+    .await
+})
+.run()
+.await?;
 ```
 
 ### 2. Keep Steps Small
@@ -507,19 +786,32 @@ Each step should do one thing. Easier to debug and compensate:
 
 ```rust
 // Good: Small, focused steps
-ctx.step("charge_card").run(|| ...).await?;
-ctx.step("create_invoice").run(|| ...).await?;
-ctx.step("send_receipt").run(|| ...).await?;
+ctx.step("charge_card", || async { charge(&card).await }).run().await?;
+ctx.step("create_invoice", || async { create_invoice(&order).await }).run().await?;
+ctx.step("send_receipt", || async { send_receipt(&email).await }).run().await?;
 
 // Bad: Giant step doing everything
-ctx.step("process_payment").run(|| {
+ctx.step("process_payment", || async {
     charge_card()?;
     create_invoice()?;
     send_receipt()?;
-}).await?;
+    Ok(())
+}).run().await?;
 ```
 
-### 3. Compensation Should Never Fail
+### 3. Use Deterministic Time
+
+Always use `ctx.workflow_time()` instead of `Utc::now()` for timestamps that affect workflow logic:
+
+```rust
+// Good: Deterministic - consistent on replay
+let expires_at = ctx.workflow_time() + Duration::days(30);
+
+// Bad: Non-deterministic - different on each replay
+let expires_at = Utc::now() + Duration::days(30);
+```
+
+### 4. Compensation Should Never Fail
 
 Design compensation to be resilient:
 

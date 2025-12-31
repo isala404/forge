@@ -1,0 +1,633 @@
+---
+sidebar_position: 7
+title: Testing
+description: API reference for testing FORGE applications
+---
+
+# Testing
+
+FORGE provides a comprehensive testing framework for unit and integration testing your applications. This includes `TestContext` for isolated test environments, `MockHttp` for mocking external HTTP calls, and assertion macros for common test patterns.
+
+## Quick Start
+
+```rust
+use forge::prelude::*;
+use forge_runtime::testing::*;
+
+#[tokio::test]
+async fn test_user_creation() {
+    let mut ctx = TestContext::new_without_db();
+
+    // Dispatch a job
+    let job_id = ctx.dispatch_job("send_welcome_email", serde_json::json!({
+        "user_id": "123",
+        "email": "user@example.com"
+    }));
+
+    // Assert job was dispatched
+    assert_job_dispatched!(ctx, "send_welcome_email");
+    assert_eq!(ctx.job_status(job_id), Some(JobStatus::Pending));
+}
+```
+
+## TestContext
+
+The `TestContext` provides an isolated testing environment with mock support, job tracking, and workflow tracking.
+
+### Definition
+
+```rust
+pub struct TestContext {
+    pool: Option<PgPool>,
+    mock_http: MockHttp,
+    auth: AuthContext,
+    dispatched_jobs: Vec<DispatchedJob>,
+    started_workflows: Vec<StartedWorkflow>,
+}
+```
+
+### Creating a TestContext
+
+**Without Database (fastest, for unit tests):**
+
+```rust
+let ctx = TestContext::new_without_db();
+```
+
+**With Database Connection:**
+
+```rust
+let ctx = TestContext::new().await?;
+```
+
+**Using the Builder Pattern:**
+
+```rust
+let ctx = TestContext::builder()
+    .database_url("postgres://localhost/test_db")
+    .as_user(user_id)
+    .with_roles(vec!["admin".into()])
+    .with_logging(true)
+    .mock_http("https://api.stripe.com/*", |req| {
+        MockResponse::json(serde_json::json!({ "id": "ch_123" }))
+    })
+    .build()
+    .await?;
+```
+
+### TestContext Methods
+
+| Method | Description |
+|--------|-------------|
+| `pool()` | Returns optional database pool reference |
+| `auth()` | Returns the authentication context |
+| `user_id()` | Returns user ID if authenticated |
+| `set_user(user_id)` | Sets the authenticated user |
+| `mock_http()` | Returns reference to MockHttp |
+| `mock_http_mut()` | Returns mutable reference to MockHttp |
+
+### Job Testing Methods
+
+| Method | Description |
+|--------|-------------|
+| `dispatch_job(job_type, input)` | Simulates dispatching a job, returns job ID |
+| `dispatched_jobs()` | Returns slice of all dispatched jobs |
+| `job_dispatched(job_type)` | Returns `true` if job type was dispatched |
+| `job_status(job_id)` | Returns current status of a job |
+| `complete_job(job_id)` | Marks a job as completed |
+| `run_jobs()` | Completes all pending jobs |
+
+```rust
+#[tokio::test]
+async fn test_job_dispatch() {
+    let mut ctx = TestContext::new_without_db();
+
+    // Dispatch a job
+    let job_id = ctx.dispatch_job("export_data", serde_json::json!({
+        "format": "csv",
+        "user_id": "user_123"
+    }));
+
+    // Verify dispatch
+    assert!(ctx.job_dispatched("export_data"));
+    assert_eq!(ctx.job_status(job_id), Some(JobStatus::Pending));
+
+    // Simulate job completion
+    ctx.complete_job(job_id);
+    assert_eq!(ctx.job_status(job_id), Some(JobStatus::Completed));
+
+    // Or complete all pending jobs at once
+    ctx.run_jobs();
+}
+```
+
+### Workflow Testing Methods
+
+| Method | Description |
+|--------|-------------|
+| `start_workflow(name, input)` | Simulates starting a workflow, returns run ID |
+| `started_workflows()` | Returns slice of all started workflows |
+| `workflow_status(run_id)` | Returns current workflow status |
+| `complete_workflow_step(run_id, step)` | Marks a step as completed |
+| `complete_workflow(run_id)` | Marks workflow as completed |
+| `workflow_step_completed(run_id, step)` | Returns `true` if step was completed |
+
+```rust
+#[tokio::test]
+async fn test_workflow_execution() {
+    let mut ctx = TestContext::new_without_db();
+
+    // Start a workflow
+    let run_id = ctx.start_workflow("user_onboarding", serde_json::json!({
+        "user_id": "user_123",
+        "email": "new@example.com"
+    }));
+
+    // Verify initial state
+    assert_eq!(ctx.workflow_status(run_id), Some(WorkflowStatus::Created));
+
+    // Simulate step completion
+    ctx.complete_workflow_step(run_id, "create_account");
+    assert!(ctx.workflow_step_completed(run_id, "create_account"));
+
+    ctx.complete_workflow_step(run_id, "send_welcome_email");
+    ctx.complete_workflow(run_id);
+
+    assert_eq!(ctx.workflow_status(run_id), Some(WorkflowStatus::Completed));
+}
+```
+
+## TestContextBuilder
+
+The builder provides a fluent API for configuring test contexts.
+
+```rust
+pub struct TestContextBuilder {
+    config: TestConfig,
+    user_id: Option<Uuid>,
+    roles: Vec<String>,
+    custom_claims: HashMap<String, Value>,
+    mock_http: MockHttp,
+}
+```
+
+### Builder Methods
+
+| Method | Description |
+|--------|-------------|
+| `database_url(url)` | Sets the database URL |
+| `as_user(user_id)` | Sets the authenticated user |
+| `with_roles(roles)` | Sets user roles |
+| `with_claims(claims)` | Sets custom JWT claims |
+| `with_logging(enabled)` | Enables/disables test logging |
+| `mock_http(pattern, handler)` | Adds an HTTP mock |
+| `build()` | Builds the TestContext |
+
+```rust
+let admin_ctx = TestContext::builder()
+    .as_user(Uuid::new_v4())
+    .with_roles(vec!["admin".into(), "manager".into()])
+    .with_claims(HashMap::from([
+        ("org_id".into(), serde_json::json!("org_123"))
+    ]))
+    .build()
+    .await?;
+```
+
+## DispatchedJob
+
+Records information about dispatched jobs for test verification.
+
+```rust
+pub struct DispatchedJob {
+    pub id: Uuid,
+    pub job_type: String,
+    pub input: serde_json::Value,
+    pub dispatched_at: DateTime<Utc>,
+    pub status: JobStatus,
+}
+```
+
+### Example: Verifying Job Input
+
+```rust
+#[tokio::test]
+async fn test_job_input() {
+    let mut ctx = TestContext::new_without_db();
+
+    ctx.dispatch_job("send_email", serde_json::json!({
+        "to": "user@example.com",
+        "subject": "Welcome!"
+    }));
+
+    let jobs = ctx.dispatched_jobs();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].input["to"], "user@example.com");
+    assert_eq!(jobs[0].input["subject"], "Welcome!");
+}
+```
+
+## StartedWorkflow
+
+Records information about started workflows for test verification.
+
+```rust
+pub struct StartedWorkflow {
+    pub run_id: Uuid,
+    pub workflow_name: String,
+    pub input: serde_json::Value,
+    pub started_at: DateTime<Utc>,
+    pub status: WorkflowStatus,
+    pub completed_steps: Vec<String>,
+}
+```
+
+## MockHttp
+
+Mocks external HTTP requests in tests. Supports pattern matching and request recording.
+
+### Creating Mocks
+
+```rust
+let mut mock = MockHttp::new();
+
+// Add a mock with pattern matching (* = wildcard)
+mock.add_mock("https://api.stripe.com/*", |req| {
+    MockResponse::json(serde_json::json!({
+        "id": "ch_123",
+        "status": "succeeded"
+    }))
+});
+```
+
+### Pattern Matching
+
+Patterns support wildcards:
+- `*` matches any characters
+- `?` matches a single character
+
+```rust
+// Match any Stripe API call
+mock.add_mock("https://api.stripe.com/*", |_| MockResponse::ok());
+
+// Match specific endpoint
+mock.add_mock("https://api.example.com/users/*", |req| {
+    // Access request details
+    let user_id = req.path.split('/').last().unwrap();
+    MockResponse::json(serde_json::json!({ "id": user_id }))
+});
+```
+
+### Request Recording
+
+MockHttp records all requests for verification:
+
+```rust
+#[tokio::test]
+async fn test_api_calls() {
+    let mock = MockHttp::new();
+
+    // Make some requests...
+
+    // Get all recorded requests
+    let requests = mock.requests().await;
+    assert_eq!(requests.len(), 2);
+
+    // Get requests to specific URL pattern
+    let stripe_calls = mock.requests_to("https://api.stripe.com/*").await;
+    assert_eq!(stripe_calls.len(), 1);
+
+    // Clear recorded requests
+    mock.clear_requests().await;
+}
+```
+
+### MockRequest
+
+```rust
+pub struct MockRequest {
+    pub method: String,      // "GET", "POST", etc.
+    pub path: String,        // "/users/123"
+    pub url: String,         // Full URL
+    pub headers: HashMap<String, String>,
+    pub body: serde_json::Value,
+}
+```
+
+### MockResponse
+
+Helper methods for creating common responses:
+
+```rust
+// Success with JSON body (200)
+MockResponse::json(serde_json::json!({ "id": 123 }))
+
+// Empty success (200)
+MockResponse::ok()
+
+// Custom error
+MockResponse::error(400, "Invalid request")
+
+// Common error shortcuts
+MockResponse::not_found("User not found")
+MockResponse::unauthorized("Invalid token")
+MockResponse::internal_error("Database connection failed")
+```
+
+### Dynamic Responses
+
+```rust
+mock.add_mock("https://api.example.com/users/*", |req| {
+    if req.method == "POST" {
+        MockResponse::json(serde_json::json!({
+            "id": "new_user_123",
+            "created": true
+        }))
+    } else if req.method == "DELETE" {
+        MockResponse::ok()
+    } else {
+        MockResponse::json(serde_json::json!({
+            "id": "existing_user"
+        }))
+    }
+});
+```
+
+## Assertion Macros
+
+FORGE provides assertion macros for common test patterns.
+
+### `assert_ok!`
+
+Asserts that a Result is Ok.
+
+```rust
+let result: Result<User> = create_user(&input).await;
+assert_ok!(result);
+
+// With custom message
+assert_ok!(result, "user creation should succeed");
+```
+
+### `assert_err!`
+
+Asserts that a Result is Err.
+
+```rust
+let result = create_user(&invalid_input).await;
+assert_err!(result);
+
+// With custom message
+assert_err!(result, "should reject invalid email");
+```
+
+### `assert_err_variant!`
+
+Asserts that an error matches a specific variant.
+
+```rust
+let result = get_user(invalid_id).await;
+assert_err_variant!(result, ForgeError::NotFound(_));
+
+let result = admin_only_action(&regular_user_ctx).await;
+assert_err_variant!(result, ForgeError::Forbidden(_));
+```
+
+### `assert_job_dispatched!`
+
+Asserts that a job was dispatched.
+
+```rust
+// Check job type was dispatched
+assert_job_dispatched!(ctx, "send_email");
+
+// Check with predicate on input
+assert_job_dispatched!(ctx, "send_email", |input| {
+    input["to"] == "user@example.com"
+});
+```
+
+### `assert_workflow_started!`
+
+Asserts that a workflow was started.
+
+```rust
+assert_workflow_started!(ctx, "user_onboarding");
+```
+
+## Helper Functions
+
+### `error_contains`
+
+Checks if an error message contains a substring.
+
+```rust
+use forge_runtime::testing::error_contains;
+
+let err = ForgeError::Validation("email is required".into());
+assert!(error_contains(&err, "email"));
+assert!(error_contains(&err, "required"));
+```
+
+### `validation_error_for_field`
+
+Checks if a validation error mentions a specific field.
+
+```rust
+use forge_runtime::testing::validation_error_for_field;
+
+let err = ForgeError::Validation("email: is invalid".into());
+assert!(validation_error_for_field(&err, "email"));
+assert!(!validation_error_for_field(&err, "password"));
+```
+
+### `assert_job_status`
+
+Asserts a job has a specific status.
+
+```rust
+use forge_runtime::testing::assert_job_status;
+
+let status = ctx.job_status(job_id);
+assert_job_status(status, JobStatus::Completed);
+```
+
+### `assert_workflow_status`
+
+Asserts a workflow has a specific status.
+
+```rust
+use forge_runtime::testing::assert_workflow_status;
+
+let status = ctx.workflow_status(run_id);
+assert_workflow_status(status, WorkflowStatus::Completed);
+```
+
+### `assert_json_matches`
+
+Performs partial JSON matching. The pattern only needs to contain the fields you want to check.
+
+```rust
+use forge_runtime::testing::assert_json_matches;
+
+let actual = serde_json::json!({
+    "id": 123,
+    "name": "Test User",
+    "email": "test@example.com",
+    "created_at": "2024-01-01T00:00:00Z"
+});
+
+// Partial match - only check specific fields
+assert!(assert_json_matches(&actual, &serde_json::json!({
+    "id": 123,
+    "name": "Test User"
+})));
+
+// Nested objects work too
+let nested = serde_json::json!({
+    "user": { "id": 1, "name": "Alice" },
+    "meta": { "version": "1.0" }
+});
+
+assert!(assert_json_matches(&nested, &serde_json::json!({
+    "user": { "id": 1 }
+})));
+```
+
+## TestConfig
+
+Configuration for test environment.
+
+```rust
+pub struct TestConfig {
+    pub database_url: Option<String>,
+    pub parallel: bool,
+    pub max_connections: u32,
+    pub default_timeout: Duration,
+    pub job_timeout: Duration,
+    pub workflow_timeout: Duration,
+    pub logging: bool,
+}
+```
+
+Default values:
+- `database_url`: From `DATABASE_URL` env var
+- `parallel`: `true`
+- `max_connections`: `50`
+- `default_timeout`: `30s`
+- `job_timeout`: `10s`
+- `workflow_timeout`: `60s`
+- `logging`: `false`
+
+## Complete Example
+
+```rust
+use forge::prelude::*;
+use forge_runtime::testing::*;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateOrderInput {
+    pub user_id: Uuid,
+    pub items: Vec<OrderItem>,
+}
+
+#[tokio::test]
+async fn test_create_order_dispatches_jobs() {
+    // Setup context with mocks
+    let mut ctx = TestContext::builder()
+        .as_user(Uuid::new_v4())
+        .mock_http("https://api.stripe.com/v1/charges", |_| {
+            MockResponse::json(serde_json::json!({
+                "id": "ch_123",
+                "status": "succeeded"
+            }))
+        })
+        .build()
+        .await
+        .unwrap();
+
+    let input = CreateOrderInput {
+        user_id: ctx.user_id().unwrap(),
+        items: vec![OrderItem { sku: "ITEM-1", qty: 2 }],
+    };
+
+    // Simulate order creation that dispatches jobs
+    ctx.dispatch_job("process_payment", serde_json::json!({
+        "order_id": "order_123",
+        "amount": 4999
+    }));
+    ctx.dispatch_job("send_confirmation", serde_json::json!({
+        "order_id": "order_123",
+        "email": "customer@example.com"
+    }));
+
+    // Verify jobs were dispatched
+    assert_job_dispatched!(ctx, "process_payment");
+    assert_job_dispatched!(ctx, "send_confirmation");
+
+    // Verify job inputs
+    let jobs = ctx.dispatched_jobs();
+    assert_eq!(jobs.len(), 2);
+
+    let payment_job = jobs.iter().find(|j| j.job_type == "process_payment").unwrap();
+    assert_eq!(payment_job.input["amount"], 4999);
+
+    // Complete jobs and verify
+    ctx.run_jobs();
+    for job in ctx.dispatched_jobs() {
+        assert_eq!(job.status, JobStatus::Completed);
+    }
+}
+
+#[tokio::test]
+async fn test_user_onboarding_workflow() {
+    let mut ctx = TestContext::new_without_db();
+
+    let run_id = ctx.start_workflow("user_onboarding", serde_json::json!({
+        "user_id": "user_123",
+        "email": "new@example.com"
+    }));
+
+    // Simulate workflow steps
+    ctx.complete_workflow_step(run_id, "create_account");
+    ctx.complete_workflow_step(run_id, "setup_profile");
+    ctx.complete_workflow_step(run_id, "send_welcome_email");
+    ctx.complete_workflow(run_id);
+
+    // Verify
+    assert_workflow_started!(ctx, "user_onboarding");
+    assert!(ctx.workflow_step_completed(run_id, "create_account"));
+    assert!(ctx.workflow_step_completed(run_id, "send_welcome_email"));
+    assert_workflow_status(ctx.workflow_status(run_id), WorkflowStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_external_api_mocking() {
+    let mock = MockHttp::new();
+
+    // This would be used by your code under test
+    let request = MockRequest {
+        method: "POST".into(),
+        path: "/v1/charges".into(),
+        url: "https://api.stripe.com/v1/charges".into(),
+        headers: HashMap::from([
+            ("Authorization".into(), "Bearer sk_test_123".into())
+        ]),
+        body: serde_json::json!({ "amount": 1000 }),
+    };
+
+    let response = mock.execute(request.clone()).await;
+
+    // Verify request was recorded
+    let requests = mock.requests().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[0].body["amount"], 1000);
+}
+```
+
+## See Also
+
+- [Background Jobs](/background/jobs) - Full jobs guide
+- [Workflows](/background/workflows) - Workflows guide
+- [ForgeError](/api/forge-error) - Error types

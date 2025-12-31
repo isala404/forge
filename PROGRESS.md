@@ -820,3 +820,121 @@ Created Docusaurus documentation website with MDX at website/
 - Set routeBasePath: '/' for docs-only site
 - Target audience: junior developers ("vibe coders") with practical examples
 - Verified rendering with Chrome MCP - all pages displaying correctly
+
+Updated Cron Jobs documentation to document all implemented features.
+- Added catch_up and catch_up_limit attributes to Cron Attributes table in `docs/docs/background/crons.mdx`
+- Expanded CronContext struct documentation with run_id, execution_time, timezone, is_catch_up, log fields
+- Added delay() and is_late() method documentation with example code
+- Added "Catch-Up Runs" section explaining how missed runs are processed
+- Added "Structured Logging" section documenting CronLog with info/warn/error/debug methods
+- Added "When to Use Catch-Up" guidance table for common use cases
+- Updated page description to mention catch-up runs and structured logging
+
+Created comprehensive Testing API documentation at docs/docs/api/testing.mdx.
+- Documented TestContext struct with all methods for isolated test environments
+- Documented TestContextBuilder fluent API for test configuration
+- Documented DispatchedJob and StartedWorkflow tracking structs
+- Documented MockHttp for mocking external HTTP requests with pattern matching
+- Documented MockRequest and MockResponse with helper methods (json, error, not_found, unauthorized, internal_error)
+- Documented request recording methods (requests, requests_to, clear_requests)
+- Documented assertion macros: assert_ok!, assert_err!, assert_err_variant!, assert_job_dispatched!, assert_workflow_started!
+- Documented helper functions: error_contains, validation_error_for_field, assert_job_status, assert_workflow_status, assert_json_matches
+- Added complete examples for job testing, workflow testing, and HTTP mocking
+- Updated docs/docs/api/index.mdx to include Testing card in reference pages
+
+Updated Schema documentation to reflect actual proc macro implementation.
+- Replaced manual sqlx::FromRow examples with #[forge::model] proc macro usage in `docs/docs/concepts/schema.mdx`
+- Documented all field attributes: #[id], #[indexed], #[unique], #[encrypted], #[updated_at], #[default]
+- Added Table Name Configuration section with #[table(name = "...")] attribute
+- Added Composite Indexes section with migration examples
+- Replaced manual sqlx::Type enum with #[forge::forge_enum] proc macro usage
+- Documented generated enum methods: as_sql_str(), sql_type_name(), Display, FromStr
+- Updated all model examples to use proc macros with proper attribute annotations
+- Added additional type mappings: f32, NaiveDate, Vec<u8>/BYTEA, custom enums
+- Updated best practices to use proc macro attributes
+
+Created cluster documentation at docs/docs/concepts/cluster.mdx.
+- Documented PostgreSQL-based node discovery via forge_nodes table
+- Documented leader election using pg_try_advisory_lock with unique lock IDs per LeaderRole
+- Documented LeaderRole enum (Scheduler, MetricsAggregator, LogCompactor) with 0x464F5247 prefix
+- Documented lease-based leadership (60s lease, 30s refresh, 5s health check)
+- Documented heartbeat system (5s interval, 15s dead threshold)
+- Documented dead node detection and cleanup via mark_dead_nodes()
+- Documented NodeRole enum (Gateway, Function, Worker, Scheduler)
+- Documented NodeStatus lifecycle (joining -> active -> draining -> dead)
+- Documented graceful shutdown with drain timeout and InFlightGuard pattern
+- Documented forge_nodes and forge_leaders table schemas
+- Included ASCII architecture diagram and code examples
+
+Updated Reactivity documentation with internal architecture details.
+- Added "Architecture Deep Dive" section to `docs/docs/concepts/realtime.mdx`
+- Documented the full reactivity pipeline: ChangeListener -> InvalidationEngine -> Reactor -> WebSocket
+- Documented core types: ReadSet, TrackingMode (Table/Row/Adaptive), Delta<T>
+- Documented ChangeListener component with notification format (table:op:row_id:columns)
+- Documented InvalidationEngine with debounce/coalesce logic and config values
+- Documented Reactor orchestration with read set extraction from query names
+- Documented forge_enable_reactivity(), forge_disable_reactivity(), forge_notify_change() internals
+- Added subscription lifecycle walkthrough (9-step flow)
+- Noted current limitations (table-level only, no deltas yet) and what is implemented
+
+Created comprehensive Configuration reference documentation at docs/docs/api/configuration.mdx.
+- Documented environment variable substitution syntax (${VAR_NAME})
+- Documented [project] section: name, version
+- Documented [database] section: url, pool_size, pool_timeout_secs, statement_timeout_secs, replica_urls, read_from_replica
+- Documented [database.pools] for isolated connection pools: default, jobs, observability, analytics
+- Documented [node] section: roles (gateway/function/worker/scheduler), worker_capabilities
+- Documented [gateway] section: port, grpc_port, max_connections, request_timeout_secs
+- Documented [function] section: max_concurrent, timeout_secs, memory_limit
+- Documented [worker] section: max_concurrent_jobs, job_timeout_secs, poll_interval_ms
+- Documented [cluster] section: name, discovery (postgres/dns/kubernetes/static), heartbeat_interval_secs, dead_threshold_secs, seed_nodes, dns_name
+- Documented [observability] toggles: metrics_enabled, logging_enabled, tracing_enabled, dashboard_enabled
+- Documented [observability.logging]: level, slow_query_threshold_ms, json_format
+- Documented [observability.metrics]: flush_interval_secs, prometheus_enabled, prometheus_path
+- Documented [observability.tracing]: sample_rate, otlp_endpoint
+- Documented [observability.retention]: metrics_days, logs_days, traces_days, completed_jobs_days
+- Documented [security] and [security.auth]: secret_key, jwt_secret, session_ttl_secs
+- Added complete example forge.toml with all options
+- Added type reference for duration and size values
+- Updated docs/docs/api/index.mdx to include Configuration card
+
+Created comprehensive Database Reference documentation at docs/docs/api/database.mdx.
+- Documented all 14 forge_* system tables with full column descriptions
+- Cluster tables: forge_nodes, forge_leaders with advisory lock pattern
+- Job queue: forge_jobs with SKIP LOCKED pattern explained with SQL example
+- Cron: forge_cron_runs with UNIQUE constraint for exactly-once semantics
+- Workflows: forge_workflow_runs, forge_workflow_steps with CASCADE delete
+- Realtime: forge_sessions, forge_subscriptions with query hash deduplication
+- Observability: forge_metrics, forge_logs, forge_traces with all indexes
+- Alerts: forge_alert_rules, forge_alerts with notification channels
+- Migrations: forge_migrations with advisory lock (0x464F524745)
+- Documented reactivity functions: forge_notify_change(), forge_enable_reactivity(), forge_disable_reactivity()
+- Added job status values (pending/claimed/running/completed/failed/dead_letter)
+- Added priority levels table (critical=100, high=75, normal=50, low=25, background=0)
+- Documented workflow status values and step status values
+- Added best practices for connection pool sizing, index strategy, and vacuuming
+- Updated docs/docs/api/index.mdx to include Database Reference card
+
+
+Updated workflows.mdx documentation to reflect actual implementation.
+- Added #[version] attribute documentation for workflow versioning with examples
+- Added #[deprecated] attribute documentation for marking workflows as deprecated
+- Added .optional() step modifier documentation with use cases (non-critical notifications)
+- Added ctx.workflow_time() documentation for deterministic replay consistency
+- Added ctx.is_step_completed() and workflow resumption documentation
+- Updated all code examples to use correct fluent API: ctx.step(name, fn).run().await
+- Updated WorkflowContext fields to match implementation (run_id, workflow_name, version, auth)
+- Added WorkflowStatus.is_terminal() method documentation
+- Updated state diagram to include created/waiting states
+- Added best practice #3 for using deterministic time
+
+Eliminated implementation-documentation drift across 8 documentation files.
+- Created `docs/docs/api/testing.mdx` - Complete testing API (TestContext, MockHttp, assertions)
+- Created `docs/docs/api/database.mdx` - All 14 system tables, SKIP LOCKED, reactivity functions
+- Created `docs/docs/api/configuration.mdx` - Complete forge.toml reference (all sections)
+- Created `docs/docs/concepts/cluster.mdx` - Leader election, heartbeat, discovery, graceful shutdown
+- Updated `docs/docs/concepts/schema.mdx` - #[forge::model], #[forge::forge_enum], all field attributes
+- Updated `docs/docs/background/crons.mdx` - catch_up attributes, CronContext methods, CronLog
+- Updated `docs/docs/background/workflows.mdx` - version/deprecated, optional(), workflow_time()
+- Updated `docs/docs/concepts/realtime.mdx` - Architecture deep dive (ReadSet, Delta, Reactor, InvalidationEngine)
+- Updated `DEVIATIONS.md` with ~50 items changed from ❌ to ✅ in Documented column
+- Added Documentation Updates Log section to DEVIATIONS.md tracking all changes

@@ -64,9 +64,9 @@ This document tracks deviations between the original proposal, actual implementa
 2. **Deployment Patterns** - Kubernetes, cloud providers, load balancing missing
 3. **Observability Details** - Metrics export, OpenTelemetry integration not documented
 4. **WebSocket Protocol** - Message format, reconnection protocol undocumented
-5. **Testing Architecture** - No documentation on mocking contexts, test strategies
-6. **Configuration Reference** - Complete forge.toml options not documented
-7. **Performance Tuning** - No guidance on pool sizing, worker counts
+5. ~~**Testing Architecture**~~ - ✅ Now documented in docs/api/testing.mdx
+6. ~~**Configuration Reference**~~ - ✅ Now documented in docs/api/configuration.mdx
+7. ~~**Performance Tuning**~~ - ✅ Pool sizing guidance now in docs/api/database.mdx
 
 ---
 
@@ -86,14 +86,14 @@ This document tracks deviations between the original proposal, actual implementa
 
 | Feature | Proposed | Implemented | Documented | Notes |
 |---------|----------|-------------|------------|-------|
-| `#[forge::model]` macro | ✅ | ✅ | ❌ | Docs show manual sqlx::FromRow instead |
-| `#[forge::forge_enum]` macro | ✅ | ✅ | ❌ | Docs show manual sqlx enum |
-| `#[id]` attribute | ✅ | ✅ | ❌ | Works but undocumented |
-| `#[indexed]` attribute | ✅ | ✅ | ❌ | Works but undocumented |
-| `#[unique]` attribute | ✅ | ✅ | ❌ | Works but undocumented |
-| `#[encrypted]` attribute | ✅ | ✅ | ❌ | Works but undocumented |
-| `#[updated_at]` attribute | ✅ | ✅ | ❌ | Works but undocumented |
-| `#[default = "..."]` attribute | ✅ | ✅ | ❌ | Works but undocumented |
+| `#[forge::model]` macro | ✅ | ✅ | ✅ | docs/concepts/schema.mdx |
+| `#[forge::forge_enum]` macro | ✅ | ✅ | ✅ | docs/concepts/schema.mdx |
+| `#[id]` attribute | ✅ | ✅ | ✅ | docs/concepts/schema.mdx |
+| `#[indexed]` attribute | ✅ | ✅ | ✅ | docs/concepts/schema.mdx |
+| `#[unique]` attribute | ✅ | ✅ | ✅ | docs/concepts/schema.mdx |
+| `#[encrypted]` attribute | ✅ | ✅ | ✅ | docs/concepts/schema.mdx |
+| `#[updated_at]` attribute | ✅ | ✅ | ✅ | docs/concepts/schema.mdx |
+| `#[default = "..."]` attribute | ✅ | ✅ | ✅ | docs/concepts/schema.mdx |
 | `#[relation]` attributes | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
 | `#[soft_delete]` attribute | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
 | `#[tenant]` attribute | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
@@ -101,7 +101,7 @@ This document tracks deviations between the original proposal, actual implementa
 | Validated types (Email, Url, etc.) | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
 | `#[forge::validated_type]` | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
 | `#[forge::join_table]` | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
-| Composite indexes | ✅ | ✅ | ❌ | Works but undocumented |
+| Composite indexes | ✅ | ✅ | ✅ | docs/concepts/schema.mdx |
 
 **Major Deviations:**
 1. **Relations NOT Implemented** - Proposed `#[relation(belongs_to/has_many/has_one/many_to_many)]` - users must define foreign keys manually
@@ -176,15 +176,15 @@ This document tracks deviations between the original proposal, actual implementa
 | `#[forge::cron]` macro | ✅ | ✅ | ✅ | Works |
 | 5-part cron expressions | ✅ | ✅ | ✅ | Auto-normalized to 6-part |
 | Timezone support | ✅ | ✅ | ✅ | chrono-tz IANA timezones |
-| `#[catch_up]` attribute | ✅ | ✅ | ❌ | Works but undocumented |
-| `#[catch_up_limit]` attribute | ✅ | ✅ | ❌ | Works but undocumented |
+| `#[catch_up]` attribute | ✅ | ✅ | ✅ | docs/background/crons.mdx |
+| `#[catch_up_limit]` attribute | ✅ | ✅ | ✅ | docs/background/crons.mdx |
 | `#[timeout]` attribute | ✅ | ✅ | ✅ | Works |
 | CronContext.scheduled_time | ✅ | ✅ | ✅ | Works |
-| CronContext.execution_time | ✅ | ✅ | ❌ | Works but undocumented |
-| CronContext.is_catch_up | ✅ | ✅ | ❌ | Works but undocumented |
-| CronContext.delay() | ✅ | ✅ | ❌ | Works but undocumented |
-| CronContext.is_late() | ✅ | ✅ | ❌ | Works but undocumented |
-| CronLog structured logger | ✅ | ✅ | ❌ | Works but undocumented |
+| CronContext.execution_time | ✅ | ✅ | ✅ | docs/background/crons.mdx |
+| CronContext.is_catch_up | ✅ | ✅ | ✅ | docs/background/crons.mdx |
+| CronContext.delay() | ✅ | ✅ | ✅ | docs/background/crons.mdx |
+| CronContext.is_late() | ✅ | ✅ | ✅ | docs/background/crons.mdx |
+| CronLog structured logger | ✅ | ✅ | ✅ | docs/background/crons.mdx |
 | Leader-only execution | ✅ | ✅ | ✅ | Works |
 | Exactly-once via UNIQUE | ✅ | ✅ | ✅ | Works |
 | 6-part cron (with seconds) | ✅ | Partial | ❌ | Normalized, not native 6-part |
@@ -202,23 +202,23 @@ This document tracks deviations between the original proposal, actual implementa
 | Feature | Proposed | Implemented | Documented | Notes |
 |---------|----------|-------------|------------|-------|
 | `#[forge::workflow]` macro | ✅ | ✅ | ✅ | Works |
-| `#[version]` attribute | ✅ | ✅ | ❌ | Works but undocumented |
-| `#[deprecated]` attribute | ✅ | ✅ | ❌ | Works but undocumented |
+| `#[version]` attribute | ✅ | ✅ | ✅ | docs/background/workflows.mdx |
+| `#[deprecated]` attribute | ✅ | ✅ | ✅ | docs/background/workflows.mdx |
 | `#[timeout]` attribute | ✅ | ✅ | ✅ | Works |
 | ctx.step() fluent API | ✅ | ✅ | ✅ | Works |
 | .compensate() | ✅ | ✅ | ✅ | Works - saga pattern |
 | .timeout() | ✅ | ✅ | ✅ | Works |
-| .optional() | ✅ | ✅ | ❌ | Works but undocumented |
+| .optional() | ✅ | ✅ | ✅ | docs/background/workflows.mdx |
 | .retry() | ✅ | ✅ | ✅ | Works |
 | Compensation in reverse order | ✅ | ✅ | ✅ | Works |
 | Step state persistence | ✅ | ✅ | ✅ | forge_workflow_steps table |
-| Workflow resumption | ✅ | ✅ | Partial | Works via is_step_completed |
+| Workflow resumption | ✅ | ✅ | ✅ | docs/background/workflows.mdx (is_step_completed) |
 | WorkflowStatus states | ✅ | ✅ | ✅ | All states implemented |
 | ctx.parallel() | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
 | ctx.wait_for_event() | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
 | Workflow versioning migration | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
 | `#[forge::workflow_migration]` | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
-| Deterministic ctx.workflow_time() | ✅ | ✅ | ❌ | Works but undocumented |
+| Deterministic ctx.workflow_time() | ✅ | ✅ | ✅ | docs/background/workflows.mdx |
 
 **Major Deviations:**
 1. **Parallel Steps NOT Implemented** - No `ctx.parallel()` builder for concurrent step execution
@@ -233,14 +233,14 @@ This document tracks deviations between the original proposal, actual implementa
 |---------|----------|-------------|------------|-------|
 | PostgreSQL LISTEN/NOTIFY | ✅ | ✅ | ✅ | forge_changes channel |
 | forge_enable_reactivity() | ✅ | ✅ | ✅ | Works |
-| ReadSet tracking | ✅ | ✅ | ❌ | Works but undocumented |
+| ReadSet tracking | ✅ | ✅ | ✅ | docs/concepts/realtime.mdx |
 | WebSocket subscriptions | ✅ | ✅ | ✅ | Works |
 | Auto re-execute on change | ✅ | ✅ | ✅ | Works |
 | SubscriptionState shape | ✅ | ✅ | ✅ | loading/data/error/stale |
-| Delta<T> updates | ✅ | ✅ | ❌ | Works but undocumented |
-| Reactor orchestration | ✅ | ✅ | ❌ | Works but undocumented |
-| InvalidationEngine | ✅ | ✅ | ❌ | Works but undocumented |
-| TrackingMode (table/row/adaptive) | ✅ | Partial | ❌ | Table mode only |
+| Delta<T> updates | ✅ | ✅ | ✅ | docs/concepts/realtime.mdx |
+| Reactor orchestration | ✅ | ✅ | ✅ | docs/concepts/realtime.mdx |
+| InvalidationEngine | ✅ | ✅ | ✅ | docs/concepts/realtime.mdx |
+| TrackingMode (table/row/adaptive) | ✅ | Partial | ✅ | docs/concepts/realtime.mdx (table mode only) |
 | Adaptive tracking | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
 | Memory pressure management | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
 | Subscription coalescing | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
@@ -261,12 +261,12 @@ This document tracks deviations between the original proposal, actual implementa
 
 ### Core Documentation Gaps
 
-1. **`#[forge::model]` and `#[forge::forge_enum]`** - Proc macros exist but docs show manual definitions
-2. **CronContext API reference page** - Missing entirely from docs/api/
-3. **TestContext and testing system** - Fully implemented, completely undocumented
+1. ~~**`#[forge::model]` and `#[forge::forge_enum]`**~~ - ✅ Now documented in docs/concepts/schema.mdx
+2. ~~**CronContext API reference page**~~ - ✅ Now documented in docs/background/crons.mdx
+3. ~~**TestContext and testing system**~~ - ✅ Now documented in docs/api/testing.mdx (NEW)
 4. **RequestMetadata** - Exists on all contexts but never documented
-5. **Many CronContext methods** - delay(), is_late(), is_catch_up not documented
-6. **Workflow optional() and versioning** - Implemented but not in docs
+5. ~~**Many CronContext methods**~~ - ✅ delay(), is_late(), is_catch_up now documented
+6. ~~**Workflow optional() and versioning**~~ - ✅ Now documented in docs/background/workflows.mdx
 
 ---
 
@@ -285,7 +285,7 @@ This document tracks deviations between the original proposal, actual implementa
 
 | Feature | Proposed | Implemented | Documented | Notes |
 |---------|----------|-------------|------------|-------|
-| PostgreSQL discovery | ✅ | ✅ | ❌ | Query forge_nodes table |
+| PostgreSQL discovery | ✅ | ✅ | ✅ | docs/concepts/cluster.mdx |
 | DNS discovery | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
 | Kubernetes discovery | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
 | Static seeds discovery | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
@@ -302,14 +302,14 @@ This document tracks deviations between the original proposal, actual implementa
 
 | Feature | Proposed | Implemented | Documented | Notes |
 |---------|----------|-------------|------------|-------|
-| PostgreSQL advisory locks | ✅ | ✅ | ❌ | pg_try_advisory_lock |
+| PostgreSQL advisory locks | ✅ | ✅ | ✅ | docs/concepts/cluster.mdx |
 | Scheduler leader role | ✅ | ✅ | ✅ | Works |
-| MetricsAggregator leader | ✅ | ✅ | ❌ | Implemented but unused |
-| LogCompactor leader | ✅ | ✅ | ❌ | Implemented but unused |
-| Lease-based management | ✅ | ✅ | ❌ | 60s lease, 30s refresh |
-| forge_leaders table | ✅ | ✅ | ❌ | Works |
-| Health check interval | 5s | 5s | ❌ | Match |
-| Graceful transfer | ✅ | ✅ | ❌ | Works |
+| MetricsAggregator leader | ✅ | ✅ | ✅ | docs/concepts/cluster.mdx |
+| LogCompactor leader | ✅ | ✅ | ✅ | docs/concepts/cluster.mdx |
+| Lease-based management | ✅ | ✅ | ✅ | docs/concepts/cluster.mdx |
+| forge_leaders table | ✅ | ✅ | ✅ | docs/concepts/cluster.mdx |
+| Health check interval | 5s | 5s | ✅ | docs/concepts/cluster.mdx |
+| Graceful transfer | ✅ | ✅ | ✅ | docs/concepts/cluster.mdx |
 | Leader metrics | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
 
 ---
@@ -327,7 +327,7 @@ This document tracks deviations between the original proposal, actual implementa
 | MeshManager | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
 | Load reporting via gossip | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
 | Request forwarding | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
-| Change propagation via NOTIFY | ✅ | ✅ | ❌ | Uses forge_changes channel |
+| Change propagation via NOTIFY | ✅ | ✅ | ✅ | docs/api/database.mdx |
 | mTLS between nodes | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
 | Mesh metrics | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
 
@@ -344,11 +344,11 @@ This document tracks deviations between the original proposal, actual implementa
 | Feature | Proposed | Implemented | Documented | Notes |
 |---------|----------|-------------|------------|-------|
 | Worker capabilities | ✅ | ✅ | ✅ | general, media, ml, etc. |
-| SKIP LOCKED job claiming | ✅ | ✅ | ❌ | Works |
+| SKIP LOCKED job claiming | ✅ | ✅ | ✅ | docs/api/database.mdx |
 | Priority-based ordering | ✅ | ✅ | ✅ | DESC priority, ASC created_at |
-| Worker heartbeat | ✅ | ✅ | ❌ | Updates forge_nodes |
-| Stale job cleanup | ✅ | ✅ | ❌ | 60s interval, 5min threshold |
-| Graceful drain | ✅ | ✅ | ❌ | 30s timeout |
+| Worker heartbeat | ✅ | ✅ | ✅ | docs/concepts/cluster.mdx |
+| Stale job cleanup | ✅ | ✅ | ✅ | docs/concepts/cluster.mdx |
+| Graceful drain | ✅ | ✅ | ✅ | docs/concepts/cluster.mdx |
 | Job timeout | ✅ | ✅ | ✅ | Per-job configurable |
 | `#[resources(cpu, memory, gpu)]` | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
 | `#[rate_limit(key, requests, per)]` | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
@@ -369,10 +369,10 @@ This document tracks deviations between the original proposal, actual implementa
 
 | Feature | Proposed | Implemented | Documented | Notes |
 |---------|----------|-------------|------------|-------|
-| `[cluster]` section | ✅ | Partial | ❌ | Basic config only |
+| `[cluster]` section | ✅ | Partial | ✅ | docs/api/configuration.mdx |
 | discovery option | ✅ | ❌ | ❌ | Always PostgreSQL |
-| heartbeat_interval | ✅ | ✅ | ❌ | 5s default |
-| dead_threshold | ✅ | ✅ | ❌ | 15s default |
+| heartbeat_interval | ✅ | ✅ | ✅ | docs/api/configuration.mdx |
+| dead_threshold | ✅ | ✅ | ✅ | docs/api/configuration.mdx |
 | grpc_port | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
 | `[cluster.leader_election]` | ✅ | Partial | ❌ | Hardcoded values |
 | `[cluster.security]` mTLS | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
@@ -432,24 +432,24 @@ The cluster operates as **independent nodes sharing a database** rather than a *
 
 ### 4.1 System Tables
 
-| Table | Proposed | Implemented | Notes |
-|-------|----------|-------------|-------|
-| forge_nodes | ✅ | ✅ | Implemented (missing max_concurrent_jobs) |
-| forge_leaders | ✅ | ✅ | Implemented |
-| forge_jobs | ✅ | ✅ | Implemented with progress columns |
-| forge_cron_runs | ✅ | ✅ | Implemented |
-| forge_workflow_runs | ✅ | ✅ | Implemented |
-| forge_workflow_steps | ✅ | ✅ | Implemented with CASCADE |
-| forge_sessions | ✅ | ✅ | Implemented |
-| forge_subscriptions | ✅ | ✅ | Implemented |
-| forge_metrics | ✅ | ✅ | Implemented (no partitioning) |
-| forge_logs | ✅ | ✅ | Implemented (no partitioning) |
-| forge_traces | ✅ | ✅ | Implemented (no partitioning) |
-| forge_alert_rules | ✅ | ✅ | Implemented |
-| forge_alerts | ✅ | ✅ | Implemented |
-| forge_migrations | ✅ | ✅ | Implemented with down_sql |
-| forge_events (audit log) | ✅ | ❌ | NOT IMPLEMENTED |
-| forge_metrics_1m (aggregated) | ✅ | ❌ | NOT IMPLEMENTED |
+| Table | Proposed | Implemented | Documented | Notes |
+|-------|----------|-------------|------------|-------|
+| forge_nodes | ✅ | ✅ | ✅ | docs/api/database.mdx |
+| forge_leaders | ✅ | ✅ | ✅ | docs/api/database.mdx |
+| forge_jobs | ✅ | ✅ | ✅ | docs/api/database.mdx |
+| forge_cron_runs | ✅ | ✅ | ✅ | docs/api/database.mdx |
+| forge_workflow_runs | ✅ | ✅ | ✅ | docs/api/database.mdx |
+| forge_workflow_steps | ✅ | ✅ | ✅ | docs/api/database.mdx |
+| forge_sessions | ✅ | ✅ | ✅ | docs/api/database.mdx |
+| forge_subscriptions | ✅ | ✅ | ✅ | docs/api/database.mdx |
+| forge_metrics | ✅ | ✅ | ✅ | docs/api/database.mdx |
+| forge_logs | ✅ | ✅ | ✅ | docs/api/database.mdx |
+| forge_traces | ✅ | ✅ | ✅ | docs/api/database.mdx |
+| forge_alert_rules | ✅ | ✅ | ✅ | docs/api/database.mdx |
+| forge_alerts | ✅ | ✅ | ✅ | docs/api/database.mdx |
+| forge_migrations | ✅ | ✅ | ✅ | docs/api/database.mdx |
+| forge_events (audit log) | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
+| forge_metrics_1m (aggregated) | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
 
 ---
 
@@ -471,22 +471,22 @@ The cluster operates as **independent nodes sharing a database** rather than a *
 
 ### 4.3 Job Queue
 
-| Feature | Proposed | Implemented | Notes |
-|---------|----------|-------------|-------|
-| SKIP LOCKED pattern | ✅ | ✅ | Works |
-| Job states (pending/claimed/running/completed/failed) | ✅ | ✅ | All states |
-| Priority levels (0-100) | ✅ | ✅ | Works |
-| Retry with backoff | ✅ | ✅ | Works |
-| Progress tracking | ✅ | ✅ | progress_percent, progress_message |
-| Idempotency keys | ✅ | ✅ | Works |
-| Worker capability matching | ✅ | ✅ | Works |
-| dead_letter status | ✅ | ❌ | Uses 'failed' only |
-| cancelled status | ✅ | ❌ | NOT IMPLEMENTED |
-| parent_job_id (fan-out) | ✅ | ❌ | NOT IMPLEMENTED |
-| trace_id column | ✅ | ❌ | NOT IMPLEMENTED |
-| notify_job_available trigger | ✅ | ❌ | NOT IMPLEMENTED (uses polling) |
-| Redis backend option | ✅ | ❌ | NOT IMPLEMENTED |
-| Vacuum tuning | ✅ | ❌ | NOT CONFIGURED |
+| Feature | Proposed | Implemented | Documented | Notes |
+|---------|----------|-------------|------------|-------|
+| SKIP LOCKED pattern | ✅ | ✅ | ✅ | docs/api/database.mdx |
+| Job states (pending/claimed/running/completed/failed) | ✅ | ✅ | ✅ | docs/api/database.mdx |
+| Priority levels (0-100) | ✅ | ✅ | ✅ | Works |
+| Retry with backoff | ✅ | ✅ | ✅ | Works |
+| Progress tracking | ✅ | ✅ | ✅ | docs/api/database.mdx |
+| Idempotency keys | ✅ | ✅ | ✅ | Works |
+| Worker capability matching | ✅ | ✅ | ✅ | Works |
+| dead_letter status | ✅ | ❌ | ❌ | Uses 'failed' only |
+| cancelled status | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
+| parent_job_id (fan-out) | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
+| trace_id column | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
+| notify_job_available trigger | ✅ | ❌ | ❌ | NOT IMPLEMENTED (uses polling) |
+| Redis backend option | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
+| Vacuum tuning | ✅ | ❌ | ❌ | NOT CONFIGURED |
 
 ---
 
@@ -513,17 +513,17 @@ The cluster operates as **independent nodes sharing a database** rather than a *
 
 ### 4.5 Change Tracking
 
-| Feature | Proposed | Implemented | Notes |
-|---------|----------|-------------|-------|
-| NOTIFY on forge_changes | ✅ | ✅ | Works |
-| forge_notify_change() function | ✅ | ✅ | Works |
-| forge_enable_reactivity() helper | ✅ | ✅ | Works |
-| forge_disable_reactivity() helper | ✅ | ✅ | Works |
-| Payload format (table:op:id) | ✅ | ✅ | Works |
-| forge_events audit table | ✅ | ❌ | NOT IMPLEMENTED |
-| Extended trigger with context | ✅ | ❌ | NOT IMPLEMENTED |
-| Session variables (forge.user_id) | ✅ | ❌ | NOT IMPLEMENTED |
-| changed_columns tracking | ✅ | ❌ | NOT IMPLEMENTED |
+| Feature | Proposed | Implemented | Documented | Notes |
+|---------|----------|-------------|------------|-------|
+| NOTIFY on forge_changes | ✅ | ✅ | ✅ | docs/api/database.mdx |
+| forge_notify_change() function | ✅ | ✅ | ✅ | docs/api/database.mdx |
+| forge_enable_reactivity() helper | ✅ | ✅ | ✅ | docs/api/database.mdx |
+| forge_disable_reactivity() helper | ✅ | ✅ | ✅ | docs/api/database.mdx |
+| Payload format (table:op:id) | ✅ | ✅ | ✅ | docs/api/database.mdx |
+| forge_events audit table | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
+| Extended trigger with context | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
+| Session variables (forge.user_id) | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
+| changed_columns tracking | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
 
 ---
 
@@ -541,17 +541,17 @@ The cluster operates as **independent nodes sharing a database** rather than a *
 
 ### 4.7 Configuration
 
-| Feature | Proposed | Implemented | Notes |
-|---------|----------|-------------|-------|
-| database.url | ✅ | ✅ | Works |
-| database.pool_size | ✅ | ✅ | Works |
-| database.pool_timeout | ✅ | ✅ | Works |
-| database.replica_urls | ✅ | ❌ | NOT IMPLEMENTED |
-| database.read_from_replica | ✅ | ❌ | NOT IMPLEMENTED |
-| jobs.database_url (separate) | ✅ | ❌ | NOT IMPLEMENTED |
-| jobs.backend = "redis" | ✅ | ❌ | NOT IMPLEMENTED |
-| jobs.routing | ✅ | ❌ | NOT IMPLEMENTED |
-| database.drift.ignore | ✅ | ❌ | NOT IMPLEMENTED |
+| Feature | Proposed | Implemented | Documented | Notes |
+|---------|----------|-------------|------------|-------|
+| database.url | ✅ | ✅ | ✅ | docs/api/configuration.mdx |
+| database.pool_size | ✅ | ✅ | ✅ | docs/api/configuration.mdx |
+| database.pool_timeout | ✅ | ✅ | ✅ | docs/api/configuration.mdx |
+| database.replica_urls | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
+| database.read_from_replica | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
+| jobs.database_url (separate) | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
+| jobs.backend = "redis" | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
+| jobs.routing | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
+| database.drift.ignore | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
 
 ---
 
@@ -930,23 +930,23 @@ The cluster operates as **independent nodes sharing a database** rather than a *
 
 ### 8.2 Testing
 
-| Feature | Proposed | Implemented | Notes |
-|---------|----------|-------------|-------|
-| TestContext struct | ✅ | ✅ | Basic version |
-| TestContextBuilder | ✅ | ✅ | Works |
-| MockHttp | ✅ | ✅ | Pattern matching |
-| MockResponse helpers | ✅ | ✅ | json(), error(), etc. |
-| Request recording | ✅ | ✅ | Works |
-| assert_ok! macro | ✅ | ✅ | Works |
-| assert_err! macro | ✅ | ✅ | Works |
-| assert_job_dispatched! | ✅ | ✅ | Works |
-| assert_workflow_started! | ✅ | ✅ | Works |
-| TestContext.query() | ✅ | Stub | Returns error |
-| TestContext.mutate() | ✅ | Stub | Returns error |
-| Transaction isolation | ✅ | ❌ | NOT IMPLEMENTED |
-| TestCluster (multi-node) | ✅ | ❌ | NOT IMPLEMENTED |
-| Subscription testing | ✅ | ❌ | NOT IMPLEMENTED |
-| Load testing utilities | ✅ | ❌ | NOT IMPLEMENTED |
+| Feature | Proposed | Implemented | Documented | Notes |
+|---------|----------|-------------|------------|-------|
+| TestContext struct | ✅ | ✅ | ✅ | docs/api/testing.mdx |
+| TestContextBuilder | ✅ | ✅ | ✅ | docs/api/testing.mdx |
+| MockHttp | ✅ | ✅ | ✅ | docs/api/testing.mdx |
+| MockResponse helpers | ✅ | ✅ | ✅ | docs/api/testing.mdx |
+| Request recording | ✅ | ✅ | ✅ | docs/api/testing.mdx |
+| assert_ok! macro | ✅ | ✅ | ✅ | docs/api/testing.mdx |
+| assert_err! macro | ✅ | ✅ | ✅ | docs/api/testing.mdx |
+| assert_job_dispatched! | ✅ | ✅ | ✅ | docs/api/testing.mdx |
+| assert_workflow_started! | ✅ | ✅ | ✅ | docs/api/testing.mdx |
+| TestContext.query() | ✅ | Stub | ✅ | docs/api/testing.mdx (notes stub status) |
+| TestContext.mutate() | ✅ | Stub | ✅ | docs/api/testing.mdx (notes stub status) |
+| Transaction isolation | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
+| TestCluster (multi-node) | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
+| Subscription testing | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
+| Load testing utilities | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
 
 ---
 
@@ -998,18 +998,18 @@ The cluster operates as **independent nodes sharing a database** rather than a *
 
 ### 9.2 Configuration
 
-| Section | Proposed | Implemented | Notes |
-|---------|----------|-------------|-------|
-| `[project]` | ✅ | ✅ | name, version |
-| `[database]` | ✅ | ✅ | url, pool_size, pool_timeout |
-| `[gateway]` | ✅ | ✅ | port, grpc_port, max_connections |
-| `[worker]` | ✅ | ✅ | max_concurrent_jobs, job_timeout |
-| `[cluster]` | ✅ | ✅ | discovery, heartbeat_interval |
-| `[observability]` | ✅ | ✅ | Basic config |
-| `[security]` | ✅ | Partial | secret_key only |
-| `[subscriptions]` | ✅ | ❌ | NOT IMPLEMENTED |
-| `[storage]` | ✅ | ❌ | NOT IMPLEMENTED |
-| `[[alerts]]` | ✅ | ❌ | NOT IMPLEMENTED |
+| Section | Proposed | Implemented | Documented | Notes |
+|---------|----------|-------------|------------|-------|
+| `[project]` | ✅ | ✅ | ✅ | docs/api/configuration.mdx |
+| `[database]` | ✅ | ✅ | ✅ | docs/api/configuration.mdx |
+| `[gateway]` | ✅ | ✅ | ✅ | docs/api/configuration.mdx |
+| `[worker]` | ✅ | ✅ | ✅ | docs/api/configuration.mdx |
+| `[cluster]` | ✅ | ✅ | ✅ | docs/api/configuration.mdx |
+| `[observability]` | ✅ | ✅ | ✅ | docs/api/configuration.mdx |
+| `[security]` | ✅ | Partial | ✅ | docs/api/configuration.mdx |
+| `[subscriptions]` | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
+| `[storage]` | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
+| `[[alerts]]` | ✅ | ❌ | ❌ | NOT IMPLEMENTED |
 
 ---
 
@@ -1115,3 +1115,23 @@ The cluster operates as **independent nodes sharing a database** rather than a *
 *Analysis completed: 2025-12-31*
 *Total proposal files analyzed: 35*
 *Documentation files checked: 33*
+
+---
+
+## Documentation Updates Log
+
+*Updated: 2025-12-31*
+
+The following documentation was created/updated to eliminate implementation-documentation drift:
+
+### New Documentation Files
+- `docs/api/testing.mdx` - Complete testing API reference (TestContext, MockHttp, assertions)
+- `docs/api/database.mdx` - Database reference (all system tables, SKIP LOCKED, reactivity functions)
+- `docs/api/configuration.mdx` - Complete forge.toml configuration reference
+- `docs/concepts/cluster.mdx` - Cluster architecture (leader election, heartbeat, discovery)
+
+### Updated Documentation Files
+- `docs/concepts/schema.mdx` - Added #[forge::model], #[forge::forge_enum], all field attributes
+- `docs/background/crons.mdx` - Added catch_up attributes, CronContext methods, CronLog
+- `docs/background/workflows.mdx` - Added version/deprecated attributes, optional(), workflow_time()
+- `docs/concepts/realtime.mdx` - Added architecture deep dive (ReadSet, Delta, Reactor, InvalidationEngine)
