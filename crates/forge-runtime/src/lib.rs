@@ -9,6 +9,7 @@ pub mod gateway;
 pub mod jobs;
 pub mod migrations;
 pub mod observability;
+pub mod rate_limit;
 pub mod realtime;
 pub mod testing;
 pub mod workflow;
@@ -35,13 +36,16 @@ pub use migrations::{MigrationExecutor, MigrationGenerator, SchemaDiff};
 pub use observability::{
     Alert, AlertCondition, AlertEvaluator, AlertRule, AlertSeverity, AlertStatus, AlertStore,
     ForgeTracingLayer, LogCollector, LogStore, LogsConfig, MetricsCollector, MetricsConfig,
-    MetricsStore, ObservabilityConfig, ObservabilityState, SystemMetricsCollector,
-    SystemMetricsSnapshot, TraceCollector, TraceStore, TraceSummary, TracesConfig,
+    MetricsStore, ObservabilityConfig, ObservabilityState, PartitionConfig, PartitionGranularity,
+    PartitionManager, SystemMetricsCollector, SystemMetricsSnapshot, TraceCollector, TraceStore,
+    TraceSummary, TracesConfig,
 };
+pub use rate_limit::RateLimiter;
 pub use realtime::{
-    ChangeListener, InvalidationEngine, SessionManager, SubscriptionManager, WebSocketConfig,
-    WebSocketServer,
+    AdaptiveTracker, AdaptiveTrackingConfig, AdaptiveTrackingStats, ChangeListener,
+    InvalidationEngine, SessionManager, SubscriptionManager, WebSocketConfig, WebSocketServer,
 };
 pub use workflow::{
-    WorkflowEntry, WorkflowExecutor, WorkflowRecord, WorkflowRegistry, WorkflowStepRecord,
+    EventStore, WorkflowEntry, WorkflowExecutor, WorkflowRecord, WorkflowRegistry,
+    WorkflowScheduler, WorkflowSchedulerConfig, WorkflowStepRecord,
 };

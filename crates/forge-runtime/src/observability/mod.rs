@@ -1,6 +1,7 @@
 mod alerts;
 mod collector;
 mod config;
+mod partitions;
 mod storage;
 mod tracing_layer;
 
@@ -11,6 +12,7 @@ pub use collector::{
     LogCollector, MetricsCollector, SystemMetricsCollector, SystemMetricsSnapshot, TraceCollector,
 };
 pub use config::{LogsConfig, MetricsConfig, ObservabilityConfig, TracesConfig};
+pub use partitions::{PartitionConfig, PartitionGranularity, PartitionManager};
 pub use storage::{LogStore, MetricsStore, TraceStore, TraceSummary};
 pub use tracing_layer::ForgeTracingLayer;
 

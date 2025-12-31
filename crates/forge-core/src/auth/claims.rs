@@ -41,6 +41,14 @@ impl Claims {
         self.custom.get(key)
     }
 
+    /// Get the tenant ID if present in claims.
+    pub fn tenant_id(&self) -> Option<Uuid> {
+        self.custom
+            .get("tenant_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+    }
+
     /// Create a builder for constructing claims.
     pub fn builder() -> ClaimsBuilder {
         ClaimsBuilder::new()
@@ -94,6 +102,13 @@ impl ClaimsBuilder {
     /// Add a custom claim.
     pub fn claim(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
         self.custom.insert(key.into(), value);
+        self
+    }
+
+    /// Set the tenant ID.
+    pub fn tenant_id(mut self, id: Uuid) -> Self {
+        self.custom
+            .insert("tenant_id".to_string(), serde_json::json!(id.to_string()));
         self
     }
 

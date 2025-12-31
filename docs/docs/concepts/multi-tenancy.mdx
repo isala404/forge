@@ -1,0 +1,204 @@
+---
+sidebar_position: 6
+title: Multi-Tenancy
+description: Row-level tenant isolation for SaaS applications
+---
+
+# Multi-Tenancy
+
+FORGE provides built-in support for multi-tenant applications with automatic row-level isolation.
+
+## Overview
+
+Multi-tenancy allows multiple customers (tenants) to share the same database while keeping their data isolated. FORGE handles this through:
+
+- **TenantContext** - Tracks the current tenant
+- **JWT Claims** - Extracts tenant ID from authentication
+- **SQL Filtering** - Automatic WHERE clause injection
+
+## Configuration
+
+### Extracting Tenant from JWT
+
+The tenant ID is extracted from JWT claims:
+
+```rust
+use forge::prelude::*;
+
+// When creating tokens, include tenant_id
+let claims = Claims::builder()
+    .user_id(user_id)
+    .tenant_id(tenant_uuid)  // Add tenant to claims
+    .role("user")
+    .build()?;
+```
+
+### Accessing Tenant in Functions
+
+```rust
+#[forge::query]
+pub async fn list_projects(ctx: &QueryContext) -> Result<Vec<Project>> {
+    // Get tenant from auth context
+    let tenant_id = ctx.auth.claim("tenant_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .ok_or(ForgeError::Unauthorized("Tenant required".into()))?;
+
+    // Query with tenant filter
+    let projects: Vec<Project> = sqlx::query_as(
+        "SELECT * FROM projects WHERE tenant_id = $1"
+    )
+    .bind(tenant_id)
+    .fetch_all(ctx.db())
+    .await?;
+
+    Ok(projects)
+}
+```
+
+## TenantContext
+
+The `TenantContext` provides utilities for tenant-aware operations:
+
+```rust
+use forge_core::tenant::{TenantContext, TenantIsolationMode};
+
+// Create a strict tenant context
+let tenant_ctx = TenantContext::new(
+    Some(tenant_uuid),
+    TenantIsolationMode::Strict
+);
+
+// Check tenant
+if tenant_ctx.has_tenant() {
+    let id = tenant_ctx.require_tenant()?;
+    // Use tenant_id...
+}
+
+// Generate SQL filter
+let filter = tenant_ctx.sql_filter("tenant_id");
+// Returns: "tenant_id = 'uuid'" or "1=1" if no tenant
+```
+
+### Isolation Modes
+
+| Mode | Behavior |
+|------|----------|
+| `None` | No tenant filtering (admin access) |
+| `Strict` | Require tenant, fail if missing |
+
+## Database Schema
+
+Add `tenant_id` to your tables:
+
+```sql
+-- In your migration
+CREATE TABLE projects (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    -- Index for efficient tenant queries
+    CONSTRAINT fk_tenant FOREIGN KEY (tenant_id) REFERENCES tenants(id)
+);
+
+CREATE INDEX idx_projects_tenant ON projects(tenant_id);
+```
+
+## Workflows with Tenants
+
+Tenant context flows through to workflows:
+
+```rust
+#[forge::workflow]
+pub async fn tenant_workflow(ctx: &WorkflowContext, input: Input) -> Result<()> {
+    // Tenant available from auth context
+    let tenant_id = ctx.auth.claim("tenant_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok());
+
+    ctx.step("tenant_operation", || async {
+        // Operations scoped to tenant
+        process_for_tenant(tenant_id, &input).await
+    }).run().await?;
+
+    Ok(())
+}
+```
+
+## Best Practices
+
+### 1. Always Filter by Tenant
+
+Never trust client-provided tenant IDs. Extract from authenticated JWT:
+
+```rust
+// Good: Extract from verified JWT
+let tenant_id = ctx.auth.claim("tenant_id")...;
+
+// Bad: Trust user input
+let tenant_id = input.tenant_id;  // Don't do this!
+```
+
+### 2. Index Tenant Columns
+
+Add indexes for efficient queries:
+
+```sql
+CREATE INDEX idx_orders_tenant ON orders(tenant_id);
+CREATE INDEX idx_orders_tenant_created ON orders(tenant_id, created_at);
+```
+
+### 3. Use Composite Keys
+
+For globally unique lookups within a tenant:
+
+```sql
+CREATE UNIQUE INDEX idx_projects_tenant_slug
+ON projects(tenant_id, slug);
+```
+
+### 4. Validate Cross-Tenant Access
+
+When resources reference each other, verify tenant ownership:
+
+```rust
+#[forge::mutation]
+pub async fn assign_to_project(
+    ctx: &MutationContext,
+    input: AssignInput
+) -> Result<()> {
+    let tenant_id = require_tenant(&ctx.auth)?;
+
+    // Verify project belongs to tenant
+    let project: Option<Project> = sqlx::query_as(
+        "SELECT * FROM projects WHERE id = $1 AND tenant_id = $2"
+    )
+    .bind(input.project_id)
+    .bind(tenant_id)
+    .fetch_optional(ctx.db())
+    .await?;
+
+    let project = project.ok_or(ForgeError::NotFound("Project not found".into()))?;
+
+    // Safe to proceed...
+    Ok(())
+}
+```
+
+## Rate Limiting per Tenant
+
+Combine with rate limiting for per-tenant quotas:
+
+```rust
+use forge_core::rate_limit::{RateLimitConfig, RateLimitKey};
+
+let config = RateLimitConfig {
+    requests: 1000,
+    per: "1h".to_string(),
+    key: RateLimitKey::Tenant,  // Rate limit by tenant
+};
+```
+
+See [Rate Limiting](/concepts/rate-limiting) for details.

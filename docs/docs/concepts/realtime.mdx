@@ -328,11 +328,59 @@ Controls invalidation granularity:
 
 | Mode | Description | Status |
 |------|-------------|--------|
-| `Table` | Invalidate when any row in the table changes | Fully implemented |
-| `Row` | Invalidate only when specific read rows change | Defined, not active |
-| `Adaptive` | Auto-select based on query characteristics | Planned |
+| `None` | No tracking (disabled) | Implemented |
+| `Table` | Invalidate when any row in the table changes | Implemented |
+| `Row` | Invalidate only when specific read rows change | Implemented |
+| `Adaptive` | Auto-select based on subscription count | Implemented |
 
-Currently, FORGE uses table-level tracking. This means if your query reads from the `tasks` table, any INSERT/UPDATE/DELETE on `tasks` will trigger a re-query.
+The `AdaptiveTracker` automatically switches between row-level and table-level tracking based on subscription patterns.
+
+#### Adaptive Tracking
+
+The `AdaptiveTracker` optimizes invalidation overhead by dynamically adjusting tracking granularity:
+
+```rust
+pub struct AdaptiveTrackingConfig {
+    /// Switch to table tracking when subscriptions exceed this (default: 100)
+    pub row_threshold: usize,
+    /// Switch to row tracking when subscriptions drop below this (default: 50)
+    pub table_threshold: usize,
+    /// Maximum rows to track per table (default: 10,000)
+    pub max_tracked_rows: usize,
+    /// Re-evaluation interval (default: 60s)
+    pub evaluation_interval: Duration,
+}
+```
+
+**How it works:**
+
+1. **Few subscriptions (< 50):** Row-level tracking
+   - Only rows actually read trigger invalidation
+   - Most efficient when subscriptions are sparse
+
+2. **Many subscriptions (> 100):** Table-level tracking
+   - Any change to the table triggers invalidation
+   - Avoids overhead of tracking thousands of individual rows
+
+3. **Hysteresis (50-100):** Keep current mode
+   - Prevents oscillation when subscription count fluctuates
+
+```rust
+// AdaptiveTracker decides invalidation scope
+let tracker = AdaptiveTracker::new(config);
+
+// Record new subscription with specific rows
+tracker.record_subscription("users", Some(vec!["user-1", "user-2"])).await;
+
+// Check if a change should trigger invalidation
+if tracker.should_invalidate("users", "user-1").await {
+    // Invalidate subscriptions watching this row
+}
+
+// Get current tracking mode
+let mode = tracker.get_mode("users").await;
+// Returns: TrackingMode::Row or TrackingMode::Table
+```
 
 #### Delta&lt;T&gt;
 

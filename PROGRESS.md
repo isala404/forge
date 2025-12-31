@@ -326,3 +326,34 @@ Updated docs for actual implementation.
 
 Eliminated documentation drift.
 - ~50 items in DEVIATIONS.md changed to documented
+
+Implemented Phase 1 (P0): Durable Workflows + Multi-tenancy.
+- `forge-core/src/workflow/suspend.rs`: SuspendReason, WorkflowEvent, WorkflowState structs
+- `forge-core/src/workflow/events.rs`: WorkflowEventSender trait, NoOpEventSender
+- WorkflowContext.sleep(), sleep_until(), wait_for_event() for durable suspension
+- `forge-runtime/src/workflow/event_store.rs`: EventStore for storing/consuming events
+- `forge-runtime/src/workflow/scheduler.rs`: WorkflowScheduler polls for ready workflows
+- `forge-core/src/tenant/mod.rs`: TenantContext, TenantIsolationMode for multi-tenancy
+- Claims.tenant_id(), ClaimsBuilder.tenant_id() for JWT tenant extraction
+- Database: suspended_at, wake_at, waiting_for_event, tenant_id columns
+
+Implemented Phase 2 (P1): Rate Limiting + Parallel Workflows + Partitioning.
+- `forge-core/src/rate_limit/mod.rs`: RateLimitConfig, RateLimitKey, RateLimitResult
+- `forge-runtime/src/rate_limit/limiter.rs`: RateLimiter with PostgreSQL token bucket
+- `forge-core/src/workflow/parallel.rs`: ParallelBuilder, ParallelResults for concurrent steps
+- `forge-runtime/src/observability/partitions.rs`: PartitionManager for time-based partitions
+- Database: forge_rate_limits table for token bucket state, forge_workflow_events table
+
+Implemented Phase 3 (P2): Adaptive Tracking.
+- `forge-runtime/src/realtime/adaptive.rs`: AdaptiveTracker with row→table mode switching
+- TrackingMode enum: None, Table, Row, Adaptive
+- record_subscription(), remove_subscription(), should_invalidate() methods
+- AdaptiveTrackingStats for monitoring mode distribution
+
+Updated documentation for new features.
+- `docs/background/workflows.mdx`: Added Durable Execution section (sleep, wait_for_event, parallel)
+- `docs/api/workflow-context.mdx`: Added sleep(), sleep_until(), wait_for_event(), parallel() methods
+- `docs/concepts/multi-tenancy.mdx`: New file documenting TenantContext, tenant JWT claims
+- `docs/concepts/rate-limiting.mdx`: New file documenting token bucket rate limiter
+- `docs/concepts/observability.mdx`: New file with metrics, logs, traces, partitioning, alerts
+- `docs/concepts/realtime.mdx`: Updated TrackingMode table, added Adaptive Tracking section

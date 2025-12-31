@@ -2,13 +2,18 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use serde::de::DeserializeOwned;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use super::parallel::ParallelBuilder;
 use super::step::StepStatus;
+use super::suspend::{SuspendReason, WorkflowEvent};
 use crate::function::AuthContext;
-use crate::Result;
+use crate::{ForgeError, Result};
 
 /// Type alias for compensation handler function.
 pub type CompensationHandler = Arc<
@@ -95,6 +100,12 @@ pub struct WorkflowContext {
     completed_steps: Arc<RwLock<Vec<String>>>,
     /// Compensation handlers for completed steps.
     compensation_handlers: Arc<RwLock<HashMap<String, CompensationHandler>>>,
+    /// Channel for signaling suspension (sent by workflow, received by executor).
+    suspend_tx: Option<mpsc::Sender<SuspendReason>>,
+    /// Whether this is a resumed execution.
+    is_resumed: bool,
+    /// Tenant ID for multi-tenancy.
+    tenant_id: Option<Uuid>,
 }
 
 impl WorkflowContext {
@@ -119,7 +130,59 @@ impl WorkflowContext {
             step_states: Arc::new(RwLock::new(HashMap::new())),
             completed_steps: Arc::new(RwLock::new(Vec::new())),
             compensation_handlers: Arc::new(RwLock::new(HashMap::new())),
+            suspend_tx: None,
+            is_resumed: false,
+            tenant_id: None,
         }
+    }
+
+    /// Create a resumed workflow context.
+    pub fn resumed(
+        run_id: Uuid,
+        workflow_name: String,
+        version: u32,
+        started_at: DateTime<Utc>,
+        db_pool: sqlx::PgPool,
+        http_client: reqwest::Client,
+    ) -> Self {
+        Self {
+            run_id,
+            workflow_name,
+            version,
+            started_at,
+            workflow_time: started_at,
+            auth: AuthContext::unauthenticated(),
+            db_pool,
+            http_client,
+            step_states: Arc::new(RwLock::new(HashMap::new())),
+            completed_steps: Arc::new(RwLock::new(Vec::new())),
+            compensation_handlers: Arc::new(RwLock::new(HashMap::new())),
+            suspend_tx: None,
+            is_resumed: true,
+            tenant_id: None,
+        }
+    }
+
+    /// Set the suspend channel.
+    pub fn with_suspend_channel(mut self, tx: mpsc::Sender<SuspendReason>) -> Self {
+        self.suspend_tx = Some(tx);
+        self
+    }
+
+    /// Set the tenant ID.
+    pub fn with_tenant(mut self, tenant_id: Uuid) -> Self {
+        self.tenant_id = Some(tenant_id);
+        self
+    }
+
+    /// Get the tenant ID.
+    pub fn tenant_id(&self) -> Option<Uuid> {
+        self.tenant_id
+    }
+
+    /// Check if this is a resumed execution.
+    pub fn is_resumed(&self) -> bool {
+        self.is_resumed
     }
 
     /// Get the deterministic workflow time.
@@ -428,6 +491,215 @@ impl WorkflowContext {
     /// Get compensation handlers (for cloning to executor).
     pub fn compensation_handlers(&self) -> HashMap<String, CompensationHandler> {
         self.compensation_handlers.read().unwrap().clone()
+    }
+
+    // =========================================================================
+    // DURABLE WORKFLOW API
+    // =========================================================================
+
+    /// Sleep for a duration.
+    ///
+    /// This suspends the workflow and persists the wake time to the database.
+    /// The workflow scheduler will resume the workflow when the time arrives.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Sleep for 30 days
+    /// ctx.sleep(Duration::from_secs(30 * 24 * 60 * 60)).await?;
+    /// ```
+    pub async fn sleep(&self, duration: Duration) -> Result<()> {
+        let wake_at = Utc::now() + chrono::Duration::from_std(duration).unwrap_or_default();
+        self.sleep_until(wake_at).await
+    }
+
+    /// Sleep until a specific time.
+    ///
+    /// If the wake time has already passed, returns immediately.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use chrono::{Utc, Duration};
+    /// let renewal_date = Utc::now() + Duration::days(30);
+    /// ctx.sleep_until(renewal_date).await?;
+    /// ```
+    pub async fn sleep_until(&self, wake_at: DateTime<Utc>) -> Result<()> {
+        // If wake time already passed, return immediately
+        if wake_at <= Utc::now() {
+            return Ok(());
+        }
+
+        // Persist the wake time to database
+        self.set_wake_at(wake_at).await?;
+
+        // Signal suspension to executor
+        self.signal_suspend(SuspendReason::Sleep { wake_at })
+            .await?;
+
+        Ok(())
+    }
+
+    /// Wait for an external event with optional timeout.
+    ///
+    /// The workflow suspends until the event arrives or the timeout expires.
+    /// Events are correlated by the workflow run ID.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let payment: PaymentConfirmation = ctx.wait_for_event(
+    ///     "payment_confirmed",
+    ///     Some(Duration::from_secs(7 * 24 * 60 * 60)), // 7 days
+    /// ).await?;
+    /// ```
+    pub async fn wait_for_event<T: DeserializeOwned>(
+        &self,
+        event_name: &str,
+        timeout: Option<Duration>,
+    ) -> Result<T> {
+        let correlation_id = self.run_id.to_string();
+
+        // Check if event already exists (race condition handling)
+        if let Some(event) = self.try_consume_event(event_name, &correlation_id).await? {
+            return serde_json::from_value(event.payload.unwrap_or_default())
+                .map_err(|e| ForgeError::Deserialization(e.to_string()));
+        }
+
+        // Calculate timeout
+        let timeout_at =
+            timeout.map(|d| Utc::now() + chrono::Duration::from_std(d).unwrap_or_default());
+
+        // Persist waiting state
+        self.set_waiting_for_event(event_name, timeout_at).await?;
+
+        // Signal suspension
+        self.signal_suspend(SuspendReason::WaitingEvent {
+            event_name: event_name.to_string(),
+            timeout: timeout_at,
+        })
+        .await?;
+
+        // After resume, try to consume the event
+        self.try_consume_event(event_name, &correlation_id)
+            .await?
+            .and_then(|e| e.payload)
+            .map(|p| serde_json::from_value(p).ok())
+            .flatten()
+            .ok_or_else(|| ForgeError::Timeout(format!("Event '{}' timed out", event_name)))
+    }
+
+    /// Try to consume an event from the database.
+    async fn try_consume_event(
+        &self,
+        event_name: &str,
+        correlation_id: &str,
+    ) -> Result<Option<WorkflowEvent>> {
+        let result: Option<(
+            Uuid,
+            String,
+            String,
+            Option<serde_json::Value>,
+            DateTime<Utc>,
+        )> = sqlx::query_as(
+            r#"
+                UPDATE forge_workflow_events
+                SET consumed_at = NOW(), consumed_by = $3
+                WHERE id = (
+                    SELECT id FROM forge_workflow_events
+                    WHERE event_name = $1 AND correlation_id = $2 AND consumed_at IS NULL
+                    ORDER BY created_at ASC LIMIT 1
+                    FOR UPDATE SKIP LOCKED
+                )
+                RETURNING id, event_name, correlation_id, payload, created_at
+                "#,
+        )
+        .bind(event_name)
+        .bind(correlation_id)
+        .bind(self.run_id)
+        .fetch_optional(&self.db_pool)
+        .await
+        .map_err(|e| ForgeError::Database(e.to_string()))?;
+
+        Ok(result.map(
+            |(id, event_name, correlation_id, payload, created_at)| WorkflowEvent {
+                id,
+                event_name,
+                correlation_id,
+                payload,
+                created_at,
+            },
+        ))
+    }
+
+    /// Persist wake time to database.
+    async fn set_wake_at(&self, wake_at: DateTime<Utc>) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE forge_workflow_runs
+            SET status = 'waiting', suspended_at = NOW(), wake_at = $2
+            WHERE id = $1
+            "#,
+        )
+        .bind(self.run_id)
+        .bind(wake_at)
+        .execute(&self.db_pool)
+        .await
+        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Persist waiting for event state to database.
+    async fn set_waiting_for_event(
+        &self,
+        event_name: &str,
+        timeout_at: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE forge_workflow_runs
+            SET status = 'waiting', suspended_at = NOW(), waiting_for_event = $2, event_timeout_at = $3
+            WHERE id = $1
+            "#,
+        )
+        .bind(self.run_id)
+        .bind(event_name)
+        .bind(timeout_at)
+        .execute(&self.db_pool)
+        .await
+        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Signal suspension to the executor.
+    async fn signal_suspend(&self, reason: SuspendReason) -> Result<()> {
+        if let Some(ref tx) = self.suspend_tx {
+            tx.send(reason)
+                .await
+                .map_err(|_| ForgeError::Internal("Failed to signal suspension".into()))?;
+        }
+        // Return a special error that the executor catches
+        Err(ForgeError::WorkflowSuspended)
+    }
+
+    // =========================================================================
+    // PARALLEL EXECUTION API
+    // =========================================================================
+
+    /// Create a parallel builder for executing steps concurrently.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let results = ctx.parallel()
+    ///     .step("fetch_user", || async { get_user(id).await })
+    ///     .step("fetch_orders", || async { get_orders(id).await })
+    ///     .step_with_compensate("charge_card",
+    ///         || async { charge_card(amount).await },
+    ///         |charge| async move { refund(charge.id).await })
+    ///     .run().await?;
+    ///
+    /// let user: User = results.get("fetch_user")?;
+    /// let orders: Vec<Order> = results.get("fetch_orders")?;
+    /// ```
+    pub fn parallel(&self) -> ParallelBuilder<'_> {
+        ParallelBuilder::new(self)
     }
 
     // =========================================================================

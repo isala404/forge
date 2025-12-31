@@ -6,8 +6,10 @@ pub mod error;
 pub mod function;
 pub mod job;
 pub mod observability;
+pub mod rate_limit;
 pub mod realtime;
 pub mod schema;
+pub mod tenant;
 pub mod workflow;
 
 pub use auth::{Claims, ClaimsBuilder};
@@ -24,9 +26,14 @@ pub use observability::{
     Alert, AlertCondition, AlertSeverity, AlertState, AlertStatus, LogEntry, LogLevel, Metric,
     MetricKind, MetricLabels, MetricValue, Span, SpanContext, SpanKind, SpanStatus, TraceId,
 };
+pub use rate_limit::{RateLimitConfig, RateLimitHeaders, RateLimitKey, RateLimitResult};
 pub use realtime::{
     Change, ChangeOperation, Delta, ReadSet, SessionId, SessionInfo, SessionStatus, SubscriptionId,
     SubscriptionInfo, SubscriptionState, TrackingMode,
 };
 pub use schema::{FieldDef, ModelMeta, SchemaRegistry, TableDef};
-pub use workflow::{ForgeWorkflow, WorkflowContext, WorkflowInfo, WorkflowStatus};
+pub use tenant::{HasTenant, TenantContext, TenantIsolationMode};
+pub use workflow::{
+    ForgeWorkflow, ParallelBuilder, ParallelResults, SuspendReason, WorkflowContext, WorkflowEvent,
+    WorkflowEventSender, WorkflowInfo, WorkflowStatus,
+};

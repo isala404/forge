@@ -78,7 +78,7 @@ CREATE INDEX IF NOT EXISTS idx_forge_cron_runs_name_time
 CREATE TABLE IF NOT EXISTS forge_workflow_runs (
     id UUID PRIMARY KEY,
     workflow_name VARCHAR(255) NOT NULL,
-    version VARCHAR(64),
+    version INTEGER DEFAULT 1,
     input JSONB NOT NULL DEFAULT '{}',
     output JSONB,
     status VARCHAR(32) NOT NULL DEFAULT 'created',
@@ -87,11 +87,40 @@ CREATE TABLE IF NOT EXISTS forge_workflow_runs (
     started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     completed_at TIMESTAMPTZ,
     error TEXT,
-    trace_id VARCHAR(64)
+    trace_id VARCHAR(64),
+    -- Durable workflow support
+    suspended_at TIMESTAMPTZ,
+    wake_at TIMESTAMPTZ,
+    waiting_for_event TEXT,
+    event_timeout_at TIMESTAMPTZ,
+    tenant_id UUID
 );
 
 CREATE INDEX IF NOT EXISTS idx_forge_workflow_runs_status
     ON forge_workflow_runs(status);
+
+CREATE INDEX IF NOT EXISTS idx_forge_workflow_runs_wake
+    ON forge_workflow_runs(wake_at)
+    WHERE status = 'waiting' AND wake_at IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_forge_workflow_runs_tenant
+    ON forge_workflow_runs(tenant_id)
+    WHERE tenant_id IS NOT NULL;
+
+-- Workflows: Event storage for durable workflows
+CREATE TABLE IF NOT EXISTS forge_workflow_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    event_name TEXT NOT NULL,
+    correlation_id TEXT NOT NULL,
+    payload JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    consumed_at TIMESTAMPTZ,
+    consumed_by UUID REFERENCES forge_workflow_runs(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_forge_workflow_events_lookup
+    ON forge_workflow_events(event_name, correlation_id)
+    WHERE consumed_at IS NULL;
 
 -- Workflows: Step state
 CREATE TABLE IF NOT EXISTS forge_workflow_steps (
@@ -106,6 +135,20 @@ CREATE TABLE IF NOT EXISTS forge_workflow_steps (
     error TEXT,
     UNIQUE(workflow_run_id, step_name)
 );
+
+-- Rate Limiting: Token bucket storage
+CREATE TABLE IF NOT EXISTS forge_rate_limits (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    bucket_key TEXT NOT NULL,
+    tokens DOUBLE PRECISION NOT NULL,
+    last_refill TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    max_tokens INTEGER NOT NULL,
+    refill_rate DOUBLE PRECISION NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_forge_rate_limits_bucket
+    ON forge_rate_limits(bucket_key);
 
 -- Observability: Metrics
 CREATE TABLE IF NOT EXISTS forge_metrics (

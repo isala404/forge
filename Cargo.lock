@@ -824,6 +824,7 @@ dependencies = [
  "clap",
  "console",
  "dialoguer",
+ "dotenvy",
  "forge-codegen",
  "forge-core",
  "forge-macros",
@@ -861,6 +862,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "cron",
+ "futures",
  "regex-lite",
  "reqwest",
  "serde",
@@ -907,6 +909,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-test",
+ "tokio-util",
  "tonic",
  "tower",
  "tower-http",
@@ -922,6 +925,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "futures"
+version = "0.3.31"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65bc07b1a8bc7c85c5f2e110c476c7389b4554ba72af57d8445ea63a576b0876"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "futures-executor",
+ "futures-io",
+ "futures-sink",
+ "futures-task",
+ "futures-util",
 ]
 
 [[package]]
@@ -997,6 +1015,7 @@ version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9fa08315bb612088cc391249efdc3bc77536f16c91f6cf495e6fbe85b20a4a81"
 dependencies = [
+ "futures-channel",
  "futures-core",
  "futures-io",
  "futures-macro",

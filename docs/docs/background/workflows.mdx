@@ -837,6 +837,157 @@ Design compensation to be resilient:
 })
 ```
 
+## Durable Execution
+
+Workflows are durable - they survive server restarts and can pause for extended periods. FORGE provides primitives for long-running processes.
+
+### Sleep (Durable Timers)
+
+Pause a workflow for a duration or until a specific time:
+
+```rust
+use std::time::Duration;
+
+#[forge::workflow]
+#[timeout = "7d"]
+pub async fn delayed_notification(ctx: &WorkflowContext, input: NotifyInput) -> Result<()> {
+    // Wait for 24 hours (workflow suspends, resumes automatically)
+    ctx.sleep(Duration::from_secs(86400)).await?;
+
+    // Send the notification
+    ctx.step("send_notification", || async {
+        send_notification(&input.user_id, &input.message).await
+    }).run().await?;
+
+    Ok(())
+}
+```
+
+Sleep until a specific time:
+
+```rust
+#[forge::workflow]
+pub async fn scheduled_report(ctx: &WorkflowContext, input: ReportInput) -> Result<()> {
+    // Wait until next Monday at 9am
+    let next_monday = calculate_next_monday_9am();
+    ctx.sleep_until(next_monday).await?;
+
+    ctx.step("generate_report", || async {
+        generate_weekly_report(&input).await
+    }).run().await?;
+
+    Ok(())
+}
+```
+
+**How it works:**
+- `sleep()` suspends the workflow and sets a `wake_at` time in the database
+- The `WorkflowScheduler` polls for suspended workflows ready to resume
+- When `wake_at <= now`, the workflow automatically resumes
+- No resources consumed while sleeping
+
+### Wait for External Events
+
+Wait for external events (webhooks, user actions, approvals):
+
+```rust
+#[forge::workflow]
+#[timeout = "7d"]
+pub async fn approval_workflow(ctx: &WorkflowContext, input: ApprovalInput) -> Result<()> {
+    // Step 1: Create approval request
+    ctx.step("create_request", || async {
+        create_approval_request(&input).await
+    }).run().await?;
+
+    // Step 2: Wait for approval (with 48h timeout)
+    let approval = ctx.wait_for_event(
+        "approval_response",
+        Some(Duration::from_secs(48 * 3600))
+    ).await?;
+
+    // Step 3: Process based on approval
+    match approval.payload.and_then(|p| p.get("approved").and_then(|v| v.as_bool())) {
+        Some(true) => {
+            ctx.step("process_approved", || async {
+                process_approved(&input).await
+            }).run().await?;
+        }
+        _ => {
+            ctx.step("process_rejected", || async {
+                process_rejected(&input).await
+            }).run().await?;
+        }
+    }
+
+    Ok(())
+}
+```
+
+Send events to waiting workflows:
+
+```rust
+#[forge::action]
+pub async fn approve_request(ctx: &ActionContext, input: ApproveInput) -> Result<()> {
+    // Send event to the waiting workflow
+    ctx.send_workflow_event(
+        "approval_response",
+        &input.workflow_id.to_string(),  // correlation_id
+        Some(serde_json::json!({ "approved": true }))
+    ).await?;
+
+    Ok(())
+}
+```
+
+**How it works:**
+- `wait_for_event()` suspends the workflow with `waiting_for_event` set
+- Events are stored in `forge_workflow_events` table
+- PostgreSQL `NOTIFY` triggers immediate wakeup
+- Timeout triggers resume with error if event not received
+
+### Parallel Step Execution
+
+Execute multiple independent steps concurrently:
+
+```rust
+#[forge::workflow]
+pub async fn provision_resources(ctx: &WorkflowContext, input: ProvisionInput) -> Result<()> {
+    // Run three provisioning steps in parallel
+    let results = ctx.parallel()
+        .step("create_database", || async {
+            create_database(&input.db_config).await
+        })
+        .step("create_storage", || async {
+            create_storage_bucket(&input.storage_config).await
+        })
+        .step_with_compensate(
+            "create_compute",
+            || async { create_compute_instance(&input.compute_config).await },
+            |instance| async move { destroy_compute_instance(&instance.id).await }
+        )
+        .run()
+        .await?;
+
+    // Get typed results
+    let db: Database = results.get("create_database")?;
+    let storage: StorageBucket = results.get("create_storage")?;
+    let compute: ComputeInstance = results.get("create_compute")?;
+
+    // Continue with sequential steps
+    ctx.step("configure_networking", || async {
+        configure_networking(&db, &storage, &compute).await
+    }).run().await?;
+
+    Ok(())
+}
+```
+
+**Parallel execution behavior:**
+- Steps start immediately and run concurrently
+- All steps must succeed for the parallel block to succeed
+- On failure, compensation runs in reverse order for completed steps
+- Results cached for workflow resumption
+
 ## What's Next?
 
 <div className="row">

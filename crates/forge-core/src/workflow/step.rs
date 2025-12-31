@@ -26,6 +26,8 @@ pub enum StepStatus {
     Compensated,
     /// Step was skipped.
     Skipped,
+    /// Step is waiting (suspended).
+    Waiting,
 }
 
 impl StepStatus {
@@ -38,6 +40,7 @@ impl StepStatus {
             Self::Failed => "failed",
             Self::Compensated => "compensated",
             Self::Skipped => "skipped",
+            Self::Waiting => "waiting",
         }
     }
 }
@@ -53,6 +56,7 @@ impl FromStr for StepStatus {
             "failed" => Self::Failed,
             "compensated" => Self::Compensated,
             "skipped" => Self::Skipped,
+            "waiting" => Self::Waiting,
             _ => Self::Pending,
         })
     }

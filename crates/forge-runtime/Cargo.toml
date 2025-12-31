@@ -30,6 +30,7 @@ sysinfo = { workspace = true }
 regex = "1.12"
 jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
 futures-util = "0.3"
+tokio-util = "0.7"
 
 [dev-dependencies]
 tokio-test = { workspace = true }

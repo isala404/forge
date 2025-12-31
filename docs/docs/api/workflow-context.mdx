@@ -12,16 +12,32 @@ The `WorkflowContext` is passed to workflow functions. It provides step manageme
 
 ```rust
 pub struct WorkflowContext {
-    pub workflow_id: Uuid,
-    pub workflow_type: String,
+    pub run_id: Uuid,
+    pub workflow_name: String,
+    pub version: u32,
     pub started_at: DateTime<Utc>,
+    pub auth: AuthContext,
 }
 
 impl WorkflowContext {
+    // Database and HTTP
     pub fn db(&self) -> &PgPool;
     pub fn http(&self) -> &Client;
-    pub fn step(&self, name: &str) -> StepBuilder;
-    pub fn get_step_output<T: DeserializeOwned>(&self, step_name: &str) -> Option<T>;
+
+    // Step execution
+    pub fn step<T, F, Fut>(&self, name: &str, f: F) -> StepRunner<T>;
+    pub fn parallel(&self) -> ParallelBuilder;
+    pub fn get_step_result<T: DeserializeOwned>(&self, name: &str) -> Option<T>;
+    pub fn is_step_completed(&self, name: &str) -> bool;
+
+    // Durable execution
+    pub async fn sleep(&self, duration: Duration) -> Result<()>;
+    pub async fn sleep_until(&self, wake_at: DateTime<Utc>) -> Result<()>;
+    pub async fn wait_for_event(&self, event_name: &str, timeout: Option<Duration>) -> Result<WorkflowEvent>;
+
+    // Time and dispatch
+    pub fn workflow_time(&self) -> DateTime<Utc>;
+    pub fn elapsed(&self) -> chrono::Duration;
     pub async fn dispatch_job(&self, job_type: &str, input: Value) -> Result<Uuid>;
 }
 ```
@@ -30,9 +46,11 @@ impl WorkflowContext {
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `workflow_id` | `Uuid` | Unique identifier for this workflow instance |
-| `workflow_type` | `String` | Name of the workflow type |
+| `run_id` | `Uuid` | Unique identifier for this workflow execution |
+| `workflow_name` | `String` | Name of the workflow type |
+| `version` | `u32` | Workflow version number |
 | `started_at` | `DateTime<Utc>` | When the workflow started |
+| `auth` | `AuthContext` | Authentication context from the request |
 
 ## Methods
 
@@ -92,6 +110,99 @@ ctx.dispatch_job("send_notification", serde_json::json!({
     "user_id": user_id,
     "message": "Your order is complete!",
 })).await?;
+```
+
+### `sleep()`
+
+Suspends the workflow for a specified duration. The workflow is persisted and resumes automatically.
+
+```rust
+use std::time::Duration;
+
+// Pause for 24 hours
+ctx.sleep(Duration::from_secs(86400)).await?;
+
+// Continue after 24 hours
+ctx.step("delayed_action", || async {
+    perform_delayed_action().await
+}).run().await?;
+```
+
+**Note:** No resources are consumed while sleeping. The `WorkflowScheduler` polls the database and resumes workflows when their `wake_at` time is reached.
+
+### `sleep_until()`
+
+Suspends the workflow until a specific point in time.
+
+```rust
+// Wait until a specific time
+let next_monday = calculate_next_monday_9am();
+ctx.sleep_until(next_monday).await?;
+```
+
+### `wait_for_event()`
+
+Suspends the workflow until an external event is received or timeout occurs.
+
+```rust
+// Wait up to 48 hours for an approval event
+let event = ctx.wait_for_event(
+    "approval_response",
+    Some(Duration::from_secs(48 * 3600))
+).await?;
+
+// Access event data
+if let Some(payload) = event.payload {
+    let approved = payload.get("approved").and_then(|v| v.as_bool());
+    // Handle approval...
+}
+```
+
+**WorkflowEvent fields:**
+- `id: Uuid` - Event unique identifier
+- `event_name: String` - Name of the event
+- `correlation_id: String` - Workflow run ID (as string)
+- `payload: Option<serde_json::Value>` - Event data
+- `created_at: DateTime<Utc>` - When event was sent
+
+### `parallel()`
+
+Creates a builder for executing multiple steps concurrently.
+
+```rust
+let results = ctx.parallel()
+    .step("task_a", || async { do_task_a().await })
+    .step("task_b", || async { do_task_b().await })
+    .step_with_compensate(
+        "task_c",
+        || async { do_task_c().await },
+        |result| async move { undo_task_c(result).await }
+    )
+    .run()
+    .await?;
+
+// Get typed results
+let a: TypeA = results.get("task_a")?;
+let b: TypeB = results.get("task_b")?;
+```
+
+### `workflow_time()`
+
+Returns deterministic time for replay consistency. Use instead of `Utc::now()`.
+
+```rust
+// Deterministic - same value on replay
+let expires_at = ctx.workflow_time() + Duration::hours(24);
+```
+
+### `is_step_completed()`
+
+Checks if a step has already been completed (for manual resumption logic).
+
+```rust
+if !ctx.is_step_completed("custom_step") {
+    // Step hasn't run yet
+}
 ```
 
 ## StepBuilder

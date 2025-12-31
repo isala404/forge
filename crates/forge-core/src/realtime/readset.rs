@@ -6,6 +6,8 @@ use uuid::Uuid;
 /// Tracking mode for read sets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrackingMode {
+    /// No tracking (disabled).
+    None,
     /// Track only tables (coarse-grained).
     Table,
     /// Track individual rows (fine-grained).
@@ -24,6 +26,7 @@ impl TrackingMode {
     /// Convert to string.
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::None => "none",
             Self::Table => "table",
             Self::Row => "row",
             Self::Adaptive => "adaptive",
@@ -48,6 +51,7 @@ impl FromStr for TrackingMode {
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
+            "none" => Ok(Self::None),
             "table" => Ok(Self::Table),
             "row" => Ok(Self::Row),
             "adaptive" => Ok(Self::Adaptive),

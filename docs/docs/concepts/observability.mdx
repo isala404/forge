@@ -1,0 +1,302 @@
+---
+sidebar_position: 8
+title: Observability
+description: Metrics, logs, traces, and table partitioning
+---
+
+# Observability
+
+FORGE includes built-in observability with metrics, logs, traces, and alerts stored in PostgreSQL.
+
+## Overview
+
+FORGE automatically collects:
+
+- **Metrics** - Counters, gauges, histograms
+- **Logs** - Structured log entries with levels
+- **Traces** - Distributed tracing with spans
+- **Alerts** - Condition-based alerting
+
+All observability data is stored in PostgreSQL for simplicity - no external services required.
+
+## Metrics
+
+### Recording Metrics
+
+```rust
+use forge_core::observability::{Metric, MetricKind};
+
+// Counter
+let counter = Metric::counter("http_requests_total")
+    .label("method", "GET")
+    .label("path", "/api/users")
+    .value(1.0);
+
+// Gauge
+let gauge = Metric::gauge("active_connections")
+    .value(42.0);
+
+// Histogram
+let histogram = Metric::histogram("request_duration_seconds")
+    .value(0.125);
+```
+
+### Querying Metrics
+
+```sql
+-- Request count by path
+SELECT
+    labels->>'path' as path,
+    SUM(value) as total
+FROM forge_metrics
+WHERE name = 'http_requests_total'
+  AND timestamp > NOW() - INTERVAL '1 hour'
+GROUP BY labels->>'path';
+
+-- P99 latency
+SELECT
+    PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY value) as p99
+FROM forge_metrics
+WHERE name = 'request_duration_seconds'
+  AND timestamp > NOW() - INTERVAL '1 hour';
+```
+
+## Logs
+
+### Recording Logs
+
+```rust
+use forge_core::observability::{LogEntry, LogLevel};
+
+let log = LogEntry::new(LogLevel::Info, "User logged in")
+    .field("user_id", user_id.to_string())
+    .field("ip", client_ip);
+```
+
+### Log Levels
+
+| Level | Use Case |
+|-------|----------|
+| `Error` | Service-impacting failures |
+| `Warn` | Potential issues or handled errors |
+| `Info` | Significant lifecycle events |
+| `Debug` | Detailed diagnostic info |
+| `Trace` | Very detailed debugging |
+
+## Traces
+
+### Creating Spans
+
+```rust
+use forge_core::observability::{Span, TraceId, SpanId};
+
+let trace_id = TraceId::new();
+let span = Span::new("process_order", trace_id)
+    .attribute("order_id", order_id.to_string())
+    .attribute("user_id", user_id.to_string());
+
+// Later...
+span.end();
+```
+
+### Child Spans
+
+```rust
+let child = parent_span.child("validate_payment")
+    .attribute("amount", amount.to_string());
+
+// Work...
+child.end();
+```
+
+## Table Partitioning
+
+For high-volume deployments, FORGE supports time-based partitioning of observability tables.
+
+### PartitionManager
+
+```rust
+use forge_runtime::observability::{PartitionManager, PartitionGranularity, PartitionConfig};
+use std::time::Duration;
+
+let config = PartitionConfig {
+    granularity: PartitionGranularity::Daily,
+    lookahead: Duration::from_secs(7 * 24 * 3600), // Create 7 days ahead
+    retention: [
+        ("forge_metrics".into(), Duration::from_secs(30 * 24 * 3600)), // 30 days
+        ("forge_logs".into(), Duration::from_secs(14 * 24 * 3600)),    // 14 days
+        ("forge_traces".into(), Duration::from_secs(7 * 24 * 3600)),   // 7 days
+    ].into(),
+    maintenance_interval: Duration::from_secs(3600), // Check hourly
+};
+
+let manager = PartitionManager::new(pool, config);
+
+// Ensure partition exists for a table
+manager.ensure_partition("forge_metrics", PartitionGranularity::Daily).await?;
+
+// Clean up old partitions
+let dropped = manager.cleanup_old_partitions("forge_metrics").await?;
+```
+
+### Partition Granularity
+
+| Granularity | Partition Size | Best For |
+|-------------|----------------|----------|
+| `Hour` | 1 hour | Very high volume (>1M rows/hour) |
+| `Day` | 1 day | High volume (>100K rows/day) |
+| `Week` | 1 week | Medium volume |
+| `Month` | 1 month | Low volume |
+
+### Default Retention
+
+| Table | Default Retention |
+|-------|-------------------|
+| `forge_metrics` | 30 days |
+| `forge_logs` | 14 days |
+| `forge_traces` | 7 days |
+
+### Partition Naming
+
+Partitions are named with suffixes based on granularity:
+
+- **Daily:** `forge_metrics_2024_01_15`
+- **Weekly:** `forge_metrics_2024_w03`
+- **Monthly:** `forge_metrics_2024_01`
+
+### Running Partition Maintenance
+
+```rust
+// Run periodically (e.g., in a cron job)
+#[forge::cron(schedule = "0 * * * *")]  // Every hour
+pub async fn partition_maintenance(ctx: &CronContext) -> Result<()> {
+    let manager = PartitionManager::new(ctx.db().clone(), config);
+
+    // Ensure future partitions exist
+    manager.ensure_partition("forge_metrics", PartitionGranularity::Daily).await?;
+    manager.ensure_partition("forge_logs", PartitionGranularity::Daily).await?;
+    manager.ensure_partition("forge_traces", PartitionGranularity::Daily).await?;
+
+    // Drop old partitions
+    manager.cleanup_old_partitions("forge_metrics").await?;
+    manager.cleanup_old_partitions("forge_logs").await?;
+    manager.cleanup_old_partitions("forge_traces").await?;
+
+    Ok(())
+}
+```
+
+## Alerts
+
+### Defining Alert Rules
+
+```rust
+use forge_core::observability::{AlertRule, AlertSeverity, AlertCondition};
+
+let rule = AlertRule::new("high_error_rate")
+    .severity(AlertSeverity::Critical)
+    .condition(AlertCondition::GreaterThan {
+        metric: "error_rate".into(),
+        threshold: 0.05, // 5% error rate
+    })
+    .for_duration(Duration::from_secs(300)) // 5 minutes
+    .description("Error rate exceeds 5% for 5 minutes");
+```
+
+### Alert Severities
+
+| Severity | Use Case |
+|----------|----------|
+| `Critical` | Immediate action required |
+| `Warning` | Investigate soon |
+| `Info` | Informational |
+
+## Dashboard
+
+FORGE includes a built-in dashboard at `/_dashboard/`:
+
+- **Overview** - System health, key metrics
+- **Metrics** - Metric explorer with charts
+- **Logs** - Log viewer with filtering
+- **Traces** - Distributed trace viewer
+- **Alerts** - Active and historical alerts
+- **Jobs** - Background job status
+- **Workflows** - Workflow execution tracking
+- **Cluster** - Node health and leader status
+
+## Configuration
+
+```toml title="forge.toml"
+[observability]
+enabled = true
+
+[observability.metrics]
+enabled = true
+buffer_size = 1000
+flush_interval_ms = 5000
+
+[observability.logs]
+enabled = true
+level = "info"
+buffer_size = 500
+
+[observability.traces]
+enabled = true
+sample_rate = 0.1  # Sample 10% of traces
+always_sample_errors = true
+
+[observability.export]
+# Optional: Export to external systems
+otlp_endpoint = "http://localhost:4317"
+prometheus_endpoint = "/metrics"
+```
+
+## Best Practices
+
+### 1. Use Structured Logging
+
+```rust
+// Good: Structured fields
+tracing::info!(
+    user_id = %user_id,
+    action = "login",
+    ip = %client_ip,
+    "User logged in"
+);
+
+// Bad: String interpolation
+tracing::info!("User {} logged in from {}", user_id, client_ip);
+```
+
+### 2. Add Context to Spans
+
+```rust
+let span = Span::new("process_order", trace_id)
+    .attribute("order_id", order_id.to_string())
+    .attribute("user_id", user_id.to_string())
+    .attribute("total", format!("{:.2}", total));
+```
+
+### 3. Set Appropriate Retention
+
+Adjust retention based on your needs:
+
+```rust
+let config = PartitionConfig {
+    retention: [
+        // Keep metrics longer for trend analysis
+        ("forge_metrics".into(), Duration::from_secs(90 * 24 * 3600)),
+        // Keep logs shorter if high volume
+        ("forge_logs".into(), Duration::from_secs(7 * 24 * 3600)),
+    ].into(),
+    ..Default::default()
+};
+```
+
+### 4. Sample High-Volume Traces
+
+```toml
+[observability.traces]
+sample_rate = 0.01  # 1% sampling for high traffic
+always_sample_errors = true  # But always capture errors
+```

@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use thiserror::Error;
 
 /// Core error type for FORGE operations.
@@ -19,7 +21,10 @@ pub enum ForgeError {
     Cluster(String),
 
     #[error("Serialization error: {0}")]
-    Serialization(#[from] serde_json::Error),
+    Serialization(String),
+
+    #[error("Deserialization error: {0}")]
+    Deserialization(String),
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
@@ -47,6 +52,25 @@ pub enum ForgeError {
 
     #[error("Internal error: {0}")]
     Internal(String),
+
+    #[error("Invalid state: {0}")]
+    InvalidState(String),
+
+    #[error("Workflow suspended")]
+    WorkflowSuspended,
+
+    #[error("Rate limit exceeded: retry after {retry_after:?}")]
+    RateLimitExceeded {
+        retry_after: Duration,
+        limit: u32,
+        remaining: u32,
+    },
+}
+
+impl From<serde_json::Error> for ForgeError {
+    fn from(e: serde_json::Error) -> Self {
+        ForgeError::Serialization(e.to_string())
+    }
 }
 
 /// Result type alias using ForgeError.

@@ -1,0 +1,272 @@
+---
+sidebar_position: 7
+title: Rate Limiting
+description: Token bucket rate limiting with PostgreSQL
+---
+
+# Rate Limiting
+
+FORGE includes a PostgreSQL-backed rate limiter using the token bucket algorithm.
+
+## Overview
+
+Rate limiting protects your application from:
+- Abuse and DDoS attacks
+- Runaway automation
+- API quota enforcement
+- Fair usage policies
+
+## Configuration
+
+Define rate limits with `RateLimitConfig`:
+
+```rust
+use forge_core::rate_limit::{RateLimitConfig, RateLimitKey};
+use std::time::Duration;
+
+// 100 requests per minute per user
+let config = RateLimitConfig {
+    requests: 100,
+    per: "1m".to_string(),
+    key: RateLimitKey::User,
+};
+
+// 1000 requests per hour per tenant
+let tenant_config = RateLimitConfig {
+    requests: 1000,
+    per: "1h".to_string(),
+    key: RateLimitKey::Tenant,
+};
+
+// 10 requests per second globally
+let global_config = RateLimitConfig {
+    requests: 10,
+    per: "1s".to_string(),
+    key: RateLimitKey::Global,
+};
+```
+
+### Rate Limit Keys
+
+| Key | Bucket By | Use Case |
+|-----|-----------|----------|
+| `User` | User ID | Per-user quotas |
+| `Ip` | Client IP | Anonymous rate limiting |
+| `Tenant` | Tenant ID | SaaS tier limits |
+| `UserAction` | User + Action | Action-specific limits |
+| `Global` | Action only | System-wide throttling |
+
+### Duration Format
+
+Supported duration formats:
+- `1s`, `30s` - Seconds
+- `1m`, `5m` - Minutes
+- `1h`, `24h` - Hours
+- `1d`, `7d` - Days
+
+## Using the Rate Limiter
+
+```rust
+use forge_runtime::rate_limit::RateLimiter;
+
+// Check rate limit
+let limiter = RateLimiter::new(pool.clone());
+
+let result = limiter.check("user:123:api_call", &config).await?;
+
+if result.allowed {
+    // Proceed with request
+    println!("Remaining: {}", result.remaining);
+} else {
+    // Rate limited
+    println!("Retry after: {:?}", result.retry_after);
+    return Err(ForgeError::RateLimitExceeded {
+        retry_after: result.retry_after.unwrap_or(Duration::from_secs(1)),
+        limit: config.requests,
+        remaining: result.remaining,
+    });
+}
+```
+
+### Enforce with Error
+
+Use `enforce()` to automatically return an error when rate limited:
+
+```rust
+// Throws ForgeError::RateLimitExceeded if limit exceeded
+limiter.enforce("user:123:api_call", &config).await?;
+
+// If we get here, request is allowed
+process_request().await
+```
+
+## Building Bucket Keys
+
+The rate limiter provides a helper to build keys:
+
+```rust
+let key = limiter.build_key(
+    RateLimitKey::User,
+    "create_order",
+    &auth_context,
+    &request_metadata
+);
+// Result: "user:abc123:create_order"
+
+let key = limiter.build_key(
+    RateLimitKey::Tenant,
+    "api_call",
+    &auth_context,
+    &request_metadata
+);
+// Result: "tenant:tenant-uuid:api_call"
+```
+
+## Rate Limit Result
+
+```rust
+pub struct RateLimitResult {
+    /// Whether the request is allowed
+    pub allowed: bool,
+    /// Remaining requests in current window
+    pub remaining: u32,
+    /// When the limit resets
+    pub reset_at: DateTime<Utc>,
+    /// How long to wait before retrying (if denied)
+    pub retry_after: Option<Duration>,
+}
+```
+
+## HTTP Headers
+
+Add rate limit headers to responses:
+
+```rust
+use forge_core::rate_limit::RateLimitHeaders;
+
+let headers = RateLimitHeaders::from_result(&result, &config);
+
+// Returns headers:
+// X-RateLimit-Limit: 100
+// X-RateLimit-Remaining: 95
+// X-RateLimit-Reset: 1704067200
+// Retry-After: 60 (only if denied)
+```
+
+## Token Bucket Algorithm
+
+FORGE uses the token bucket algorithm:
+
+1. Each bucket has a maximum number of tokens (= `requests`)
+2. Tokens refill continuously at `requests / per` rate
+3. Each request consumes 1 token
+4. If no tokens available, request is denied
+
+**Benefits:**
+- Allows bursts up to the limit
+- Smooth rate limiting over time
+- No "thundering herd" at window boundaries
+- Efficient PostgreSQL implementation
+
+## Database Schema
+
+Rate limits are stored in `forge_rate_limits`:
+
+```sql
+CREATE TABLE forge_rate_limits (
+    bucket_key VARCHAR(255) PRIMARY KEY,
+    tokens DOUBLE PRECISION NOT NULL,
+    last_refill TIMESTAMPTZ NOT NULL,
+    max_tokens INTEGER NOT NULL,
+    refill_rate DOUBLE PRECISION NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+The rate limiter uses atomic UPSERT for thread-safe updates:
+
+```sql
+INSERT INTO forge_rate_limits (bucket_key, tokens, last_refill, max_tokens, refill_rate)
+VALUES ($1, $2 - 1, NOW(), $2, $3)
+ON CONFLICT (bucket_key) DO UPDATE SET
+    tokens = LEAST(
+        max_tokens,
+        tokens + (EXTRACT(EPOCH FROM (NOW() - last_refill)) * refill_rate)
+    ) - 1,
+    last_refill = NOW()
+RETURNING tokens, max_tokens, last_refill, (tokens >= 0) as allowed
+```
+
+## Cleanup
+
+Remove old rate limit entries:
+
+```rust
+let deleted = limiter.cleanup(
+    Utc::now() - chrono::Duration::days(1)
+).await?;
+
+println!("Cleaned up {} old entries", deleted);
+```
+
+## Best Practices
+
+### 1. Layer Rate Limits
+
+Apply multiple limits at different levels:
+
+```rust
+// Global protection
+limiter.enforce("global:api", &global_config).await?;
+
+// Per-tenant limit
+limiter.enforce(&format!("tenant:{}:api", tenant_id), &tenant_config).await?;
+
+// Per-user limit
+limiter.enforce(&format!("user:{}:api", user_id), &user_config).await?;
+```
+
+### 2. Different Limits for Different Actions
+
+```rust
+let create_config = RateLimitConfig {
+    requests: 10,
+    per: "1m".to_string(),
+    key: RateLimitKey::User,
+};
+
+let read_config = RateLimitConfig {
+    requests: 100,
+    per: "1m".to_string(),
+    key: RateLimitKey::User,
+};
+```
+
+### 3. Graceful Degradation
+
+Return appropriate HTTP status:
+
+```rust
+match result {
+    Ok(_) => process_request().await,
+    Err(ForgeError::RateLimitExceeded { retry_after, .. }) => {
+        // Return 429 Too Many Requests
+        // Include Retry-After header
+    }
+}
+```
+
+### 4. Monitor Rate Limit Hits
+
+Log rate limit events for monitoring:
+
+```rust
+if !result.allowed {
+    tracing::warn!(
+        bucket = %bucket_key,
+        remaining = result.remaining,
+        retry_after = ?result.retry_after,
+        "Rate limit exceeded"
+    );
+}
+```

@@ -16,7 +16,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 sqlx = { workspace = true }
 reqwest = { workspace = true }
-tokio = { workspace = true, features = ["rt"] }
+tokio = { workspace = true, features = ["rt", "sync"] }
+futures = "0.3"
 regex-lite = "0.1.8"
 
 [dev-dependencies]
