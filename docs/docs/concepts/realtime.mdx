@@ -1,0 +1,319 @@
+---
+sidebar_position: 4
+title: Real-Time Updates
+description: Automatic live data with WebSocket subscriptions
+---
+
+# Real-Time Updates
+
+FORGE makes real-time data simple. Subscribe to a query, and it updates automatically when the data changes. No WebSocket setup, no event handlers, no Redux.
+
+## How It Works
+
+```
+Your Svelte Component
+        │
+        ▼
+subscribe('list_tasks', {})
+        │
+        ▼
+WebSocket connection to FORGE
+        │
+        ▼
+FORGE watches PostgreSQL changes
+        │
+        ▼
+When data changes → Query re-runs → UI updates
+```
+
+## Basic Subscription
+
+```svelte title="src/routes/+page.svelte"
+<script lang="ts">
+  import { subscribe } from '$lib/forge';
+
+  // This updates automatically when tasks change!
+  const tasks = subscribe('list_tasks', {});
+</script>
+
+{#if $tasks.loading}
+  <p>Loading tasks...</p>
+{:else if $tasks.error}
+  <p>Error: {$tasks.error.message}</p>
+{:else}
+  {#each $tasks.data ?? [] as task}
+    <div class="task">
+      <input type="checkbox" checked={task.completed} />
+      <span>{task.title}</span>
+    </div>
+  {/each}
+{/if}
+```
+
+## Enable Reactivity
+
+For real-time to work, you need to enable reactivity on your tables:
+
+```sql title="migrations/0001_initial.sql"
+-- Create your table
+CREATE TABLE tasks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    title VARCHAR(255) NOT NULL,
+    completed BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Enable real-time updates (THIS IS REQUIRED)
+SELECT forge_enable_reactivity('tasks');
+```
+
+This creates PostgreSQL triggers that notify FORGE when data changes.
+
+## Subscription Store
+
+The `subscribe` function returns a Svelte store with this shape:
+
+```typescript
+interface SubscriptionResult<T> {
+  loading: boolean;    // True while initial data loads
+  data: T | null;      // The data from your query
+  error: Error | null; // Any error that occurred
+  stale: boolean;      // True if data might be outdated
+}
+```
+
+## Query vs Subscribe
+
+| Function | Use When |
+|----------|----------|
+| `query()` | One-time fetch (page load, search) |
+| `subscribe()` | Live updates (lists, dashboards) |
+
+```typescript
+// One-time fetch
+const user = await query('get_user', { id: userId });
+
+// Live subscription
+const tasks = subscribe('list_tasks', {});
+```
+
+## Reactive Parameters
+
+Subscribe with dynamic parameters:
+
+```svelte
+<script lang="ts">
+  import { subscribe } from '$lib/forge';
+
+  let { projectId } = $props();
+
+  // Re-subscribes when projectId changes
+  const tasks = subscribe('list_project_tasks', () => ({ projectId }));
+</script>
+```
+
+## Mutations Trigger Updates
+
+When you run a mutation, subscriptions update automatically:
+
+```svelte
+<script lang="ts">
+  import { subscribe, mutate } from '$lib/forge';
+
+  const tasks = subscribe('list_tasks', {});
+
+  async function addTask(title: string) {
+    // This mutation...
+    await mutate('create_task', { title });
+
+    // ...automatically updates $tasks!
+    // No refetch needed
+  }
+</script>
+
+<button onclick={() => addTask('New task')}>
+  Add Task
+</button>
+
+{#each $tasks.data ?? [] as task}
+  <div>{task.title}</div>
+{/each}
+```
+
+## Connection States
+
+Handle connection issues gracefully:
+
+```svelte
+<script lang="ts">
+  import { getForgeClient } from '$lib/forge';
+
+  const client = getForgeClient();
+
+  // Listen for connection changes
+  client.onConnectionStateChange((state) => {
+    console.log('Connection:', state);
+    // 'connecting' | 'connected' | 'reconnecting' | 'disconnected'
+  });
+</script>
+
+{#if client.getConnectionState() === 'reconnecting'}
+  <div class="banner">
+    Reconnecting...
+  </div>
+{/if}
+```
+
+## Optimistic Updates
+
+For instant UI feedback:
+
+```svelte
+<script lang="ts">
+  import { subscribe, mutate } from '$lib/forge';
+
+  const tasks = subscribe('list_tasks', {});
+
+  async function toggleTask(task: Task) {
+    // Optimistically update the UI
+    const oldData = $tasks.data;
+    $tasks.data = $tasks.data?.map(t =>
+      t.id === task.id ? { ...t, completed: !t.completed } : t
+    );
+
+    try {
+      await mutate('toggle_task', { id: task.id });
+    } catch (error) {
+      // Rollback on error
+      $tasks.data = oldData;
+    }
+  }
+</script>
+```
+
+Or use the built-in helpers:
+
+```typescript
+import { mutateOptimisticUpdate } from '$lib/forge';
+
+async function toggleTask(task: Task) {
+  await mutateOptimisticUpdate(
+    'toggle_task',
+    tasks,
+    {
+      input: { id: task.id },
+      itemId: task.id,
+      getId: (t) => t.id,
+      update: (t) => ({ ...t, completed: !t.completed }),
+    }
+  );
+}
+```
+
+## Multiple Subscriptions
+
+Subscribe to multiple queries:
+
+```svelte
+<script lang="ts">
+  import { subscribe } from '$lib/forge';
+
+  const tasks = subscribe('list_tasks', {});
+  const users = subscribe('list_users', {});
+  const stats = subscribe('get_dashboard_stats', {});
+</script>
+
+<div class="dashboard">
+  <TaskList tasks={$tasks.data ?? []} />
+  <UserList users={$users.data ?? []} />
+  <StatsPanel stats={$stats.data} />
+</div>
+```
+
+## Under the Hood
+
+FORGE uses PostgreSQL's LISTEN/NOTIFY:
+
+1. When you call `forge_enable_reactivity('tasks')`, FORGE creates a trigger
+2. When a row is inserted/updated/deleted, the trigger fires
+3. PostgreSQL sends a NOTIFY to FORGE
+4. FORGE finds all subscriptions watching that table
+5. FORGE re-runs the queries
+6. Results are pushed via WebSocket
+
+```sql
+-- This is what forge_enable_reactivity creates:
+CREATE TRIGGER tasks_notify_changes
+    AFTER INSERT OR UPDATE OR DELETE ON tasks
+    FOR EACH ROW EXECUTE FUNCTION forge_notify_change();
+```
+
+## Performance Tips
+
+### 1. Subscribe to Specific Data
+
+```typescript
+// Good: Subscribe to user's tasks only
+const tasks = subscribe('get_user_tasks', { userId });
+
+// Less efficient: Subscribe to all tasks, filter client-side
+const allTasks = subscribe('list_all_tasks', {});
+```
+
+### 2. Use Query for One-Time Data
+
+```typescript
+// Good: One-time fetch for user profile
+const user = await query('get_user', { id });
+
+// Wasteful: Subscribing to rarely-changing data
+const user = subscribe('get_user', { id });
+```
+
+### 3. Unsubscribe When Done
+
+Subscriptions are cleaned up automatically when components unmount, but you can also manually unsubscribe:
+
+```typescript
+const tasks = subscribe('list_tasks', {});
+
+// Later
+tasks.unsubscribe();
+```
+
+## Debugging
+
+Enable debug logging:
+
+```typescript
+import { setForgeDebug } from '$lib/forge';
+
+setForgeDebug(true);
+// Logs: [FORGE] Subscribe: list_tasks
+// Logs: [FORGE] Data update: list_tasks
+```
+
+## What's Next?
+
+<div className="row">
+  <div className="col col--6">
+    <a className="card" href="/frontend/realtime-subscriptions">
+      <div className="card__header">
+        <h3>📡 Frontend Subscriptions</h3>
+      </div>
+      <div className="card__body">
+        Advanced subscription patterns
+      </div>
+    </a>
+  </div>
+  <div className="col col--6">
+    <a className="card" href="/frontend/job-tracking">
+      <div className="card__header">
+        <h3>📊 Job Tracking</h3>
+      </div>
+      <div className="card__body">
+        Real-time job progress
+      </div>
+    </a>
+  </div>
+</div>

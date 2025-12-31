@@ -1,0 +1,224 @@
+---
+sidebar_position: 0
+title: Background Processing
+description: Jobs, crons, and workflows for reliable background task execution
+---
+
+# Background Processing
+
+FORGE provides three primitives for background work:
+
+| Type | Use For | Example |
+|------|---------|---------|
+| **Jobs** | One-off tasks | Send email, process upload |
+| **Crons** | Scheduled recurring tasks | Daily reports, hourly cleanup |
+| **Workflows** | Multi-step processes | Order processing, user onboarding |
+
+All three share common features:
+- **Persistent** - Survive server restarts
+- **Observable** - Track progress in real-time
+- **Reliable** - Automatic retries with backoff
+
+## Quick Comparison
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     When to Use What                             │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  "I need to send an email after signup"                        │
+│  └──► Job                                                       │
+│                                                                 │
+│  "I need to clean up old data every night"                     │
+│  └──► Cron                                                      │
+│                                                                 │
+│  "I need to charge payment, reserve inventory, notify warehouse"│
+│  └──► Workflow (with compensation for rollback)                 │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Jobs
+
+One-off background tasks with retries and progress tracking:
+
+```rust
+#[forge::job]
+#[retry(max_attempts = 3)]
+pub async fn send_welcome_email(ctx: &JobContext, input: EmailInput) -> Result<()> {
+    ctx.progress(0, "Preparing email...");
+
+    let template = load_template("welcome").await?;
+    ctx.progress(50, "Sending...");
+
+    send_email(&input.to, &template).await?;
+    ctx.progress(100, "Sent!");
+
+    Ok(())
+}
+```
+
+[Learn more about Jobs →](/background/jobs)
+
+## Crons
+
+Scheduled tasks that run automatically:
+
+```rust
+#[forge::cron]
+#[schedule = "0 3 * * *"]  // 3 AM daily
+pub async fn nightly_cleanup(ctx: &CronContext) -> Result<()> {
+    sqlx::query("DELETE FROM sessions WHERE expires_at < NOW()")
+        .execute(ctx.db())
+        .await?;
+    Ok(())
+}
+```
+
+[Learn more about Crons →](/background/crons)
+
+## Workflows
+
+Multi-step processes with automatic compensation:
+
+```rust
+#[forge::workflow]
+pub async fn process_order(ctx: &WorkflowContext, order: Order) -> Result<()> {
+    ctx.step("charge_payment")
+        .run(|| charge(&order))
+        .compensate(|| refund(&order))
+        .await?;
+
+    ctx.step("reserve_inventory")
+        .run(|| reserve(&order))
+        .compensate(|| release(&order))
+        .await?;
+
+    ctx.step("ship")
+        .run(|| create_shipment(&order))
+        .await?;
+
+    Ok(())
+}
+```
+
+If any step fails, compensation runs in reverse order automatically.
+
+[Learn more about Workflows →](/background/workflows)
+
+## Architecture
+
+All background processing uses PostgreSQL for coordination:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      Your App                                │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐    │
+│  │ Gateway  │  │ Worker 1 │  │ Worker 2 │  │ Scheduler │    │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬──────┘    │
+│       │             │             │             │           │
+└───────┼─────────────┼─────────────┼─────────────┼───────────┘
+        │             │             │             │
+        └─────────────┼─────────────┼─────────────┘
+                      ▼
+            ┌─────────────────┐
+            │   PostgreSQL    │
+            │                 │
+            │  forge_jobs     │
+            │  forge_crons    │
+            │  forge_workflows│
+            └─────────────────┘
+```
+
+- **Gateway** dispatches jobs/workflows
+- **Workers** process jobs and workflow steps
+- **Scheduler** triggers crons
+- **PostgreSQL** stores state and coordinates workers
+
+No Redis. No RabbitMQ. Just PostgreSQL.
+
+## Dispatching from Code
+
+```rust
+// From a mutation
+#[forge::mutation]
+pub async fn create_order(ctx: &MutationContext, input: OrderInput) -> Result<Order> {
+    let order = save_order(ctx.db(), &input).await?;
+
+    // Dispatch a job
+    ctx.dispatch_job("send_confirmation", serde_json::json!({
+        "order_id": order.id,
+    })).await?;
+
+    // Or start a workflow
+    ctx.dispatch_workflow("process_order", serde_json::json!({
+        "order_id": order.id,
+    })).await?;
+
+    Ok(order)
+}
+```
+
+## Frontend Tracking
+
+Track job and workflow progress in real-time:
+
+```svelte
+<script>
+  import { createJobTracker } from '$lib/forge';
+
+  const job = createJobTracker('export_data');
+</script>
+
+<button onclick={() => job.start({ format: 'csv' })}>
+  Export
+</button>
+
+{#if $job?.status === 'running'}
+  <progress value={$job.progress_percent} max="100" />
+  <p>{$job.progress_message}</p>
+{/if}
+```
+
+## Dashboard
+
+Monitor all background processing at `http://localhost:8080/_dashboard`:
+
+- **Jobs** - View queue, running jobs, failed jobs
+- **Crons** - See schedules, last run, next run
+- **Workflows** - Track step progress, see compensations
+
+## What's Next?
+
+<div className="row">
+  <div className="col col--4">
+    <a className="card" href="/background/jobs">
+      <div className="card__header">
+        <h3>📋 Jobs</h3>
+      </div>
+      <div className="card__body">
+        One-off background tasks
+      </div>
+    </a>
+  </div>
+  <div className="col col--4">
+    <a className="card" href="/background/crons">
+      <div className="card__header">
+        <h3>⏰ Crons</h3>
+      </div>
+      <div className="card__body">
+        Scheduled recurring tasks
+      </div>
+    </a>
+  </div>
+  <div className="col col--4">
+    <a className="card" href="/background/workflows">
+      <div className="card__header">
+        <h3>🔄 Workflows</h3>
+      </div>
+      <div className="card__body">
+        Multi-step processes
+      </div>
+    </a>
+  </div>
+</div>

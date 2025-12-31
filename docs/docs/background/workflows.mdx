@@ -1,0 +1,571 @@
+---
+sidebar_position: 3
+title: Workflows
+description: Multi-step processes with automatic compensation and state persistence
+---
+
+# Workflows
+
+Workflows are multi-step processes that can span hours or days. They automatically handle:
+
+- **State persistence** - survives server restarts
+- **Step retries** - failed steps retry with backoff
+- **Compensation** - automatic rollback on failure
+- **Progress tracking** - real-time visibility
+
+Perfect for:
+
+- Order processing
+- User onboarding
+- Payment flows
+- Multi-service orchestration
+- Any process with multiple fallible steps
+
+## The Problem Workflows Solve
+
+Imagine processing an order:
+
+```rust
+// Without workflows - dangerous!
+async fn process_order(order: Order) -> Result<()> {
+    charge_payment(&order).await?;     // What if this fails after charging?
+    reserve_inventory(&order).await?;  // Need to refund!
+    notify_warehouse(&order).await?;   // Need to unreserve!
+    send_confirmation(&order).await?;  // Need to cancel notification!
+    Ok(())
+}
+```
+
+If step 3 fails, you need to manually undo steps 1 and 2. This is error-prone and hard to track.
+
+**Workflows solve this** by defining compensation (undo) actions for each step:
+
+```rust
+#[forge::workflow]
+pub async fn process_order(ctx: &WorkflowContext, order: Order) -> Result<()> {
+    // Step 1: Charge payment
+    ctx.step("charge_payment")
+        .run(|| charge_payment(&order))
+        .compensate(|| refund_payment(&order))
+        .await?;
+
+    // Step 2: Reserve inventory
+    ctx.step("reserve_inventory")
+        .run(|| reserve_inventory(&order))
+        .compensate(|| release_inventory(&order))
+        .await?;
+
+    // Step 3: Notify warehouse
+    ctx.step("notify_warehouse")
+        .run(|| notify_warehouse(&order))
+        .compensate(|| cancel_warehouse_notification(&order))
+        .await?;
+
+    // Step 4: Send confirmation (no compensation needed)
+    ctx.step("send_confirmation")
+        .run(|| send_confirmation(&order))
+        .await?;
+
+    Ok(())
+}
+```
+
+If step 3 fails, FORGE automatically runs compensations in reverse order:
+1. `release_inventory()` - undo step 2
+2. `refund_payment()` - undo step 1
+
+## Creating a Workflow
+
+```rust
+use forge::prelude::*;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnboardUserInput {
+    pub user_id: Uuid,
+    pub email: String,
+    pub plan: String,
+}
+
+#[forge::workflow]
+#[timeout = "1h"]
+pub async fn onboard_user(ctx: &WorkflowContext, input: OnboardUserInput) -> Result<()> {
+    // Step 1: Create Stripe customer
+    let customer_id = ctx.step("create_stripe_customer")
+        .run(|| create_stripe_customer(&input.email))
+        .compensate(|customer_id| delete_stripe_customer(customer_id))
+        .await?;
+
+    // Step 2: Create subscription
+    let subscription_id = ctx.step("create_subscription")
+        .run(|| create_subscription(&customer_id, &input.plan))
+        .compensate(|sub_id| cancel_subscription(sub_id))
+        .await?;
+
+    // Step 3: Provision resources
+    ctx.step("provision_resources")
+        .run(|| provision_user_resources(&input.user_id))
+        .compensate(|| deprovision_user_resources(&input.user_id))
+        .await?;
+
+    // Step 4: Send welcome email (no undo needed)
+    ctx.step("send_welcome")
+        .run(|| send_welcome_email(&input.email))
+        .await?;
+
+    // Step 5: Update user status
+    ctx.step("activate_user")
+        .run(|| activate_user(&input.user_id))
+        .await?;
+
+    Ok(())
+}
+```
+
+## Workflow Attributes
+
+| Attribute | Example | Description |
+|-----------|---------|-------------|
+| `timeout` | `#[timeout = "2h"]` | Max total workflow duration |
+| `retry` | `#[retry(max_attempts = 3)]` | Retry failed steps |
+
+## Step Configuration
+
+Each step can be configured:
+
+```rust
+ctx.step("risky_operation")
+    .timeout(Duration::from_secs(30))  // Step timeout
+    .retries(5)                        // Max retries for this step
+    .backoff(BackoffStrategy::Exponential)
+    .run(|| do_risky_thing())
+    .compensate(|| undo_risky_thing())
+    .await?;
+```
+
+## WorkflowContext
+
+```rust
+pub struct WorkflowContext {
+    pub workflow_id: Uuid,
+    pub workflow_type: String,
+    pub started_at: DateTime<Utc>,
+}
+
+impl WorkflowContext {
+    // Create a step builder
+    fn step(&self, name: &str) -> StepBuilder;
+
+    // Database access
+    fn db(&self) -> &PgPool;
+
+    // HTTP client
+    fn http(&self) -> &Client;
+
+    // Get data from a previous step
+    fn get_step_output<T: DeserializeOwned>(&self, step_name: &str) -> Option<T>;
+
+    // Dispatch a job from within the workflow
+    async fn dispatch_job(&self, job_type: &str, input: Value) -> Result<Uuid>;
+}
+```
+
+## Practical Examples
+
+### E-Commerce Order Processing
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderInput {
+    pub order_id: Uuid,
+    pub user_id: Uuid,
+    pub items: Vec<OrderItem>,
+    pub payment_method_id: String,
+    pub shipping_address: Address,
+}
+
+#[forge::workflow]
+#[timeout = "30m"]
+pub async fn process_order(ctx: &WorkflowContext, input: OrderInput) -> Result<OrderResult> {
+    // Step 1: Validate inventory
+    let inventory_check = ctx.step("check_inventory")
+        .run(|| check_inventory_available(&input.items))
+        .await?;
+
+    if !inventory_check.all_available {
+        return Err(ForgeError::Validation("Some items out of stock".into()));
+    }
+
+    // Step 2: Reserve inventory
+    ctx.step("reserve_inventory")
+        .run(|| reserve_inventory(&input.order_id, &input.items))
+        .compensate(|| release_inventory(&input.order_id))
+        .await?;
+
+    // Step 3: Calculate totals
+    let totals = ctx.step("calculate_totals")
+        .run(|| calculate_order_totals(&input.items, &input.shipping_address))
+        .await?;
+
+    // Step 4: Charge payment
+    let payment = ctx.step("charge_payment")
+        .timeout(Duration::from_secs(30))
+        .retries(3)
+        .run(|| charge_payment(&input.payment_method_id, totals.total))
+        .compensate(|payment| refund_payment(payment.id))
+        .await?;
+
+    // Step 5: Create shipment
+    let shipment = ctx.step("create_shipment")
+        .run(|| create_shipment(&input.order_id, &input.shipping_address))
+        .compensate(|shipment| cancel_shipment(shipment.id))
+        .await?;
+
+    // Step 6: Update order status
+    ctx.step("update_order")
+        .run(|| update_order_status(&input.order_id, OrderStatus::Processing))
+        .await?;
+
+    // Step 7: Send confirmation
+    ctx.step("send_confirmation")
+        .run(|| send_order_confirmation(&input.user_id, &input.order_id))
+        .await?;
+
+    Ok(OrderResult {
+        order_id: input.order_id,
+        payment_id: payment.id,
+        shipment_id: shipment.id,
+        tracking_number: shipment.tracking_number,
+    })
+}
+```
+
+### Multi-Service User Setup
+
+```rust
+#[forge::workflow]
+#[timeout = "15m"]
+pub async fn setup_organization(ctx: &WorkflowContext, input: OrgInput) -> Result<Organization> {
+    // Step 1: Create org in database
+    let org = ctx.step("create_org")
+        .run(|| create_organization(&input))
+        .compensate(|org| delete_organization(org.id))
+        .await?;
+
+    // Step 2: Create GitHub team
+    let github_team = ctx.step("create_github_team")
+        .run(|| create_github_team(&org.slug))
+        .compensate(|team| delete_github_team(team.id))
+        .await?;
+
+    // Step 3: Create Slack channel
+    let slack_channel = ctx.step("create_slack_channel")
+        .run(|| create_slack_channel(&org.slug))
+        .compensate(|channel| archive_slack_channel(channel.id))
+        .await?;
+
+    // Step 4: Provision cloud resources
+    ctx.step("provision_cloud")
+        .timeout(Duration::from_secs(300))
+        .run(|| provision_cloud_resources(&org.id))
+        .compensate(|| destroy_cloud_resources(&org.id))
+        .await?;
+
+    // Step 5: Configure SSO
+    ctx.step("configure_sso")
+        .run(|| configure_sso(&org.id, &input.sso_config))
+        .compensate(|| remove_sso_config(&org.id))
+        .await?;
+
+    // Step 6: Send invites (no compensation - emails already sent)
+    ctx.step("send_invites")
+        .run(|| send_org_invites(&org.id, &input.admin_emails))
+        .await?;
+
+    Ok(org)
+}
+```
+
+### Payment with Retry Logic
+
+```rust
+#[forge::workflow]
+#[timeout = "5m"]
+pub async fn process_payment(ctx: &WorkflowContext, input: PaymentInput) -> Result<PaymentResult> {
+    // Step 1: Validate payment method
+    ctx.step("validate_payment_method")
+        .run(|| validate_payment_method(&input.payment_method_id))
+        .await?;
+
+    // Step 2: Create payment intent
+    let intent = ctx.step("create_intent")
+        .run(|| create_payment_intent(&input))
+        .compensate(|intent| cancel_payment_intent(intent.id))
+        .await?;
+
+    // Step 3: Confirm payment (may require 3DS)
+    let confirmation = ctx.step("confirm_payment")
+        .timeout(Duration::from_secs(60))  // Allow time for 3DS
+        .retries(1)  // Only 1 retry for payments
+        .run(|| confirm_payment(&intent.id))
+        .await?;
+
+    // Step 4: Record in ledger
+    ctx.step("record_transaction")
+        .run(|| record_transaction(&input.user_id, &confirmation))
+        .await?;
+
+    // Step 5: Send receipt
+    ctx.step("send_receipt")
+        .run(|| send_payment_receipt(&input.email, &confirmation))
+        .await?;
+
+    Ok(PaymentResult {
+        transaction_id: confirmation.id,
+        amount: input.amount,
+        status: PaymentStatus::Completed,
+    })
+}
+```
+
+## Workflow States
+
+```
+PENDING → RUNNING → COMPLETED
+    ↓         ↓
+    └── COMPENSATING → COMPENSATED
+                ↓
+              FAILED
+```
+
+| State | Description |
+|-------|-------------|
+| `pending` | Waiting to start |
+| `running` | Executing steps |
+| `completed` | All steps succeeded |
+| `compensating` | Running compensation |
+| `compensated` | Compensation complete |
+| `failed` | Compensation failed (needs manual intervention) |
+
+## How Compensation Works
+
+```
+Step 1: charge_payment     ────► Success ────┐
+                                             │
+Step 2: reserve_inventory  ────► Success ────┤
+                                             │
+Step 3: notify_warehouse   ────► FAILURE! ◄──┘
+                                    │
+                     ┌──────────────┘
+                     ▼
+            Start Compensation
+                     │
+    ┌────────────────┼────────────────┐
+    ▼                ▼                ▼
+release_inventory  refund_payment   (done)
+    (undo step 2)   (undo step 1)
+```
+
+Compensation runs in **reverse order** - most recent step first.
+
+## Dispatching Workflows
+
+### From Mutations
+
+```rust
+#[forge::mutation]
+pub async fn create_order(ctx: &MutationContext, input: OrderInput) -> Result<Order> {
+    // Create order record
+    let order = create_order_in_db(ctx.db(), &input).await?;
+
+    // Start the workflow
+    ctx.dispatch_workflow("process_order", serde_json::json!({
+        "order_id": order.id,
+        "user_id": input.user_id,
+        "items": input.items,
+    })).await?;
+
+    Ok(order)
+}
+```
+
+### From Actions
+
+```rust
+#[forge::action]
+pub async fn stripe_webhook(ctx: &ActionContext, event: StripeEvent) -> Result<()> {
+    match event.type_ {
+        "checkout.session.completed" => {
+            ctx.dispatch_workflow("fulfill_order", event.data).await?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+```
+
+## Frontend Workflow Tracking
+
+Track workflow progress in real-time:
+
+```svelte
+<script lang="ts">
+  import { createWorkflowTracker } from '$lib/forge';
+
+  const workflow = createWorkflowTracker('process_order');
+
+  async function startOrder() {
+    await workflow.start({ orderId, items });
+  }
+</script>
+
+{#if $workflow}
+  <div class="workflow-status">
+    <h3>Order Status: {$workflow.status}</h3>
+
+    <div class="steps">
+      {#each $workflow.steps as step}
+        <div class="step" class:completed={step.status === 'completed'}>
+          <span class="icon">
+            {#if step.status === 'completed'}✓
+            {:else if step.status === 'running'}⏳
+            {:else if step.status === 'failed'}✗
+            {:else}○{/if}
+          </span>
+          <span class="name">{step.name}</span>
+        </div>
+      {/each}
+    </div>
+
+    {#if $workflow.status === 'compensating'}
+      <p class="warning">Order failed, rolling back...</p>
+    {/if}
+  </div>
+{/if}
+```
+
+## Registering Workflows
+
+```rust
+Forge::builder()
+    .workflow_registry_mut()
+    .register::<ProcessOrderWorkflow>()
+    .register::<OnboardUserWorkflow>()
+    .register::<SetupOrganizationWorkflow>()
+    // ...
+```
+
+## Database Schema
+
+```sql
+CREATE TABLE forge_workflows (
+    id UUID PRIMARY KEY,
+    workflow_type VARCHAR(255) NOT NULL,
+    input JSONB NOT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'pending',
+    current_step INTEGER NOT NULL DEFAULT 0,
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    error TEXT
+);
+
+CREATE TABLE forge_workflow_steps (
+    id UUID PRIMARY KEY,
+    workflow_id UUID REFERENCES forge_workflows(id),
+    step_index INTEGER NOT NULL,
+    step_name VARCHAR(255) NOT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'pending',
+    output JSONB,
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    error TEXT
+);
+```
+
+## Best Practices
+
+### 1. Make Steps Idempotent
+
+Steps may be retried. Design them to be safe to run multiple times:
+
+```rust
+// Good: Idempotent
+ctx.step("create_user")
+    .run(|| {
+        sqlx::query(r#"
+            INSERT INTO users (id, email)
+            VALUES ($1, $2)
+            ON CONFLICT (email) DO NOTHING
+            RETURNING *
+        "#)
+    })
+    .await?;
+```
+
+### 2. Keep Steps Small
+
+Each step should do one thing. Easier to debug and compensate:
+
+```rust
+// Good: Small, focused steps
+ctx.step("charge_card").run(|| ...).await?;
+ctx.step("create_invoice").run(|| ...).await?;
+ctx.step("send_receipt").run(|| ...).await?;
+
+// Bad: Giant step doing everything
+ctx.step("process_payment").run(|| {
+    charge_card()?;
+    create_invoice()?;
+    send_receipt()?;
+}).await?;
+```
+
+### 3. Compensation Should Never Fail
+
+Design compensation to be resilient:
+
+```rust
+.compensate(|data| async move {
+    // Try multiple times
+    for attempt in 1..=3 {
+        match refund_payment(data.payment_id).await {
+            Ok(_) => return Ok(()),
+            Err(e) if attempt < 3 => {
+                tracing::warn!("Refund attempt {} failed: {}", attempt, e);
+                sleep(Duration::from_secs(attempt as u64)).await;
+            }
+            Err(e) => {
+                // Log for manual intervention
+                tracing::error!("Refund failed after 3 attempts: {}", e);
+                alert_ops_team(&data, &e).await;
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
+})
+```
+
+## What's Next?
+
+<div className="row">
+  <div className="col col--6">
+    <a className="card" href="/background/jobs">
+      <div className="card__header">
+        <h3>📋 Background Jobs</h3>
+      </div>
+      <div className="card__body">
+        Simple one-off tasks
+      </div>
+    </a>
+  </div>
+  <div className="col col--6">
+    <a className="card" href="/background/crons">
+      <div className="card__header">
+        <h3>⏰ Cron Jobs</h3>
+      </div>
+      <div className="card__body">
+        Scheduled recurring tasks
+      </div>
+    </a>
+  </div>
+</div>

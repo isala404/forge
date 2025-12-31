@@ -1,0 +1,144 @@
+---
+sidebar_position: 1
+slug: /
+title: Introduction
+description: FORGE - The full-stack framework that just works. Build complete apps in hours, not weeks.
+---
+
+# Welcome to FORGE
+
+**Build full-stack apps in hours, not weeks.** FORGE gives you everything you need in one package — database, API, real-time updates, background jobs, and a beautiful dashboard. Just write your code and ship.
+
+## What Makes FORGE Different?
+
+Imagine building a complete app with:
+- ✅ **Database** that just works (PostgreSQL)
+- ✅ **API** that writes itself (from your Rust functions)
+- ✅ **Real-time updates** that magically sync (WebSocket built-in)
+- ✅ **Background jobs** with progress tracking
+- ✅ **Scheduled tasks** that actually run
+- ✅ **Dashboard** to see everything happening
+
+**No Redis. No message queues. No separate services to manage.** Just PostgreSQL and your code.
+
+```bash
+# Create a new project in 30 seconds
+forge new my-app
+cd my-app
+
+# Start building
+cargo run          # Backend on :8080
+cd frontend && bun dev  # Frontend on :5173
+```
+
+## The Stack
+
+| Layer | Technology | Why |
+|-------|-----------|-----|
+| **Frontend** | Svelte 5 | Fast, reactive, simple |
+| **Backend** | Rust | Type-safe, blazing fast |
+| **Database** | PostgreSQL | Battle-tested, powerful |
+| **Real-time** | WebSocket | Built-in, automatic |
+
+## Quick Example
+
+Here's how simple FORGE is. Define your data:
+
+```rust title="src/schema/mod.rs"
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Task {
+    pub id: Uuid,
+    pub title: String,
+    pub completed: bool,
+    pub created_at: DateTime<Utc>,
+}
+```
+
+Write a query:
+
+```rust title="src/functions/queries/list_tasks.rs"
+#[forge::query]
+pub async fn list_tasks(ctx: &QueryContext) -> Result<Vec<Task>> {
+    sqlx::query_as("SELECT * FROM tasks ORDER BY created_at DESC")
+        .fetch_all(ctx.db())
+        .await
+        .map_err(Into::into)
+}
+```
+
+Use it in your frontend:
+
+```svelte title="src/routes/+page.svelte"
+<script lang="ts">
+  import { subscribe } from '$lib/forge';
+
+  // This automatically updates when data changes!
+  const tasks = subscribe('list_tasks', {});
+</script>
+
+{#each $tasks.data ?? [] as task}
+  <div>{task.title}</div>
+{/each}
+```
+
+**That's it.** The data automatically syncs when it changes. No WebSocket setup, no subscription management, no Redux.
+
+## Who Is This For?
+
+FORGE is built for developers who:
+
+- 🚀 Want to ship fast without sacrificing quality
+- 🛠️ Are tired of gluing 10 services together
+- 💡 Prefer code over configuration
+- 🔒 Need type-safety end-to-end
+- 📊 Want observability without extra setup
+
+## What's Next?
+
+<div className="row">
+  <div className="col col--6">
+    <a className="card" href="/quick-start">
+      <div className="card__header">
+        <h3>🚀 Quick Start</h3>
+      </div>
+      <div className="card__body">
+        Build your first FORGE app in 5 minutes
+      </div>
+    </a>
+  </div>
+  <div className="col col--6">
+    <a className="card" href="/why-forge">
+      <div className="card__header">
+        <h3>💡 Why FORGE?</h3>
+      </div>
+      <div className="card__body">
+        See how FORGE compares to other tools
+      </div>
+    </a>
+  </div>
+</div>
+
+<br/>
+
+<div className="row">
+  <div className="col col--6">
+    <a className="card" href="/tutorials/build-a-todo-app">
+      <div className="card__header">
+        <h3>📚 Build a Todo App</h3>
+      </div>
+      <div className="card__body">
+        Complete tutorial with real-time updates
+      </div>
+    </a>
+  </div>
+  <div className="col col--6">
+    <a className="card" href="/concepts/how-it-works">
+      <div className="card__header">
+        <h3>🧠 How It Works</h3>
+      </div>
+      <div className="card__body">
+        Understand the architecture
+      </div>
+    </a>
+  </div>
+</div>

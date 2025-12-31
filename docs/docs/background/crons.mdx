@@ -1,0 +1,397 @@
+---
+sidebar_position: 2
+title: Cron Jobs
+description: Scheduled recurring tasks with timezone support and monitoring
+---
+
+# Cron Jobs
+
+Crons are scheduled tasks that run automatically at specified intervals. Perfect for:
+
+- Daily reports
+- Hourly cleanups
+- Weekly digests
+- Database maintenance
+- Syncing external data
+
+## Creating a Cron
+
+```rust
+use forge::prelude::*;
+
+#[forge::cron]
+#[schedule = "0 9 * * *"]  // Every day at 9 AM
+pub async fn daily_summary(ctx: &CronContext) -> Result<()> {
+    let yesterday = Utc::now() - chrono::Duration::days(1);
+
+    // Get yesterday's stats
+    let stats: (i64, i64) = sqlx::query_as(r#"
+        SELECT
+            COUNT(*) as total,
+            COUNT(*) FILTER (WHERE completed) as done
+        FROM tasks
+        WHERE created_at >= $1
+    "#)
+    .bind(yesterday)
+    .fetch_one(ctx.db())
+    .await?;
+
+    tracing::info!("Daily summary: {} tasks, {} completed", stats.0, stats.1);
+
+    // Send email, Slack notification, etc.
+    Ok(())
+}
+```
+
+The macro generates `DailySummaryCron` which implements the `ForgeCron` trait.
+
+## Cron Attributes
+
+| Attribute | Example | Description |
+|-----------|---------|-------------|
+| `schedule` | `#[schedule = "0 * * * *"]` | Cron expression (required) |
+| `timezone` | `#[timezone = "America/New_York"]` | Timezone for schedule |
+| `timeout` | `#[timeout = "10m"]` | Max execution time |
+| `enabled` | `#[enabled = false]` | Disable without removing |
+
+## Schedule Expressions
+
+FORGE uses standard cron expressions:
+
+```
+┌───────────── minute (0 - 59)
+│ ┌───────────── hour (0 - 23)
+│ │ ┌───────────── day of month (1 - 31)
+│ │ │ ┌───────────── month (1 - 12)
+│ │ │ │ ┌───────────── day of week (0 - 6, Sun = 0)
+│ │ │ │ │
+* * * * *
+```
+
+### Common Schedules
+
+| Expression | Description |
+|------------|-------------|
+| `* * * * *` | Every minute |
+| `0 * * * *` | Every hour |
+| `0 0 * * *` | Every day at midnight |
+| `0 9 * * 1-5` | Weekdays at 9 AM |
+| `0 0 * * 0` | Every Sunday at midnight |
+| `0 0 1 * *` | First of every month |
+| `*/15 * * * *` | Every 15 minutes |
+| `0 */2 * * *` | Every 2 hours |
+
+## CronContext
+
+The context provides access to execution info:
+
+```rust
+pub struct CronContext {
+    pub cron_name: String,     // Name of this cron
+    pub scheduled_at: DateTime<Utc>,  // When it was scheduled
+    pub started_at: DateTime<Utc>,    // When it started
+}
+
+impl CronContext {
+    // Database access
+    fn db(&self) -> &PgPool;
+
+    // HTTP client for external APIs
+    fn http(&self) -> &Client;
+}
+```
+
+## Timezone Support
+
+By default, crons use UTC. Specify a timezone for local scheduling:
+
+```rust
+#[forge::cron]
+#[schedule = "0 9 * * *"]
+#[timezone = "America/Los_Angeles"]  // 9 AM Pacific
+pub async fn west_coast_report(ctx: &CronContext) -> Result<()> {
+    // Runs at 9 AM Pacific, regardless of daylight saving
+    Ok(())
+}
+
+#[forge::cron]
+#[schedule = "0 18 * * 1-5"]
+#[timezone = "Europe/London"]  // 6 PM London
+pub async fn uk_end_of_day(ctx: &CronContext) -> Result<()> {
+    // Runs at 6 PM UK time on weekdays
+    Ok(())
+}
+```
+
+## Practical Examples
+
+### Database Cleanup
+
+```rust
+#[forge::cron]
+#[schedule = "0 3 * * *"]  // 3 AM daily
+#[timeout = "30m"]
+pub async fn cleanup_old_data(ctx: &CronContext) -> Result<()> {
+    let threshold = Utc::now() - chrono::Duration::days(90);
+
+    // Delete old sessions
+    let sessions = sqlx::query("DELETE FROM sessions WHERE created_at < $1")
+        .bind(threshold)
+        .execute(ctx.db())
+        .await?;
+
+    // Delete old audit logs
+    let logs = sqlx::query("DELETE FROM audit_logs WHERE created_at < $1")
+        .bind(threshold)
+        .execute(ctx.db())
+        .await?;
+
+    tracing::info!(
+        "Cleanup: {} sessions, {} logs deleted",
+        sessions.rows_affected(),
+        logs.rows_affected()
+    );
+
+    Ok(())
+}
+```
+
+### External API Sync
+
+```rust
+#[derive(Deserialize)]
+struct ExchangeRates {
+    rates: HashMap<String, f64>,
+}
+
+#[forge::cron]
+#[schedule = "0 */6 * * *"]  // Every 6 hours
+pub async fn sync_exchange_rates(ctx: &CronContext) -> Result<()> {
+    // Fetch latest rates
+    let rates: ExchangeRates = ctx.http()
+        .get("https://api.exchangerate.host/latest?base=USD")
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    // Update database
+    for (currency, rate) in rates.rates {
+        sqlx::query(r#"
+            INSERT INTO exchange_rates (currency, rate, updated_at)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (currency) DO UPDATE
+            SET rate = $2, updated_at = NOW()
+        "#)
+        .bind(&currency)
+        .bind(rate)
+        .execute(ctx.db())
+        .await?;
+    }
+
+    tracing::info!("Updated {} exchange rates", rates.rates.len());
+    Ok(())
+}
+```
+
+### Weekly Digest Email
+
+```rust
+#[forge::cron]
+#[schedule = "0 9 * * 1"]  // Every Monday at 9 AM
+#[timezone = "America/New_York"]
+pub async fn weekly_digest(ctx: &CronContext) -> Result<()> {
+    let week_ago = Utc::now() - chrono::Duration::days(7);
+
+    // Get users who want digests
+    let users: Vec<(Uuid, String)> = sqlx::query_as(r#"
+        SELECT id, email FROM users
+        WHERE digest_enabled = true
+    "#)
+    .fetch_all(ctx.db())
+    .await?;
+
+    for (user_id, email) in users {
+        // Get user's weekly stats
+        let stats: (i64, i64) = sqlx::query_as(r#"
+            SELECT
+                COUNT(*) as created,
+                COUNT(*) FILTER (WHERE completed) as completed
+            FROM tasks
+            WHERE user_id = $1 AND created_at >= $2
+        "#)
+        .bind(user_id)
+        .bind(week_ago)
+        .fetch_one(ctx.db())
+        .await?;
+
+        // Dispatch email job
+        ctx.dispatch_job("send_digest_email", serde_json::json!({
+            "email": email,
+            "tasks_created": stats.0,
+            "tasks_completed": stats.1,
+        })).await?;
+    }
+
+    tracing::info!("Queued {} weekly digest emails", users.len());
+    Ok(())
+}
+```
+
+### Health Check
+
+```rust
+#[forge::cron]
+#[schedule = "*/5 * * * *"]  // Every 5 minutes
+#[timeout = "30s"]
+pub async fn health_check(ctx: &CronContext) -> Result<()> {
+    // Check database
+    let db_ok = sqlx::query("SELECT 1")
+        .fetch_one(ctx.db())
+        .await
+        .is_ok();
+
+    // Check external service
+    let api_ok = ctx.http()
+        .get("https://api.example.com/health")
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false);
+
+    if !db_ok || !api_ok {
+        tracing::error!(db = db_ok, api = api_ok, "Health check failed");
+        // Could trigger an alert here
+    }
+
+    Ok(())
+}
+```
+
+## Registering Crons
+
+```rust
+Forge::builder()
+    .cron_registry_mut()
+    .register::<DailySummaryCron>()
+    .register::<CleanupOldDataCron>()
+    .register::<SyncExchangeRatesCron>()
+    .register::<WeeklyDigestCron>()
+    .register::<HealthCheckCron>()
+    // ...
+```
+
+## Cron Execution
+
+```
+                    Scheduler
+                        │
+            ┌───────────┼───────────┐
+            ▼           ▼           ▼
+        Worker 1    Worker 2    Worker 3
+            │
+            ▼
+    ┌──────────────┐
+    │ Check: Is it │  ───► No ───► Skip
+    │ time to run? │
+    └──────────────┘
+            │
+           Yes
+            ▼
+    ┌──────────────┐
+    │ Acquire lock │  ───► Fail ───► Another worker got it
+    └──────────────┘
+            │
+         Success
+            ▼
+    ┌──────────────┐
+    │  Run cron    │
+    │  function    │
+    └──────────────┘
+            │
+            ▼
+    ┌──────────────┐
+    │ Update last  │
+    │ run time     │
+    └──────────────┘
+```
+
+Only one worker runs each cron, even in a multi-worker deployment.
+
+## Database Schema
+
+```sql
+CREATE TABLE forge_crons (
+    name VARCHAR(255) PRIMARY KEY,
+    schedule VARCHAR(100) NOT NULL,
+    timezone VARCHAR(50) NOT NULL DEFAULT 'UTC',
+    enabled BOOLEAN NOT NULL DEFAULT true,
+    last_run TIMESTAMPTZ,
+    next_run TIMESTAMPTZ,
+    last_error TEXT,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0
+);
+```
+
+## Monitoring
+
+View cron status in the dashboard at `http://localhost:8080/_dashboard/crons`:
+
+- Last run time
+- Next scheduled run
+- Success/failure history
+- Error messages
+- Enable/disable toggle
+
+## Error Handling
+
+Failed crons are logged but don't retry automatically (unlike jobs). Use proper error handling:
+
+```rust
+#[forge::cron]
+#[schedule = "0 * * * *"]
+pub async fn risky_operation(ctx: &CronContext) -> Result<()> {
+    match do_something_risky().await {
+        Ok(_) => {
+            tracing::info!("Risky operation succeeded");
+        }
+        Err(e) => {
+            tracing::error!("Risky operation failed: {}", e);
+            // Could dispatch an alert job
+            ctx.dispatch_job("send_alert", serde_json::json!({
+                "type": "cron_failure",
+                "cron": "risky_operation",
+                "error": e.to_string(),
+            })).await?;
+        }
+    }
+
+    Ok(())
+}
+```
+
+## What's Next?
+
+<div className="row">
+  <div className="col col--6">
+    <a className="card" href="/background/workflows">
+      <div className="card__header">
+        <h3>🔄 Workflows</h3>
+      </div>
+      <div className="card__body">
+        Multi-step processes with compensation
+      </div>
+    </a>
+  </div>
+  <div className="col col--6">
+    <a className="card" href="/background/jobs">
+      <div className="card__header">
+        <h3>📋 Background Jobs</h3>
+      </div>
+      <div className="card__body">
+        One-off background tasks
+      </div>
+    </a>
+  </div>
+</div>

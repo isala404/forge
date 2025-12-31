@@ -1,0 +1,160 @@
+---
+sidebar_position: 0
+title: API Reference
+description: Complete reference for FORGE's Rust API
+---
+
+# API Reference
+
+This section documents all of FORGE's Rust APIs.
+
+## Quick Reference
+
+### Proc Macros
+
+| Macro | Purpose |
+|-------|---------|
+| `#[forge::query]` | Read-only data fetching |
+| `#[forge::mutation]` | Data modification |
+| `#[forge::action]` | External integrations (webhooks) |
+| `#[forge::job]` | Background tasks |
+| `#[forge::cron]` | Scheduled tasks |
+| `#[forge::workflow]` | Multi-step processes |
+
+### Context Objects
+
+Each function type receives a context object:
+
+| Context | Available In | Provides |
+|---------|--------------|----------|
+| `QueryContext` | Queries | DB, Auth |
+| `MutationContext` | Mutations | DB, Auth, Job dispatch |
+| `ActionContext` | Actions | DB, Job dispatch |
+| `JobContext` | Jobs | DB, HTTP, Progress |
+| `CronContext` | Crons | DB, HTTP |
+| `WorkflowContext` | Workflows | DB, HTTP, Steps |
+
+## Common Patterns
+
+### Database Access
+
+All contexts provide database access:
+
+```rust
+let user: User = sqlx::query_as("SELECT * FROM users WHERE id = $1")
+    .bind(user_id)
+    .fetch_one(ctx.db())
+    .await?;
+```
+
+### Authentication
+
+Check if user is authenticated:
+
+```rust
+// Get optional user ID
+if let Some(user_id) = ctx.auth.user_id() {
+    // User is logged in
+}
+
+// Require authentication
+let user_id = ctx.auth.require_user_id()?;  // Returns error if not authenticated
+```
+
+### Dispatching Jobs
+
+```rust
+ctx.dispatch_job("job_name", serde_json::json!({
+    "key": "value"
+})).await?;
+```
+
+### Error Handling
+
+```rust
+// Validation error (400)
+return Err(ForgeError::Validation("Invalid input".into()));
+
+// Not found (404)
+return Err(ForgeError::NotFound("User not found".into()));
+
+// Unauthorized (401)
+return Err(ForgeError::Unauthorized("Please log in".into()));
+
+// Forbidden (403)
+return Err(ForgeError::Forbidden("Access denied".into()));
+
+// Internal error (500)
+return Err(ForgeError::Internal("Something went wrong".into()));
+```
+
+## Reference Pages
+
+<div className="row">
+  <div className="col col--6">
+    <a className="card" href="/api/query-context">
+      <div className="card__header">
+        <h3>QueryContext</h3>
+      </div>
+      <div className="card__body">
+        Context for query functions
+      </div>
+    </a>
+  </div>
+  <div className="col col--6">
+    <a className="card" href="/api/mutation-context">
+      <div className="card__header">
+        <h3>MutationContext</h3>
+      </div>
+      <div className="card__body">
+        Context for mutation functions
+      </div>
+    </a>
+  </div>
+</div>
+
+<div className="row" style={{marginTop: '1rem'}}>
+  <div className="col col--6">
+    <a className="card" href="/api/action-context">
+      <div className="card__header">
+        <h3>ActionContext</h3>
+      </div>
+      <div className="card__body">
+        Context for action functions
+      </div>
+    </a>
+  </div>
+  <div className="col col--6">
+    <a className="card" href="/api/job-context">
+      <div className="card__header">
+        <h3>JobContext</h3>
+      </div>
+      <div className="card__body">
+        Context for background jobs
+      </div>
+    </a>
+  </div>
+</div>
+
+<div className="row" style={{marginTop: '1rem'}}>
+  <div className="col col--6">
+    <a className="card" href="/api/workflow-context">
+      <div className="card__header">
+        <h3>WorkflowContext</h3>
+      </div>
+      <div className="card__body">
+        Context for workflows
+      </div>
+    </a>
+  </div>
+  <div className="col col--6">
+    <a className="card" href="/api/forge-error">
+      <div className="card__header">
+        <h3>ForgeError</h3>
+      </div>
+      <div className="card__body">
+        Error types and handling
+      </div>
+    </a>
+  </div>
+</div>

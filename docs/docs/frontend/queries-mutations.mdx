@@ -1,0 +1,425 @@
+---
+sidebar_position: 2
+title: Queries & Mutations
+description: Call your FORGE backend functions from Svelte
+---
+
+# Queries & Mutations
+
+FORGE provides two ways to call your backend:
+
+- **`query()`** - One-time data fetch
+- **`mutate()`** - Modify data
+
+Both are type-safe and return typed responses.
+
+## Queries
+
+### Basic Query
+
+```svelte
+<script lang="ts">
+  import { query } from '$lib/forge';
+
+  // One-time fetch
+  let tasks = $state<Task[]>([]);
+  let loading = $state(true);
+  let error = $state<Error | null>(null);
+
+  onMount(async () => {
+    try {
+      tasks = await query('list_tasks', {});
+    } catch (e) {
+      error = e as Error;
+    } finally {
+      loading = false;
+    }
+  });
+</script>
+
+{#if loading}
+  <p>Loading...</p>
+{:else if error}
+  <p>Error: {error.message}</p>
+{:else}
+  {#each tasks as task}
+    <div>{task.title}</div>
+  {/each}
+{/if}
+```
+
+### Query with Parameters
+
+```svelte
+<script lang="ts">
+  import { query } from '$lib/forge';
+
+  let { userId } = $props();
+
+  let profile = $state<User | null>(null);
+
+  onMount(async () => {
+    profile = await query('get_user', { id: userId });
+  });
+</script>
+
+{#if profile}
+  <h1>{profile.name}</h1>
+  <p>{profile.email}</p>
+{/if}
+```
+
+### Query Function Signature
+
+```typescript
+async function query<T>(
+  name: string,      // Query function name
+  input: object      // Query parameters
+): Promise<T>
+```
+
+## Mutations
+
+### Basic Mutation
+
+```svelte
+<script lang="ts">
+  import { mutate } from '$lib/forge';
+
+  let title = $state('');
+  let loading = $state(false);
+  let error = $state<string | null>(null);
+
+  async function createTask() {
+    if (!title.trim()) return;
+
+    loading = true;
+    error = null;
+
+    try {
+      const task = await mutate('create_task', { title });
+      console.log('Created:', task);
+      title = '';
+    } catch (e) {
+      error = (e as Error).message;
+    } finally {
+      loading = false;
+    }
+  }
+</script>
+
+<input bind:value={title} placeholder="New task..." />
+<button onclick={createTask} disabled={loading}>
+  {loading ? 'Creating...' : 'Add Task'}
+</button>
+
+{#if error}
+  <p class="error">{error}</p>
+{/if}
+```
+
+### Mutation with Complex Input
+
+```svelte
+<script lang="ts">
+  import { mutate } from '$lib/forge';
+
+  let form = $state({
+    title: '',
+    description: '',
+    priority: 'normal',
+    dueDate: null as string | null,
+  });
+
+  async function submit() {
+    const task = await mutate('create_task', {
+      title: form.title,
+      description: form.description,
+      priority: form.priority,
+      due_date: form.dueDate,
+    });
+
+    // Handle success
+  }
+</script>
+
+<form onsubmit|preventDefault={submit}>
+  <input bind:value={form.title} placeholder="Title" required />
+  <textarea bind:value={form.description} placeholder="Description" />
+
+  <select bind:value={form.priority}>
+    <option value="low">Low</option>
+    <option value="normal">Normal</option>
+    <option value="high">High</option>
+  </select>
+
+  <input type="date" bind:value={form.dueDate} />
+
+  <button type="submit">Create</button>
+</form>
+```
+
+### Mutation Function Signature
+
+```typescript
+async function mutate<T>(
+  name: string,      // Mutation function name
+  input: object      // Mutation parameters
+): Promise<T>
+```
+
+## Error Handling
+
+FORGE returns structured errors:
+
+```typescript
+interface ForgeError {
+  code: string;      // 'VALIDATION', 'UNAUTHORIZED', 'NOT_FOUND', etc.
+  message: string;   // Human-readable message
+  details?: object;  // Additional error details
+}
+```
+
+Handle errors appropriately:
+
+```svelte
+<script lang="ts">
+  import { mutate } from '$lib/forge';
+
+  async function submit() {
+    try {
+      await mutate('create_task', { title });
+    } catch (e) {
+      const error = e as ForgeError;
+
+      switch (error.code) {
+        case 'VALIDATION':
+          // Show validation message
+          validationError = error.message;
+          break;
+        case 'UNAUTHORIZED':
+          // Redirect to login
+          goto('/login');
+          break;
+        case 'NOT_FOUND':
+          // Resource doesn't exist
+          notFound = true;
+          break;
+        default:
+          // Generic error
+          alert('Something went wrong');
+      }
+    }
+  }
+</script>
+```
+
+## Query vs Subscribe
+
+Use `query()` when you need data once:
+
+```svelte
+<script lang="ts">
+  // One-time fetch - good for:
+  // - Initial page load data
+  // - Data that doesn't change often
+  // - Export/download operations
+  onMount(async () => {
+    const data = await query('get_report', { id: reportId });
+  });
+</script>
+```
+
+Use `subscribe()` when you need live updates:
+
+```svelte
+<script lang="ts">
+  // Real-time subscription - good for:
+  // - Lists that other users modify
+  // - Dashboards
+  // - Collaborative features
+  const tasks = subscribe('list_tasks', {});
+</script>
+```
+
+See [Real-Time Subscriptions](/frontend/realtime-subscriptions) for more on `subscribe()`.
+
+## Mutation + Subscription Pattern
+
+A common pattern: mutate data and let subscriptions handle updates:
+
+```svelte
+<script lang="ts">
+  import { subscribe, mutate } from '$lib/forge';
+
+  // Subscribe to tasks - updates automatically
+  const tasks = subscribe('list_tasks', {});
+
+  async function addTask(title: string) {
+    // Just mutate - subscription will update the UI
+    await mutate('create_task', { title });
+    // No need to manually update $tasks.data!
+  }
+
+  async function deleteTask(id: string) {
+    await mutate('delete_task', { id });
+    // UI updates automatically via WebSocket
+  }
+</script>
+
+{#each $tasks.data ?? [] as task}
+  <div>
+    {task.title}
+    <button onclick={() => deleteTask(task.id)}>Delete</button>
+  </div>
+{/each}
+```
+
+## Parallel Queries
+
+Fetch multiple things at once:
+
+```svelte
+<script lang="ts">
+  import { query } from '$lib/forge';
+
+  let data = $state<{
+    tasks: Task[];
+    user: User;
+    stats: Stats;
+  } | null>(null);
+
+  onMount(async () => {
+    // Fetch in parallel
+    const [tasks, user, stats] = await Promise.all([
+      query('list_tasks', {}),
+      query('get_current_user', {}),
+      query('get_dashboard_stats', {}),
+    ]);
+
+    data = { tasks, user, stats };
+  });
+</script>
+
+{#if data}
+  <h1>Welcome, {data.user.name}</h1>
+  <p>You have {data.tasks.length} tasks</p>
+  <p>Completed: {data.stats.completed}</p>
+{/if}
+```
+
+## Caching
+
+FORGE doesn't cache queries by default. For caching, use Svelte stores:
+
+```typescript title="frontend/src/lib/stores/user.ts"
+import { writable } from 'svelte/store';
+import { query } from '$lib/forge';
+
+interface UserStore {
+  user: User | null;
+  loading: boolean;
+  error: Error | null;
+}
+
+function createUserStore() {
+  const { subscribe, set, update } = writable<UserStore>({
+    user: null,
+    loading: true,
+    error: null,
+  });
+
+  return {
+    subscribe,
+    load: async () => {
+      update((s) => ({ ...s, loading: true, error: null }));
+      try {
+        const user = await query('get_current_user', {});
+        set({ user, loading: false, error: null });
+      } catch (e) {
+        set({ user: null, loading: false, error: e as Error });
+      }
+    },
+    clear: () => {
+      set({ user: null, loading: false, error: null });
+    },
+  };
+}
+
+export const userStore = createUserStore();
+```
+
+Use in components:
+
+```svelte
+<script lang="ts">
+  import { userStore } from '$lib/stores/user';
+  import { onMount } from 'svelte';
+
+  onMount(() => {
+    userStore.load();
+  });
+</script>
+
+{#if $userStore.user}
+  <p>Hello, {$userStore.user.name}</p>
+{/if}
+```
+
+## Refreshing Data
+
+After a mutation, you might want to refresh queries:
+
+```svelte
+<script lang="ts">
+  import { query, mutate } from '$lib/forge';
+
+  let stats = $state<Stats | null>(null);
+
+  async function loadStats() {
+    stats = await query('get_stats', {});
+  }
+
+  onMount(loadStats);
+
+  async function completeTask(id: string) {
+    await mutate('toggle_task', { id });
+    // Refresh stats after mutation
+    await loadStats();
+  }
+</script>
+```
+
+Or better, use subscriptions for data that changes:
+
+```svelte
+<script lang="ts">
+  // Stats update automatically when tasks change
+  const stats = subscribe('get_stats', {});
+</script>
+```
+
+## What's Next?
+
+<div className="row">
+  <div className="col col--6">
+    <a className="card" href="/frontend/realtime-subscriptions">
+      <div className="card__header">
+        <h3>⚡ Real-Time Subscriptions</h3>
+      </div>
+      <div className="card__body">
+        Live data with WebSocket
+      </div>
+    </a>
+  </div>
+  <div className="col col--6">
+    <a className="card" href="/frontend/job-tracking">
+      <div className="card__header">
+        <h3>📋 Job Tracking</h3>
+      </div>
+      <div className="card__body">
+        Monitor background jobs
+      </div>
+    </a>
+  </div>
+</div>

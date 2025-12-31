@@ -1,0 +1,367 @@
+---
+sidebar_position: 0
+title: CLI Reference
+description: Complete reference for the forge command-line tool
+---
+
+# CLI Reference
+
+The `forge` CLI tool helps you create, develop, and manage FORGE projects.
+
+## Installation
+
+```bash
+# Install from cargo
+cargo install forge-cli
+
+# Or build from source
+git clone https://github.com/forge/forge
+cd forge
+cargo install --path crates/forge-cli
+```
+
+## Commands Overview
+
+| Command | Description |
+|---------|-------------|
+| `forge new` | Create a new project |
+| `forge add` | Add a function |
+| `forge generate` | Generate TypeScript types |
+| `forge migrate` | Run database migrations |
+| `forge run` | Start the server |
+
+## forge new
+
+Create a new FORGE project.
+
+```bash
+forge new <project-name>
+```
+
+**Arguments:**
+- `<project-name>` - Name of the project (also used as directory name)
+
+**Example:**
+```bash
+forge new my-app
+cd my-app
+```
+
+This creates:
+```
+my-app/
+├── Cargo.toml
+├── forge.toml           # FORGE configuration
+├── .env                 # Environment variables
+├── src/
+│   ├── main.rs          # Entry point
+│   ├── schema/
+│   │   └── mod.rs       # Data models
+│   └── functions/
+│       ├── mod.rs
+│       ├── queries/
+│       └── mutations/
+├── migrations/
+│   └── 0001_initial.sql
+└── frontend/
+    ├── package.json
+    ├── src/
+    └── ...
+```
+
+## forge add
+
+Add a new function to your project.
+
+```bash
+forge add <type> <name>
+```
+
+**Arguments:**
+- `<type>` - Function type: `query`, `mutation`, `action`, `job`, `cron`, `workflow`
+- `<name>` - Function name (snake_case)
+
+**Examples:**
+
+```bash
+# Add a query
+forge add query list_users
+
+# Add a mutation
+forge add mutation create_user
+
+# Add a job
+forge add job send_email
+
+# Add a cron
+forge add cron daily_cleanup
+
+# Add a workflow
+forge add workflow process_order
+```
+
+**Generated Files:**
+
+Query:
+```rust
+// src/functions/queries/list_users.rs
+use forge::prelude::*;
+
+#[forge::query]
+pub async fn list_users(ctx: &QueryContext) -> Result<Vec<User>> {
+    todo!("Implement list_users")
+}
+```
+
+Job:
+```rust
+// src/functions/jobs/send_email.rs
+use forge::prelude::*;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SendEmailInput {
+    // Add input fields
+}
+
+#[forge::job]
+pub async fn send_email(ctx: &JobContext, input: SendEmailInput) -> Result<()> {
+    todo!("Implement send_email")
+}
+```
+
+## forge generate
+
+Generate TypeScript types from your Rust code.
+
+```bash
+forge generate
+```
+
+This scans your Rust code and generates:
+- TypeScript interfaces for all structs
+- Type-safe client functions
+- Query/mutation names and input types
+
+**Output:**
+```
+frontend/src/lib/forge/
+├── client.ts      # FORGE client
+├── types.ts       # Generated types
+└── index.ts       # Re-exports
+```
+
+**When to run:**
+- After adding/modifying Rust structs
+- After adding/modifying functions
+- Before starting frontend development
+
+## forge migrate
+
+Manage database migrations.
+
+```bash
+forge migrate [command]
+```
+
+**Subcommands:**
+
+### `forge migrate up`
+
+Apply pending migrations:
+
+```bash
+forge migrate up
+```
+
+### `forge migrate down`
+
+Rollback the last migration:
+
+```bash
+forge migrate down
+```
+
+### `forge migrate status`
+
+Show migration status:
+
+```bash
+forge migrate status
+```
+
+Output:
+```
+Migration Status:
+  ✓ 0001_initial.sql (applied)
+  ✓ 0002_add_users.sql (applied)
+  ○ 0003_add_tasks.sql (pending)
+```
+
+### `forge migrate new`
+
+Create a new migration:
+
+```bash
+forge migrate new <name>
+```
+
+Example:
+```bash
+forge migrate new add_comments
+```
+
+Creates:
+```sql
+-- migrations/0003_add_comments.sql
+
+-- @up
+-- Add your migration SQL here
+
+-- @down
+-- Add your rollback SQL here
+```
+
+## forge run
+
+Start the FORGE server.
+
+```bash
+forge run [options]
+```
+
+**Options:**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--port` | 8080 | HTTP port |
+| `--workers` | CPU count | Number of workers |
+| `--no-dashboard` | false | Disable dashboard |
+
+**Examples:**
+
+```bash
+# Default (port 8080)
+forge run
+
+# Custom port
+forge run --port 3000
+
+# With specific workers
+forge run --workers 4
+
+# Without dashboard
+forge run --no-dashboard
+```
+
+**Output:**
+```
+🔥 FORGE starting...
+📦 Running migrations...
+✅ Applied 0001_initial.sql
+🚀 Gateway listening on http://localhost:8080
+📊 Dashboard at http://localhost:8080/_dashboard
+⚡ Worker 1 started
+⚡ Worker 2 started
+⏰ Scheduler started
+```
+
+## forge.toml Configuration
+
+```toml
+[project]
+name = "my-app"
+version = "0.1.0"
+
+[gateway]
+port = 8080
+cors_origins = ["http://localhost:5173"]
+
+[worker]
+count = 4
+capabilities = []
+
+[database]
+url = "${DATABASE_URL}"
+max_connections = 10
+
+[scheduler]
+enabled = true
+
+[dashboard]
+enabled = true
+auth = false  # Set true for production
+```
+
+## Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `DATABASE_URL` | Yes | PostgreSQL connection string |
+| `FORGE_PORT` | No | Override gateway port |
+| `FORGE_LOG` | No | Log level (debug, info, warn, error) |
+| `FORGE_JWT_SECRET` | No | JWT signing secret |
+
+**.env Example:**
+```bash
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/myapp
+FORGE_LOG=debug
+FORGE_JWT_SECRET=your-secret-key-here
+```
+
+## Common Workflows
+
+### Starting a New Project
+
+```bash
+# Create project
+forge new my-app
+cd my-app
+
+# Start database
+docker run -d --name forge-db -p 5432:5432 \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=my_app \
+  postgres:alpine
+
+# Run migrations
+forge migrate up
+
+# Start server
+cargo run
+```
+
+### Adding a New Feature
+
+```bash
+# Add query
+forge add query get_user_profile
+
+# Add mutation
+forge add mutation update_user_profile
+
+# Edit the generated files...
+
+# Regenerate types
+forge generate
+
+# Test
+cargo run
+```
+
+### Deploying
+
+```bash
+# Build release binary
+cargo build --release
+
+# Run migrations on production database
+DATABASE_URL=$PROD_DB forge migrate up
+
+# Start server
+./target/release/my-app
+```
+
+## See Also
+
+- [Quick Start](/quick-start) - Get started in 5 minutes
+- [Tutorials](/tutorials) - Learn by building

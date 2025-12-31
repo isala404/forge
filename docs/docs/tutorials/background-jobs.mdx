@@ -1,0 +1,438 @@
+---
+sidebar_position: 4
+title: "Background Jobs"
+description: Process work asynchronously with jobs, progress tracking, and retries
+---
+
+# Background Jobs
+
+In this tutorial, you'll learn to:
+- Create and dispatch background jobs
+- Track job progress in real-time
+- Handle retries and failures
+- Show progress in the frontend
+
+## What We're Building
+
+An export feature that processes data in the background:
+
+```
+┌─────────────────────────────────────┐
+│  Export Tasks                        │
+├─────────────────────────────────────┤
+│                                     │
+│  [Export as CSV]                    │
+│                                     │
+│  ████████████░░░░░░░░░░░ 45%        │
+│  Processing task 45 of 100...       │
+│                                     │
+└─────────────────────────────────────┘
+```
+
+## Step 1: Create a Job
+
+Jobs are background tasks that:
+- Survive server restarts
+- Retry automatically on failure
+- Report progress in real-time
+
+```rust title="src/functions/jobs/export_tasks.rs"
+use forge::prelude::*;
+use crate::schema::Task;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportTasksInput {
+    pub user_id: Uuid,
+    pub format: String,  // "csv" or "json"
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportTasksOutput {
+    pub file_url: String,
+    pub task_count: usize,
+}
+
+#[forge::job]
+#[timeout = "5m"]
+#[retry(max_attempts = 3, backoff = "exponential")]
+pub async fn export_tasks(
+    ctx: &JobContext,
+    input: ExportTasksInput,
+) -> Result<ExportTasksOutput> {
+    // Report initial progress
+    ctx.progress(0, "Starting export...");
+
+    // Fetch all tasks for the user
+    let tasks: Vec<Task> = sqlx::query_as(r#"
+        SELECT * FROM tasks WHERE user_id = $1 ORDER BY created_at
+    "#)
+    .bind(input.user_id)
+    .fetch_all(ctx.db())
+    .await?;
+
+    let total = tasks.len();
+    ctx.progress(10, format!("Found {} tasks to export", total));
+
+    // Process tasks with progress updates
+    let mut output_lines = Vec::new();
+
+    if input.format == "csv" {
+        output_lines.push("id,title,completed,created_at".to_string());
+    }
+
+    for (i, task) in tasks.iter().enumerate() {
+        // Simulate some processing time
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let line = if input.format == "csv" {
+            format!("{},{},{},{}", task.id, task.title, task.completed, task.created_at)
+        } else {
+            serde_json::to_string(task)?
+        };
+        output_lines.push(line);
+
+        // Update progress
+        let pct = 10 + ((i + 1) * 80 / total) as u8;
+        ctx.progress(pct, format!("Processing task {} of {}", i + 1, total));
+    }
+
+    ctx.progress(95, "Saving file...");
+
+    // In a real app, you'd upload to S3/R2 here
+    let file_url = format!("/exports/tasks_{}.{}", ctx.job_id, input.format);
+
+    ctx.progress(100, "Export complete!");
+
+    Ok(ExportTasksOutput {
+        file_url,
+        task_count: total,
+    })
+}
+```
+
+## Step 2: Register the Job
+
+```rust title="src/main.rs"
+use forge::prelude::*;
+
+mod schema;
+mod functions;
+
+use functions::jobs::*;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    dotenvy::dotenv().ok();
+    let config = ForgeConfig::from_env()?;
+
+    Forge::builder()
+        .function_registry_mut()
+        // ... other functions ...
+        // Register jobs
+        .job_registry_mut()
+        .register::<ExportTasksJob>()
+        // Run
+        .config(config)
+        .build()?
+        .run()
+        .await
+}
+```
+
+## Step 3: Dispatch from Mutation
+
+Create a mutation to start the export:
+
+```rust title="src/functions/mutations/export.rs"
+use forge::prelude::*;
+use crate::functions::jobs::ExportTasksInput;
+
+#[derive(Debug, Serialize)]
+pub struct ExportStarted {
+    pub job_id: Uuid,
+}
+
+#[forge::mutation]
+pub async fn start_export(
+    ctx: &MutationContext,
+    format: String,
+) -> Result<ExportStarted> {
+    let user_id = ctx.auth.require_user_id()?;
+
+    // Dispatch the background job
+    let job_id = ctx.dispatch_job("export_tasks", serde_json::json!({
+        "user_id": user_id,
+        "format": format,
+    })).await?;
+
+    Ok(ExportStarted { job_id })
+}
+```
+
+## Step 4: Frontend Job Tracker
+
+FORGE provides a job tracker that handles WebSocket subscriptions:
+
+```svelte title="frontend/src/routes/export/+page.svelte"
+<script lang="ts">
+  import { onDestroy } from 'svelte';
+  import { createJobTracker, mutate } from '$lib/forge';
+
+  // Create a tracker for the export job
+  const exportJob = createJobTracker<{ format: string }>('export_tasks');
+
+  // Clean up subscription when component unmounts
+  onDestroy(() => exportJob.cleanup());
+
+  let format = $state('csv');
+
+  async function startExport() {
+    // Dispatch the job and start tracking
+    await exportJob.start({ format });
+  }
+</script>
+
+<main>
+  <h1>Export Tasks</h1>
+
+  {#if !$exportJob}
+    <!-- No job running -->
+    <div class="options">
+      <label>
+        <input type="radio" bind:group={format} value="csv" />
+        CSV format
+      </label>
+      <label>
+        <input type="radio" bind:group={format} value="json" />
+        JSON format
+      </label>
+    </div>
+
+    <button onclick={startExport}>Export Tasks</button>
+
+  {:else if $exportJob.status === 'running' || $exportJob.status === 'pending'}
+    <!-- Job in progress -->
+    <div class="progress">
+      <div
+        class="progress-bar"
+        style="width: {$exportJob.progress_percent ?? 0}%"
+      />
+    </div>
+    <p class="message">{$exportJob.progress_message ?? 'Starting...'}</p>
+
+  {:else if $exportJob.status === 'completed'}
+    <!-- Job completed -->
+    <div class="success">
+      <h2>Export Complete!</h2>
+      <p>{$exportJob.output?.task_count} tasks exported.</p>
+      <a href={$exportJob.output?.file_url} download>
+        Download File
+      </a>
+      <button onclick={() => exportJob.cleanup()}>
+        Start New Export
+      </button>
+    </div>
+
+  {:else if $exportJob.status === 'failed'}
+    <!-- Job failed -->
+    <div class="error">
+      <h2>Export Failed</h2>
+      <p>{$exportJob.error}</p>
+      <button onclick={() => exportJob.cleanup()}>
+        Try Again
+      </button>
+    </div>
+  {/if}
+</main>
+
+<style>
+  main {
+    max-width: 500px;
+    margin: 2rem auto;
+    padding: 1rem;
+  }
+
+  .options {
+    display: flex;
+    gap: 1rem;
+    margin-bottom: 1rem;
+  }
+
+  button {
+    padding: 0.75rem 1.5rem;
+    background: #007bff;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+
+  .progress {
+    height: 24px;
+    background: #e9ecef;
+    border-radius: 12px;
+    overflow: hidden;
+    margin-bottom: 0.5rem;
+  }
+
+  .progress-bar {
+    height: 100%;
+    background: #007bff;
+    transition: width 0.3s ease;
+  }
+
+  .message {
+    color: #666;
+    text-align: center;
+  }
+
+  .success {
+    text-align: center;
+    color: #28a745;
+  }
+
+  .error {
+    text-align: center;
+    color: #dc3545;
+  }
+</style>
+```
+
+## Step 5: Job with Retries
+
+Configure retry behavior:
+
+```rust
+#[forge::job]
+#[timeout = "10m"]
+#[retry(
+    max_attempts = 5,
+    backoff = "exponential",  // 1s, 2s, 4s, 8s, 16s...
+    max_backoff = "5m"        // Cap at 5 minutes
+)]
+pub async fn send_email(ctx: &JobContext, input: SendEmailInput) -> Result<()> {
+    // Check if this is a retry
+    if ctx.is_retry() {
+        tracing::info!(
+            "Retry attempt {} of {}",
+            ctx.attempt,
+            ctx.max_attempts
+        );
+    }
+
+    // Try to send email
+    let result = send_email_via_provider(&input).await;
+
+    if let Err(e) = result {
+        if ctx.is_last_attempt() {
+            // Last attempt failed - maybe notify someone
+            tracing::error!("Email permanently failed: {}", e);
+        }
+        return Err(e.into());
+    }
+
+    Ok(())
+}
+```
+
+## Step 6: Priority Jobs
+
+Set job priority for important tasks:
+
+```rust
+#[forge::job]
+#[priority = "critical"]  // Processed before normal jobs
+pub async fn process_payment(ctx: &JobContext, input: PaymentInput) -> Result<()> {
+    // Critical jobs run first
+    // Priority levels: critical (100), high (75), normal (50), low (25), background (0)
+}
+
+#[forge::job]
+#[priority = "background"]  // Processed when queue is empty
+pub async fn cleanup_old_data(ctx: &JobContext, input: ()) -> Result<()> {
+    // Low priority cleanup
+}
+```
+
+## Step 7: Long-Running Jobs
+
+For jobs that take a long time, use heartbeat:
+
+```rust
+#[forge::job]
+#[timeout = "2h"]
+pub async fn process_large_file(ctx: &JobContext, input: FileInput) -> Result<()> {
+    let chunks = get_file_chunks(&input.file_id).await?;
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        process_chunk(chunk).await?;
+
+        // Send heartbeat to prevent stale job detection
+        ctx.heartbeat().await?;
+
+        let pct = ((i + 1) * 100 / chunks.len()) as u8;
+        ctx.progress(pct, format!("Chunk {} of {}", i + 1, chunks.len()));
+    }
+
+    Ok(())
+}
+```
+
+## How Job Progress Works
+
+```
+Frontend                FORGE                 PostgreSQL
+   │                      │                       │
+   │  subscribeJob(id)    │                       │
+   ├─────────────────────►│                       │
+   │                      │                       │
+   │  ◄─── WebSocket ────►│                       │
+   │                      │                       │
+   │                      │  ctx.progress(50,     │
+   │                      │    "Processing...")   │
+   │                      ├──────────────────────►│
+   │                      │                       │  UPDATE forge_jobs
+   │                      │   NOTIFY              │  SET progress = 50
+   │                      │◄──────────────────────┤
+   │                      │                       │
+   │  { progress: 50,     │                       │
+   │    message: "..." }  │                       │
+   │◄─────────────────────┤                       │
+   │                      │                       │
+```
+
+## What You Learned
+
+| Concept | What You Did |
+|---------|--------------|
+| **Job Definition** | Used `#[forge::job]` with timeout and retry |
+| **Progress Tracking** | Called `ctx.progress()` for real-time updates |
+| **Job Dispatch** | Used `ctx.dispatch_job()` from mutations |
+| **Frontend Tracking** | Used `createJobTracker()` for WebSocket subscription |
+| **Retries** | Configured exponential backoff |
+| **Priority** | Set job priority levels |
+
+## What's Next?
+
+<div className="row">
+  <div className="col col--6">
+    <a className="card" href="/background/jobs">
+      <div className="card__header">
+        <h3>📋 Jobs Reference</h3>
+      </div>
+      <div className="card__body">
+        Full job API documentation
+      </div>
+    </a>
+  </div>
+  <div className="col col--6">
+    <a className="card" href="/background/workflows">
+      <div className="card__header">
+        <h3>🔄 Workflows</h3>
+      </div>
+      <div className="card__body">
+        Multi-step processes with compensation
+      </div>
+    </a>
+  </div>
+</div>

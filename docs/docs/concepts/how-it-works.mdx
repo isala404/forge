@@ -1,0 +1,315 @@
+---
+sidebar_position: 1
+title: How It Works
+description: Understanding FORGE's architecture and how all the pieces fit together
+---
+
+# How FORGE Works
+
+FORGE is designed to be simple on the surface but powerful underneath. Let's peek behind the curtain and understand how it all works.
+
+## The Big Picture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        YOUR BROWSER                              │
+│                                                                  │
+│    Svelte App ─────────── HTTP/WS ───────────► FORGE Binary     │
+│    (TypeScript)                                   (Rust)         │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+                                                     │
+                                                     ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                        FORGE BINARY                              │
+│                                                                  │
+│   ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐   │
+│   │  Gateway  │  │  Worker   │  │ Scheduler │  │  Reactor  │   │
+│   │ (HTTP/WS) │  │  (Jobs)   │  │  (Crons)  │  │ (Realtime)│   │
+│   └───────────┘  └───────────┘  └───────────┘  └───────────┘   │
+│                                                                  │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │                    Function Executor                      │   │
+│   │         (Queries, Mutations, Actions)                     │   │
+│   └─────────────────────────────────────────────────────────┘   │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                        POSTGRESQL                                │
+│                                                                  │
+│   Your Tables │ Jobs Queue │ Sessions │ Metrics │ Logs │ Traces │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## One Binary, Many Components
+
+FORGE compiles to a single executable that contains:
+
+### 1. Gateway (HTTP/WebSocket Server)
+
+The gateway handles all incoming requests:
+- **HTTP**: API calls to `/rpc/{function_name}`
+- **WebSocket**: Real-time subscriptions at `/ws`
+- **Dashboard**: Admin UI at `/_dashboard/`
+
+```rust
+// Your functions become HTTP endpoints automatically
+#[forge::query]
+pub async fn get_user(ctx: &QueryContext, id: Uuid) -> Result<User> {
+    // POST /rpc/get_user { "id": "uuid" }
+}
+```
+
+### 2. Function Executor
+
+The executor runs your functions with the right context:
+- **Queries** get `QueryContext` (read-only database access)
+- **Mutations** get `MutationContext` (read-write + job dispatch)
+- **Actions** get `ActionContext` (+ HTTP client for external APIs)
+
+```rust
+// The executor provides the context automatically
+#[forge::mutation]
+pub async fn create_user(ctx: &MutationContext, input: CreateUserInput) -> Result<User> {
+    // ctx.db() gives you database access
+    // ctx.dispatch_job() lets you queue background work
+}
+```
+
+### 3. Worker (Job Processor)
+
+The worker polls the job queue and executes jobs:
+
+```
+Job Queue (in PostgreSQL)
+   ↓
+Worker claims job (SKIP LOCKED)
+   ↓
+Runs your job function
+   ↓
+Updates status (completed/failed/retry)
+```
+
+Jobs survive server restarts because they're in PostgreSQL.
+
+### 4. Scheduler (Cron Runner)
+
+The scheduler checks which crons need to run:
+
+```
+Every second:
+   ↓
+Check cron schedules
+   ↓
+Insert run record (prevents duplicates)
+   ↓
+Execute cron function
+```
+
+### 5. Reactor (Real-Time Engine)
+
+The reactor powers real-time updates:
+
+```
+Data changes in PostgreSQL
+   ↓
+PostgreSQL NOTIFY trigger fires
+   ↓
+Reactor receives notification
+   ↓
+Finds affected subscriptions
+   ↓
+Re-runs queries
+   ↓
+Pushes updates to WebSocket clients
+```
+
+## How Requests Flow
+
+### Query Request
+
+```
+1. Browser: POST /rpc/list_users {}
+2. Gateway: Parse request, check auth
+3. Executor: Create QueryContext, run function
+4. Function: SELECT * FROM users
+5. Gateway: Return JSON response
+```
+
+### Mutation Request
+
+```
+1. Browser: POST /rpc/create_user { name, email }
+2. Gateway: Parse request, check auth
+3. Executor: Create MutationContext, run function
+4. Function: INSERT INTO users...
+5. PostgreSQL: Row inserted, NOTIFY trigger fires
+6. Reactor: Receives notification
+7. Reactor: Finds subscriptions to list_users
+8. Reactor: Re-runs list_users query
+9. WebSocket: Pushes update to subscribed clients
+```
+
+### Real-Time Subscription
+
+```
+1. Browser: WebSocket connect to /ws
+2. Browser: { type: "subscribe", function: "list_users", args: {} }
+3. Gateway: Register subscription
+4. Reactor: Run initial query, send data
+5. (Later) Data changes in database
+6. PostgreSQL: NOTIFY trigger fires
+7. Reactor: Finds this subscription
+8. Reactor: Re-runs query
+9. WebSocket: Push { type: "data", data: [...] }
+```
+
+## PostgreSQL Is the Backbone
+
+FORGE uses PostgreSQL for everything:
+
+| What | Where |
+|------|-------|
+| Your data | Your tables |
+| Job queue | `forge_jobs` table |
+| Cron history | `forge_cron_runs` table |
+| Workflow state | `forge_workflow_runs` + `forge_workflow_steps` |
+| Sessions | `forge_sessions` table |
+| Metrics | `forge_metrics` table |
+| Logs | `forge_logs` table |
+| Traces | `forge_traces` table |
+
+**Why PostgreSQL?**
+- No extra services to run
+- ACID transactions for data integrity
+- LISTEN/NOTIFY for real-time
+- Advisory locks for leader election
+- SKIP LOCKED for safe job claiming
+- Proven at any scale
+
+## How Real-Time Works
+
+FORGE uses PostgreSQL's LISTEN/NOTIFY for change detection:
+
+```sql
+-- FORGE creates triggers on your tables
+CREATE TRIGGER users_notify_changes
+    AFTER INSERT OR UPDATE OR DELETE ON users
+    FOR EACH ROW EXECUTE FUNCTION forge_notify_change();
+```
+
+When data changes:
+1. PostgreSQL trigger fires
+2. `forge_notify_change()` sends a NOTIFY
+3. FORGE's Reactor receives it
+4. Reactor finds affected subscriptions
+5. Reactor re-runs queries
+6. Updates are pushed to clients
+
+You enable this per table:
+```sql
+SELECT forge_enable_reactivity('users');
+```
+
+## Type Safety Flow
+
+```
+Rust Structs (your schema)
+   ↓
+FORGE builds your project
+   ↓
+TypeScript types generated
+   ↓
+Frontend imports types
+   ↓
+Full type safety in Svelte
+```
+
+When you define a Rust struct:
+```rust
+pub struct User {
+    pub id: Uuid,
+    pub email: String,
+    pub name: String,
+}
+```
+
+You get TypeScript:
+```typescript
+export interface User {
+    id: string;
+    email: string;
+    name: string;
+}
+```
+
+And type-safe API calls:
+```typescript
+const user = await query<User>('get_user', { id });
+// user is typed as User | null
+```
+
+## Scaling Up
+
+FORGE can run as a cluster:
+
+```
+                    Load Balancer
+                         │
+         ┌───────────────┼───────────────┐
+         ▼               ▼               ▼
+    ┌─────────┐    ┌─────────┐    ┌─────────┐
+    │ Node 1  │    │ Node 2  │    │ Node 3  │
+    │(gateway)│    │(gateway)│    │(worker) │
+    └────┬────┘    └────┬────┘    └────┬────┘
+         │              │              │
+         └──────────────┴──────────────┘
+                        │
+                        ▼
+                   PostgreSQL
+```
+
+Each node can have different roles:
+- **Gateway**: Handles HTTP/WebSocket
+- **Worker**: Processes jobs
+- **Scheduler**: Runs crons (leader-elected)
+
+All nodes share state through PostgreSQL. No Redis needed.
+
+## What's Next?
+
+<div className="row">
+  <div className="col col--4">
+    <a className="card" href="/concepts/schema">
+      <div className="card__header">
+        <h3>📦 Schema</h3>
+      </div>
+      <div className="card__body">
+        Define your data models
+      </div>
+    </a>
+  </div>
+  <div className="col col--4">
+    <a className="card" href="/concepts/functions">
+      <div className="card__header">
+        <h3>⚙️ Functions</h3>
+      </div>
+      <div className="card__body">
+        Queries, Mutations, Actions
+      </div>
+    </a>
+  </div>
+  <div className="col col--4">
+    <a className="card" href="/concepts/realtime">
+      <div className="card__header">
+        <h3>⚡ Real-Time</h3>
+      </div>
+      <div className="card__body">
+        Live data subscriptions
+      </div>
+    </a>
+  </div>
+</div>

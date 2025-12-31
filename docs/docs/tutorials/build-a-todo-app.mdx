@@ -1,0 +1,549 @@
+---
+sidebar_position: 2
+title: "Build a Todo App"
+description: Learn FORGE basics by building a complete todo app with real-time updates
+---
+
+# Build a Todo App
+
+In this tutorial, you'll build a complete todo app with:
+- Create, update, and delete tasks
+- Real-time updates (changes sync instantly across tabs)
+- Task filtering (all, active, completed)
+
+By the end, you'll understand the core FORGE concepts.
+
+## What We're Building
+
+A simple todo app that looks like this:
+
+```
+┌─────────────────────────────────────┐
+│  📋 My Tasks                         │
+├─────────────────────────────────────┤
+│  [Enter new task...        ] [Add]  │
+├─────────────────────────────────────┤
+│  ☐ Buy groceries                    │
+│  ☑ Walk the dog              [🗑️]   │
+│  ☐ Finish FORGE tutorial            │
+├─────────────────────────────────────┤
+│  3 items • 1 completed              │
+│  [All] [Active] [Completed]         │
+└─────────────────────────────────────┘
+```
+
+## Step 1: Create the Project
+
+```bash
+forge new todo-app
+cd todo-app
+```
+
+Start PostgreSQL if you haven't:
+
+```bash
+docker run -d --name forge-db -p 5432:5432 \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=todo_app \
+  postgres:alpine
+```
+
+## Step 2: Define the Schema
+
+Open `src/schema/mod.rs` and replace it with:
+
+```rust title="src/schema/mod.rs"
+use forge::prelude::*;
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Task {
+    pub id: Uuid,
+    pub title: String,
+    pub completed: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateTaskInput {
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateTaskInput {
+    pub title: Option<String>,
+    pub completed: Option<bool>,
+}
+```
+
+## Step 3: Create the Migration
+
+Replace the existing migration:
+
+```sql title="migrations/0001_initial.sql"
+-- @up
+CREATE TABLE tasks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    title VARCHAR(255) NOT NULL,
+    completed BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Enable real-time updates
+SELECT forge_enable_reactivity('tasks');
+
+-- @down
+DROP TABLE tasks;
+```
+
+## Step 4: Write the Query
+
+Create the query to list tasks:
+
+```rust title="src/functions/queries/list_tasks.rs"
+use forge::prelude::*;
+use crate::schema::Task;
+
+#[forge::query]
+pub async fn list_tasks(ctx: &QueryContext) -> Result<Vec<Task>> {
+    sqlx::query_as("SELECT * FROM tasks ORDER BY created_at DESC")
+        .fetch_all(ctx.db())
+        .await
+        .map_err(Into::into)
+}
+```
+
+Update the module file:
+
+```rust title="src/functions/queries/mod.rs"
+mod list_tasks;
+
+pub use list_tasks::*;
+```
+
+## Step 5: Write the Mutations
+
+Create mutations for CRUD operations:
+
+```rust title="src/functions/mutations/tasks.rs"
+use forge::prelude::*;
+use crate::schema::{Task, CreateTaskInput, UpdateTaskInput};
+
+#[forge::mutation]
+pub async fn create_task(ctx: &MutationContext, input: CreateTaskInput) -> Result<Task> {
+    // Validate input
+    if input.title.trim().is_empty() {
+        return Err(ForgeError::Validation("Title cannot be empty".into()));
+    }
+
+    sqlx::query_as(r#"
+        INSERT INTO tasks (id, title, completed, created_at)
+        VALUES ($1, $2, false, NOW())
+        RETURNING *
+    "#)
+    .bind(Uuid::new_v4())
+    .bind(input.title.trim())
+    .fetch_one(ctx.db())
+    .await
+    .map_err(Into::into)
+}
+
+#[forge::mutation]
+pub async fn update_task(
+    ctx: &MutationContext,
+    id: Uuid,
+    input: UpdateTaskInput,
+) -> Result<Task> {
+    sqlx::query_as(r#"
+        UPDATE tasks
+        SET title = COALESCE($2, title),
+            completed = COALESCE($3, completed)
+        WHERE id = $1
+        RETURNING *
+    "#)
+    .bind(id)
+    .bind(&input.title)
+    .bind(input.completed)
+    .fetch_one(ctx.db())
+    .await
+    .map_err(Into::into)
+}
+
+#[forge::mutation]
+pub async fn delete_task(ctx: &MutationContext, id: Uuid) -> Result<bool> {
+    let result = sqlx::query("DELETE FROM tasks WHERE id = $1")
+        .bind(id)
+        .execute(ctx.db())
+        .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+#[forge::mutation]
+pub async fn toggle_task(ctx: &MutationContext, id: Uuid) -> Result<Task> {
+    sqlx::query_as(r#"
+        UPDATE tasks
+        SET completed = NOT completed
+        WHERE id = $1
+        RETURNING *
+    "#)
+    .bind(id)
+    .fetch_one(ctx.db())
+    .await
+    .map_err(Into::into)
+}
+```
+
+Update the module:
+
+```rust title="src/functions/mutations/mod.rs"
+mod tasks;
+
+pub use tasks::*;
+```
+
+## Step 6: Register the Functions
+
+Update `main.rs`:
+
+```rust title="src/main.rs"
+use forge::prelude::*;
+
+mod schema;
+mod functions;
+
+use functions::queries::*;
+use functions::mutations::*;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    dotenvy::dotenv().ok();
+    let config = ForgeConfig::from_env()?;
+
+    Forge::builder()
+        .function_registry_mut()
+        // Queries
+        .register_query::<ListTasksQuery>()
+        // Mutations
+        .register_mutation::<CreateTaskMutation>()
+        .register_mutation::<UpdateTaskMutation>()
+        .register_mutation::<DeleteTaskMutation>()
+        .register_mutation::<ToggleTaskMutation>()
+        // Run
+        .config(config)
+        .build()?
+        .run()
+        .await
+}
+```
+
+## Step 7: Test the Backend
+
+Run the backend:
+
+```bash
+cargo run
+```
+
+You should see:
+```
+🔥 FORGE starting...
+📦 Running migrations...
+✅ Applied 0001_initial.sql
+🚀 Gateway listening on http://localhost:8080
+```
+
+Test with curl:
+
+```bash
+# Create a task
+curl -X POST http://localhost:8080/rpc/create_task \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Learn FORGE"}'
+
+# List tasks
+curl http://localhost:8080/rpc/list_tasks \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+## Step 8: Build the Frontend
+
+Replace the frontend page:
+
+```svelte title="frontend/src/routes/+page.svelte"
+<script lang="ts">
+  import { subscribe, mutate } from '$lib/forge';
+
+  // Real-time subscription - updates automatically!
+  const tasks = subscribe('list_tasks', {});
+
+  // Filter state
+  let filter: 'all' | 'active' | 'completed' = $state('all');
+  let newTaskTitle = $state('');
+
+  // Filtered tasks
+  const filteredTasks = $derived(() => {
+    const data = $tasks.data ?? [];
+    switch (filter) {
+      case 'active':
+        return data.filter((t) => !t.completed);
+      case 'completed':
+        return data.filter((t) => t.completed);
+      default:
+        return data;
+    }
+  });
+
+  // Stats
+  const stats = $derived(() => {
+    const data = $tasks.data ?? [];
+    const total = data.length;
+    const completed = data.filter((t) => t.completed).length;
+    return { total, completed, active: total - completed };
+  });
+
+  async function addTask() {
+    if (!newTaskTitle.trim()) return;
+
+    await mutate('create_task', { title: newTaskTitle });
+    newTaskTitle = '';
+  }
+
+  async function toggleTask(id: string) {
+    await mutate('toggle_task', { id });
+  }
+
+  async function deleteTask(id: string) {
+    await mutate('delete_task', { id });
+  }
+
+  function handleKeydown(e: KeyboardEvent) {
+    if (e.key === 'Enter') {
+      addTask();
+    }
+  }
+</script>
+
+<main>
+  <h1>📋 My Tasks</h1>
+
+  <div class="add-task">
+    <input
+      type="text"
+      placeholder="Enter new task..."
+      bind:value={newTaskTitle}
+      onkeydown={handleKeydown}
+    />
+    <button onclick={addTask}>Add</button>
+  </div>
+
+  {#if $tasks.loading}
+    <p class="loading">Loading tasks...</p>
+  {:else if $tasks.error}
+    <p class="error">Error: {$tasks.error.message}</p>
+  {:else}
+    <ul class="task-list">
+      {#each filteredTasks() as task (task.id)}
+        <li class:completed={task.completed}>
+          <input
+            type="checkbox"
+            checked={task.completed}
+            onchange={() => toggleTask(task.id)}
+          />
+          <span class="title">{task.title}</span>
+          <button class="delete" onclick={() => deleteTask(task.id)}>🗑️</button>
+        </li>
+      {:else}
+        <li class="empty">No tasks yet. Add one above!</li>
+      {/each}
+    </ul>
+
+    <div class="footer">
+      <span>{stats().total} items • {stats().completed} completed</span>
+      <div class="filters">
+        <button class:active={filter === 'all'} onclick={() => (filter = 'all')}>
+          All
+        </button>
+        <button class:active={filter === 'active'} onclick={() => (filter = 'active')}>
+          Active
+        </button>
+        <button class:active={filter === 'completed'} onclick={() => (filter = 'completed')}>
+          Completed
+        </button>
+      </div>
+    </div>
+  {/if}
+</main>
+
+<style>
+  main {
+    max-width: 500px;
+    margin: 2rem auto;
+    padding: 1rem;
+    font-family: system-ui, sans-serif;
+  }
+
+  h1 {
+    margin-bottom: 1rem;
+  }
+
+  .add-task {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+  }
+
+  .add-task input {
+    flex: 1;
+    padding: 0.75rem;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 1rem;
+  }
+
+  .add-task button {
+    padding: 0.75rem 1.5rem;
+    background: #007bff;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 1rem;
+  }
+
+  .task-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+
+  .task-list li {
+    display: flex;
+    align-items: center;
+    padding: 0.75rem;
+    border-bottom: 1px solid #eee;
+    gap: 0.75rem;
+  }
+
+  .task-list li.completed .title {
+    text-decoration: line-through;
+    color: #999;
+  }
+
+  .task-list li.empty {
+    color: #999;
+    font-style: italic;
+  }
+
+  .title {
+    flex: 1;
+  }
+
+  .delete {
+    background: none;
+    border: none;
+    cursor: pointer;
+    opacity: 0.5;
+    font-size: 1rem;
+  }
+
+  .delete:hover {
+    opacity: 1;
+  }
+
+  .footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem 0;
+    color: #666;
+    font-size: 0.9rem;
+  }
+
+  .filters {
+    display: flex;
+    gap: 0.5rem;
+  }
+
+  .filters button {
+    background: none;
+    border: 1px solid #ddd;
+    padding: 0.25rem 0.75rem;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+
+  .filters button.active {
+    background: #007bff;
+    color: white;
+    border-color: #007bff;
+  }
+
+  .loading, .error {
+    text-align: center;
+    padding: 2rem;
+  }
+
+  .error {
+    color: #dc3545;
+  }
+</style>
+```
+
+## Step 9: Run the Frontend
+
+```bash
+cd frontend
+bun install
+bun dev
+```
+
+Open http://localhost:5173 and try:
+
+1. **Add tasks** - Type and press Enter or click Add
+2. **Toggle tasks** - Click the checkbox
+3. **Delete tasks** - Click the trash icon
+4. **Filter tasks** - Use the All/Active/Completed buttons
+5. **Real-time sync** - Open in two tabs, changes sync instantly!
+
+## What You Learned
+
+Congratulations! You just built a real-time todo app. Here's what you learned:
+
+| Concept | What You Did |
+|---------|--------------|
+| **Schema** | Defined `Task` struct with `sqlx::FromRow` |
+| **Migrations** | Created table with `forge_enable_reactivity` |
+| **Query** | Used `#[forge::query]` to list tasks |
+| **Mutations** | Used `#[forge::mutation]` for CRUD operations |
+| **Real-Time** | Used `subscribe()` for live updates |
+| **Frontend** | Connected Svelte to FORGE API |
+
+## What's Next?
+
+<div className="row">
+  <div className="col col--6">
+    <a className="card" href="/tutorials/user-authentication">
+      <div className="card__header">
+        <h3>🔐 Add Authentication</h3>
+      </div>
+      <div className="card__body">
+        Add user accounts and protect your tasks
+      </div>
+    </a>
+  </div>
+  <div className="col col--6">
+    <a className="card" href="/tutorials/background-jobs">
+      <div className="card__header">
+        <h3>⚙️ Background Jobs</h3>
+      </div>
+      <div className="card__body">
+        Send email reminders for tasks
+      </div>
+    </a>
+  </div>
+</div>
+
+## Full Code
+
+Find the complete code on [GitHub](https://github.com/forge/examples/todo-app).

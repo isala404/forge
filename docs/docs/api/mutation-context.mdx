@@ -1,0 +1,265 @@
+---
+sidebar_position: 2
+title: MutationContext
+description: API reference for MutationContext
+---
+
+# MutationContext
+
+The `MutationContext` is passed to all mutation functions. It provides database access, authentication, and the ability to dispatch background jobs and workflows.
+
+## Definition
+
+```rust
+pub struct MutationContext {
+    pub auth: AuthContext,
+}
+
+impl MutationContext {
+    pub fn db(&self) -> &PgPool;
+    pub async fn dispatch_job(&self, job_type: &str, input: Value) -> Result<Uuid>;
+    pub async fn dispatch_workflow(&self, workflow_type: &str, input: Value) -> Result<Uuid>;
+}
+```
+
+## Methods
+
+### `db()`
+
+Returns a reference to the PostgreSQL connection pool.
+
+```rust
+#[forge::mutation]
+pub async fn create_task(ctx: &MutationContext, input: CreateTaskInput) -> Result<Task> {
+    let user_id = ctx.auth.require_user_id()?;
+
+    sqlx::query_as(r#"
+        INSERT INTO tasks (id, title, user_id, created_at)
+        VALUES ($1, $2, $3, NOW())
+        RETURNING *
+    "#)
+    .bind(Uuid::new_v4())
+    .bind(&input.title)
+    .bind(user_id)
+    .fetch_one(ctx.db())
+    .await
+    .map_err(Into::into)
+}
+```
+
+**Returns:** `&PgPool` - A reference to the SQLx PostgreSQL pool.
+
+### `dispatch_job()`
+
+Dispatches a background job for async processing.
+
+```rust
+#[forge::mutation]
+pub async fn create_order(ctx: &MutationContext, input: OrderInput) -> Result<Order> {
+    let user_id = ctx.auth.require_user_id()?;
+
+    // Create order in database
+    let order: Order = sqlx::query_as(r#"
+        INSERT INTO orders (id, user_id, total, status, created_at)
+        VALUES ($1, $2, $3, 'pending', NOW())
+        RETURNING *
+    "#)
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(input.total)
+    .fetch_one(ctx.db())
+    .await?;
+
+    // Dispatch background job
+    ctx.dispatch_job("send_order_confirmation", serde_json::json!({
+        "order_id": order.id,
+        "email": input.email,
+    })).await?;
+
+    Ok(order)
+}
+```
+
+**Parameters:**
+- `job_type: &str` - Name of the job to dispatch
+- `input: Value` - JSON input for the job
+
+**Returns:** `Result<Uuid>` - The ID of the dispatched job.
+
+### `dispatch_workflow()`
+
+Starts a multi-step workflow.
+
+```rust
+#[forge::mutation]
+pub async fn checkout(ctx: &MutationContext, input: CheckoutInput) -> Result<CheckoutResult> {
+    let user_id = ctx.auth.require_user_id()?;
+
+    // Start the checkout workflow
+    let workflow_id = ctx.dispatch_workflow("process_checkout", serde_json::json!({
+        "user_id": user_id,
+        "cart_id": input.cart_id,
+        "payment_method_id": input.payment_method_id,
+        "shipping_address": input.shipping_address,
+    })).await?;
+
+    Ok(CheckoutResult {
+        workflow_id,
+        message: "Checkout started".into(),
+    })
+}
+```
+
+**Parameters:**
+- `workflow_type: &str` - Name of the workflow to start
+- `input: Value` - JSON input for the workflow
+
+**Returns:** `Result<Uuid>` - The ID of the started workflow.
+
+## Fields
+
+### `auth`
+
+The authentication context containing user information. Same as [QueryContext.auth](/api/query-context#authcontext).
+
+```rust
+#[forge::mutation]
+pub async fn update_profile(ctx: &MutationContext, input: ProfileInput) -> Result<User> {
+    let user_id = ctx.auth.require_user_id()?;
+
+    sqlx::query_as(r#"
+        UPDATE users
+        SET name = $2, bio = $3, updated_at = NOW()
+        WHERE id = $1
+        RETURNING *
+    "#)
+    .bind(user_id)
+    .bind(&input.name)
+    .bind(&input.bio)
+    .fetch_one(ctx.db())
+    .await
+    .map_err(Into::into)
+}
+```
+
+## Common Patterns
+
+### Create with Validation
+
+```rust
+#[forge::mutation]
+pub async fn create_task(ctx: &MutationContext, input: CreateTaskInput) -> Result<Task> {
+    // Validate input
+    if input.title.trim().is_empty() {
+        return Err(ForgeError::Validation("Title cannot be empty".into()));
+    }
+
+    if input.title.len() > 255 {
+        return Err(ForgeError::Validation("Title too long".into()));
+    }
+
+    let user_id = ctx.auth.require_user_id()?;
+
+    sqlx::query_as(r#"
+        INSERT INTO tasks (id, title, user_id, created_at)
+        VALUES ($1, $2, $3, NOW())
+        RETURNING *
+    "#)
+    .bind(Uuid::new_v4())
+    .bind(input.title.trim())
+    .bind(user_id)
+    .fetch_one(ctx.db())
+    .await
+    .map_err(Into::into)
+}
+```
+
+### Update with Ownership Check
+
+```rust
+#[forge::mutation]
+pub async fn update_task(ctx: &MutationContext, id: Uuid, input: UpdateTaskInput) -> Result<Task> {
+    let user_id = ctx.auth.require_user_id()?;
+
+    // Update only if user owns the task
+    let task: Option<Task> = sqlx::query_as(r#"
+        UPDATE tasks
+        SET title = COALESCE($3, title),
+            completed = COALESCE($4, completed),
+            updated_at = NOW()
+        WHERE id = $1 AND user_id = $2
+        RETURNING *
+    "#)
+    .bind(id)
+    .bind(user_id)
+    .bind(&input.title)
+    .bind(input.completed)
+    .fetch_optional(ctx.db())
+    .await?;
+
+    task.ok_or_else(|| ForgeError::NotFound("Task not found".into()))
+}
+```
+
+### Delete with Authorization
+
+```rust
+#[forge::mutation]
+pub async fn delete_task(ctx: &MutationContext, id: Uuid) -> Result<bool> {
+    let user_id = ctx.auth.require_user_id()?;
+
+    let result = sqlx::query("DELETE FROM tasks WHERE id = $1 AND user_id = $2")
+        .bind(id)
+        .bind(user_id)
+        .execute(ctx.db())
+        .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(ForgeError::NotFound("Task not found".into()));
+    }
+
+    Ok(true)
+}
+```
+
+### Dispatch Multiple Jobs
+
+```rust
+#[forge::mutation]
+pub async fn publish_post(ctx: &MutationContext, id: Uuid) -> Result<Post> {
+    let user_id = ctx.auth.require_user_id()?;
+
+    let post: Post = sqlx::query_as(r#"
+        UPDATE posts
+        SET published = true, published_at = NOW()
+        WHERE id = $1 AND author_id = $2
+        RETURNING *
+    "#)
+    .bind(id)
+    .bind(user_id)
+    .fetch_one(ctx.db())
+    .await?;
+
+    // Dispatch multiple background jobs
+    ctx.dispatch_job("notify_followers", serde_json::json!({
+        "author_id": user_id,
+        "post_id": post.id,
+    })).await?;
+
+    ctx.dispatch_job("update_search_index", serde_json::json!({
+        "post_id": post.id,
+    })).await?;
+
+    ctx.dispatch_job("generate_social_preview", serde_json::json!({
+        "post_id": post.id,
+    })).await?;
+
+    Ok(post)
+}
+```
+
+## See Also
+
+- [QueryContext](/api/query-context) - For read-only operations
+- [JobContext](/api/job-context) - For background jobs
+- [WorkflowContext](/api/workflow-context) - For workflows

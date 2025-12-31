@@ -1,0 +1,197 @@
+---
+sidebar_position: 0
+title: Frontend Integration
+description: Connect your Svelte 5 frontend to FORGE with real-time subscriptions
+---
+
+# Frontend Integration
+
+FORGE generates TypeScript types from your Rust code and provides a Svelte 5 client with:
+
+- **Type-safe API calls** - Full autocomplete for queries and mutations
+- **Real-time subscriptions** - Data updates automatically via WebSocket
+- **Job tracking** - Monitor background jobs in your UI
+- **Optimistic updates** - Instant UI feedback
+
+## How It Works
+
+```
+┌─────────────────┐    forge generate    ┌─────────────────┐
+│   Rust Backend  │ ─────────────────►  │  TypeScript     │
+│                 │                      │  Types + Client │
+│  #[forge::query]│                      │                 │
+│  list_tasks()   │                      │  listTasks()    │
+│                 │                      │  subscribe()    │
+└─────────────────┘                      └─────────────────┘
+         │                                       │
+         │                                       │
+         ▼                                       ▼
+┌─────────────────────────────────────────────────────────┐
+│                    Your App                              │
+│                                                         │
+│   ┌───────────────┐              ┌───────────────┐     │
+│   │ FORGE Gateway │◄────────────►│ Svelte 5 App  │     │
+│   │   Port 8080   │   WebSocket   │   Port 5173   │     │
+│   └───────────────┘              └───────────────┘     │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+```
+
+## Quick Example
+
+```svelte
+<script lang="ts">
+  import { subscribe, mutate } from '$lib/forge';
+
+  // Real-time subscription - updates when data changes!
+  const tasks = subscribe('list_tasks', {});
+
+  async function addTask(title: string) {
+    await mutate('create_task', { title });
+    // No need to refetch - subscription updates automatically
+  }
+</script>
+
+{#if $tasks.loading}
+  <p>Loading...</p>
+{:else if $tasks.error}
+  <p>Error: {$tasks.error.message}</p>
+{:else}
+  <ul>
+    {#each $tasks.data ?? [] as task}
+      <li>{task.title}</li>
+    {/each}
+  </ul>
+{/if}
+```
+
+## What You Get
+
+### Type Safety
+
+Your Rust types become TypeScript types:
+
+```rust
+// Rust
+#[derive(Serialize)]
+pub struct Task {
+    pub id: Uuid,
+    pub title: String,
+    pub completed: bool,
+}
+```
+
+```typescript
+// Generated TypeScript
+interface Task {
+  id: string;
+  title: string;
+  completed: boolean;
+}
+```
+
+### Auto-complete
+
+Full IDE support:
+
+```typescript
+// Query names are typed
+const tasks = subscribe('list_tasks', {});
+//                       ^^^^^^^^^ autocomplete!
+
+// Input types are checked
+await mutate('create_task', { title: 'Buy milk' });
+//                          ^^^^^^^^ type-checked!
+```
+
+### Real-Time
+
+No polling. No manual refresh. Data just updates:
+
+```
+User A                          User B
+   │                               │
+   │  mutate('create_task')        │
+   ├──────────────────────────────►│
+   │                               │
+   │        WebSocket Push         │
+   │◄──────────────────────────────┤
+   │                               │
+   │  UI updates automatically     │  UI updates automatically
+   ▼                               ▼
+```
+
+## Frontend Stack
+
+FORGE works with **Svelte 5** and **SvelteKit**:
+
+| Component | Version | Notes |
+|-----------|---------|-------|
+| Svelte | 5.x | Uses runes (`$state`, `$derived`) |
+| SvelteKit | 2.x | File-based routing |
+| TypeScript | 5.x | Full type generation |
+
+## Project Structure
+
+```
+frontend/
+├── src/
+│   ├── lib/
+│   │   └── forge/           # Generated code
+│   │       ├── client.ts    # API client
+│   │       ├── types.ts     # Generated types
+│   │       └── index.ts     # Exports
+│   ├── routes/
+│   │   └── +page.svelte     # Your pages
+│   └── app.html
+├── package.json
+└── svelte.config.js
+```
+
+## What's Next?
+
+<div className="row">
+  <div className="col col--6">
+    <a className="card" href="/frontend/setup">
+      <div className="card__header">
+        <h3>🔧 Setup</h3>
+      </div>
+      <div className="card__body">
+        Configure your frontend
+      </div>
+    </a>
+  </div>
+  <div className="col col--6">
+    <a className="card" href="/frontend/queries-mutations">
+      <div className="card__header">
+        <h3>📡 Queries & Mutations</h3>
+      </div>
+      <div className="card__body">
+        Call your API functions
+      </div>
+    </a>
+  </div>
+</div>
+
+<div className="row" style={{marginTop: '1rem'}}>
+  <div className="col col--6">
+    <a className="card" href="/frontend/realtime-subscriptions">
+      <div className="card__header">
+        <h3>⚡ Real-Time Subscriptions</h3>
+      </div>
+      <div className="card__body">
+        Live data updates
+      </div>
+    </a>
+  </div>
+  <div className="col col--6">
+    <a className="card" href="/frontend/job-tracking">
+      <div className="card__header">
+        <h3>📋 Job Tracking</h3>
+      </div>
+      <div className="card__body">
+        Monitor background jobs
+      </div>
+    </a>
+  </div>
+</div>

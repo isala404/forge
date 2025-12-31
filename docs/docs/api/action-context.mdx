@@ -1,0 +1,220 @@
+---
+sidebar_position: 3
+title: ActionContext
+description: API reference for ActionContext
+---
+
+# ActionContext
+
+The `ActionContext` is passed to action functions. Actions are for external integrations like webhooks that may come from unauthenticated sources.
+
+## Definition
+
+```rust
+pub struct ActionContext {
+    // No auth context - webhooks are typically unauthenticated
+}
+
+impl ActionContext {
+    pub fn db(&self) -> &PgPool;
+    pub fn http(&self) -> &Client;
+    pub async fn dispatch_job(&self, job_type: &str, input: Value) -> Result<Uuid>;
+    pub async fn dispatch_workflow(&self, workflow_type: &str, input: Value) -> Result<Uuid>;
+}
+```
+
+## Methods
+
+### `db()`
+
+Returns the PostgreSQL connection pool.
+
+```rust
+sqlx::query("UPDATE webhooks SET last_received = NOW() WHERE id = $1")
+    .bind(webhook_id)
+    .execute(ctx.db())
+    .await?;
+```
+
+### `http()`
+
+Returns an HTTP client for calling external APIs.
+
+```rust
+let response = ctx.http()
+    .post("https://api.example.com/acknowledge")
+    .json(&payload)
+    .send()
+    .await?;
+```
+
+### `dispatch_job()`
+
+Dispatches a background job.
+
+```rust
+ctx.dispatch_job("process_webhook_payload", serde_json::json!({
+    "event_type": event.type_,
+    "data": event.data,
+})).await?;
+```
+
+### `dispatch_workflow()`
+
+Starts a workflow.
+
+```rust
+ctx.dispatch_workflow("fulfill_order", serde_json::json!({
+    "order_id": order_id,
+})).await?;
+```
+
+## Common Patterns
+
+### Stripe Webhook
+
+```rust
+use forge::prelude::*;
+
+#[derive(Debug, Deserialize)]
+pub struct StripeEvent {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub data: StripeEventData,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StripeEventData {
+    pub object: serde_json::Value,
+}
+
+#[forge::action]
+pub async fn stripe_webhook(ctx: &ActionContext, event: StripeEvent) -> Result<()> {
+    // Log the event
+    sqlx::query(r#"
+        INSERT INTO webhook_events (id, provider, event_type, payload, received_at)
+        VALUES ($1, 'stripe', $2, $3, NOW())
+    "#)
+    .bind(&event.id)
+    .bind(&event.type_)
+    .bind(serde_json::to_value(&event.data)?)
+    .execute(ctx.db())
+    .await?;
+
+    // Handle different event types
+    match event.type_.as_str() {
+        "checkout.session.completed" => {
+            let session_id = event.data.object["id"].as_str().unwrap();
+            ctx.dispatch_workflow("fulfill_order", serde_json::json!({
+                "stripe_session_id": session_id,
+            })).await?;
+        }
+        "invoice.paid" => {
+            ctx.dispatch_job("process_invoice", serde_json::json!({
+                "invoice_id": event.data.object["id"],
+            })).await?;
+        }
+        "customer.subscription.deleted" => {
+            ctx.dispatch_job("handle_subscription_cancel", serde_json::json!({
+                "subscription_id": event.data.object["id"],
+            })).await?;
+        }
+        _ => {
+            tracing::debug!("Unhandled Stripe event: {}", event.type_);
+        }
+    }
+
+    Ok(())
+}
+```
+
+### GitHub Webhook
+
+```rust
+#[derive(Debug, Deserialize)]
+pub struct GitHubPushEvent {
+    #[serde(rename = "ref")]
+    pub ref_: String,
+    pub repository: GitHubRepository,
+    pub commits: Vec<GitHubCommit>,
+}
+
+#[forge::action]
+pub async fn github_push(ctx: &ActionContext, event: GitHubPushEvent) -> Result<()> {
+    // Only handle main branch
+    if !event.ref_.ends_with("/main") {
+        return Ok(());
+    }
+
+    // Trigger deployment
+    ctx.dispatch_job("deploy", serde_json::json!({
+        "repo": event.repository.full_name,
+        "commit": event.commits.last().map(|c| &c.id),
+    })).await?;
+
+    Ok(())
+}
+```
+
+### Generic Webhook Handler
+
+```rust
+#[forge::action]
+pub async fn webhook(ctx: &ActionContext, payload: serde_json::Value) -> Result<()> {
+    // Store raw payload
+    let event_id = Uuid::new_v4();
+
+    sqlx::query(r#"
+        INSERT INTO webhook_events (id, payload, received_at)
+        VALUES ($1, $2, NOW())
+    "#)
+    .bind(event_id)
+    .bind(&payload)
+    .execute(ctx.db())
+    .await?;
+
+    // Process asynchronously
+    ctx.dispatch_job("process_webhook", serde_json::json!({
+        "event_id": event_id,
+    })).await?;
+
+    Ok(())
+}
+```
+
+## Security Notes
+
+Actions receive raw requests from external sources. Always:
+
+1. **Verify signatures** for webhooks that support them
+2. **Validate payloads** before processing
+3. **Process asynchronously** via jobs for long operations
+4. **Log all events** for debugging
+
+```rust
+#[forge::action]
+pub async fn secure_webhook(
+    ctx: &ActionContext,
+    headers: Headers,  // Contains signature
+    payload: Bytes,    // Raw body for signature verification
+) -> Result<()> {
+    // Verify webhook signature
+    let signature = headers
+        .get("X-Webhook-Signature")
+        .ok_or(ForgeError::Unauthorized("Missing signature".into()))?;
+
+    verify_signature(&payload, signature, &webhook_secret)?;
+
+    // Now safe to process
+    let event: WebhookEvent = serde_json::from_slice(&payload)?;
+    // ...
+
+    Ok(())
+}
+```
+
+## See Also
+
+- [Functions](/concepts/functions) - Action overview
+- [JobContext](/api/job-context) - For background processing

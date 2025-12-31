@@ -1,0 +1,433 @@
+---
+sidebar_position: 3
+title: Real-Time Subscriptions
+description: Live data updates with WebSocket subscriptions
+---
+
+# Real-Time Subscriptions
+
+Subscriptions keep your UI in sync with the database. When data changes, your UI updates automatically.
+
+## Basic Subscription
+
+```svelte
+<script lang="ts">
+  import { subscribe } from '$lib/forge';
+
+  // This updates automatically when tasks change!
+  const tasks = subscribe('list_tasks', {});
+</script>
+
+{#if $tasks.loading}
+  <p>Loading...</p>
+{:else if $tasks.error}
+  <p>Error: {$tasks.error.message}</p>
+{:else}
+  {#each $tasks.data ?? [] as task (task.id)}
+    <div>{task.title}</div>
+  {/each}
+{/if}
+```
+
+## How It Works
+
+```
+  ┌────────────────┐         ┌────────────────┐
+  │   Your App     │         │  FORGE Server  │
+  │                │         │                │
+  │ subscribe()────┼────────►│                │
+  │                │         │  PostgreSQL    │
+  │ ◄──WebSocket───┼─────────┤  NOTIFY/LISTEN │
+  │                │         │                │
+  │  UI updates!   │         │                │
+  └────────────────┘         └────────────────┘
+```
+
+1. You call `subscribe('list_tasks', {})`
+2. FORGE establishes a WebSocket connection
+3. Server listens to PostgreSQL NOTIFY on the `tasks` table
+4. When any client modifies tasks, PostgreSQL sends NOTIFY
+5. Server pushes fresh data to all subscribers
+6. Your UI updates automatically
+
+## Subscription Object
+
+`subscribe()` returns a Svelte store with:
+
+```typescript
+interface SubscriptionStore<T> {
+  data: T | null;           // The actual data
+  loading: boolean;         // True while fetching
+  error: Error | null;      // Error if fetch failed
+  unsubscribe: () => void;  // Clean up subscription
+}
+```
+
+## Subscription with Parameters
+
+Pass parameters to filter data:
+
+```svelte
+<script lang="ts">
+  import { subscribe } from '$lib/forge';
+
+  let { projectId } = $props();
+
+  // Only tasks for this project
+  const tasks = subscribe('list_project_tasks', { projectId });
+</script>
+```
+
+## Reactive Parameters
+
+Use a function for reactive parameters:
+
+```svelte
+<script lang="ts">
+  import { subscribe } from '$lib/forge';
+
+  let filter = $state('all');
+
+  // Re-subscribes when filter changes
+  const tasks = subscribe('list_tasks', () => ({
+    status: filter === 'all' ? null : filter,
+  }));
+</script>
+
+<select bind:value={filter}>
+  <option value="all">All</option>
+  <option value="active">Active</option>
+  <option value="completed">Completed</option>
+</select>
+
+{#each $tasks.data ?? [] as task}
+  <div>{task.title}</div>
+{/each}
+```
+
+## Cleanup
+
+Subscriptions automatically clean up when the component is destroyed. For manual cleanup:
+
+```svelte
+<script lang="ts">
+  import { subscribe } from '$lib/forge';
+  import { onDestroy } from 'svelte';
+
+  const tasks = subscribe('list_tasks', {});
+
+  onDestroy(() => {
+    tasks.unsubscribe();
+  });
+</script>
+```
+
+## Multiple Subscriptions
+
+You can have multiple subscriptions in one component:
+
+```svelte
+<script lang="ts">
+  import { subscribe } from '$lib/forge';
+
+  const tasks = subscribe('list_tasks', {});
+  const users = subscribe('list_online_users', {});
+  const stats = subscribe('get_dashboard_stats', {});
+</script>
+
+<div class="dashboard">
+  <div class="users">
+    {($users.data ?? []).length} online
+  </div>
+
+  <div class="stats">
+    {$stats.data?.total} total, {$stats.data?.completed} done
+  </div>
+
+  <div class="tasks">
+    {#each $tasks.data ?? [] as task}
+      <div>{task.title}</div>
+    {/each}
+  </div>
+</div>
+```
+
+## Optimistic Updates
+
+Update the UI immediately, before the server responds:
+
+```svelte
+<script lang="ts">
+  import { subscribe, mutateOptimisticUpdate } from '$lib/forge';
+
+  const tasks = subscribe('list_tasks', {});
+
+  async function toggleTask(task: Task) {
+    await mutateOptimisticUpdate('toggle_task', tasks, {
+      input: { id: task.id },
+      itemId: task.id,
+      getId: (t) => t.id,
+      update: (t) => ({ ...t, completed: !t.completed }),
+    });
+  }
+</script>
+
+{#each $tasks.data ?? [] as task (task.id)}
+  <div>
+    <input
+      type="checkbox"
+      checked={task.completed}
+      onchange={() => toggleTask(task)}
+    />
+    {task.title}
+  </div>
+{/each}
+```
+
+How optimistic updates work:
+
+```
+1. User clicks checkbox
+   ├── UI updates immediately
+   └── Mutation sent to server
+
+2a. Server succeeds
+    └── WebSocket pushes real data
+        └── UI already matches
+
+2b. Server fails
+    └── Rollback to original state
+```
+
+## Optimistic Add
+
+Add items optimistically:
+
+```svelte
+<script lang="ts">
+  import { subscribe, mutateOptimisticAdd } from '$lib/forge';
+
+  const tasks = subscribe('list_tasks', {});
+
+  async function addTask(title: string) {
+    await mutateOptimisticAdd('create_task', tasks, {
+      input: { title },
+      optimisticItem: {
+        id: crypto.randomUUID(),  // Temporary ID
+        title,
+        completed: false,
+        created_at: new Date().toISOString(),
+      },
+      getId: (t) => t.id,
+    });
+  }
+</script>
+```
+
+## Optimistic Remove
+
+Remove items optimistically:
+
+```svelte
+<script lang="ts">
+  import { subscribe, mutateOptimisticRemove } from '$lib/forge';
+
+  const tasks = subscribe('list_tasks', {});
+
+  async function deleteTask(id: string) {
+    await mutateOptimisticRemove('delete_task', tasks, {
+      input: { id },
+      itemId: id,
+      getId: (t) => t.id,
+    });
+  }
+</script>
+```
+
+## Connection State
+
+Monitor the WebSocket connection:
+
+```svelte
+<script lang="ts">
+  import { getForgeClient } from '$lib/forge';
+
+  const client = getForgeClient();
+
+  let state = $state(client.getConnectionState());
+
+  client.onConnectionStateChange((newState) => {
+    state = newState;
+  });
+</script>
+
+{#if state === 'disconnected'}
+  <div class="banner error">
+    Connection lost. Trying to reconnect...
+  </div>
+{:else if state === 'reconnecting'}
+  <div class="banner warning">
+    Reconnecting...
+  </div>
+{/if}
+```
+
+Connection states:
+- `connected` - WebSocket is open
+- `disconnected` - Connection lost
+- `reconnecting` - Attempting to reconnect
+
+## Handling Reconnection
+
+When the connection is restored, subscriptions automatically resync:
+
+```
+WebSocket closes
+      │
+      ▼
+Client enters 'disconnected' state
+      │
+      ▼
+Automatic reconnection attempts
+      │
+      ▼
+WebSocket opens
+      │
+      ▼
+Client enters 'connected' state
+      │
+      ▼
+All subscriptions re-fetch fresh data
+      │
+      ▼
+UI updates with latest data
+```
+
+## Presence (Who's Online)
+
+Build presence features with subscriptions:
+
+```rust title="Backend"
+#[forge::query]
+pub async fn list_online_users(ctx: &QueryContext, room_id: Uuid) -> Result<Vec<OnlineUser>> {
+    sqlx::query_as(r#"
+        SELECT user_id, user_name, last_seen
+        FROM presence
+        WHERE room_id = $1
+          AND last_seen > NOW() - INTERVAL '30 seconds'
+    "#)
+    .bind(room_id)
+    .fetch_all(ctx.db())
+    .await
+    .map_err(Into::into)
+}
+```
+
+```svelte title="Frontend"
+<script lang="ts">
+  import { subscribe, mutate } from '$lib/forge';
+  import { onMount } from 'svelte';
+
+  let { roomId } = $props();
+
+  const onlineUsers = subscribe('list_online_users', { roomId });
+
+  // Heartbeat to maintain presence
+  onMount(() => {
+    const interval = setInterval(() => {
+      mutate('update_presence', { roomId });
+    }, 10000);
+
+    return () => clearInterval(interval);
+  });
+</script>
+
+<div class="online">
+  {#each $onlineUsers.data ?? [] as user (user.user_id)}
+    <span class="avatar">{user.user_name.charAt(0)}</span>
+  {/each}
+  <span>{($onlineUsers.data ?? []).length} online</span>
+</div>
+```
+
+## Performance Tips
+
+### 1. Subscribe to What You Need
+
+```svelte
+<script lang="ts">
+  // Good: Only tasks for this project
+  const tasks = subscribe('list_project_tasks', { projectId });
+
+  // Bad: All tasks, filtered client-side
+  const allTasks = subscribe('list_all_tasks', {});
+  const filtered = $derived($allTasks.data?.filter(t => t.projectId === projectId));
+</script>
+```
+
+### 2. Unsubscribe When Not Needed
+
+```svelte
+<script lang="ts">
+  let showDetails = $state(false);
+
+  // Only subscribe when showing details
+  const details = $derived(
+    showDetails ? subscribe('get_task_details', { id }) : null
+  );
+</script>
+
+<button onclick={() => showDetails = !showDetails}>
+  {showDetails ? 'Hide' : 'Show'} Details
+</button>
+
+{#if showDetails && $details}
+  <div>{$details.data?.description}</div>
+{/if}
+```
+
+### 3. Debounce Rapid Changes
+
+If your UI allows rapid mutations, debounce them:
+
+```svelte
+<script lang="ts">
+  let title = $state('');
+
+  const debouncedUpdate = debounce((value: string) => {
+    mutate('update_task', { id, title: value });
+  }, 300);
+
+  function handleInput(e: Event) {
+    title = (e.target as HTMLInputElement).value;
+    debouncedUpdate(title);
+  }
+</script>
+
+<input value={title} oninput={handleInput} />
+```
+
+## What's Next?
+
+<div className="row">
+  <div className="col col--6">
+    <a className="card" href="/frontend/job-tracking">
+      <div className="card__header">
+        <h3>📋 Job Tracking</h3>
+      </div>
+      <div className="card__body">
+        Monitor background jobs
+      </div>
+    </a>
+  </div>
+  <div className="col col--6">
+    <a className="card" href="/tutorials/realtime-updates">
+      <div className="card__header">
+        <h3>🎓 Tutorial</h3>
+      </div>
+      <div className="card__body">
+        Build a live dashboard
+      </div>
+    </a>
+  </div>
+</div>

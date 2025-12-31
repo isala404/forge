@@ -1,0 +1,182 @@
+---
+sidebar_position: 1
+title: QueryContext
+description: API reference for QueryContext
+---
+
+# QueryContext
+
+The `QueryContext` is passed to all query functions. It provides database access and authentication context.
+
+## Definition
+
+```rust
+pub struct QueryContext {
+    pub auth: AuthContext,
+}
+
+impl QueryContext {
+    pub fn db(&self) -> &PgPool;
+}
+```
+
+## Methods
+
+### `db()`
+
+Returns a reference to the PostgreSQL connection pool.
+
+```rust
+#[forge::query]
+pub async fn list_users(ctx: &QueryContext) -> Result<Vec<User>> {
+    sqlx::query_as("SELECT * FROM users ORDER BY created_at DESC")
+        .fetch_all(ctx.db())
+        .await
+        .map_err(Into::into)
+}
+```
+
+**Returns:** `&PgPool` - A reference to the SQLx PostgreSQL pool.
+
+## Fields
+
+### `auth`
+
+The authentication context containing user information.
+
+```rust
+#[forge::query]
+pub async fn get_my_profile(ctx: &QueryContext) -> Result<User> {
+    let user_id = ctx.auth.require_user_id()?;
+
+    sqlx::query_as("SELECT * FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(ctx.db())
+        .await
+        .map_err(Into::into)
+}
+```
+
+See [AuthContext](#authcontext) for details.
+
+## AuthContext
+
+```rust
+pub struct AuthContext {
+    user_id: Option<Uuid>,
+    roles: Vec<String>,
+    claims: HashMap<String, Value>,
+}
+
+impl AuthContext {
+    // Get user ID if authenticated
+    pub fn user_id(&self) -> Option<Uuid>;
+
+    // Get user ID or return Unauthorized error
+    pub fn require_user_id(&self) -> Result<Uuid>;
+
+    // Check if user has a specific role
+    pub fn has_role(&self, role: &str) -> bool;
+
+    // Require a specific role
+    pub fn require_role(&self, role: &str) -> Result<()>;
+
+    // Get all roles
+    pub fn roles(&self) -> &[String];
+
+    // Get a custom claim
+    pub fn get_claim<T: DeserializeOwned>(&self, key: &str) -> Option<T>;
+}
+```
+
+### Examples
+
+**Optional Authentication:**
+
+```rust
+#[forge::query]
+pub async fn list_posts(ctx: &QueryContext) -> Result<Vec<Post>> {
+    match ctx.auth.user_id() {
+        Some(user_id) => {
+            // Authenticated: show all posts including private
+            sqlx::query_as(
+                "SELECT * FROM posts WHERE public = true OR author_id = $1"
+            )
+            .bind(user_id)
+            .fetch_all(ctx.db())
+            .await
+            .map_err(Into::into)
+        }
+        None => {
+            // Not authenticated: only public posts
+            sqlx::query_as("SELECT * FROM posts WHERE public = true")
+                .fetch_all(ctx.db())
+                .await
+                .map_err(Into::into)
+        }
+    }
+}
+```
+
+**Required Authentication:**
+
+```rust
+#[forge::query]
+pub async fn get_my_tasks(ctx: &QueryContext) -> Result<Vec<Task>> {
+    let user_id = ctx.auth.require_user_id()?;
+
+    sqlx::query_as("SELECT * FROM tasks WHERE user_id = $1")
+        .bind(user_id)
+        .fetch_all(ctx.db())
+        .await
+        .map_err(Into::into)
+}
+```
+
+**Role-Based Access:**
+
+```rust
+#[forge::query]
+pub async fn list_all_users(ctx: &QueryContext) -> Result<Vec<User>> {
+    ctx.auth.require_role("admin")?;
+
+    sqlx::query_as("SELECT * FROM users")
+        .fetch_all(ctx.db())
+        .await
+        .map_err(Into::into)
+}
+```
+
+## Usage Pattern
+
+```rust
+use forge::prelude::*;
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct Task {
+    pub id: Uuid,
+    pub title: String,
+    pub completed: bool,
+}
+
+#[forge::query]
+pub async fn list_tasks(ctx: &QueryContext) -> Result<Vec<Task>> {
+    let user_id = ctx.auth.require_user_id()?;
+
+    sqlx::query_as(r#"
+        SELECT id, title, completed
+        FROM tasks
+        WHERE user_id = $1
+        ORDER BY created_at DESC
+    "#)
+    .bind(user_id)
+    .fetch_all(ctx.db())
+    .await
+    .map_err(Into::into)
+}
+```
+
+## See Also
+
+- [MutationContext](/api/mutation-context) - For data modification
+- [Functions](/concepts/functions) - Function types overview

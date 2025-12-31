@@ -87,6 +87,13 @@ Frontend
 - Svelte 5 runes integration for reactivity
 - WebSocket subscriptions with automatic reconnect
 
+Documentation Website (website/)
+- Docusaurus 3.9.2 with bun, TypeScript
+- Dark mode default, docs-only site (routeBasePath: '/')
+- Start: cd website && bun run start
+- Structure: docs/{concepts,tutorials,background,frontend,api,cli}/
+- MDX files with Rust/TypeScript syntax highlighting via prism
+
 Database Tables
 - forge_nodes: cluster membership
 - forge_leaders: leader election state

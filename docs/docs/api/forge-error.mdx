@@ -1,0 +1,264 @@
+---
+sidebar_position: 6
+title: ForgeError
+description: Error types and handling in FORGE
+---
+
+# ForgeError
+
+FORGE provides structured error types that map to HTTP status codes.
+
+## Error Types
+
+```rust
+pub enum ForgeError {
+    /// 400 Bad Request - Invalid input
+    Validation(String),
+
+    /// 401 Unauthorized - Not authenticated
+    Unauthorized(String),
+
+    /// 403 Forbidden - Not authorized
+    Forbidden(String),
+
+    /// 404 Not Found - Resource doesn't exist
+    NotFound(String),
+
+    /// 409 Conflict - Resource conflict
+    Conflict(String),
+
+    /// 500 Internal Server Error
+    Internal(String),
+}
+```
+
+## Usage
+
+### Validation Errors (400)
+
+Use for invalid user input:
+
+```rust
+#[forge::mutation]
+pub async fn create_task(ctx: &MutationContext, input: CreateTaskInput) -> Result<Task> {
+    if input.title.trim().is_empty() {
+        return Err(ForgeError::Validation("Title cannot be empty".into()));
+    }
+
+    if input.title.len() > 255 {
+        return Err(ForgeError::Validation("Title must be 255 characters or less".into()));
+    }
+
+    // ... create task
+}
+```
+
+### Unauthorized Errors (401)
+
+Use when authentication is required:
+
+```rust
+#[forge::query]
+pub async fn get_my_profile(ctx: &QueryContext) -> Result<User> {
+    let user_id = ctx.auth.user_id()
+        .ok_or(ForgeError::Unauthorized("Please log in".into()))?;
+
+    // ... fetch user
+}
+```
+
+The `require_user_id()` helper returns this error automatically:
+
+```rust
+let user_id = ctx.auth.require_user_id()?;  // Returns Unauthorized if not logged in
+```
+
+### Forbidden Errors (403)
+
+Use when the user lacks permission:
+
+```rust
+#[forge::mutation]
+pub async fn delete_user(ctx: &MutationContext, id: Uuid) -> Result<bool> {
+    let current_user_id = ctx.auth.require_user_id()?;
+
+    if !ctx.auth.has_role("admin") && current_user_id != id {
+        return Err(ForgeError::Forbidden("Cannot delete other users".into()));
+    }
+
+    // ... delete user
+}
+```
+
+### Not Found Errors (404)
+
+Use when a resource doesn't exist:
+
+```rust
+#[forge::query]
+pub async fn get_task(ctx: &QueryContext, id: Uuid) -> Result<Task> {
+    let task: Option<Task> = sqlx::query_as("SELECT * FROM tasks WHERE id = $1")
+        .bind(id)
+        .fetch_optional(ctx.db())
+        .await?;
+
+    task.ok_or(ForgeError::NotFound(format!("Task {} not found", id)))
+}
+```
+
+### Conflict Errors (409)
+
+Use for resource conflicts:
+
+```rust
+#[forge::mutation]
+pub async fn create_user(ctx: &MutationContext, input: RegisterInput) -> Result<User> {
+    // Check if email exists
+    let existing: Option<(i64,)> = sqlx::query_as(
+        "SELECT 1 FROM users WHERE email = $1"
+    )
+    .bind(&input.email)
+    .fetch_optional(ctx.db())
+    .await?;
+
+    if existing.is_some() {
+        return Err(ForgeError::Conflict("Email already registered".into()));
+    }
+
+    // ... create user
+}
+```
+
+### Internal Errors (500)
+
+Use for unexpected server errors:
+
+```rust
+#[forge::job]
+pub async fn process_file(ctx: &JobContext, input: FileInput) -> Result<()> {
+    let file = fetch_file(&input.file_id).await
+        .map_err(|e| ForgeError::Internal(format!("Failed to fetch file: {}", e)))?;
+
+    // ... process file
+}
+```
+
+## Converting from Other Errors
+
+SQLx errors automatically convert:
+
+```rust
+// This works - sqlx errors convert to ForgeError
+sqlx::query("SELECT * FROM users")
+    .fetch_all(ctx.db())
+    .await?  // ? converts sqlx::Error to ForgeError
+```
+
+For custom error types, implement `Into<ForgeError>`:
+
+```rust
+impl From<MyError> for ForgeError {
+    fn from(err: MyError) -> Self {
+        match err {
+            MyError::NotFound(msg) => ForgeError::NotFound(msg),
+            MyError::Invalid(msg) => ForgeError::Validation(msg),
+            _ => ForgeError::Internal(err.to_string()),
+        }
+    }
+}
+```
+
+## Frontend Error Handling
+
+Errors are returned as JSON to the frontend:
+
+```json
+{
+  "error": {
+    "code": "VALIDATION",
+    "message": "Title cannot be empty"
+  }
+}
+```
+
+Handle in Svelte:
+
+```svelte
+<script lang="ts">
+  import { mutate } from '$lib/forge';
+
+  async function createTask() {
+    try {
+      await mutate('create_task', { title });
+    } catch (e) {
+      const error = e as ForgeError;
+
+      switch (error.code) {
+        case 'VALIDATION':
+          validationMessage = error.message;
+          break;
+        case 'UNAUTHORIZED':
+          goto('/login');
+          break;
+        case 'FORBIDDEN':
+          alert('Permission denied');
+          break;
+        case 'NOT_FOUND':
+          notFound = true;
+          break;
+        default:
+          alert('Something went wrong');
+      }
+    }
+  }
+</script>
+```
+
+## Error Codes
+
+| Rust Variant | HTTP Status | JSON Code | Use For |
+|--------------|-------------|-----------|---------|
+| `Validation` | 400 | `VALIDATION` | Invalid input |
+| `Unauthorized` | 401 | `UNAUTHORIZED` | Not logged in |
+| `Forbidden` | 403 | `FORBIDDEN` | No permission |
+| `NotFound` | 404 | `NOT_FOUND` | Resource missing |
+| `Conflict` | 409 | `CONFLICT` | Resource conflict |
+| `Internal` | 500 | `INTERNAL` | Server error |
+
+## Best Practices
+
+### 1. Be Specific
+
+```rust
+// Good - specific message
+Err(ForgeError::Validation("Email must contain @".into()))
+
+// Bad - vague message
+Err(ForgeError::Validation("Invalid".into()))
+```
+
+### 2. Don't Leak Internal Details
+
+```rust
+// Good - user-friendly message
+Err(ForgeError::Internal("Unable to process request".into()))
+
+// Bad - exposes implementation
+Err(ForgeError::Internal(format!("PostgreSQL error: {}", db_error)))
+```
+
+Log the detailed error separately:
+
+```rust
+tracing::error!("Database error: {}", db_error);
+Err(ForgeError::Internal("Database error".into()))
+```
+
+### 3. Use the Right Error Type
+
+```rust
+// User not logged in → Unauthorized (401)
+// User logged in but can't access → Forbidden (403)
+// Resource doesn't exist → NotFound (404)
+// User input invalid → Validation (400)
+```

@@ -1,0 +1,598 @@
+---
+sidebar_position: 4
+title: Job & Workflow Tracking
+description: Monitor background jobs and workflows in real-time
+---
+
+# Job & Workflow Tracking
+
+FORGE provides real-time tracking for background jobs and workflows. Show progress bars, status updates, and results in your UI.
+
+## Job Tracking
+
+### Basic Usage
+
+```svelte
+<script lang="ts">
+  import { createJobTracker } from '$lib/forge';
+  import { onDestroy } from 'svelte';
+
+  // Create tracker for a job type
+  const exportJob = createJobTracker<{ format: string }>('export_data');
+
+  // Clean up when component unmounts
+  onDestroy(() => exportJob.cleanup());
+
+  async function startExport() {
+    await exportJob.start({ format: 'csv' });
+  }
+</script>
+
+<button onclick={startExport} disabled={$exportJob?.status === 'running'}>
+  Export to CSV
+</button>
+
+{#if $exportJob}
+  {#if $exportJob.status === 'running'}
+    <div class="progress">
+      <div
+        class="bar"
+        style="width: {$exportJob.progress_percent}%"
+      />
+    </div>
+    <p>{$exportJob.progress_message}</p>
+
+  {:else if $exportJob.status === 'completed'}
+    <p>Export complete!</p>
+    <a href={$exportJob.output.file_url} download>
+      Download File
+    </a>
+    <button onclick={() => exportJob.cleanup()}>
+      Start New Export
+    </button>
+
+  {:else if $exportJob.status === 'failed'}
+    <p class="error">{$exportJob.error}</p>
+    <button onclick={() => exportJob.cleanup()}>
+      Try Again
+    </button>
+  {/if}
+{/if}
+```
+
+### Job Tracker API
+
+```typescript
+interface JobTracker<TInput, TOutput> {
+  // Start a new job
+  start(input: TInput): Promise<void>;
+
+  // Track an existing job
+  track(jobId: string): void;
+
+  // Stop tracking and reset
+  cleanup(): void;
+}
+
+interface JobState<TOutput> {
+  job_id: string;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'retry';
+  progress_percent: number | null;
+  progress_message: string | null;
+  output: TOutput | null;
+  error: string | null;
+}
+```
+
+### Multiple Jobs
+
+Track multiple independent jobs:
+
+```svelte
+<script lang="ts">
+  import { createJobTracker } from '$lib/forge';
+
+  const pdfExport = createJobTracker('export_pdf');
+  const csvExport = createJobTracker('export_csv');
+  const thumbnails = createJobTracker('generate_thumbnails');
+
+  onDestroy(() => {
+    pdfExport.cleanup();
+    csvExport.cleanup();
+    thumbnails.cleanup();
+  });
+</script>
+
+<button onclick={() => pdfExport.start({})}>Export PDF</button>
+<button onclick={() => csvExport.start({})}>Export CSV</button>
+<button onclick={() => thumbnails.start({ imageIds })}>
+  Generate Thumbnails
+</button>
+
+{#if $pdfExport?.status === 'running'}
+  <p>PDF: {$pdfExport.progress_percent}%</p>
+{/if}
+
+{#if $csvExport?.status === 'running'}
+  <p>CSV: {$csvExport.progress_percent}%</p>
+{/if}
+
+{#if $thumbnails?.status === 'running'}
+  <p>Thumbnails: {$thumbnails.progress_message}</p>
+{/if}
+```
+
+### Track Existing Job
+
+Track a job that was started elsewhere:
+
+```svelte
+<script lang="ts">
+  import { createJobTracker } from '$lib/forge';
+  import { page } from '$app/stores';
+
+  const job = createJobTracker('process_file');
+
+  // Track job ID from URL
+  $effect(() => {
+    const jobId = $page.url.searchParams.get('job');
+    if (jobId) {
+      job.track(jobId);
+    }
+  });
+</script>
+
+{#if $job}
+  <h2>Processing File</h2>
+  <progress value={$job.progress_percent ?? 0} max="100" />
+  <p>{$job.progress_message}</p>
+{/if}
+```
+
+## Workflow Tracking
+
+Workflows have multiple steps. Track them all:
+
+```svelte
+<script lang="ts">
+  import { createWorkflowTracker } from '$lib/forge';
+
+  const orderWorkflow = createWorkflowTracker('process_order');
+
+  async function placeOrder() {
+    await orderWorkflow.start({
+      items: cart,
+      paymentMethodId,
+      shippingAddress,
+    });
+  }
+</script>
+
+<button onclick={placeOrder}>Place Order</button>
+
+{#if $orderWorkflow}
+  <div class="workflow-status">
+    <h3>Order Status: {$orderWorkflow.status}</h3>
+
+    <div class="steps">
+      {#each $orderWorkflow.steps as step}
+        <div class="step" class:completed={step.status === 'completed'}>
+          <span class="icon">
+            {#if step.status === 'completed'}
+              ✓
+            {:else if step.status === 'running'}
+              ⏳
+            {:else if step.status === 'failed'}
+              ✗
+            {:else}
+              ○
+            {/if}
+          </span>
+          <span class="name">{formatStepName(step.name)}</span>
+        </div>
+      {/each}
+    </div>
+
+    {#if $orderWorkflow.status === 'compensating'}
+      <div class="warning">
+        Something went wrong. Rolling back changes...
+      </div>
+    {/if}
+
+    {#if $orderWorkflow.status === 'completed'}
+      <div class="success">
+        Order placed successfully!
+        <a href="/orders/{$orderWorkflow.output.order_id}">
+          View Order
+        </a>
+      </div>
+    {/if}
+
+    {#if $orderWorkflow.status === 'failed'}
+      <div class="error">
+        Order failed: {$orderWorkflow.error}
+        <button onclick={() => orderWorkflow.cleanup()}>
+          Try Again
+        </button>
+      </div>
+    {/if}
+  </div>
+{/if}
+```
+
+### Workflow Tracker API
+
+```typescript
+interface WorkflowTracker<TInput, TOutput> {
+  start(input: TInput): Promise<void>;
+  track(workflowId: string): void;
+  cleanup(): void;
+}
+
+interface WorkflowState<TOutput> {
+  workflow_id: string;
+  status: 'pending' | 'running' | 'completed' | 'compensating' | 'compensated' | 'failed';
+  steps: WorkflowStep[];
+  output: TOutput | null;
+  error: string | null;
+}
+
+interface WorkflowStep {
+  name: string;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'compensated';
+  started_at: string | null;
+  completed_at: string | null;
+  error: string | null;
+}
+```
+
+## Progress Bar Component
+
+Create a reusable progress component:
+
+```svelte title="frontend/src/lib/components/JobProgress.svelte"
+<script lang="ts">
+  import type { JobState } from '$lib/forge';
+
+  let { job, onComplete, onRetry } = $props<{
+    job: JobState<any> | null;
+    onComplete?: () => void;
+    onRetry?: () => void;
+  }>();
+
+  $effect(() => {
+    if (job?.status === 'completed' && onComplete) {
+      onComplete();
+    }
+  });
+</script>
+
+{#if job}
+  <div class="job-progress">
+    {#if job.status === 'pending'}
+      <div class="status pending">
+        <span class="spinner">⏳</span>
+        Waiting to start...
+      </div>
+
+    {:else if job.status === 'running'}
+      <div class="progress-container">
+        <div class="progress-bar">
+          <div
+            class="progress-fill"
+            style="width: {job.progress_percent ?? 0}%"
+          />
+        </div>
+        <div class="progress-text">
+          <span class="percent">{job.progress_percent ?? 0}%</span>
+          <span class="message">{job.progress_message ?? 'Processing...'}</span>
+        </div>
+      </div>
+
+    {:else if job.status === 'completed'}
+      <div class="status completed">
+        <span class="icon">✓</span>
+        Complete!
+      </div>
+
+    {:else if job.status === 'failed'}
+      <div class="status failed">
+        <span class="icon">✗</span>
+        {job.error}
+        {#if onRetry}
+          <button onclick={onRetry}>Retry</button>
+        {/if}
+      </div>
+
+    {:else if job.status === 'retry'}
+      <div class="status retry">
+        <span class="spinner">🔄</span>
+        Retrying...
+      </div>
+    {/if}
+  </div>
+{/if}
+
+<style>
+  .job-progress {
+    padding: 1rem;
+    border-radius: 8px;
+    background: #f5f5f5;
+  }
+
+  .progress-container {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .progress-bar {
+    height: 8px;
+    background: #ddd;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+
+  .progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #007bff, #00bcd4);
+    transition: width 0.3s ease;
+  }
+
+  .progress-text {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.875rem;
+  }
+
+  .status {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .status.completed {
+    color: #28a745;
+  }
+
+  .status.failed {
+    color: #dc3545;
+  }
+
+  .spinner {
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+</style>
+```
+
+Use it:
+
+```svelte
+<script lang="ts">
+  import { createJobTracker } from '$lib/forge';
+  import JobProgress from '$lib/components/JobProgress.svelte';
+
+  const exportJob = createJobTracker('export_data');
+</script>
+
+<button onclick={() => exportJob.start({ format: 'csv' })}>
+  Export
+</button>
+
+<JobProgress
+  job={$exportJob}
+  onComplete={() => console.log('Done!')}
+  onRetry={() => exportJob.cleanup()}
+/>
+```
+
+## Stepper Component for Workflows
+
+```svelte title="frontend/src/lib/components/WorkflowStepper.svelte"
+<script lang="ts">
+  import type { WorkflowStep } from '$lib/forge';
+
+  let { steps } = $props<{ steps: WorkflowStep[] }>();
+
+  function formatStepName(name: string) {
+    return name
+      .replace(/_/g, ' ')
+      .replace(/\b\w/g, (c) => c.toUpperCase());
+  }
+</script>
+
+<div class="stepper">
+  {#each steps as step, i}
+    <div
+      class="step"
+      class:completed={step.status === 'completed'}
+      class:running={step.status === 'running'}
+      class:failed={step.status === 'failed'}
+      class:compensated={step.status === 'compensated'}
+    >
+      <div class="connector" class:active={i > 0} />
+
+      <div class="circle">
+        {#if step.status === 'completed'}
+          ✓
+        {:else if step.status === 'running'}
+          <span class="pulse" />
+        {:else if step.status === 'failed'}
+          ✗
+        {:else if step.status === 'compensated'}
+          ↩
+        {:else}
+          {i + 1}
+        {/if}
+      </div>
+
+      <div class="label">
+        <span class="name">{formatStepName(step.name)}</span>
+        {#if step.error}
+          <span class="error">{step.error}</span>
+        {/if}
+      </div>
+    </div>
+  {/each}
+</div>
+
+<style>
+  .stepper {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .step {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    position: relative;
+    padding: 0.5rem 0;
+  }
+
+  .connector {
+    position: absolute;
+    left: 15px;
+    top: -50%;
+    width: 2px;
+    height: 100%;
+    background: #ddd;
+  }
+
+  .connector.active {
+    background: #ddd;
+  }
+
+  .step.completed .connector {
+    background: #28a745;
+  }
+
+  .circle {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #ddd;
+    color: #666;
+    font-size: 0.875rem;
+    font-weight: 500;
+    position: relative;
+    z-index: 1;
+  }
+
+  .step.completed .circle {
+    background: #28a745;
+    color: white;
+  }
+
+  .step.running .circle {
+    background: #007bff;
+    color: white;
+  }
+
+  .step.failed .circle {
+    background: #dc3545;
+    color: white;
+  }
+
+  .step.compensated .circle {
+    background: #ffc107;
+    color: black;
+  }
+
+  .pulse {
+    width: 8px;
+    height: 8px;
+    background: white;
+    border-radius: 50%;
+    animation: pulse 1s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.5); opacity: 0.5; }
+  }
+
+  .label {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .name {
+    font-weight: 500;
+  }
+
+  .error {
+    font-size: 0.75rem;
+    color: #dc3545;
+  }
+</style>
+```
+
+## Dispatch from Server, Track on Client
+
+Common pattern: mutation dispatches job, frontend tracks it:
+
+```rust title="Backend"
+#[forge::mutation]
+pub async fn start_export(ctx: &MutationContext, format: String) -> Result<Uuid> {
+    let user_id = ctx.auth.require_user_id()?;
+
+    // Dispatch job and return its ID
+    let job_id = ctx.dispatch_job("export_user_data", serde_json::json!({
+        "user_id": user_id,
+        "format": format,
+    })).await?;
+
+    Ok(job_id)
+}
+```
+
+```svelte title="Frontend"
+<script lang="ts">
+  import { mutate, createJobTracker } from '$lib/forge';
+
+  const job = createJobTracker('export_user_data');
+
+  async function startExport() {
+    // Get job ID from mutation
+    const jobId = await mutate('start_export', { format: 'csv' });
+
+    // Track it
+    job.track(jobId);
+  }
+</script>
+```
+
+## What's Next?
+
+<div className="row">
+  <div className="col col--6">
+    <a className="card" href="/background/jobs">
+      <div className="card__header">
+        <h3>📋 Jobs Reference</h3>
+      </div>
+      <div className="card__body">
+        Full job API documentation
+      </div>
+    </a>
+  </div>
+  <div className="col col--6">
+    <a className="card" href="/background/workflows">
+      <div className="card__header">
+        <h3>🔄 Workflows Reference</h3>
+      </div>
+      <div className="card__body">
+        Full workflow API documentation
+      </div>
+    </a>
+  </div>
+</div>

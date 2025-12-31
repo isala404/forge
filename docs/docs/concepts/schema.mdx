@@ -1,0 +1,375 @@
+---
+sidebar_position: 2
+title: Schema & Data Models
+description: Define your data models in Rust and let FORGE do the rest
+---
+
+# Schema & Data Models
+
+In FORGE, you define your data models as Rust structs. These become:
+- Database tables
+- TypeScript types
+- API request/response types
+
+Write once, use everywhere.
+
+## Basic Model
+
+```rust title="src/schema/mod.rs"
+use forge::prelude::*;
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct User {
+    pub id: Uuid,
+    pub email: String,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+```
+
+That's it! This struct:
+- Works with `sqlx::query_as` for database queries
+- Serializes to JSON for API responses
+- Generates TypeScript types for the frontend
+
+## Migration for Your Model
+
+Create a migration to set up the database table:
+
+```sql title="migrations/0001_initial.sql"
+-- @up
+CREATE TABLE users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email VARCHAR(255) UNIQUE NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Enable real-time updates for this table
+SELECT forge_enable_reactivity('users');
+
+-- @down
+DROP TABLE users;
+```
+
+:::tip Up and Down Migrations
+The `-- @up` marker starts the "up" migration (apply changes).
+The `-- @down` marker starts the "down" migration (rollback).
+:::
+
+## Type Mappings
+
+| Rust Type | PostgreSQL Type | TypeScript Type |
+|-----------|-----------------|-----------------|
+| `String` | `VARCHAR(255)` | `string` |
+| `i32` | `INTEGER` | `number` |
+| `i64` | `BIGINT` | `number` |
+| `f64` | `DOUBLE PRECISION` | `number` |
+| `bool` | `BOOLEAN` | `boolean` |
+| `Uuid` | `UUID` | `string` |
+| `DateTime<Utc>` | `TIMESTAMPTZ` | `string` |
+| `Option<T>` | Nullable | `T \| null` |
+| `Vec<T>` | `T[]` | `T[]` |
+| `serde_json::Value` | `JSONB` | `unknown` |
+
+## Enums
+
+Define enums for type-safe status fields:
+
+```rust title="src/schema/mod.rs"
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(type_name = "task_status", rename_all = "snake_case")]
+pub enum TaskStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Cancelled,
+}
+```
+
+Migration:
+
+```sql title="migrations/0002_add_tasks.sql"
+-- @up
+CREATE TYPE task_status AS ENUM ('pending', 'in_progress', 'completed', 'cancelled');
+
+CREATE TABLE tasks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    title VARCHAR(255) NOT NULL,
+    status task_status NOT NULL DEFAULT 'pending',
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+SELECT forge_enable_reactivity('tasks');
+
+-- @down
+DROP TABLE tasks;
+DROP TYPE task_status;
+```
+
+## Relationships
+
+Model relationships through foreign keys:
+
+```rust title="src/schema/mod.rs"
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Task {
+    pub id: Uuid,
+    pub title: String,
+    pub status: TaskStatus,
+    pub user_id: Uuid,  // Foreign key to users
+    pub created_at: DateTime<Utc>,
+}
+
+// For queries that need user data, create a joined struct
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct TaskWithUser {
+    pub id: Uuid,
+    pub title: String,
+    pub status: TaskStatus,
+    pub user_id: Uuid,
+    pub user_name: String,
+    pub user_email: String,
+    pub created_at: DateTime<Utc>,
+}
+```
+
+Query with joins:
+
+```rust title="src/functions/queries/tasks.rs"
+#[forge::query]
+pub async fn list_tasks_with_users(ctx: &QueryContext) -> Result<Vec<TaskWithUser>> {
+    sqlx::query_as(r#"
+        SELECT
+            t.id, t.title, t.status, t.user_id, t.created_at,
+            u.name as user_name, u.email as user_email
+        FROM tasks t
+        JOIN users u ON u.id = t.user_id
+        ORDER BY t.created_at DESC
+    "#)
+    .fetch_all(ctx.db())
+    .await
+    .map_err(Into::into)
+}
+```
+
+## Input Types
+
+Create separate structs for input validation:
+
+```rust title="src/schema/mod.rs"
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateUserInput {
+    pub email: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateUserInput {
+    pub name: Option<String>,
+    pub email: Option<String>,
+}
+```
+
+Use in mutations:
+
+```rust title="src/functions/mutations/users.rs"
+#[forge::mutation]
+pub async fn create_user(ctx: &MutationContext, input: CreateUserInput) -> Result<User> {
+    // input is automatically deserialized and validated
+    sqlx::query_as(r#"
+        INSERT INTO users (id, email, name, created_at, updated_at)
+        VALUES ($1, $2, $3, NOW(), NOW())
+        RETURNING *
+    "#)
+    .bind(Uuid::new_v4())
+    .bind(&input.email)
+    .bind(&input.name)
+    .fetch_one(ctx.db())
+    .await
+    .map_err(Into::into)
+}
+```
+
+## Optional Fields
+
+Use `Option<T>` for nullable fields:
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct User {
+    pub id: Uuid,
+    pub email: String,
+    pub name: String,
+    pub avatar_url: Option<String>,  // Nullable
+    pub bio: Option<String>,         // Nullable
+}
+```
+
+## JSONB Fields
+
+Store flexible data with JSONB:
+
+```rust
+use serde_json::Value;
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct UserSettings {
+    pub user_id: Uuid,
+    pub preferences: Value,  // JSONB
+}
+```
+
+Or with typed JSON:
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Preferences {
+    pub theme: String,
+    pub notifications_enabled: bool,
+    pub language: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct UserSettings {
+    pub user_id: Uuid,
+    #[sqlx(json)]
+    pub preferences: Preferences,  // Stored as JSONB
+}
+```
+
+## Timestamps
+
+FORGE uses `chrono` for timestamps:
+
+```rust
+use chrono::{DateTime, Utc};
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Article {
+    pub id: Uuid,
+    pub title: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub published_at: Option<DateTime<Utc>>,  // Nullable timestamp
+}
+```
+
+:::tip Auto-Update Timestamps
+FORGE doesn't auto-update `updated_at`. Set it manually in mutations:
+```rust
+.bind(Utc::now())  // Set updated_at
+```
+:::
+
+## Project Structure
+
+Organize your schema like this:
+
+```
+src/
+└── schema/
+    ├── mod.rs        # Re-exports everything
+    ├── user.rs       # User model
+    ├── task.rs       # Task model
+    └── inputs.rs     # Input types
+```
+
+```rust title="src/schema/mod.rs"
+mod user;
+mod task;
+mod inputs;
+
+pub use user::*;
+pub use task::*;
+pub use inputs::*;
+```
+
+## Best Practices
+
+### 1. Keep Models Simple
+
+```rust
+// Good: Simple, focused model
+pub struct User {
+    pub id: Uuid,
+    pub email: String,
+    pub name: String,
+}
+
+// Avoid: Too many fields, do everything model
+pub struct User {
+    pub id: Uuid,
+    pub email: String,
+    // 50 more fields...
+}
+```
+
+### 2. Use Specific Types
+
+```rust
+// Good: UUID for IDs
+pub id: Uuid,
+
+// Avoid: String for IDs
+pub id: String,
+```
+
+### 3. Separate Input from Output
+
+```rust
+// Input type (what the client sends)
+pub struct CreateTaskInput {
+    pub title: String,
+    pub user_id: Uuid,
+}
+
+// Output type (what the database returns)
+pub struct Task {
+    pub id: Uuid,
+    pub title: String,
+    pub user_id: Uuid,
+    pub created_at: DateTime<Utc>,
+}
+```
+
+### 4. Derive What You Need
+
+```rust
+#[derive(
+    Debug,       // For logging
+    Clone,       // For passing around
+    Serialize,   // For JSON responses
+    Deserialize, // For JSON requests
+    sqlx::FromRow // For database queries
+)]
+pub struct User { ... }
+```
+
+## What's Next?
+
+<div className="row">
+  <div className="col col--6">
+    <a className="card" href="/concepts/functions">
+      <div className="card__header">
+        <h3>⚙️ Functions</h3>
+      </div>
+      <div className="card__body">
+        Use your models in queries and mutations
+      </div>
+    </a>
+  </div>
+  <div className="col col--6">
+    <a className="card" href="/cli/migrate">
+      <div className="card__header">
+        <h3>🗃️ Migrations</h3>
+      </div>
+      <div className="card__body">
+        Learn migration commands
+      </div>
+    </a>
+  </div>
+</div>

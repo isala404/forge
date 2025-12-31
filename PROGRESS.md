@@ -802,3 +802,21 @@ Completed comprehensive FORGE documentation reflecting actual implementation.
 - docs/observability/OBSERVABILITY.md: Metrics, logs, traces, alerts
 - docs/observability/DASHBOARD.md: Built-in dashboard pages and REST API
 - docs/reference/CLI.md: All CLI commands with examples
+
+Created Docusaurus documentation website with MDX at website/
+- Set up Docusaurus 3.9.2 with bun, TypeScript, dark mode default
+- Customized docusaurus.config.ts for FORGE branding and navigation
+- Created comprehensive documentation structure:
+  - docs/index.mdx: Welcome page with feature overview
+  - docs/quick-start.mdx: 5-minute getting started guide
+  - docs/why-forge.mdx: Comparison vs Next.js+Supabase, Firebase
+  - docs/concepts/: how-it-works, schema, functions, realtime
+  - docs/tutorials/: build-a-todo-app, user-authentication, background-jobs, realtime-updates
+  - docs/background/: index, jobs, crons, workflows (full reference)
+  - docs/frontend/: index, setup, queries-mutations, realtime-subscriptions, job-tracking
+  - docs/api/: index, query-context, mutation-context, action-context, job-context, workflow-context, forge-error
+  - docs/cli/index.mdx: Complete CLI reference
+- Removed default Docusaurus homepage (src/pages/)
+- Set routeBasePath: '/' for docs-only site
+- Target audience: junior developers ("vibe coders") with practical examples
+- Verified rendering with Chrome MCP - all pages displaying correctly

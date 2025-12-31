@@ -1,0 +1,641 @@
+---
+sidebar_position: 3
+title: "User Authentication"
+description: Add user accounts, JWT auth, and protected routes to your FORGE app
+---
+
+# User Authentication
+
+In this tutorial, you'll add authentication to your app:
+- User registration and login
+- JWT token-based auth
+- Protected routes and queries
+- Current user context
+
+We'll build on the todo app from the previous tutorial, but you can apply these concepts to any FORGE app.
+
+## What We're Building
+
+```
+┌─────────────────────────────────────┐
+│  Login                              │
+├─────────────────────────────────────┤
+│  Email:    [________________]       │
+│  Password: [________________]       │
+│                                     │
+│  [Login]  or  [Create Account]      │
+└─────────────────────────────────────┘
+
+After login:
+
+┌─────────────────────────────────────┐
+│  📋 john@example.com's Tasks   [⏏]  │
+├─────────────────────────────────────┤
+│  ... your tasks here ...            │
+└─────────────────────────────────────┘
+```
+
+## Step 1: Add User Schema
+
+Add the User model to your schema:
+
+```rust title="src/schema/mod.rs"
+use forge::prelude::*;
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct User {
+    pub id: Uuid,
+    pub email: String,
+    #[serde(skip_serializing)]  // Never send password hash to client
+    pub password_hash: String,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+}
+
+// Safe version for API responses
+#[derive(Debug, Clone, Serialize)]
+pub struct UserResponse {
+    pub id: Uuid,
+    pub email: String,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<User> for UserResponse {
+    fn from(user: User) -> Self {
+        UserResponse {
+            id: user.id,
+            email: user.email,
+            name: user.name,
+            created_at: user.created_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RegisterInput {
+    pub email: String,
+    pub password: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LoginInput {
+    pub email: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthResponse {
+    pub token: String,
+    pub user: UserResponse,
+}
+
+// Update Task to have a user_id
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Task {
+    pub id: Uuid,
+    pub title: String,
+    pub completed: bool,
+    pub user_id: Uuid,  // Add this!
+    pub created_at: DateTime<Utc>,
+}
+```
+
+## Step 2: Update Migration
+
+```sql title="migrations/0001_initial.sql"
+-- @up
+CREATE TABLE users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email VARCHAR(255) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE tasks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    title VARCHAR(255) NOT NULL,
+    completed BOOLEAN NOT NULL DEFAULT false,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_tasks_user_id ON tasks(user_id);
+
+SELECT forge_enable_reactivity('tasks');
+
+-- @down
+DROP TABLE tasks;
+DROP TABLE users;
+```
+
+## Step 3: Add Password Hashing
+
+Add `bcrypt` to your dependencies:
+
+```toml title="Cargo.toml"
+[dependencies]
+bcrypt = "0.15"
+```
+
+Create auth mutations:
+
+```rust title="src/functions/mutations/auth.rs"
+use forge::prelude::*;
+use crate::schema::{User, UserResponse, RegisterInput, LoginInput, AuthResponse};
+use bcrypt::{hash, verify, DEFAULT_COST};
+
+#[forge::mutation]
+pub async fn register(ctx: &MutationContext, input: RegisterInput) -> Result<AuthResponse> {
+    // Validate input
+    if input.email.is_empty() || !input.email.contains('@') {
+        return Err(ForgeError::Validation("Invalid email".into()));
+    }
+    if input.password.len() < 8 {
+        return Err(ForgeError::Validation("Password must be at least 8 characters".into()));
+    }
+    if input.name.trim().is_empty() {
+        return Err(ForgeError::Validation("Name is required".into()));
+    }
+
+    // Hash password
+    let password_hash = hash(&input.password, DEFAULT_COST)
+        .map_err(|_| ForgeError::Internal("Failed to hash password".into()))?;
+
+    // Check if email exists
+    let existing: Option<(i64,)> = sqlx::query_as(
+        "SELECT 1 FROM users WHERE email = $1"
+    )
+    .bind(&input.email)
+    .fetch_optional(ctx.db())
+    .await?;
+
+    if existing.is_some() {
+        return Err(ForgeError::Validation("Email already registered".into()));
+    }
+
+    // Create user
+    let user: User = sqlx::query_as(r#"
+        INSERT INTO users (id, email, password_hash, name, created_at)
+        VALUES ($1, $2, $3, $4, NOW())
+        RETURNING *
+    "#)
+    .bind(Uuid::new_v4())
+    .bind(&input.email)
+    .bind(&password_hash)
+    .bind(input.name.trim())
+    .fetch_one(ctx.db())
+    .await?;
+
+    // Generate JWT token (simple implementation)
+    let token = generate_token(&user)?;
+
+    Ok(AuthResponse {
+        token,
+        user: user.into(),
+    })
+}
+
+#[forge::mutation]
+pub async fn login(ctx: &MutationContext, input: LoginInput) -> Result<AuthResponse> {
+    // Find user by email
+    let user: Option<User> = sqlx::query_as(
+        "SELECT * FROM users WHERE email = $1"
+    )
+    .bind(&input.email)
+    .fetch_optional(ctx.db())
+    .await?;
+
+    let user = user.ok_or_else(|| ForgeError::Unauthorized("Invalid email or password".into()))?;
+
+    // Verify password
+    let valid = verify(&input.password, &user.password_hash)
+        .map_err(|_| ForgeError::Internal("Failed to verify password".into()))?;
+
+    if !valid {
+        return Err(ForgeError::Unauthorized("Invalid email or password".into()));
+    }
+
+    // Generate token
+    let token = generate_token(&user)?;
+
+    Ok(AuthResponse {
+        token,
+        user: user.into(),
+    })
+}
+
+fn generate_token(user: &User) -> Result<String> {
+    // Simple token: base64(user_id:timestamp:secret)
+    // In production, use proper JWT with jsonwebtoken crate
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    let payload = format!("{}:{}", user.id, chrono::Utc::now().timestamp());
+    let token = STANDARD.encode(payload);
+    Ok(token)
+}
+```
+
+## Step 4: Get Current User Query
+
+```rust title="src/functions/queries/auth.rs"
+use forge::prelude::*;
+use crate::schema::UserResponse;
+
+#[forge::query]
+pub async fn get_current_user(ctx: &QueryContext) -> Result<UserResponse> {
+    // This requires authentication
+    let user_id = ctx.auth.require_user_id()?;
+
+    let user: (Uuid, String, String, DateTime<Utc>) = sqlx::query_as(
+        "SELECT id, email, name, created_at FROM users WHERE id = $1"
+    )
+    .bind(user_id)
+    .fetch_one(ctx.db())
+    .await?;
+
+    Ok(UserResponse {
+        id: user.0,
+        email: user.1,
+        name: user.2,
+        created_at: user.3,
+    })
+}
+```
+
+## Step 5: Protect Task Functions
+
+Update your task functions to use the current user:
+
+```rust title="src/functions/queries/list_tasks.rs"
+use forge::prelude::*;
+use crate::schema::Task;
+
+#[forge::query]
+pub async fn list_tasks(ctx: &QueryContext) -> Result<Vec<Task>> {
+    // Get current user's ID
+    let user_id = ctx.auth.require_user_id()?;
+
+    // Only return tasks for this user
+    sqlx::query_as(r#"
+        SELECT * FROM tasks
+        WHERE user_id = $1
+        ORDER BY created_at DESC
+    "#)
+    .bind(user_id)
+    .fetch_all(ctx.db())
+    .await
+    .map_err(Into::into)
+}
+```
+
+```rust title="src/functions/mutations/tasks.rs"
+#[forge::mutation]
+pub async fn create_task(ctx: &MutationContext, input: CreateTaskInput) -> Result<Task> {
+    let user_id = ctx.auth.require_user_id()?;
+
+    sqlx::query_as(r#"
+        INSERT INTO tasks (id, title, completed, user_id, created_at)
+        VALUES ($1, $2, false, $3, NOW())
+        RETURNING *
+    "#)
+    .bind(Uuid::new_v4())
+    .bind(input.title.trim())
+    .bind(user_id)  // Use authenticated user
+    .fetch_one(ctx.db())
+    .await
+    .map_err(Into::into)
+}
+
+#[forge::mutation]
+pub async fn delete_task(ctx: &MutationContext, id: Uuid) -> Result<bool> {
+    let user_id = ctx.auth.require_user_id()?;
+
+    // Only delete if it belongs to the user
+    let result = sqlx::query(r#"
+        DELETE FROM tasks
+        WHERE id = $1 AND user_id = $2
+    "#)
+    .bind(id)
+    .bind(user_id)
+    .execute(ctx.db())
+    .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+```
+
+## Step 6: Register Functions
+
+```rust title="src/main.rs"
+use forge::prelude::*;
+
+mod schema;
+mod functions;
+
+use functions::queries::*;
+use functions::mutations::*;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    dotenvy::dotenv().ok();
+    let config = ForgeConfig::from_env()?;
+
+    Forge::builder()
+        .function_registry_mut()
+        // Auth (public - no auth required)
+        .register_mutation::<RegisterMutation>()
+        .register_mutation::<LoginMutation>()
+        // Protected queries
+        .register_query::<GetCurrentUserQuery>()
+        .register_query::<ListTasksQuery>()
+        // Protected mutations
+        .register_mutation::<CreateTaskMutation>()
+        .register_mutation::<UpdateTaskMutation>()
+        .register_mutation::<DeleteTaskMutation>()
+        .register_mutation::<ToggleTaskMutation>()
+        .config(config)
+        .build()?
+        .run()
+        .await
+}
+```
+
+## Step 7: Frontend Auth Store
+
+Create an auth store:
+
+```svelte title="frontend/src/lib/auth.ts"
+import { writable } from 'svelte/store';
+
+interface AuthState {
+  token: string | null;
+  user: {
+    id: string;
+    email: string;
+    name: string;
+  } | null;
+}
+
+function createAuthStore() {
+  // Load from localStorage
+  const stored = typeof localStorage !== 'undefined'
+    ? localStorage.getItem('auth')
+    : null;
+  const initial: AuthState = stored
+    ? JSON.parse(stored)
+    : { token: null, user: null };
+
+  const { subscribe, set, update } = writable<AuthState>(initial);
+
+  return {
+    subscribe,
+    login: (token: string, user: AuthState['user']) => {
+      const state = { token, user };
+      localStorage.setItem('auth', JSON.stringify(state));
+      set(state);
+    },
+    logout: () => {
+      localStorage.removeItem('auth');
+      set({ token: null, user: null });
+    },
+  };
+}
+
+export const auth = createAuthStore();
+```
+
+## Step 8: Login Page
+
+```svelte title="frontend/src/routes/login/+page.svelte"
+<script lang="ts">
+  import { goto } from '$app/navigation';
+  import { mutate } from '$lib/forge';
+  import { auth } from '$lib/auth';
+
+  let email = $state('');
+  let password = $state('');
+  let name = $state('');
+  let isRegister = $state(false);
+  let error = $state('');
+  let loading = $state(false);
+
+  async function handleSubmit() {
+    error = '';
+    loading = true;
+
+    try {
+      if (isRegister) {
+        const result = await mutate('register', { email, password, name });
+        auth.login(result.token, result.user);
+      } else {
+        const result = await mutate('login', { email, password });
+        auth.login(result.token, result.user);
+      }
+      goto('/');
+    } catch (e: any) {
+      error = e.message || 'Something went wrong';
+    } finally {
+      loading = false;
+    }
+  }
+</script>
+
+<main>
+  <h1>{isRegister ? 'Create Account' : 'Login'}</h1>
+
+  <form onsubmit|preventDefault={handleSubmit}>
+    {#if isRegister}
+      <label>
+        Name
+        <input type="text" bind:value={name} required />
+      </label>
+    {/if}
+
+    <label>
+      Email
+      <input type="email" bind:value={email} required />
+    </label>
+
+    <label>
+      Password
+      <input type="password" bind:value={password} required minlength="8" />
+    </label>
+
+    {#if error}
+      <p class="error">{error}</p>
+    {/if}
+
+    <button type="submit" disabled={loading}>
+      {loading ? 'Loading...' : isRegister ? 'Create Account' : 'Login'}
+    </button>
+  </form>
+
+  <p class="toggle">
+    {#if isRegister}
+      Already have an account?
+      <button type="button" onclick={() => (isRegister = false)}>Login</button>
+    {:else}
+      Don't have an account?
+      <button type="button" onclick={() => (isRegister = true)}>Create one</button>
+    {/if}
+  </p>
+</main>
+
+<style>
+  main {
+    max-width: 400px;
+    margin: 4rem auto;
+    padding: 2rem;
+  }
+
+  form {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  input {
+    padding: 0.75rem;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 1rem;
+  }
+
+  button[type="submit"] {
+    padding: 0.75rem;
+    background: #007bff;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    font-size: 1rem;
+    cursor: pointer;
+  }
+
+  button[type="submit"]:disabled {
+    opacity: 0.7;
+  }
+
+  .error {
+    color: #dc3545;
+  }
+
+  .toggle {
+    text-align: center;
+    margin-top: 1rem;
+  }
+
+  .toggle button {
+    background: none;
+    border: none;
+    color: #007bff;
+    cursor: pointer;
+    text-decoration: underline;
+  }
+</style>
+```
+
+## Step 9: Protect Routes
+
+Update your layout to check auth:
+
+```svelte title="frontend/src/routes/+layout.svelte"
+<script lang="ts">
+  import { page } from '$app/stores';
+  import { goto } from '$app/navigation';
+  import { auth } from '$lib/auth';
+  import { ForgeProvider } from '$lib/forge';
+
+  let { children } = $props();
+
+  // Redirect to login if not authenticated
+  $effect(() => {
+    const publicPaths = ['/login'];
+    const isPublic = publicPaths.includes($page.url.pathname);
+
+    if (!$auth.token && !isPublic) {
+      goto('/login');
+    }
+  });
+
+  // Provide token to FORGE client
+  function getToken() {
+    return $auth.token;
+  }
+</script>
+
+<ForgeProvider url="http://localhost:8080" {getToken}>
+  {@render children()}
+</ForgeProvider>
+```
+
+## Step 10: Update Main Page
+
+```svelte title="frontend/src/routes/+page.svelte"
+<script lang="ts">
+  import { goto } from '$app/navigation';
+  import { subscribe, mutate } from '$lib/forge';
+  import { auth } from '$lib/auth';
+
+  const tasks = subscribe('list_tasks', {});
+
+  // ... rest of your todo app code ...
+
+  function logout() {
+    auth.logout();
+    goto('/login');
+  }
+</script>
+
+<header>
+  <h1>📋 {$auth.user?.name}'s Tasks</h1>
+  <button onclick={logout}>Logout</button>
+</header>
+
+<!-- ... rest of your todo app template ... -->
+```
+
+## What You Learned
+
+You now have a secure, authenticated app:
+
+| Concept | What You Did |
+|---------|--------------|
+| **Password Hashing** | Used bcrypt to safely store passwords |
+| **JWT Tokens** | Generated tokens for authentication |
+| **Protected Routes** | Used `ctx.auth.require_user_id()` |
+| **Auth Store** | Created a Svelte store for auth state |
+| **Route Guards** | Redirected unauthenticated users |
+
+## What's Next?
+
+<div className="row">
+  <div className="col col--6">
+    <a className="card" href="/tutorials/background-jobs">
+      <div className="card__header">
+        <h3>⚙️ Background Jobs</h3>
+      </div>
+      <div className="card__body">
+        Send email notifications
+      </div>
+    </a>
+  </div>
+  <div className="col col--6">
+    <a className="card" href="/tutorials/realtime-updates">
+      <div className="card__header">
+        <h3>⚡ Real-Time Updates</h3>
+      </div>
+      <div className="card__body">
+        Build a live dashboard
+      </div>
+    </a>
+  </div>
+</div>

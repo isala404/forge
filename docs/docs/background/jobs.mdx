@@ -1,0 +1,345 @@
+---
+sidebar_position: 1
+title: Background Jobs
+description: Persistent background tasks with retries, progress tracking, and priority queues
+---
+
+# Background Jobs
+
+Jobs are background tasks that run outside of the request/response cycle. They're perfect for:
+
+- Sending emails/notifications
+- Processing uploads
+- Generating reports
+- Calling external APIs
+- Any slow operation
+
+## Creating a Job
+
+```rust
+use forge::prelude::*;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SendEmailInput {
+    pub to: String,
+    pub subject: String,
+    pub body: String,
+}
+
+#[forge::job]
+pub async fn send_email(ctx: &JobContext, input: SendEmailInput) -> Result<()> {
+    // Your job logic here
+    send_via_smtp(&input).await?;
+    Ok(())
+}
+```
+
+The macro generates `SendEmailJob` which implements the `ForgeJob` trait.
+
+## Job Attributes
+
+| Attribute | Example | Description |
+|-----------|---------|-------------|
+| `timeout` | `#[timeout = "5m"]` | Max execution time |
+| `priority` | `#[priority = "high"]` | Queue priority |
+| `retry` | `#[retry(max_attempts = 5)]` | Retry configuration |
+| `worker_capability` | `#[worker_capability = "gpu"]` | Required worker capability |
+| `idempotent` | `#[idempotent]` | Enable idempotency checking |
+
+### Duration Format
+
+- `30s` - 30 seconds
+- `5m` - 5 minutes
+- `2h` - 2 hours
+- `1000ms` - 1000 milliseconds
+
+## JobContext
+
+The context provides access to job metadata and utilities:
+
+```rust
+pub struct JobContext {
+    pub job_id: Uuid,        // Unique job identifier
+    pub job_type: String,    // Job type name
+    pub attempt: u32,        // Current attempt (1-based)
+    pub max_attempts: u32,   // Maximum attempts allowed
+    pub auth: AuthContext,   // Auth context (if dispatched with auth)
+}
+
+impl JobContext {
+    // Database access
+    fn db(&self) -> &PgPool;
+
+    // HTTP client for external APIs
+    fn http(&self) -> &Client;
+
+    // Report progress (0-100)
+    fn progress(&self, percent: u8, message: impl Into<String>) -> Result<()>;
+
+    // Keep job alive for long-running tasks
+    async fn heartbeat(&self) -> Result<()>;
+
+    // Check if this is a retry
+    fn is_retry(&self) -> bool;
+
+    // Check if this is the last attempt
+    fn is_last_attempt(&self) -> bool;
+}
+```
+
+## Progress Tracking
+
+Report progress for real-time UI updates:
+
+```rust
+#[forge::job]
+pub async fn process_file(ctx: &JobContext, input: FileInput) -> Result<()> {
+    ctx.progress(0, "Starting...");
+
+    let chunks = load_chunks(&input.file_id).await?;
+    let total = chunks.len();
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        process_chunk(chunk).await?;
+
+        let percent = ((i + 1) * 100 / total) as u8;
+        ctx.progress(percent, format!("Chunk {} of {}", i + 1, total));
+    }
+
+    ctx.progress(100, "Complete!");
+    Ok(())
+}
+```
+
+## Retry Configuration
+
+Configure automatic retries with backoff:
+
+```rust
+#[forge::job]
+#[retry(
+    max_attempts = 5,
+    backoff = "exponential",  // fixed, linear, or exponential
+    max_backoff = "10m"       // Cap backoff duration
+)]
+pub async fn unreliable_api_call(ctx: &JobContext, input: ApiInput) -> Result<()> {
+    if ctx.is_retry() {
+        tracing::info!("Retry attempt {} of {}", ctx.attempt, ctx.max_attempts);
+    }
+
+    let result = call_flaky_api(&input).await;
+
+    if let Err(e) = &result {
+        if ctx.is_last_attempt() {
+            // Send alert, this is the last chance
+            alert_ops_team(e).await?;
+        }
+    }
+
+    result
+}
+```
+
+### Backoff Strategies
+
+| Strategy | Behavior | Example (1s base) |
+|----------|----------|-------------------|
+| `fixed` | Same delay each time | 1s, 1s, 1s, 1s |
+| `linear` | Increases linearly | 1s, 2s, 3s, 4s |
+| `exponential` | Doubles each time | 1s, 2s, 4s, 8s |
+
+## Priority Levels
+
+Jobs are processed by priority, then by age:
+
+```rust
+#[forge::job]
+#[priority = "critical"]
+pub async fn process_payment(ctx: &JobContext, input: PaymentInput) -> Result<()> {
+    // Runs before lower priority jobs
+}
+```
+
+| Priority | Value | Use For |
+|----------|-------|---------|
+| `critical` | 100 | Payments, security alerts |
+| `high` | 75 | User notifications |
+| `normal` | 50 | Default, most jobs |
+| `low` | 25 | Analytics, reporting |
+| `background` | 0 | Cleanup, maintenance |
+
+## Dispatching Jobs
+
+### From Mutations
+
+```rust
+#[forge::mutation]
+pub async fn create_order(ctx: &MutationContext, input: OrderInput) -> Result<Order> {
+    let order = create_order_in_db(ctx.db(), &input).await?;
+
+    // Dispatch job
+    ctx.dispatch_job("send_order_confirmation", serde_json::json!({
+        "order_id": order.id,
+        "email": input.email,
+    })).await?;
+
+    Ok(order)
+}
+```
+
+### From Actions
+
+```rust
+#[forge::action]
+pub async fn webhook_handler(ctx: &ActionContext, payload: WebhookPayload) -> Result<()> {
+    // Process asynchronously
+    ctx.dispatch_job("process_webhook", serde_json::json!(payload)).await?;
+    Ok(())
+}
+```
+
+### Via Dashboard API
+
+```bash
+curl -X POST http://localhost:8080/_api/jobs/send_email/dispatch \
+  -H "Content-Type: application/json" \
+  -d '{"args": {"to": "user@example.com", "subject": "Hello"}}'
+```
+
+## Job Status Lifecycle
+
+```
+PENDING → CLAIMED → RUNNING → COMPLETED
+    ↓                    ↓
+    └────── RETRY ←──────┘
+              ↓
+           FAILED
+              ↓
+        DEAD_LETTER
+```
+
+| Status | Description |
+|--------|-------------|
+| `pending` | Waiting in queue |
+| `claimed` | Assigned to worker |
+| `running` | Currently executing |
+| `completed` | Finished successfully |
+| `retry` | Failed, scheduled for retry |
+| `failed` | All retries exhausted |
+| `dead_letter` | For manual review |
+
+## Long-Running Jobs
+
+For jobs that may exceed the stale job threshold (5 minutes), send heartbeats:
+
+```rust
+#[forge::job]
+#[timeout = "2h"]
+pub async fn process_large_file(ctx: &JobContext, input: FileInput) -> Result<()> {
+    for chunk in chunks {
+        process_chunk(chunk).await?;
+
+        // Prevent stale detection
+        ctx.heartbeat().await?;
+    }
+    Ok(())
+}
+```
+
+## Worker Capabilities
+
+Route jobs to specific workers:
+
+```rust
+#[forge::job]
+#[worker_capability = "gpu"]
+pub async fn render_video(ctx: &JobContext, input: VideoInput) -> Result<()> {
+    // Only runs on workers with "gpu" capability
+}
+```
+
+Configure workers in `forge.toml`:
+
+```toml
+[worker]
+capabilities = ["gpu", "high-memory"]
+```
+
+## Registering Jobs
+
+```rust
+Forge::builder()
+    .job_registry_mut()
+    .register::<SendEmailJob>()
+    .register::<ProcessFileJob>()
+    .register::<RenderVideoJob>()
+    // ...
+```
+
+## Frontend Job Tracking
+
+Track job progress in real-time:
+
+```typescript
+import { createJobTracker } from '$lib/forge';
+
+const job = createJobTracker<{ format: string }>('export_data');
+
+// Start job
+await job.start({ format: 'csv' });
+
+// Access status
+$job.status;          // 'pending' | 'running' | 'completed' | 'failed'
+$job.progress_percent; // 0-100
+$job.progress_message; // "Processing..."
+$job.output;           // Result when completed
+$job.error;            // Error message if failed
+```
+
+## Database Schema
+
+```sql
+CREATE TABLE forge_jobs (
+    id UUID PRIMARY KEY,
+    job_type VARCHAR(255) NOT NULL,
+    input JSONB NOT NULL,
+    output JSONB,
+    status VARCHAR(32) NOT NULL DEFAULT 'pending',
+    priority INTEGER NOT NULL DEFAULT 50,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 3,
+    progress_percent INTEGER DEFAULT 0,
+    progress_message TEXT,
+    last_error TEXT,
+    worker_capability VARCHAR(255),
+    scheduled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    claimed_at TIMESTAMPTZ,
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ
+);
+```
+
+## What's Next?
+
+<div className="row">
+  <div className="col col--6">
+    <a className="card" href="/background/crons">
+      <div className="card__header">
+        <h3>⏰ Cron Jobs</h3>
+      </div>
+      <div className="card__body">
+        Scheduled recurring tasks
+      </div>
+    </a>
+  </div>
+  <div className="col col--6">
+    <a className="card" href="/background/workflows">
+      <div className="card__header">
+        <h3>🔄 Workflows</h3>
+      </div>
+      <div className="card__body">
+        Multi-step processes
+      </div>
+    </a>
+  </div>
+</div>

@@ -1,0 +1,243 @@
+---
+sidebar_position: 5
+title: WorkflowContext
+description: API reference for WorkflowContext
+---
+
+# WorkflowContext
+
+The `WorkflowContext` is passed to workflow functions. It provides step management, database access, and workflow metadata.
+
+## Definition
+
+```rust
+pub struct WorkflowContext {
+    pub workflow_id: Uuid,
+    pub workflow_type: String,
+    pub started_at: DateTime<Utc>,
+}
+
+impl WorkflowContext {
+    pub fn db(&self) -> &PgPool;
+    pub fn http(&self) -> &Client;
+    pub fn step(&self, name: &str) -> StepBuilder;
+    pub fn get_step_output<T: DeserializeOwned>(&self, step_name: &str) -> Option<T>;
+    pub async fn dispatch_job(&self, job_type: &str, input: Value) -> Result<Uuid>;
+}
+```
+
+## Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `workflow_id` | `Uuid` | Unique identifier for this workflow instance |
+| `workflow_type` | `String` | Name of the workflow type |
+| `started_at` | `DateTime<Utc>` | When the workflow started |
+
+## Methods
+
+### `db()`
+
+Returns the PostgreSQL connection pool.
+
+```rust
+let user: User = sqlx::query_as("SELECT * FROM users WHERE id = $1")
+    .bind(user_id)
+    .fetch_one(ctx.db())
+    .await?;
+```
+
+### `http()`
+
+Returns an HTTP client for external API calls.
+
+```rust
+let response = ctx.http()
+    .post("https://api.stripe.com/v1/charges")
+    .bearer_auth(&api_key)
+    .json(&charge_data)
+    .send()
+    .await?;
+```
+
+### `step()`
+
+Creates a step builder for defining workflow steps.
+
+```rust
+let result = ctx.step("charge_payment")
+    .run(|| charge_payment(&input))
+    .compensate(|| refund_payment(&input))
+    .await?;
+```
+
+**Returns:** `StepBuilder` - A builder for configuring the step.
+
+### `get_step_output()`
+
+Retrieves the output from a previously completed step.
+
+```rust
+// In a later step, get output from earlier step
+let customer_id: String = ctx.get_step_output("create_customer")
+    .ok_or(ForgeError::Internal("Missing customer ID".into()))?;
+```
+
+### `dispatch_job()`
+
+Dispatches a background job from within the workflow.
+
+```rust
+ctx.dispatch_job("send_notification", serde_json::json!({
+    "user_id": user_id,
+    "message": "Your order is complete!",
+})).await?;
+```
+
+## StepBuilder
+
+The `StepBuilder` configures individual workflow steps:
+
+```rust
+pub struct StepBuilder {
+    // Internal fields
+}
+
+impl StepBuilder {
+    // Set step timeout
+    pub fn timeout(self, duration: Duration) -> Self;
+
+    // Set number of retries
+    pub fn retries(self, count: u32) -> Self;
+
+    // Set backoff strategy
+    pub fn backoff(self, strategy: BackoffStrategy) -> Self;
+
+    // Define the step execution
+    pub fn run<F, Fut, T>(self, f: F) -> StepRunner<T>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T>>;
+}
+```
+
+### Step with Compensation
+
+```rust
+ctx.step("reserve_inventory")
+    .run(|| reserve_items(&order))
+    .compensate(|reservation| release_items(reservation))
+    .await?;
+```
+
+### Step without Compensation
+
+```rust
+ctx.step("send_email")
+    .run(|| send_confirmation(&user))
+    .await?;
+```
+
+### Step with Configuration
+
+```rust
+ctx.step("call_external_api")
+    .timeout(Duration::from_secs(30))
+    .retries(3)
+    .backoff(BackoffStrategy::Exponential)
+    .run(|| external_api_call(&data))
+    .compensate(|| rollback_external(&data))
+    .await?;
+```
+
+## Complete Example
+
+```rust
+use forge::prelude::*;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderInput {
+    pub user_id: Uuid,
+    pub items: Vec<OrderItem>,
+    pub payment_method_id: String,
+    pub shipping_address: Address,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderResult {
+    pub order_id: Uuid,
+    pub tracking_number: String,
+}
+
+#[forge::workflow]
+#[timeout = "30m"]
+pub async fn process_order(ctx: &WorkflowContext, input: OrderInput) -> Result<OrderResult> {
+    // Step 1: Create order record
+    let order = ctx.step("create_order")
+        .run(|| create_order_record(ctx.db(), &input))
+        .compensate(|order| cancel_order(ctx.db(), order.id))
+        .await?;
+
+    // Step 2: Reserve inventory
+    let reservation = ctx.step("reserve_inventory")
+        .timeout(Duration::from_secs(30))
+        .run(|| reserve_inventory(&input.items))
+        .compensate(|res| release_inventory(res))
+        .await?;
+
+    // Step 3: Charge payment
+    let payment = ctx.step("charge_payment")
+        .retries(3)
+        .run(|| charge_payment(&input.payment_method_id, order.total))
+        .compensate(|payment| refund_payment(payment.id))
+        .await?;
+
+    // Step 4: Create shipment
+    let shipment = ctx.step("create_shipment")
+        .run(|| create_shipment(&order, &input.shipping_address))
+        .compensate(|shipment| cancel_shipment(shipment.id))
+        .await?;
+
+    // Step 5: Update order status (no compensation needed)
+    ctx.step("finalize_order")
+        .run(|| {
+            update_order_status(ctx.db(), order.id, OrderStatus::Processing)
+        })
+        .await?;
+
+    // Step 6: Send confirmation (async, no compensation)
+    ctx.dispatch_job("send_order_confirmation", serde_json::json!({
+        "order_id": order.id,
+        "user_id": input.user_id,
+    })).await?;
+
+    Ok(OrderResult {
+        order_id: order.id,
+        tracking_number: shipment.tracking_number,
+    })
+}
+```
+
+## Compensation Flow
+
+When a step fails, compensation runs in reverse order:
+
+```
+Step 1: create_order    → Success (saved)
+Step 2: reserve_inventory → Success (saved)
+Step 3: charge_payment   → Success (saved)
+Step 4: create_shipment  → FAILED!
+                            │
+                            ▼
+                   Begin Compensation
+                            │
+        ┌───────────────────┼───────────────────┐
+        ▼                   ▼                   ▼
+  refund_payment     release_inventory    cancel_order
+   (undo step 3)      (undo step 2)      (undo step 1)
+```
+
+## See Also
+
+- [Workflows](/background/workflows) - Full workflows guide
+- [JobContext](/api/job-context) - For background jobs

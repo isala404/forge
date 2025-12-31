@@ -1,0 +1,470 @@
+---
+sidebar_position: 5
+title: "Real-Time Updates"
+description: Build a live dashboard with optimistic updates and collaborative features
+---
+
+# Real-Time Updates
+
+In this tutorial, you'll build advanced real-time features:
+- Optimistic updates for instant feedback
+- Presence (who's online)
+- Collaborative editing
+
+## What We're Building
+
+A real-time project dashboard:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  📊 Project Dashboard          👤 3 online              │
+├─────────────────────────────────────────────────────────┤
+│                                                         │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐     │
+│  │ To Do       │  │ In Progress │  │ Done        │     │
+│  │             │  │             │  │             │     │
+│  │ ┌─────────┐ │  │ ┌─────────┐ │  │ ┌─────────┐ │     │
+│  │ │ Task 1  │ │  │ │ Task 2  │ │  │ │ Task 3  │ │     │
+│  │ └─────────┘ │  │ │ (John)  │ │  │ └─────────┘ │     │
+│  │             │  │ └─────────┘ │  │             │     │
+│  └─────────────┘  └─────────────┘  └─────────────┘     │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+```
+
+## Optimistic Updates
+
+Make your UI feel instant by updating before the server responds:
+
+```svelte title="frontend/src/lib/components/TaskCard.svelte"
+<script lang="ts">
+  import { subscribe, mutateOptimisticUpdate } from '$lib/forge';
+
+  const tasks = subscribe('list_tasks', {});
+
+  async function toggleComplete(task: Task) {
+    // Optimistically update the UI immediately
+    await mutateOptimisticUpdate(
+      'toggle_task',
+      tasks,
+      {
+        input: { id: task.id },
+        itemId: task.id,
+        getId: (t) => t.id,
+        update: (t) => ({ ...t, completed: !t.completed }),
+      }
+    );
+    // If the mutation fails, it automatically rolls back
+  }
+
+  async function deleteTask(task: Task) {
+    await mutateOptimisticRemove(
+      'delete_task',
+      tasks,
+      {
+        input: { id: task.id },
+        itemId: task.id,
+        getId: (t) => t.id,
+      }
+    );
+  }
+</script>
+
+{#each $tasks.data ?? [] as task (task.id)}
+  <div class="task-card" class:completed={task.completed}>
+    <input
+      type="checkbox"
+      checked={task.completed}
+      onchange={() => toggleComplete(task)}
+    />
+    <span>{task.title}</span>
+    <button onclick={() => deleteTask(task)}>🗑️</button>
+  </div>
+{/each}
+```
+
+## How Optimistic Updates Work
+
+```
+1. User clicks checkbox
+   ├── UI updates immediately (optimistic)
+   └── Mutation sent to server
+
+2a. Server succeeds
+    └── WebSocket sends real data
+        └── UI already matches, no flicker
+
+2b. Server fails
+    └── Rollback to original state
+        └── Show error message
+```
+
+## Drag-and-Drop Kanban
+
+Build a kanban board with real-time sync:
+
+```svelte title="frontend/src/routes/board/+page.svelte"
+<script lang="ts">
+  import { subscribe, mutate } from '$lib/forge';
+
+  const tasks = subscribe('list_project_tasks', { projectId });
+
+  // Group tasks by status
+  const columns = $derived(() => {
+    const data = $tasks.data ?? [];
+    return {
+      todo: data.filter((t) => t.status === 'todo'),
+      in_progress: data.filter((t) => t.status === 'in_progress'),
+      done: data.filter((t) => t.status === 'done'),
+    };
+  });
+
+  async function moveTask(taskId: string, newStatus: string) {
+    // Optimistic update
+    const oldData = $tasks.data;
+    $tasks.data = $tasks.data?.map((t) =>
+      t.id === taskId ? { ...t, status: newStatus } : t
+    );
+
+    try {
+      await mutate('update_task', { id: taskId, status: newStatus });
+    } catch (error) {
+      // Rollback on error
+      $tasks.data = oldData;
+    }
+  }
+
+  function handleDrop(e: DragEvent, status: string) {
+    e.preventDefault();
+    const taskId = e.dataTransfer?.getData('text/plain');
+    if (taskId) {
+      moveTask(taskId, status);
+    }
+  }
+
+  function handleDragStart(e: DragEvent, taskId: string) {
+    e.dataTransfer?.setData('text/plain', taskId);
+  }
+</script>
+
+<div class="board">
+  {#each ['todo', 'in_progress', 'done'] as status}
+    <div
+      class="column"
+      ondragover|preventDefault
+      ondrop={(e) => handleDrop(e, status)}
+    >
+      <h3>{status.replace('_', ' ').toUpperCase()}</h3>
+
+      {#each columns()[status] ?? [] as task (task.id)}
+        <div
+          class="task-card"
+          draggable="true"
+          ondragstart={(e) => handleDragStart(e, task.id)}
+        >
+          {task.title}
+        </div>
+      {/each}
+    </div>
+  {/each}
+</div>
+
+<style>
+  .board {
+    display: flex;
+    gap: 1rem;
+    padding: 1rem;
+  }
+
+  .column {
+    flex: 1;
+    background: #f5f5f5;
+    border-radius: 8px;
+    padding: 1rem;
+    min-height: 400px;
+  }
+
+  .task-card {
+    background: white;
+    padding: 0.75rem;
+    border-radius: 4px;
+    margin-bottom: 0.5rem;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    cursor: grab;
+  }
+
+  .task-card:active {
+    cursor: grabbing;
+  }
+</style>
+```
+
+## Presence (Who's Online)
+
+Track active users in real-time:
+
+```rust title="src/functions/queries/presence.rs"
+use forge::prelude::*;
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct OnlineUser {
+    pub user_id: Uuid,
+    pub user_name: String,
+    pub last_seen: DateTime<Utc>,
+}
+
+#[forge::query]
+pub async fn get_online_users(ctx: &QueryContext, project_id: Uuid) -> Result<Vec<OnlineUser>> {
+    // Get users active in the last 5 minutes
+    sqlx::query_as(r#"
+        SELECT DISTINCT ON (u.id)
+            u.id as user_id,
+            u.name as user_name,
+            s.last_activity as last_seen
+        FROM users u
+        JOIN sessions s ON s.user_id = u.id
+        WHERE s.project_id = $1
+          AND s.last_activity > NOW() - INTERVAL '5 minutes'
+        ORDER BY u.id, s.last_activity DESC
+    "#)
+    .bind(project_id)
+    .fetch_all(ctx.db())
+    .await
+    .map_err(Into::into)
+}
+```
+
+```svelte title="frontend/src/lib/components/OnlineUsers.svelte"
+<script lang="ts">
+  import { subscribe } from '$lib/forge';
+
+  let { projectId } = $props();
+
+  const onlineUsers = subscribe('get_online_users', () => ({ projectId }));
+</script>
+
+<div class="online-users">
+  <span class="indicator">●</span>
+  <span>{($onlineUsers.data ?? []).length} online</span>
+
+  <div class="avatars">
+    {#each $onlineUsers.data ?? [] as user (user.user_id)}
+      <div class="avatar" title={user.user_name}>
+        {user.user_name.charAt(0).toUpperCase()}
+      </div>
+    {/each}
+  </div>
+</div>
+```
+
+## Collaborative Cursor Tracking
+
+Show where other users are looking:
+
+```svelte title="frontend/src/lib/components/CollaborativeCursors.svelte"
+<script lang="ts">
+  import { subscribe, mutate } from '$lib/forge';
+  import { onMount } from 'svelte';
+
+  let { projectId } = $props();
+
+  const cursors = subscribe('get_cursors', () => ({ projectId }));
+
+  // Broadcast cursor position
+  onMount(() => {
+    const handleMouseMove = debounce((e: MouseEvent) => {
+      mutate('update_cursor', {
+        project_id: projectId,
+        x: e.clientX,
+        y: e.clientY,
+      });
+    }, 50);
+
+    document.addEventListener('mousemove', handleMouseMove);
+    return () => document.removeEventListener('mousemove', handleMouseMove);
+  });
+
+  function debounce(fn: Function, ms: number) {
+    let timeout: number;
+    return (...args: any[]) => {
+      clearTimeout(timeout);
+      timeout = setTimeout(() => fn(...args), ms);
+    };
+  }
+</script>
+
+{#each $cursors.data ?? [] as cursor (cursor.user_id)}
+  <div
+    class="cursor"
+    style="left: {cursor.x}px; top: {cursor.y}px"
+  >
+    <div class="pointer">▲</div>
+    <span class="label">{cursor.user_name}</span>
+  </div>
+{/each}
+
+<style>
+  .cursor {
+    position: fixed;
+    pointer-events: none;
+    z-index: 9999;
+  }
+
+  .pointer {
+    transform: rotate(-45deg);
+    font-size: 12px;
+  }
+
+  .label {
+    background: #007bff;
+    color: white;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 11px;
+    margin-left: 4px;
+  }
+</style>
+```
+
+## Live Activity Feed
+
+Show real-time activity:
+
+```svelte title="frontend/src/lib/components/ActivityFeed.svelte"
+<script lang="ts">
+  import { subscribe } from '$lib/forge';
+
+  let { projectId } = $props();
+
+  const activities = subscribe('list_recent_activities', () => ({ projectId }));
+</script>
+
+<div class="activity-feed">
+  <h3>Activity</h3>
+
+  {#each $activities.data ?? [] as activity (activity.id)}
+    <div class="activity-item">
+      <span class="user">{activity.user_name}</span>
+      <span class="action">{activity.action}</span>
+      <span class="target">{activity.target_name}</span>
+      <span class="time">{formatRelativeTime(activity.created_at)}</span>
+    </div>
+  {/each}
+
+  {#if $activities.data?.length === 0}
+    <p class="empty">No recent activity</p>
+  {/if}
+</div>
+```
+
+## Connection Status
+
+Show users when they're offline:
+
+```svelte title="frontend/src/lib/components/ConnectionStatus.svelte"
+<script lang="ts">
+  import { getForgeClient } from '$lib/forge';
+
+  const client = getForgeClient();
+
+  let state = $state(client.getConnectionState());
+
+  client.onConnectionStateChange((newState) => {
+    state = newState;
+  });
+</script>
+
+{#if state === 'disconnected'}
+  <div class="banner error">
+    Disconnected. Trying to reconnect...
+  </div>
+{:else if state === 'reconnecting'}
+  <div class="banner warning">
+    Reconnecting...
+  </div>
+{/if}
+
+<style>
+  .banner {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    padding: 0.5rem;
+    text-align: center;
+  }
+
+  .error {
+    background: #dc3545;
+    color: white;
+  }
+
+  .warning {
+    background: #ffc107;
+    color: black;
+  }
+</style>
+```
+
+## Performance Tips
+
+### 1. Debounce Frequent Updates
+
+```typescript
+// Don't send every keystroke
+const debouncedUpdate = debounce((value: string) => {
+  mutate('update_title', { id, title: value });
+}, 300);
+```
+
+### 2. Use Specific Subscriptions
+
+```typescript
+// Good: Subscribe to what you need
+const myTasks = subscribe('get_user_tasks', { userId });
+
+// Bad: Subscribe to everything, filter client-side
+const allTasks = subscribe('list_all_tasks', {});
+```
+
+### 3. Unsubscribe When Done
+
+```typescript
+onDestroy(() => {
+  myTasks.unsubscribe();
+});
+```
+
+## What You Learned
+
+| Concept | What You Did |
+|---------|--------------|
+| **Optimistic Updates** | Used `mutateOptimisticUpdate` for instant UI |
+| **Drag & Drop** | Built a kanban board with real-time sync |
+| **Presence** | Showed online users |
+| **Connection State** | Handled offline scenarios |
+
+## What's Next?
+
+<div className="row">
+  <div className="col col--6">
+    <a className="card" href="/concepts/realtime">
+      <div className="card__header">
+        <h3>⚡ How Real-Time Works</h3>
+      </div>
+      <div className="card__body">
+        Deep dive into the architecture
+      </div>
+    </a>
+  </div>
+  <div className="col col--6">
+    <a className="card" href="/frontend/realtime-subscriptions">
+      <div className="card__header">
+        <h3>📡 Subscription API</h3>
+      </div>
+      <div className="card__body">
+        Full subscription reference
+      </div>
+    </a>
+  </div>
+</div>

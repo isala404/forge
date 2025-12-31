@@ -1,0 +1,235 @@
+---
+sidebar_position: 2
+title: Quick Start
+description: Get your first FORGE app running in 5 minutes
+---
+
+# Quick Start
+
+Let's build a working FORGE app in 5 minutes. By the end, you'll have a full-stack app with a database, API, and reactive frontend.
+
+## Prerequisites
+
+Before starting, make sure you have:
+
+- **Rust** (1.75+) - [Install Rust](https://rustup.rs/)
+- **Bun** (1.0+) - [Install Bun](https://bun.sh/)
+- **Docker** - For running PostgreSQL locally
+- **PostgreSQL client** (optional) - For database inspection
+
+```bash
+# Check your versions
+rustc --version  # Should be 1.75+
+bun --version    # Should be 1.0+
+docker --version
+```
+
+## Step 1: Install FORGE CLI
+
+```bash
+# Install from source (the only way for now)
+git clone https://github.com/forge/forge.git
+cd forge
+cargo install --path crates/forge
+```
+
+Verify it works:
+
+```bash
+forge --version
+```
+
+## Step 2: Create Your Project
+
+```bash
+# Create a new FORGE project
+forge new my-app
+cd my-app
+```
+
+This creates a complete project structure:
+
+```
+my-app/
+├── Cargo.toml           # Rust dependencies
+├── forge.toml           # FORGE configuration
+├── .env                 # Environment variables
+├── migrations/          # SQL migrations
+│   └── 0001_initial.sql
+├── src/
+│   ├── main.rs          # Entry point
+│   ├── schema/          # Data models
+│   └── functions/       # Your API functions
+└── frontend/            # Svelte 5 app
+    ├── package.json
+    └── src/
+```
+
+## Step 3: Start PostgreSQL
+
+```bash
+# Start a PostgreSQL container
+docker run -d \
+  --name forge-db \
+  -p 5432:5432 \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=my_app \
+  postgres:alpine
+```
+
+:::tip Database URL
+FORGE automatically reads the `DATABASE_URL` from your `.env` file:
+```bash
+DATABASE_URL=postgres://postgres:postgres@localhost/my_app
+```
+:::
+
+## Step 4: Run the Backend
+
+```bash
+# Start the FORGE server
+cargo run
+```
+
+You should see:
+
+```
+🔥 FORGE starting...
+📦 Running migrations...
+✅ Applied 0001_initial.sql
+🚀 Gateway listening on http://localhost:8080
+📊 Dashboard at http://localhost:8080/_dashboard/
+```
+
+## Step 5: Run the Frontend
+
+In a new terminal:
+
+```bash
+cd frontend
+bun install
+bun dev
+```
+
+Open http://localhost:5173 in your browser. You should see your app!
+
+## Step 6: Open the Dashboard
+
+Open http://localhost:8080/_dashboard/ in your browser.
+
+The dashboard shows:
+- **Cluster health** - Node status
+- **Jobs** - Background job queue
+- **Logs** - Real-time logs
+- **Metrics** - Request counts, latency
+
+## What Just Happened?
+
+You now have:
+
+1. **A PostgreSQL database** with your schema
+2. **A Rust backend** with auto-generated API endpoints
+3. **A Svelte frontend** with reactive data fetching
+4. **Real-time updates** via WebSocket
+5. **An admin dashboard** for monitoring
+
+All from a single `forge new` command.
+
+## Your First Change
+
+Let's add a simple feature. Open `src/functions/queries/users.rs`:
+
+```rust
+use forge::prelude::*;
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct User {
+    pub id: Uuid,
+    pub email: String,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[forge::query]
+pub async fn list_users(ctx: &QueryContext) -> Result<Vec<User>> {
+    sqlx::query_as("SELECT * FROM users ORDER BY created_at DESC")
+        .fetch_all(ctx.db())
+        .await
+        .map_err(Into::into)
+}
+```
+
+The frontend can now use this query:
+
+```svelte
+<script>
+  import { subscribe } from '$lib/forge';
+
+  const users = subscribe('list_users', {});
+</script>
+
+{#if $users.loading}
+  <p>Loading...</p>
+{:else}
+  {#each $users.data ?? [] as user}
+    <p>{user.name} ({user.email})</p>
+  {/each}
+{/if}
+```
+
+**Changes sync automatically!** When you add a user, the list updates in real-time.
+
+## What's Next?
+
+<div className="row">
+  <div className="col col--6">
+    <a className="card" href="/tutorials/build-a-todo-app">
+      <div className="card__header">
+        <h3>📚 Build a Todo App</h3>
+      </div>
+      <div className="card__body">
+        Complete tutorial with CRUD and real-time
+      </div>
+    </a>
+  </div>
+  <div className="col col--6">
+    <a className="card" href="/concepts/functions">
+      <div className="card__header">
+        <h3>🔧 Learn Functions</h3>
+      </div>
+      <div className="card__body">
+        Queries, Mutations, and Actions explained
+      </div>
+    </a>
+  </div>
+</div>
+
+## Troubleshooting
+
+### "Database connection refused"
+
+Make sure PostgreSQL is running:
+```bash
+docker ps | grep forge-db
+```
+
+If not, start it:
+```bash
+docker start forge-db
+```
+
+### "cargo: command not found"
+
+Install Rust: https://rustup.rs/
+
+### "bun: command not found"
+
+Install Bun: https://bun.sh/
+
+### Port already in use
+
+Change the port in `forge.toml`:
+```toml
+[gateway]
+port = 8081
+```

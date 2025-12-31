@@ -1,0 +1,253 @@
+---
+sidebar_position: 3
+title: Why FORGE?
+description: How FORGE compares to Next.js + Supabase, Firebase, and other stacks
+---
+
+# Why FORGE?
+
+You've probably built apps with Next.js + Supabase, Firebase, or a custom Node.js stack. They work, but they all have the same problems. Let's talk about why FORGE might be a better choice for your next project.
+
+## The Problem with Modern Stacks
+
+### Next.js + Supabase
+
+```
+What you need:
+├── Next.js (frontend + API routes)
+├── Supabase (database + auth)
+├── Vercel (hosting)
+├── Upstash (Redis for queues)
+├── Resend (emails)
+└── Cloudflare (storage)
+
+Total: 6 services to manage
+Monthly cost: $50-200+
+```
+
+**Pain points:**
+- API routes are scattered across `app/api/**`
+- No type safety between client and server
+- Background jobs need a separate service (Trigger.dev, Inngest)
+- Real-time needs separate Supabase subscriptions
+- Auth logic duplicated between client and server
+
+### Firebase
+
+```
+What you deal with:
+├── Firestore (NoSQL only)
+├── Cloud Functions (cold starts)
+├── Firebase Auth
+├── Cloud Storage
+└── Firebase Hosting
+
+Vendor lock-in: 100%
+```
+
+**Pain points:**
+- NoSQL means no joins, complex queries are hard
+- Cold starts on Cloud Functions (seconds of latency)
+- No local development experience
+- Unpredictable billing
+- Firebase rules are a separate language to learn
+
+### Custom Node.js Stack
+
+```
+What you build:
+├── Express/Fastify (API)
+├── Prisma (ORM)
+├── PostgreSQL (database)
+├── Redis (caching, queues)
+├── BullMQ (background jobs)
+├── Socket.io (real-time)
+└── Prometheus + Grafana (monitoring)
+
+Time to production: 2-4 weeks
+```
+
+**Pain points:**
+- Days of boilerplate before writing features
+- Multiple services to deploy and monitor
+- Each service can fail independently
+- Type safety requires extra tooling (tRPC, etc.)
+
+## The FORGE Solution
+
+```
+What FORGE gives you:
+├── One binary (backend, jobs, crons, real-time)
+├── PostgreSQL (the only dependency)
+└── Svelte frontend (auto-generated types)
+
+Services to manage: 1
+Time to production: 1 day
+```
+
+### Everything in One Binary
+
+FORGE compiles to a single Rust binary that includes:
+- HTTP API gateway
+- WebSocket for real-time
+- Background job workers
+- Cron scheduler
+- Metrics, logs, and traces
+- Admin dashboard
+
+**No Redis. No message queues. No separate services.**
+
+### Type Safety End-to-End
+
+```rust
+// Define your function in Rust
+#[forge::query]
+pub async fn get_user(ctx: &QueryContext, id: Uuid) -> Result<User> {
+    // ...
+}
+```
+
+```typescript
+// TypeScript types are auto-generated
+const user = await query('get_user', { id: 'uuid' });
+// user is typed as User | null
+```
+
+No manual type definitions. No runtime type checking. If it compiles, it works.
+
+### Real-Time Without the Hassle
+
+```svelte
+<script>
+  // This just works. Updates automatically.
+  const tasks = subscribe('list_tasks', {});
+</script>
+
+{#each $tasks.data ?? [] as task}
+  <div>{task.title}</div>
+{/each}
+```
+
+FORGE uses PostgreSQL's LISTEN/NOTIFY under the hood. When data changes, subscribers update automatically. No WebSocket setup, no subscription management.
+
+### Background Jobs Built-In
+
+```rust
+#[forge::job]
+#[retry(max_attempts = 5, backoff = "exponential")]
+pub async fn send_email(ctx: &JobContext, input: SendEmailInput) -> Result<()> {
+    ctx.progress(50, "Sending email...");
+    // Send the email
+    ctx.progress(100, "Done!");
+    Ok(())
+}
+```
+
+```typescript
+// Dispatch from frontend
+const jobId = await dispatchJob('send_email', { to: 'user@example.com' });
+
+// Track progress
+const job = subscribeJob(jobId);
+// $job.progress_percent, $job.progress_message
+```
+
+Jobs are persisted to PostgreSQL, survive server restarts, and have automatic retries with backoff.
+
+## Feature Comparison
+
+| Feature | FORGE | Next.js + Supabase | Firebase |
+|---------|-------|-------------------|----------|
+| Type safety | Full (Rust → TS) | Partial | None |
+| Real-time | Built-in | Needs setup | Built-in |
+| Background jobs | Built-in | Needs service | Cloud Functions |
+| Cron jobs | Built-in | Needs service | Cloud Scheduler |
+| Workflows (sagas) | Built-in | Needs service | ❌ |
+| SQL database | PostgreSQL | PostgreSQL | NoSQL only |
+| Dashboard | Built-in | Supabase dashboard | Firebase console |
+| Local development | Full | Partial | Limited |
+| Vendor lock-in | None | Moderate | High |
+| Cold starts | None | None | Yes |
+| Self-hosting | Easy | Possible | ❌ |
+
+## When to Use FORGE
+
+**FORGE is great for:**
+- SaaS applications
+- Internal tools and dashboards
+- Real-time collaborative apps
+- Apps with complex business logic
+- Apps that need background processing
+- Teams that value type safety
+
+**Consider alternatives if:**
+- You need mobile-first (FORGE is web-focused)
+- You want a fully managed solution (FORGE needs a server)
+- Your team doesn't know Rust (learning curve)
+
+## Performance
+
+FORGE is fast. Really fast.
+
+| Metric | FORGE | Node.js |
+|--------|-------|---------|
+| Startup time | ~100ms | ~2-5s |
+| Memory usage | ~30MB | ~100-300MB |
+| Request latency (p99) | ~5ms | ~20-50ms |
+| Concurrent connections | 10,000+ | 1,000-5,000 |
+
+The Rust advantage: no garbage collector, zero-cost abstractions, native async.
+
+## Cost Comparison
+
+For a typical SaaS app with 10,000 monthly active users:
+
+| Service | FORGE | Next.js + Supabase |
+|---------|-------|-------------------|
+| Hosting | $20/mo VPS | $20/mo Vercel Pro |
+| Database | Included | $25/mo Supabase |
+| Background Jobs | Included | $30/mo Trigger.dev |
+| Real-time | Included | Included |
+| Monitoring | Included | $10/mo (basic) |
+| **Total** | **$20/mo** | **$85/mo** |
+
+FORGE runs on a single VPS. All services in one binary means lower costs.
+
+## Getting Started
+
+Ready to try FORGE?
+
+```bash
+# Install FORGE CLI
+cargo install --path crates/forge
+
+# Create your project
+forge new my-app
+cd my-app
+
+# Start building
+cargo run
+```
+
+<div className="row">
+  <div className="col col--6">
+    <a className="card" href="/quick-start">
+      <div className="card__header">
+        <h3>🚀 Quick Start</h3>
+      </div>
+      <div className="card__body">
+        Get running in 5 minutes
+      </div>
+    </a>
+  </div>
+  <div className="col col--6">
+    <a className="card" href="/tutorials/build-a-todo-app">
+      <div className="card__header">
+        <h3>📚 Build a Todo App</h3>
+      </div>
+      <div className="card__body">
+        Complete tutorial with all features
+      </div>
+    </a>
+  </div>
+</div>

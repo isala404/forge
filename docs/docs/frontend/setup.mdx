@@ -1,0 +1,312 @@
+---
+sidebar_position: 1
+title: Frontend Setup
+description: Configure your Svelte 5 frontend to connect to FORGE
+---
+
+# Frontend Setup
+
+This guide shows how to set up the FORGE client in your Svelte 5 frontend.
+
+## Prerequisites
+
+- A running FORGE backend
+- Node.js 18+ or Bun
+- Basic familiarity with Svelte
+
+## Step 1: Create Frontend
+
+If you used `forge new`, you already have a `frontend/` directory. Otherwise:
+
+```bash
+bunx sv create frontend
+cd frontend
+bun install
+```
+
+Choose these options:
+- Template: SvelteKit minimal
+- TypeScript: Yes
+- Add-ons: None (we'll add what we need)
+
+## Step 2: Generate Types
+
+From your project root, generate TypeScript types:
+
+```bash
+forge generate
+```
+
+This creates `frontend/src/lib/forge/`:
+
+```
+frontend/src/lib/forge/
+├── client.ts      # FORGE client
+├── types.ts       # Generated types from Rust
+└── index.ts       # Re-exports
+```
+
+Run this command whenever you change your Rust schema or functions.
+
+## Step 3: Configure the Provider
+
+Create a layout that provides the FORGE client to your app:
+
+```svelte title="frontend/src/routes/+layout.svelte"
+<script lang="ts">
+  import { ForgeProvider } from '$lib/forge';
+
+  let { children } = $props();
+</script>
+
+<ForgeProvider url="http://localhost:8080">
+  {@render children()}
+</ForgeProvider>
+```
+
+### Provider Options
+
+```svelte
+<ForgeProvider
+  url="http://localhost:8080"   // Backend URL
+  getToken={() => authToken}    // Optional: auth token function
+  onError={(e) => console.error(e)}  // Optional: error handler
+  reconnectDelay={1000}         // Optional: WebSocket reconnect delay
+>
+```
+
+## Step 4: Use in Components
+
+Now you can use FORGE in any component:
+
+```svelte title="frontend/src/routes/+page.svelte"
+<script lang="ts">
+  import { subscribe, mutate } from '$lib/forge';
+
+  const tasks = subscribe('list_tasks', {});
+
+  let newTitle = $state('');
+
+  async function addTask() {
+    if (!newTitle.trim()) return;
+    await mutate('create_task', { title: newTitle });
+    newTitle = '';
+  }
+</script>
+
+<input bind:value={newTitle} placeholder="New task..." />
+<button onclick={addTask}>Add</button>
+
+{#each $tasks.data ?? [] as task}
+  <div>{task.title}</div>
+{/each}
+```
+
+## Project Structure
+
+Here's a recommended structure:
+
+```
+frontend/
+├── src/
+│   ├── lib/
+│   │   ├── forge/           # Generated (don't edit)
+│   │   │   ├── client.ts
+│   │   │   ├── types.ts
+│   │   │   └── index.ts
+│   │   ├── components/      # Your components
+│   │   │   ├── TaskList.svelte
+│   │   │   └── TaskCard.svelte
+│   │   └── auth.ts          # Auth store (if needed)
+│   ├── routes/
+│   │   ├── +layout.svelte   # Provider setup
+│   │   ├── +page.svelte     # Home page
+│   │   └── login/
+│   │       └── +page.svelte
+│   └── app.html
+├── static/
+├── package.json
+├── svelte.config.js
+└── vite.config.ts
+```
+
+## Authentication
+
+If your app has auth, provide a token getter:
+
+```svelte title="frontend/src/routes/+layout.svelte"
+<script lang="ts">
+  import { ForgeProvider } from '$lib/forge';
+  import { auth } from '$lib/auth';
+
+  let { children } = $props();
+
+  // Return current auth token
+  function getToken() {
+    return $auth.token;
+  }
+</script>
+
+<ForgeProvider url="http://localhost:8080" {getToken}>
+  {@render children()}
+</ForgeProvider>
+```
+
+Create an auth store:
+
+```typescript title="frontend/src/lib/auth.ts"
+import { writable } from 'svelte/store';
+
+interface AuthState {
+  token: string | null;
+  user: { id: string; email: string } | null;
+}
+
+function createAuthStore() {
+  const stored = typeof localStorage !== 'undefined'
+    ? localStorage.getItem('auth')
+    : null;
+
+  const initial: AuthState = stored
+    ? JSON.parse(stored)
+    : { token: null, user: null };
+
+  const { subscribe, set } = writable<AuthState>(initial);
+
+  return {
+    subscribe,
+    login: (token: string, user: AuthState['user']) => {
+      const state = { token, user };
+      localStorage.setItem('auth', JSON.stringify(state));
+      set(state);
+    },
+    logout: () => {
+      localStorage.removeItem('auth');
+      set({ token: null, user: null });
+    },
+  };
+}
+
+export const auth = createAuthStore();
+```
+
+## Environment Variables
+
+Configure the backend URL per environment:
+
+```bash title=".env"
+PUBLIC_FORGE_URL=http://localhost:8080
+```
+
+```bash title=".env.production"
+PUBLIC_FORGE_URL=https://api.yourapp.com
+```
+
+Use in your layout:
+
+```svelte
+<script lang="ts">
+  import { ForgeProvider } from '$lib/forge';
+  import { PUBLIC_FORGE_URL } from '$env/static/public';
+</script>
+
+<ForgeProvider url={PUBLIC_FORGE_URL}>
+  <slot />
+</ForgeProvider>
+```
+
+## Development Workflow
+
+1. **Start the backend:**
+   ```bash
+   cargo run
+   ```
+
+2. **Start the frontend:**
+   ```bash
+   cd frontend
+   bun dev
+   ```
+
+3. **Regenerate types after Rust changes:**
+   ```bash
+   forge generate
+   ```
+
+Both servers support hot reload:
+- Backend recompiles on Rust changes
+- Frontend hot-reloads on Svelte changes
+- Types regenerate with `forge generate`
+
+## CORS Configuration
+
+FORGE handles CORS automatically in development. For production, configure in `forge.toml`:
+
+```toml title="forge.toml"
+[gateway]
+cors_origins = ["https://yourapp.com"]
+```
+
+## Common Issues
+
+### "Cannot find module '$lib/forge'"
+
+Run `forge generate` to create the client files.
+
+### "WebSocket connection failed"
+
+Check that:
+1. Backend is running on the expected port
+2. URL in ForgeProvider is correct
+3. No firewall blocking WebSocket connections
+
+### "Unauthorized" errors
+
+Ensure your `getToken` function returns a valid token:
+
+```svelte
+<script lang="ts">
+  function getToken() {
+    const token = localStorage.getItem('token');
+    console.log('Token:', token);  // Debug
+    return token;
+  }
+</script>
+
+<ForgeProvider url="..." {getToken}>
+```
+
+### Types out of sync
+
+If TypeScript complains about types, regenerate:
+
+```bash
+forge generate
+```
+
+Then restart your TypeScript server (Cmd+Shift+P → "TypeScript: Restart TS Server").
+
+## What's Next?
+
+<div className="row">
+  <div className="col col--6">
+    <a className="card" href="/frontend/queries-mutations">
+      <div className="card__header">
+        <h3>📡 Queries & Mutations</h3>
+      </div>
+      <div className="card__body">
+        Call your backend functions
+      </div>
+    </a>
+  </div>
+  <div className="col col--6">
+    <a className="card" href="/frontend/realtime-subscriptions">
+      <div className="card__header">
+        <h3>⚡ Real-Time</h3>
+      </div>
+      <div className="card__body">
+        Live data subscriptions
+      </div>
+    </a>
+  </div>
+</div>

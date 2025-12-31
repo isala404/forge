@@ -1,0 +1,197 @@
+---
+sidebar_position: 4
+title: JobContext
+description: API reference for JobContext
+---
+
+# JobContext
+
+The `JobContext` is passed to all job functions. It provides database access, HTTP client, progress reporting, and job metadata.
+
+## Definition
+
+```rust
+pub struct JobContext {
+    pub job_id: Uuid,
+    pub job_type: String,
+    pub attempt: u32,
+    pub max_attempts: u32,
+    pub auth: AuthContext,
+}
+
+impl JobContext {
+    pub fn db(&self) -> &PgPool;
+    pub fn http(&self) -> &Client;
+    pub fn progress(&self, percent: u8, message: impl Into<String>) -> Result<()>;
+    pub async fn heartbeat(&self) -> Result<()>;
+    pub fn is_retry(&self) -> bool;
+    pub fn is_last_attempt(&self) -> bool;
+    pub async fn dispatch_job(&self, job_type: &str, input: Value) -> Result<Uuid>;
+}
+```
+
+## Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `job_id` | `Uuid` | Unique identifier for this job |
+| `job_type` | `String` | Name of the job type |
+| `attempt` | `u32` | Current attempt number (1-based) |
+| `max_attempts` | `u32` | Maximum attempts configured |
+| `auth` | `AuthContext` | Auth context from dispatcher |
+
+## Methods
+
+### `db()`
+
+Returns the PostgreSQL connection pool.
+
+```rust
+let user: User = sqlx::query_as("SELECT * FROM users WHERE id = $1")
+    .bind(user_id)
+    .fetch_one(ctx.db())
+    .await?;
+```
+
+### `http()`
+
+Returns an HTTP client for external API calls.
+
+```rust
+let response: ApiResponse = ctx.http()
+    .post("https://api.example.com/webhook")
+    .json(&payload)
+    .send()
+    .await?
+    .json()
+    .await?;
+```
+
+### `progress()`
+
+Reports job progress for real-time UI updates.
+
+```rust
+ctx.progress(0, "Starting...")?;
+ctx.progress(50, "Halfway there...")?;
+ctx.progress(100, "Complete!")?;
+```
+
+**Parameters:**
+- `percent: u8` - Progress percentage (0-100)
+- `message: impl Into<String>` - Human-readable status message
+
+### `heartbeat()`
+
+Sends a heartbeat to prevent stale job detection. Use for long-running jobs.
+
+```rust
+for chunk in chunks {
+    process_chunk(chunk).await?;
+    ctx.heartbeat().await?;  // Keep job alive
+}
+```
+
+### `is_retry()`
+
+Returns `true` if this is a retry attempt.
+
+```rust
+if ctx.is_retry() {
+    tracing::info!("Retry attempt {} of {}", ctx.attempt, ctx.max_attempts);
+}
+```
+
+### `is_last_attempt()`
+
+Returns `true` if this is the final attempt.
+
+```rust
+if ctx.is_last_attempt() {
+    // This is our last chance - send an alert
+    alert_ops_team(&error).await?;
+}
+```
+
+### `dispatch_job()`
+
+Dispatches another background job.
+
+```rust
+ctx.dispatch_job("send_notification", serde_json::json!({
+    "user_id": user_id,
+    "message": "Your export is ready!",
+})).await?;
+```
+
+## Complete Example
+
+```rust
+use forge::prelude::*;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessFileInput {
+    pub file_id: Uuid,
+    pub user_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessFileOutput {
+    pub processed_url: String,
+    pub size_bytes: u64,
+}
+
+#[forge::job]
+#[timeout = "10m"]
+#[retry(max_attempts = 3, backoff = "exponential")]
+pub async fn process_file(
+    ctx: &JobContext,
+    input: ProcessFileInput,
+) -> Result<ProcessFileOutput> {
+    ctx.progress(0, "Loading file...")?;
+
+    // Fetch file from storage
+    let file = fetch_file(&input.file_id).await?;
+
+    ctx.progress(20, "Processing...")?;
+
+    // Process in chunks with heartbeat
+    let chunks = file.chunks(1024 * 1024);  // 1MB chunks
+    let total = chunks.len();
+
+    for (i, chunk) in chunks.enumerate() {
+        process_chunk(chunk).await?;
+
+        // Keep alive for long processing
+        ctx.heartbeat().await?;
+
+        let pct = 20 + ((i + 1) * 60 / total) as u8;
+        ctx.progress(pct, format!("Chunk {} of {}", i + 1, total))?;
+    }
+
+    ctx.progress(85, "Uploading result...")?;
+
+    let result_url = upload_result(&file).await?;
+
+    ctx.progress(95, "Notifying user...")?;
+
+    // Dispatch notification job
+    ctx.dispatch_job("send_notification", serde_json::json!({
+        "user_id": input.user_id,
+        "type": "file_processed",
+        "url": result_url,
+    })).await?;
+
+    ctx.progress(100, "Done!")?;
+
+    Ok(ProcessFileOutput {
+        processed_url: result_url,
+        size_bytes: file.size,
+    })
+}
+```
+
+## See Also
+
+- [Background Jobs](/background/jobs) - Full jobs guide
+- [MutationContext](/api/mutation-context) - Dispatching jobs
