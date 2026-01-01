@@ -33,6 +33,11 @@ async fn main() -> Result<()> {
         .function_registry_mut()
         .register_mutation::<functions::DeleteUserMutation>();
 
+    // Actions
+    builder
+        .function_registry_mut()
+        .register_action::<functions::SendWelcomeEmailAction>();
+
     // Jobs
     builder
         .job_registry_mut()

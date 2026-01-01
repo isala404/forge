@@ -1,8 +1,13 @@
 -- @up
+
+-- User roles enum
+CREATE TYPE user_role AS ENUM ('admin', 'member', 'guest');
+
 CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY,
     email VARCHAR(255) NOT NULL,
     name VARCHAR(255) NOT NULL,
+    role user_role NOT NULL DEFAULT 'member',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -20,8 +25,10 @@ SELECT forge_enable_reactivity('users');
 SELECT forge_enable_reactivity('app_stats');
 
 -- @down
+
 SELECT forge_disable_reactivity('app_stats');
 SELECT forge_disable_reactivity('users');
 DROP TABLE IF EXISTS app_stats;
 DROP INDEX IF EXISTS idx_users_email;
 DROP TABLE IF EXISTS users;
+DROP TYPE IF EXISTS user_role;

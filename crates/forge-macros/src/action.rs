@@ -209,12 +209,12 @@ fn expand_action_impl(input: ItemFn, attrs: ActionAttrs) -> syn::Result<TokenStr
     let inner_fn = if arg_names.is_empty() {
         quote! {
             #(#fn_attrs)*
-            #vis async fn #fn_name(#ctx_param) -> forge_core::Result<#output_type> #fn_block
+            #vis async fn #fn_name(#ctx_param) -> forge::forge_core::Result<#output_type> #fn_block
         }
     } else {
         quote! {
             #(#fn_attrs)*
-            #vis async fn #fn_name(#ctx_param, #(#arg_params),*) -> forge_core::Result<#output_type> #fn_block
+            #vis async fn #fn_name(#ctx_param, #(#arg_params),*) -> forge::forge_core::Result<#output_type> #fn_block
         }
     };
 
@@ -237,15 +237,15 @@ fn expand_action_impl(input: ItemFn, attrs: ActionAttrs) -> syn::Result<TokenStr
 
         #inner_fn
 
-        impl forge_core::ForgeAction for #struct_name {
+        impl forge::forge_core::ForgeAction for #struct_name {
             type Args = #args_type;
             type Output = #output_type;
 
-            fn info() -> forge_core::FunctionInfo {
-                forge_core::FunctionInfo {
+            fn info() -> forge::forge_core::FunctionInfo {
+                forge::forge_core::FunctionInfo {
                     name: #fn_name_str,
                     description: None,
-                    kind: forge_core::FunctionKind::Action,
+                    kind: forge::forge_core::FunctionKind::Action,
                     requires_auth: #requires_auth,
                     required_role: #required_role,
                     is_public: false,
@@ -255,9 +255,9 @@ fn expand_action_impl(input: ItemFn, attrs: ActionAttrs) -> syn::Result<TokenStr
             }
 
             fn execute(
-                ctx: &forge_core::ActionContext,
+                ctx: &forge::forge_core::ActionContext,
                 args: Self::Args,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = forge_core::Result<Self::Output>> + Send + '_>> {
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = forge::forge_core::Result<Self::Output>> + Send + '_>> {
                 Box::pin(async move {
                     #execute_call
                 })

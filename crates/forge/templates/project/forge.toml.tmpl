@@ -3,12 +3,57 @@
 
 [project]
 name = "{{name}}"
+# version = "0.1.0"
 
 [database]
 url = "${DATABASE_URL}"
+# max_connections = 10
+# statement_timeout = "30s"
+# replica_url = "${DATABASE_REPLICA_URL}"  # Read replica for scaling reads
 
 [gateway]
 port = 8080
+# host = "0.0.0.0"
+# cors_origins = ["http://localhost:5173"]
+# enable_dashboard = true
+# dashboard_path = "/_dashboard/"
 
 [observability]
 enabled = true
+# log_level = "info"  # debug, info, warn, error
+# metrics_flush_interval = "10s"
+# enable_metrics = true
+# enable_logging = true
+# enable_tracing = true
+# otlp_endpoint = "http://localhost:4317"  # OpenTelemetry collector
+
+# [function]
+# default_timeout = 30  # seconds
+# cache_enabled = true
+
+# [worker]
+# enabled = true
+# concurrency = 4       # max concurrent jobs
+# poll_interval = 1000  # milliseconds
+
+# [auth]
+# jwt_secret = "${JWT_SECRET}"
+# jwt_algorithm = "HS256"  # HS256, HS384, HS512, RS256, RS384, RS512
+# jwt_issuer = "forge"
+# token_expiry = "15m"
+
+# [rate_limit]
+# enabled = true
+# requests = 100
+# per = "1m"
+# key = "user"  # user, ip, tenant, user_action, global
+
+# [cluster]
+# enabled = true
+# heartbeat_interval = "5s"
+# leader_election_timeout = "30s"
+# node_name = "node-1"  # Optional, auto-generated if not set
+
+# [node]
+# roles = ["Gateway", "Function", "Worker", "Scheduler"]
+# worker_capabilities = ["general"]  # general, gpu, high_cpu

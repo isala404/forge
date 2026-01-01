@@ -220,14 +220,14 @@ export function subscribeWorkflow(workflowId: string): WorkflowStore {
 
 export interface JobTracker<TArgs> extends Readable<JobProgress | null> {
   start: (args: TArgs) => Promise<string>;
-  resume: (jobId: string) => void;
+  resume: (jobId: string, onNotFound?: () => void) => void;
   cleanup: () => void;
 }
 
 export interface WorkflowTracker<TArgs>
   extends Readable<WorkflowProgress | null> {
   start: (args: TArgs) => Promise<string>;
-  resume: (workflowId: string) => void;
+  resume: (workflowId: string, onNotFound?: () => void) => void;
   cleanup: () => void;
 }
 
@@ -242,7 +242,7 @@ export function createJobTracker<TArgs>(
 
   const notify = () => subscribers.forEach((run) => run(state));
 
-  const subscribeToJob = (jobId: string) => {
+  const subscribeToJob = (jobId: string, onNotFound?: () => void) => {
     if (!uuidRegex.test(jobId)) {
       throw new Error("Invalid job ID: must be a valid UUID");
     }
@@ -263,6 +263,13 @@ export function createJobTracker<TArgs>(
     notify();
 
     unsubscribeFn = client.subscribeJob(jobId, (data: JobProgress) => {
+      if (data.status === "not_found") {
+        // Clear state when job not found (e.g., stale localStorage)
+        state = null;
+        notify();
+        onNotFound?.();
+        return;
+      }
       state = data;
       notify();
     });
@@ -294,8 +301,8 @@ export function createJobTracker<TArgs>(
       return jobId;
     },
 
-    resume(jobId: string) {
-      subscribeToJob(jobId);
+    resume(jobId: string, onNotFound?: () => void) {
+      subscribeToJob(jobId, onNotFound);
     },
 
     cleanup() {
@@ -320,7 +327,7 @@ export function createWorkflowTracker<TArgs>(
 
   const notify = () => subscribers.forEach((run) => run(state));
 
-  const subscribeToWorkflow = (workflowId: string) => {
+  const subscribeToWorkflow = (workflowId: string, onNotFound?: () => void) => {
     if (!uuidRegex.test(workflowId)) {
       throw new Error("Invalid workflow ID: must be a valid UUID");
     }
@@ -343,6 +350,13 @@ export function createWorkflowTracker<TArgs>(
     unsubscribeFn = client.subscribeWorkflow(
       workflowId,
       (data: WorkflowProgress) => {
+        if (data.status === "not_found") {
+          // Clear state when workflow not found (e.g., stale localStorage)
+          state = null;
+          notify();
+          onNotFound?.();
+          return;
+        }
         state = data;
         notify();
       },
@@ -378,8 +392,8 @@ export function createWorkflowTracker<TArgs>(
       return workflowId;
     },
 
-    resume(workflowId: string) {
-      subscribeToWorkflow(workflowId);
+    resume(workflowId: string, onNotFound?: () => void) {
+      subscribeToWorkflow(workflowId, onNotFound);
     },
 
     cleanup() {

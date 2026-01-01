@@ -1,19 +1,28 @@
 use forge::prelude::*;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountVerificationInput {
     pub user_id: String,
-    #[serde(default)]
     pub email: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountVerificationOutput {
     pub verified: bool,
-    pub verification_token: Option<String>,
-    pub verified_at: Option<String>,
+    pub token: String,
+    pub verification_method: String,
 }
 
+/// Durable workflow demonstrating:
+/// - Manual step tracking for resumable execution
+/// - Suspension with ctx.sleep() (survives server restarts)
+/// - Resumption detection with ctx.is_resumed()
+/// - Deterministic time with ctx.workflow_time()
+/// - Step state persistence with is_step_completed/record_step_*
+///
+/// For parallel execution, see ctx.parallel() in the docs.
+/// For fluent API, see ctx.step(name, fn).compensate(fn).timeout().run()
 #[forge::workflow]
 #[version = 1]
 #[timeout = "24h"]
@@ -21,24 +30,32 @@ pub async fn account_verification(
     ctx: &WorkflowContext,
     input: AccountVerificationInput,
 ) -> Result<AccountVerificationOutput> {
-    use std::time::Duration;
+    // Check if we're resuming from a previous suspension
+    if ctx.is_resumed() {
+        tracing::info!(
+            workflow_id = %ctx.run_id,
+            "Resuming verification workflow from suspended state"
+        );
+    } else {
+        tracing::info!(
+            workflow_id = %ctx.run_id,
+            user_id = %input.user_id,
+            "Starting new verification workflow"
+        );
+    }
 
-    tracing::info!(
-        workflow_id = %ctx.run_id,
-        user_id = %input.user_id,
-        email = %input.email,
-        "Starting account verification workflow"
-    );
+    // Use deterministic workflow time for reproducible behavior on replay
+    let workflow_start = ctx.workflow_time();
+    tracing::debug!(workflow_time = %workflow_start, "Workflow time recorded");
 
-    // Step 1: Generate verification token
+    // Step 1: Generate verification token (with resumption support)
     let token = if ctx.is_step_completed("generate_token") {
         ctx.get_step_result::<String>("generate_token")
             .unwrap_or_else(|| format!("verify_{}", Uuid::new_v4()))
     } else {
         ctx.record_step_start("generate_token");
         tracing::info!("Generating verification token");
-        tokio::time::sleep(Duration::from_secs(1)).await;
-
+        tokio::time::sleep(Duration::from_millis(200)).await;
         let token = format!("verify_{}", Uuid::new_v4());
         ctx.record_step_complete("generate_token", serde_json::json!(token));
         token
@@ -47,98 +64,84 @@ pub async fn account_verification(
     // Step 2: Store token in database
     if !ctx.is_step_completed("store_token") {
         ctx.record_step_start("store_token");
-        tracing::info!(user_id = %input.user_id, "Storing verification token");
-        tokio::time::sleep(Duration::from_secs(1)).await;
-
-        // In a real app:
-        // sqlx::query("INSERT INTO verification_tokens (user_id, token) VALUES ($1, $2)")
-        //     .bind(&input.user_id)
-        //     .bind(&token)
-        //     .execute(ctx.db())
-        //     .await?;
-
-        ctx.record_step_complete(
-            "store_token",
-            serde_json::json!({
-                "stored": true,
-                "user_id": input.user_id
-            }),
-        );
+        tracing::info!("Storing verification token in database");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // In production: INSERT INTO verification_tokens ...
+        ctx.record_step_complete("store_token", serde_json::json!({"stored": true}));
     }
 
     // Step 3: Send verification email
     if !ctx.is_step_completed("send_email") {
         ctx.record_step_start("send_email");
         tracing::info!(email = %input.email, "Sending verification email");
-
-        // Retry logic for transient failures
-        let mut attempts = 0;
-        let max_attempts = 3;
-        loop {
-            attempts += 1;
-            match send_email_simulation(&input.email, &token).await {
-                Ok(_) => break,
-                Err(e) if attempts < max_attempts => {
-                    tracing::warn!(attempt = attempts, "Email send failed, retrying: {}", e);
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                }
-                Err(e) => {
-                    ctx.record_step_failure("send_email", e.to_string());
-                    return Err(e);
-                }
-            }
-        }
-
-        ctx.record_step_complete(
-            "send_email",
-            serde_json::json!({
-                "sent_to": input.email,
-                "sent_at": chrono::Utc::now().to_rfc3339()
-            }),
-        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        // In production: call email service API
+        ctx.record_step_complete("send_email", serde_json::json!({"sent": true}));
     }
 
-    // Step 4: Mark account as verified
-    let verified_at = if ctx.is_step_completed("mark_verified") {
-        ctx.get_step_result::<Option<String>>("mark_verified")
-            .flatten()
-    } else {
+    // Step 4: Durable sleep - workflow suspends and resumes after delay
+    // This is the key differentiator: ctx.sleep() survives server restarts!
+    // The workflow will be suspended in the database and resumed by the scheduler.
+    if !ctx.is_step_completed("wait_period") {
+        ctx.record_step_start("wait_period");
+        tracing::info!("Entering durable sleep (2 seconds)");
+
+        // Use ctx.sleep() for durable waiting - workflow suspends here
+        // In production, you might sleep for hours or days
+        ctx.sleep(Duration::from_secs(2)).await?;
+
+        ctx.record_step_complete("wait_period", serde_json::json!({"waited": true}));
+        tracing::info!("Resumed from durable sleep");
+    }
+
+    // Step 5: Mark account as verified
+    if !ctx.is_step_completed("mark_verified") {
         ctx.record_step_start("mark_verified");
-        tracing::info!("Marking account as verified");
-        tokio::time::sleep(Duration::from_secs(1)).await;
-
-        // In a real app:
-        // sqlx::query("UPDATE users SET verified = true WHERE id = $1")
-        //     .bind(&input.user_id)
-        //     .execute(ctx.db())
-        //     .await?;
-
-        let verified_at = Some(chrono::Utc::now().to_rfc3339());
-        ctx.record_step_complete("mark_verified", serde_json::json!(verified_at));
-        verified_at
-    };
+        tracing::info!(user_id = %input.user_id, "Marking account as verified");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // In production: UPDATE users SET verified = true WHERE id = $1
+        ctx.record_step_complete("mark_verified", serde_json::json!(true));
+    }
 
     tracing::info!(
         workflow_id = %ctx.run_id,
-        user_id = %input.user_id,
-        "Account verification workflow completed"
+        "Verification workflow completed"
     );
 
     Ok(AccountVerificationOutput {
         verified: true,
-        verification_token: Some(token),
-        verified_at,
+        token,
+        verification_method: "email".to_string(),
     })
 }
 
-/// Simulated email sending (for demo purposes)
-async fn send_email_simulation(email: &str, token: &str) -> Result<()> {
-    use std::time::Duration;
+// ============================================================================
+// ADVANCED PATTERNS (for reference - uncomment to use)
+// ============================================================================
 
-    // Simulate occasional failure for demo (1 in 3 chance)
-    tokio::time::sleep(Duration::from_millis(500)).await;
+// Parallel step execution example:
+// let results = ctx.parallel()
+//     .step("send_email", || async { Ok(serde_json::json!({"sent": true})) })
+//     .step("send_sms", || async { Ok(serde_json::json!({"sent": true})) })
+//     .run()
+//     .await?;
+// let email_result: serde_json::Value = results.get("send_email")?;
 
-    // In a real app, this would call an email service
-    tracing::debug!(email = %email, token = %token, "Simulated email sent");
-    Ok(())
-}
+// Fluent step API with compensation (saga pattern):
+// let token: String = ctx
+//     .step("generate_token", || async {
+//         Ok(format!("verify_{}", Uuid::new_v4()))
+//     })
+//     .compensate(|token| async move {
+//         tracing::warn!(token = %token, "Compensating: invalidating token");
+//         Ok(())
+//     })
+//     .timeout(Duration::from_secs(30))
+//     .optional()  // Won't fail workflow if this step fails
+//     .run()
+//     .await?;
+
+// Wait for external event with timeout:
+// let event_data: serde_json::Value = ctx
+//     .wait_for_event("email_confirmed", Some(Duration::from_hours(24)))
+//     .await?;

@@ -2,7 +2,11 @@ pub mod account_verification_workflow;
 pub mod app_stats;
 pub mod export_users_job;
 pub mod heartbeat_stats_cron;
+pub mod send_welcome_action;
 pub mod users;
+
+#[cfg(test)]
+mod tests;
 
 #[allow(unused_imports)]
 pub use account_verification_workflow::*;
@@ -11,4 +15,6 @@ pub use app_stats::*;
 pub use export_users_job::*;
 #[allow(unused_imports)]
 pub use heartbeat_stats_cron::*;
+#[allow(unused_imports)]
+pub use send_welcome_action::*;
 pub use users::*;

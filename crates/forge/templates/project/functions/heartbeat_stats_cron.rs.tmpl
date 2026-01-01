@@ -1,10 +1,52 @@
-/// Updates app_stats every minute for frontend live updates
+use forge::prelude::*;
+
+/// Scheduled cron job demonstrating:
+/// - Cron schedule expression (every minute)
+/// - Timezone configuration
+/// - Catch-up execution after downtime
+/// - Delay detection with ctx.delay() and ctx.is_late()
+/// - Catch-up detection with ctx.is_catch_up
+/// - Structured logging with ctx.log.info/warn/error/debug
 #[forge::cron("* * * * *")]
 #[timezone = "UTC"]
-pub async fn heartbeat_stats(ctx: &forge::prelude::CronContext) -> forge::prelude::Result<()> {
-    let now = chrono::Utc::now();
-    tracing::debug!(run_id = %ctx.run_id, "Running heartbeat stats cron");
+#[catch_up]
+#[catch_up_limit = 5]
+pub async fn heartbeat_stats(ctx: &CronContext) -> Result<()> {
+    let now = Utc::now();
 
+    // Check if this is a catch-up run (missed execution being replayed)
+    if ctx.is_catch_up {
+        ctx.log.warn(
+            "Executing catch-up run for missed schedule",
+            serde_json::json!({
+                "scheduled_time": ctx.scheduled_time.to_rfc3339(),
+                "execution_time": ctx.execution_time.to_rfc3339(),
+            }),
+        );
+    }
+
+    // Check if execution is delayed
+    let delay = ctx.delay();
+    if ctx.is_late() {
+        ctx.log.warn(
+            "Cron execution is late",
+            serde_json::json!({
+                "delay_seconds": delay.num_seconds(),
+                "scheduled_time": ctx.scheduled_time.to_rfc3339(),
+            }),
+        );
+    }
+
+    // Log start with structured context
+    ctx.log.info(
+        "Running heartbeat stats update",
+        serde_json::json!({
+            "run_id": ctx.run_id.to_string(),
+            "timezone": &ctx.timezone,
+        }),
+    );
+
+    // Update last heartbeat timestamp
     sqlx::query(
         "INSERT INTO app_stats (id, stat_name, stat_value, updated_at)
          VALUES ('heartbeat', 'last_heartbeat', $1, NOW())
@@ -14,6 +56,7 @@ pub async fn heartbeat_stats(ctx: &forge::prelude::CronContext) -> forge::prelud
     .execute(ctx.db())
     .await?;
 
+    // Get user count
     let user_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
         .fetch_one(ctx.db())
         .await?;
@@ -27,10 +70,13 @@ pub async fn heartbeat_stats(ctx: &forge::prelude::CronContext) -> forge::prelud
     .execute(ctx.db())
     .await?;
 
-    tracing::debug!(
-        run_id = %ctx.run_id,
-        user_count = user_count.0,
-        "Heartbeat stats updated"
+    // Log completion with stats
+    ctx.log.debug(
+        "Heartbeat stats updated successfully",
+        serde_json::json!({
+            "user_count": user_count.0,
+            "execution_time_ms": (Utc::now() - ctx.execution_time).num_milliseconds(),
+        }),
     );
 
     Ok(())

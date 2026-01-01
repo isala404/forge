@@ -74,7 +74,8 @@ export type JobStatus =
   | "completed"
   | "retry"
   | "failed"
-  | "dead_letter";
+  | "dead_letter"
+  | "not_found";
 
 // Job progress information
 export interface JobProgress {
@@ -84,6 +85,10 @@ export interface JobProgress {
   progress_message: string | null;
   output: unknown | null;
   error: string | null;
+  // Retry/heartbeat info (if available from backend)
+  attempts?: number;
+  max_attempts?: number;
+  last_heartbeat?: string;
 }
 
 // Workflow status enum
@@ -94,7 +99,8 @@ export type WorkflowStatus =
   | "completed"
   | "compensating"
   | "compensated"
-  | "failed";
+  | "failed"
+  | "not_found";
 
 // Workflow step status enum
 export type WorkflowStepStatus =

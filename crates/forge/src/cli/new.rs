@@ -27,6 +27,9 @@ const FUNCTIONS_HEARTBEAT_CRON: &str =
     include_str!("../../templates/project/functions/heartbeat_stats_cron.rs.tmpl");
 const FUNCTIONS_VERIFICATION_WORKFLOW: &str =
     include_str!("../../templates/project/functions/account_verification_workflow.rs.tmpl");
+const FUNCTIONS_SEND_WELCOME_ACTION: &str =
+    include_str!("../../templates/project/functions/send_welcome_action.rs.tmpl");
+const FUNCTIONS_TESTS: &str = include_str!("../../templates/project/functions/tests.rs.tmpl");
 
 // Frontend templates
 const FRONTEND_PACKAGE_JSON: &str = include_str!("../../templates/frontend/package.json.tmpl");
@@ -43,6 +46,7 @@ const FRONTEND_TYPES_TS: &str = include_str!("../../templates/frontend/lib/forge
 const FRONTEND_API_TS: &str = include_str!("../../templates/frontend/lib/forge/api.ts.tmpl");
 const FRONTEND_INDEX_TS: &str = include_str!("../../templates/frontend/lib/forge/index.ts.tmpl");
 const FRONTEND_PRETTIERIGNORE: &str = include_str!("../../templates/frontend/prettierignore.tmpl");
+const FRONTEND_PRETTIERRC: &str = include_str!("../../templates/frontend/prettierrc.tmpl");
 
 /// Create a new FORGE project.
 #[derive(Parser)]
@@ -131,6 +135,11 @@ pub fn create_project(dir: &Path, name: &str, minimal: bool) -> Result<()> {
         dir.join("src/functions/account_verification_workflow.rs"),
         FUNCTIONS_VERIFICATION_WORKFLOW,
     )?;
+    fs::write(
+        dir.join("src/functions/send_welcome_action.rs"),
+        FUNCTIONS_SEND_WELCOME_ACTION,
+    )?;
+    fs::write(dir.join("src/functions/tests.rs"), FUNCTIONS_TESTS)?;
 
     // Create frontend if not minimal
     if !minimal {
@@ -163,6 +172,7 @@ fn create_frontend(dir: &Path, name: &str) -> Result<()> {
     fs::write(frontend_dir.join("src/app.html"), FRONTEND_APP_HTML)?;
     fs::write(frontend_dir.join(".env"), FRONTEND_ENV_EXAMPLE)?;
     fs::write(frontend_dir.join(".prettierignore"), FRONTEND_PRETTIERIGNORE)?;
+    fs::write(frontend_dir.join(".prettierrc"), FRONTEND_PRETTIERRC)?;
 
     // Routes
     fs::write(

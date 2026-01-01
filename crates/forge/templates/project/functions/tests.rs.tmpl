@@ -1,0 +1,218 @@
+//! Example tests demonstrating FORGE testing utilities.
+//!
+//! Run with: cargo test
+//!
+//! These tests showcase:
+//! - TestContext and TestContextBuilder
+//! - MockHttp for external API mocking
+//! - Assertion macros (assert_ok!, assert_err!, etc.)
+//! - Job and workflow dispatch verification
+
+#[cfg(test)]
+mod tests {
+    use forge::prelude::*;
+    use forge::testing::*;
+
+    // Test context creation without database
+    #[test]
+    fn test_context_without_database() {
+        let ctx = TestContext::new_without_db();
+
+        // Verify unauthenticated by default
+        assert!(!ctx.auth().is_authenticated());
+        assert!(ctx.user_id().is_none());
+    }
+
+    // Test context with authenticated user
+    #[tokio::test]
+    async fn test_context_with_user() {
+        let user_id = Uuid::new_v4();
+
+        let ctx = TestContext::builder()
+            .as_user(user_id)
+            .with_roles(vec!["admin".to_string()])
+            .build()
+            .await
+            .expect("Failed to build test context");
+
+        assert!(ctx.auth().is_authenticated());
+        assert_eq!(ctx.user_id(), Some(user_id));
+        assert!(ctx.auth().has_role("admin"));
+    }
+
+    // Test job dispatch verification
+    #[test]
+    fn test_job_dispatch_verification() {
+        let mut ctx = TestContext::new_without_db();
+
+        // Dispatch a job
+        let job_id = ctx.dispatch_job(
+            "export_users",
+            serde_json::json!({
+                "format": "csv"
+            }),
+        );
+
+        // Verify job was dispatched
+        assert_job_dispatched!(ctx, "export_users");
+
+        // Verify with predicate (check input)
+        assert_job_dispatched!(ctx, "export_users", |input: &serde_json::Value| {
+            input.get("format").and_then(|v| v.as_str()) == Some("csv")
+        });
+
+        // Check job status
+        assert_eq!(ctx.job_status(job_id), Some(JobStatus::Pending));
+
+        // Simulate job completion
+        ctx.complete_job(job_id);
+        assert_eq!(ctx.job_status(job_id), Some(JobStatus::Completed));
+    }
+
+    // Test workflow dispatch verification
+    #[test]
+    fn test_workflow_dispatch_verification() {
+        let mut ctx = TestContext::new_without_db();
+
+        // Start a workflow
+        let run_id = ctx.start_workflow(
+            "account_verification",
+            serde_json::json!({
+                "user_id": "user-123",
+                "email": "test@example.com"
+            }),
+        );
+
+        // Verify workflow was started
+        assert_workflow_started!(ctx, "account_verification");
+
+        // Check initial status
+        assert_eq!(ctx.workflow_status(run_id), Some(WorkflowStatus::Created));
+
+        // Simulate step completions
+        ctx.complete_workflow_step(run_id, "generate_token");
+        ctx.complete_workflow_step(run_id, "send_email");
+
+        assert!(ctx.workflow_step_completed(run_id, "generate_token"));
+        assert!(ctx.workflow_step_completed(run_id, "send_email"));
+        assert!(!ctx.workflow_step_completed(run_id, "mark_verified"));
+
+        // Complete the workflow
+        ctx.complete_workflow(run_id);
+        assert_eq!(ctx.workflow_status(run_id), Some(WorkflowStatus::Completed));
+    }
+
+    // Test assertion macros
+    #[test]
+    fn test_result_assertions() {
+        let success: Result<i32> = Ok(42);
+        let failure: Result<i32> = Err(ForgeError::Validation("invalid input".into()));
+
+        assert_ok!(success);
+        assert_err!(failure);
+
+        // Test with custom message
+        assert_ok!(Ok::<_, ForgeError>(42), "expected success");
+        assert_err!(
+            Err::<i32, _>(ForgeError::NotFound("missing".into())),
+            "expected error"
+        );
+    }
+
+    // Test error variant matching
+    #[test]
+    fn test_error_variant_assertions() {
+        let validation_err: Result<()> = Err(ForgeError::Validation("bad input".into()));
+        let not_found_err: Result<()> = Err(ForgeError::NotFound("missing".into()));
+
+        assert_err_variant!(validation_err, ForgeError::Validation(_));
+        assert_err_variant!(not_found_err, ForgeError::NotFound(_));
+    }
+
+    // Test JSON matching
+    #[test]
+    fn test_json_matching() {
+        use forge::testing::assert_json_matches;
+
+        let actual = serde_json::json!({
+            "user": {
+                "id": "123",
+                "email": "test@example.com",
+                "metadata": {
+                    "created": "2024-01-01",
+                    "verified": true
+                }
+            },
+            "status": "active"
+        });
+
+        // Partial match - only check specific fields
+        assert!(assert_json_matches(
+            &actual,
+            &serde_json::json!({
+                "status": "active"
+            })
+        ));
+
+        // Nested partial match
+        assert!(assert_json_matches(
+            &actual,
+            &serde_json::json!({
+                "user": {
+                    "email": "test@example.com"
+                }
+            })
+        ));
+
+        // Deep nested match
+        assert!(assert_json_matches(
+            &actual,
+            &serde_json::json!({
+                "user": {
+                    "metadata": {
+                        "verified": true
+                    }
+                }
+            })
+        ));
+    }
+
+    // Example: Testing a query function
+    // Uncomment and adapt for your actual functions
+    //
+    // #[tokio::test]
+    // async fn test_get_users_query() {
+    //     let ctx = TestContext::builder()
+    //         .database_url(std::env::var("TEST_DATABASE_URL").unwrap())
+    //         .build()
+    //         .await
+    //         .expect("Failed to build test context");
+    //
+    //     // Execute query
+    //     let result = get_users(&ctx).await;
+    //     assert_ok!(result);
+    //
+    //     let users = result.unwrap();
+    //     assert!(users.is_empty() || users.len() > 0);
+    // }
+
+    // Example: Testing with HTTP mocks
+    // Uncomment to use
+    //
+    // #[tokio::test]
+    // async fn test_action_with_mock_http() {
+    //     let ctx = TestContext::builder()
+    //         .mock_http("https://api.sendgrid.com/*", |_req| {
+    //             MockResponse::ok(serde_json::json!({
+    //                 "message_id": "mock-123"
+    //             }))
+    //         })
+    //         .build()
+    //         .await
+    //         .expect("Failed to build test context");
+    //
+    //     // Your action would use ctx.http() which returns the mock
+    //     // let result = send_welcome_email(&ctx, input).await;
+    //     // assert_ok!(result);
+    // }
+}

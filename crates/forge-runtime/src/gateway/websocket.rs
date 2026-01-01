@@ -261,6 +261,11 @@ async fn handle_socket(socket: WebSocket, state: Arc<WsState>) {
                     code,
                     message,
                 },
+                ReactorMessage::ErrorWithId { id, code, message } => ServerMessage::Error {
+                    id: Some(id),
+                    code,
+                    message,
+                },
                 ReactorMessage::Ping => ServerMessage::Pong,
                 ReactorMessage::Pong => continue,
                 _ => continue,
@@ -453,9 +458,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<WsState>) {
                             .ws_server()
                             .send_to_session(
                                 session_id,
-                                ReactorMessage::Error {
-                                    code: "SUBSCRIBE_ERROR".to_string(),
-                                    message: "Failed to subscribe to job".to_string(),
+                                ReactorMessage::ErrorWithId {
+                                    id: id.clone(),
+                                    code: "NOT_FOUND".to_string(),
+                                    message: "Job not found".to_string(),
                                 },
                             )
                             .await;
@@ -528,9 +534,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<WsState>) {
                             .ws_server()
                             .send_to_session(
                                 session_id,
-                                ReactorMessage::Error {
-                                    code: "SUBSCRIBE_ERROR".to_string(),
-                                    message: "Failed to subscribe to workflow".to_string(),
+                                ReactorMessage::ErrorWithId {
+                                    id: id.clone(),
+                                    code: "NOT_FOUND".to_string(),
+                                    message: "Workflow not found".to_string(),
                                 },
                             )
                             .await;

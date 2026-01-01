@@ -1,7 +1,9 @@
-use crate::schema::User;
+use crate::schema::{User, UserRole};
 use forge::prelude::*;
 
-#[forge::query]
+/// Public query - no authentication required
+/// Cached for 30 seconds to reduce database load
+#[forge::query(cache = "30s", public)]
 pub async fn get_users(ctx: &QueryContext) -> Result<Vec<User>> {
     sqlx::query_as::<_, User>("SELECT * FROM users ORDER BY created_at DESC")
         .fetch_all(ctx.db())
@@ -9,7 +11,9 @@ pub async fn get_users(ctx: &QueryContext) -> Result<Vec<User>> {
         .map_err(Into::into)
 }
 
-#[forge::query]
+/// Query with explicit timeout
+/// Returns None if user not found (no error)
+#[forge::query(timeout = 10)]
 pub async fn get_user(ctx: &QueryContext, id: Uuid) -> Result<Option<User>> {
     sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
         .bind(id)
@@ -18,18 +22,29 @@ pub async fn get_user(ctx: &QueryContext, id: Uuid) -> Result<Option<User>> {
         .map_err(Into::into)
 }
 
+/// Mutation demonstrating:
+/// - Default auth (mutations typically require auth in production)
+/// - Optional parameters with defaults
+/// - Returning created entity
 #[forge::mutation]
-pub async fn create_user(ctx: &MutationContext, email: String, name: String) -> Result<User> {
+pub async fn create_user(
+    ctx: &MutationContext,
+    email: String,
+    name: String,
+    role: Option<UserRole>,
+) -> Result<User> {
     let id = Uuid::new_v4();
     let now = Utc::now();
+    let role = role.unwrap_or_default();
 
     let user = sqlx::query_as::<_, User>(
-        "INSERT INTO users (id, email, name, created_at, updated_at) \
-         VALUES ($1, $2, $3, $4, $5) RETURNING *",
+        "INSERT INTO users (id, email, name, role, created_at, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
     )
     .bind(id)
     .bind(&email)
     .bind(&name)
+    .bind(role)
     .bind(now)
     .bind(now)
     .fetch_one(ctx.db())
@@ -38,12 +53,15 @@ pub async fn create_user(ctx: &MutationContext, email: String, name: String) -> 
     Ok(user)
 }
 
-#[forge::mutation]
+/// Mutation with partial updates
+/// Only provided fields are updated
+#[forge::mutation(timeout = 30)]
 pub async fn update_user(
     ctx: &MutationContext,
     id: Uuid,
     email: Option<String>,
     name: Option<String>,
+    role: Option<UserRole>,
 ) -> Result<User> {
     let now = Utc::now();
 
@@ -51,13 +69,15 @@ pub async fn update_user(
         "UPDATE users SET \
          email = COALESCE($2, email), \
          name = COALESCE($3, name), \
-         updated_at = $4 \
+         role = COALESCE($4, role), \
+         updated_at = $5 \
          WHERE id = $1 \
          RETURNING *",
     )
     .bind(id)
     .bind(email)
     .bind(name)
+    .bind(role)
     .bind(now)
     .fetch_one(ctx.db())
     .await?;
@@ -65,6 +85,7 @@ pub async fn update_user(
     Ok(user)
 }
 
+/// Mutation returning boolean success indicator
 #[forge::mutation]
 pub async fn delete_user(ctx: &MutationContext, id: Uuid) -> Result<bool> {
     let result = sqlx::query("DELETE FROM users WHERE id = $1")
@@ -74,3 +95,20 @@ pub async fn delete_user(ctx: &MutationContext, id: Uuid) -> Result<bool> {
 
     Ok(result.rows_affected() > 0)
 }
+
+// Example of role-protected mutation (uncomment to use):
+// #[forge::mutation(require_auth, require_role("admin"))]
+// pub async fn admin_reset_user(
+//     ctx: &MutationContext,
+//     id: Uuid,
+// ) -> Result<User> {
+//     // Only admins can call this mutation
+//     // ctx.auth.require_role("admin")? is enforced automatically
+//     sqlx::query_as::<_, User>(
+//         "UPDATE users SET role = 'guest', updated_at = NOW() WHERE id = $1 RETURNING *"
+//     )
+//     .bind(id)
+//     .fetch_one(ctx.db())
+//     .await
+//     .map_err(Into::into)
+// }

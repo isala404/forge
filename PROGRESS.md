@@ -364,3 +364,34 @@ Refactored CLI scaffolding to use template files.
 - Rewrote `crates/forge/src/cli/new.rs`: 1500 lines → 200 lines using include_str!
 - Rewrote `crates/forge/src/cli/runtime_generator.rs`: 1000 lines → 200 lines using include_str!
 - Templates use simple `{{var}}` placeholder replacement
+
+Expanded scaffolded template feature coverage.
+- Added UserRole enum to User model (schema/user.rs.tmpl)
+- Added #[cache = "30s"] to get_users query (functions/users.rs.tmpl)
+- Created send_welcome_action.rs.tmpl demonstrating #[forge::action]
+- Enhanced export_users_job with #[idempotent], #[retry(backoff = "exponential")], ctx.is_retry()
+- Converted account_verification_workflow to fluent step API: ctx.step().compensate().run()
+- Added user_role enum type and role column to migration
+- Added commented config examples to forge.toml (rate_limit, auth, cluster)
+- Updated frontend types.ts and api.ts with UserRole and action support
+- Updated new.rs to include send_welcome_action template
+
+Fixed stale job/workflow localStorage issue.
+- Added ErrorWithId variant to WebSocketMessage enum (forge-runtime/src/realtime/websocket.rs)
+- Server now sends error with subscription ID when job/workflow not found (forge-runtime/src/gateway/websocket.rs)
+- Client handles error responses and sends "not_found" status to callbacks (runtime/client.ts.tmpl)
+- Added "not_found" to JobStatus and WorkflowStatus types (runtime/types.ts.tmpl)
+- Trackers clear state and call onNotFound callback when receiving "not_found" (runtime/stores.ts.tmpl)
+- Page clears localStorage when job/workflow subscription fails (routes/page.svelte.tmpl)
+- Added .prettierrc and prettier-plugin-svelte to frontend templates (prettierrc.tmpl, package.json.tmpl)
+- Formatted svelte templates to pass prettier check (layout.svelte.tmpl, page.svelte.tmpl)
+
+Expanded scaffolded template feature coverage for better framework showcase.
+- Workflow: ctx.sleep() durable suspension, ctx.is_resumed(), ctx.workflow_time(), advanced patterns (commented)
+- Job: #[priority = "low"], ctx.heartbeat(), ctx.is_last_attempt(), #[worker_capability] (commented)
+- Cron: #[catch_up], #[catch_up_limit = 5], ctx.delay(), ctx.is_late(), ctx.is_catch_up, ctx.log structured logging
+- Query: #[forge::query(public)], #[forge::query(timeout = 10)]
+- Mutation: #[forge::mutation(timeout = 30)], role-protected example (commented)
+- Action: #[forge::action(timeout = 60)], ctx.http() example (commented)
+- Config: added [function], [worker], [auth], [rate_limit], [cluster], [node] sections (commented)
+- Testing: new tests.rs.tmpl with TestContext, assertion macros, MockHttp, job/workflow verification examples

@@ -287,6 +287,35 @@ export class ForgeClient implements ForgeClientInterface {
       ) {
         const callback = this.workflowCallbacks.get(message.id);
         if (callback) callback(message.workflow);
+      } else if (message.type === "error" && message.id) {
+        // Handle subscription errors (e.g., job/workflow not found)
+        const errorMessage = (message as { message?: string }).message || "Unknown error";
+        const jobCallback = this.jobCallbacks.get(message.id);
+        if (jobCallback) {
+          jobCallback({
+            job_id: "",
+            status: "not_found",
+            progress_percent: null,
+            progress_message: null,
+            output: null,
+            error: errorMessage,
+          });
+          this.jobCallbacks.delete(message.id);
+          this.pendingJobSubscriptions.delete(message.id);
+        }
+        const workflowCallback = this.workflowCallbacks.get(message.id);
+        if (workflowCallback) {
+          workflowCallback({
+            workflow_id: "",
+            status: "not_found",
+            current_step: null,
+            steps: [],
+            output: null,
+            error: errorMessage,
+          });
+          this.workflowCallbacks.delete(message.id);
+          this.pendingWorkflowSubscriptions.delete(message.id);
+        }
       }
     } catch {}
   }

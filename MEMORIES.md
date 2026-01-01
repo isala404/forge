@@ -110,3 +110,60 @@ CLI Scaffolding
 - template::render() for {{var}} replacement, template_vars! macro
 - include_str!() embeds templates at compile time
 - Directories: project/, frontend/, runtime/
+- new.rs must include_str! and fs::write for each template file
+
+Template Features Demonstrated
+
+Schema:
+- Enum: sqlx::Type with #[sqlx(type_name, rename_all)]
+- #[default] for default enum variant
+
+Queries:
+- Caching: #[forge::query(cache = "30s")]
+- Public endpoint: #[forge::query(cache = "30s", public)]
+- Timeout: #[forge::query(timeout = 10)]
+
+Mutations:
+- Basic: #[forge::mutation]
+- With timeout: #[forge::mutation(timeout = 30)]
+- Role-protected (commented): #[forge::mutation(require_auth, require_role("admin"))]
+
+Actions:
+- With timeout: #[forge::action(timeout = 60)]
+- ctx.http() for external API calls (commented example)
+
+Jobs:
+- Retry: #[retry(max_attempts = 3, backoff = "exponential")]
+- Idempotency: #[idempotent]
+- Priority: #[priority = "low"]
+- Worker capability (commented): #[worker_capability = "general"]
+- ctx.heartbeat() for long-running jobs
+- ctx.is_retry(), ctx.is_last_attempt() for retry detection
+- ctx.progress(percent, message) for progress reporting
+
+Crons:
+- Schedule: #[forge::cron("* * * * *")]
+- Timezone: #[timezone = "UTC"]
+- Catch-up: #[catch_up], #[catch_up_limit = 5]
+- ctx.delay(), ctx.is_late() for delay detection
+- ctx.is_catch_up for catch-up run detection
+- ctx.log.info/warn/error/debug() for structured logging
+
+Workflows:
+- Version: #[version = 1], #[timeout = "24h"]
+- Manual step tracking: ctx.is_step_completed(), ctx.record_step_start/complete()
+- Durable sleep: ctx.sleep(Duration) - survives server restarts
+- Resumption detection: ctx.is_resumed()
+- Deterministic time: ctx.workflow_time()
+- Advanced patterns (commented): parallel(), fluent step API, wait_for_event()
+
+Testing:
+- TestContext, TestContextBuilder
+- assert_ok!, assert_err!, assert_err_variant!
+- assert_job_dispatched!, assert_workflow_started!
+- assert_json_matches() for partial JSON matching
+- MockHttp for HTTP mocking
+
+Config (forge.toml):
+- [project], [database], [gateway], [observability] sections
+- Commented: [function], [worker], [auth], [rate_limit], [cluster], [node]
