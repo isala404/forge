@@ -53,6 +53,7 @@ Reactivity
 - Pipeline: ChangeListener -> InvalidationEngine -> Reactor -> WebSocket
 - Triggers: forge_enable_reactivity(table) creates NOTIFY triggers
 - Read set: query name patterns (get_X/list_X -> table X)
+- Hash updates: must update last_result_hash after sending, not during (lock ordering)
 
 Frontend
 

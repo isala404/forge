@@ -414,3 +414,8 @@ Updated documentation for MVP features.
 - deployment.mdx: New file with Docker, docker-compose, Kubernetes, health endpoints
 - realtime-subscriptions.mdx: Added ConnectionStatusStore, createConnectionStore(), reset() method
 - database.mdx: Added GIN indexes on JSONB columns section with query examples
+
+Fixed WebSocket reactivity bug for last item deletion.
+- Root cause: `last_result_hash` in Reactor.handle_change() never updated after re-execution
+- `forge-runtime/src/realtime/reactor.rs`: Restructured handle_change() to collect subscription info under read lock, release, process changes, then update hashes via write lock
+- Replaced delete confirmation browser confirm() with popover component in page.svelte.tmpl

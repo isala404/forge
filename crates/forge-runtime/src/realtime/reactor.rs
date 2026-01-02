@@ -632,43 +632,64 @@ impl Reactor {
 
         tracing::debug!(count = invalidated.len(), "Invalidating subscriptions");
 
-        // Re-execute invalidated queries and push updates
-        let subscriptions = active_subscriptions.read().await;
+        // Collect subscription info under read lock, then release before async operations
+        let subs_to_process: Vec<_> = {
+            let subscriptions = active_subscriptions.read().await;
+            invalidated
+                .iter()
+                .filter_map(|sub_id| {
+                    subscriptions.get(sub_id).map(|active| {
+                        (
+                            *sub_id,
+                            active.session_id,
+                            active.query_name.clone(),
+                            active.args.clone(),
+                            active.last_result_hash.clone(),
+                        )
+                    })
+                })
+                .collect()
+        };
 
-        for sub_id in invalidated {
-            if let Some(active) = subscriptions.get(&sub_id) {
-                // Re-execute the query
-                match Self::execute_query_static(
-                    registry,
-                    db_pool,
-                    &active.query_name,
-                    &active.args,
-                )
-                .await
-                {
-                    Ok((new_data, _read_set)) => {
-                        let new_hash = Self::compute_hash(&new_data);
+        // Track updates to apply after processing
+        let mut updates: Vec<(SubscriptionId, String)> = Vec::new();
 
-                        // Only push if data changed
-                        if active.last_result_hash.as_ref() != Some(&new_hash) {
-                            // Send updated data to client
-                            let message = WebSocketMessage::Data {
-                                subscription_id: sub_id,
-                                data: new_data,
-                            };
+        // Re-execute invalidated queries and push updates (without holding locks)
+        for (sub_id, session_id, query_name, args, last_hash) in subs_to_process {
+            // Re-execute the query
+            match Self::execute_query_static(registry, db_pool, &query_name, &args).await {
+                Ok((new_data, _read_set)) => {
+                    let new_hash = Self::compute_hash(&new_data);
 
-                            if let Err(e) =
-                                ws_server.send_to_session(active.session_id, message).await
-                            {
-                                tracing::warn!(?sub_id, "Failed to send update: {}", e);
-                            } else {
-                                tracing::debug!(?sub_id, "Pushed update to client");
-                            }
+                    // Only push if data changed
+                    if last_hash.as_ref() != Some(&new_hash) {
+                        // Send updated data to client
+                        let message = WebSocketMessage::Data {
+                            subscription_id: sub_id,
+                            data: new_data,
+                        };
+
+                        if let Err(e) = ws_server.send_to_session(session_id, message).await {
+                            tracing::warn!(?sub_id, "Failed to send update: {}", e);
+                        } else {
+                            tracing::debug!(?sub_id, "Pushed update to client");
+                            // Track the hash update
+                            updates.push((sub_id, new_hash));
                         }
                     }
-                    Err(e) => {
-                        tracing::error!(?sub_id, "Failed to re-execute query: {}", e);
-                    }
+                }
+                Err(e) => {
+                    tracing::error!(?sub_id, "Failed to re-execute query: {}", e);
+                }
+            }
+        }
+
+        // Update hashes for successfully sent updates
+        if !updates.is_empty() {
+            let mut subscriptions = active_subscriptions.write().await;
+            for (sub_id, new_hash) in updates {
+                if let Some(active) = subscriptions.get_mut(&sub_id) {
+                    active.last_result_hash = Some(new_hash);
                 }
             }
         }

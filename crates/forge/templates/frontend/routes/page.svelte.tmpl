@@ -32,6 +32,9 @@
   let editEmail = $state("");
   let isEditing = $state(false);
 
+  // Delete confirmation popover state
+  let deletePopoverUserId = $state<string | null>(null);
+
   // Action state
   let actionResult = $state<{ sent: boolean; message_id: string } | null>(null);
   let actionError = $state<string | null>(null);
@@ -83,8 +86,16 @@
     if (result.data) selectedUser = result.data;
   }
 
-  async function handleDeleteUser(id: string) {
-    if (!confirm("Delete this user?")) return;
+  function showDeletePopover(id: string) {
+    deletePopoverUserId = id;
+  }
+
+  function hideDeletePopover() {
+    deletePopoverUserId = null;
+  }
+
+  async function confirmDeleteUser(id: string) {
+    hideDeletePopover();
     await mutate(deleteUser, { id });
     if (selectedUser?.id === id) selectedUser = null;
   }
@@ -434,7 +445,7 @@
             <tr>
               <td>{user.name}</td>
               <td>{user.email}</td>
-              <td>
+              <td class="actions-cell">
                 <button class="small" onclick={() => handleSelectUser(user.id)}>
                   View
                 </button>
@@ -444,12 +455,30 @@
                 >
                   Edit
                 </button>
-                <button
-                  class="small danger"
-                  onclick={() => handleDeleteUser(user.id)}
-                >
-                  Delete
-                </button>
+                <div class="delete-wrapper">
+                  <button
+                    class="small danger"
+                    onclick={() => showDeletePopover(user.id)}
+                  >
+                    Delete
+                  </button>
+                  {#if deletePopoverUserId === user.id}
+                    <div class="delete-popover">
+                      <p>Delete this user?</p>
+                      <div class="popover-buttons">
+                        <button
+                          class="small danger"
+                          onclick={() => confirmDeleteUser(user.id)}
+                        >
+                          Confirm
+                        </button>
+                        <button class="small secondary" onclick={hideDeletePopover}>
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  {/if}
+                </div>
               </td>
             </tr>
           {/each}
@@ -779,5 +808,41 @@
       flex-direction: column;
       gap: 1rem;
     }
+  }
+
+  /* Delete popover styles */
+  .actions-cell {
+    position: relative;
+  }
+
+  .delete-wrapper {
+    display: inline-block;
+    position: relative;
+  }
+
+  .delete-popover {
+    position: absolute;
+    right: 0;
+    top: 100%;
+    margin-top: 4px;
+    background: white;
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    padding: 0.75rem;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    z-index: 100;
+    min-width: 140px;
+  }
+
+  .delete-popover p {
+    margin: 0 0 0.5rem 0;
+    font-size: 0.9rem;
+    color: #333;
+    white-space: nowrap;
+  }
+
+  .popover-buttons {
+    display: flex;
+    gap: 0.5rem;
   }
 </style>
