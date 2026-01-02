@@ -1,0 +1,76 @@
+# {{project_name}}
+
+A full-stack application built with [FORGE](https://github.com/isala404/forge).
+
+## What is FORGE?
+
+FORGE is a full-stack framework where PostgreSQL is your only infrastructure dependency. Like React declares UI components and handles rendering, FORGE lets you declare backend functions (queries, mutations, actions, jobs, crons, workflows) and handles execution, scheduling, and real-time updates automatically.
+
+- **Queries/Mutations** - Database operations with caching and auth
+- **Actions** - External API calls outside transactions
+- **Jobs** - Background tasks with retries and progress tracking
+- **Crons** - Scheduled tasks with timezone support
+- **Workflows** - Durable multi-step processes that survive restarts
+
+## Prerequisites
+
+- Rust 1.92+
+- PostgreSQL 18+
+- Bun 1.3+
+
+## Quick Start
+
+```bash
+docker run -d --name forge-db -e POSTGRES_PASSWORD=forge -e POSTGRES_DB={{project_name}} -p 5432:5432 postgres:16-alpine
+echo 'DATABASE_URL="postgres://postgres:forge@localhost/{{project_name}}"' > .env
+cargo run
+```
+
+Frontend (separate terminal):
+```bash
+cd frontend
+bun install
+bun dev
+```
+
+Backend: `http://localhost:8080` | Frontend: `http://localhost:5173`
+
+## Build
+
+Single binary (backend + frontend):
+```bash
+cargo build --release --features embedded-frontend
+```
+
+Backend only:
+```bash
+cargo build --release
+```
+
+## Test
+
+```bash
+cargo test
+```
+
+## Project Structure
+
+```
+{{project_name}}/
+├── src/
+│   ├── main.rs              # Entry point
+│   ├── schema/              # Data models
+│   └── functions/           # Queries, mutations, jobs, crons, workflows
+├── migrations/              # SQL migrations
+├── frontend/                # SvelteKit frontend
+├── forge.toml               # FORGE configuration
+└── Dockerfile
+```
+
+## Endpoints
+
+- `POST /rpc` - RPC endpoint for queries, mutations, actions
+- `GET /health` - Health check
+- `GET /ready` - Readiness check (database connectivity)
+- `GET /_dashboard` - Admin dashboard
+- `WS /ws` - WebSocket for real-time subscriptions

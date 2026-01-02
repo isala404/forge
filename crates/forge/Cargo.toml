@@ -19,6 +19,7 @@ forge-codegen = { path = "../forge-codegen" }
 forge-macros = { path = "../forge-macros" }
 
 tokio = { workspace = true }
+tokio-util = "0.7"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }

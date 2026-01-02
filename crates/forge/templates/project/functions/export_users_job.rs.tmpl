@@ -26,7 +26,7 @@ pub struct ExportUsersOutput {
 #[priority = "low"]
 #[retry(max_attempts = 3, backoff = "exponential")]
 #[idempotent]
-// #[worker_capability = "general"]  // Target specific worker types
+#[worker_capability = "general"]
 pub async fn export_users(ctx: &JobContext, input: ExportUsersInput) -> Result<ExportUsersOutput> {
     use std::time::Duration;
 
@@ -53,13 +53,20 @@ pub async fn export_users(ctx: &JobContext, input: ExportUsersInput) -> Result<E
     );
 
     let _ = ctx.progress(0, "Initializing export...");
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Send heartbeat to indicate job is still alive
     // Important for long-running jobs to prevent timeout
     ctx.heartbeat().await?;
 
-    let _ = ctx.progress(20, "Fetching users...");
+    let _ = ctx.progress(10, "Preparing database query...");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let _ = ctx.progress(25, "Connecting to database...");
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    ctx.heartbeat().await?;
+
+    let _ = ctx.progress(40, "Fetching users...");
     let users: Vec<User> =
         sqlx::query_as::<_, User>("SELECT * FROM users ORDER BY created_at DESC")
             .fetch_all(ctx.db())
@@ -69,8 +76,8 @@ pub async fn export_users(ctx: &JobContext, input: ExportUsersInput) -> Result<E
     ctx.heartbeat().await?;
 
     let total = users.len();
-    let _ = ctx.progress(50, format!("Found {} users, formatting...", total));
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    let _ = ctx.progress(60, format!("Found {} users, formatting...", total));
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Format data based on requested format
     let data = match input.format.as_str() {
@@ -87,7 +94,7 @@ pub async fn export_users(ctx: &JobContext, input: ExportUsersInput) -> Result<E
 
                 // Update progress during large exports
                 if i > 0 && i % 100 == 0 {
-                    let progress = 50 + (i * 40 / total.max(1)) as u8;
+                    let progress = 60 + (i * 30 / total.max(1)) as u8;
                     let _ = ctx.progress(progress, format!("Formatted {}/{} users", i, total));
                     ctx.heartbeat().await?;
                 }
@@ -97,7 +104,7 @@ pub async fn export_users(ctx: &JobContext, input: ExportUsersInput) -> Result<E
     };
 
     let _ = ctx.progress(95, "Finalizing...");
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     let _ = ctx.progress(100, format!("Exported {} users", total));
 

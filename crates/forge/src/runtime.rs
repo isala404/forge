@@ -9,11 +9,16 @@
 //! - Observability dashboard
 //! - Cluster coordination
 
+use std::future::Future;
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::body::Body;
+use axum::http::Request;
+use axum::response::Response;
 use tokio::sync::broadcast;
 
 use forge_core::cluster::{LeaderRole, NodeId, NodeInfo, NodeRole, NodeStatus};
@@ -35,7 +40,13 @@ use forge_runtime::gateway::{AuthConfig, GatewayConfig as RuntimeGatewayConfig, 
 use forge_runtime::jobs::{JobDispatcher, JobQueue, JobRegistry, Worker, WorkerConfig};
 use forge_runtime::observability::{ObservabilityConfig, ObservabilityState};
 use forge_runtime::realtime::{WebSocketConfig, WebSocketServer};
-use forge_runtime::workflow::{WorkflowExecutor, WorkflowRegistry};
+use forge_runtime::workflow::{
+    EventStore, WorkflowExecutor, WorkflowRegistry, WorkflowScheduler, WorkflowSchedulerConfig,
+};
+use tokio_util::sync::CancellationToken;
+
+/// Type alias for frontend handler function.
+pub type FrontendHandler = fn(Request<Body>) -> Pin<Box<dyn Future<Output = Response> + Send>>;
 
 /// Prelude module for common imports.
 pub mod prelude {
@@ -82,6 +93,8 @@ pub struct Forge {
     extra_migrations: Vec<Migration>,
     /// Observability state (created during run()).
     observability: Option<ObservabilityState>,
+    /// Optional frontend handler for embedded SPA.
+    frontend_handler: Option<FrontendHandler>,
 }
 
 impl Forge {
@@ -326,6 +339,30 @@ impl Forge {
             tracing::info!("Cron scheduler started");
         }
 
+        // Start workflow scheduler if scheduler role
+        let workflow_shutdown_token = CancellationToken::new();
+        if roles.contains(&NodeRole::Scheduler) {
+            let scheduler_executor = Arc::new(WorkflowExecutor::new(
+                Arc::new(self.workflow_registry.clone()),
+                pool.clone(),
+                http_client.clone(),
+            ));
+            let event_store = Arc::new(EventStore::new(pool.clone()));
+            let scheduler = WorkflowScheduler::new(
+                pool.clone(),
+                scheduler_executor,
+                event_store,
+                WorkflowSchedulerConfig::default(),
+            );
+
+            let shutdown_token = workflow_shutdown_token.clone();
+            handles.push(tokio::spawn(async move {
+                scheduler.run(shutdown_token).await;
+            }));
+
+            tracing::info!("Workflow scheduler started");
+        }
+
         // Reactor handle for shutdown
         let mut reactor_handle = None;
 
@@ -389,6 +426,13 @@ impl Forge {
                 )
                 .nest("/_api", create_api_router(dashboard_state));
 
+            // Add frontend handler as fallback if configured
+            if let Some(handler) = self.frontend_handler {
+                use axum::routing::get;
+                router = router.fallback(get(move |req| handler(req)));
+                tracing::info!("Frontend handler enabled - serving embedded assets");
+            }
+
             let addr = gateway.addr();
 
             handles.push(tokio::spawn(async move {
@@ -433,6 +477,10 @@ impl Forge {
         // Graceful shutdown
         tracing::info!("Starting graceful shutdown...");
 
+        // Stop workflow scheduler
+        workflow_shutdown_token.cancel();
+        tracing::info!("Workflow scheduler stopped");
+
         if let Err(e) = shutdown.shutdown().await {
             tracing::warn!("Shutdown error: {}", e);
         }
@@ -476,6 +524,7 @@ pub struct ForgeBuilder {
     workflow_registry: WorkflowRegistry,
     migrations_dir: PathBuf,
     extra_migrations: Vec<Migration>,
+    frontend_handler: Option<FrontendHandler>,
 }
 
 impl ForgeBuilder {
@@ -489,6 +538,7 @@ impl ForgeBuilder {
             workflow_registry: WorkflowRegistry::new(),
             migrations_dir: PathBuf::from("migrations"),
             extra_migrations: Vec::new(),
+            frontend_handler: None,
         }
     }
 
@@ -509,6 +559,14 @@ impl ForgeBuilder {
     pub fn migration(mut self, name: impl Into<String>, sql: impl Into<String>) -> Self {
         self.extra_migrations.push(Migration::new(name, sql));
         self
+    }
+
+    /// Set a frontend handler for serving embedded SPA assets.
+    ///
+    /// Use with the `embedded-frontend` feature to build a single binary
+    /// that includes both backend and frontend.
+    pub fn frontend_handler(&mut self, handler: FrontendHandler) {
+        self.frontend_handler = Some(handler);
     }
 
     /// Set the configuration.
@@ -557,6 +615,7 @@ impl ForgeBuilder {
             migrations_dir: self.migrations_dir,
             extra_migrations: self.extra_migrations,
             observability: None,
+            frontend_handler: self.frontend_handler,
         })
     }
 }

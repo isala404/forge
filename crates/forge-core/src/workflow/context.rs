@@ -104,6 +104,8 @@ pub struct WorkflowContext {
     suspend_tx: Option<mpsc::Sender<SuspendReason>>,
     /// Whether this is a resumed execution.
     is_resumed: bool,
+    /// Whether this execution resumed specifically from a sleep (timer expired).
+    resumed_from_sleep: bool,
     /// Tenant ID for multi-tenancy.
     tenant_id: Option<Uuid>,
 }
@@ -132,6 +134,7 @@ impl WorkflowContext {
             compensation_handlers: Arc::new(RwLock::new(HashMap::new())),
             suspend_tx: None,
             is_resumed: false,
+            resumed_from_sleep: false,
             tenant_id: None,
         }
     }
@@ -159,8 +162,15 @@ impl WorkflowContext {
             compensation_handlers: Arc::new(RwLock::new(HashMap::new())),
             suspend_tx: None,
             is_resumed: true,
+            resumed_from_sleep: false,
             tenant_id: None,
         }
+    }
+
+    /// Mark that this context resumed from a sleep (timer expired).
+    pub fn with_resumed_from_sleep(mut self) -> Self {
+        self.resumed_from_sleep = true;
+        self
     }
 
     /// Set the suspend channel.
@@ -287,8 +297,38 @@ impl WorkflowContext {
         });
     }
 
-    /// Record step completion.
+    /// Record step completion (fire-and-forget database update).
+    /// Use `record_step_complete_async` if you need to ensure persistence before continuing.
     pub fn record_step_complete(&self, name: &str, result: serde_json::Value) {
+        let state_clone = self.update_step_state_complete(name, result);
+
+        // Persist to database in background
+        if let Some(state) = state_clone {
+            let pool = self.db_pool.clone();
+            let run_id = self.run_id;
+            let step_name = name.to_string();
+            tokio::spawn(async move {
+                Self::persist_step_complete(&pool, run_id, &step_name, &state).await;
+            });
+        }
+    }
+
+    /// Record step completion and wait for database persistence.
+    pub async fn record_step_complete_async(&self, name: &str, result: serde_json::Value) {
+        let state_clone = self.update_step_state_complete(name, result);
+
+        // Persist to database synchronously
+        if let Some(state) = state_clone {
+            Self::persist_step_complete(&self.db_pool, self.run_id, name, &state).await;
+        }
+    }
+
+    /// Update in-memory step state to completed.
+    fn update_step_state_complete(
+        &self,
+        name: &str,
+        result: serde_json::Value,
+    ) -> Option<StepState> {
         let mut states = self.step_states.write().unwrap();
         if let Some(state) = states.get_mut(name) {
             state.complete(result.clone());
@@ -302,35 +342,40 @@ impl WorkflowContext {
         }
         drop(completed);
 
-        // Persist to database in background
-        if let Some(state) = state_clone {
-            let pool = self.db_pool.clone();
-            let run_id = self.run_id;
-            let step_name = name.to_string();
-            tokio::spawn(async move {
-                if let Err(e) = sqlx::query(
-                    r#"
-                    UPDATE forge_workflow_steps
-                    SET status = $3, result = $4, completed_at = $5
-                    WHERE workflow_run_id = $1 AND step_name = $2
-                    "#,
-                )
-                .bind(run_id)
-                .bind(&step_name)
-                .bind(state.status.as_str())
-                .bind(&state.result)
-                .bind(state.completed_at)
-                .execute(&pool)
-                .await
-                {
-                    tracing::warn!(
-                        workflow_run_id = %run_id,
-                        step = %step_name,
-                        "Failed to persist step completion: {}",
-                        e
-                    );
-                }
-            });
+        state_clone
+    }
+
+    /// Persist step completion to database.
+    async fn persist_step_complete(
+        pool: &sqlx::PgPool,
+        run_id: Uuid,
+        step_name: &str,
+        state: &StepState,
+    ) {
+        // Use UPSERT to handle race condition where persist_step_start hasn't completed yet
+        if let Err(e) = sqlx::query(
+            r#"
+            INSERT INTO forge_workflow_steps (id, workflow_run_id, step_name, status, result, started_at, completed_at)
+            VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6)
+            ON CONFLICT (workflow_run_id, step_name) DO UPDATE
+            SET status = $3, result = $4, completed_at = $6
+            "#,
+        )
+        .bind(run_id)
+        .bind(step_name)
+        .bind(state.status.as_str())
+        .bind(&state.result)
+        .bind(state.started_at)
+        .bind(state.completed_at)
+        .execute(pool)
+        .await
+        {
+            tracing::warn!(
+                workflow_run_id = %run_id,
+                step = %step_name,
+                "Failed to persist step completion: {}",
+                e
+            );
         }
     }
 
@@ -508,6 +553,11 @@ impl WorkflowContext {
     /// ctx.sleep(Duration::from_secs(30 * 24 * 60 * 60)).await?;
     /// ```
     pub async fn sleep(&self, duration: Duration) -> Result<()> {
+        // If we resumed from a sleep, the timer already expired - continue immediately
+        if self.resumed_from_sleep {
+            return Ok(());
+        }
+
         let wake_at = Utc::now() + chrono::Duration::from_std(duration).unwrap_or_default();
         self.sleep_until(wake_at).await
     }
@@ -523,6 +573,11 @@ impl WorkflowContext {
     /// ctx.sleep_until(renewal_date).await?;
     /// ```
     pub async fn sleep_until(&self, wake_at: DateTime<Utc>) -> Result<()> {
+        // If we resumed from a sleep, the timer already expired - continue immediately
+        if self.resumed_from_sleep {
+            return Ok(());
+        }
+
         // If wake time already passed, return immediately
         if wake_at <= Utc::now() {
             return Ok(());

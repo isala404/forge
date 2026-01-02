@@ -1,17 +1,16 @@
 <script lang="ts">
-  import { subscribe, mutate, query, action } from "@forge/svelte";
+  import { subscribe, mutate, action } from "@forge/svelte";
   import {
     getUsers,
-    getUser,
     createUser,
     updateUser,
     deleteUser,
     getAppStats,
-    sendWelcomeEmail,
+    getQuote,
     createExportUsersJob,
     createAccountVerificationWorkflow,
   } from "$lib/forge";
-  import type { User } from "$lib/forge/types";
+  import type { User, GetQuoteOutput } from "$lib/forge/types";
   import { onMount, onDestroy } from "svelte";
 
   const ACTIVE_JOB_KEY = "forge_active_job_id";
@@ -36,7 +35,7 @@
   let deletePopoverUserId = $state<string | null>(null);
 
   // Action state
-  let actionResult = $state<{ sent: boolean; message_id: string } | null>(null);
+  let actionResult = $state<GetQuoteOutput | null>(null);
   let actionError = $state<string | null>(null);
   let isActionRunning = $state(false);
 
@@ -81,11 +80,6 @@
     isSubmitting = false;
   }
 
-  async function handleSelectUser(id: string) {
-    const result = await query(getUser, { id });
-    if (result.data) selectedUser = result.data;
-  }
-
   function showDeletePopover(id: string) {
     deletePopoverUserId = id;
   }
@@ -121,20 +115,16 @@
     }
   }
 
-  async function handleSendWelcomeEmail() {
-    if (!selectedUser) return;
-
+  async function handleGetQuote() {
     isActionRunning = true;
     actionResult = null;
     actionError = null;
 
     try {
       // Actions expect input wrapped in an 'input' field
-      const result = await action(sendWelcomeEmail, {
+      const result = await action(getQuote, {
         input: {
-          user_id: selectedUser.id,
-          email: selectedUser.email,
-          name: selectedUser.name,
+          category: "inspiration",
         },
       });
       actionResult = result;
@@ -148,6 +138,7 @@
     editingUser = user;
     editName = user.name;
     editEmail = user.email;
+    selectedUser = user;
   }
 
   async function handleUpdateUser(e: Event) {
@@ -205,19 +196,16 @@
 </script>
 
 <main>
-  <h1>FORGE Demo</h1>
+  <h1>Forge</h1>
   <p class="subtitle">
-    Backend: <a href="{apiUrl}/health" target="_blank">{apiUrl}</a> | Dashboard:
-    <a href="{apiUrl}/_dashboard" target="_blank">/_dashboard</a>
+    Backend: <a href={apiUrl + "/health"} target="_blank">{apiUrl}</a> |
+    Dashboard:
+    <a href={apiUrl + "/_dashboard"} target="_blank">/_dashboard</a>
   </p>
 
-  <!-- System Status Panel - Shows live stats from heartbeat cron -->
-  <section class="card full-width status-panel">
-    <h2>System Status <span class="badge live">live</span></h2>
-    <p class="hint">
-      Updated every minute by heartbeat cron. Subscribe to get real-time
-      updates!
-    </p>
+  <section class="card status-panel">
+    <h2>System Health <span class="badge live">cron + subscribe</span></h2>
+    <p class="hint">Auto-updates every minute via scheduled heartbeat</p>
 
     {#if $stats.loading}
       <p>Loading stats...</p>
@@ -236,10 +224,6 @@
           <span class="stat-label">Total Users</span>
           <span class="stat-value">{$stats.data.user_count || "0"}</span>
         </div>
-        <div class="stat-item">
-          <span class="stat-label">Cron Features</span>
-          <span class="stat-hint">catch-up, late detection</span>
-        </div>
       </div>
     {:else}
       <p class="muted">
@@ -249,12 +233,9 @@
   </section>
 
   <div class="grid">
-    <!-- Job Demo Panel -->
     <section class="card">
-      <h2>Background Job <span class="badge">demo</span></h2>
-      <p class="hint">
-        Export users to CSV with real-time progress tracking via WebSocket
-      </p>
+      <h2>Export to CSV <span class="badge">job</span></h2>
+      <p class="hint">Background job with real-time progress tracking</p>
 
       {#if $exportUsersJob}
         <div class="progress-container">
@@ -272,8 +253,7 @@
             <p class="retry-info">⟳ Retrying (job will retry on failure)</p>
           {/if}
           {#if $exportUsersJob.status === "completed" || $exportUsersJob.status === "failed" || $exportUsersJob.status === "pending"}
-            <button onclick={startExportJob} style="margin-top: 0.5rem;"
-              >Start New Job</button
+            <button onclick={startExportJob} class="mt-sm">Start New Job</button
             >
           {/if}
         </div>
@@ -282,19 +262,11 @@
       {/if}
     </section>
 
-    <!-- Workflow Demo Panel -->
     <section class="card">
-      <h2>Workflow <span class="badge">demo</span></h2>
-      <p class="hint">
-        Multi-step account verification with step tracking via WebSocket
-      </p>
+      <h2>Verify Account <span class="badge">workflow</span></h2>
+      <p class="hint">Multi-step verification with automatic recovery</p>
 
       {#if $verifyAccountWorkflow}
-        {#if $verifyAccountWorkflow.status === "waiting"}
-          <p class="suspended-info">
-            ⏸ Workflow suspended (durable sleep) - will resume automatically
-          </p>
-        {/if}
         <div class="steps-list">
           {#each $verifyAccountWorkflow.steps as step}
             <div class="step-item {step.status}">
@@ -305,9 +277,8 @@
           {/each}
         </div>
         {#if $verifyAccountWorkflow.status === "completed" || $verifyAccountWorkflow.status === "failed" || $verifyAccountWorkflow.status === "compensated"}
-          <button
-            onclick={startVerificationWorkflow}
-            style="margin-top: 0.5rem;">Start New Workflow</button
+          <button onclick={startVerificationWorkflow} class="mt-sm"
+            >Start New Workflow</button
           >
         {/if}
       {:else}
@@ -317,46 +288,34 @@
   </div>
 
   <div class="grid">
-    <!-- Action Demo Panel -->
     <section class="card">
-      <h2>Action <span class="badge">demo</span></h2>
-      <p class="hint">
-        Call external APIs (non-transactional). Select a user first.
-      </p>
+      <h2>Get Quote <span class="badge">action</span></h2>
+      <p class="hint">Fetch from external API (sync, non-transactional)</p>
 
-      {#if !selectedUser}
-        <p class="muted">Select a user below to send welcome email</p>
-      {:else if isActionRunning}
-        <p>Sending welcome email to {selectedUser.email}...</p>
+      {#if isActionRunning}
+        <p>Fetching inspirational quote...</p>
       {:else if actionResult}
         <div class="action-result success">
-          <p>✓ Email sent successfully!</p>
-          <p class="small">Message ID: {actionResult.message_id}</p>
-          <button
-            class="small"
-            onclick={() => (actionResult = null)}
-            style="margin-top: 0.5rem;">Clear</button
+          <p class="quote">"{actionResult.quote}"</p>
+          <p class="author">— {actionResult.author}</p>
+          <button class="small mt-sm" onclick={() => (actionResult = null)}
+            >Get Another</button
           >
         </div>
       {:else if actionError}
         <div class="action-result error">
           <p>✗ Failed: {actionError}</p>
-          <button
-            class="small"
-            onclick={() => (actionError = null)}
-            style="margin-top: 0.5rem;">Clear</button
+          <button class="small mt-sm" onclick={() => (actionError = null)}
+            >Retry</button
           >
         </div>
       {:else}
-        <button onclick={handleSendWelcomeEmail}>
-          Send Welcome Email to {selectedUser.name}
-        </button>
+        <button onclick={handleGetQuote}>Get Inspirational Quote</button>
       {/if}
     </section>
 
-    <!-- Edit User Panel -->
     <section class="card">
-      <h2>Edit User <span class="badge">mutation</span></h2>
+      <h2>Edit User <span class="badge">mutate</span></h2>
       {#if editingUser}
         <form onsubmit={handleUpdateUser}>
           <input
@@ -386,44 +345,20 @@
     </section>
   </div>
 
-  <div class="grid">
-    <section class="card">
-      <h2>Create User <span class="badge">mutation</span></h2>
-      <form onsubmit={handleCreateUser}>
-        <input type="text" placeholder="Name" bind:value={name} required />
-        <input type="email" placeholder="Email" bind:value={email} required />
-        <button type="submit" disabled={isSubmitting}>
-          {isSubmitting ? "Creating..." : "Create"}
-        </button>
-      </form>
-    </section>
+  <section class="card">
+    <h2>Create User <span class="badge">mutate</span></h2>
+    <form onsubmit={handleCreateUser}>
+      <input type="text" placeholder="Name" bind:value={name} required />
+      <input type="email" placeholder="Email" bind:value={email} required />
+      <button type="submit" disabled={isSubmitting}>
+        {isSubmitting ? "Creating..." : "Create"}
+      </button>
+    </form>
+  </section>
 
-    <section class="card">
-      <h2>User Detail <span class="badge">query</span></h2>
-      {#if selectedUser}
-        <div class="user-detail">
-          <p><strong>ID:</strong> {selectedUser.id}</p>
-          <p><strong>Name:</strong> {selectedUser.name}</p>
-          <p><strong>Email:</strong> {selectedUser.email}</p>
-          <p>
-            <strong>Created:</strong>
-            {new Date(selectedUser.created_at).toLocaleString()}
-          </p>
-          <button class="secondary" onclick={() => (selectedUser = null)}
-            >Close</button
-          >
-        </div>
-      {:else}
-        <p class="muted">Click a user below to view details</p>
-      {/if}
-    </section>
-  </div>
-
-  <section class="card full-width">
-    <h2>Users <span class="badge live">subscription (live)</span></h2>
-    <p class="hint">
-      This list updates automatically when data changes - no refresh needed!
-    </p>
+  <section class="card">
+    <h2>User Directory <span class="badge live">subscribe</span></h2>
+    <p class="hint">Live-updating list - changes appear instantly</p>
 
     {#if $users.loading}
       <p>Loading...</p>
@@ -446,13 +381,7 @@
               <td>{user.name}</td>
               <td>{user.email}</td>
               <td class="actions-cell">
-                <button class="small" onclick={() => handleSelectUser(user.id)}>
-                  View
-                </button>
-                <button
-                  class="small secondary"
-                  onclick={() => startEditUser(user)}
-                >
+                <button class="small" onclick={() => startEditUser(user)}>
                   Edit
                 </button>
                 <div class="delete-wrapper">
@@ -472,7 +401,10 @@
                         >
                           Confirm
                         </button>
-                        <button class="small secondary" onclick={hideDeletePopover}>
+                        <button
+                          class="small secondary"
+                          onclick={hideDeletePopover}
+                        >
                           Cancel
                         </button>
                       </div>
@@ -490,29 +422,32 @@
 
 <style>
   main {
-    max-width: 900px;
+    max-width: 56rem;
     margin: 0 auto;
     padding: 2rem;
     font-family:
       system-ui,
       -apple-system,
       sans-serif;
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
   }
 
   h1 {
-    color: #1a1a1a;
-    margin-bottom: 0.25rem;
+    margin: 0;
   }
+
   h2 {
-    color: #333;
-    margin: 0 0 1rem 0;
+    margin: 0 0 0.75rem;
     font-size: 1.1rem;
   }
 
   .subtitle {
+    margin: -1rem 0 0;
     color: #666;
-    margin-bottom: 2rem;
   }
+
   .subtitle a {
     color: #0066cc;
   }
@@ -521,18 +456,13 @@
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 1.5rem;
-    margin-bottom: 1.5rem;
   }
 
   .card {
     background: #fff;
     border: 1px solid #e0e0e0;
     border-radius: 8px;
-    padding: 1.5rem;
-  }
-
-  .full-width {
-    grid-column: 1 / -1;
+    padding: 1.25rem;
   }
 
   .status-panel {
@@ -553,7 +483,6 @@
   .stat-label {
     font-size: 0.8rem;
     color: #666;
-    margin-bottom: 0.25rem;
   }
 
   .stat-value {
@@ -571,29 +500,13 @@
   .late-warning {
     font-size: 0.75rem;
     color: #dc2626;
-    margin-left: 0.5rem;
-  }
-
-  .retry-info {
-    font-size: 0.85rem;
-    color: #d97706;
-    margin-top: 0.25rem;
-  }
-
-  .suspended-info {
-    font-size: 0.85rem;
-    color: #7c3aed;
-    background: #f3e8ff;
-    padding: 0.5rem;
-    border-radius: 4px;
-    margin-bottom: 0.5rem;
   }
 
   .badge {
     font-size: 0.7rem;
     padding: 0.2rem 0.5rem;
     border-radius: 4px;
-    background: #e0e0e0;
+    background: #e5e5e5;
     color: #666;
     font-weight: normal;
     vertical-align: middle;
@@ -607,7 +520,7 @@
   .hint {
     font-size: 0.85rem;
     color: #666;
-    margin-bottom: 1rem;
+    margin: 0 0 1rem;
   }
 
   .muted {
@@ -622,7 +535,7 @@
 
   input {
     flex: 1;
-    padding: 0.5rem;
+    padding: 0.5rem 0.75rem;
     border: 1px solid #ccc;
     border-radius: 4px;
     font-size: 0.95rem;
@@ -641,6 +554,7 @@
   button:hover:not(:disabled) {
     background: #0055aa;
   }
+
   button:disabled {
     background: #999;
     cursor: not-allowed;
@@ -648,6 +562,10 @@
 
   button.secondary {
     background: #666;
+  }
+
+  button.secondary:hover {
+    background: #555;
   }
 
   button.small {
@@ -663,16 +581,14 @@
     background: #b91c1c;
   }
 
-  /* Progress bar styles */
-  .progress-container {
+  .mt-sm {
     margin-top: 0.5rem;
   }
 
   .progress-bar {
-    width: 100%;
-    height: 20px;
-    background: #e0e0e0;
-    border-radius: 10px;
+    height: 1.25rem;
+    background: #e5e5e5;
+    border-radius: 0.625rem;
     overflow: hidden;
   }
 
@@ -685,10 +601,15 @@
   .progress-text {
     font-size: 0.85rem;
     color: #666;
-    margin-top: 0.5rem;
+    margin: 0.5rem 0 0;
   }
 
-  /* Workflow steps styles */
+  .retry-info {
+    font-size: 0.85rem;
+    color: #d97706;
+    margin: 0.25rem 0 0;
+  }
+
   .steps-list {
     display: flex;
     flex-direction: column;
@@ -700,22 +621,24 @@
     align-items: center;
     gap: 0.75rem;
     padding: 0.5rem;
-    background: #f8f8f8;
+    background: #f5f5f5;
     border-radius: 4px;
   }
 
   .step-item.completed {
     background: #dcfce7;
   }
+
   .step-item.running {
     background: #dbeafe;
   }
+
   .step-item.failed {
     background: #fee2e2;
   }
 
   .step-icon {
-    width: 20px;
+    width: 1.25rem;
     text-align: center;
     font-weight: bold;
   }
@@ -723,9 +646,11 @@
   .step-item.completed .step-icon {
     color: #166534;
   }
+
   .step-item.running .step-icon {
     color: #1d4ed8;
   }
+
   .step-item.failed .step-icon {
     color: #dc2626;
   }
@@ -757,15 +682,10 @@
     color: #555;
   }
 
-  .user-detail p {
-    margin: 0.5rem 0;
-  }
-
   .error {
     color: #dc2626;
   }
 
-  /* Action result styles */
   .action-result {
     padding: 0.75rem;
     border-radius: 4px;
@@ -790,27 +710,33 @@
     color: #666;
   }
 
-  /* Button group */
+  .action-result button {
+    background: #fff;
+    color: #333;
+    border: 1px solid #ccc;
+  }
+
+  .action-result button:hover:not(:disabled) {
+    background: #f5f5f5;
+  }
+
+  .action-result .quote {
+    font-style: italic;
+    font-size: 1rem;
+    line-height: 1.4;
+    margin-bottom: 0.5rem;
+  }
+
+  .action-result .author {
+    font-size: 0.85rem;
+    color: #555;
+  }
+
   .button-group {
     display: flex;
     gap: 0.5rem;
   }
 
-  button.secondary:hover {
-    background: #555;
-  }
-
-  @media (max-width: 600px) {
-    .grid {
-      grid-template-columns: 1fr;
-    }
-    .stats-grid {
-      flex-direction: column;
-      gap: 1rem;
-    }
-  }
-
-  /* Delete popover styles */
   .actions-cell {
     position: relative;
   }
@@ -835,14 +761,24 @@
   }
 
   .delete-popover p {
-    margin: 0 0 0.5rem 0;
+    margin: 0 0 0.5rem;
     font-size: 0.9rem;
-    color: #333;
     white-space: nowrap;
   }
 
   .popover-buttons {
     display: flex;
     gap: 0.5rem;
+  }
+
+  @media (max-width: 600px) {
+    .grid {
+      grid-template-columns: 1fr;
+    }
+
+    .stats-grid {
+      flex-direction: column;
+      gap: 1rem;
+    }
   }
 </style>

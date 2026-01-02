@@ -6,8 +6,8 @@ import type {
   CreateUserInput,
   UpdateUserInput,
   DeleteUserInput,
-  SendWelcomeInput,
-  SendWelcomeOutput,
+  GetQuoteInput,
+  GetQuoteOutput,
   Job,
   Workflow,
   JobStats,
@@ -30,10 +30,9 @@ export const deleteUser = createMutation<DeleteUserInput, boolean>(
 );
 
 // Actions (for external API calls)
-export const sendWelcomeEmail = createAction<
-  SendWelcomeInput,
-  SendWelcomeOutput
->("send_welcome_email");
+export const getQuote = createAction<GetQuoteInput, GetQuoteOutput>(
+  "get_quote",
+);
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8080";
 

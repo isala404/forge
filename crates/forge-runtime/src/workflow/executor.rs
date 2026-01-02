@@ -148,6 +148,107 @@ impl WorkflowExecutor {
                 Ok(WorkflowResult::Completed(output))
             }
             Ok(Err(e)) => {
+                // Check if this is a suspension (not a real failure)
+                if matches!(e, forge_core::ForgeError::WorkflowSuspended) {
+                    // Workflow suspended itself (sleep or wait_for_event)
+                    // Status already set to 'waiting' by ctx.sleep() - don't mark as failed
+                    return Ok(WorkflowResult::Waiting {
+                        event_type: "timer".to_string(),
+                    });
+                }
+                // Mark as failed - compensation can be triggered via cancel
+                self.fail_workflow(run_id, &e.to_string()).await?;
+                Ok(WorkflowResult::Failed {
+                    error: e.to_string(),
+                })
+            }
+            Err(_) => {
+                // Timeout
+                self.fail_workflow(run_id, "Workflow timed out").await?;
+                Ok(WorkflowResult::Failed {
+                    error: "Workflow timed out".to_string(),
+                })
+            }
+        }
+    }
+
+    /// Execute a resumed workflow with step states loaded from the database.
+    async fn execute_workflow_resumed(
+        &self,
+        run_id: Uuid,
+        entry: &super::registry::WorkflowEntry,
+        input: serde_json::Value,
+        started_at: chrono::DateTime<chrono::Utc>,
+        from_sleep: bool,
+    ) -> forge_core::Result<WorkflowResult> {
+        // Update status to running
+        self.update_workflow_status(run_id, WorkflowStatus::Running)
+            .await?;
+
+        // Load step states from database
+        let step_records = self.get_workflow_steps(run_id).await?;
+        let mut step_states = std::collections::HashMap::new();
+        for step in step_records {
+            let status = step.status;
+            step_states.insert(
+                step.step_name.clone(),
+                forge_core::workflow::StepState {
+                    name: step.step_name,
+                    status,
+                    result: step.result,
+                    error: step.error,
+                    started_at: step.started_at,
+                    completed_at: step.completed_at,
+                },
+            );
+        }
+
+        // Create resumed workflow context with step states
+        let mut ctx = WorkflowContext::resumed(
+            run_id,
+            entry.info.name.to_string(),
+            entry.info.version,
+            started_at,
+            self.pool.clone(),
+            self.http_client.clone(),
+        )
+        .with_step_states(step_states);
+
+        // If resuming from a sleep timer, mark the context so sleep() returns immediately
+        if from_sleep {
+            ctx = ctx.with_resumed_from_sleep();
+        }
+
+        // Execute workflow with timeout
+        let handler = entry.handler.clone();
+        let result = tokio::time::timeout(entry.info.timeout, handler(&ctx, input)).await;
+
+        // Capture compensation state after execution
+        let compensation_state = CompensationState {
+            handlers: ctx.compensation_handlers(),
+            completed_steps: ctx.completed_steps_reversed().into_iter().rev().collect(),
+        };
+        self.compensation_state
+            .write()
+            .await
+            .insert(run_id, compensation_state);
+
+        match result {
+            Ok(Ok(output)) => {
+                // Mark as completed, clean up compensation state
+                self.complete_workflow(run_id, output.clone()).await?;
+                self.compensation_state.write().await.remove(&run_id);
+                Ok(WorkflowResult::Completed(output))
+            }
+            Ok(Err(e)) => {
+                // Check if this is a suspension (not a real failure)
+                if matches!(e, forge_core::ForgeError::WorkflowSuspended) {
+                    // Workflow suspended itself (sleep or wait_for_event)
+                    // Status already set to 'waiting' by ctx.sleep() - don't mark as failed
+                    return Ok(WorkflowResult::Waiting {
+                        event_type: "timer".to_string(),
+                    });
+                }
                 // Mark as failed - compensation can be triggered via cancel
                 self.fail_workflow(run_id, &e.to_string()).await?;
                 Ok(WorkflowResult::Failed {
@@ -166,6 +267,20 @@ impl WorkflowExecutor {
 
     /// Resume a workflow from where it left off.
     pub async fn resume(&self, run_id: Uuid) -> forge_core::Result<WorkflowResult> {
+        self.resume_internal(run_id, false).await
+    }
+
+    /// Resume a workflow after a sleep timer expired.
+    pub async fn resume_from_sleep(&self, run_id: Uuid) -> forge_core::Result<WorkflowResult> {
+        self.resume_internal(run_id, true).await
+    }
+
+    /// Internal resume logic.
+    async fn resume_internal(
+        &self,
+        run_id: Uuid,
+        from_sleep: bool,
+    ) -> forge_core::Result<WorkflowResult> {
         let record = self.get_workflow(run_id).await?;
 
         let entry = self.registry.get(&record.workflow_name).ok_or_else(|| {
@@ -189,7 +304,8 @@ impl WorkflowExecutor {
             _ => {}
         }
 
-        self.execute_workflow(run_id, entry, record.input).await
+        self.execute_workflow_resumed(run_id, entry, record.input, record.started_at, from_sleep)
+            .await
     }
 
     /// Get workflow status.

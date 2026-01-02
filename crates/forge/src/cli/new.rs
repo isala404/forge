@@ -11,11 +11,13 @@ use crate::template_vars;
 const CARGO_TOML: &str = include_str!("../../templates/project/Cargo.toml.tmpl");
 const FORGE_TOML: &str = include_str!("../../templates/project/forge.toml.tmpl");
 const MAIN_RS: &str = include_str!("../../templates/project/main.rs.tmpl");
+const BUILD_RS: &str = include_str!("../../templates/project/build.rs.tmpl");
 const GITIGNORE: &str = include_str!("../../templates/project/gitignore.tmpl");
 const ENV: &str = include_str!("../../templates/project/env.tmpl");
 const DOCKERFILE: &str = include_str!("../../templates/project/Dockerfile.tmpl");
 const DOCKER_COMPOSE: &str = include_str!("../../templates/project/docker-compose.yml.tmpl");
 const DOCKERIGNORE: &str = include_str!("../../templates/project/dockerignore.tmpl");
+const README: &str = include_str!("../../templates/project/README.md.tmpl");
 const MIGRATION_INITIAL: &str =
     include_str!("../../templates/project/migrations/0001_initial.sql.tmpl");
 const SCHEMA_MOD: &str = include_str!("../../templates/project/schema/mod.rs.tmpl");
@@ -30,8 +32,8 @@ const FUNCTIONS_HEARTBEAT_CRON: &str =
     include_str!("../../templates/project/functions/heartbeat_stats_cron.rs.tmpl");
 const FUNCTIONS_VERIFICATION_WORKFLOW: &str =
     include_str!("../../templates/project/functions/account_verification_workflow.rs.tmpl");
-const FUNCTIONS_SEND_WELCOME_ACTION: &str =
-    include_str!("../../templates/project/functions/send_welcome_action.rs.tmpl");
+const FUNCTIONS_GET_QUOTE_ACTION: &str =
+    include_str!("../../templates/project/functions/get_quote_action.rs.tmpl");
 const FUNCTIONS_TESTS: &str = include_str!("../../templates/project/functions/tests.rs.tmpl");
 
 // Frontend templates
@@ -103,7 +105,7 @@ impl NewCommand {
 
 /// Create project files in the given directory.
 pub fn create_project(dir: &Path, name: &str, minimal: bool) -> Result<()> {
-    let vars = template_vars!("name" => name);
+    let vars = template_vars!("name" => name, "project_name" => name);
 
     // Create directory structure
     fs::create_dir_all(dir.join("src/schema"))?;
@@ -114,6 +116,7 @@ pub fn create_project(dir: &Path, name: &str, minimal: bool) -> Result<()> {
     fs::write(dir.join("Cargo.toml"), render(CARGO_TOML, &vars))?;
     fs::write(dir.join("forge.toml"), render(FORGE_TOML, &vars))?;
     fs::write(dir.join("src/main.rs"), MAIN_RS)?;
+    fs::write(dir.join("build.rs"), BUILD_RS)?;
     fs::write(dir.join(".gitignore"), GITIGNORE)?;
     fs::write(dir.join(".env"), ENV)?;
     fs::write(dir.join("migrations/0001_initial.sql"), MIGRATION_INITIAL)?;
@@ -125,6 +128,9 @@ pub fn create_project(dir: &Path, name: &str, minimal: bool) -> Result<()> {
         render(DOCKER_COMPOSE, &vars),
     )?;
     fs::write(dir.join(".dockerignore"), DOCKERIGNORE)?;
+
+    // README
+    fs::write(dir.join("README.md"), render(README, &vars))?;
 
     // Schema files
     fs::write(dir.join("src/schema/mod.rs"), SCHEMA_MOD)?;
@@ -147,8 +153,8 @@ pub fn create_project(dir: &Path, name: &str, minimal: bool) -> Result<()> {
         FUNCTIONS_VERIFICATION_WORKFLOW,
     )?;
     fs::write(
-        dir.join("src/functions/send_welcome_action.rs"),
-        FUNCTIONS_SEND_WELCOME_ACTION,
+        dir.join("src/functions/get_quote_action.rs"),
+        FUNCTIONS_GET_QUOTE_ACTION,
     )?;
     fs::write(dir.join("src/functions/tests.rs"), FUNCTIONS_TESTS)?;
 
@@ -162,7 +168,7 @@ pub fn create_project(dir: &Path, name: &str, minimal: bool) -> Result<()> {
 
 /// Create frontend scaffolding.
 fn create_frontend(dir: &Path, name: &str) -> Result<()> {
-    let vars = template_vars!("name" => name);
+    let vars = template_vars!("name" => name, "project_name" => name);
 
     let frontend_dir = dir.join("frontend");
     fs::create_dir_all(&frontend_dir)?;
@@ -232,6 +238,7 @@ mod tests {
         assert!(path.join("Cargo.toml").exists());
         assert!(path.join("forge.toml").exists());
         assert!(path.join("src/main.rs").exists());
+        assert!(path.join("build.rs").exists());
         assert!(path.join("src/schema/mod.rs").exists());
         assert!(path.join("frontend/package.json").exists());
         assert!(path.join("frontend/src/lib/forge/types.ts").exists());
@@ -241,6 +248,7 @@ mod tests {
         assert!(path.join("Dockerfile").exists());
         assert!(path.join("docker-compose.yml").exists());
         assert!(path.join(".dockerignore").exists());
+        assert!(path.join("README.md").exists());
     }
 
     #[test]

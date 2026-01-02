@@ -109,9 +109,11 @@ CLI Scaffolding
 
 - Templates in crates/forge/templates/ with .tmpl extension
 - template::render() for {{var}} replacement, template_vars! macro
+- Template vars: "name" and "project_name" both set to project name
 - include_str!() embeds templates at compile time
 - Directories: project/, frontend/, runtime/
 - new.rs must include_str! and fs::write for each template file
+- Single binary: `cargo build --features embedded-frontend` embeds frontend via rust-embed
 
 Template Features Demonstrated
 
@@ -131,13 +133,13 @@ Mutations:
 
 Actions:
 - With timeout: #[forge::action(timeout = 60)]
-- ctx.http() for external API calls (commented example)
+- ctx.http() for external API calls (ZenQuotes API example in template)
 
 Jobs:
 - Retry: #[retry(max_attempts = 3, backoff = "exponential")]
 - Idempotency: #[idempotent]
 - Priority: #[priority = "low"]
-- Worker capability (commented): #[worker_capability = "general"]
+- Worker capability: #[worker_capability = "general"]
 - ctx.heartbeat() for long-running jobs
 - ctx.is_retry(), ctx.is_last_attempt() for retry detection
 - ctx.progress(percent, message) for progress reporting

@@ -3,27 +3,15 @@ use forge::prelude::*;
 /// Scheduled cron job demonstrating:
 /// - Cron schedule expression (every minute)
 /// - Timezone configuration
-/// - Catch-up execution after downtime
 /// - Delay detection with ctx.delay() and ctx.is_late()
-/// - Catch-up detection with ctx.is_catch_up
 /// - Structured logging with ctx.log.info/warn/error/debug
+///
+/// Note: Catch-up is disabled by default. If the server is down when a cron
+/// should run, that execution is skipped. Enable with #[catch_up] if needed.
 #[forge::cron("* * * * *")]
 #[timezone = "UTC"]
-#[catch_up]
-#[catch_up_limit = 5]
 pub async fn heartbeat_stats(ctx: &CronContext) -> Result<()> {
     let now = Utc::now();
-
-    // Check if this is a catch-up run (missed execution being replayed)
-    if ctx.is_catch_up {
-        ctx.log.warn(
-            "Executing catch-up run for missed schedule",
-            serde_json::json!({
-                "scheduled_time": ctx.scheduled_time.to_rfc3339(),
-                "execution_time": ctx.execution_time.to_rfc3339(),
-            }),
-        );
-    }
 
     // Check if execution is delayed
     let delay = ctx.delay();

@@ -28,19 +28,18 @@ export interface DeleteUserInput {
   id: string;
 }
 
-export interface SendWelcomeInputData {
-  user_id: string;
-  email: string;
-  name: string;
+export interface GetQuoteInputData {
+  category?: string;
 }
 
-export interface SendWelcomeInput {
-  input: SendWelcomeInputData;
+export interface GetQuoteInput {
+  input: GetQuoteInputData;
 }
 
-export interface SendWelcomeOutput {
-  sent: boolean;
-  message_id: string;
+export interface GetQuoteOutput {
+  quote: string;
+  author: string;
+  category: string;
 }
 
 export type JobStatus =

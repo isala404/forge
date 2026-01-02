@@ -55,7 +55,7 @@ pub async fn account_verification(
     } else {
         ctx.record_step_start("generate_token");
         tracing::info!("Generating verification token");
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
         let token = format!("verify_{}", Uuid::new_v4());
         ctx.record_step_complete("generate_token", serde_json::json!(token));
         token
@@ -65,7 +65,7 @@ pub async fn account_verification(
     if !ctx.is_step_completed("store_token") {
         ctx.record_step_start("store_token");
         tracing::info!("Storing verification token in database");
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
         // In production: INSERT INTO verification_tokens ...
         ctx.record_step_complete("store_token", serde_json::json!({"stored": true}));
     }
@@ -74,7 +74,7 @@ pub async fn account_verification(
     if !ctx.is_step_completed("send_email") {
         ctx.record_step_start("send_email");
         tracing::info!(email = %input.email, "Sending verification email");
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
         // In production: call email service API
         ctx.record_step_complete("send_email", serde_json::json!({"sent": true}));
     }
@@ -84,13 +84,15 @@ pub async fn account_verification(
     // The workflow will be suspended in the database and resumed by the scheduler.
     if !ctx.is_step_completed("wait_period") {
         ctx.record_step_start("wait_period");
-        tracing::info!("Entering durable sleep (2 seconds)");
+        tracing::info!("Entering durable sleep (5 seconds)");
 
         // Use ctx.sleep() for durable waiting - workflow suspends here
         // In production, you might sleep for hours or days
-        ctx.sleep(Duration::from_secs(2)).await?;
+        ctx.sleep(Duration::from_secs(5)).await?;
 
-        ctx.record_step_complete("wait_period", serde_json::json!({"waited": true}));
+        // Use async version to ensure step status is persisted before continuing
+        ctx.record_step_complete_async("wait_period", serde_json::json!({"waited": true}))
+            .await;
         tracing::info!("Resumed from durable sleep");
     }
 
@@ -98,7 +100,7 @@ pub async fn account_verification(
     if !ctx.is_step_completed("mark_verified") {
         ctx.record_step_start("mark_verified");
         tracing::info!(user_id = %input.user_id, "Marking account as verified");
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
         // In production: UPDATE users SET verified = true WHERE id = $1
         ctx.record_step_complete("mark_verified", serde_json::json!(true));
     }

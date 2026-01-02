@@ -129,16 +129,19 @@ impl WorkflowScheduler {
     /// Process workflows that have pending events.
     async fn process_event_wakeups(&self) -> Result<()> {
         // Find workflows waiting for events that have matching events
+        // Use a subquery to avoid DISTINCT with FOR UPDATE
         let workflows: Vec<(Uuid, String)> = sqlx::query_as(
             r#"
-            SELECT DISTINCT wr.id, wr.waiting_for_event
+            SELECT wr.id, wr.waiting_for_event
             FROM forge_workflow_runs wr
-            INNER JOIN forge_workflow_events we
-                ON we.correlation_id = wr.id::text
-                AND we.event_name = wr.waiting_for_event
-                AND we.consumed_at IS NULL
             WHERE wr.status = 'waiting'
                 AND wr.waiting_for_event IS NOT NULL
+                AND EXISTS (
+                    SELECT 1 FROM forge_workflow_events we
+                    WHERE we.correlation_id = wr.id::text
+                    AND we.event_name = wr.waiting_for_event
+                    AND we.consumed_at IS NULL
+                )
             LIMIT $1
             FOR UPDATE OF wr SKIP LOCKED
             "#,
@@ -177,8 +180,8 @@ impl WorkflowScheduler {
             return;
         }
 
-        // Resume execution
-        if let Err(e) = self.executor.resume(workflow_run_id).await {
+        // Resume execution - use resume_from_sleep so ctx.sleep() returns immediately
+        if let Err(e) = self.executor.resume_from_sleep(workflow_run_id).await {
             tracing::error!(
                 workflow_run_id = %workflow_run_id,
                 error = %e,

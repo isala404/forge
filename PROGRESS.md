@@ -1,3 +1,23 @@
+Fixed {{project_name}} template variable not being replaced.
+- `crates/forge/src/cli/new.rs`: Added `"project_name" => name` to template_vars! in create_project() and create_frontend()
+
+Simplified README and added single binary frontend embedding support.
+- `crates/forge/templates/project/README.md.tmpl`: Simplified to Quick Start with docker postgres + echo .env + cargo run
+- `crates/forge/templates/project/Cargo.toml.tmpl`: Added `embedded-frontend` feature with rust-embed, mime_guess deps
+- `crates/forge/templates/project/build.rs.tmpl`: New file, builds frontend when embedded-frontend feature enabled
+- `crates/forge/templates/project/main.rs.tmpl`: Added embedded module with rust-embed Assets and serve_frontend handler
+- `crates/forge/templates/frontend/svelte.config.js.tmpl`: Changed output dir from dist to build
+- `crates/forge/src/runtime.rs`: Added FrontendHandler type, frontend_handler field/method to ForgeBuilder, fallback route
+- `crates/forge/src/cli/new.rs`: Added BUILD_RS include_str and fs::write for build.rs
+
+Fixed workflow durable sleep resumption bug causing infinite loop and step status race condition.
+- `crates/forge-core/src/workflow/context.rs`: Added `resumed_from_sleep` flag, `with_resumed_from_sleep()` builder, `record_step_complete_async()` for sync DB persistence, changed `persist_step_complete` to use UPSERT to fix race condition with background INSERT
+- `crates/forge-runtime/src/workflow/executor.rs`: Added `resume_from_sleep()` method that sets flag and loads step states from DB
+- `crates/forge-runtime/src/workflow/scheduler.rs`: Changed to call `resume_from_sleep()` instead of `resume()`
+- `crates/forge/templates/project/functions/account_verification_workflow.rs.tmpl`: Use `record_step_complete_async()` after sleep
+- `crates/forge/templates/frontend/routes/page.svelte.tmpl`: Removed suspended workflow message
+- `crates/forge/templates/project/functions/heartbeat_stats_cron.rs.tmpl`: Removed `#[catch_up]` attribute by default
+
 Created SCHEMA.md documentation for schema system.
 - `docs/core/SCHEMA.md`: #[forge::model], #[forge::forge_enum], field attributes, type mappings
 
@@ -419,3 +439,53 @@ Fixed WebSocket reactivity bug for last item deletion.
 - Root cause: `last_result_hash` in Reactor.handle_change() never updated after re-execution
 - `forge-runtime/src/realtime/reactor.rs`: Restructured handle_change() to collect subscription info under read lock, release, process changes, then update hashes via write lock
 - Replaced delete confirmation browser confirm() with popover component in page.svelte.tmpl
+
+Improved frontend template styling and spacing.
+- `crates/forge/templates/frontend/routes/page.svelte.tmpl`: Cleaner layout using flexbox with consistent gap
+- Removed redundant CSS classes (.full-width removed, spacing handled by parent flex)
+- Reduced card padding from 1.5rem to 1.25rem, consistent 1.5rem gap between sections
+- Added .mt-sm utility class for margin-top, removed inline styles
+- Prettier-formatted for consistent code style
+
+Enhanced demo UX with longer step timings and new action.
+- `export_users_job.rs.tmpl`: Increased delays from 200-300ms to 2s per step for visible progress
+- `account_verification_workflow.rs.tmpl`: Increased step delays from 200-300ms to 2s for visible progress
+- Replaced SendWelcomeEmail action with GetQuote action (sync external API demo)
+- `get_quote_action.rs.tmpl`: Returns random inspirational quote with author
+- `page.svelte.tmpl`: Fixed button text color in success boxes (white bg, dark text, border)
+- Updated types.ts.tmpl, api.ts.tmpl, mod.rs.tmpl, main.rs.tmpl for new action
+
+Fixed workflow suspension and cleaned up demo UI.
+- `forge-runtime/src/workflow/executor.rs`: Handle WorkflowSuspended error as normal suspension, not failure
+- Root cause: ctx.sleep() throws WorkflowSuspended but executor marked it as failed instead of waiting
+- `page.svelte.tmpl`: Removed static "Cron Features" text (was docs, not dynamic data)
+- `account_verification_workflow.rs.tmpl`: Changed durable sleep from 2s to 5s
+
+Wired up WorkflowScheduler to runtime for durable workflow resumption.
+- `crates/forge/src/runtime.rs`: Added WorkflowScheduler startup in Scheduler role block
+- Added tokio-util dependency to forge crate for CancellationToken
+- Scheduler polls every 1s for workflows with wake_at <= NOW() and resumes them
+- Added graceful shutdown with CancellationToken
+
+Updated export job to pause at 25% for visible progress demo.
+- `export_users_job.rs.tmpl`: Added 10% and 25% progress steps with 5s pause at 25%
+- Progress flow: 0% → 10% → 25% (5s pause) → 40% → 60% → 95% → 100%
+
+Fixed workflow resume looping bug and disabled cron catch-up by default.
+- `crates/forge-core/src/workflow/context.rs`: Added `resumed_from_sleep` field and `with_resumed_from_sleep()` builder
+- `crates/forge-core/src/workflow/context.rs`: Updated `sleep()` and `sleep_until()` to return immediately when `resumed_from_sleep` is true
+- `crates/forge-core/src/workflow/context.rs`: Added `record_step_complete_async()` for synchronous DB persistence
+- `crates/forge-runtime/src/workflow/executor.rs`: Added `execute_workflow_resumed()` that loads step states from database
+- `crates/forge-runtime/src/workflow/executor.rs`: Added `resume_from_sleep()` method that sets `resumed_from_sleep` flag
+- `crates/forge-runtime/src/workflow/scheduler.rs`: Changed `resume_workflow()` to call `resume_from_sleep()` instead of `resume()`
+- Root cause: ctx.sleep() suspends BEFORE record_step_complete(), so on resume the sleep was re-executed infinitely
+- `page.svelte.tmpl`: Removed "Workflow suspended (durable sleep)" message and unused CSS
+- `account_verification_workflow.rs.tmpl`: Use record_step_complete_async for wait_period step
+- `heartbeat_stats_cron.rs.tmpl`: Removed #[catch_up] and #[catch_up_limit = 5] - missed cron runs now skipped by default
+
+Improved scaffolded templates with real API calls and README.
+- `export_users_job.rs.tmpl`: Uncommented #[worker_capability = "general"] attribute (fully supported)
+- `get_quote_action.rs.tmpl`: Replaced hardcoded quotes with ZenQuotes API call (~1s response), uses ForgeError::Function
+- `functions/mod.rs.tmpl`: Removed #[allow(unused_imports)] attributes (pub use re-exports don't trigger warnings)
+- `README.md.tmpl`: New file with FORGE description, build instructions (with/without Docker), test commands
+- `crates/forge/src/cli/new.rs`: Added README.md generation during project scaffolding
