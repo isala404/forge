@@ -258,9 +258,7 @@
               $exportUsersJob.status}
           </p>
           {#if $exportUsersJob.status === "retry"}
-            <p class="retry-info">
-              ⟳ Retrying (job will retry on failure)
-            </p>
+            <p class="retry-info">⟳ Retrying (job will retry on failure)</p>
           {/if}
           {#if $exportUsersJob.status === "completed" || $exportUsersJob.status === "failed" || $exportUsersJob.status === "pending"}
             <button onclick={startExportJob} style="margin-top: 0.5rem;"
@@ -440,7 +438,10 @@
                 <button class="small" onclick={() => handleSelectUser(user.id)}>
                   View
                 </button>
-                <button class="small secondary" onclick={() => startEditUser(user)}>
+                <button
+                  class="small secondary"
+                  onclick={() => startEditUser(user)}
+                >
                   Edit
                 </button>
                 <button

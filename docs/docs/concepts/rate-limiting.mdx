@@ -8,6 +8,50 @@ description: Token bucket rate limiting with PostgreSQL
 
 FORGE includes a PostgreSQL-backed rate limiter using the token bucket algorithm.
 
+## Function Attributes
+
+The simplest way to add rate limiting is with function attributes:
+
+```rust
+// 100 requests per minute per user
+#[forge::query(rate_limit(requests = 100, per = "1m", key = "user"))]
+pub async fn get_users(ctx: &QueryContext) -> Result<Vec<User>> {
+    // Automatically rate limited before execution
+}
+
+// 10 requests per hour per IP (for public endpoints)
+#[forge::mutation(rate_limit(requests = 10, per = "1h", key = "ip"))]
+pub async fn create_account(ctx: &MutationContext, input: CreateAccountInput) -> Result<User> {
+    // Rate limited by client IP
+}
+
+// 1000 requests per day per tenant
+#[forge::action(rate_limit(requests = 1000, per = "1d", key = "tenant"))]
+pub async fn send_email(ctx: &ActionContext, input: SendEmailInput) -> Result<EmailResult> {
+    // Rate limited by tenant
+}
+```
+
+### Available Keys
+
+| Key | Description |
+|-----|-------------|
+| `"user"` | Rate limit per authenticated user ID |
+| `"ip"` | Rate limit per client IP address |
+| `"tenant"` | Rate limit per tenant ID (multi-tenant apps) |
+| `"global"` | Single global rate limit for all callers |
+
+### Duration Format
+
+| Format | Example | Description |
+|--------|---------|-------------|
+| `Ns` | `"30s"` | N seconds |
+| `Nm` | `"5m"` | N minutes |
+| `Nh` | `"1h"` | N hours |
+| `Nd` | `"1d"` | N days |
+
+When a rate limit is exceeded, the function returns `ForgeError::RateLimitExceeded` with retry information.
+
 ## Overview
 
 Rate limiting protects your application from:

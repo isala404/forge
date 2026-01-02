@@ -83,6 +83,63 @@ pub async fn search_users(ctx: &QueryContext, params: ListUsersParams) -> Result
 }
 ```
 
+### Query Caching
+
+Enable in-memory caching for expensive queries with the `cache` attribute:
+
+```rust
+// Cache results for 30 seconds
+#[forge::query(cache = "30s")]
+pub async fn get_app_stats(ctx: &QueryContext) -> Result<AppStats> {
+    sqlx::query_as(r#"
+        SELECT
+            COUNT(*) as total_users,
+            COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours') as new_today
+        FROM users
+    "#)
+    .fetch_one(ctx.db())
+    .await
+    .map_err(Into::into)
+}
+
+// Cache for 5 minutes
+#[forge::query(cache = "5m")]
+pub async fn get_popular_posts(ctx: &QueryContext) -> Result<Vec<Post>> {
+    // Expensive aggregation query
+}
+
+// Cache for 1 hour
+#[forge::query(cache = "1h")]
+pub async fn get_categories(ctx: &QueryContext) -> Result<Vec<Category>> {
+    // Rarely changing data
+}
+```
+
+**Cache behavior:**
+- Cache key is based on function name + arguments
+- Cache is per-node (not distributed)
+- TTL starts from first access
+- Automatic eviction when cache is full (LRU)
+
+**Supported durations:**
+- `Ns` - seconds (e.g., `"30s"`)
+- `Nm` - minutes (e.g., `"5m"`)
+- `Nh` - hours (e.g., `"1h"`)
+- `Nd` - days (e.g., `"1d"`)
+
+:::tip When to Cache
+Use caching for:
+- Aggregate/analytics queries
+- Reference data that rarely changes
+- Expensive computations
+- High-frequency read endpoints
+
+Don't cache:
+- User-specific data (use `public` + rate limiting instead)
+- Data that must be real-time
+- Queries with high cardinality arguments
+:::
+
 ## Mutations
 
 Mutations are for **modifying data**. They can read and write to the database, and dispatch background jobs.

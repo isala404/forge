@@ -507,8 +507,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_metrics_collector_flush() {
-        let mut config = MetricsConfig::default();
-        config.buffer_size = 2;
+        let config = MetricsConfig {
+            buffer_size: 2,
+            ..Default::default()
+        };
         let collector = MetricsCollector::new(config);
 
         collector.increment_counter("test1", 1.0).await;
@@ -520,8 +522,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_log_collector_level_filter() {
-        let mut config = LogsConfig::default();
-        config.level = LogLevel::Warn;
+        let config = LogsConfig {
+            level: LogLevel::Warn,
+            ..Default::default()
+        };
         let collector = LogCollector::new(config);
 
         collector.debug("Debug message").await;
@@ -544,8 +548,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_trace_collector_sampling() {
-        let mut config = TracesConfig::default();
-        config.sample_rate = 1.0; // 100% sampling
+        let config = TracesConfig {
+            sample_rate: 1.0, // 100% sampling
+            ..Default::default()
+        };
         let collector = TraceCollector::new(config);
 
         let span = Span::new("test_span");
@@ -557,9 +563,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_trace_collector_always_trace_errors() {
-        let mut config = TracesConfig::default();
-        config.sample_rate = 0.0; // No sampling
-        config.always_trace_errors = true;
+        let config = TracesConfig {
+            sample_rate: 0.0, // No sampling
+            always_trace_errors: true,
+            ..Default::default()
+        };
         let collector = TraceCollector::new(config);
 
         let mut span = Span::new("error_span");

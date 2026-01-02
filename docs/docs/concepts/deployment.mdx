@@ -1,0 +1,355 @@
+---
+sidebar_position: 8
+title: Deployment
+description: Deploy FORGE applications with Docker and Kubernetes
+---
+
+# Deployment
+
+FORGE applications are single binaries that include everything needed to run your application. This makes deployment straightforward.
+
+## Docker
+
+Scaffolded projects include Docker files for containerized deployment.
+
+### Dockerfile
+
+```dockerfile title="Dockerfile"
+# Build stage
+FROM rust:1.75-slim as builder
+
+WORKDIR /app
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy manifests
+COPY Cargo.toml Cargo.lock ./
+
+# Copy source
+COPY src ./src
+COPY migrations ./migrations
+
+# Build release binary
+RUN cargo build --release
+
+# Runtime stage
+FROM debian:bookworm-slim
+
+WORKDIR /app
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy binary from builder
+COPY --from=builder /app/target/release/your-app /app/app
+
+# Copy migrations
+COPY --from=builder /app/migrations /app/migrations
+
+# Copy config
+COPY forge.toml /app/forge.toml
+
+# Expose port
+EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+# Run
+CMD ["/app/app"]
+```
+
+### Docker Compose
+
+```yaml title="docker-compose.yml"
+services:
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - DATABASE_URL=postgres://forge:forge@db:5432/forge
+      - RUST_LOG=info
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: forge
+      POSTGRES_PASSWORD: forge
+      POSTGRES_DB: forge
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forge"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+```
+
+### Building and Running
+
+```bash
+# Build the image
+docker build -t my-forge-app .
+
+# Run with docker-compose
+docker-compose up -d
+
+# View logs
+docker-compose logs -f app
+```
+
+## Health Endpoints
+
+FORGE provides two health endpoints for container orchestration:
+
+### `/health` - Liveness Probe
+
+Returns `200 OK` if the application is running. Use this for Kubernetes liveness probes.
+
+```bash
+curl http://localhost:8080/health
+# {"status": "ok"}
+```
+
+### `/ready` - Readiness Probe
+
+Returns `200 OK` only when the application is ready to serve traffic (database connected, migrations complete). Use this for Kubernetes readiness probes.
+
+```bash
+curl http://localhost:8080/ready
+# {"ready": true, "database": true}
+
+# If database is unavailable:
+# HTTP 503 {"ready": false, "database": false}
+```
+
+## Kubernetes
+
+### Deployment
+
+```yaml title="k8s/deployment.yaml"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: forge-app
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: forge-app
+  template:
+    metadata:
+      labels:
+        app: forge-app
+    spec:
+      containers:
+        - name: app
+          image: my-forge-app:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: forge-secrets
+                  key: database-url
+            - name: RUST_LOG
+              value: "info"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+```
+
+### Service
+
+```yaml title="k8s/service.yaml"
+apiVersion: v1
+kind: Service
+metadata:
+  name: forge-app
+spec:
+  selector:
+    app: forge-app
+  ports:
+    - port: 80
+      targetPort: 8080
+  type: ClusterIP
+```
+
+### Ingress
+
+```yaml title="k8s/ingress.yaml"
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: forge-app
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+spec:
+  rules:
+    - host: api.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: forge-app
+                port:
+                  number: 80
+```
+
+## Environment Variables
+
+### Required
+
+| Variable | Description |
+|----------|-------------|
+| `DATABASE_URL` | PostgreSQL connection string |
+
+### Optional
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RUST_LOG` | `info` | Log level (trace, debug, info, warn, error) |
+| `PORT` | `8080` | HTTP server port |
+| `GRPC_PORT` | `50051` | gRPC server port |
+
+## Production Checklist
+
+### Security
+
+- [ ] Use TLS/HTTPS in production
+- [ ] Set strong `JWT_SECRET` (min 32 bytes)
+- [ ] Use secrets management (Vault, AWS Secrets Manager)
+- [ ] Enable `auth.require_authentication = true`
+- [ ] Configure proper CORS origins
+
+### Performance
+
+- [ ] Set appropriate `database.max_connections` based on replicas
+- [ ] Enable connection pooling with PgBouncer for high scale
+- [ ] Configure `worker.max_concurrent_jobs` based on resources
+- [ ] Use read replicas for query-heavy workloads
+
+### Reliability
+
+- [ ] Run multiple replicas (min 2 for HA)
+- [ ] Configure proper resource limits
+- [ ] Set up database backups
+- [ ] Enable observability export (Prometheus, OTLP)
+- [ ] Configure alerting on error rates and latency
+
+### Scaling
+
+FORGE supports horizontal scaling with these considerations:
+
+1. **Gateway nodes** can scale freely - they're stateless
+2. **Worker nodes** use `SKIP LOCKED` for safe job distribution
+3. **Scheduler nodes** use leader election - only one runs crons
+4. **WebSocket connections** are node-local (use sticky sessions or pub/sub)
+
+```yaml title="forge.toml"
+[node]
+# Run all roles for simple deployments
+roles = ["gateway", "worker", "scheduler"]
+
+# Or specialize nodes
+# roles = ["gateway"]  # For API servers
+# roles = ["worker"]   # For background processing
+# roles = ["scheduler"]  # For cron jobs
+```
+
+## Frontend Deployment
+
+The Svelte frontend can be deployed to any static hosting:
+
+```bash
+# Build frontend
+cd frontend
+bun run build
+
+# Output is in build/ directory
+```
+
+### Vercel
+
+```json title="vercel.json"
+{
+  "buildCommand": "cd frontend && bun install && bun run build",
+  "outputDirectory": "frontend/build"
+}
+```
+
+### Netlify
+
+```toml title="netlify.toml"
+[build]
+  base = "frontend"
+  command = "bun install && bun run build"
+  publish = "build"
+```
+
+### Environment
+
+Set `VITE_API_URL` to your backend URL:
+
+```bash
+VITE_API_URL=https://api.example.com bun run build
+```
+
+## What's Next?
+
+<div className="row">
+  <div className="col col--6">
+    <a className="card" href="/concepts/cluster">
+      <div className="card__header">
+        <h3>🔗 Clustering</h3>
+      </div>
+      <div className="card__body">
+        Multi-node deployment and leader election
+      </div>
+    </a>
+  </div>
+  <div className="col col--6">
+    <a className="card" href="/concepts/observability">
+      <div className="card__header">
+        <h3>📊 Observability</h3>
+      </div>
+      <div className="card__body">
+        Metrics, logs, and tracing
+      </div>
+    </a>
+  </div>
+</div>

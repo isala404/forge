@@ -1,12 +1,16 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use forge_core::{
-    ActionContext, AuthContext, ForgeError, FunctionKind, JobDispatch, MutationContext,
-    QueryContext, RequestMetadata, Result, WorkflowDispatch,
+    rate_limit::{RateLimitConfig, RateLimitKey},
+    ActionContext, AuthContext, ForgeError, FunctionInfo, FunctionKind, JobDispatch,
+    MutationContext, QueryContext, RequestMetadata, Result, WorkflowDispatch,
 };
 use serde_json::Value;
 
+use super::cache::QueryCache;
 use super::registry::{FunctionEntry, FunctionRegistry};
+use crate::rate_limit::RateLimiter;
 
 /// Result of routing a function call.
 pub enum RouteResult {
@@ -25,17 +29,22 @@ pub struct FunctionRouter {
     http_client: reqwest::Client,
     job_dispatcher: Option<Arc<dyn JobDispatch>>,
     workflow_dispatcher: Option<Arc<dyn WorkflowDispatch>>,
+    rate_limiter: RateLimiter,
+    query_cache: QueryCache,
 }
 
 impl FunctionRouter {
     /// Create a new function router.
     pub fn new(registry: Arc<FunctionRegistry>, db_pool: sqlx::PgPool) -> Self {
+        let rate_limiter = RateLimiter::new(db_pool.clone());
         Self {
             registry,
             db_pool,
             http_client: reqwest::Client::new(),
             job_dispatcher: None,
             workflow_dispatcher: None,
+            rate_limiter,
+            query_cache: QueryCache::new(),
         }
     }
 
@@ -45,12 +54,15 @@ impl FunctionRouter {
         db_pool: sqlx::PgPool,
         http_client: reqwest::Client,
     ) -> Self {
+        let rate_limiter = RateLimiter::new(db_pool.clone());
         Self {
             registry,
             db_pool,
             http_client,
             job_dispatcher: None,
             workflow_dispatcher: None,
+            rate_limiter,
+            query_cache: QueryCache::new(),
         }
     }
 
@@ -81,11 +93,35 @@ impl FunctionRouter {
         // Check authorization
         self.check_auth(entry.info(), &auth)?;
 
+        // Check rate limit
+        self.check_rate_limit(entry.info(), function_name, &auth, &request)
+            .await?;
+
         match entry {
-            FunctionEntry::Query { handler, .. } => {
-                let ctx = QueryContext::new(self.db_pool.clone(), auth, request);
-                let result = handler(&ctx, args).await?;
-                Ok(RouteResult::Query(result))
+            FunctionEntry::Query { handler, info, .. } => {
+                // Check cache first if TTL is configured
+                if let Some(ttl) = info.cache_ttl {
+                    if let Some(cached) = self.query_cache.get(function_name, &args) {
+                        return Ok(RouteResult::Query(cached));
+                    }
+
+                    // Execute and cache result
+                    let ctx = QueryContext::new(self.db_pool.clone(), auth, request);
+                    let result = handler(&ctx, args.clone()).await?;
+
+                    self.query_cache.set(
+                        function_name,
+                        &args,
+                        result.clone(),
+                        Duration::from_secs(ttl),
+                    );
+
+                    Ok(RouteResult::Query(result))
+                } else {
+                    let ctx = QueryContext::new(self.db_pool.clone(), auth, request);
+                    let result = handler(&ctx, args).await?;
+                    Ok(RouteResult::Query(result))
+                }
             }
             FunctionEntry::Mutation { handler, .. } => {
                 let ctx = MutationContext::with_dispatch(
@@ -114,7 +150,7 @@ impl FunctionRouter {
     }
 
     /// Check authorization for a function call.
-    fn check_auth(&self, info: &forge_core::FunctionInfo, auth: &AuthContext) -> Result<()> {
+    fn check_auth(&self, info: &FunctionInfo, auth: &AuthContext) -> Result<()> {
         // Public functions don't require auth
         if info.is_public {
             return Ok(());
@@ -131,6 +167,40 @@ impl FunctionRouter {
                 return Err(ForgeError::Forbidden(format!("Role '{}' required", role)));
             }
         }
+
+        Ok(())
+    }
+
+    /// Check rate limit for a function call.
+    async fn check_rate_limit(
+        &self,
+        info: &FunctionInfo,
+        function_name: &str,
+        auth: &AuthContext,
+        request: &RequestMetadata,
+    ) -> Result<()> {
+        // Skip if no rate limit configured
+        let (requests, per_secs) = match (info.rate_limit_requests, info.rate_limit_per_secs) {
+            (Some(r), Some(p)) => (r, p),
+            _ => return Ok(()),
+        };
+
+        // Build rate limit config
+        let key_type: RateLimitKey = info
+            .rate_limit_key
+            .unwrap_or("user")
+            .parse()
+            .unwrap_or_default();
+
+        let config = RateLimitConfig::new(requests, Duration::from_secs(per_secs)).with_key(key_type);
+
+        // Build bucket key
+        let bucket_key = self
+            .rate_limiter
+            .build_key(key_type, function_name, auth, request);
+
+        // Enforce rate limit
+        self.rate_limiter.enforce(&bucket_key, &config).await?;
 
         Ok(())
     }
@@ -152,7 +222,7 @@ mod tests {
 
     #[test]
     fn test_check_auth_public() {
-        let info = forge_core::FunctionInfo {
+        let info = FunctionInfo {
             name: "test",
             description: None,
             kind: FunctionKind::Query,
@@ -161,6 +231,9 @@ mod tests {
             is_public: true,
             cache_ttl: None,
             timeout: None,
+            rate_limit_requests: None,
+            rate_limit_per_secs: None,
+            rate_limit_key: None,
         };
 
         let _auth = AuthContext::unauthenticated();

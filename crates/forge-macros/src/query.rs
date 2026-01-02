@@ -25,6 +25,9 @@ struct QueryAttrs {
     required_role: Option<String>,
     is_public: bool,
     timeout: Option<u64>,
+    rate_limit_requests: Option<u32>,
+    rate_limit_per_secs: Option<u64>,
+    rate_limit_key: Option<String>,
 }
 
 fn parse_query_attrs(attr: TokenStream) -> QueryAttrs {
@@ -65,6 +68,54 @@ fn parse_query_attrs(attr: TokenStream) -> QueryAttrs {
                 .parse::<u64>()
             {
                 attrs.timeout = Some(secs);
+            }
+        }
+    }
+
+    // Parse rate_limit(requests = N, per = "Xm", key = "user")
+    if let Some(rl_start) = attr_str.find("rate_limit") {
+        if let Some(paren_start) = attr_str[rl_start..].find('(') {
+            let remaining = &attr_str[rl_start + paren_start + 1..];
+            if let Some(paren_end) = remaining.find(')') {
+                let rl_content = &remaining[..paren_end];
+
+                // Parse requests = N
+                if let Some(req_start) = rl_content.find("requests") {
+                    if let Some(eq_pos) = rl_content[req_start..].find('=') {
+                        let after_eq = &rl_content[req_start + eq_pos + 1..];
+                        if let Ok(n) = after_eq
+                            .split(',')
+                            .next()
+                            .unwrap_or("")
+                            .trim()
+                            .parse::<u32>()
+                        {
+                            attrs.rate_limit_requests = Some(n);
+                        }
+                    }
+                }
+
+                // Parse per = "Xm" or per = "Xs"
+                if let Some(per_start) = rl_content.find("per") {
+                    if let Some(quote_start) = rl_content[per_start..].find('"') {
+                        let after_quote = &rl_content[per_start + quote_start + 1..];
+                        if let Some(quote_end) = after_quote.find('"') {
+                            let per_str = &after_quote[..quote_end];
+                            attrs.rate_limit_per_secs = parse_duration(per_str);
+                        }
+                    }
+                }
+
+                // Parse key = "user" or key = "ip" etc
+                if let Some(key_start) = rl_content.find("key") {
+                    if let Some(quote_start) = rl_content[key_start..].find('"') {
+                        let after_quote = &rl_content[key_start + quote_start + 1..];
+                        if let Some(quote_end) = after_quote.find('"') {
+                            let key = &after_quote[..quote_end];
+                            attrs.rate_limit_key = Some(key.to_string());
+                        }
+                    }
+                }
             }
         }
     }
@@ -199,6 +250,21 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
         None => quote! { None },
     };
 
+    let rate_limit_requests = match attrs.rate_limit_requests {
+        Some(n) => quote! { Some(#n) },
+        None => quote! { None },
+    };
+
+    let rate_limit_per_secs = match attrs.rate_limit_per_secs {
+        Some(n) => quote! { Some(#n) },
+        None => quote! { None },
+    };
+
+    let rate_limit_key = match &attrs.rate_limit_key {
+        Some(k) => quote! { Some(#k) },
+        None => quote! { None },
+    };
+
     // Generate the args struct (use unit type if no args)
     let args_struct = if args_fields.is_empty() {
         quote! {
@@ -263,6 +329,9 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
                     is_public: #is_public,
                     cache_ttl: #cache_ttl,
                     timeout: #timeout,
+                    rate_limit_requests: #rate_limit_requests,
+                    rate_limit_per_secs: #rate_limit_per_secs,
+                    rate_limit_key: #rate_limit_key,
                 }
             }
 

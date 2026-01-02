@@ -342,6 +342,63 @@ CREATE INDEX IF NOT EXISTS idx_forge_alerts_rule_id
 CREATE INDEX IF NOT EXISTS idx_forge_alerts_triggered_at
     ON forge_alerts(triggered_at DESC);
 
+-- GIN indexes for JSONB columns (enables efficient queries on JSON data)
+
+-- Jobs: Enable queries on input/output JSON
+CREATE INDEX IF NOT EXISTS idx_forge_jobs_input_gin
+    ON forge_jobs USING GIN (input);
+CREATE INDEX IF NOT EXISTS idx_forge_jobs_output_gin
+    ON forge_jobs USING GIN (output)
+    WHERE output IS NOT NULL;
+
+-- Workflows: Enable queries on workflow data
+CREATE INDEX IF NOT EXISTS idx_forge_workflow_runs_input_gin
+    ON forge_workflow_runs USING GIN (input);
+CREATE INDEX IF NOT EXISTS idx_forge_workflow_runs_output_gin
+    ON forge_workflow_runs USING GIN (output)
+    WHERE output IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_forge_workflow_runs_step_results_gin
+    ON forge_workflow_runs USING GIN (step_results);
+
+-- Workflow events: Enable queries on event payload
+CREATE INDEX IF NOT EXISTS idx_forge_workflow_events_payload_gin
+    ON forge_workflow_events USING GIN (payload)
+    WHERE payload IS NOT NULL;
+
+-- Workflow steps: Enable queries on step data
+CREATE INDEX IF NOT EXISTS idx_forge_workflow_steps_input_gin
+    ON forge_workflow_steps USING GIN (input)
+    WHERE input IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_forge_workflow_steps_result_gin
+    ON forge_workflow_steps USING GIN (result)
+    WHERE result IS NOT NULL;
+
+-- Metrics: Enable label-based filtering
+CREATE INDEX IF NOT EXISTS idx_forge_metrics_labels_gin
+    ON forge_metrics USING GIN (labels);
+
+-- Logs: Enable field-based filtering
+CREATE INDEX IF NOT EXISTS idx_forge_logs_fields_gin
+    ON forge_logs USING GIN (fields);
+
+-- Traces: Enable attribute and event filtering
+CREATE INDEX IF NOT EXISTS idx_forge_traces_attributes_gin
+    ON forge_traces USING GIN (attributes);
+CREATE INDEX IF NOT EXISTS idx_forge_traces_events_gin
+    ON forge_traces USING GIN (events);
+
+-- Subscriptions: Enable args matching
+CREATE INDEX IF NOT EXISTS idx_forge_subscriptions_args_gin
+    ON forge_subscriptions USING GIN (args);
+
+-- Alerts: Enable label/annotation filtering
+CREATE INDEX IF NOT EXISTS idx_forge_alert_rules_labels_gin
+    ON forge_alert_rules USING GIN (labels);
+CREATE INDEX IF NOT EXISTS idx_forge_alerts_labels_gin
+    ON forge_alerts USING GIN (labels);
+CREATE INDEX IF NOT EXISTS idx_forge_alerts_annotations_gin
+    ON forge_alerts USING GIN (annotations);
+
 -- Enable reactivity on job/workflow tables for WebSocket subscriptions
 SELECT forge_enable_reactivity('forge_jobs');
 SELECT forge_enable_reactivity('forge_workflow_runs');

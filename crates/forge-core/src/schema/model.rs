@@ -91,10 +91,18 @@ impl TableDef {
         // Add individual field indexes
         for field in self.indexed_fields() {
             if !field.is_primary_key() && !field.is_unique() {
-                sql.push_str(&format!(
-                    "\nCREATE INDEX idx_{}_{} ON {}({});",
-                    self.name, field.column_name, table_name, field.column_name
-                ));
+                // For soft delete tables, add partial index excluding deleted rows
+                if self.soft_delete && field.column_name != "deleted_at" {
+                    sql.push_str(&format!(
+                        "\nCREATE INDEX idx_{}_{} ON {}({}) WHERE deleted_at IS NULL;",
+                        self.name, field.column_name, table_name, field.column_name
+                    ));
+                } else {
+                    sql.push_str(&format!(
+                        "\nCREATE INDEX idx_{}_{} ON {}({});",
+                        self.name, field.column_name, table_name, field.column_name
+                    ));
+                }
             }
         }
 

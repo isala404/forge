@@ -13,15 +13,48 @@ import type {
   WorkflowProgress,
   JobStatus,
   WorkflowStatus,
+  ConnectionState,
 } from "./types.js";
 
 export interface Readable<T> {
   subscribe: (run: (value: T) => void) => () => void;
 }
 
+export interface ConnectionStatusStore extends Readable<ConnectionState> {
+  get(): ConnectionState;
+}
+
 export interface SubscriptionStore<T> extends Readable<SubscriptionResult<T>> {
   refetch: () => Promise<void>;
   unsubscribe: () => void;
+  reset: () => void;
+}
+
+/**
+ * Create a reactive store for WebSocket connection status.
+ * Use this to show connection state in your UI.
+ */
+export function createConnectionStore(): ConnectionStatusStore {
+  const client = getForgeClient();
+  const subscribers = new Set<(value: ConnectionState) => void>();
+  let currentState: ConnectionState = client.getConnectionState();
+
+  // Subscribe to client connection state changes
+  client.onConnectionStateChange((state) => {
+    currentState = state;
+    subscribers.forEach((run) => run(state));
+  });
+
+  return {
+    subscribe(run) {
+      subscribers.add(run);
+      run(currentState);
+      return () => subscribers.delete(run);
+    },
+    get() {
+      return currentState;
+    },
+  };
 }
 
 export async function query<TArgs, TResult>(
@@ -105,6 +138,10 @@ export function subscribe<TArgs, TResult>(
         unsubscribeFn();
         unsubscribeFn = null;
       }
+    },
+    reset: () => {
+      state = { loading: true, data: null, error: null, stale: false };
+      notify();
     },
   };
 }

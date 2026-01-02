@@ -24,11 +24,8 @@ struct ActionAttrs {
     requires_auth: bool,
     required_role: Option<String>,
     timeout: Option<u64>,
-    #[allow(dead_code)]
     rate_limit_requests: Option<u32>,
-    #[allow(dead_code)]
-    rate_limit_per: Option<String>,
-    #[allow(dead_code)]
+    rate_limit_per_secs: Option<u64>,
     rate_limit_key: Option<String>,
     #[allow(dead_code)]
     retry_max_attempts: Option<u32>,
@@ -74,7 +71,71 @@ fn parse_action_attrs(attr: TokenStream) -> ActionAttrs {
         }
     }
 
+    // Parse rate_limit(requests = N, per = "Xm", key = "user")
+    if let Some(rl_start) = attr_str.find("rate_limit") {
+        if let Some(paren_start) = attr_str[rl_start..].find('(') {
+            let remaining = &attr_str[rl_start + paren_start + 1..];
+            if let Some(paren_end) = remaining.find(')') {
+                let rl_content = &remaining[..paren_end];
+
+                // Parse requests = N
+                if let Some(req_start) = rl_content.find("requests") {
+                    if let Some(eq_pos) = rl_content[req_start..].find('=') {
+                        let after_eq = &rl_content[req_start + eq_pos + 1..];
+                        if let Ok(n) = after_eq
+                            .split(',')
+                            .next()
+                            .unwrap_or("")
+                            .trim()
+                            .parse::<u32>()
+                        {
+                            attrs.rate_limit_requests = Some(n);
+                        }
+                    }
+                }
+
+                // Parse per = "Xm" or per = "Xs"
+                if let Some(per_start) = rl_content.find("per") {
+                    if let Some(quote_start) = rl_content[per_start..].find('"') {
+                        let after_quote = &rl_content[per_start + quote_start + 1..];
+                        if let Some(quote_end) = after_quote.find('"') {
+                            let per_str = &after_quote[..quote_end];
+                            attrs.rate_limit_per_secs = parse_duration_to_secs(per_str);
+                        }
+                    }
+                }
+
+                // Parse key = "user" or key = "ip" etc
+                if let Some(key_start) = rl_content.find("key") {
+                    if let Some(quote_start) = rl_content[key_start..].find('"') {
+                        let after_quote = &rl_content[key_start + quote_start + 1..];
+                        if let Some(quote_end) = after_quote.find('"') {
+                            let key = &after_quote[..quote_end];
+                            attrs.rate_limit_key = Some(key.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     attrs
+}
+
+fn parse_duration_to_secs(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (num_str, unit) = s.split_at(s.len() - 1);
+    let num: u64 = num_str.parse().ok()?;
+    match unit {
+        "s" => Some(num),
+        "m" => Some(num * 60),
+        "h" => Some(num * 3600),
+        "d" => Some(num * 86400),
+        _ => None,
+    }
 }
 
 fn expand_action_impl(input: ItemFn, attrs: ActionAttrs) -> syn::Result<TokenStream2> {
@@ -183,6 +244,21 @@ fn expand_action_impl(input: ItemFn, attrs: ActionAttrs) -> syn::Result<TokenStr
         None => quote! { None },
     };
 
+    let rate_limit_requests = match attrs.rate_limit_requests {
+        Some(n) => quote! { Some(#n) },
+        None => quote! { None },
+    };
+
+    let rate_limit_per_secs = match attrs.rate_limit_per_secs {
+        Some(n) => quote! { Some(#n) },
+        None => quote! { None },
+    };
+
+    let rate_limit_key = match &attrs.rate_limit_key {
+        Some(k) => quote! { Some(#k) },
+        None => quote! { None },
+    };
+
     // Generate the args struct (use unit type if no args)
     let args_struct = if args_fields.is_empty() {
         quote! {
@@ -251,6 +327,9 @@ fn expand_action_impl(input: ItemFn, attrs: ActionAttrs) -> syn::Result<TokenStr
                     is_public: false,
                     cache_ttl: None,
                     timeout: #timeout,
+                    rate_limit_requests: #rate_limit_requests,
+                    rate_limit_per_secs: #rate_limit_per_secs,
+                    rate_limit_key: #rate_limit_key,
                 }
             }
 

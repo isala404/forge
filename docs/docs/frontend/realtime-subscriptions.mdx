@@ -59,8 +59,28 @@ interface SubscriptionStore<T> {
   data: T | null;           // The actual data
   loading: boolean;         // True while fetching
   error: Error | null;      // Error if fetch failed
+  refetch: () => Promise<void>;  // Manually refetch data
   unsubscribe: () => void;  // Clean up subscription
+  reset: () => void;        // Reset to initial state
 }
+```
+
+### Reset Method
+
+Use `reset()` to clear the subscription state (useful for logout or route changes):
+
+```svelte
+<script lang="ts">
+  import { subscribe } from '$lib/forge';
+
+  const userProfile = subscribe('get_my_profile', {});
+
+  function handleLogout() {
+    // Clear cached data
+    userProfile.reset();
+    // Navigate to login...
+  }
+</script>
 ```
 
 ## Subscription with Parameters
@@ -246,7 +266,46 @@ Remove items optimistically:
 
 ## Connection State
 
-Monitor the WebSocket connection:
+### Connection Status Store
+
+Use `createConnectionStore()` for reactive connection status:
+
+```svelte
+<script lang="ts">
+  import { createConnectionStore } from '$lib/forge';
+
+  // Reactive store that tracks connection state
+  const connection = createConnectionStore();
+</script>
+
+{#if !$connection.connected}
+  <div class="banner error">
+    Connection lost. Trying to reconnect...
+  </div>
+{:else if $connection.reconnecting}
+  <div class="banner warning">
+    Reconnecting...
+  </div>
+{/if}
+
+<footer>
+  {$connection.connected ? 'Online' : 'Offline'}
+</footer>
+```
+
+The connection store provides:
+
+```typescript
+interface ConnectionStatusStore {
+  connected: boolean;      // WebSocket is connected
+  reconnecting: boolean;   // Currently attempting reconnection
+  lastConnected: Date | null;  // When last connected
+}
+```
+
+### Manual Connection Monitoring
+
+For more control, use the client directly:
 
 ```svelte
 <script lang="ts">

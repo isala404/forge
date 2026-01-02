@@ -395,3 +395,22 @@ Expanded scaffolded template feature coverage for better framework showcase.
 - Action: #[forge::action(timeout = 60)], ctx.http() example (commented)
 - Config: added [function], [worker], [auth], [rate_limit], [cluster], [node] sections (commented)
 - Testing: new tests.rs.tmpl with TestContext, assertion macros, MockHttp, job/workflow verification examples
+
+MVP release preparation.
+- Rate limiting: FunctionInfo fields, parser in query.rs/mutation.rs, RateLimiter check in router.rs
+- Query cache: new cache.rs with TTL, eviction, router.rs integration for queries with cache_ttl
+- Soft delete: #[soft_delete] attribute in model.rs, generates deleted_at column + partial indexes
+- Docker: Dockerfile.tmpl multi-stage build, docker-compose.yml.tmpl with app + postgres, dockerignore.tmpl
+- Readiness: /ready endpoint with database connectivity check in server.rs
+- JSONB indexes: GIN indexes on all JSONB columns in 0000_forge_internal.sql
+- Frontend stores: ConnectionStatusStore, createConnectionStore(), SubscriptionStore.reset() in stores.ts.tmpl
+- Clippy fixes: field_reassign_with_default in collector.rs/websocket.rs, unused imports in test modules
+- Template fixes: tests.rs.tmpl simplified (removed non-existent testing module), page.svelte.tmpl formatted
+
+Updated documentation for MVP features.
+- rate-limiting.mdx: Added function attribute syntax section (#[forge::query(rate_limit(...))])
+- functions.mdx: Added query caching section with #[cache = "30s"] attribute
+- schema.mdx: Added #[soft_delete] attribute documentation with examples
+- deployment.mdx: New file with Docker, docker-compose, Kubernetes, health endpoints
+- realtime-subscriptions.mdx: Added ConnectionStatusStore, createConnectionStore(), reset() method
+- database.mdx: Added GIN indexes on JSONB columns section with query examples

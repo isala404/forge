@@ -19,6 +19,7 @@ fn expand_model_impl(_attr: TokenStream2, input: DeriveInput) -> syn::Result<Tok
     let struct_name = &input.ident;
     let table_name = get_table_name(&input)?;
     let vis = &input.vis;
+    let soft_delete = has_attribute(&input.attrs, "soft_delete");
 
     // Extract fields
     let fields = match &input.data {
@@ -122,6 +123,25 @@ fn expand_model_impl(_attr: TokenStream2, input: DeriveInput) -> syn::Result<Tok
         })
         .collect();
 
+    // Generate soft_delete field addition if enabled
+    let soft_delete_field = if soft_delete {
+        quote! {
+            // Add deleted_at field for soft delete
+            {
+                let rust_type = forge::forge_core::schema::RustType::Optional(
+                    Box::new(forge::forge_core::schema::RustType::DateTime)
+                );
+                let mut field = forge::forge_core::schema::FieldDef::new("deleted_at", rust_type);
+                field.column_name = "deleted_at".to_string();
+                field.attributes = vec![forge::forge_core::schema::FieldAttribute::Indexed];
+                field.default = Some("NULL".to_string());
+                field
+            },
+        }
+    } else {
+        quote! {}
+    };
+
     // Generate the impl
     let expanded = quote! {
         #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -134,8 +154,10 @@ fn expand_model_impl(_attr: TokenStream2, input: DeriveInput) -> syn::Result<Tok
 
             fn table_def() -> forge::forge_core::schema::TableDef {
                 let mut table = forge::forge_core::schema::TableDef::new(#table_name, stringify!(#struct_name));
+                table.soft_delete = #soft_delete;
                 table.fields = vec![
                     #(#field_tokens),*
+                    #soft_delete_field
                 ];
                 table
             }

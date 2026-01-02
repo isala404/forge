@@ -136,6 +136,95 @@ pub struct Document {
 }
 ```
 
+### `#[soft_delete]` - Soft Delete Support
+
+Enable soft delete for a model. Instead of permanently deleting rows, they're marked with a `deleted_at` timestamp.
+
+```rust
+#[forge::model]
+#[soft_delete]
+pub struct Document {
+    #[id]
+    pub id: Uuid,
+
+    pub title: String,
+
+    pub content: String,
+
+    pub created_at: DateTime<Utc>,
+
+    // deleted_at is automatically added by #[soft_delete]
+}
+```
+
+The `#[soft_delete]` attribute automatically:
+- Adds a `deleted_at: Option<DateTime<Utc>>` column
+- Creates a partial index for efficient queries on non-deleted rows
+- Sets up `WHERE deleted_at IS NULL` as the default query pattern
+
+**Migration with soft delete:**
+
+```sql title="migrations/0002_documents.sql"
+-- @up
+CREATE TABLE documents (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    title VARCHAR(255) NOT NULL,
+    content TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at TIMESTAMPTZ  -- Added by #[soft_delete]
+);
+
+-- Partial index for efficient queries on active documents
+CREATE INDEX idx_documents_active ON documents(created_at DESC) WHERE deleted_at IS NULL;
+
+SELECT forge_enable_reactivity('documents');
+
+-- @down
+DROP TABLE documents;
+```
+
+**Querying soft-deleted records:**
+
+```rust
+// Get active documents only
+#[forge::query]
+pub async fn list_documents(ctx: &QueryContext) -> Result<Vec<Document>> {
+    sqlx::query_as("SELECT * FROM documents WHERE deleted_at IS NULL ORDER BY created_at DESC")
+        .fetch_all(ctx.db())
+        .await
+        .map_err(Into::into)
+}
+
+// Include deleted documents
+#[forge::query]
+pub async fn list_all_documents(ctx: &QueryContext) -> Result<Vec<Document>> {
+    sqlx::query_as("SELECT * FROM documents ORDER BY created_at DESC")
+        .fetch_all(ctx.db())
+        .await
+        .map_err(Into::into)
+}
+
+// Soft delete
+#[forge::mutation]
+pub async fn delete_document(ctx: &MutationContext, id: Uuid) -> Result<bool> {
+    let result = sqlx::query("UPDATE documents SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL")
+        .bind(id)
+        .execute(ctx.db())
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+// Restore a soft-deleted document
+#[forge::mutation]
+pub async fn restore_document(ctx: &MutationContext, id: Uuid) -> Result<bool> {
+    let result = sqlx::query("UPDATE documents SET deleted_at = NULL WHERE id = $1")
+        .bind(id)
+        .execute(ctx.db())
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+```
+
 ### `#[default = "..."]` - Default Value
 
 Sets a SQL default value expression for the field.

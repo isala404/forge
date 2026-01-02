@@ -59,6 +59,20 @@ pub struct HealthResponse {
     pub version: String,
 }
 
+/// Readiness check response.
+#[derive(Debug, Serialize)]
+pub struct ReadinessResponse {
+    pub ready: bool,
+    pub database: bool,
+    pub version: String,
+}
+
+/// State for readiness check.
+#[derive(Clone)]
+pub struct ReadinessState {
+    db_pool: sqlx::PgPool,
+}
+
 /// Gateway HTTP server.
 pub struct GatewayServer {
     config: GatewayConfig,
@@ -177,10 +191,20 @@ impl GatewayServer {
             node_id,
         ));
 
+        // Readiness state for DB health check
+        let readiness_state = Arc::new(ReadinessState {
+            db_pool: self.db_pool.clone(),
+        });
+
         // Build the main router with middleware
         let mut main_router = Router::new()
-            // Health check endpoint
+            // Health check endpoint (liveness)
             .route("/health", get(health_handler))
+            // Readiness check endpoint (checks DB)
+            .route(
+                "/ready",
+                get(readiness_handler).with_state(readiness_state),
+            )
             // RPC endpoint
             .route("/rpc", post(rpc_handler))
             // REST-style function endpoint
@@ -242,12 +266,39 @@ impl GatewayServer {
     }
 }
 
-/// Health check handler.
+/// Health check handler (liveness probe).
 async fn health_handler() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "healthy".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
+}
+
+/// Readiness check handler (readiness probe).
+async fn readiness_handler(
+    axum::extract::State(state): axum::extract::State<Arc<ReadinessState>>,
+) -> (axum::http::StatusCode, Json<ReadinessResponse>) {
+    // Check database connectivity
+    let db_ok = sqlx::query("SELECT 1")
+        .fetch_one(&state.db_pool)
+        .await
+        .is_ok();
+
+    let ready = db_ok;
+    let status_code = if ready {
+        axum::http::StatusCode::OK
+    } else {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    (
+        status_code,
+        Json(ReadinessResponse {
+            ready,
+            database: db_ok,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        }),
+    )
 }
 
 /// Simple tracing middleware that adds TracingState to extensions.

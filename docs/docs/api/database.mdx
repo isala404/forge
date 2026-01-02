@@ -737,7 +737,31 @@ Rule of thumb: `pool_size = (CPU cores * 2) + effective_spindle_count`
 
 ### Index Strategy
 
-FORGE creates essential indexes automatically. For your tables:
+FORGE creates essential indexes automatically, including GIN indexes on all JSONB columns in system tables for efficient querying:
+
+```sql
+-- GIN indexes on JSONB columns (created automatically)
+CREATE INDEX idx_forge_jobs_input_gin ON forge_jobs USING GIN (input);
+CREATE INDEX idx_forge_metrics_labels_gin ON forge_metrics USING GIN (labels);
+CREATE INDEX idx_forge_logs_fields_gin ON forge_logs USING GIN (fields);
+CREATE INDEX idx_forge_traces_attributes_gin ON forge_traces USING GIN (attributes);
+-- ... and more
+```
+
+**GIN indexes enable efficient JSONB queries**:
+
+```sql
+-- Find jobs with specific input fields
+SELECT * FROM forge_jobs WHERE input @> '{"user_id": "123"}';
+
+-- Find metrics with matching labels
+SELECT * FROM forge_metrics WHERE labels @> '{"service": "api"}';
+
+-- Search logs by fields
+SELECT * FROM forge_logs WHERE fields @> '{"request_id": "abc"}';
+```
+
+For your own tables:
 
 ```sql
 -- Primary key (automatic)
@@ -752,6 +776,9 @@ CREATE INDEX idx_orders_user_status ON orders(user_id, status);
 -- Partial indexes for status columns
 CREATE INDEX idx_orders_pending ON orders(created_at)
     WHERE status = 'pending';
+
+-- GIN index for your JSONB columns
+CREATE INDEX idx_orders_metadata_gin ON orders USING GIN (metadata);
 ```
 
 ### Vacuuming

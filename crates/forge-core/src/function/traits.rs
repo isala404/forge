@@ -25,6 +25,12 @@ pub struct FunctionInfo {
     pub cache_ttl: Option<u64>,
     /// Timeout in seconds.
     pub timeout: Option<u64>,
+    /// Rate limit: requests per time window.
+    pub rate_limit_requests: Option<u32>,
+    /// Rate limit: time window in seconds.
+    pub rate_limit_per_secs: Option<u64>,
+    /// Rate limit: bucket key type (user, ip, tenant, global).
+    pub rate_limit_key: Option<&'static str>,
 }
 
 /// The kind of function.
@@ -138,11 +144,15 @@ mod tests {
             is_public: false,
             cache_ttl: Some(300),
             timeout: Some(30),
+            rate_limit_requests: Some(100),
+            rate_limit_per_secs: Some(60),
+            rate_limit_key: Some("user"),
         };
 
         assert_eq!(info.name, "get_user");
         assert_eq!(info.kind, FunctionKind::Query);
         assert!(info.requires_auth);
         assert_eq!(info.cache_ttl, Some(300));
+        assert_eq!(info.rate_limit_requests, Some(100));
     }
 }

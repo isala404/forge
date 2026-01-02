@@ -13,6 +13,9 @@ const FORGE_TOML: &str = include_str!("../../templates/project/forge.toml.tmpl")
 const MAIN_RS: &str = include_str!("../../templates/project/main.rs.tmpl");
 const GITIGNORE: &str = include_str!("../../templates/project/gitignore.tmpl");
 const ENV: &str = include_str!("../../templates/project/env.tmpl");
+const DOCKERFILE: &str = include_str!("../../templates/project/Dockerfile.tmpl");
+const DOCKER_COMPOSE: &str = include_str!("../../templates/project/docker-compose.yml.tmpl");
+const DOCKERIGNORE: &str = include_str!("../../templates/project/dockerignore.tmpl");
 const MIGRATION_INITIAL: &str =
     include_str!("../../templates/project/migrations/0001_initial.sql.tmpl");
 const SCHEMA_MOD: &str = include_str!("../../templates/project/schema/mod.rs.tmpl");
@@ -114,6 +117,14 @@ pub fn create_project(dir: &Path, name: &str, minimal: bool) -> Result<()> {
     fs::write(dir.join(".gitignore"), GITIGNORE)?;
     fs::write(dir.join(".env"), ENV)?;
     fs::write(dir.join("migrations/0001_initial.sql"), MIGRATION_INITIAL)?;
+
+    // Docker files
+    fs::write(dir.join("Dockerfile"), render(DOCKERFILE, &vars))?;
+    fs::write(
+        dir.join("docker-compose.yml"),
+        render(DOCKER_COMPOSE, &vars),
+    )?;
+    fs::write(dir.join(".dockerignore"), DOCKERIGNORE)?;
 
     // Schema files
     fs::write(dir.join("src/schema/mod.rs"), SCHEMA_MOD)?;
@@ -227,6 +238,9 @@ mod tests {
         assert!(path.join("frontend/src/lib/forge/api.ts").exists());
         assert!(path.join("frontend/src/routes/+layout.ts").exists());
         assert!(path.join("migrations/0001_initial.sql").exists());
+        assert!(path.join("Dockerfile").exists());
+        assert!(path.join("docker-compose.yml").exists());
+        assert!(path.join(".dockerignore").exists());
     }
 
     #[test]

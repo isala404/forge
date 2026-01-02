@@ -426,8 +426,10 @@ mod tests {
     #[tokio::test]
     async fn test_websocket_subscription_limit() {
         let node_id = NodeId::new();
-        let mut config = WebSocketConfig::default();
-        config.max_subscriptions_per_connection = 2;
+        let config = WebSocketConfig {
+            max_subscriptions_per_connection: 2,
+            ..Default::default()
+        };
         let server = WebSocketServer::new(node_id, config);
         let session_id = SessionId::new();
         let (tx, _rx) = mpsc::channel(100);
