@@ -38,3 +38,7 @@ axum = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+
+[features]
+default = []
+testing = ["forge-core/testing"]

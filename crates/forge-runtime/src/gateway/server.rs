@@ -201,10 +201,7 @@ impl GatewayServer {
             // Health check endpoint (liveness)
             .route("/health", get(health_handler))
             // Readiness check endpoint (checks DB)
-            .route(
-                "/ready",
-                get(readiness_handler).with_state(readiness_state),
-            )
+            .route("/ready", get(readiness_handler).with_state(readiness_state))
             // RPC endpoint
             .route("/rpc", post(rpc_handler))
             // REST-style function endpoint

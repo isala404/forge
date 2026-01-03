@@ -1,127 +1,590 @@
-//! Example tests for FORGE applications.
+//! Comprehensive tests for {{project_name}} FORGE application.
+//!
+//! This file demonstrates testing patterns for all function types:
+//! - Queries (read-only database access)
+//! - Mutations (write operations + job dispatch)
+//! - Actions (external HTTP calls)
+//! - Jobs (background processing)
+//! - Crons (scheduled tasks)
+//! - Workflows (durable multi-step processes)
 //!
 //! Run with: cargo test
+//! Run with database: DATABASE_URL=postgres://... cargo test
 
 use forge::prelude::*;
 
-// Test ForgeError variants
-#[test]
-fn test_error_types() {
-    let validation_err = ForgeError::Validation("invalid input".to_string());
-    let not_found_err = ForgeError::NotFound("missing".to_string());
+// ============================================================================
+// QUERY TESTS
+// ============================================================================
 
-    assert!(matches!(validation_err, ForgeError::Validation(_)));
-    assert!(matches!(not_found_err, ForgeError::NotFound(_)));
-}
+mod query_tests {
+    use super::*;
 
-// Test Result handling
-#[test]
-fn test_result_handling() {
-    fn get_value() -> Result<i32> {
-        Ok(42)
+    #[tokio::test]
+    async fn test_get_users_requires_auth() {
+        let ctx = TestQueryContext::minimal();
+
+        // Unauthenticated request should fail
+        let result = ctx.require_user_id();
+        assert_err!(result);
     }
-    let success = get_value();
-    let failure: Result<i32> = Err(ForgeError::Validation("bad input".into()));
 
-    assert!(success.is_ok());
-    assert_eq!(success.unwrap(), 42);
+    #[tokio::test]
+    async fn test_get_users_with_auth() {
+        let user_id = Uuid::new_v4();
+        let ctx = TestQueryContext::authenticated(user_id);
 
-    assert!(failure.is_err());
-    assert!(matches!(failure, Err(ForgeError::Validation(_))));
-}
+        assert_eq!(ctx.require_user_id().unwrap(), user_id);
+    }
 
-// Helper: Check if JSON contains expected fields
-fn json_contains(actual: &serde_json::Value, expected: &serde_json::Value) -> bool {
-    match (actual, expected) {
-        (serde_json::Value::Object(a), serde_json::Value::Object(e)) => e
-            .iter()
-            .all(|(k, v)| a.get(k).map(|av| json_contains(av, v)).unwrap_or(false)),
-        (a, e) => a == e,
+    #[tokio::test]
+    async fn test_auth_with_roles() {
+        let ctx = TestQueryContext::builder()
+            .as_user(Uuid::new_v4())
+            .with_role("admin")
+            .with_role("moderator")
+            .build();
+
+        assert!(ctx.auth.has_role("admin"));
+        assert!(ctx.auth.has_role("moderator"));
+        assert!(!ctx.auth.has_role("superuser"));
+    }
+
+    #[tokio::test]
+    async fn test_auth_with_claims() {
+        let org_id = Uuid::new_v4();
+        let ctx = TestQueryContext::builder()
+            .as_user(Uuid::new_v4())
+            .with_claim("org_id", serde_json::json!(org_id.to_string()))
+            .with_claim("tier", serde_json::json!("premium"))
+            .build();
+
+        assert_eq!(ctx.auth.claim("tier"), Some(&serde_json::json!("premium")));
+    }
+
+    #[tokio::test]
+    async fn test_multi_tenant() {
+        let tenant_id = Uuid::new_v4();
+        let ctx = TestQueryContext::builder()
+            .as_user(Uuid::new_v4())
+            .with_tenant(tenant_id)
+            .build();
+
+        assert_eq!(ctx.tenant_id(), Some(tenant_id));
     }
 }
 
-// Test JSON matching helper
-#[test]
-fn test_json_matching() {
-    let actual = serde_json::json!({
-        "user": {
-            "id": "123",
-            "email": "test@example.com",
-            "metadata": {
-                "created": "2024-01-01",
-                "verified": true
-            }
-        },
-        "status": "active"
-    });
+// ============================================================================
+// MUTATION TESTS
+// ============================================================================
 
-    // Partial match - only check specific fields
-    assert!(json_contains(
-        &actual,
-        &serde_json::json!({
-            "status": "active"
-        })
-    ));
+mod mutation_tests {
+    use super::*;
 
-    // Nested partial match
-    assert!(json_contains(
-        &actual,
-        &serde_json::json!({
+    #[tokio::test]
+    async fn test_mutation_dispatches_job() {
+        let ctx = TestMutationContext::builder()
+            .as_user(Uuid::new_v4())
+            .build();
+
+        // Simulate creating a user that dispatches a welcome email job
+        ctx.dispatch_job("send_welcome_email", serde_json::json!({
+            "user_id": "new_user_123",
+            "email": "new@example.com"
+        })).await.unwrap();
+
+        // Verify job was dispatched
+        assert_job_dispatched!(ctx, "send_welcome_email");
+
+        // Verify job args
+        ctx.job_dispatch().assert_dispatched_with("send_welcome_email", |args| {
+            args["email"] == "new@example.com"
+        });
+    }
+
+    #[tokio::test]
+    async fn test_mutation_does_not_dispatch_for_invalid_input() {
+        let ctx = TestMutationContext::builder()
+            .as_user(Uuid::new_v4())
+            .build();
+
+        // Simulate validation failure - no job should be dispatched
+        // (your validation logic would go here)
+
+        assert_job_not_dispatched!(ctx, "send_welcome_email");
+    }
+
+    #[tokio::test]
+    async fn test_mutation_starts_workflow() {
+        let ctx = TestMutationContext::builder()
+            .as_user(Uuid::new_v4())
+            .build();
+
+        ctx.start_workflow("user_onboarding", serde_json::json!({
+            "user_id": "user_123"
+        })).await.unwrap();
+
+        assert_workflow_started!(ctx, "user_onboarding");
+    }
+
+    #[tokio::test]
+    async fn test_job_dispatch_count() {
+        let ctx = TestMutationContext::builder()
+            .as_user(Uuid::new_v4())
+            .build();
+
+        // Dispatch multiple jobs
+        ctx.dispatch_job("job_a", serde_json::json!({})).await.unwrap();
+        ctx.dispatch_job("job_b", serde_json::json!({})).await.unwrap();
+        ctx.dispatch_job("job_a", serde_json::json!({})).await.unwrap();
+
+        let jobs = ctx.job_dispatch().dispatched_jobs();
+        assert_eq!(jobs.len(), 3);
+        assert_eq!(jobs.iter().filter(|j| j.job_type == "job_a").count(), 2);
+    }
+}
+
+// ============================================================================
+// ACTION TESTS (with HTTP mocking)
+// ============================================================================
+
+mod action_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_action_with_mocked_http() {
+        let ctx = TestActionContext::builder()
+            .as_user(Uuid::new_v4())
+            .mock_http_json("https://api.example.com/*", serde_json::json!({
+                "status": "ok",
+                "data": {"id": 123}
+            }))
+            .build();
+
+        // Your action would use ctx.http() to make requests
+        // MockHttp intercepts and returns the mocked response
+        // After your action runs, verify the call was made:
+        ctx.http().assert_called("https://api.example.com/*");
+    }
+
+    #[tokio::test]
+    async fn test_action_handles_api_error() {
+        let ctx = TestActionContext::builder()
+            .as_user(Uuid::new_v4())
+            .mock_http("https://api.example.com/*", |_| {
+                MockResponse::error(500, "Internal Server Error")
+            })
+            .build();
+
+        // Your action should handle the error gracefully
+        // Verify error handling logic works as expected
+    }
+
+    #[tokio::test]
+    async fn test_action_with_dynamic_response() {
+        let ctx = TestActionContext::builder()
+            .as_user(Uuid::new_v4())
+            .mock_http("https://api.example.com/users/*", |req| {
+                let user_id = req.url.split('/').last().unwrap_or("unknown");
+                MockResponse::json(serde_json::json!({
+                    "id": user_id,
+                    "name": "Test User"
+                }))
+            })
+            .build();
+
+        // Dynamic responses based on request URL
+    }
+
+    #[tokio::test]
+    async fn test_action_request_verification() {
+        let ctx = TestActionContext::builder()
+            .as_user(Uuid::new_v4())
+            .mock_http_json("https://api.stripe.com/v1/charges", serde_json::json!({
+                "id": "ch_123",
+                "status": "succeeded"
+            }))
+            .build();
+
+        // After making request, verify it was made correctly
+        ctx.http().assert_not_called("https://api.stripe.com/*");
+
+        // Make the call in your action...
+        // Then verify:
+        // ctx.http().assert_called("https://api.stripe.com/*");
+        // ctx.http().assert_called_times("https://api.stripe.com/*", 1);
+    }
+}
+
+// ============================================================================
+// JOB TESTS
+// ============================================================================
+
+mod job_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_job_context_creation() {
+        let ctx = TestJobContext::builder("export_users").build();
+
+        assert_eq!(ctx.job_type, "export_users");
+        assert_eq!(ctx.attempt, 1);
+        assert!(!ctx.is_retry());
+    }
+
+    #[tokio::test]
+    async fn test_job_retry_detection() {
+        let ctx = TestJobContext::builder("export_users")
+            .as_retry(3)
+            .with_max_attempts(5)
+            .build();
+
+        assert!(ctx.is_retry());
+        assert_eq!(ctx.attempt, 3);
+        assert!(!ctx.is_last_attempt());
+    }
+
+    #[tokio::test]
+    async fn test_job_last_attempt() {
+        let ctx = TestJobContext::builder("export_users")
+            .as_last_attempt()
+            .build();
+
+        assert!(ctx.is_retry());
+        assert!(ctx.is_last_attempt());
+    }
+
+    #[tokio::test]
+    async fn test_job_progress_tracking() {
+        let ctx = TestJobContext::builder("export_users").build();
+
+        ctx.progress(25, "Processing batch 1").unwrap();
+        ctx.progress(50, "Processing batch 2").unwrap();
+        ctx.progress(100, "Complete").unwrap();
+
+        let updates = ctx.progress_updates();
+        assert_eq!(updates.len(), 3);
+        assert_eq!(updates[0].percent, 25);
+        assert_eq!(updates[2].percent, 100);
+    }
+
+    #[tokio::test]
+    async fn test_job_with_http_calls() {
+        let ctx = TestJobContext::builder("sync_external_data")
+            .mock_http_json("https://api.external.com/data", serde_json::json!({
+                "items": [1, 2, 3]
+            }))
+            .build();
+
+        // Job can make HTTP calls via ctx.http()
+        // Verify with: ctx.http().assert_called("https://api.external.com/*");
+    }
+}
+
+// ============================================================================
+// CRON TESTS
+// ============================================================================
+
+mod cron_tests {
+    use super::*;
+    use chrono::Duration;
+
+    #[tokio::test]
+    async fn test_cron_context_creation() {
+        let now = Utc::now();
+        let ctx = TestCronContext::builder("heartbeat_stats")
+            .scheduled_at(now)
+            .build();
+
+        assert_eq!(ctx.cron_name, "heartbeat_stats");
+        assert!(!ctx.is_catch_up);
+        assert!(!ctx.is_late());
+    }
+
+    #[tokio::test]
+    async fn test_cron_catch_up_run() {
+        let ctx = TestCronContext::builder("daily_report")
+            .as_catch_up()
+            .build();
+
+        assert!(ctx.is_catch_up);
+    }
+
+    #[tokio::test]
+    async fn test_cron_late_detection() {
+        let scheduled = Utc::now() - Duration::minutes(5);
+        let ctx = TestCronContext::builder("hourly_sync")
+            .scheduled_at(scheduled)
+            .build();
+
+        assert!(ctx.is_late());
+        assert!(ctx.delay() > Duration::minutes(4));
+    }
+
+    #[tokio::test]
+    async fn test_cron_timezone() {
+        let ctx = TestCronContext::builder("daily_report")
+            .with_timezone("America/New_York")
+            .build();
+
+        assert_eq!(ctx.timezone, "America/New_York");
+    }
+
+    #[tokio::test]
+    async fn test_cron_logging() {
+        let ctx = TestCronContext::builder("stats_aggregation").build();
+
+        ctx.log.info("Starting aggregation");
+        ctx.log.warn("Slow query detected");
+        ctx.log.error("Failed to connect");
+
+        let entries = ctx.log.entries();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].level, "info");
+        assert_eq!(entries[1].level, "warn");
+        assert_eq!(entries[2].level, "error");
+    }
+}
+
+// ============================================================================
+// WORKFLOW TESTS
+// ============================================================================
+
+mod workflow_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn test_workflow_context_creation() {
+        let ctx = TestWorkflowContext::builder("account_verification")
+            .with_run_id(Uuid::new_v4())
+            .with_version(1)
+            .build();
+
+        assert_eq!(ctx.workflow_name, "account_verification");
+        assert_eq!(ctx.version, 1);
+        assert!(!ctx.is_resumed());
+    }
+
+    #[tokio::test]
+    async fn test_workflow_step_tracking() {
+        let ctx = TestWorkflowContext::builder("user_onboarding").build();
+
+        assert!(!ctx.is_step_completed("create_account"));
+
+        ctx.record_step_start("create_account");
+        ctx.record_step_complete("create_account", serde_json::json!({"user_id": "123"}));
+
+        assert!(ctx.is_step_completed("create_account"));
+
+        let result: serde_json::Value = ctx.get_step_result("create_account").unwrap();
+        assert_eq!(result["user_id"], "123");
+    }
+
+    #[tokio::test]
+    async fn test_workflow_resume() {
+        let ctx = TestWorkflowContext::builder("account_verification")
+            .as_resumed()
+            .with_completed_step("validate_email", serde_json::json!({"valid": true}))
+            .with_completed_step("send_code", serde_json::json!({"code_sent": true}))
+            .build();
+
+        assert!(ctx.is_resumed());
+        assert!(ctx.is_step_completed("validate_email"));
+        assert!(ctx.is_step_completed("send_code"));
+        assert!(!ctx.is_step_completed("verify_code"));
+    }
+
+    #[tokio::test]
+    async fn test_workflow_step_order() {
+        let ctx = TestWorkflowContext::builder("order_processing").build();
+
+        ctx.record_step_complete("validate_order", serde_json::json!({}));
+        ctx.record_step_complete("process_payment", serde_json::json!({}));
+        ctx.record_step_complete("ship_order", serde_json::json!({}));
+
+        let completed = ctx.completed_step_names();
+        assert_eq!(completed, vec!["validate_order", "process_payment", "ship_order"]);
+    }
+
+    #[tokio::test]
+    async fn test_workflow_durable_sleep() {
+        let ctx = TestWorkflowContext::builder("delayed_notification").build();
+
+        // In tests, sleep is a no-op but records the intent
+        ctx.sleep(Duration::from_secs(3600)).await.unwrap();
+
+        // Verify sleep was called (for workflow correctness)
+        assert!(ctx.sleep_called());
+    }
+
+    #[tokio::test]
+    async fn test_workflow_deterministic_time() {
+        let fixed_time = Utc::now();
+        let ctx = TestWorkflowContext::builder("time_sensitive")
+            .with_workflow_time(fixed_time)
+            .build();
+
+        // workflow_time() is deterministic for replays
+        assert_eq!(ctx.workflow_time(), fixed_time);
+    }
+
+    #[tokio::test]
+    async fn test_workflow_with_tenant() {
+        let tenant_id = Uuid::new_v4();
+        let ctx = TestWorkflowContext::builder("tenant_workflow")
+            .with_tenant(tenant_id)
+            .build();
+
+        assert_eq!(ctx.tenant_id(), Some(tenant_id));
+    }
+}
+
+// ============================================================================
+// ERROR HANDLING TESTS
+// ============================================================================
+
+mod error_tests {
+    use super::*;
+
+    #[test]
+    fn test_forge_error_variants() {
+        let validation_err = ForgeError::Validation("invalid input".to_string());
+        let not_found_err = ForgeError::NotFound("user".to_string());
+        let unauthorized_err = ForgeError::Unauthorized;
+        let forbidden_err = ForgeError::Forbidden("admin required".to_string());
+
+        assert!(matches!(validation_err, ForgeError::Validation(_)));
+        assert!(matches!(not_found_err, ForgeError::NotFound(_)));
+        assert!(matches!(unauthorized_err, ForgeError::Unauthorized));
+        assert!(matches!(forbidden_err, ForgeError::Forbidden(_)));
+    }
+
+    #[test]
+    fn test_error_contains_helper() {
+        let err = ForgeError::Validation("email is required".to_string());
+        assert!(error_contains(&err, "email"));
+        assert!(error_contains(&err, "required"));
+        assert!(!error_contains(&err, "password"));
+    }
+
+    #[test]
+    fn test_assert_macros() {
+        let ok_result: Result<i32> = Ok(42);
+        let err_result: Result<i32> = Err(ForgeError::NotFound("item".into()));
+
+        assert_ok!(ok_result);
+        assert_err!(err_result);
+    }
+
+    #[test]
+    fn test_assert_err_variant() {
+        let result: Result<i32> = Err(ForgeError::NotFound("user".into()));
+        assert_err_variant!(result, ForgeError::NotFound(_));
+    }
+}
+
+// ============================================================================
+// JSON MATCHING TESTS
+// ============================================================================
+
+mod json_tests {
+    use super::*;
+
+    #[test]
+    fn test_json_partial_matching() {
+        let actual = serde_json::json!({
             "user": {
-                "email": "test@example.com"
-            }
-        })
-    ));
-
-    // Deep nested match
-    assert!(json_contains(
-        &actual,
-        &serde_json::json!({
-            "user": {
-                "metadata": {
-                    "verified": true
+                "id": "123",
+                "email": "test@example.com",
+                "profile": {
+                    "name": "Test User",
+                    "avatar": "https://example.com/avatar.png"
                 }
+            },
+            "meta": {
+                "created_at": "2024-01-01",
+                "version": 1
             }
-        })
-    ));
+        });
+
+        // Match subset of fields
+        assert!(assert_json_matches(&actual, &serde_json::json!({
+            "user": { "id": "123" }
+        })));
+
+        // Match nested fields
+        assert!(assert_json_matches(&actual, &serde_json::json!({
+            "user": {
+                "profile": { "name": "Test User" }
+            }
+        })));
+
+        // Non-matching should fail
+        assert!(!assert_json_matches(&actual, &serde_json::json!({
+            "user": { "id": "999" }
+        })));
+    }
 }
 
-// Test UUID generation
-#[test]
-fn test_uuid_generation() {
-    let id1 = Uuid::new_v4();
-    let id2 = Uuid::new_v4();
-    assert_ne!(id1, id2);
+// ============================================================================
+// UTILITY TESTS
+// ============================================================================
+
+mod utility_tests {
+    use super::*;
+
+    #[test]
+    fn test_uuid_generation() {
+        let id1 = Uuid::new_v4();
+        let id2 = Uuid::new_v4();
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_timestamp_handling() {
+        let now: Timestamp = Utc::now();
+        let later = now + chrono::Duration::hours(1);
+        assert!(later > now);
+    }
 }
 
-// Test timestamp handling
-#[test]
-fn test_timestamp() {
-    let now: Timestamp = Utc::now();
-    let later = now + chrono::Duration::hours(1);
-    assert!(later > now);
-}
+// ============================================================================
+// DATABASE INTEGRATION TESTS
+// ============================================================================
+//
+// The tests below require a database. Use one of these approaches:
+//
+// 1. With embedded Postgres (automatic, requires embedded-test-db feature):
+//    cargo test --features embedded-test-db
+//
+// 2. With external database:
+//    DATABASE_URL=postgres://user:pass@localhost/test_db cargo test
+//
+// Uncomment the following tests when ready to test with a database:
 
-// Example: Testing a query function with database
-// Requires TEST_DATABASE_URL environment variable
+// mod database_tests {
+//     use super::*;
 //
-// #[tokio::test]
-// async fn test_get_users_query() {
-//     dotenvy::dotenv().ok();
-//     let db_url = std::env::var("TEST_DATABASE_URL")
-//         .expect("TEST_DATABASE_URL must be set");
+//     #[tokio::test]
+//     #[ignore = "requires DATABASE_URL"]
+//     async fn test_query_with_database() {
+//         let db = TestDatabase::isolated("query_test").await.unwrap();
 //
-//     let pool = sqlx::PgPool::connect(&db_url)
-//         .await
-//         .expect("Failed to connect to database");
+//         // Set up schema
+//         db.execute("CREATE TABLE users (id UUID PRIMARY KEY, email TEXT NOT NULL)").await.unwrap();
+//         db.execute("INSERT INTO users VALUES (gen_random_uuid(), 'test@example.com')").await.unwrap();
 //
-//     let users: Vec<crate::models::User> = sqlx::query_as("SELECT * FROM users LIMIT 10")
-//         .fetch_all(&pool)
-//         .await
-//         .expect("Query failed");
+//         let ctx = TestQueryContext::with_pool(db.pool().clone(), Some(Uuid::new_v4()));
 //
-//     // Verify results
-//     for user in &users {
-//         assert!(!user.email.is_empty());
+//         let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
+//             .fetch_one(ctx.db().unwrap())
+//             .await
+//             .unwrap();
+//
+//         assert_eq!(count.0, 1);
+//
+//         // Cleanup
+//         db.cleanup().await.unwrap();
 //     }
 // }

@@ -188,7 +188,10 @@ fn create_frontend(dir: &Path, name: &str) -> Result<()> {
     fs::write(frontend_dir.join("tsconfig.json"), FRONTEND_TSCONFIG)?;
     fs::write(frontend_dir.join("src/app.html"), FRONTEND_APP_HTML)?;
     fs::write(frontend_dir.join(".env"), FRONTEND_ENV_EXAMPLE)?;
-    fs::write(frontend_dir.join(".prettierignore"), FRONTEND_PRETTIERIGNORE)?;
+    fs::write(
+        frontend_dir.join(".prettierignore"),
+        FRONTEND_PRETTIERIGNORE,
+    )?;
     fs::write(frontend_dir.join(".prettierrc"), FRONTEND_PRETTIERRC)?;
 
     // Routes

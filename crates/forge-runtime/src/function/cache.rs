@@ -228,8 +228,18 @@ mod tests {
         let args1 = json!({"id": 1});
         let args2 = json!({"id": 2});
 
-        cache.set("get_user", &args1, json!({"name": "a"}), Duration::from_secs(60));
-        cache.set("get_user", &args2, json!({"name": "b"}), Duration::from_secs(60));
+        cache.set(
+            "get_user",
+            &args1,
+            json!({"name": "a"}),
+            Duration::from_secs(60),
+        );
+        cache.set(
+            "get_user",
+            &args2,
+            json!({"name": "b"}),
+            Duration::from_secs(60),
+        );
         cache.set("list_users", &json!({}), json!([]), Duration::from_secs(60));
 
         cache.invalidate_function("get_user");

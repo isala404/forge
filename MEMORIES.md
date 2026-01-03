@@ -161,11 +161,15 @@ Workflows:
 - Advanced patterns (commented): parallel(), fluent step API, wait_for_event()
 
 Testing:
-- TestContext, TestContextBuilder
-- assert_ok!, assert_err!, assert_err_variant!
-- assert_job_dispatched!, assert_workflow_started!
-- assert_json_matches() for partial JSON matching
-- MockHttp for HTTP mocking
+- Per-function-type contexts: TestQueryContext, TestMutationContext, TestActionContext, TestJobContext, TestCronContext, TestWorkflowContext
+- Builder pattern: .as_user(), .with_role(), .with_claim(), .with_tenant(), .with_pool()
+- MockHttp with pattern matching, request recording, verification (assert_called, assert_called_times, assert_not_called)
+- MockJobDispatch, MockWorkflowDispatch for dispatch verification
+- Assertion macros: assert_ok!, assert_err!, assert_err_variant!, assert_job_dispatched!, assert_workflow_started!, assert_http_called!
+- Helper functions: assert_json_matches(), error_contains(), validation_error_for_field()
+- TestDatabase for zero-config database provisioning (uses DATABASE_URL or embedded Postgres)
+- Feature flag: forge = { features = ["testing"] } in dev-dependencies
+- Macros re-exported at forge crate root and in prelude
 
 Config (forge.toml):
 - [project], [database], [gateway], [observability] sections

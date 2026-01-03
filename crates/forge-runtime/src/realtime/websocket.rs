@@ -112,7 +112,11 @@ pub enum WebSocketMessage {
     /// Error message.
     Error { code: String, message: String },
     /// Error message with subscription ID.
-    ErrorWithId { id: String, code: String, message: String },
+    ErrorWithId {
+        id: String,
+        code: String,
+        message: String,
+    },
 }
 
 /// Represents a connected WebSocket client.

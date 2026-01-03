@@ -489,3 +489,15 @@ Improved scaffolded templates with real API calls and README.
 - `functions/mod.rs.tmpl`: Removed #[allow(unused_imports)] attributes (pub use re-exports don't trigger warnings)
 - `README.md.tmpl`: New file with FORGE description, build instructions (with/without Docker), test commands
 - `crates/forge/src/cli/new.rs`: Added README.md generation during project scaffolding
+
+Implemented first-class unit testing infrastructure.
+- `crates/forge-core/src/testing/db.rs`: TestDatabase with zero-config Postgres (uses DATABASE_URL or embedded)
+- `crates/forge-core/src/testing/context/`: TestQueryContext, TestMutationContext, TestActionContext, TestJobContext, TestCronContext, TestWorkflowContext with builders
+- `crates/forge-core/src/testing/mock_http.rs`: MockHttp with pattern matching, request recording, verification (assert_called, assert_called_times)
+- `crates/forge-core/src/testing/mock_dispatch.rs`: MockJobDispatch, MockWorkflowDispatch for verifying dispatch calls
+- `crates/forge-core/src/testing/assertions.rs`: Assertion macros (assert_ok!, assert_err!, assert_job_dispatched!, assert_workflow_started!, assert_http_called!, etc.)
+- `crates/forge/src/lib.rs`: Re-exported macros at crate root with testing feature
+- `crates/forge/src/runtime.rs`: Added testing exports to prelude with testing feature, fixed redundant closure clippy warning
+- `crates/forge/templates/project/functions/tests.rs.tmpl`: Comprehensive test examples for all function types
+- `docs/docs/api/testing.mdx`: Updated documentation with new testing patterns
+- Feature: forge-core/testing (lib), forge/testing (user-facing)

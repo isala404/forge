@@ -12,6 +12,10 @@ pub mod schema;
 pub mod tenant;
 pub mod workflow;
 
+// Testing utilities - available when the "testing" feature is enabled or in test mode
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
+
 pub use auth::{Claims, ClaimsBuilder};
 pub use cluster::{ClusterInfo, LeaderInfo, LeaderRole, NodeId, NodeInfo, NodeRole, NodeStatus};
 pub use config::ForgeConfig;

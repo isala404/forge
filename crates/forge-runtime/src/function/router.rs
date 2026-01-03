@@ -192,7 +192,8 @@ impl FunctionRouter {
             .parse()
             .unwrap_or_default();
 
-        let config = RateLimitConfig::new(requests, Duration::from_secs(per_secs)).with_key(key_type);
+        let config =
+            RateLimitConfig::new(requests, Duration::from_secs(per_secs)).with_key(key_type);
 
         // Build bucket key
         let bucket_key = self

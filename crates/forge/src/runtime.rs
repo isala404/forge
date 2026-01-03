@@ -75,6 +75,49 @@ pub mod prelude {
     pub use forge_core::workflow::{ForgeWorkflow, WorkflowContext};
 
     pub use crate::{Forge, ForgeBuilder};
+
+    // Testing utilities - re-export when testing feature is enabled
+    // Note: Uses feature = "testing" only (not cfg(test)) because cfg(test) in this
+    // crate doesn't enable the testing module in forge-core dependency.
+    #[cfg(feature = "testing")]
+    pub use forge_core::testing::{
+        assert_json_matches,
+        error_contains,
+        validation_error_for_field,
+        // Mocks
+        DispatchedJob,
+        // Database
+        IsolatedTestDb,
+        MockHttp,
+        MockHttpBuilder,
+        MockJobDispatch,
+        MockRequest,
+        MockResponse,
+        MockWorkflowDispatch,
+        StartedWorkflow,
+        // Test contexts
+        TestActionContext,
+        TestActionContextBuilder,
+        TestCronContext,
+        TestCronContextBuilder,
+        TestDatabase,
+        TestJobContext,
+        TestJobContextBuilder,
+        TestMutationContext,
+        TestMutationContextBuilder,
+        TestQueryContext,
+        TestQueryContextBuilder,
+        TestWorkflowContext,
+        TestWorkflowContextBuilder,
+    };
+
+    // Re-export assertion macros in prelude (macros are at crate root via #[macro_export])
+    #[cfg(feature = "testing")]
+    pub use forge_core::{
+        assert_err, assert_err_variant, assert_http_called, assert_http_not_called,
+        assert_job_dispatched, assert_job_not_dispatched, assert_ok, assert_workflow_not_started,
+        assert_workflow_started,
+    };
 }
 
 /// The main FORGE runtime.
@@ -429,7 +472,7 @@ impl Forge {
             // Add frontend handler as fallback if configured
             if let Some(handler) = self.frontend_handler {
                 use axum::routing::get;
-                router = router.fallback(get(move |req| handler(req)));
+                router = router.fallback(get(handler));
                 tracing::info!("Frontend handler enabled - serving embedded assets");
             }
 

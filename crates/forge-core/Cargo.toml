@@ -19,7 +19,16 @@ reqwest = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync"] }
 futures = "0.3"
 regex-lite = "0.1.8"
+once_cell = "1.19"
+
+# Optional: for embedded test database
+postgresql_embedded = { version = "0.20", features = ["bundled"], optional = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[features]
+default = []
+testing = []
+embedded-test-db = ["postgresql_embedded"]
