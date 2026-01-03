@@ -21,3 +21,26 @@ pub async fn get_app_stats(ctx: &QueryContext) -> Result<HashMap<String, String>
 
     Ok(map)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Test contexts don't need a database - they're for testing auth logic,
+    // dispatch verification, and HTTP mocking without infrastructure.
+
+    #[tokio::test]
+    async fn test_query_context_creation() {
+        let ctx = TestQueryContext::minimal();
+        assert!(!ctx.auth.is_authenticated());
+    }
+
+    #[tokio::test]
+    async fn test_query_with_user() {
+        let user_id = Uuid::new_v4();
+        let ctx = TestQueryContext::authenticated(user_id);
+
+        assert!(ctx.auth.is_authenticated());
+        assert_eq!(ctx.require_user_id().unwrap(), user_id);
+    }
+}

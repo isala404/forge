@@ -33,6 +33,8 @@ pub struct TestQueryContext {
     pub request: RequestMetadata,
     /// Optional database pool for integration tests.
     pool: Option<PgPool>,
+    /// Tenant ID for multi-tenant testing.
+    tenant_id: Option<Uuid>,
 }
 
 impl TestQueryContext {
@@ -79,6 +81,11 @@ impl TestQueryContext {
     pub fn claim(&self, key: &str) -> Option<&serde_json::Value> {
         self.auth.claim(key)
     }
+
+    /// Get the tenant ID (if set).
+    pub fn tenant_id(&self) -> Option<Uuid> {
+        self.tenant_id
+    }
 }
 
 /// Builder for TestQueryContext.
@@ -87,6 +94,7 @@ pub struct TestQueryContextBuilder {
     user_id: Option<Uuid>,
     roles: Vec<String>,
     claims: HashMap<String, serde_json::Value>,
+    tenant_id: Option<Uuid>,
     pool: Option<PgPool>,
 }
 
@@ -115,6 +123,12 @@ impl TestQueryContextBuilder {
         self
     }
 
+    /// Set the tenant ID for multi-tenant testing.
+    pub fn with_tenant(mut self, tenant_id: Uuid) -> Self {
+        self.tenant_id = Some(tenant_id);
+        self
+    }
+
     /// Set the database pool.
     pub fn with_pool(mut self, pool: PgPool) -> Self {
         self.pool = Some(pool);
@@ -133,6 +147,7 @@ impl TestQueryContextBuilder {
             auth,
             request: RequestMetadata::default(),
             pool: self.pool,
+            tenant_id: self.tenant_id,
         }
     }
 }

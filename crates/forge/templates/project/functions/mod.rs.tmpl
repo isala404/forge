@@ -1,16 +1,13 @@
 pub mod account_verification_workflow;
 pub mod app_stats;
 pub mod export_users_job;
-pub mod get_quote_action;
+pub mod get_bitcoin_price_action;
 pub mod heartbeat_stats_cron;
 pub mod users;
-
-#[cfg(test)]
-mod tests;
 
 pub use account_verification_workflow::*;
 pub use app_stats::*;
 pub use export_users_job::*;
-pub use get_quote_action::*;
+pub use get_bitcoin_price_action::*;
 pub use heartbeat_stats_cron::*;
 pub use users::*;

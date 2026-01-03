@@ -69,3 +69,68 @@ pub async fn heartbeat_stats(ctx: &CronContext) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+
+    // Cron test contexts simulate scheduled execution timing, late detection,
+    // catch-up runs, and timezone handling.
+
+    #[tokio::test]
+    async fn test_cron_on_time() {
+        let now = Utc::now();
+        let ctx = TestCronContext::builder("heartbeat_stats")
+            .scheduled_at(now)
+            .build();
+
+        assert_eq!(ctx.cron_name, "heartbeat_stats");
+        assert!(!ctx.is_late());
+        assert!(!ctx.is_catch_up);
+    }
+
+    #[tokio::test]
+    async fn test_cron_late_detection() {
+        let scheduled = Utc::now() - Duration::minutes(5);
+        let ctx = TestCronContext::builder("heartbeat_stats")
+            .scheduled_at(scheduled)
+            .build();
+
+        assert!(ctx.is_late());
+        assert!(ctx.delay() >= Duration::minutes(4));
+    }
+
+    #[tokio::test]
+    async fn test_cron_catch_up() {
+        let ctx = TestCronContext::builder("heartbeat_stats")
+            .as_catch_up()
+            .build();
+
+        assert!(ctx.is_catch_up);
+    }
+
+    #[tokio::test]
+    async fn test_cron_timezone() {
+        let ctx = TestCronContext::builder("heartbeat_stats")
+            .with_timezone("America/New_York")
+            .build();
+
+        assert_eq!(ctx.timezone, "America/New_York");
+    }
+
+    #[tokio::test]
+    async fn test_cron_logging() {
+        let ctx = TestCronContext::builder("heartbeat_stats").build();
+
+        ctx.log.info("Starting stats update");
+        ctx.log.warn("Slow query detected");
+        ctx.log.debug("Query completed");
+
+        let entries = ctx.log.entries();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].level, "info");
+        assert_eq!(entries[1].level, "warn");
+        assert_eq!(entries[2].level, "debug");
+    }
+}

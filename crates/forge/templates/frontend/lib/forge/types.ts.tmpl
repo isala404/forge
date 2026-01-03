@@ -28,18 +28,20 @@ export interface DeleteUserInput {
   id: string;
 }
 
-export interface GetQuoteInputData {
-  category?: string;
+export interface GetBitcoinPriceInputData {
+  currency?: string;
 }
 
-export interface GetQuoteInput {
-  input: GetQuoteInputData;
+export interface GetBitcoinPriceInput {
+  input: GetBitcoinPriceInputData;
 }
 
-export interface GetQuoteOutput {
-  quote: string;
-  author: string;
-  category: string;
+export interface GetBitcoinPriceOutput {
+  price_usd: number;
+  price_eur: number;
+  price_gbp: number;
+  change_24h: number;
+  currency: string;
 }
 
 export type JobStatus =

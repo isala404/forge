@@ -6,8 +6,8 @@ import type {
   CreateUserInput,
   UpdateUserInput,
   DeleteUserInput,
-  GetQuoteInput,
-  GetQuoteOutput,
+  GetBitcoinPriceInput,
+  GetBitcoinPriceOutput,
   Job,
   Workflow,
   JobStats,
@@ -30,9 +30,10 @@ export const deleteUser = createMutation<DeleteUserInput, boolean>(
 );
 
 // Actions (for external API calls)
-export const getQuote = createAction<GetQuoteInput, GetQuoteOutput>(
-  "get_quote",
-);
+export const getBitcoinPrice = createAction<
+  GetBitcoinPriceInput,
+  GetBitcoinPriceOutput
+>("get_bitcoin_price");
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8080";
 

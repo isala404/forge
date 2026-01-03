@@ -501,3 +501,58 @@ Implemented first-class unit testing infrastructure.
 - `crates/forge/templates/project/functions/tests.rs.tmpl`: Comprehensive test examples for all function types
 - `docs/docs/api/testing.mdx`: Updated documentation with new testing patterns
 - Feature: forge-core/testing (lib), forge/testing (user-facing)
+
+Improved testing ergonomics: inline tests, explicit database config.
+- `crates/forge-core/src/testing/db.rs`: Changed to EXPLICIT config (from_url, from_env, embedded) - never auto-reads .env
+- TestDatabase.from_env() uses TEST_DATABASE_URL (not DATABASE_URL) for safety
+- `crates/forge-core/src/testing/context/query.rs`: Added with_tenant() and tenant_id() methods
+- Moved tests inline with function files (idiomatic Rust #[cfg(test)] mod tests)
+- Deleted separate tests.rs.tmpl, removed from mod.rs.tmpl
+- All function templates now have inline tests (32 total): users (9), job (5), action (4), cron (5), workflow (7), app_stats (2)
+- `crates/forge/templates/project/Cargo.toml.tmpl`: Added dev-dependencies with testing feature
+- `crates/forge/templates/project/README.md.tmpl`: Added comprehensive testing section
+- `docs/docs/api/testing.mdx`: Updated for explicit TestDatabase API
+
+Cleaned up test templates per CLAUDE.md (explain why, not what).
+- README.md.tmpl: Simplified test section - removed code examples, points to inline tests in src/functions/
+- All function templates: Added single quality comment explaining test context purpose
+- app_stats.rs.tmpl: "Test contexts don't need a database - they're for testing auth logic, dispatch verification, and HTTP mocking without infrastructure"
+- users.rs.tmpl: "Test contexts simulate auth states, roles, and dispatch verification without needing a database connection"
+- export_users_job.rs.tmpl: "Job test contexts track retry state, progress updates, and heartbeats for verifying job behavior across attempts"
+- get_quote_action.rs.tmpl: "Action test contexts provide HTTP mocking for external API calls with pattern matching and response verification"
+- heartbeat_stats_cron.rs.tmpl: "Cron test contexts simulate scheduled execution timing, late detection, catch-up runs, and timezone handling"
+- account_verification_workflow.rs.tmpl: "Workflow test contexts track step completion, resumption state, durable sleep calls, and deterministic time for reproducible tests"
+- Removed verbose section headers (=== TESTS ===) and tutorial-style comments
+
+Fixed Cargo.toml dual-source dependency error.
+- Cargo.toml.tmpl: Moved `features = ["testing"]` from dev-dependencies to main forge dependency
+- dev.sh: Updated fix_deps() sed to handle new template format with testing feature
+- Root cause: Cargo doesn't allow same dependency from different sources (crates.io vs local path)
+
+Standardized PostgreSQL credentials and fixed template rendering.
+- env.tmpl: postgres://postgres:forge@localhost:5432/{{project_name}}
+- docker-compose.yml.tmpl: POSTGRES_USER=postgres, POSTGRES_PASSWORD=forge, POSTGRES_DB={{project_name}}
+- dev.sh: Updated credentials to match (user=postgres, password=forge, db=$APP_NAME)
+- new.rs: Fixed .env not templated - changed `fs::write(dir.join(".env"), ENV)` to `render(ENV, &vars)`
+
+Replaced get_quote with get_bitcoin_price action.
+- get_bitcoin_price_action.rs.tmpl: CoinGecko API for live Bitcoin price (USD/EUR/GBP + 24h change)
+- Deleted get_quote_action.rs.tmpl
+- types.ts.tmpl: GetBitcoinPriceInput, GetBitcoinPriceOutput interfaces
+- api.ts.tmpl: getBitcoinPrice action export
+- page.svelte.tmpl: Bitcoin price display with formatting, 24h change indicator (positive/negative styling)
+- main.rs.tmpl: GetBitcoinPriceAction registration
+- new.rs: Updated template reference to get_bitcoin_price_action.rs.tmpl
+
+Fixed workflow step status race condition on resume from durable sleep.
+- Root cause: record_step_start spawned background DB update that could overwrite "completed" back to "running"
+- forge-core/src/workflow/context.rs: record_step_start now returns early if step status != Pending
+- Changed SQL from `ON CONFLICT DO UPDATE SET status` to `ON CONFLICT DO NOTHING`
+- Added is_step_started() method to check if step has begun (not just completed)
+- forge-core/src/testing/context/workflow.rs: Added is_step_started() and record_step_complete_async() for API parity
+- forge-core/src/testing/db.rs: Added #[cfg(feature)] guard to OnceCell import
+- account_verification_workflow.rs.tmpl: Updated comments explaining durable sleep pattern
+
+Updated documentation for testing and workflow APIs.
+- docs/docs/api/testing.mdx: Added has_role() and claim() methods to TestQueryContext table
+- docs/docs/api/workflow-context.mdx: Added is_step_started(), record_step_start(), record_step_complete(), record_step_complete_async() methods with examples

@@ -6,11 +6,11 @@
     updateUser,
     deleteUser,
     getAppStats,
-    getQuote,
+    getBitcoinPrice,
     createExportUsersJob,
     createAccountVerificationWorkflow,
   } from "$lib/forge";
-  import type { User, GetQuoteOutput } from "$lib/forge/types";
+  import type { User, GetBitcoinPriceOutput } from "$lib/forge/types";
   import { onMount, onDestroy } from "svelte";
 
   const ACTIVE_JOB_KEY = "forge_active_job_id";
@@ -35,7 +35,7 @@
   let deletePopoverUserId = $state<string | null>(null);
 
   // Action state
-  let actionResult = $state<GetQuoteOutput | null>(null);
+  let actionResult = $state<GetBitcoinPriceOutput | null>(null);
   let actionError = $state<string | null>(null);
   let isActionRunning = $state(false);
 
@@ -115,23 +115,32 @@
     }
   }
 
-  async function handleGetQuote() {
+  async function handleGetBitcoinPrice() {
     isActionRunning = true;
     actionResult = null;
     actionError = null;
 
     try {
-      // Actions expect input wrapped in an 'input' field
-      const result = await action(getQuote, {
-        input: {
-          category: "inspiration",
-        },
+      const result = await action(getBitcoinPrice, {
+        input: { currency: "usd" },
       });
       actionResult = result;
     } catch (err) {
       actionError = err instanceof Error ? err.message : "Action failed";
     }
     isActionRunning = false;
+  }
+
+  function formatPrice(price: number): string {
+    return price.toLocaleString("en-US", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+  }
+
+  function formatChange(change: number): string {
+    const sign = change >= 0 ? "+" : "";
+    return `${sign}${change.toFixed(2)}%`;
   }
 
   function startEditUser(user: User) {
@@ -289,17 +298,31 @@
 
   <div class="grid">
     <section class="card">
-      <h2>Get Quote <span class="badge">action</span></h2>
-      <p class="hint">Fetch from external API (sync, non-transactional)</p>
+      <h2>Bitcoin Price <span class="badge">action</span></h2>
+      <p class="hint">Live price from CoinGecko API (external API call)</p>
 
       {#if isActionRunning}
-        <p>Fetching inspirational quote...</p>
+        <p>Fetching Bitcoin price...</p>
       {:else if actionResult}
         <div class="action-result success">
-          <p class="quote">"{actionResult.quote}"</p>
-          <p class="author">— {actionResult.author}</p>
-          <button class="small mt-sm" onclick={() => (actionResult = null)}
-            >Get Another</button
+          <div class="price-display">
+            <span class="price-value"
+              >${formatPrice(actionResult.price_usd)}</span
+            >
+            <span
+              class="price-change"
+              class:positive={actionResult.change_24h >= 0}
+              class:negative={actionResult.change_24h < 0}
+            >
+              {formatChange(actionResult.change_24h)} (24h)
+            </span>
+          </div>
+          <div class="price-other">
+            <span>€{formatPrice(actionResult.price_eur)}</span>
+            <span>£{formatPrice(actionResult.price_gbp)}</span>
+          </div>
+          <button class="small mt-sm" onclick={handleGetBitcoinPrice}
+            >Refresh</button
           >
         </div>
       {:else if actionError}
@@ -310,7 +333,7 @@
           >
         </div>
       {:else}
-        <button onclick={handleGetQuote}>Get Inspirational Quote</button>
+        <button onclick={handleGetBitcoinPrice}>Get Bitcoin Price</button>
       {/if}
     </section>
 
@@ -720,15 +743,36 @@
     background: #f5f5f5;
   }
 
-  .action-result .quote {
-    font-style: italic;
-    font-size: 1rem;
-    line-height: 1.4;
+  .price-display {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
     margin-bottom: 0.5rem;
   }
 
-  .action-result .author {
-    font-size: 0.85rem;
+  .price-value {
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: #166534;
+  }
+
+  .price-change {
+    font-size: 0.9rem;
+    font-weight: 500;
+  }
+
+  .price-change.positive {
+    color: #166534;
+  }
+
+  .price-change.negative {
+    color: #dc2626;
+  }
+
+  .price-other {
+    display: flex;
+    gap: 1rem;
+    font-size: 0.9rem;
     color: #555;
   }
 

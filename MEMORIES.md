@@ -132,8 +132,8 @@ Mutations:
 - Role-protected (commented): #[forge::mutation(require_auth, require_role("admin"))]
 
 Actions:
-- With timeout: #[forge::action(timeout = 60)]
-- ctx.http() for external API calls (ZenQuotes API example in template)
+- With timeout: #[forge::action(timeout = 30)]
+- ctx.http() for external API calls (CoinGecko API example: Bitcoin price)
 
 Jobs:
 - Retry: #[retry(max_attempts = 3, backoff = "exponential")]
@@ -167,7 +167,9 @@ Testing:
 - MockJobDispatch, MockWorkflowDispatch for dispatch verification
 - Assertion macros: assert_ok!, assert_err!, assert_err_variant!, assert_job_dispatched!, assert_workflow_started!, assert_http_called!
 - Helper functions: assert_json_matches(), error_contains(), validation_error_for_field()
-- TestDatabase for zero-config database provisioning (uses DATABASE_URL or embedded Postgres)
+- TestDatabase: EXPLICIT config required (from_url, from_env, embedded) - never auto-reads .env
+- TestDatabase.from_env() uses TEST_DATABASE_URL (not DATABASE_URL) for safety
+- Tests are inline with function files (#[cfg(test)] mod tests), not separate files
 - Feature flag: forge = { features = ["testing"] } in dev-dependencies
 - Macros re-exported at forge crate root and in prelude
 

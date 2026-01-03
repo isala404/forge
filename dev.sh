@@ -47,15 +47,15 @@ start_db() {
     docker rm -f forge-dev-db 2>/dev/null || true
     docker run -d \
         --name forge-dev-db \
-        -e POSTGRES_DB=forge_dev \
-        -e POSTGRES_USER=forge \
+        -e POSTGRES_DB="$APP_NAME" \
+        -e POSTGRES_USER=postgres \
         -e POSTGRES_PASSWORD=forge \
         -p 5432:5432 \
         postgres:16-alpine
 
     log "Waiting for PostgreSQL..."
     for i in {1..30}; do
-        if docker exec forge-dev-db pg_isready -U forge -d forge_dev >/dev/null 2>&1; then
+        if docker exec forge-dev-db pg_isready -U postgres -d "$APP_NAME" >/dev/null 2>&1; then
             log "PostgreSQL ready"
             return 0
         fi
@@ -88,7 +88,8 @@ scaffold_app() {
 fix_deps() {
     log "Linking to local forge source..."
 
-    # Update Cargo.toml to use local path
+    # Update Cargo.toml to use local path (handles both old and new template formats)
+    sed -i '' 's|forge = { version = "0.1", features = \["testing"\] }|forge = { path = "'"$FORGE_ROOT"'/crates/forge", features = ["testing"] }|' "$APP_DIR/Cargo.toml"
     sed -i '' "s|forge = \"0.1\"|forge = { path = \"$FORGE_ROOT/crates/forge\" }|" "$APP_DIR/Cargo.toml"
 
     # Install frontend deps

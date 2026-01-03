@@ -121,3 +121,68 @@ pub async fn export_users(ctx: &JobContext, input: ExportUsersInput) -> Result<E
         format: input.format,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Job test contexts track retry state, progress updates, and heartbeats
+    // for verifying job behavior across attempts.
+
+    #[tokio::test]
+    async fn test_first_attempt() {
+        let ctx = TestJobContext::builder("export_users").build();
+
+        assert_eq!(ctx.job_type, "export_users");
+        assert_eq!(ctx.attempt, 1);
+        assert!(!ctx.is_retry());
+    }
+
+    #[tokio::test]
+    async fn test_retry_detection() {
+        let ctx = TestJobContext::builder("export_users")
+            .as_retry(3)
+            .with_max_attempts(5)
+            .build();
+
+        assert!(ctx.is_retry());
+        assert_eq!(ctx.attempt, 3);
+        assert!(!ctx.is_last_attempt());
+    }
+
+    #[tokio::test]
+    async fn test_last_attempt() {
+        let ctx = TestJobContext::builder("export_users")
+            .as_last_attempt()
+            .build();
+
+        assert!(ctx.is_retry());
+        assert!(ctx.is_last_attempt());
+    }
+
+    #[tokio::test]
+    async fn test_progress_updates() {
+        let ctx = TestJobContext::builder("export_users").build();
+
+        ctx.progress(25, "Processing batch 1").unwrap();
+        ctx.progress(50, "Processing batch 2").unwrap();
+        ctx.progress(100, "Complete").unwrap();
+
+        let updates = ctx.progress_updates();
+        assert_eq!(updates.len(), 3);
+        assert_eq!(updates[0].percent, 25);
+        assert_eq!(updates[0].message, "Processing batch 1");
+        assert_eq!(updates[2].percent, 100);
+    }
+
+    #[tokio::test]
+    async fn test_job_with_http_mock() {
+        let ctx = TestJobContext::builder("sync_external_data")
+            .mock_http_json("https://api.example.com/data", serde_json::json!({
+                "items": [1, 2, 3]
+            }))
+            .build();
+
+        ctx.http().assert_not_called("https://api.example.com/*");
+    }
+}

@@ -1,90 +1,123 @@
-//! Zero-config database provisioning for tests.
+//! Explicit database provisioning for tests.
 //!
-//! Provides automatic PostgreSQL setup following sqlx's philosophy of testing
-//! against real databases. When DATABASE_URL is set, uses that database.
-//! When the `embedded-test-db` feature is enabled and DATABASE_URL is not set,
-//! automatically downloads and starts an embedded PostgreSQL instance.
+//! Provides PostgreSQL access for integration tests. Database configuration
+//! is EXPLICIT - you must either:
+//! 1. Pass a URL directly via `from_url()`
+//! 2. Use `from_env()` to explicitly read from TEST_DATABASE_URL
+//! 3. Enable `embedded-test-db` feature and use `embedded()`
+//!
+//! This design prevents accidental use of production databases. The .env file
+//! DATABASE_URL is NEVER automatically read.
 
 use sqlx::PgPool;
+#[cfg(feature = "embedded-test-db")]
 use tokio::sync::OnceCell;
 
 use crate::error::{ForgeError, Result};
 
-// Singleton instances survive across all tests, avoiding repeated Postgres startup overhead
-static TEST_POOL: OnceCell<PgPool> = OnceCell::const_new();
-
 #[cfg(feature = "embedded-test-db")]
 static EMBEDDED_PG: OnceCell<postgresql_embedded::PostgreSQL> = OnceCell::const_new();
 
-/// Zero-configuration database access for tests.
+/// Explicit database access for tests.
 ///
-/// Follows sqlx's philosophy of testing against real databases. When DATABASE_URL
-/// is set, uses the external database (for CI with service containers). Otherwise,
-/// when the `embedded-test-db` feature is enabled, automatically downloads and
-/// starts an embedded PostgreSQL instance.
-pub struct TestDatabase;
+/// Unlike runtime database access, test database configuration is intentionally
+/// explicit to prevent accidental use of production databases.
+///
+/// # Examples
+///
+/// ```ignore
+/// // Option 1: Explicit URL
+/// let db = TestDatabase::from_url("postgres://localhost/test_db").await?;
+///
+/// // Option 2: From TEST_DATABASE_URL env var (explicit opt-in)
+/// let db = TestDatabase::from_env().await?;
+///
+/// // Option 3: Embedded Postgres (requires embedded-test-db feature)
+/// let db = TestDatabase::embedded().await?;
+/// ```
+pub struct TestDatabase {
+    pool: PgPool,
+    url: String,
+}
 
 impl TestDatabase {
-    /// Returns a shared connection pool, initializing the database on first call.
+    /// Connect to database at the given URL.
     ///
-    /// The pool is shared across tests for efficiency. For test isolation,
-    /// use `isolated()` instead which creates a fresh database per test.
-    pub async fn pool() -> Result<&'static PgPool> {
-        TEST_POOL
-            .get_or_try_init(|| async {
-                let url = Self::ensure_database().await?;
-
-                sqlx::postgres::PgPoolOptions::new()
-                    .max_connections(10)
-                    .connect(&url)
-                    .await
-                    .map_err(ForgeError::Sql)
-            })
+    /// Use this for explicit database configuration in tests.
+    pub async fn from_url(url: &str) -> Result<Self> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(10)
+            .connect(url)
             .await
+            .map_err(ForgeError::Sql)?;
+
+        Ok(Self {
+            pool,
+            url: url.to_string(),
+        })
     }
 
-    /// Guarantees a PostgreSQL instance is running and returns its connection URL.
+    /// Connect using TEST_DATABASE_URL environment variable.
     ///
-    /// Priority: DATABASE_URL env var > embedded Postgres > error
-    pub async fn ensure_database() -> Result<String> {
-        // Prefer explicit DATABASE_URL for CI environments with service containers
-        if let Ok(url) = std::env::var("DATABASE_URL") {
-            return Ok(url);
-        }
+    /// Note: This reads TEST_DATABASE_URL (not DATABASE_URL) to prevent
+    /// accidental use of production databases in tests.
+    pub async fn from_env() -> Result<Self> {
+        let url = std::env::var("TEST_DATABASE_URL").map_err(|_| {
+            ForgeError::Database(
+                "TEST_DATABASE_URL not set. Set it explicitly for database tests.".to_string(),
+            )
+        })?;
+        Self::from_url(&url).await
+    }
 
-        #[cfg(feature = "embedded-test-db")]
-        {
-            let pg = EMBEDDED_PG
-                .get_or_try_init(|| async {
-                    let mut pg = postgresql_embedded::PostgreSQL::default();
-                    pg.setup().await.map_err(|e| {
-                        ForgeError::Database(format!("Failed to setup embedded Postgres: {}", e))
-                    })?;
-                    pg.start().await.map_err(|e| {
-                        ForgeError::Database(format!("Failed to start embedded Postgres: {}", e))
-                    })?;
-                    Ok::<_, ForgeError>(pg)
-                })
-                .await?;
+    /// Start an embedded PostgreSQL instance.
+    ///
+    /// Requires the `embedded-test-db` feature. Downloads and starts a real
+    /// PostgreSQL instance automatically.
+    #[cfg(feature = "embedded-test-db")]
+    pub async fn embedded() -> Result<Self> {
+        let pg = EMBEDDED_PG
+            .get_or_try_init(|| async {
+                let mut pg = postgresql_embedded::PostgreSQL::default();
+                pg.setup().await.map_err(|e| {
+                    ForgeError::Database(format!("Failed to setup embedded Postgres: {}", e))
+                })?;
+                pg.start().await.map_err(|e| {
+                    ForgeError::Database(format!("Failed to start embedded Postgres: {}", e))
+                })?;
+                Ok::<_, ForgeError>(pg)
+            })
+            .await?;
 
-            Ok(pg.settings().url("postgres"))
-        }
+        let url = pg.settings().url("postgres");
+        Self::from_url(&url).await
+    }
 
-        #[cfg(not(feature = "embedded-test-db"))]
-        {
-            Err(ForgeError::Database(
-                "DATABASE_URL not set. Either set it or enable 'embedded-test-db' feature."
-                    .to_string(),
-            ))
-        }
+    /// Get the connection pool.
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
+    /// Get the database URL.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Run raw SQL to set up test data or schema.
+    pub async fn execute(&self, sql: &str) -> Result<()> {
+        sqlx::query(sql)
+            .execute(&self.pool)
+            .await
+            .map_err(ForgeError::Sql)?;
+        Ok(())
     }
 
     /// Creates a dedicated database for a single test, providing full isolation.
     ///
     /// Each call creates a new database with a unique name. Use this when tests
     /// modify data and could interfere with each other.
-    pub async fn isolated(test_name: &str) -> Result<IsolatedTestDb> {
-        let base_url = Self::ensure_database().await?;
+    pub async fn isolated(&self, test_name: &str) -> Result<IsolatedTestDb> {
+        let base_url = self.url.clone();
         // UUID suffix prevents collisions when tests run in parallel
         let db_name = format!(
             "forge_test_{}_{}",

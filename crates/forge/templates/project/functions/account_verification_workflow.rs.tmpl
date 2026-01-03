@@ -82,15 +82,18 @@ pub async fn account_verification(
     // Step 4: Durable sleep - workflow suspends and resumes after delay
     // This is the key differentiator: ctx.sleep() survives server restarts!
     // The workflow will be suspended in the database and resumed by the scheduler.
+    //
+    // Pattern for durable sleep steps:
+    // - record_step_start is idempotent (no-op if already started)
+    // - ctx.sleep() returns immediately on resume (timer already expired)
+    // - record_step_complete_async ensures DB is updated before continuing
     if !ctx.is_step_completed("wait_period") {
         ctx.record_step_start("wait_period");
         tracing::info!("Entering durable sleep (5 seconds)");
 
-        // Use ctx.sleep() for durable waiting - workflow suspends here
-        // In production, you might sleep for hours or days
+        // ctx.sleep() suspends on first run, returns immediately on resume
         ctx.sleep(Duration::from_secs(5)).await?;
 
-        // Use async version to ensure step status is persisted before continuing
         ctx.record_step_complete_async("wait_period", serde_json::json!({"waited": true}))
             .await;
         tracing::info!("Resumed from durable sleep");
@@ -147,3 +150,92 @@ pub async fn account_verification(
 // let event_data: serde_json::Value = ctx
 //     .wait_for_event("email_confirmed", Some(Duration::from_hours(24)))
 //     .await?;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Workflow test contexts track step completion, resumption state,
+    // durable sleep calls, and deterministic time for reproducible tests.
+
+    #[tokio::test]
+    async fn test_workflow_fresh_start() {
+        let ctx = TestWorkflowContext::builder("account_verification")
+            .with_version(1)
+            .build();
+
+        assert_eq!(ctx.workflow_name, "account_verification");
+        assert_eq!(ctx.version, 1);
+        assert!(!ctx.is_resumed());
+    }
+
+    #[tokio::test]
+    async fn test_workflow_step_tracking() {
+        let ctx = TestWorkflowContext::builder("account_verification").build();
+
+        assert!(!ctx.is_step_completed("generate_token"));
+
+        ctx.record_step_start("generate_token");
+        ctx.record_step_complete("generate_token", serde_json::json!("token_123"));
+
+        assert!(ctx.is_step_completed("generate_token"));
+
+        let token: String = ctx.get_step_result("generate_token").unwrap();
+        assert_eq!(token, "token_123");
+    }
+
+    #[tokio::test]
+    async fn test_workflow_resume() {
+        let ctx = TestWorkflowContext::builder("account_verification")
+            .as_resumed()
+            .with_completed_step("generate_token", serde_json::json!("token_abc"))
+            .with_completed_step("store_token", serde_json::json!({"stored": true}))
+            .build();
+
+        assert!(ctx.is_resumed());
+        assert!(ctx.is_step_completed("generate_token"));
+        assert!(ctx.is_step_completed("store_token"));
+        assert!(!ctx.is_step_completed("send_email"));
+    }
+
+    #[tokio::test]
+    async fn test_workflow_step_order() {
+        let ctx = TestWorkflowContext::builder("account_verification").build();
+
+        ctx.record_step_complete("step1", serde_json::json!({}));
+        ctx.record_step_complete("step2", serde_json::json!({}));
+        ctx.record_step_complete("step3", serde_json::json!({}));
+
+        let completed = ctx.completed_step_names();
+        assert_eq!(completed, vec!["step1", "step2", "step3"]);
+    }
+
+    #[tokio::test]
+    async fn test_workflow_durable_sleep() {
+        let ctx = TestWorkflowContext::builder("account_verification").build();
+
+        ctx.sleep(Duration::from_secs(3600)).await.unwrap();
+
+        assert!(ctx.sleep_called());
+    }
+
+    #[tokio::test]
+    async fn test_workflow_deterministic_time() {
+        let fixed_time = Utc::now();
+        let ctx = TestWorkflowContext::builder("account_verification")
+            .with_workflow_time(fixed_time)
+            .build();
+
+        assert_eq!(ctx.workflow_time(), fixed_time);
+    }
+
+    #[tokio::test]
+    async fn test_workflow_with_tenant() {
+        let tenant_id = Uuid::new_v4();
+        let ctx = TestWorkflowContext::builder("account_verification")
+            .with_tenant(tenant_id)
+            .build();
+
+        assert_eq!(ctx.tenant_id(), Some(tenant_id));
+    }
+}

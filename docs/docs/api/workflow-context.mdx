@@ -29,6 +29,12 @@ impl WorkflowContext {
     pub fn parallel(&self) -> ParallelBuilder;
     pub fn get_step_result<T: DeserializeOwned>(&self, name: &str) -> Option<T>;
     pub fn is_step_completed(&self, name: &str) -> bool;
+    pub fn is_step_started(&self, name: &str) -> bool;
+
+    // Manual step tracking
+    pub fn record_step_start(&self, name: &str);
+    pub fn record_step_complete(&self, name: &str, result: Value);
+    pub async fn record_step_complete_async(&self, name: &str, result: Value);
 
     // Durable execution
     pub async fn sleep(&self, duration: Duration) -> Result<()>;
@@ -203,6 +209,46 @@ Checks if a step has already been completed (for manual resumption logic).
 if !ctx.is_step_completed("custom_step") {
     // Step hasn't run yet
 }
+```
+
+### `is_step_started()`
+
+Checks if a step has been started (running, completed, or failed). Use this to guard steps that should only execute once, even across workflow suspension and resumption.
+
+```rust
+if !ctx.is_step_started("custom_step") {
+    ctx.record_step_start("custom_step");
+    // Do work...
+    ctx.record_step_complete("custom_step", result);
+}
+```
+
+### `record_step_start()`
+
+Manually records that a step has started. This is idempotent - if the step is already running or beyond (completed/failed), this is a no-op. This prevents race conditions when resuming workflows.
+
+```rust
+ctx.record_step_start("manual_step");
+```
+
+### `record_step_complete()`
+
+Records step completion with a result. Uses fire-and-forget database persistence.
+
+```rust
+ctx.record_step_complete("manual_step", serde_json::json!({
+    "processed": 100
+}));
+```
+
+### `record_step_complete_async()`
+
+Records step completion and awaits database persistence. Use this after `sleep()` calls to ensure the step is marked complete before suspension.
+
+```rust
+// After durable sleep, use async version to ensure DB persistence
+ctx.sleep(Duration::from_secs(3600)).await?;
+ctx.record_step_complete_async("wait_period", serde_json::json!({})).await;
 ```
 
 ## StepBuilder

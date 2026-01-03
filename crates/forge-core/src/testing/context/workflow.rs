@@ -108,6 +108,11 @@ impl TestWorkflowContext {
             .unwrap_or(false)
     }
 
+    /// Check if a step has been started (exists in step states).
+    pub fn is_step_started(&self, name: &str) -> bool {
+        self.step_states.read().unwrap().contains_key(name)
+    }
+
     /// Get the result of a completed step.
     pub fn get_step_result<T: serde::de::DeserializeOwned>(&self, name: &str) -> Option<T> {
         self.step_states
@@ -146,6 +151,11 @@ impl TestWorkflowContext {
         if !completed.contains(&name.to_string()) {
             completed.push(name.to_string());
         }
+    }
+
+    /// Record step completion (async version for API compatibility).
+    pub async fn record_step_complete_async(&self, name: &str, result: serde_json::Value) {
+        self.record_step_complete(name, result);
     }
 
     /// Get completed step names in order.

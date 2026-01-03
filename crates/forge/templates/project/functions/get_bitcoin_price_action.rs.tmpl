@@ -1,0 +1,109 @@
+use forge::prelude::*;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetBitcoinPriceInput {
+    pub currency: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetBitcoinPriceOutput {
+    pub price_usd: f64,
+    pub price_eur: f64,
+    pub price_gbp: f64,
+    pub change_24h: f64,
+    pub currency: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CoinGeckoResponse {
+    bitcoin: BitcoinData,
+}
+
+#[derive(Debug, Deserialize)]
+struct BitcoinData {
+    usd: f64,
+    eur: f64,
+    gbp: f64,
+    usd_24h_change: f64,
+}
+
+/// Action demonstrating external API calls via ctx.http()
+#[forge::action(timeout = 30)]
+pub async fn get_bitcoin_price(
+    ctx: &ActionContext,
+    input: GetBitcoinPriceInput,
+) -> Result<GetBitcoinPriceOutput> {
+    let currency = input.currency.unwrap_or_else(|| "usd".to_string());
+
+    tracing::info!(currency = %currency, "Fetching Bitcoin price");
+
+    let response = ctx
+        .http()
+        .get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd,eur,gbp&include_24hr_change=true")
+        .send()
+        .await
+        .map_err(|e| ForgeError::Function(format!("HTTP request failed: {}", e)))?;
+
+    if !response.status().is_success() {
+        return Err(ForgeError::Function(format!(
+            "API returned error status: {}",
+            response.status()
+        )));
+    }
+
+    let data: CoinGeckoResponse = response
+        .json()
+        .await
+        .map_err(|e| ForgeError::Function(format!("Failed to parse response: {}", e)))?;
+
+    tracing::info!(
+        price_usd = data.bitcoin.usd,
+        change_24h = data.bitcoin.usd_24h_change,
+        "Bitcoin price fetched"
+    );
+
+    Ok(GetBitcoinPriceOutput {
+        price_usd: data.bitcoin.usd,
+        price_eur: data.bitcoin.eur,
+        price_gbp: data.bitcoin.gbp,
+        change_24h: data.bitcoin.usd_24h_change,
+        currency,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Action test contexts provide HTTP mocking for external API calls
+    // with pattern matching and response verification.
+
+    #[tokio::test]
+    async fn test_action_http_mock() {
+        let ctx = TestActionContext::builder()
+            .as_user(Uuid::new_v4())
+            .mock_http_json("https://api.coingecko.com/*", serde_json::json!({
+                "bitcoin": {
+                    "usd": 50000.0,
+                    "eur": 45000.0,
+                    "gbp": 40000.0,
+                    "usd_24h_change": 2.5
+                }
+            }))
+            .build();
+
+        ctx.http().assert_not_called("https://api.coingecko.com/*");
+    }
+
+    #[tokio::test]
+    async fn test_action_error_mock() {
+        let ctx = TestActionContext::builder()
+            .as_user(Uuid::new_v4())
+            .mock_http("https://api.coingecko.com/*", |_req| {
+                MockResponse::error(429, "Rate limited")
+            })
+            .build();
+
+        ctx.http().assert_not_called("https://api.coingecko.com/*");
+    }
+}

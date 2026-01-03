@@ -32,9 +32,8 @@ const FUNCTIONS_HEARTBEAT_CRON: &str =
     include_str!("../../templates/project/functions/heartbeat_stats_cron.rs.tmpl");
 const FUNCTIONS_VERIFICATION_WORKFLOW: &str =
     include_str!("../../templates/project/functions/account_verification_workflow.rs.tmpl");
-const FUNCTIONS_GET_QUOTE_ACTION: &str =
-    include_str!("../../templates/project/functions/get_quote_action.rs.tmpl");
-const FUNCTIONS_TESTS: &str = include_str!("../../templates/project/functions/tests.rs.tmpl");
+const FUNCTIONS_GET_BITCOIN_PRICE_ACTION: &str =
+    include_str!("../../templates/project/functions/get_bitcoin_price_action.rs.tmpl");
 
 // Frontend templates
 const FRONTEND_PACKAGE_JSON: &str = include_str!("../../templates/frontend/package.json.tmpl");
@@ -52,6 +51,7 @@ const FRONTEND_API_TS: &str = include_str!("../../templates/frontend/lib/forge/a
 const FRONTEND_INDEX_TS: &str = include_str!("../../templates/frontend/lib/forge/index.ts.tmpl");
 const FRONTEND_PRETTIERIGNORE: &str = include_str!("../../templates/frontend/prettierignore.tmpl");
 const FRONTEND_PRETTIERRC: &str = include_str!("../../templates/frontend/prettierrc.tmpl");
+const FRONTEND_ESLINT_CONFIG: &str = include_str!("../../templates/frontend/eslint.config.js.tmpl");
 
 /// Create a new FORGE project.
 #[derive(Parser)]
@@ -118,7 +118,7 @@ pub fn create_project(dir: &Path, name: &str, minimal: bool) -> Result<()> {
     fs::write(dir.join("src/main.rs"), MAIN_RS)?;
     fs::write(dir.join("build.rs"), BUILD_RS)?;
     fs::write(dir.join(".gitignore"), GITIGNORE)?;
-    fs::write(dir.join(".env"), ENV)?;
+    fs::write(dir.join(".env"), render(ENV, &vars))?;
     fs::write(dir.join("migrations/0001_initial.sql"), MIGRATION_INITIAL)?;
 
     // Docker files
@@ -153,10 +153,9 @@ pub fn create_project(dir: &Path, name: &str, minimal: bool) -> Result<()> {
         FUNCTIONS_VERIFICATION_WORKFLOW,
     )?;
     fs::write(
-        dir.join("src/functions/get_quote_action.rs"),
-        FUNCTIONS_GET_QUOTE_ACTION,
+        dir.join("src/functions/get_bitcoin_price_action.rs"),
+        FUNCTIONS_GET_BITCOIN_PRICE_ACTION,
     )?;
-    fs::write(dir.join("src/functions/tests.rs"), FUNCTIONS_TESTS)?;
 
     // Create frontend if not minimal
     if !minimal {
@@ -193,6 +192,10 @@ fn create_frontend(dir: &Path, name: &str) -> Result<()> {
         FRONTEND_PRETTIERIGNORE,
     )?;
     fs::write(frontend_dir.join(".prettierrc"), FRONTEND_PRETTIERRC)?;
+    fs::write(
+        frontend_dir.join("eslint.config.js"),
+        FRONTEND_ESLINT_CONFIG,
+    )?;
 
     // Routes
     fs::write(
@@ -247,6 +250,7 @@ mod tests {
         assert!(path.join("frontend/src/lib/forge/types.ts").exists());
         assert!(path.join("frontend/src/lib/forge/api.ts").exists());
         assert!(path.join("frontend/src/routes/+layout.ts").exists());
+        assert!(path.join("frontend/eslint.config.js").exists());
         assert!(path.join("migrations/0001_initial.sql").exists());
         assert!(path.join("Dockerfile").exists());
         assert!(path.join("docker-compose.yml").exists());

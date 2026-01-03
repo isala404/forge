@@ -112,3 +112,112 @@ pub async fn delete_user(ctx: &MutationContext, id: Uuid) -> Result<bool> {
 //     .await
 //     .map_err(Into::into)
 // }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Test contexts simulate auth states, roles, and dispatch verification
+    // without needing a database connection.
+
+    #[tokio::test]
+    async fn test_unauthenticated_access() {
+        let ctx = TestQueryContext::minimal();
+        assert_err!(ctx.require_user_id());
+    }
+
+    #[tokio::test]
+    async fn test_authenticated_user() {
+        let user_id = Uuid::new_v4();
+        let ctx = TestQueryContext::authenticated(user_id);
+
+        assert!(ctx.auth.is_authenticated());
+        assert_eq!(ctx.require_user_id().unwrap(), user_id);
+    }
+
+    #[tokio::test]
+    async fn test_admin_role() {
+        let ctx = TestQueryContext::builder()
+            .as_user(Uuid::new_v4())
+            .with_role("admin")
+            .build();
+
+        assert!(ctx.auth.has_role("admin"));
+        assert!(!ctx.auth.has_role("superuser"));
+    }
+
+    #[tokio::test]
+    async fn test_multiple_roles() {
+        let ctx = TestQueryContext::builder()
+            .as_user(Uuid::new_v4())
+            .with_role("admin")
+            .with_role("moderator")
+            .build();
+
+        assert!(ctx.auth.has_role("admin"));
+        assert!(ctx.auth.has_role("moderator"));
+    }
+
+    #[tokio::test]
+    async fn test_custom_claims() {
+        let org_id = Uuid::new_v4();
+        let ctx = TestQueryContext::builder()
+            .as_user(Uuid::new_v4())
+            .with_claim("org_id", serde_json::json!(org_id.to_string()))
+            .with_claim("tier", serde_json::json!("premium"))
+            .build();
+
+        assert_eq!(ctx.auth.claim("tier"), Some(&serde_json::json!("premium")));
+        assert_eq!(ctx.auth.claim("org_id"), Some(&serde_json::json!(org_id.to_string())));
+    }
+
+    #[tokio::test]
+    async fn test_tenant_isolation() {
+        let tenant_id = Uuid::new_v4();
+        let ctx = TestQueryContext::builder()
+            .as_user(Uuid::new_v4())
+            .with_tenant(tenant_id)
+            .build();
+
+        assert_eq!(ctx.tenant_id(), Some(tenant_id));
+    }
+
+    #[tokio::test]
+    async fn test_mutation_dispatches_job() {
+        let ctx = TestMutationContext::builder()
+            .as_user(Uuid::new_v4())
+            .build();
+
+        ctx.dispatch_job("send_welcome_email", serde_json::json!({
+            "email": "new@example.com"
+        })).await.unwrap();
+
+        assert_job_dispatched!(ctx, "send_welcome_email");
+        ctx.job_dispatch().assert_dispatched_with("send_welcome_email", |args| {
+            args["email"] == "new@example.com"
+        });
+    }
+
+    #[tokio::test]
+    async fn test_mutation_starts_workflow() {
+        let ctx = TestMutationContext::builder()
+            .as_user(Uuid::new_v4())
+            .build();
+
+        ctx.start_workflow("user_onboarding", serde_json::json!({
+            "user_id": "123"
+        })).await.unwrap();
+
+        assert_workflow_started!(ctx, "user_onboarding");
+    }
+
+    #[tokio::test]
+    async fn test_no_job_on_validation_failure() {
+        let ctx = TestMutationContext::builder()
+            .as_user(Uuid::new_v4())
+            .build();
+
+        // Validation failed, so no job should be dispatched
+        assert_job_not_dispatched!(ctx, "send_welcome_email");
+    }
+}

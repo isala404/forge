@@ -244,6 +244,19 @@ impl WorkflowContext {
             .unwrap_or(false)
     }
 
+    /// Check if a step has been started (running, completed, or failed).
+    ///
+    /// Use this to guard steps that should only execute once, even across
+    /// workflow suspension and resumption.
+    pub fn is_step_started(&self, name: &str) -> bool {
+        self.step_states
+            .read()
+            .unwrap()
+            .get(name)
+            .map(|s| s.status != StepStatus::Pending)
+            .unwrap_or(false)
+    }
+
     /// Get the result of a completed step.
     pub fn get_step_result<T: serde::de::DeserializeOwned>(&self, name: &str) -> Option<T> {
         self.step_states
@@ -255,11 +268,21 @@ impl WorkflowContext {
     }
 
     /// Record step start.
+    ///
+    /// If the step is already running or beyond (completed/failed), this is a no-op.
+    /// This prevents race conditions when resuming workflows.
     pub fn record_step_start(&self, name: &str) {
         let mut states = self.step_states.write().unwrap();
         let state = states
             .entry(name.to_string())
             .or_insert_with(|| StepState::new(name));
+
+        // Only update if step is pending - prevents race condition on resume
+        // where background DB update could overwrite a completed status
+        if state.status != StepStatus::Pending {
+            return;
+        }
+
         state.start();
         let state_clone = state.clone();
         drop(states);
@@ -274,9 +297,7 @@ impl WorkflowContext {
                 r#"
                 INSERT INTO forge_workflow_steps (id, workflow_run_id, step_name, status, started_at)
                 VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (workflow_run_id, step_name) DO UPDATE SET
-                    status = EXCLUDED.status,
-                    started_at = COALESCE(forge_workflow_steps.started_at, EXCLUDED.started_at)
+                ON CONFLICT (workflow_run_id, step_name) DO NOTHING
                 "#,
             )
             .bind(step_id)

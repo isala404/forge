@@ -77,7 +77,7 @@ async fn main() -> Result<()> {
     // Actions
     builder
         .function_registry_mut()
-        .register_action::<functions::GetQuoteAction>();
+        .register_action::<functions::GetBitcoinPriceAction>();
 
     // Jobs
     builder

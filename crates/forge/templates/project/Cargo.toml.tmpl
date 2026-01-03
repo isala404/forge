@@ -9,7 +9,7 @@ default = []
 embedded-frontend = ["dep:rust-embed", "dep:mime_guess", "dep:axum"]
 
 [dependencies]
-forge = "0.1"
+forge = { version = "0.1", features = ["testing"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

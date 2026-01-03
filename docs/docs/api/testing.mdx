@@ -51,58 +51,69 @@ let ctx = TestQueryContext::authenticated(id);   // With user
 
 ### Integration Tests (With Database)
 
-Tests that require database access. Use `TestDatabase` for zero-config Postgres:
+Tests that require database access. Use `TestDatabase` with **explicit** configuration:
 
 ```rust
 #[tokio::test]
-#[ignore = "requires DATABASE_URL"]
+#[ignore = "requires TEST_DATABASE_URL"]
 async fn test_with_database() {
-    let db = TestDatabase::isolated("my_test").await?;
-    db.execute("CREATE TABLE users (id UUID PRIMARY KEY)").await?;
+    // Option 1: Explicit URL
+    let db = TestDatabase::from_url("postgres://localhost/test_db").await?;
 
+    // Option 2: From TEST_DATABASE_URL env var (explicit opt-in)
+    let db = TestDatabase::from_env().await?;
+
+    db.execute("CREATE TABLE users (id UUID PRIMARY KEY)").await?;
     let ctx = TestQueryContext::with_pool(db.pool().clone(), Some(user_id));
     // Use ctx.db() to access the pool
 }
 ```
 
-## Zero-Config Database
+## TestDatabase
 
-`TestDatabase` provides automatic PostgreSQL setup following sqlx's philosophy of testing against real databases.
+`TestDatabase` provides PostgreSQL access for integration tests with **explicit configuration**. This prevents accidental use of production databases.
 
-### Priority Order
-
-1. **DATABASE_URL environment variable** - For CI with service containers
-2. **Embedded PostgreSQL** - Automatic download and start (requires `embedded-test-db` feature)
-3. **Error** - If neither is available
-
-### Usage
-
-**Shared Pool (for read-only tests):**
+### Configuration Options
 
 ```rust
-let pool = TestDatabase::pool().await?;
+// Option 1: Explicit URL
+let db = TestDatabase::from_url("postgres://localhost/test_db").await?;
+
+// Option 2: From TEST_DATABASE_URL environment variable
+// Note: Uses TEST_DATABASE_URL (not DATABASE_URL) for safety
+let db = TestDatabase::from_env().await?;
+
+// Option 3: Embedded PostgreSQL (requires embedded-test-db feature)
+#[cfg(feature = "embedded-test-db")]
+let db = TestDatabase::embedded().await?;
 ```
 
-**Isolated Database (for tests that modify data):**
+**Important:** The `.env` file `DATABASE_URL` is NEVER automatically read. You must explicitly choose one of the options above.
+
+### Isolated Databases
+
+For tests that modify data, create an isolated database:
 
 ```rust
-let db = TestDatabase::isolated("test_name").await?;
-db.execute("CREATE TABLE users (id UUID PRIMARY KEY)").await?;
+let db = TestDatabase::from_env().await?;
+let isolated = db.isolated("my_test").await?;
 
-// Use db.pool() for queries
+isolated.execute("CREATE TABLE users (id UUID PRIMARY KEY)").await?;
+
+// Use isolated.pool() for queries
 let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
-    .fetch_one(db.pool())
+    .fetch_one(isolated.pool())
     .await?;
 
 // Clean up (optional - orphaned databases are cleaned on next run)
-db.cleanup().await?;
+isolated.cleanup().await?;
 ```
 
 ### Running Tests
 
 ```bash
-# With external database
-DATABASE_URL=postgres://localhost/test cargo test
+# With external database (explicit env var)
+TEST_DATABASE_URL=postgres://localhost/test cargo test
 
 # With embedded Postgres (automatic)
 cargo test --features embedded-test-db
@@ -142,6 +153,8 @@ let ctx = TestQueryContext::with_pool(pool, Some(user_id));
 | `auth` | Authentication context |
 | `db()` | Optional database pool |
 | `require_user_id()` | Returns user ID or error |
+| `has_role(role)` | Check if user has a specific role |
+| `claim(key)` | Get a custom claim value |
 | `tenant_id()` | Returns tenant ID if set |
 
 ### TestMutationContext

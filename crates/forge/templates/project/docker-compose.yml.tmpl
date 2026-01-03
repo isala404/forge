@@ -6,7 +6,7 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - DATABASE_URL=postgres://forge:forge@db:5432/{{project_name}}
+      - DATABASE_URL=postgres://postgres:forge@db:5432/{{project_name}}
       - RUST_LOG=info
       - HOST=0.0.0.0
       - PORT=8080
@@ -18,7 +18,7 @@ services:
   db:
     image: postgres:16-alpine
     environment:
-      - POSTGRES_USER=forge
+      - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=forge
       - POSTGRES_DB={{project_name}}
     ports:
@@ -26,7 +26,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U forge -d {{project_name}}"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d {{project_name}}"]
       interval: 5s
       timeout: 5s
       retries: 5
