@@ -140,11 +140,11 @@ pub fn cron_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         #(#other_attrs)*
         #vis struct #struct_name;
 
-        impl forge::forge_core::cron::ForgeCron for #struct_name {
-            fn info() -> forge::forge_core::cron::CronInfo {
-                forge::forge_core::cron::CronInfo {
+        impl forgex::forge_core::cron::ForgeCron for #struct_name {
+            fn info() -> forgex::forge_core::cron::CronInfo {
+                forgex::forge_core::cron::CronInfo {
                     name: #fn_name_str,
-                    schedule: forge::forge_core::cron::CronSchedule::new(#schedule)
+                    schedule: forgex::forge_core::cron::CronSchedule::new(#schedule)
                         .expect("Invalid cron schedule"),
                     timezone: #timezone,
                     catch_up: #catch_up,
@@ -154,8 +154,8 @@ pub fn cron_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
 
             fn execute(
-                ctx: &forge::forge_core::cron::CronContext,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = forge::forge_core::Result<()>> + Send + '_>> {
+                ctx: &forgex::forge_core::cron::CronContext,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = forgex::forge_core::Result<()>> + Send + '_>> {
                 Box::pin(async move #block)
             }
         }

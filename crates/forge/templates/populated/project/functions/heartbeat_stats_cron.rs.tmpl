@@ -1,4 +1,4 @@
-use forge::prelude::*;
+use forgex::prelude::*;
 
 /// Scheduled cron job demonstrating:
 /// - Cron schedule expression (every minute)
@@ -8,7 +8,7 @@ use forge::prelude::*;
 ///
 /// Note: Catch-up is disabled by default. If the server is down when a cron
 /// should run, that execution is skipped. Enable with #[catch_up] if needed.
-#[forge::cron("* * * * *")]
+#[forgex::cron("* * * * *")]
 #[timezone = "UTC"]
 pub async fn heartbeat_stats(ctx: &CronContext) -> Result<()> {
     let now = Utc::now();

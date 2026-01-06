@@ -1,5 +1,5 @@
 use crate::schema::User;
-use forge::prelude::*;
+use forgex::prelude::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportUsersInput {
@@ -21,7 +21,7 @@ pub struct ExportUsersOutput {
 /// - Retry detection with ctx.is_retry() and ctx.is_last_attempt()
 /// - Priority levels (low, normal, high, critical, background)
 /// - Worker capability targeting (general, gpu, high_cpu)
-#[forge::job]
+#[forgex::job]
 #[timeout = "10m"]
 #[priority = "low"]
 #[retry(max_attempts = 3, backoff = "exponential")]

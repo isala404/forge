@@ -3,6 +3,8 @@ name = "forge-runtime"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Runtime executors and gateway for the Forge framework"
 
 [dependencies]
 forge-core = { path = "../forge-core" }

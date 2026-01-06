@@ -3,6 +3,8 @@ name = "forge-macros"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Procedural macros for the Forge framework"
 
 [lib]
 proc-macro = true

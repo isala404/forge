@@ -1,11 +1,15 @@
 [package]
-name = "forge"
+name = "forgex"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "CLI and runtime for the Forge full-stack framework"
+keywords = ["framework", "postgresql", "full-stack", "cli"]
+categories = ["web-programming", "command-line-utilities"]
 
 [lib]
-name = "forge"
+name = "forgex"
 path = "src/lib.rs"
 
 [[bin]]

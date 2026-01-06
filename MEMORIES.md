@@ -111,9 +111,12 @@ CLI Scaffolding
 - template::render() for {{var}} replacement, template_vars! macro
 - Template vars: "name" and "project_name" both set to project name
 - include_str!() embeds templates at compile time
-- Directories: project/, frontend/, runtime/
+- Directories: empty/ (project/, frontend/), populated/ (project/, frontend/), runtime/
 - new.rs must include_str! and fs::write for each template file
 - Single binary: `cargo build --features embedded-frontend` embeds frontend via rust-embed
+- Flags: --minimal (no frontend), --empty (no example code)
+- Empty templates in empty/ subdirs: schema_mod.rs, functions_mod.rs, main.rs, 0001_initial.sql, page.svelte, types.ts, api.ts
+- create_project(dir, name, minimal, empty) signature
 
 Template Features Demonstrated
 

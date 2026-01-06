@@ -839,34 +839,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
 
 [[package]]
-name = "forge"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "chrono",
- "clap",
- "console",
- "dialoguer",
- "dotenvy",
- "forge-codegen",
- "forge-core",
- "forge-macros",
- "forge-runtime",
- "hostname",
- "indicatif",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "forge-codegen"
 version = "0.1.0"
 dependencies = [
@@ -940,6 +912,34 @@ dependencies = [
  "tonic",
  "tower",
  "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "forgex"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "clap",
+ "console",
+ "dialoguer",
+ "dotenvy",
+ "forge-codegen",
+ "forge-core",
+ "forge-macros",
+ "forge-runtime",
+ "hostname",
+ "indicatif",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "uuid",

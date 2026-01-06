@@ -1,9 +1,9 @@
 use crate::schema::{User, UserRole};
-use forge::prelude::*;
+use forgex::prelude::*;
 
 /// Public query - no authentication required
 /// Cached for 30 seconds to reduce database load
-#[forge::query(cache = "30s", public)]
+#[forgex::query(cache = "30s", public)]
 pub async fn get_users(ctx: &QueryContext) -> Result<Vec<User>> {
     sqlx::query_as::<_, User>("SELECT * FROM users ORDER BY created_at DESC")
         .fetch_all(ctx.db())
@@ -13,7 +13,7 @@ pub async fn get_users(ctx: &QueryContext) -> Result<Vec<User>> {
 
 /// Query with explicit timeout
 /// Returns None if user not found (no error)
-#[forge::query(timeout = 10)]
+#[forgex::query(timeout = 10)]
 pub async fn get_user(ctx: &QueryContext, id: Uuid) -> Result<Option<User>> {
     sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
         .bind(id)
@@ -26,7 +26,7 @@ pub async fn get_user(ctx: &QueryContext, id: Uuid) -> Result<Option<User>> {
 /// - Default auth (mutations typically require auth in production)
 /// - Optional parameters with defaults
 /// - Returning created entity
-#[forge::mutation]
+#[forgex::mutation]
 pub async fn create_user(
     ctx: &MutationContext,
     email: String,
@@ -55,7 +55,7 @@ pub async fn create_user(
 
 /// Mutation with partial updates
 /// Only provided fields are updated
-#[forge::mutation(timeout = 30)]
+#[forgex::mutation(timeout = 30)]
 pub async fn update_user(
     ctx: &MutationContext,
     id: Uuid,
@@ -86,7 +86,7 @@ pub async fn update_user(
 }
 
 /// Mutation returning boolean success indicator
-#[forge::mutation]
+#[forgex::mutation]
 pub async fn delete_user(ctx: &MutationContext, id: Uuid) -> Result<bool> {
     let result = sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(id)
@@ -97,7 +97,7 @@ pub async fn delete_user(ctx: &MutationContext, id: Uuid) -> Result<bool> {
 }
 
 // Example of role-protected mutation (uncomment to use):
-// #[forge::mutation(require_auth, require_role("admin"))]
+// #[forgex::mutation(require_auth, require_role("admin"))]
 // pub async fn admin_reset_user(
 //     ctx: &MutationContext,
 //     id: Uuid,

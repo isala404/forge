@@ -12,7 +12,10 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/example/forge"
+repository = "https://github.com/isala404/forge"
+description = "Full-stack framework with PostgreSQL as the only infrastructure dependency"
+keywords = ["framework", "postgresql", "full-stack", "backend", "web"]
+categories = ["web-programming", "database"]
 
 [workspace.dependencies]
 # Async runtime

@@ -1,4 +1,4 @@
-use forge::prelude::*;
+use forgex::prelude::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetBitcoinPriceInput {
@@ -28,7 +28,7 @@ struct BitcoinData {
 }
 
 /// Action demonstrating external API calls via ctx.http()
-#[forge::action(timeout = 30)]
+#[forgex::action(timeout = 30)]
 pub async fn get_bitcoin_price(
     ctx: &ActionContext,
     input: GetBitcoinPriceInput,

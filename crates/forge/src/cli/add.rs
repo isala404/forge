@@ -89,10 +89,10 @@ fn add_model(name: &str) -> Result<()> {
     }
 
     let content = format!(
-        r#"use forge::prelude::*;
+        r#"use forgex::prelude::*;
 
 /// {pascal_name} model.
-#[forge::model]
+#[forgex::model]
 pub struct {pascal_name} {{
     #[id]
     pub id: Uuid,
@@ -145,10 +145,10 @@ fn add_function(name: &str, fn_type: FunctionType) -> Result<()> {
 //! - Caching and deduplication
 //! - Pagination helpers
 
-use forge::prelude::*;
+use forgex::prelude::*;
 
 /// {snake_name} query.
-#[forge::query]
+#[forgex::query]
 pub async fn {snake_name}(ctx: &QueryContext) -> Result<Vec<()>> {{
     // Example: Fetch data from database
     // let items = sqlx::query_as!(
@@ -170,10 +170,10 @@ pub async fn {snake_name}(ctx: &QueryContext) -> Result<Vec<()>> {{
 //! - Support optimistic updates on the frontend
 //! - Are wrapped in database transactions
 
-use forge::prelude::*;
+use forgex::prelude::*;
 
 /// {snake_name} mutation.
-#[forge::mutation]
+#[forgex::mutation]
 pub async fn {snake_name}(ctx: &MutationContext) -> Result<()> {{
     // Example: Insert or update data
     // let id = Uuid::new_v4();
@@ -203,7 +203,7 @@ pub async fn {snake_name}(ctx: &MutationContext) -> Result<()> {{
 //! - Third-party API calls
 //! - File uploads to cloud storage
 
-use forge::prelude::*;
+use forgex::prelude::*;
 
 /// Result from {snake_name} action.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -213,7 +213,7 @@ pub struct {pascal_name}Result {{
 }}
 
 /// {snake_name} action.
-#[forge::action]
+#[forgex::action]
 pub async fn {snake_name}(ctx: &ActionContext) -> Result<{pascal_name}Result> {{
     tracing::info!("Executing {snake_name} action");
 
@@ -282,7 +282,7 @@ fn add_job(name: &str) -> Result<()> {
 //! }}).await?;
 //! ```
 
-use forge::prelude::*;
+use forgex::prelude::*;
 
 /// Input for the {snake_name} job.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -305,7 +305,7 @@ pub struct {pascal_name}Output {{
 /// - `timeout`: Maximum execution time (default: "5m")
 /// - `max_attempts`: Number of retry attempts (default: 3)
 /// - `backoff`: Retry backoff strategy: "exponential" or "linear" (default: "exponential")
-#[forge::job]
+#[forgex::job]
 #[timeout = "5m"]
 #[retry(max_attempts = 3, backoff = "exponential")]
 pub async fn {snake_name}(ctx: &JobContext, _input: {pascal_name}Input) -> Result<{pascal_name}Output> {{
@@ -372,7 +372,7 @@ fn add_cron(name: &str) -> Result<()> {
 //!
 //! Format: `second minute hour day-of-month month day-of-week`
 
-use forge::prelude::*;
+use forgex::prelude::*;
 
 /// {snake_name} scheduled task.
 ///
@@ -380,7 +380,7 @@ use forge::prelude::*;
 /// - First argument: Cron expression (required)
 /// - `timezone`: Timezone for schedule (default: "UTC")
 /// - `catch_up`: Run missed executions on startup (default: false)
-#[forge::cron("0 0 * * *")]  // Daily at midnight UTC
+#[forgex::cron("0 0 * * *")]  // Daily at midnight UTC
 #[timezone = "UTC"]
 pub async fn {snake_name}(ctx: &CronContext) -> Result<()> {{
     tracing::info!(run_id = %ctx.run_id, "Running {snake_name}");
@@ -409,7 +409,7 @@ pub async fn {snake_name}(ctx: &CronContext) -> Result<()> {{
         style(&file_path.display()).cyan()
     );
     println!("   Schedule: 0 0 * * * (daily at midnight)");
-    println!("   Edit the schedule in the #[forge::cron] attribute");
+    println!("   Edit the schedule in the #[forgex::cron] attribute");
 
     Ok(())
 }
@@ -450,7 +450,7 @@ fn add_workflow(name: &str) -> Result<()> {
 //! - Compensation runs in reverse order on failure
 //! - Workflow state persists across restarts
 
-use forge::prelude::*;
+use forgex::prelude::*;
 
 /// Input for the {snake_name} workflow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -473,7 +473,7 @@ pub struct {pascal_name}Output {{
 /// Configuration options:
 /// - `version`: Workflow version for migrations (default: 1)
 /// - `timeout`: Maximum workflow duration (default: "1h")
-#[forge::workflow]
+#[forgex::workflow]
 #[version = 1]
 #[timeout = "1h"]
 pub async fn {snake_name}(ctx: &WorkflowContext, _input: {pascal_name}Input) -> Result<{pascal_name}Output> {{

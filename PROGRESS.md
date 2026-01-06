@@ -556,3 +556,15 @@ Fixed workflow step status race condition on resume from durable sleep.
 Updated documentation for testing and workflow APIs.
 - docs/docs/api/testing.mdx: Added has_role() and claim() methods to TestQueryContext table
 - docs/docs/api/workflow-context.mdx: Added is_step_started(), record_step_start(), record_step_complete(), record_step_complete_async() methods with examples
+
+Implemented --empty flag for scaffolding (creates projects without example code).
+- Reorganized templates: crates/forge/templates/{empty,populated,runtime}/
+- empty/project/: Minimal templates with commented examples (main.rs, schema/mod.rs, functions/mod.rs)
+- empty/frontend/: Starter page with getting started guide
+- populated/project/: Full demo with User CRUD, job, cron, workflow, action examples
+- populated/frontend/: Complete demo UI
+- crates/forge/src/cli/new.rs: Added --empty flag, EMPTY_* constants for all templates
+- crates/forge/src/cli/mod.rs: Added --empty flag to InitCommand
+- docs/docs/cli/index.mdx: Added --empty flag documentation, both project structure examples
+- docs/docs/quick-start.mdx: Added tip about --empty flag
+- docs/docs/frontend/setup.mdx: Added scaffolding options explanation

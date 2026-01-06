@@ -1,4 +1,4 @@
-use forge::prelude::*;
+use forgex::prelude::*;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,7 +23,7 @@ pub struct AccountVerificationOutput {
 ///
 /// For parallel execution, see ctx.parallel() in the docs.
 /// For fluent API, see ctx.step(name, fn).compensate(fn).timeout().run()
-#[forge::workflow]
+#[forgex::workflow]
 #[version = 1]
 #[timeout = "24h"]
 pub async fn account_verification(
