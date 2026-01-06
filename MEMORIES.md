@@ -117,6 +117,7 @@ CLI Scaffolding
 - Flags: --minimal (no frontend), --empty (no example code)
 - Empty templates in empty/ subdirs: schema_mod.rs, functions_mod.rs, main.rs, 0001_initial.sql, page.svelte, types.ts, api.ts
 - create_project(dir, name, minimal, empty) signature
+- CLAUDE.md included in all scaffolded projects (agent guide for coding assistants)
 
 Template Features Demonstrated
 

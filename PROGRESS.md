@@ -557,6 +557,15 @@ Updated documentation for testing and workflow APIs.
 - docs/docs/api/testing.mdx: Added has_role() and claim() methods to TestQueryContext table
 - docs/docs/api/workflow-context.mdx: Added is_step_started(), record_step_start(), record_step_complete(), record_step_complete_async() methods with examples
 
+Added CLAUDE.md agent guide to all scaffolded projects.
+- `crates/forge/templates/populated/project/CLAUDE.md.tmpl`: World-class agent guide for FORGE development
+- `crates/forge/templates/empty/project/CLAUDE.md.tmpl`: Same guide for empty projects
+- `crates/forge/src/cli/new.rs`: Include CLAUDE.md in both populated and empty scaffolding
+
+Fixed CLAUDE.md.tmpl structured logging method name.
+- `crates/forge/templates/populated/project/CLAUDE.md.tmpl`: Changed `ctx.log.info_with()` to `ctx.log.info()` (line 53)
+- `crates/forge/templates/empty/project/CLAUDE.md.tmpl`: Same fix
+
 Implemented --empty flag for scaffolding (creates projects without example code).
 - Reorganized templates: crates/forge/templates/{empty,populated,runtime}/
 - empty/project/: Minimal templates with commented examples (main.rs, schema/mod.rs, functions/mod.rs)

@@ -37,6 +37,7 @@ const FUNCTIONS_VERIFICATION_WORKFLOW: &str =
     include_str!("../../templates/populated/project/functions/account_verification_workflow.rs.tmpl");
 const FUNCTIONS_GET_BITCOIN_PRICE_ACTION: &str =
     include_str!("../../templates/populated/project/functions/get_bitcoin_price_action.rs.tmpl");
+const CLAUDE_MD: &str = include_str!("../../templates/populated/project/CLAUDE.md.tmpl");
 
 // Populated frontend templates (default)
 const FRONTEND_PACKAGE_JSON: &str =
@@ -86,6 +87,7 @@ const EMPTY_MIGRATION_INITIAL: &str =
 const EMPTY_SCHEMA_MOD: &str = include_str!("../../templates/empty/project/schema/mod.rs.tmpl");
 const EMPTY_FUNCTIONS_MOD: &str =
     include_str!("../../templates/empty/project/functions/mod.rs.tmpl");
+const EMPTY_CLAUDE_MD: &str = include_str!("../../templates/empty/project/CLAUDE.md.tmpl");
 
 // Empty frontend templates (for --empty flag)
 const EMPTY_FRONTEND_PACKAGE_JSON: &str =
@@ -203,6 +205,7 @@ pub fn create_project(dir: &Path, name: &str, minimal: bool, empty: bool) -> Res
         )?;
         fs::write(dir.join("src/schema/mod.rs"), EMPTY_SCHEMA_MOD)?;
         fs::write(dir.join("src/functions/mod.rs"), EMPTY_FUNCTIONS_MOD)?;
+        fs::write(dir.join("CLAUDE.md"), EMPTY_CLAUDE_MD)?;
     } else {
         // Populated templates - full example code
         fs::write(dir.join("Cargo.toml"), render(CARGO_TOML, &vars))?;
@@ -240,6 +243,7 @@ pub fn create_project(dir: &Path, name: &str, minimal: bool, empty: bool) -> Res
             dir.join("src/functions/get_bitcoin_price_action.rs"),
             FUNCTIONS_GET_BITCOIN_PRICE_ACTION,
         )?;
+        fs::write(dir.join("CLAUDE.md"), CLAUDE_MD)?;
     }
 
     // Create frontend if not minimal
@@ -391,6 +395,7 @@ mod tests {
         assert!(path.join("docker-compose.yml").exists());
         assert!(path.join(".dockerignore").exists());
         assert!(path.join("README.md").exists());
+        assert!(path.join("CLAUDE.md").exists());
     }
 
     #[test]
@@ -402,6 +407,7 @@ mod tests {
         create_project(&path, "test-minimal", true, false).unwrap();
 
         assert!(path.join("Cargo.toml").exists());
+        assert!(path.join("CLAUDE.md").exists());
         assert!(!path.join("frontend").exists());
     }
 
@@ -420,6 +426,7 @@ mod tests {
         assert!(path.join("src/schema/mod.rs").exists());
         assert!(path.join("src/functions/mod.rs").exists());
         assert!(path.join("migrations/0001_initial.sql").exists());
+        assert!(path.join("CLAUDE.md").exists());
 
         // Example files should NOT exist
         assert!(!path.join("src/schema/user.rs").exists());
@@ -452,6 +459,7 @@ mod tests {
         assert!(path.join("src/main.rs").exists());
         assert!(path.join("src/schema/mod.rs").exists());
         assert!(path.join("src/functions/mod.rs").exists());
+        assert!(path.join("CLAUDE.md").exists());
 
         // Example files should NOT exist
         assert!(!path.join("src/schema/user.rs").exists());

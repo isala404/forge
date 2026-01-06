@@ -1,0 +1,145 @@
+# FORGE Agent Guide
+
+This is a FORGE project. PostgreSQL is the only infrastructure - no Redis, Kafka, or service meshes.
+
+## CLI
+
+Use `forge --help` and `forge <command> --help`. Prefer `forge add` and `forge generate` over manual file creation.
+
+## Function Selection
+
+| Need | Use | Why |
+|------|-----|-----|
+| Read data | Query | Cacheable, subscribable, no side effects |
+| Write data | Mutation | Transactional, atomic, triggers reactivity |
+| Call external API | Action | Non-transactional, has HTTP client |
+| Async work | Job | Retryable, progress tracking, survives restarts |
+| Scheduled task | Cron | Time-based, catch-up support, leader-only |
+| Multi-step process | Workflow | Durable, suspendable, compensatable |
+
+**Decision:** Read? → Query | Write DB? → Mutation | External call? → Action | Can retry? → Job | On schedule? → Cron | Multiple steps? → Workflow
+
+## Backend Patterns
+
+```rust
+// Context access
+ctx.db()                         // Database pool
+ctx.http()                       // HTTP client (Action/Job/Cron)
+ctx.require_user_id()?           // Auth or error
+ctx.dispatch_job(name, args)     // Queue job
+ctx.start_workflow(name, input)  // Start workflow
+
+// Query
+#[forgex::query]                  // Basic
+#[forgex::query(cache = "30s")]   // Cached
+#[forgex::query(public)]          // No auth
+
+// Mutation - always authenticated, transactional
+#[forgex::mutation]
+#[forgex::mutation(timeout = 30)]
+
+// Job
+#[forgex::job]
+#[retry(max_attempts = 3, backoff = "exponential")]
+#[priority = "high"]             // background|low|normal|high|critical
+#[idempotent]
+ctx.progress(50, "message")?;    // Report progress
+ctx.heartbeat().await?;          // Keep alive in loops
+
+// Cron
+#[forgex::cron("0 * * * *")]      // Hourly
+#[timezone = "UTC"]
+#[catch_up]                      // Run missed
+ctx.log.info("msg", json!({...}));    // Structured logging
+
+// Workflow
+#[forgex::workflow]
+#[version = 1]
+ctx.step("name", || async { ... }).compensate(...).run().await?;
+ctx.sleep(Duration::from_secs(3600)).await?;  // Durable sleep
+ctx.wait_for_event("name", timeout).await?;   // External trigger
+ctx.parallel().step("a", ...).step("b", ...).run().await?;
+```
+
+## Frontend (Svelte 5)
+
+```svelte
+// CRITICAL: Never destructure $props() at module level
+let props: Props = $props();  // Use props.x in closures
+
+// Data fetching
+const users = subscribe(getUsers, {});        // Real-time
+const data = await query(getUsers, {});       // One-time
+await mutate(createUser, { name, email });    // Write
+
+// Job tracking
+const job = createJobTracker<Args>('type', apiUrl);
+await job.start({ ... });
+job.resume(savedId, () => localStorage.removeItem(key));
+// Use: $job.status, $job.progress_percent
+```
+
+## Testing
+
+```rust
+// Unit tests: no DB needed. Integration tests: real DB (no mocking, per sqlx philosophy).
+let ctx = TestQueryContext::authenticated(user_id);
+let ctx = TestQueryContext::builder()
+    .as_user(id).with_role("admin").build();
+
+// HTTP mocking
+let ctx = TestActionContext::builder()
+    .mock_http_json("https://api.example.com/*", json!({...}))
+    .build();
+ctx.http().assert_called("https://api.example.com/*");
+
+// Dispatch verification
+assert_job_dispatched!(ctx, "job_name");
+assert_workflow_started!(ctx, "workflow_name");
+```
+
+## Code Quality
+
+| Principle | Practice |
+|-----------|----------|
+| **Testability** | Inject deps via context. Pure functions. Isolate I/O at edges. |
+| **Fail Fast** | Validate at boundaries. `require_user_id()?` not silent `None`. |
+| **Locality** | Related code lives together. No scattered features. |
+| **Explicit** | No magic. Clear names. Obvious control flow. |
+| **Small Functions** | One thing per function. < 30 lines. Extract named helpers. |
+| **No Premature Abstraction** | Duplicate until you have 3 cases. Wrong abstraction > duplication. |
+| **Design Out Edge Cases** | Uniform logic over special cases. If you need `if` for edge case, redesign. |
+| **Observability** | Structured logs via `ctx.log.*`. Export traces/metrics when sensible. Progress in jobs. |
+
+## Anti-Patterns
+
+| Don't | Do |
+|-------|-----|
+| External API in Mutation | Use Action |
+| `tokio::sleep` in Workflow | `ctx.sleep()` (durable) |
+| Destructure `$props()` | Keep reference |
+| Poll with `query()` loop | Use `subscribe()` |
+| Skip `ctx.heartbeat()` | Call in long loops |
+| Manual retry logic | `#[retry(...)]` attribute |
+
+## Structure
+
+```
+src/
+├── main.rs           # ForgeBuilder, registrations
+├── schema/           # #[forgex::model] structs
+└── functions/        # Queries, mutations, jobs, crons, workflows
+
+frontend/src/
+├── lib/forge/        # Generated (forge generate)
+└── routes/           # Pages
+```
+
+## Workflow
+
+1. Define schema in `src/schema/` with `#[forgex::model]`
+2. Create migration: `migrations/XXXX_description.sql`
+3. Add functions with `forge add <type> <name>` or manually
+4. Register in `main.rs`
+5. Run `forge generate` to update TypeScript types
+6. Use generated types in frontend
