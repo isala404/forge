@@ -56,6 +56,10 @@ pub struct InitCommand {
     /// Use minimal template (no frontend).
     #[arg(long)]
     pub minimal: bool,
+
+    /// Use empty template (no example code, just scaffolding).
+    #[arg(long)]
+    pub empty: bool,
 }
 
 impl Cli {
@@ -83,7 +87,7 @@ async fn init_project(cmd: InitCommand) -> Result<()> {
             .to_string()
     });
 
-    new::create_project(&current_dir, &name, cmd.minimal)?;
+    new::create_project(&current_dir, &name, cmd.minimal, cmd.empty)?;
     println!("✅ Initialized FORGE project: {}", name);
     Ok(())
 }

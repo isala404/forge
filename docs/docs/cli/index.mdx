@@ -35,37 +35,83 @@ cargo install --path crates/forge-cli
 Create a new FORGE project.
 
 ```bash
-forge new <project-name>
+forge new <project-name> [options]
 ```
 
 **Arguments:**
 - `<project-name>` - Name of the project (also used as directory name)
 
-**Example:**
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--empty` | Create minimal scaffolding without example code |
+| `--minimal` | Skip frontend (backend only) |
+| `-o, --output` | Output directory (defaults to project name) |
+
+**Examples:**
+
 ```bash
+# Create project with full demo (User CRUD, jobs, workflows, etc.)
 forge new my-app
-cd my-app
+
+# Create empty project (scaffolding only, no example code)
+forge new my-app --empty
+
+# Create backend-only project (no frontend)
+forge new my-app --minimal
+
+# Create empty backend-only project
+forge new my-app --empty --minimal
 ```
 
-This creates:
+**Default project structure** (with demo code):
 ```
 my-app/
 ├── Cargo.toml
 ├── forge.toml           # FORGE configuration
 ├── .env                 # Environment variables
 ├── src/
-│   ├── main.rs          # Entry point
+│   ├── main.rs          # Entry point with registered functions
 │   ├── schema/
-│   │   └── mod.rs       # Data models
+│   │   ├── mod.rs
+│   │   └── user.rs      # User model example
 │   └── functions/
 │       ├── mod.rs
-│       ├── queries/
-│       └── mutations/
+│       ├── users.rs     # CRUD queries/mutations
+│       ├── export_users_job.rs
+│       ├── heartbeat_stats_cron.rs
+│       ├── account_verification_workflow.rs
+│       └── get_bitcoin_price_action.rs
 ├── migrations/
-│   └── 0001_initial.sql
+│   └── 0001_initial.sql # User tables migration
 └── frontend/
     ├── package.json
     ├── src/
+    │   ├── routes/+page.svelte  # Full demo UI
+    │   └── lib/forge/           # Generated types & API
+    └── ...
+```
+
+**Empty project structure** (`--empty`):
+```
+my-app/
+├── Cargo.toml
+├── forge.toml
+├── .env
+├── src/
+│   ├── main.rs          # Entry point with commented examples
+│   ├── schema/
+│   │   └── mod.rs       # Empty, with usage comments
+│   └── functions/
+│       └── mod.rs       # Empty, with usage comments
+├── migrations/
+│   └── 0001_initial.sql # Empty migration template
+└── frontend/
+    ├── package.json
+    ├── src/
+    │   ├── routes/+page.svelte  # Starter page
+    │   └── lib/forge/           # Minimal types
     └── ...
 ```
 
