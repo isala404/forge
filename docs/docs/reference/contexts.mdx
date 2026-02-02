@@ -115,6 +115,11 @@ Background job execution context with progress reporting and heartbeats.
 | `http` | `fn http(&self) -> &Client` | Get HTTP client for external calls |
 | `progress` | `fn progress(&self, percentage: u8, message: impl Into<String>) -> Result<()>` | Report progress (0-100, clamped) |
 | `heartbeat` | `async fn heartbeat(&self) -> Result<()>` | Send heartbeat to prevent stale reclaim |
+| `context` | `async fn context(&self) -> Value` | Get persisted job context data |
+| `set_context` | `async fn set_context(&self, context: Value) -> Result<()>` | Replace persisted job context |
+| `update_context` | `async fn update_context(&self, key: &str, value: Value) -> Result<()>` | Update a single context key |
+| `is_cancel_requested` | `async fn is_cancel_requested(&self) -> Result<bool>` | Check if cancellation was requested |
+| `check_cancelled` | `async fn check_cancelled(&self) -> Result<()>` | Return error if cancellation requested |
 | `is_retry` | `fn is_retry(&self) -> bool` | Check if this is a retry attempt |
 | `is_last_attempt` | `fn is_last_attempt(&self) -> bool` | Check if this is the final attempt |
 | `env` | `fn env(&self, key: &str) -> Option<String>` | Get environment variable |

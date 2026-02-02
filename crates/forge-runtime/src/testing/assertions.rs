@@ -230,6 +230,11 @@ mod tests {
     }
 
     #[test]
+    fn test_assert_job_status_cancelled() {
+        assert_job_status(Some(JobStatus::Cancelled), JobStatus::Cancelled);
+    }
+
+    #[test]
     fn test_assert_json_matches() {
         let actual = serde_json::json!({
             "id": 123,

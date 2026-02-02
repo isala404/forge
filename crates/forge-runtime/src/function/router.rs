@@ -363,14 +363,15 @@ impl FunctionRouter {
         sqlx::query(
             r#"
             INSERT INTO forge_jobs (
-                id, job_type, input, status, priority, attempts, max_attempts,
+                id, job_type, input, job_context, status, priority, attempts, max_attempts,
                 worker_capability, scheduled_at, created_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             "#,
         )
         .bind(job.id)
         .bind(&job.job_type)
         .bind(&job.args)
+        .bind(&job.context)
         .bind(JobStatus::Pending.as_str())
         .bind(job.priority)
         .bind(0i32)

@@ -142,6 +142,32 @@ pub async fn export_data(ctx: &JobContext, args: ExportArgs) -> Result<ExportRes
 }
 ```
 
+### Cancellation & Compensation
+
+Jobs can be cancelled after dispatch. Use `ctx.check_cancelled()` to exit early and define
+a compensation handler for cleanup.
+
+```rust
+#[forge::job(compensate = "rollback_charge")]
+pub async fn charge_card(ctx: &JobContext, args: ChargeArgs) -> Result<Receipt> {
+    ctx.update_context("charge_id", serde_json::json!(args.charge_id)).await?;
+
+    // Check for cancellation between steps
+    ctx.check_cancelled().await?;
+
+    charge(&args).await
+}
+
+pub async fn rollback_charge(
+    ctx: &JobContext,
+    args: ChargeArgs,
+    reason: &str,
+) -> Result<()> {
+    ctx.update_context("cancel_reason", serde_json::json!(reason)).await?;
+    refund(&args.charge_id).await
+}
+```
+
 ### Worker Routing
 
 Route jobs to workers with specific capabilities.
@@ -301,7 +327,7 @@ Idempotent jobs check for existing records before insertion:
 ```sql
 SELECT id FROM forge_jobs
 WHERE idempotency_key = $1
-  AND status NOT IN ('completed', 'failed', 'dead_letter')
+  AND status NOT IN ('completed', 'failed', 'dead_letter', 'cancelled')
 ```
 
 If found, the existing job ID returns without creating a duplicate. The unique constraint `(job_type, idempotency_key)` prevents race conditions.

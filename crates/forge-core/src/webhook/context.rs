@@ -111,6 +111,18 @@ impl WebhookContext {
         let args_json = serde_json::to_value(args)?;
         dispatcher.dispatch_by_name(job_type, args_json).await
     }
+
+    /// Request cancellation for a job.
+    pub async fn cancel_job(
+        &self,
+        job_id: Uuid,
+        reason: Option<String>,
+    ) -> crate::error::Result<bool> {
+        let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
+            crate::error::ForgeError::Internal("Job dispatch not available".into())
+        })?;
+        dispatcher.cancel(job_id, reason).await
+    }
 }
 
 impl EnvAccess for WebhookContext {

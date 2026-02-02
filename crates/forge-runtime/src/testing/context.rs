@@ -200,6 +200,13 @@ impl TestContext {
         job_id
     }
 
+    /// Cancel a job (for testing).
+    pub fn cancel_job(&mut self, job_id: Uuid) {
+        if let Some(job) = self.dispatched_jobs.iter_mut().find(|j| j.id == job_id) {
+            job.status = JobStatus::Cancelled;
+        }
+    }
+
     /// Get dispatched jobs.
     pub fn dispatched_jobs(&self) -> &[DispatchedJob] {
         &self.dispatched_jobs

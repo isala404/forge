@@ -39,15 +39,17 @@ interface JobState<TOutput> {
   error: string | null;
 }
 
-type JobStatus =
-  | "pending"
-  | "claimed"
-  | "running"
-  | "completed"
-  | "retry"
-  | "failed"
-  | "dead_letter"
-  | "not_found";
+  type JobStatus =
+    | "pending"
+    | "claimed"
+    | "running"
+    | "completed"
+    | "retry"
+    | "failed"
+    | "dead_letter"
+    | "cancel_requested"
+    | "cancelled"
+    | "not_found";
 ```
 
 | Field | Description |
@@ -57,7 +59,7 @@ type JobStatus =
 | `progress` | Percentage complete (0-100), reported by `ctx.progress()` |
 | `message` | Status message from `ctx.progress(percent, message)` |
 | `output` | Job return value when status is `completed` |
-| `error` | Error message when status is `failed` or `dead_letter` |
+| `error` | Error message when status is `failed`, `dead_letter`, or `cancelled` |
 
 ## Workflow State
 
@@ -165,6 +167,10 @@ type WorkflowStatus =
     <p>Failed: {$job.error}</p>
   {:else if $job.status === "dead_letter"}
     <p>Permanently failed after max retries</p>
+  {:else if $job.status === "cancel_requested"}
+    <p>Cancellation requested...</p>
+  {:else if $job.status === "cancelled"}
+    <p>Job cancelled</p>
   {/if}
 {/if}
 ```

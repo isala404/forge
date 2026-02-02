@@ -28,6 +28,13 @@ pub trait JobDispatch: Send + Sync {
         job_type: &str,
         args: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = Result<Uuid>> + Send + '_>>;
+
+    /// Request cancellation for a job.
+    fn cancel(
+        &self,
+        job_id: Uuid,
+        reason: Option<String>,
+    ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + '_>>;
 }
 
 /// Trait for starting workflows from function contexts.

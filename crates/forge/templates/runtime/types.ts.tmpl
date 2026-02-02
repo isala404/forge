@@ -33,6 +33,8 @@ export type JobStatus =
   | "retry"
   | "failed"
   | "dead_letter"
+  | "cancel_requested"
+  | "cancelled"
   | "not_found";
 
 export interface JobState<TOutput = unknown> {

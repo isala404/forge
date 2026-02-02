@@ -17,6 +17,8 @@ pub struct JobContext {
     pub max_attempts: u32,
     /// Authentication context (for queries/mutations).
     pub auth: AuthContext,
+    /// Persisted job context data.
+    context: Arc<tokio::sync::RwLock<serde_json::Value>>,
     /// Database pool.
     db_pool: sqlx::PgPool,
     /// HTTP client for external calls.
@@ -54,11 +56,20 @@ impl JobContext {
             attempt,
             max_attempts,
             auth: AuthContext::unauthenticated(),
+            context: Arc::new(tokio::sync::RwLock::new(serde_json::Value::Object(
+                serde_json::Map::new(),
+            ))),
             db_pool,
             http_client,
             progress_tx: None,
             env_provider: Arc::new(RealEnvProvider::new()),
         }
+    }
+
+    /// Create a new job context with persisted context data.
+    pub fn with_context(mut self, context: serde_json::Value) -> Self {
+        self.context = Arc::new(tokio::sync::RwLock::new(context));
+        self
     }
 
     /// Set authentication context.
@@ -101,6 +112,102 @@ impl JobContext {
             tx.send(update)
                 .map_err(|e| crate::ForgeError::Job(format!("Failed to send progress: {}", e)))?;
         }
+
+        Ok(())
+    }
+
+    /// Get the current persisted job context.
+    pub async fn context(&self) -> serde_json::Value {
+        self.context.read().await.clone()
+    }
+
+    /// Replace the entire persisted job context.
+    pub async fn set_context(&self, context: serde_json::Value) -> crate::Result<()> {
+        let mut guard = self.context.write().await;
+        *guard = context;
+        let context = guard.clone();
+        drop(guard);
+        if self.job_id.is_nil() {
+            return Ok(());
+        }
+        self.persist_context_value(context).await
+    }
+
+    /// Update a single context key with a JSON value.
+    pub async fn update_context(
+        &self,
+        key: &str,
+        value: serde_json::Value,
+    ) -> crate::Result<()> {
+        if self.job_id.is_nil() {
+            let mut guard = self.context.write().await;
+            if let Some(map) = guard.as_object_mut() {
+                map.insert(key.to_string(), value);
+            } else {
+                let mut map = serde_json::Map::new();
+                map.insert(key.to_string(), value);
+                *guard = serde_json::Value::Object(map);
+            }
+            return Ok(());
+        }
+
+        let mut guard = self.context.write().await;
+        if let Some(map) = guard.as_object_mut() {
+            map.insert(key.to_string(), value);
+        } else {
+            let mut map = serde_json::Map::new();
+            map.insert(key.to_string(), value);
+            *guard = serde_json::Value::Object(map);
+        }
+        let context = guard.clone();
+        drop(guard);
+        self.persist_context_value(context).await
+    }
+
+    /// Check if cancellation has been requested for this job.
+    pub async fn is_cancel_requested(&self) -> crate::Result<bool> {
+        let row: Option<(String,)> = sqlx::query_as(
+            r#"
+            SELECT status
+            FROM forge_jobs
+            WHERE id = $1
+            "#,
+        )
+        .bind(self.job_id)
+        .fetch_optional(&self.db_pool)
+        .await
+        .map_err(|e| crate::ForgeError::Database(e.to_string()))?;
+
+        Ok(matches!(
+            row.as_ref().map(|(status,)| status.as_str()),
+            Some("cancel_requested") | Some("cancelled")
+        ))
+    }
+
+    /// Return an error if cancellation has been requested.
+    pub async fn check_cancelled(&self) -> crate::Result<()> {
+        if self.is_cancel_requested().await? {
+            Err(crate::ForgeError::JobCancelled(
+                "Job cancellation requested".to_string(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn persist_context_value(&self, context: serde_json::Value) -> crate::Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE forge_jobs
+            SET job_context = $2
+            WHERE id = $1
+            "#,
+        )
+        .bind(self.job_id)
+        .bind(context)
+        .execute(&self.db_pool)
+        .await
+        .map_err(|e| crate::ForgeError::Database(e.to_string()))?;
 
         Ok(())
     }
@@ -216,5 +323,26 @@ mod tests {
 
         assert_eq!(update.percentage, 50);
         assert_eq!(update.message, "Halfway there");
+    }
+
+    #[tokio::test]
+    async fn test_context_update_in_memory() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://localhost/nonexistent")
+            .expect("Failed to create mock pool");
+
+        let ctx = JobContext::new(
+            Uuid::nil(),
+            "test_job".to_string(),
+            1,
+            3,
+            pool,
+            reqwest::Client::new(),
+        )
+        .with_context(serde_json::json!({"foo": "bar"}));
+
+        let context = ctx.context().await;
+        assert_eq!(context["foo"], "bar");
     }
 }

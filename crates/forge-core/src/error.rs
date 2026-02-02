@@ -17,6 +17,9 @@ pub enum ForgeError {
     #[error("Job error: {0}")]
     Job(String),
 
+    #[error("Job cancelled: {0}")]
+    JobCancelled(String),
+
     #[error("Cluster error: {0}")]
     Cluster(String),
 

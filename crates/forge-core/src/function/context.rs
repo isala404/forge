@@ -73,6 +73,7 @@ pub struct PendingJob {
     pub id: Uuid,
     pub job_type: String,
     pub args: serde_json::Value,
+    pub context: serde_json::Value,
     pub priority: i32,
     pub max_attempts: i32,
     pub worker_capability: Option<String>,
@@ -495,6 +496,7 @@ impl MutationContext {
                 id: Uuid::new_v4(),
                 job_type: job_type.to_string(),
                 args: args_json,
+                context: serde_json::json!({}),
                 priority: job_info.priority.as_i32(),
                 max_attempts: job_info.retry.max_attempts as i32,
                 worker_capability: job_info.worker_capability.map(|s| s.to_string()),
@@ -510,6 +512,53 @@ impl MutationContext {
             crate::error::ForgeError::Internal("Job dispatch not available".into())
         })?;
         dispatcher.dispatch_by_name(job_type, args_json).await
+    }
+
+    /// Dispatch a job with initial context.
+    pub async fn dispatch_job_with_context<T: serde::Serialize>(
+        &self,
+        job_type: &str,
+        args: T,
+        context: serde_json::Value,
+    ) -> crate::error::Result<Uuid> {
+        let args_json = serde_json::to_value(args)?;
+
+        if let (Some(outbox), Some(job_info_lookup)) = (&self.outbox, &self.job_info_lookup) {
+            let job_info = job_info_lookup(job_type).ok_or_else(|| {
+                crate::error::ForgeError::NotFound(format!("Job type '{}' not found", job_type))
+            })?;
+
+            let pending = PendingJob {
+                id: Uuid::new_v4(),
+                job_type: job_type.to_string(),
+                args: args_json,
+                context,
+                priority: job_info.priority.as_i32(),
+                max_attempts: job_info.retry.max_attempts as i32,
+                worker_capability: job_info.worker_capability.map(|s| s.to_string()),
+            };
+
+            let job_id = pending.id;
+            outbox.lock().unwrap().jobs.push(pending);
+            return Ok(job_id);
+        }
+
+        let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
+            crate::error::ForgeError::Internal("Job dispatch not available".into())
+        })?;
+        dispatcher.dispatch_by_name(job_type, args_json).await
+    }
+
+    /// Request cancellation for a job.
+    pub async fn cancel_job(
+        &self,
+        job_id: Uuid,
+        reason: Option<String>,
+    ) -> crate::error::Result<bool> {
+        let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
+            crate::error::ForgeError::Internal("Job dispatch not available".into())
+        })?;
+        dispatcher.cancel(job_id, reason).await
     }
 
     /// In transactional mode, buffers for atomic commit; otherwise starts immediately.

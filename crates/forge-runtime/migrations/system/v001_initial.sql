@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS forge_jobs (
     job_type VARCHAR(255) NOT NULL,
     input JSONB NOT NULL DEFAULT '{}',
     output JSONB,
+    job_context JSONB NOT NULL DEFAULT '{}',
     status VARCHAR(32) NOT NULL DEFAULT 'pending',
     priority INTEGER NOT NULL DEFAULT 50,
     attempts INTEGER NOT NULL DEFAULT 0,
@@ -47,6 +48,9 @@ CREATE TABLE IF NOT EXISTS forge_jobs (
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
     failed_at TIMESTAMPTZ,
+    cancel_requested_at TIMESTAMPTZ,
+    cancelled_at TIMESTAMPTZ,
+    cancel_reason TEXT,
     last_heartbeat TIMESTAMPTZ
 );
 

@@ -184,6 +184,14 @@ impl Worker {
                                         "Job timed out"
                                     );
                                 }
+                                super::executor::ExecutionResult::Cancelled { reason } => {
+                                    tracing::info!(
+                                        job_id = %job_id,
+                                        job_type = %job_type,
+                                        reason = %reason,
+                                        "Job cancelled"
+                                    );
+                                }
                             }
 
                             drop(permit); // Release semaphore

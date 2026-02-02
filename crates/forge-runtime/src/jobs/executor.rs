@@ -38,8 +38,25 @@ impl JobExecutor {
             }
         };
 
+        if matches!(job.status, forge_core::job::JobStatus::Cancelled) {
+            return ExecutionResult::Cancelled {
+                reason: job
+                    .cancel_reason
+                    .clone()
+                    .unwrap_or_else(|| "Job cancelled".to_string()),
+            };
+        }
+
         // Mark job as running
         if let Err(e) = self.queue.start(job.id).await {
+            if matches!(e, sqlx::Error::RowNotFound) {
+                return ExecutionResult::Cancelled {
+                    reason: job
+                        .cancel_reason
+                        .clone()
+                        .unwrap_or_else(|| "Job cancelled".to_string()),
+                };
+            }
             return ExecutionResult::Failed {
                 error: format!("Failed to start job: {}", e),
                 retryable: true,
@@ -93,6 +110,7 @@ impl JobExecutor {
             self.db_pool.clone(),
             self.http_client.inner().clone(),
         )
+        .with_context(job.job_context.clone())
         .with_progress(progress_tx);
 
         // Execute with timeout
@@ -110,6 +128,24 @@ impl JobExecutor {
             Ok(Err(e)) => {
                 // Job failed
                 let error_msg = e.to_string();
+                if matches!(e, forge_core::ForgeError::JobCancelled(_))
+                    || ctx.is_cancel_requested().await.unwrap_or(false)
+                {
+                    let reason = job
+                        .cancel_reason
+                        .clone()
+                        .unwrap_or_else(|| "Job cancellation requested".to_string());
+                    if let Err(e) = self.queue.cancel(job.id, Some(&reason)).await {
+                        tracing::error!("Failed to mark job {} as cancelled: {}", job.id, e);
+                    }
+                    if let Err(e) = self
+                        .run_compensation(&entry, &ctx, &job.input, &reason)
+                        .await
+                    {
+                        tracing::error!("Compensation failed for job {}: {}", job.id, e);
+                    }
+                    return ExecutionResult::Cancelled { reason };
+                }
                 let should_retry = job.attempts < job.max_attempts;
 
                 let retry_delay = if should_retry {
@@ -162,6 +198,16 @@ impl JobExecutor {
     ) -> forge_core::Result<serde_json::Value> {
         (entry.handler)(ctx, input.clone()).await
     }
+
+    async fn run_compensation(
+        &self,
+        entry: &Arc<JobEntry>,
+        ctx: &JobContext,
+        input: &serde_json::Value,
+        reason: &str,
+    ) -> forge_core::Result<()> {
+        (entry.compensation)(ctx, input.clone(), reason).await
+    }
 }
 
 /// Result of job execution.
@@ -173,6 +219,8 @@ pub enum ExecutionResult {
     Failed { error: String, retryable: bool },
     /// Job timed out.
     TimedOut { retryable: bool },
+    /// Job cancelled.
+    Cancelled { reason: String },
 }
 
 impl ExecutionResult {
@@ -229,5 +277,14 @@ mod tests {
         let result = ExecutionResult::TimedOut { retryable: true };
         assert!(!result.is_success());
         assert!(result.should_retry());
+    }
+
+    #[test]
+    fn test_execution_result_cancelled() {
+        let result = ExecutionResult::Cancelled {
+            reason: "user request".to_string(),
+        };
+        assert!(!result.is_success());
+        assert!(!result.should_retry());
     }
 }

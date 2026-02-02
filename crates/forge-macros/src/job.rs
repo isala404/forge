@@ -13,6 +13,7 @@ struct JobAttrs {
     worker_capability: Option<String>,
     idempotent: bool,
     idempotency_key: Option<String>,
+    compensate: Option<String>,
     is_public: bool,
     required_role: Option<String>,
 }
@@ -55,6 +56,19 @@ fn parse_job_attrs(attr: TokenStream) -> syn::Result<JobAttrs> {
             if let Some(paren_end) = remaining.find(')') {
                 let role = remaining[..paren_end].trim().trim_matches('"');
                 result.required_role = Some(role.to_string());
+            }
+        }
+    }
+
+    // Parse compensate = "handler_name"
+    if let Some(comp_start) = attr_str.find("compensate") {
+        if let Some(eq_pos) = attr_str[comp_start..].find('=') {
+            let after_eq = &attr_str[comp_start + eq_pos + 1..];
+            if let Some(quote_start) = after_eq.find('"') {
+                let after_quote = &after_eq[quote_start + 1..];
+                if let Some(quote_end) = after_quote.find('"') {
+                    result.compensate = Some(after_quote[..quote_end].to_string());
+                }
             }
         }
     }
@@ -400,6 +414,22 @@ pub fn job_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! { None }
     };
 
+    let compensate = if let Some(ref handler) = attrs.compensate {
+        let handler_ident = format_ident!("{}", handler);
+        let args_ident_comp = format_ident!("_comp_args");
+        quote! {
+            fn compensate(
+                ctx: &forge::forge_core::job::JobContext,
+                #args_ident_comp: Self::Args,
+                reason: &str,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = forge::forge_core::Result<()>> + Send + '_>> {
+                Box::pin(async move { #handler_ident(ctx, #args_ident_comp, reason).await })
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     let other_attrs = &input.attrs;
 
     let expanded = quote! {
@@ -435,6 +465,8 @@ pub fn job_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             ) -> std::pin::Pin<Box<dyn std::future::Future<Output = forge::forge_core::Result<Self::Output>> + Send + '_>> {
                 Box::pin(async move #block)
             }
+
+            #compensate
         }
     };
 

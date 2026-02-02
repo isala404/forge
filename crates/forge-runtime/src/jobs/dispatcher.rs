@@ -98,6 +98,18 @@ impl JobDispatcher {
             .map_err(|e| forge_core::ForgeError::Database(e.to_string()))
     }
 
+    /// Request cancellation for a job.
+    pub async fn cancel(
+        &self,
+        job_id: Uuid,
+        reason: Option<&str>,
+    ) -> Result<bool, forge_core::ForgeError> {
+        self.queue
+            .request_cancel(job_id, reason)
+            .await
+            .map_err(|e| forge_core::ForgeError::Database(e.to_string()))
+    }
+
     /// Dispatch job at specific time with explicit info.
     async fn dispatch_at_with_info(
         &self,
@@ -191,6 +203,14 @@ impl JobDispatch for JobDispatcher {
     ) -> Pin<Box<dyn Future<Output = forge_core::Result<Uuid>> + Send + '_>> {
         let job_type = job_type.to_string();
         Box::pin(async move { self.dispatch_by_name(&job_type, args).await })
+    }
+
+    fn cancel(
+        &self,
+        job_id: Uuid,
+        reason: Option<String>,
+    ) -> Pin<Box<dyn Future<Output = forge_core::Result<bool>> + Send + '_>> {
+        Box::pin(async move { self.cancel(job_id, reason.as_deref()).await })
     }
 }
 

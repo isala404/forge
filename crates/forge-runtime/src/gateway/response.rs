@@ -107,6 +107,7 @@ impl RpcError {
             "INVALID_ARGUMENT" => StatusCode::BAD_REQUEST,
             "TIMEOUT" => StatusCode::GATEWAY_TIMEOUT,
             "RATE_LIMITED" => StatusCode::TOO_MANY_REQUESTS,
+            "JOB_CANCELLED" => StatusCode::CONFLICT,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -148,6 +149,9 @@ impl From<forge_core::error::ForgeError> for RpcError {
                 Self::new("INVALID_ARGUMENT", msg)
             }
             forge_core::error::ForgeError::Timeout(msg) => Self::new("TIMEOUT", msg),
+            forge_core::error::ForgeError::JobCancelled(msg) => {
+                Self::new("JOB_CANCELLED", msg)
+            }
             forge_core::error::ForgeError::Database(msg) => {
                 Self::internal(format!("Database error: {}", msg))
             }

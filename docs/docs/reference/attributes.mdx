@@ -95,6 +95,7 @@ Background tasks with retries and worker routing.
 | `worker_capability` | `"string"` | none | Required worker capability (e.g., `"gpu"`, `"media"`) |
 | `idempotent` | flag | `false` | Mark job as idempotent |
 | `idempotent(key = "...")` | config | none | Idempotent with custom key field |
+| `compensate` | `"handler"` | none | Cancellation compensation handler |
 
 ### Retry Configuration (Grouped)
 
@@ -122,13 +123,23 @@ Equivalent to specifying `max_attempts`, `backoff`, and `max_backoff` separately
     timeout = "30m",
     retry(max_attempts = 5, backoff = "exponential", max_backoff = "10m"),
     worker_capability = "gpu",
-    idempotent(key = "video_id")
+    idempotent(key = "video_id"),
+    compensate = "rollback_processing"
 )]
 pub async fn process_video(ctx: &JobContext, input: VideoInput) -> Result<VideoOutput> {
     ctx.progress(0, "Starting transcode")?;
     // ...
     ctx.progress(100, "Complete")?;
     Ok(output)
+}
+
+pub async fn rollback_processing(
+    ctx: &JobContext,
+    input: VideoInput,
+    reason: &str,
+) -> Result<()> {
+    ctx.update_context("cancel_reason", serde_json::json!(reason)).await?;
+    cleanup(&input).await
 }
 ```
 

@@ -25,6 +25,8 @@ pub struct DispatchedJob {
     pub dispatched_at: DateTime<Utc>,
     /// Current status (for test simulation).
     pub status: JobStatus,
+    /// Cancellation reason (if any).
+    pub cancel_reason: Option<String>,
 }
 
 /// Record of a started workflow.
@@ -81,6 +83,7 @@ impl MockJobDispatch {
             args: args_json,
             dispatched_at: Utc::now(),
             status: JobStatus::Pending,
+            cancel_reason: None,
         };
 
         self.jobs.write().unwrap().push(job);
@@ -173,11 +176,49 @@ impl MockJobDispatch {
             job.status = JobStatus::Failed;
         }
     }
+
+    /// Mark a job as cancelled (for test simulation).
+    pub fn cancel_job(&self, job_id: Uuid, reason: Option<String>) {
+        let mut jobs = self.jobs.write().unwrap();
+        if let Some(job) = jobs.iter_mut().find(|j| j.id == job_id) {
+            job.status = JobStatus::Cancelled;
+            job.cancel_reason = reason;
+        }
+    }
+
 }
 
 impl Default for MockJobDispatch {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl crate::function::JobDispatch for MockJobDispatch {
+    fn get_info(&self, _job_type: &str) -> Option<crate::job::JobInfo> {
+        None
+    }
+
+    fn dispatch_by_name(
+        &self,
+        job_type: &str,
+        args: serde_json::Value,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Uuid>> + Send + '_>,
+    > {
+        let job_type = job_type.to_string();
+        Box::pin(async move { self.dispatch(&job_type, args).await })
+    }
+
+    fn cancel(
+        &self,
+        job_id: Uuid,
+        reason: Option<String>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send + '_>> {
+        Box::pin(async move {
+            self.cancel_job(job_id, reason);
+            Ok(true)
+        })
     }
 }
 
@@ -428,5 +469,20 @@ mod tests {
 
         let jobs = dispatch.dispatched_jobs();
         assert_eq!(jobs[0].status, JobStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn test_job_cancel_simulation() {
+        let dispatch = MockJobDispatch::new();
+        let job_id = dispatch
+            .dispatch("test", serde_json::json!({}))
+            .await
+            .unwrap();
+
+        dispatch.cancel_job(job_id, Some("user request".to_string()));
+
+        let jobs = dispatch.dispatched_jobs();
+        assert_eq!(jobs[0].status, JobStatus::Cancelled);
+        assert_eq!(jobs[0].cancel_reason.as_deref(), Some("user request"));
     }
 }

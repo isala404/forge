@@ -101,6 +101,12 @@ impl TestMutationContext {
         self.job_dispatch.dispatch(job_type, args).await
     }
 
+    /// Cancel a job (records for later verification).
+    pub async fn cancel_job(&self, job_id: Uuid, reason: Option<String>) -> Result<bool> {
+        self.job_dispatch.cancel_job(job_id, reason);
+        Ok(true)
+    }
+
     /// Start a workflow (records for later verification).
     pub async fn start_workflow<T: serde::Serialize>(&self, name: &str, input: T) -> Result<Uuid> {
         self.workflow_dispatch.start(name, input).await
@@ -297,6 +303,26 @@ mod tests {
 
         assert!(!run_id.is_nil());
         ctx.workflow_dispatch().assert_started("onboarding");
+    }
+
+    #[tokio::test]
+    async fn test_cancel_job() {
+        let ctx = TestMutationContext::authenticated(Uuid::new_v4());
+
+        let job_id = ctx
+            .dispatch_job("send_email", serde_json::json!({"to": "test@example.com"}))
+            .await
+            .unwrap();
+
+        let cancelled = ctx
+            .cancel_job(job_id, Some("test cancel".to_string()))
+            .await
+            .unwrap();
+
+        assert!(cancelled);
+        let jobs = ctx.job_dispatch().dispatched_jobs();
+        assert_eq!(jobs[0].status, crate::job::JobStatus::Cancelled);
+        assert_eq!(jobs[0].cancel_reason.as_deref(), Some("test cancel"));
     }
 
     #[tokio::test]

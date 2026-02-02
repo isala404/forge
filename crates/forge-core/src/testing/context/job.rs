@@ -58,6 +58,8 @@ pub struct TestJobContext {
     progress_updates: Arc<RwLock<Vec<TestProgressUpdate>>>,
     /// Mock environment provider.
     env_provider: Arc<MockEnvProvider>,
+    /// Persisted context data (in-memory).
+    context: Arc<RwLock<serde_json::Value>>,
 }
 
 impl TestJobContext {
@@ -89,6 +91,31 @@ impl TestJobContext {
     /// Get all progress updates.
     pub fn progress_updates(&self) -> Vec<TestProgressUpdate> {
         self.progress_updates.read().unwrap().clone()
+    }
+
+    /// Get the current context data.
+    pub fn context(&self) -> serde_json::Value {
+        self.context.read().unwrap().clone()
+    }
+
+    /// Replace the context data.
+    pub fn set_context(&self, context: serde_json::Value) -> Result<()> {
+        let mut guard = self.context.write().unwrap();
+        *guard = context;
+        Ok(())
+    }
+
+    /// Update a single key in the context data.
+    pub fn update_context(&self, key: &str, value: serde_json::Value) -> Result<()> {
+        let mut guard = self.context.write().unwrap();
+        if let Some(map) = guard.as_object_mut() {
+            map.insert(key.to_string(), value);
+        } else {
+            let mut map = serde_json::Map::new();
+            map.insert(key.to_string(), value);
+            *guard = serde_json::Value::Object(map);
+        }
+        Ok(())
     }
 
     /// Check if this is a retry attempt.
@@ -238,6 +265,9 @@ impl TestJobContextBuilder {
             http: Arc::new(self.http),
             progress_updates: Arc::new(RwLock::new(Vec::new())),
             env_provider: Arc::new(MockEnvProvider::with_vars(self.env_vars)),
+            context: Arc::new(RwLock::new(serde_json::Value::Object(
+                serde_json::Map::new(),
+            ))),
         }
     }
 }
@@ -287,5 +317,12 @@ mod tests {
         assert_eq!(updates.len(), 3);
         assert_eq!(updates[0].percent, 25);
         assert_eq!(updates[2].percent, 100);
+    }
+
+    #[test]
+    fn test_context_updates() {
+        let ctx = TestJobContext::builder("test").build();
+        ctx.update_context("foo", serde_json::json!("bar")).unwrap();
+        assert_eq!(ctx.context()["foo"], "bar");
     }
 }

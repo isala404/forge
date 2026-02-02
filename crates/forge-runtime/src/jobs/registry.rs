@@ -37,12 +37,21 @@ pub type BoxedJobHandler = Arc<
         + Sync,
 >;
 
+pub type BoxedJobCompensation = Arc<
+    dyn for<'a> Fn(&'a JobContext, Value, &'a str)
+            -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>
+        + Send
+        + Sync,
+>;
+
 /// Entry in the job registry.
 pub struct JobEntry {
     /// Job metadata.
     pub info: JobInfo,
     /// Job handler function.
     pub handler: BoxedJobHandler,
+    /// Job compensation handler.
+    pub compensation: BoxedJobCompensation,
 }
 
 /// Registry of all FORGE jobs.
@@ -78,7 +87,22 @@ impl JobRegistry {
             })
         });
 
-        self.jobs.insert(name, Arc::new(JobEntry { info, handler }));
+        let compensation: BoxedJobCompensation = Arc::new(move |ctx, args, reason| {
+            Box::pin(async move {
+                let parsed_args: J::Args = serde_json::from_value(normalize_args(args))
+                    .map_err(|e| forge_core::ForgeError::Validation(e.to_string()))?;
+                J::compensate(ctx, parsed_args, reason).await
+            })
+        });
+
+        self.jobs.insert(
+            name,
+            Arc::new(JobEntry {
+                info,
+                handler,
+                compensation,
+            }),
+        );
     }
 
     /// Get a job entry by name.

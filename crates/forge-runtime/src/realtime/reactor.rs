@@ -381,7 +381,8 @@ impl Reactor {
             Option<String>,
         )> = sqlx::query_as(
             r#"
-                SELECT status, progress_percent, progress_message, output, last_error
+                SELECT status, progress_percent, progress_message, output,
+                       COALESCE(cancel_reason, last_error) as error
                 FROM forge_jobs WHERE id = $1
                 "#,
         )
