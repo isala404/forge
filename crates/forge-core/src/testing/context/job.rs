@@ -265,9 +265,7 @@ impl TestJobContextBuilder {
             http: Arc::new(self.http),
             progress_updates: Arc::new(RwLock::new(Vec::new())),
             env_provider: Arc::new(MockEnvProvider::with_vars(self.env_vars)),
-            context: Arc::new(RwLock::new(serde_json::Value::Object(
-                serde_json::Map::new(),
-            ))),
+            context: Arc::new(RwLock::new(crate::job::empty_context_value())),
         }
     }
 }

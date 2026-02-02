@@ -276,7 +276,9 @@ impl JobQueue {
                 status = 'completed',
                 output = $2,
                 completed_at = NOW(),
-                cancel_requested_at = NULL
+                cancel_requested_at = NULL,
+                cancelled_at = NULL,
+                cancel_reason = NULL
             WHERE id = $1
             "#,
         )
@@ -322,17 +324,17 @@ impl JobQueue {
             // Move to dead letter
             sqlx::query(
                 r#"
-            UPDATE forge_jobs
-            SET
-                status = 'dead_letter',
-                last_error = $2,
-                failed_at = NOW(),
-                cancel_requested_at = NULL,
-                cancelled_at = NULL,
-                cancel_reason = NULL
-            WHERE id = $1
-            "#,
-        )
+                UPDATE forge_jobs
+                SET
+                    status = 'dead_letter',
+                    last_error = $2,
+                    failed_at = NOW(),
+                    cancel_requested_at = NULL,
+                    cancelled_at = NULL,
+                    cancel_reason = NULL
+                WHERE id = $1
+                "#,
+            )
             .bind(job_id)
             .bind(error)
             .execute(&self.pool)
@@ -341,6 +343,7 @@ impl JobQueue {
 
         Ok(())
     }
+
 
     /// Update heartbeat for a running job.
     pub async fn heartbeat(&self, job_id: Uuid) -> Result<(), sqlx::Error> {
@@ -424,7 +427,14 @@ impl JobQueue {
             None => return Ok(false),
         };
 
-        if status == "running" {
+        let terminal_statuses = [
+            JobStatus::Completed.as_str(),
+            JobStatus::Failed.as_str(),
+            JobStatus::DeadLetter.as_str(),
+            JobStatus::Cancelled.as_str(),
+        ];
+
+        if status == JobStatus::Running.as_str() {
             let updated = sqlx::query(
                 r#"
                 UPDATE forge_jobs
@@ -444,7 +454,7 @@ impl JobQueue {
             return Ok(updated.rows_affected() > 0);
         }
 
-        if status == "completed" || status == "failed" || status == "dead_letter" {
+        if terminal_statuses.contains(&status.as_str()) {
             return Ok(false);
         }
 

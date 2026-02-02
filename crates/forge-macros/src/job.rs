@@ -416,14 +416,14 @@ pub fn job_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let compensate = if let Some(ref handler) = attrs.compensate {
         let handler_ident = format_ident!("{}", handler);
-        let args_ident_comp = format_ident!("_comp_args");
+        let compensation_args_ident = format_ident!("_comp_args");
         quote! {
             fn compensate(
                 ctx: &forge::forge_core::job::JobContext,
-                #args_ident_comp: Self::Args,
+                #compensation_args_ident: Self::Args,
                 reason: &str,
             ) -> std::pin::Pin<Box<dyn std::future::Future<Output = forge::forge_core::Result<()>> + Send + '_>> {
-                Box::pin(async move { #handler_ident(ctx, #args_ident_comp, reason).await })
+                Box::pin(async move { #handler_ident(ctx, #compensation_args_ident, reason).await })
             }
         }
     } else {

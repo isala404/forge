@@ -5,6 +5,10 @@ use uuid::Uuid;
 use crate::env::{EnvAccess, EnvProvider, RealEnvProvider};
 use crate::function::AuthContext;
 
+pub fn empty_context_value() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
 /// Context available to job handlers.
 pub struct JobContext {
     /// Job ID.
@@ -56,9 +60,7 @@ impl JobContext {
             attempt,
             max_attempts,
             auth: AuthContext::unauthenticated(),
-            context: Arc::new(tokio::sync::RwLock::new(serde_json::Value::Object(
-                serde_json::Map::new(),
-            ))),
+            context: Arc::new(tokio::sync::RwLock::new(empty_context_value())),
             db_pool,
             http_client,
             progress_tx: None,
@@ -125,12 +127,11 @@ impl JobContext {
     pub async fn set_context(&self, context: serde_json::Value) -> crate::Result<()> {
         let mut guard = self.context.write().await;
         *guard = context;
-        let context = guard.clone();
-        drop(guard);
+        let persisted_context = Self::clone_and_drop(guard);
         if self.job_id.is_nil() {
             return Ok(());
         }
-        self.persist_context_value(context).await
+        self.persist_context_value(persisted_context).await
     }
 
     /// Update a single context key with a JSON value.
@@ -139,29 +140,13 @@ impl JobContext {
         key: &str,
         value: serde_json::Value,
     ) -> crate::Result<()> {
+        let mut guard = self.context.write().await;
+        Self::apply_context_update(&mut guard, key, value);
+        let persisted_context = Self::clone_and_drop(guard);
         if self.job_id.is_nil() {
-            let mut guard = self.context.write().await;
-            if let Some(map) = guard.as_object_mut() {
-                map.insert(key.to_string(), value);
-            } else {
-                let mut map = serde_json::Map::new();
-                map.insert(key.to_string(), value);
-                *guard = serde_json::Value::Object(map);
-            }
             return Ok(());
         }
-
-        let mut guard = self.context.write().await;
-        if let Some(map) = guard.as_object_mut() {
-            map.insert(key.to_string(), value);
-        } else {
-            let mut map = serde_json::Map::new();
-            map.insert(key.to_string(), value);
-            *guard = serde_json::Value::Object(map);
-        }
-        let context = guard.clone();
-        drop(guard);
-        self.persist_context_value(context).await
+        self.persist_context_value(persisted_context).await
     }
 
     /// Check if cancellation has been requested for this job.
@@ -210,6 +195,28 @@ impl JobContext {
         .map_err(|e| crate::ForgeError::Database(e.to_string()))?;
 
         Ok(())
+    }
+
+    fn apply_context_update(
+        context: &mut serde_json::Value,
+        key: &str,
+        value: serde_json::Value,
+    ) {
+        if let Some(map) = context.as_object_mut() {
+            map.insert(key.to_string(), value);
+        } else {
+            let mut map = serde_json::Map::new();
+            map.insert(key.to_string(), value);
+            *context = serde_json::Value::Object(map);
+        }
+    }
+
+    fn clone_and_drop(
+        guard: tokio::sync::RwLockWriteGuard<'_, serde_json::Value>,
+    ) -> serde_json::Value {
+        let cloned = guard.clone();
+        drop(guard);
+        cloned
     }
 
     /// Send heartbeat to keep job alive (async).

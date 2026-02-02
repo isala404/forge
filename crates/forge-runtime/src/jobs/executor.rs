@@ -40,10 +40,7 @@ impl JobExecutor {
 
         if matches!(job.status, forge_core::job::JobStatus::Cancelled) {
             return ExecutionResult::Cancelled {
-                reason: job
-                    .cancel_reason
-                    .clone()
-                    .unwrap_or_else(|| "Job cancelled".to_string()),
+                reason: Self::cancellation_reason(job, "Job cancelled"),
             };
         }
 
@@ -51,10 +48,7 @@ impl JobExecutor {
         if let Err(e) = self.queue.start(job.id).await {
             if matches!(e, sqlx::Error::RowNotFound) {
                 return ExecutionResult::Cancelled {
-                    reason: job
-                        .cancel_reason
-                        .clone()
-                        .unwrap_or_else(|| "Job cancelled".to_string()),
+                    reason: Self::cancellation_reason(job, "Job cancelled"),
                 };
             }
             return ExecutionResult::Failed {
@@ -128,13 +122,22 @@ impl JobExecutor {
             Ok(Err(e)) => {
                 // Job failed
                 let error_msg = e.to_string();
-                if matches!(e, forge_core::ForgeError::JobCancelled(_))
-                    || ctx.is_cancel_requested().await.unwrap_or(false)
+                // Accepts either an explicit cancellation error or a late cancellation request.
+                let cancel_requested = match ctx.is_cancel_requested().await {
+                    Ok(value) => value,
+                    Err(err) => {
+                        tracing::warn!(
+                            job_id = %job.id,
+                            "Failed to check cancellation status: {}",
+                            err
+                        );
+                        false
+                    }
+                };
+                if matches!(e, forge_core::ForgeError::JobCancelled(_)) || cancel_requested
                 {
-                    let reason = job
-                        .cancel_reason
-                        .clone()
-                        .unwrap_or_else(|| "Job cancellation requested".to_string());
+                    let reason =
+                        Self::cancellation_reason(job, "Job cancellation requested");
                     if let Err(e) = self.queue.cancel(job.id, Some(&reason)).await {
                         tracing::error!("Failed to mark job {} as cancelled: {}", job.id, e);
                     }
@@ -207,6 +210,12 @@ impl JobExecutor {
         reason: &str,
     ) -> forge_core::Result<()> {
         (entry.compensation)(ctx, input.clone(), reason).await
+    }
+
+    fn cancellation_reason(job: &JobRecord, fallback: &str) -> String {
+        job.cancel_reason
+            .clone()
+            .unwrap_or_else(|| fallback.to_string())
     }
 }
 
