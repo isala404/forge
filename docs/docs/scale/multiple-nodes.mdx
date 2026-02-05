@@ -1,6 +1,6 @@
 # Multiple Nodes
 
-Run Forge across multiple servers with automatic leader election, work distribution, and failure recovery.
+Configure multi-node deployments with leader election, work distribution, and failure recovery.
 
 ## The Code
 
@@ -42,7 +42,7 @@ pub async fn price_feed(ctx: &DaemonContext) -> Result<()> {
 
 Deploy the same binary to multiple servers. Each node registers itself in the `forge_nodes` table and begins sending heartbeats. Workers claim jobs using `FOR UPDATE SKIP LOCKED`. One node becomes the scheduler leader via PostgreSQL advisory lock. If a node stops sending heartbeats for 15 seconds, it is marked dead and its jobs are reclaimed.
 
-No Raft. No Paxos. No Zookeeper. PostgreSQL provides the coordination.
+Coordination relies on PostgreSQL advisory locks and tables rather than Raft, Paxos, or Zookeeper.
 
 ## Node Roles
 
@@ -80,7 +80,7 @@ Role specialization is optional. Most deployments run all roles on every node.
 
 ## Discovery
 
-Nodes register in the `forge_nodes` table. No additional infrastructure required.
+Nodes register in the `forge_nodes` table. Additional infrastructure is not required.
 
 ```toml
 [cluster]
@@ -97,7 +97,7 @@ Leader election uses PostgreSQL advisory locks instead of distributed consensus.
 SELECT pg_try_advisory_lock(0x464F52470001)
 ```
 
-The lock ID is a hash of the leader role. One node acquires the lock. Others return `false` and wait. No quorum, no split-brain, no network partition drama.
+The lock ID is a hash of the leader role. One node acquires the lock. Others return `false` and wait, which avoids quorum management and split-brain handling in the application layer.
 
 ### Leader Roles
 
@@ -121,7 +121,7 @@ Node A: acquires lock → running → [crash]
 Node B: waiting → acquires lock → running
 ```
 
-Failover happens within the poll interval (5 seconds). No manual intervention.
+Failover happens within the poll interval (5 seconds) without manual intervention.
 
 ## Work Distribution
 
@@ -144,7 +144,7 @@ WHERE id IN (SELECT id FROM claimable)
 RETURNING *
 ```
 
-Each worker grabs different jobs. No coordination. No locking. No thundering herd. Job claiming is O(1) regardless of cluster size.
+Each worker grabs different jobs without extra coordination or locking, reducing thundering herd contention. Job claiming is O(1) regardless of cluster size.
 
 Add workers, throughput increases linearly.
 
@@ -200,7 +200,7 @@ On SIGTERM, nodes drain cleanly:
 4. Deregister from cluster     → DELETE FROM forge_nodes
 ```
 
-Zero dropped requests during rolling deploys.
+Rolling deploys can avoid dropped requests when drain settings are respected.
 
 ```rust
 // Daemons receive shutdown signal
@@ -250,7 +250,7 @@ impl NodeId {
 }
 ```
 
-No coordination needed. No ID collision in practice (2^122 possible values).
+Coordination is not required for node IDs, and collisions are unlikely in practice (2^122 possible values).
 
 ### Session-Bound Advisory Locks
 
@@ -258,8 +258,8 @@ PostgreSQL advisory locks tie to the database session, not a lease timer:
 
 - Lock held = connection alive
 - Lock released = connection closed
-- No explicit refresh needed
-- No clock skew issues
+- Explicit refresh is not required
+- Clock skew issues are avoided because locks are connection-scoped
 
 The database connection is the heartbeat. If the process crashes, the OS closes the TCP connection, PostgreSQL releases the lock.
 
@@ -288,7 +288,7 @@ Multiple workers safely pull from the same job queue:
 3. Status updated to `claimed` atomically
 4. Other workers skip locked rows, grab different jobs
 
-No race conditions. No duplicate processing. No distributed coordination.
+This avoids race conditions and duplicate processing without distributed coordination.
 
 ## Patterns
 
@@ -354,7 +354,7 @@ Jobs with `worker_capability = "gpu"` only run on GPU workers.
 3. Wait for in-flight work to complete
 4. Terminate old nodes
 
-New nodes handle traffic before old nodes finish draining. Zero downtime.
+New nodes handle traffic before old nodes finish draining to support rolling updates without dropped traffic.
 
 ## Health Check
 

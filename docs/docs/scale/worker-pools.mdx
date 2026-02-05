@@ -1,6 +1,6 @@
 # Worker Pools
 
-Route jobs to specialized workers based on capability requirements.
+Define worker capability routing for specialized job execution.
 
 ## The Code
 
@@ -139,7 +139,7 @@ This worker claims jobs targeting `general`, `media`, or `gpu`. Useful for small
 Jobs without `worker_capability` run on any worker, including specialized ones.
 
 ```rust
-#[forge::job]  // No capability specified
+#[forge::job]  // Capability not specified
 pub async fn send_email(ctx: &JobContext, args: EmailArgs) -> Result<()> {
     // Runs on any worker: general, media, gpu, etc.
     send(&args.to, &args.subject, &args.body).await
@@ -169,7 +169,7 @@ WHERE id IN (SELECT id FROM claimable)
 RETURNING *
 ```
 
-The `ANY($1)` operator matches jobs where `worker_capability` is in the worker's capability array. Jobs with `worker_capability IS NULL` match any worker. SKIP LOCKED prevents thundering herd across all capability pools.
+The `ANY($1)` operator matches jobs where `worker_capability` is in the worker's capability array. Jobs with `worker_capability IS NULL` match any worker. SKIP LOCKED reduces thundering herd contention across capability pools.
 
 ### Bulkhead Isolation
 
@@ -179,7 +179,7 @@ Each capability pool operates independently:
 - Media workers only claim media jobs (plus general jobs)
 - A surge in media jobs does not affect GPU job processing
 
-This natural isolation prevents one workload from starving another. No configuration required beyond capability assignment.
+This natural isolation prevents one workload from starving another. Additional configuration is not required beyond capability assignment.
 
 ### Backpressure via Semaphore
 

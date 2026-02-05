@@ -1,6 +1,6 @@
 # Deploy
 
-Ship a single binary with embedded frontend, automatic migrations, and zero-downtime updates.
+Build and deploy the runtime binary with embedded frontend support, automatic migrations, and rolling updates.
 
 ## The Build
 
@@ -14,7 +14,7 @@ cargo build --release
 
 Output: `target/release/my-app`
 
-One binary. Backend, frontend, migrations.
+Single binary containing backend, optional frontend, and migrations.
 
 ## What Happens
 
@@ -113,7 +113,7 @@ SELECT pg_advisory_lock(0x464F524745)
 
 The lock ID (`0x464F524745`) is derived from "FORGE" in hex. Only one node holds this lock at a time. Other nodes block until migrations complete. The lock releases automatically when the connection closes.
 
-Multiple nodes can start simultaneously. First node runs migrations. Others wait. No race conditions.
+Multiple nodes can start simultaneously. First node runs migrations. Others wait, which avoids race conditions.
 
 ## Health Endpoints
 
@@ -281,7 +281,7 @@ In-flight requests tracked with atomic counter. RAII guard ensures accurate coun
 let _guard = InFlightGuard::try_new(shutdown.clone())?;
 ```
 
-## Zero-Downtime Deploy
+## Rolling Updates
 
 Rolling update pattern:
 
@@ -345,7 +345,7 @@ SELECT pg_advisory_lock(0x464F524745)
 SELECT pg_advisory_unlock(0x464F524745)
 ```
 
-Advisory locks are session-scoped. If the node crashes mid-migration, the lock releases automatically when the connection terminates. No manual cleanup needed.
+Advisory locks are session-scoped. If the node crashes mid-migration, the lock releases automatically when the connection terminates, so manual cleanup is not required.
 
 ### Connection Draining
 
@@ -383,7 +383,7 @@ This allows:
 
 ### Write-Ahead Logging
 
-Forge inherits PostgreSQL's durability guarantees. All state changes (jobs, workflows, migrations) go through WAL. Committed transactions survive crashes. Point-in-time recovery possible. No data loss on unexpected termination.
+Forge inherits PostgreSQL's durability guarantees. All state changes (jobs, workflows, migrations) go through WAL. Committed transactions survive crashes, and point-in-time recovery is possible to minimize data loss on unexpected termination.
 
 ## Environment Variables
 

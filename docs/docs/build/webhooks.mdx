@@ -1,6 +1,6 @@
 # Incoming Webhooks
 
-Receive events from external services with signature verification and exactly-once delivery.
+Handle incoming webhook events with signature verification and idempotency controls.
 
 ## The Code
 
@@ -32,7 +32,7 @@ The macro generates an HTTP endpoint that:
 - Skips duplicate deliveries using the inbox pattern
 - Returns immediately while jobs process in the background
 
-Webhooks bypass JWT authentication. The signature is your authentication.
+Webhooks do not use JWT authentication; the signature serves as the authentication check.
 
 ## Attributes
 
@@ -164,7 +164,7 @@ pub async fn custom_webhook(ctx: &WebhookContext, payload: Value) -> Result<Webh
 }
 ```
 
-### Webhook Without Signature
+### Webhook Without Signature Verification
 
 For development or trusted networks. Prefer signed webhooks in production.
 
@@ -255,7 +255,7 @@ When the same webhook arrives again:
 2. If found, return cached response immediately
 3. If not found, process and record the key
 
-The unique constraint guarantees exactly-once processing. No distributed locks, no external services.
+The unique constraint guarantees exactly-once processing without distributed locks or external coordination services.
 
 ### TTL-Based Cleanup
 

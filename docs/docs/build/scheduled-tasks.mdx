@@ -1,6 +1,6 @@
 # Scheduled Tasks
 
-Run functions on a cron schedule with timezone support, catch-up runs, and exactly-once execution across your cluster.
+Define cron functions with timezone support, catch-up runs, and cluster-coordinated execution.
 
 ## The Code
 
@@ -40,7 +40,7 @@ The scheduler runs every second, checking for due cron executions. When your cro
 3. The cron executes with full context: database, HTTP, logging
 4. Status updates to `completed` or `failed`
 
-No distributed locks. No consensus protocols. PostgreSQL handles coordination.
+Coordination relies on PostgreSQL advisory locks and unique constraints rather than distributed consensus protocols.
 
 ## Attributes
 
@@ -272,7 +272,7 @@ When `catch_up` is enabled, the scheduler checks for missed runs:
 // - catch_up_limit = 1: runs only the most recent
 ```
 
-This prevents thundering herd after extended outages. Large catch-up limits could overload your system if many crons missed many runs.
+This reduces load spikes after extended outages. Large catch-up limits could overload your system if many crons missed many runs.
 
 ### Timezone Handling
 

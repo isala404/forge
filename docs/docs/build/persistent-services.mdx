@@ -1,6 +1,6 @@
 # Persistent Services
 
-Run always-on background processes with automatic leader election and crash recovery.
+Define daemon services with leader election and crash recovery.
 
 ## The Code
 
@@ -32,7 +32,7 @@ The macro transforms your function into a singleton service that:
 - Releases the lock on graceful shutdown, allowing another node to take over
 - Sends heartbeats to track liveness
 
-Only one instance runs across your entire cluster. Other nodes wait in standby, ready to take over within seconds if the leader dies.
+A single instance runs across the cluster; other nodes remain in standby and can take over within seconds if the leader stops.
 
 ## Attributes
 
@@ -233,7 +233,7 @@ Leader election uses `pg_try_advisory_lock()`:
 SELECT pg_try_advisory_lock(hash('daemon_name'))
 ```
 
-The lock ID is a hash of the daemon name. One node acquires the lock, others return `false` and wait. No Raft, no Paxos, no distributed consensus protocol.
+The lock ID is a hash of the daemon name. One node acquires the lock, others return `false` and wait. Coordination uses PostgreSQL advisory locks rather than distributed consensus protocols.
 
 ### Session-Bound Locks
 
@@ -241,8 +241,8 @@ PostgreSQL advisory locks are tied to the database connection. The lock is held 
 
 - Connection alive = lock held
 - Connection drops = lock released automatically
-- No explicit lease refresh needed
-- No heartbeat-based timeout coordination
+- Explicit lease refresh is not required
+- Heartbeat-based timeout coordination is not required
 
 If a node crashes, PostgreSQL detects the dead connection and releases the lock. Another node acquires it within 5 seconds (the standby poll interval).
 
@@ -254,7 +254,7 @@ Node A: acquires lock → running → [crash]
 Node B: waiting → waiting → acquires lock → running
 ```
 
-No manual intervention. No external service discovery. The database handles coordination.
+Failover occurs without manual intervention. Coordination relies on the database instead of an external service discovery layer.
 
 ### Graceful Shutdown
 
@@ -266,7 +266,7 @@ On SIGTERM:
 4. Lock is explicitly released via `pg_advisory_unlock()`
 5. Node deregisters from cluster
 
-No zombie locks. No 5-minute wait for dead connection detection.
+Advisory locks clear when connections drop, avoiding zombie locks and long waits for dead connection detection.
 
 ### Restart Behavior
 

@@ -1,6 +1,6 @@
 # Protect Routes
 
-Control who can call your functions.
+Define authentication and authorization requirements for function calls.
 
 ## The Code
 
@@ -36,7 +36,7 @@ Token validation checks expiry, signature, and optionally issuer/audience. Keys 
 ```rust
 #[forge::query(public)]
 pub async fn get_public_stats(ctx: &QueryContext) -> Result<Stats> {
-    // Anyone can call this, no token required
+    // Public endpoint; no token required
     sqlx::query_as!(Stats, "SELECT count(*) as total FROM orders")
         .fetch_one(ctx.db())
         .await

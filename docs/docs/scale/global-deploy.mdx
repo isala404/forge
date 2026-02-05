@@ -1,6 +1,6 @@
 # Global Deploy
 
-Deploy Forge nodes across multiple regions with read replicas for low-latency reads worldwide.
+Configure multi-region nodes with read replicas to reduce read latency.
 
 ## The Code
 
@@ -20,7 +20,7 @@ pool_size = 50
 
 Forge maintains separate connection pools for the primary database and each replica. Queries route to replicas via round-robin distribution using an atomic counter. Mutations always go to the primary. If a replica becomes unavailable, that pool is skipped and reads continue from remaining replicas or fall back to the primary.
 
-All cluster coordination happens through PostgreSQL. Nodes in different regions find each other via the shared `forge_nodes` table. No service mesh, no separate discovery service.
+All cluster coordination happens through PostgreSQL. Nodes in different regions find each other via the shared `forge_nodes` table without a service mesh or separate discovery service.
 
 ## Configuration
 
@@ -185,7 +185,7 @@ INSERT INTO forge_nodes (id, hostname, ip_address, http_port, roles, status, ...
 ON CONFLICT (id) DO UPDATE SET last_heartbeat = NOW()
 ```
 
-Nodes query this table to find peers. Leader election uses PostgreSQL advisory locks. No external coordination service required.
+Nodes query this table to find peers. Leader election uses PostgreSQL advisory locks, so an external coordination service is not required.
 
 ## Under the Hood
 
@@ -228,7 +228,7 @@ If a replica connection fails:
 3. If all replicas fail, reads fall back to primary
 4. Replica reconnects automatically when healthy
 
-No configuration change needed. No manual failover. Reads continue with higher latency until replicas recover.
+Configuration changes are not required, and failover occurs automatically. Reads continue with higher latency until replicas recover.
 
 ### Write Path
 

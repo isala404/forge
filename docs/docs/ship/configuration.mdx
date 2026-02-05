@@ -1,6 +1,6 @@
 # Configuration
 
-Control database connections, authentication, workers, clustering, and node roles from a single file.
+Configure database connections, authentication, workers, clustering, and node roles in `forge.toml`.
 
 ## The Code
 
@@ -68,7 +68,7 @@ embedded = true
 data_dir = ".forge/data"
 ```
 
-No Docker. No external database. Data persists in `data_dir`. Requires the `embedded-db` feature.
+Embedded mode runs PostgreSQL in-process and persists data in `data_dir`. It requires the `embedded-db` feature.
 
 #### Read Replicas
 
@@ -179,7 +179,7 @@ Workers maintain a semaphore sized to `max_concurrent_jobs`. They only poll when
 
 #### Discovery
 
-Nodes register in the `forge_nodes` database table. No external service required.
+Nodes register in the `forge_nodes` database table, so an external service is not required.
 
 ```toml
 [cluster]
@@ -393,7 +393,7 @@ Nodes discover each other through PostgreSQL:
 SELECT * FROM forge_nodes WHERE last_heartbeat > NOW() - INTERVAL '15s'
 ```
 
-Nodes insert their address on startup, update on heartbeat, and get cleaned up when dead_threshold passes. No additional infrastructure required.
+Nodes insert their address on startup, update on heartbeat, and get cleaned up when dead_threshold passes. Additional infrastructure is not required.
 
 ### Node Role Enforcement
 

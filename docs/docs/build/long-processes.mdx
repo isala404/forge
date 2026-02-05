@@ -1,6 +1,6 @@
 # Long Processes
 
-Workflows execute multi-step business logic that survives server restarts. Sleep for 45 days. Wait for external events. Roll back on failure.
+Define workflows with durable state, long sleeps, event waits, and compensation handlers.
 
 ## The Code
 
@@ -115,7 +115,7 @@ pub async fn send_notifications(ctx: &WorkflowContext, input: NotifyInput) -> Re
 
 ### Saga Pattern with Compensation
 
-When a step fails, previously completed steps need to be undone. The saga pattern handles this without distributed transactions.
+When a step fails, previously completed steps need to be undone. The saga pattern coordinates compensation instead of distributed transactions.
 
 ```rust
 #[forge::workflow]
@@ -363,7 +363,7 @@ Compensation (reverse order):
 - cancel_flight(flight_result)
 ```
 
-No distributed transactions. No two-phase commit. Each step is independently recoverable.
+Workflow steps avoid distributed transactions and two-phase commit; each step is independently recoverable.
 
 ### Transactional Outbox Pattern
 

@@ -129,6 +129,24 @@ Background job execution context with progress reporting and heartbeats.
 | `env_parse_or` | `fn env_parse_or<T: FromStr>(&self, key: &str, default: T) -> Result<T>` | Parse env var with default |
 | `env_contains` | `fn env_contains(&self, key: &str) -> bool` | Check if env var is set |
 
+### Saved Job Data
+
+`save`, `saved`, and `set_saved` persist JSON data in the job record. Saved data survives retries and is
+available to compensation handlers.
+
+```rust
+#[forge::job]
+pub async fn charge_card(ctx: &JobContext, args: ChargeArgs) -> Result<Receipt> {
+    let receipt = charge(&args).await?;
+    ctx.save("receipt_id", json!(receipt.id)).await?;
+
+    let saved = ctx.saved().await;
+    tracing::info!(?saved, "job context");
+
+    Ok(receipt)
+}
+```
+
 ---
 
 ## CronContext

@@ -1,6 +1,6 @@
 # Subscribe to Changes
 
-Turn any query into a real-time subscription. No WebSocket configuration.
+Create real-time subscriptions for queries; the generated client manages the transport.
 
 ## Prerequisites
 
@@ -25,7 +25,7 @@ pub async fn list_todos(ctx: &QueryContext) -> Result<Vec<Todo>> {
 }
 ```
 
-That's it. Forge parses the SQL at compile time and extracts table dependencies automatically. JOINs, subqueries, and CTEs are all tracked.
+Forge parses the SQL at compile time and extracts table dependencies automatically. JOINs, subqueries, and CTEs are all tracked.
 
 Frontend:
 
@@ -169,7 +169,7 @@ When user A creates a notification for user B, only user B's subscription re-exe
 
 ### Public Real-Time Feed
 
-Public subscriptions work without authentication.
+Public subscriptions bypass authentication checks.
 
 ```rust
 #[forge::query(public)]
@@ -237,7 +237,7 @@ store.reset();       // Clear data and set loading
 
 ### Auto-Cleanup
 
-Subscriptions automatically unsubscribe when all Svelte subscribers detach. No manual cleanup required in most cases.
+Subscriptions automatically unsubscribe when all Svelte subscribers detach, so manual cleanup is typically unnecessary.
 
 ```typescript
 // Subscription starts when component mounts
@@ -277,7 +277,7 @@ This creates triggers that emit changes to the `forge_changes` channel:
 
 ### LISTEN/NOTIFY
 
-A dedicated PostgreSQL connection stays open with `LISTEN forge_changes`. No polling. Sub-second latency.
+A dedicated PostgreSQL connection stays open with `LISTEN forge_changes`, avoiding polling and typically delivering sub-second latency.
 
 ### Debouncing
 
@@ -298,7 +298,7 @@ Forge hashes query results before pushing:
 hash = hash(function_name + serialize(result))
 ```
 
-Updates only reach the client when the hash differs from the last push. No unnecessary re-renders.
+Updates only reach the client when the hash differs from the last push, which prevents unnecessary re-renders.
 
 ### Adaptive Tracking
 

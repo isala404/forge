@@ -1,6 +1,6 @@
 # Write Data
 
-Mutations change your database state. Add the `transactional` attribute for automatic transaction wrapping and rollback guarantees.
+Define mutations that change database state. Add the `transactional` attribute for transaction wrapping and rollback guarantees.
 
 ## The Code
 
@@ -240,9 +240,9 @@ BEGIN;
 COMMIT;
 ```
 
-If the mutation fails anywhere, both the order and the job are rolled back. No orphaned jobs, no missing data. The job worker picks up pending jobs after commit.
+If the mutation fails anywhere, both the order and the job are rolled back. This avoids orphaned jobs or missing data, and the job worker picks up pending jobs after commit.
 
-This pattern guarantees exactly-once semantics for the mutation + job combination without requiring distributed transactions.
+This pattern guarantees exactly-once semantics for the mutation + job combination without distributed transactions.
 
 ### Circuit Breaker for HTTP
 

@@ -277,7 +277,7 @@ Long-running singleton services with leader election.
 
 | Attribute | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `leader_elected` | `bool` | `true` | Only one instance runs across cluster |
+| `leader_elected` | `bool` | `true` | Single leader instance runs across cluster |
 | `restart_on_panic` | `bool` | `true` | Restart daemon if it panics |
 | `restart_delay` | `"duration"` | `"5s"` | Delay before restart after failure |
 | `startup_delay` | `"duration"` | `"0s"` | Delay before first execution |
@@ -293,7 +293,7 @@ When `leader_elected = true` (default):
 
 When `leader_elected = false`:
 - Daemon runs on every node
-- No coordination between instances
+- Instances run independently without coordination
 
 ### Example
 

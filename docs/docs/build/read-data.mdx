@@ -1,6 +1,6 @@
 # Read Data
 
-Fetch data from your database with caching, rate limiting, and automatic table dependency tracking.
+Define queries with caching, rate limiting, and table dependency tracking.
 
 ## The Code
 
@@ -54,7 +54,7 @@ rate_limit(requests = 100, per = "1m", key = "user")
 
 ### Public Query
 
-No authentication required. Anyone can call this endpoint.
+Public queries bypass authentication and can be called without credentials.
 
 ```rust
 #[forge::query(public)]

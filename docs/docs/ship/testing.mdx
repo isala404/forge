@@ -1,6 +1,6 @@
 # Testing
 
-Test queries, mutations, jobs, workflows, crons, daemons, and webhooks with isolated contexts, HTTP mocking, and real PostgreSQL.
+Use test contexts for queries, mutations, jobs, workflows, crons, daemons, and webhooks with isolated state, HTTP mocking, and PostgreSQL.
 
 ## The Code
 
@@ -24,7 +24,7 @@ async fn test_admin_can_delete_user() {
 
 ## What Happens
 
-Each test context builder creates an isolated environment with mocked authentication, configurable environment variables, HTTP interception, and dispatch recording. Tests run against real PostgreSQL when needed via embedded or isolated databases. No global state pollution between tests.
+Each test context builder creates an isolated environment with mocked authentication, configurable environment variables, HTTP interception, and dispatch recording. Tests run against real PostgreSQL when needed via embedded or isolated databases. This avoids global state pollution between tests.
 
 ## Test Contexts
 
@@ -257,7 +257,7 @@ async fn test_github_webhook_dispatches_job() {
 
 ### Embedded PostgreSQL
 
-For zero-config database tests, use embedded PostgreSQL. Requires the `embedded-db` feature.
+For embedded database tests, use embedded PostgreSQL. Requires the `embedded-db` feature.
 
 ```toml
 # Cargo.toml
@@ -746,7 +746,7 @@ assert!(!assert_json_matches(&actual, &json!({ "missing": true })));
 
 ### Test Isolation
 
-Each test context is fully independent. Authentication, environment variables, HTTP mocks, and dispatch recorders are scoped to that instance. No global state mutation.
+Each test context is fully independent. Authentication, environment variables, HTTP mocks, and dispatch recorders are scoped to that instance. This avoids global state mutation.
 
 ### Deterministic Execution
 
@@ -763,7 +763,7 @@ Test contexts provide deterministic alternatives to non-deterministic operations
 
 ### Transactional Rollback
 
-Isolated databases are created fresh per test. No need for manual cleanup or transaction rollback tricks. Each test starts with a clean slate.
+Isolated databases are created fresh per test. Manual cleanup or transaction rollback tricks are not required; each test starts with a clean slate.
 
 ### Production Parity
 

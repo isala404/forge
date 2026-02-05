@@ -1,6 +1,6 @@
 # Background Work
 
-Process tasks asynchronously with automatic retries, priority queuing, and worker routing.
+Define background jobs with retries, priority queues, and worker routing.
 
 ## The Code
 
@@ -26,7 +26,7 @@ pub async fn transcode_video(ctx: &JobContext, args: TranscodeArgs) -> Result<Vi
 
 ## What Happens
 
-Forge inserts the job into a PostgreSQL queue table within your mutation's transaction. Workers poll for jobs using `FOR UPDATE SKIP LOCKED`, preventing thundering herd and guaranteeing exactly-once delivery. Each worker maintains a semaphore to limit concurrent jobs, creating backpressure when capacity is reached.
+Forge inserts the job into a PostgreSQL queue table within your mutation's transaction. Workers poll for jobs using `FOR UPDATE SKIP LOCKED`, avoiding thundering herd contention and providing exactly-once delivery. Each worker maintains a semaphore to limit concurrent jobs, creating backpressure when capacity is reached.
 
 Jobs that exceed `max_attempts` move to the dead letter queue for manual inspection. Heartbeats prevent stale job recovery from reclaiming active long-running jobs.
 
@@ -117,7 +117,7 @@ pub async fn process_payment(ctx: &JobContext, args: PaymentArgs) -> Result<Rece
 }
 ```
 
-Without a custom key, `idempotent` uses a hash of all arguments.
+If no custom key is provided, `idempotent` uses a hash of all arguments.
 
 ### Progress Tracking
 
@@ -142,6 +142,28 @@ pub async fn export_data(ctx: &JobContext, args: ExportArgs) -> Result<ExportRes
     Ok(ExportResult { path: args.output })
 }
 ```
+
+### Saved Job Data
+
+Jobs can persist JSON data in the job record for retries and compensation handlers. Use `ctx.save()`
+to store key-value pairs and `ctx.saved()` to read the full object.
+
+```rust
+#[forge::job]
+pub async fn charge_card(ctx: &JobContext, args: ChargeArgs) -> Result<Receipt> {
+    let receipt = charge(&args).await?;
+    ctx.save("receipt_id", json!(receipt.id)).await?;
+
+    // Read current saved data as JSON
+    let saved = ctx.saved().await;
+    tracing::info!(?saved, "Saved job data");
+
+    Ok(receipt)
+}
+```
+
+Saved data is stored in the job record and is available across retries and in compensation handlers.
+Use `ctx.set_saved()` when you need to replace the entire saved object.
 
 ### Cancellation & Compensation
 
@@ -295,7 +317,7 @@ WHERE id IN (SELECT id FROM claimable)
 RETURNING *
 ```
 
-Each worker grabs different jobs without blocking. Job claiming is O(1) regardless of cluster size. No thundering herd.
+Each worker grabs different jobs without blocking. Job claiming is O(1) regardless of cluster size. This avoids thundering herd contention.
 
 ### Semaphore-Based Backpressure
 

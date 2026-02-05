@@ -1,6 +1,6 @@
 # Generated Client
 
-Type-safe TypeScript bindings generated from your Rust code. Zero manual typing.
+Type-safe TypeScript bindings generated from your Rust code and Forge macros.
 
 ## The Code
 
@@ -157,7 +157,7 @@ The `stale` flag lets you show a visual indicator that data may be outdated whil
 
 ## Mutations
 
-Mutations return Promises. No subscription needed:
+Mutations return Promises; subscriptions are not required for mutation calls:
 
 ```typescript
 import { createUser, updateTodo, deleteTodo } from '$lib/forge';
@@ -294,7 +294,7 @@ forge generate [OPTIONS]
 
   async function addTodo(title: string) {
     await createTodo({ title });
-    // No manual refetch needed - subscription updates automatically
+    // Refetches are handled by the subscription updates
   }
 
   async function toggle(id: string, completed: boolean) {
@@ -337,7 +337,7 @@ Subscriptions use Server-Sent Events with a dedicated connection. The client:
 
 SSE was chosen over WebSocket for:
 - HTTP/2 multiplexing support
-- No special proxy configuration
+- Compatible with standard proxy configuration
 - Automatic reconnection built into EventSource
 - Simpler firewall traversal
 
