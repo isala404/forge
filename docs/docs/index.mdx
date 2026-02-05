@@ -1,8 +1,19 @@
-# What if PostgreSQL was enough?
+# Forge Documentation
 
-Build full-stack apps with real-time sync, background jobs, cron schedules, durable workflows, and auth.
+Forge is a Rust framework that compiles backend functions (queries, mutations, jobs, crons,
+workflows, and webhooks) into a single runtime backed by PostgreSQL. This documentation
+focuses on how to build and operate applications with Forge.
 
-One framework. One database. One binary to deploy.
+## Documentation map
+
+- **Start**: [First App](/docs/start/first-app), [Project Anatomy](/docs/start/anatomy)
+- **Build**: Queries, mutations, jobs, workflows, scheduled tasks, webhooks, and reactivity
+- **Connect**: Generated TypeScript client, authentication, caching, and frontend usage
+- **Ship**: Configuration, deployment, and testing
+- **Scale**: Multiple nodes, worker pools, and global deployments
+- **Reference**: CLI and configuration options
+
+## Quick start (development)
 
 ```bash
 curl -fsSL https://tryforge.dev/install.sh | sh
@@ -11,9 +22,7 @@ cd my-app
 forge dev
 ```
 
----
-
-## Write Rust. Get TypeScript.
+## Queries and mutations
 
 ```rust
 #[forge::query]
@@ -29,14 +38,14 @@ pub async fn list_todos(ctx: &QueryContext) -> Result<Vec<Todo>> {
 // Auto-generated, type-safe
 import { listTodos$ } from '$lib/forge';
 
-const todos = listTodos$();  // Real-time subscription
+const todos = listTodos$();
 ```
 
-Change the database, every connected client updates. No WebSocket code. No polling.
+Queries and mutations are exposed as RPC endpoints under `/_api/rpc` and used by the
+generated TypeScript client. Subscriptions use PostgreSQL `LISTEN/NOTIFY` plus a
+WebSocket connection to push updates.
 
----
-
-## Background jobs without Redis
+## Background jobs
 
 ```rust
 #[forge::job(
@@ -51,13 +60,10 @@ pub async fn send_email(ctx: &JobContext, args: EmailArgs) -> Result<()> {
 }
 ```
 
-Priority queues. Exponential backoff. Progress tracking. Dead letter queue.
+Jobs are stored in PostgreSQL and claimed with `FOR UPDATE SKIP LOCKED`. Retry policy,
+priority, and progress updates are stored alongside the job record.
 
-All in PostgreSQL with `FOR UPDATE SKIP LOCKED`.
-
----
-
-## Webhooks with one macro
+## Webhooks
 
 ```rust
 #[forge::webhook(
@@ -71,18 +77,17 @@ pub async fn stripe(ctx: &WebhookContext, payload: Value) -> Result<WebhookResul
 }
 ```
 
-Signature verification. Idempotency. Async dispatch. No middleware.
+Webhook handlers run inside the Forge runtime and can validate signatures, enforce
+idempotency, and enqueue background work.
 
----
-
-## Workflows that survive restarts
+## Workflows
 
 ```rust
 #[forge::workflow]
 pub async fn onboarding(ctx: &WorkflowContext, user_id: Uuid) -> Result<()> {
     ctx.step("welcome_email", || send_welcome(user_id)).await?;
 
-    ctx.sleep(Duration::from_days(3)).await?;  // Durable sleep
+    ctx.sleep(Duration::from_days(3)).await?;
 
     ctx.step("check_activation", || check_user_active(user_id))
         .compensate(|_| send_reminder(user_id))
@@ -92,34 +97,30 @@ pub async fn onboarding(ctx: &WorkflowContext, user_id: Uuid) -> Result<()> {
 }
 ```
 
-Event sourcing. Saga pattern. Durable timers. No external orchestrator.
+Workflow state is persisted in PostgreSQL so steps resume after restarts. Durable timers
+and compensation handlers are recorded per step.
 
----
+## PostgreSQL integration
 
-## What you don't need
+Forge relies on core PostgreSQL features for coordination and data propagation:
 
-~~Redis~~ ~~Kafka~~ ~~BullMQ~~ ~~RabbitMQ~~ ~~SQS~~ ~~Temporal~~ ~~Celery~~
+- `FOR UPDATE SKIP LOCKED` for job queues
+- `LISTEN/NOTIFY` for real-time subscriptions
+- Advisory locks for leader election and migration coordination
+- WAL durability for workflow and job state
 
-**PostgreSQL handles it all:**
-
-- `SKIP LOCKED` for job queues
-- `LISTEN/NOTIFY` for real-time
-- Advisory locks for leader election
-- WAL for durability
-
----
-
-## Ship one binary
+## Build output
 
 ```bash
 cargo build --release
 ./target/release/my-app
 ```
 
-Migrations run automatically. Frontend embeds optionally. Health checks included.
+The release binary embeds the Forge runtime and can optionally bundle the frontend build
+using the `embedded-frontend` feature.
 
----
+## Requirements
 
-MIT License. No telemetry. PostgreSQL 18+.
+Forge requires PostgreSQL 18+ and is released under the MIT License.
 
-[Get Started →](/docs/start/first-app)
+Next: [First App](/docs/start/first-app)

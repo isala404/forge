@@ -5,7 +5,7 @@ const sidebars: SidebarsConfig = {
     {
       type: 'doc',
       id: 'index',
-      label: 'What if PostgreSQL was enough?',
+      label: 'Overview',
     },
     {
       type: 'category',

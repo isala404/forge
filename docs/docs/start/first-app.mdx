@@ -1,6 +1,6 @@
 # Your First App
 
-Build a real-time todo list with PostgreSQL. Nothing else required.
+Build a real-time todo list using Forge queries, mutations, and PostgreSQL-backed subscriptions.
 
 ## Install Forge
 
@@ -201,7 +201,8 @@ Now use them in your Svelte component:
 <button onclick={add}>Add</button>
 ```
 
-The `$` suffix subscribes to real-time updates. No WebSocket setup. No polling. Create a todo in one browser tab, it appears in all others.
+The `$` suffix subscribes to real-time updates through the Forge WebSocket client, which relays
+PostgreSQL `LISTEN/NOTIFY` changes. Create a todo in one browser tab, it appears in all others.
 
 ## What You Built
 
