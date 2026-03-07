@@ -41,7 +41,7 @@ forge-codegen = { path = "/forge/crates/forge-codegen" }
 "#;
 
     let mut content = fs::read_to_string(cargo_toml_path)?;
-    content.push_str(&patch_section);
+    content.push_str(patch_section);
     fs::write(cargo_toml_path, content)?;
 
     Ok(())
