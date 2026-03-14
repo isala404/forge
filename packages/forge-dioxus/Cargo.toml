@@ -1,6 +1,6 @@
 [package]
 name = "forge-dioxus"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 description = "Dioxus runtime client for the Forge full-stack framework"
 license = "MIT"

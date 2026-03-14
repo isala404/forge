@@ -22,4 +22,3 @@ pub struct UpdateTodoInput {
     pub title: Option<String>,
     pub completed: Option<bool>,
 }
-

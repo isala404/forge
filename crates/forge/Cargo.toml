@@ -28,10 +28,10 @@ name = "forge"
 path = "src/main.rs"
 
 [dependencies]
-forge-core = { version = "0.7.0", path = "../forge-core" }
-forge-runtime = { version = "0.7.0", path = "../forge-runtime" }
-forge-codegen = { version = "0.7.0", path = "../forge-codegen" }
-forge-macros = { version = "0.7.0", path = "../forge-macros" }
+forge-core = { version = "0.7.1", path = "../forge-core" }
+forge-runtime = { version = "0.7.1", path = "../forge-runtime" }
+forge-codegen = { version = "0.7.1", path = "../forge-codegen" }
+forge-macros = { version = "0.7.1", path = "../forge-macros" }
 
 tokio = { workspace = true }
 tokio-util = "0.7"

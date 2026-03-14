@@ -27,6 +27,6 @@
     "typescript": "^5.0.0",
     "typescript-eslint": "^8.0.0",
     "vite": "^7.0.0",
-    "@forge-rs/svelte": "=0.7.0"
+    "@forge-rs/svelte": "=0.7.1"
   }
 }

@@ -10,7 +10,7 @@ description = "TypeScript code generator for the Forge framework"
 workspace = true
 
 [dependencies]
-forge-core = { version = "0.7.0", path = "../forge-core" }
+forge-core = { version = "0.7.1", path = "../forge-core" }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

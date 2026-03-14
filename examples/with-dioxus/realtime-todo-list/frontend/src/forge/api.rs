@@ -3,15 +3,18 @@
 #![allow(dead_code, unused_imports)]
 
 use forge_dioxus::{
-    ForgeClient, ForgeClientError, JobExecutionState, QueryState,
-    SubscriptionState, WorkflowExecutionState,
+    ForgeClient, ForgeClientError, JobExecutionState, QueryState, SubscriptionState,
+    WorkflowExecutionState,
 };
 use serde_json::json;
 
 use super::types::*;
 use super::{use_forge_job, use_forge_query, use_forge_subscription, use_forge_workflow};
 
-pub async fn create_todo(client: &ForgeClient, input: CreateTodoInput) -> Result<Todo, ForgeClientError> {
+pub async fn create_todo(
+    client: &ForgeClient,
+    input: CreateTodoInput,
+) -> Result<Todo, ForgeClientError> {
     client.call("create_todo", input).await
 }
 pub async fn delete_todo(client: &ForgeClient, id: String) -> Result<bool, ForgeClientError> {
@@ -28,6 +31,9 @@ pub fn use_list_todos() -> dioxus::prelude::Signal<QueryState<Vec<Todo>>> {
 pub fn use_list_todos_subscription() -> dioxus::prelude::Signal<SubscriptionState<Vec<Todo>>> {
     use_forge_subscription("list_todos", ())
 }
-pub async fn update_todo(client: &ForgeClient, input: UpdateTodoInput) -> Result<Todo, ForgeClientError> {
+pub async fn update_todo(
+    client: &ForgeClient,
+    input: UpdateTodoInput,
+) -> Result<Todo, ForgeClientError> {
     client.call("update_todo", input).await
 }
