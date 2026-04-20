@@ -85,7 +85,7 @@ jobs:
       - if: startsWith(matrix.template, 'with-dioxus/')
         uses: cargo-bins/cargo-binstall@main
       - if: startsWith(matrix.template, 'with-dioxus/')
-        run: cargo binstall dioxus-cli@0.7.3 --no-confirm
+        run: cargo binstall dioxus-cli@0.7.5 --no-confirm
       - run: scripts/ci/test-template.sh "${{ matrix.template }}" /tmp/forge-bin/forge "${{ github.workspace }}"
       - if: failure()
         run: echo "ARTIFACT_NAME=playwright-${TEMPLATE//\//-}" >> "$GITHUB_ENV"
