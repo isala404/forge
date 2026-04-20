@@ -11,7 +11,7 @@ desktop = ["dioxus/desktop"]
 mobile = ["dioxus/mobile"]
 
 [dependencies]
-dioxus = { version = "=0.7.3" }
+dioxus = { version = "=0.7.5" }
 forge-dioxus = { path = "../../../../packages/forge-dioxus" }
 base64 = "0.22"
 hex = "0.4"
