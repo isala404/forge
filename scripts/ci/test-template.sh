@@ -4,7 +4,7 @@
 set -euo pipefail
 
 TEMPLATE="$1"
-FORGE="$2"
+FORGE="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
 WORKSPACE="$3"
 shift 3
 PLAYWRIGHT_ARGS=("$@")

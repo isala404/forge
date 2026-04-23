@@ -43,9 +43,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: template-build
-          workspaces: |
-            . -> target
-            /tmp/test-project -> target
+          workspaces: . -> target
       - uses: oven-sh/setup-bun@v2
 
       - name: Build forge CLI
