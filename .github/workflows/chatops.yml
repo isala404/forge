@@ -1,0 +1,152 @@
+name: ChatOps
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  parse:
+    name: Parse command
+    if: |
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/')
+    runs-on: ubuntu-latest
+    outputs:
+      cmd: ${{ steps.parse.outputs.cmd }}
+      matrix: ${{ steps.parse.outputs.matrix }}
+      pr_sha: ${{ steps.pr.outputs.sha }}
+      pr_ref: ${{ steps.pr.outputs.ref }}
+    steps:
+      - name: Gate on author association
+        env:
+          ASSOC: ${{ github.event.comment.author_association }}
+        run: |
+          case "$ASSOC" in
+            OWNER|MEMBER|COLLABORATOR) ;;
+            *) echo "::error::author_association=$ASSOC not allowed"; exit 1 ;;
+          esac
+
+      - name: Parse
+        id: parse
+        env:
+          BODY: ${{ github.event.comment.body }}
+        run: |
+          first_line=$(printf '%s' "$BODY" | head -n1)
+          cmd=$(printf '%s' "$first_line" | awk '{print $1}')
+          arg=$(printf '%s' "$first_line" | awk '{print $2}')
+
+          echo "cmd=$cmd" >> "$GITHUB_OUTPUT"
+
+          all='["with-svelte/minimal","with-svelte/demo","with-svelte/realtime-todo-list","with-dioxus/minimal","with-dioxus/demo","with-dioxus/realtime-todo-list"]'
+
+          case "$cmd" in
+            /test-template)
+              if [ -z "$arg" ] || [ "$arg" = "all" ]; then
+                matrix="$all"
+              elif printf '%s' "$arg" | grep -Eq '^with-(svelte|dioxus)/(minimal|demo|realtime-todo-list)$'; then
+                matrix="[\"$arg\"]"
+              else
+                echo "::error::invalid template '$arg' — expected with-(svelte|dioxus)/(minimal|demo|realtime-todo-list)"
+                exit 1
+              fi
+              echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+              ;;
+            /squash-merge)
+              ;;
+            *)
+              echo "::error::unknown command '$cmd' — supported: /test-template, /squash-merge"
+              exit 1
+              ;;
+          esac
+
+      - name: Resolve PR head
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+            });
+            core.setOutput('sha', pr.data.head.sha);
+            core.setOutput('ref', pr.data.head.ref);
+
+      - name: React to comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: context.payload.comment.id,
+              content: 'eyes',
+            });
+
+  test-template:
+    needs: parse
+    if: needs.parse.outputs.cmd == '/test-template'
+    strategy:
+      fail-fast: false
+      matrix:
+        template: ${{ fromJSON(needs.parse.outputs.matrix) }}
+    uses: ./.github/workflows/template-smoke.yml
+    with:
+      template: ${{ matrix.template }}
+      ref: ${{ needs.parse.outputs.pr_sha }}
+      timeout-minutes: 30
+
+  squash-merge:
+    name: Enable auto squash-merge
+    needs: parse
+    if: needs.parse.outputs.cmd == '/squash-merge'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Enable auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: gh pr merge "$PR" --auto --squash --delete-branch --repo "$REPO"
+
+      - name: Comment
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const result = '${{ job.status }}';
+            const emoji = result === 'success' ? '🟢' : '❌';
+            const body = result === 'success'
+              ? `${emoji} auto squash-merge armed — PR will merge once required checks pass`
+              : `${emoji} failed to enable auto-merge (check repo settings: auto-merge allowed + required checks on main)`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+  report:
+    name: Report result
+    needs: [parse, test-template]
+    if: always() && needs.parse.result == 'success' && needs.parse.outputs.cmd == '/test-template'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const result = '${{ needs.test-template.result }}';
+            const emoji = result === 'success' ? '✅' : result === 'cancelled' ? '🟡' : '❌';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `${emoji} \`/test-template\` ${result} — [run](${runUrl})`,
+            });

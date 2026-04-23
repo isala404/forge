@@ -239,11 +239,16 @@ LTO enabled, single codegen unit, symbols stripped.
 ## CI Pipeline
 
 `.github/workflows/ci.yml`:
-1. **validate**: fmt check -> clippy (warnings = errors) -> cargo test --workspace -> build CLI
-2. **example-integration** (needs validate): Postgres 18 service, `cargo test -p forge-svelte-demo-template --features testcontainers`, `cargo test -p todo --features testcontainers`
-3. **template-smoke** (needs validate, matrix of 6 templates): scaffold with `forge new` -> `forge check` -> start PG in Docker -> build backend -> run backend tests -> Playwright e2e
+1. **validate**: fmt check -> clippy (warnings = errors) -> cargo test --workspace (SQLX_OFFLINE)
+2. **workspace-integration** (needs validate, runs on PR + main): Postgres 18 service, `cargo test -p forge-svelte-demo-template --features testcontainers`, `cargo test -p todo --features testcontainers`
+3. **pr-smoke** (PR only, needs validate): matrix of `with-svelte/demo` + `with-dioxus/demo`, calls the reusable `template-smoke.yml` workflow
+4. **integration** (main push only, needs validate): matrix of all 6 templates, calls the reusable `template-smoke.yml` workflow
 
-Environment: `SQLX_OFFLINE=true`, `CARGO_TERM_COLOR=always`, `FORGE_TEST_ARTIFACT_DIR=/tmp/forge-test-artifacts`.
+`.github/workflows/template-smoke.yml` (reusable, `workflow_call`): inputs `template`, `ref` (optional), `timeout-minutes` (default 20). Steps: checkout at ref -> build forge CLI -> install dioxus-cli if dioxus template -> `scripts/ci/test-template.sh` (scaffold with `forge new`, patch deps to local workspace, `forge check`, install Playwright, `forge test`). Concurrency keyed on `(ref or github.ref) + template` so repeated runs on the same template cancel the older one. Uploads Playwright report on failure.
+
+`.github/workflows/chatops.yml`: triggered by PR comments. `/test-template [name|all]` runs the reusable workflow against PR head SHA (30 min timeout). `/squash-merge` arms auto-merge. Gated on `author_association` (OWNER/MEMBER/COLLABORATOR).
+
+Environment: `SQLX_OFFLINE=true`, `CARGO_TERM_COLOR=always`, `CARGO_INCREMENTAL=0`, `FORGE_TEST_ARTIFACT_DIR=/tmp/forge-test-artifacts`. Path-ignore filters skip CI entirely for docs, markdown, and LICENSE changes.
 
 ## Testing Examples (E2E)
 

@@ -2,9 +2,24 @@ name: CI
 
 on:
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - '.gitignore'
+      - 'LICENSE*'
+      - '.github/ISSUE_TEMPLATE/**'
   push:
     branches:
       - main
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - '.gitignore'
+      - 'LICENSE*'
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
@@ -12,46 +27,40 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   SQLX_OFFLINE: "true"
-  FORGE_TEST_ARTIFACT_DIR: /tmp/forge-test-artifacts
   CARGO_INCREMENTAL: "0"
+  FORGE_TEST_ARTIFACT_DIR: /tmp/forge-test-artifacts
 
 jobs:
-  fmt:
-    name: Format
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - run: cargo fmt --all --check
-
   validate:
     name: Validate
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci
           cache-on-failure: true
-      - run: scripts/ci/create-env-stubs.sh
-      - run: cargo clippy --all-targets --all-features --workspace -- -D warnings
-      - run: cargo test --workspace
-      - run: cargo build -p forgex
-      - uses: actions/upload-artifact@v4
-        with:
-          name: forge-cli
-          path: target/debug/forge
-          retention-days: 1
 
-  example-integration:
-    name: Example Integration
+      - name: fmt
+        run: cargo fmt --all --check
+
+      - run: scripts/ci/create-env-stubs.sh
+
+      - name: clippy
+        run: cargo clippy --all-targets --all-features --workspace -- -D warnings
+
+      - name: test
+        run: cargo test --workspace
+
+  workspace-integration:
+    name: Workspace integration
     needs: validate
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:18
@@ -78,10 +87,25 @@ jobs:
       - run: cargo test -p forge-svelte-demo-template --features testcontainers
       - run: cargo test -p todo --features testcontainers
 
-  template-smoke:
-    name: ${{ matrix.template }}
+  pr-smoke:
+    name: PR Smoke
     needs: validate
-    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        template:
+          - with-svelte/demo
+          - with-dioxus/demo
+    uses: ./.github/workflows/template-smoke.yml
+    with:
+      template: ${{ matrix.template }}
+      timeout-minutes: 20
+
+  integration:
+    name: Integration
+    needs: validate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     strategy:
       fail-fast: false
       matrix:
@@ -92,27 +116,7 @@ jobs:
           - with-dioxus/minimal
           - with-dioxus/demo
           - with-dioxus/realtime-todo-list
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: template-build
-          workspaces: /tmp/test-project -> target
-      - uses: oven-sh/setup-bun@v2
-      - uses: actions/download-artifact@v4
-        with:
-          name: forge-cli
-          path: /tmp/forge-bin
-      - run: chmod +x /tmp/forge-bin/forge
-      - if: startsWith(matrix.template, 'with-dioxus/')
-        uses: cargo-bins/cargo-binstall@main
-      - if: startsWith(matrix.template, 'with-dioxus/')
-        run: cargo binstall dioxus-cli@0.7.5 --no-confirm
-      - run: scripts/ci/test-template.sh "${{ matrix.template }}" /tmp/forge-bin/forge "${{ github.workspace }}"
-      - uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: playwright-${{ strategy.job-index }}
-          path: /tmp/forge-test-artifacts/**
-          retention-days: 7
+    uses: ./.github/workflows/template-smoke.yml
+    with:
+      template: ${{ matrix.template }}
+      timeout-minutes: 20
