@@ -376,3 +376,4 @@ MIT. Do whatever you want.
   <a href="https://tryforge.dev/docs">Documentation</a> ·
   <a href="https://github.com/isala404/forge/discussions">Discussions</a>
 </p>
+
