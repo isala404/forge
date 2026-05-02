@@ -16,7 +16,7 @@
       {
         "ordinal": 2,
         "name": "waiting_for_event",
-        "type_info": "Varchar"
+        "type_info": "Text"
       },
       {
         "ordinal": 3,

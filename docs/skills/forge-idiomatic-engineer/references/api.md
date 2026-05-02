@@ -218,6 +218,16 @@ excluded_functions = []       # function names to skip from auto-capture
 bot_detection = true          # tag bot traffic via UA patterns
 # GeoIP: embedded DB-IP Country Lite resolves IPs to country codes automatically (zero config)
 geoip_db_path = ""            # optional: path to MaxMind GeoLite2-City.mmdb for city-level resolution
+
+# TLS on the gateway. Off by default — use a load balancer for public TLS.
+# Enable [gateway.tls] when you need encrypted traffic between the LB and app
+# (ALB backend HTTPS) or direct HTTPS on the app. Both cert_path and key_path
+# set → TLS on. Both omitted → plain HTTP. Half-set → startup error.
+# For a quick cert: openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+#   -keyout key.pem -out cert.pem -subj "/CN=app.internal"
+[gateway.tls]
+cert_path = "${GATEWAY_TLS_CERT_PATH}"
+key_path = "${GATEWAY_TLS_KEY_PATH}"
 ```
 
 ### Upload Size Limits

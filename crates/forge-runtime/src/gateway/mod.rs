@@ -8,6 +8,7 @@ mod response;
 mod rpc;
 mod server;
 mod sse;
+mod tls;
 mod tracing;
 
 pub use auth::{AuthConfig, AuthMiddleware, HmacTokenIssuer, build_auth_context_from_claims};
@@ -22,6 +23,9 @@ pub use server::{GatewayConfig, GatewayServer, TrustedProxies};
 pub use sse::{
     SseConfig, SsePayload, SseQuery, SseState, sse_handler, sse_job_subscribe_handler,
     sse_subscribe_handler, sse_unsubscribe_handler, sse_workflow_subscribe_handler,
+};
+pub use tls::{
+    GatewayConn, GatewayListener, PeerAddr, TlsListenConfig, bind_listener, load_rustls_config,
 };
 pub use tracing::TracingMiddleware;
 

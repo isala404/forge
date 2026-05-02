@@ -107,6 +107,7 @@ impl ForgeConfig {
                 self.gateway.max_file_size, self.gateway.max_body_size
             )));
         }
+        self.gateway.tls.validate()?;
 
         // Cross-field: OAuth requires jwt_secret for signing tokens
         if self.mcp.oauth && self.auth.jwt_secret.is_none() {
@@ -412,6 +413,10 @@ pub struct GatewayConfig {
     #[serde(default = "default_max_file_size")]
     pub max_file_size: String,
 
+    /// TLS configuration for the gateway listener.
+    #[serde(default)]
+    pub tls: TlsConfig,
+
     /// Maximum requests in a single RPC batch call.
     #[serde(default = "default_max_rpc_batch_size")]
     pub max_rpc_batch_size: usize,
@@ -450,6 +455,7 @@ impl Default for GatewayConfig {
             quiet_paths: default_quiet_paths(),
             max_body_size: default_max_body_size(),
             max_file_size: default_max_file_size(),
+            tls: TlsConfig::default(),
             max_rpc_batch_size: default_max_rpc_batch_size(),
             max_multipart_fields: default_max_multipart_fields(),
             security_headers: true,
@@ -483,6 +489,62 @@ impl GatewayConfig {
                 self.max_file_size
             ))
         })
+    }
+}
+
+/// TLS configuration for the gateway listener.
+///
+/// TLS is enabled when both `cert_path` and `key_path` are set. Leave both
+/// unset to serve plain HTTP. Setting only one is a configuration error.
+///
+/// Empty or whitespace-only strings normalize to unset at load time, so
+/// env-var-driven configs like `cert_path = "${FORGE_TLS_CERT_PATH-}"`
+/// treat an unset variable as "TLS off" instead of failing validation.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TlsConfig {
+    /// Path to a PEM-encoded certificate chain file.
+    #[serde(default, deserialize_with = "deserialize_optional_nonempty")]
+    pub cert_path: Option<String>,
+
+    /// Path to a PEM-encoded private key file.
+    #[serde(default, deserialize_with = "deserialize_optional_nonempty")]
+    pub key_path: Option<String>,
+}
+
+/// Deserialize an `Option<String>` treating empty / whitespace-only input as
+/// `None`. Lets env-var-substituted fields with an empty default fall through
+/// to "unset" semantics without tripping the half-set validator.
+fn deserialize_optional_nonempty<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    Ok(opt.filter(|s| !s.trim().is_empty()))
+}
+
+impl TlsConfig {
+    /// Return `true` when both `cert_path` and `key_path` are set.
+    pub fn is_enabled(&self) -> bool {
+        self.cert_path.is_some() && self.key_path.is_some()
+    }
+
+    /// Validate the TLS configuration: both paths or neither.
+    pub fn validate(&self) -> crate::Result<()> {
+        match (self.cert_path.as_deref(), self.key_path.as_deref()) {
+            (Some(_), Some(_)) | (None, None) => Ok(()),
+            (Some(_), None) => Err(crate::ForgeError::Config(
+                "gateway.tls.cert_path is set but gateway.tls.key_path is missing. \
+                 Set both to enable TLS, or neither to serve plain HTTP."
+                    .into(),
+            )),
+            (None, Some(_)) => Err(crate::ForgeError::Config(
+                "gateway.tls.key_path is set but gateway.tls.cert_path is missing. \
+                 Set both to enable TLS, or neither to serve plain HTTP."
+                    .into(),
+            )),
+        }
     }
 }
 
@@ -1870,6 +1932,116 @@ mod tests {
                 "Wrong error for {reserved}: {err_msg}"
             );
         }
+    }
+
+    #[test]
+    fn test_tls_disabled_default() {
+        let config = ForgeConfig::default_with_database_url("postgres://localhost/test");
+        assert!(!config.gateway.tls.is_enabled());
+        assert!(config.gateway.tls.cert_path.is_none());
+        assert!(config.gateway.tls.key_path.is_none());
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_tls_file_based_valid() {
+        let toml = r#"
+            [database]
+            url = "postgres://localhost/test"
+
+            [gateway.tls]
+            cert_path = "/etc/forge/cert.pem"
+            key_path = "/etc/forge/key.pem"
+        "#;
+
+        let config = ForgeConfig::parse_toml(toml).unwrap();
+        assert!(config.gateway.tls.is_enabled());
+        assert_eq!(
+            config.gateway.tls.cert_path.as_deref(),
+            Some("/etc/forge/cert.pem")
+        );
+        assert_eq!(
+            config.gateway.tls.key_path.as_deref(),
+            Some("/etc/forge/key.pem")
+        );
+    }
+
+    #[test]
+    fn test_tls_only_cert_path_fails() {
+        let toml = r#"
+            [database]
+            url = "postgres://localhost/test"
+
+            [gateway.tls]
+            cert_path = "/etc/forge/cert.pem"
+        "#;
+
+        let result = ForgeConfig::parse_toml(toml);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("key_path is missing"),
+            "Unexpected error: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_tls_only_key_path_fails() {
+        let toml = r#"
+            [database]
+            url = "postgres://localhost/test"
+
+            [gateway.tls]
+            key_path = "/etc/forge/key.pem"
+        "#;
+
+        let result = ForgeConfig::parse_toml(toml);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("cert_path is missing"),
+            "Unexpected error: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_tls_empty_strings_normalize_to_off() {
+        // Env-var-driven deploys rely on `cert_path = "${FOO-}"` resolving
+        // to `cert_path = ""` when the variable is unset. That must be
+        // treated as "TLS off", not a validation error.
+        let toml = r#"
+            [database]
+            url = "postgres://localhost/test"
+
+            [gateway.tls]
+            cert_path = ""
+            key_path = ""
+        "#;
+
+        let config = ForgeConfig::parse_toml(toml).expect("empty strings should normalize");
+        assert!(!config.gateway.tls.is_enabled());
+        assert!(config.gateway.tls.cert_path.is_none());
+        assert!(config.gateway.tls.key_path.is_none());
+    }
+
+    #[test]
+    fn test_tls_empty_cert_with_set_key_fails_as_half_set() {
+        let toml = r#"
+            [database]
+            url = "postgres://localhost/test"
+
+            [gateway.tls]
+            cert_path = ""
+            key_path = "/etc/forge/key.pem"
+        "#;
+
+        let result = ForgeConfig::parse_toml(toml);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("cert_path is missing"),
+            "Unexpected error: {err_msg}"
+        );
     }
 
     #[test]

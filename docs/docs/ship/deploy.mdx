@@ -392,6 +392,56 @@ This allows:
 
 Forge inherits PostgreSQL's durability guarantees. All state changes (jobs, workflows, migrations) go through WAL. Committed transactions survive crashes, and point-in-time recovery is possible to minimize data loss on unexpected termination.
 
+## TLS
+
+By default the gateway serves plain HTTP and expects a load balancer, reverse proxy, or CDN in front of it to terminate public TLS. That is still the recommended pattern for internet-facing deployments — you get HSTS, OCSP stapling, ACME, and cert rotation for free.
+
+Enable direct TLS on the gateway by setting both `cert_path` and `key_path` under `[gateway.tls]` when:
+
+- You need encrypted traffic between the load balancer and the app (ALB backend HTTPS, compliance requirements).
+- You're running without a fronting proxy and want HTTPS on the app directly.
+- You're running in a cluster where pods or nodes speak HTTPS to each other.
+
+### Configuration
+
+Provide a PEM-encoded certificate chain and private key on disk:
+
+```toml
+[gateway.tls]
+cert_path = "${GATEWAY_TLS_CERT_PATH}"
+key_path = "${GATEWAY_TLS_KEY_PATH}"
+```
+
+Both paths set → TLS is on. Both omitted → plain HTTP. Setting only one is a startup error. Use a certificate issued by a CA (cert-manager, ACM Private CA, mounted Kubernetes secret, etc.) for production.
+
+Certificate rotation requires a process restart — there is no hot reload in this release. Use a rolling deployment to swap mounted secrets with zero downtime.
+
+### Generating a cert quickly
+
+For backend-only use behind a load balancer that doesn't validate the backend chain — or for internal services and local development — a throwaway self-signed cert is fine. `openssl` produces one in a single command:
+
+```bash
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+  -keyout key.pem -out cert.pem \
+  -subj "/CN=app.internal" \
+  -addext "subjectAltName=DNS:app.internal,DNS:localhost,IP:127.0.0.1"
+```
+
+Mount the resulting `cert.pem` and `key.pem` into the app container or ship them alongside the binary, then point `cert_path` / `key_path` at them. Rotate by regenerating and restarting — there is no hot reload.
+
+### Health checks with TLS
+
+When TLS is enabled, load balancer and Kubernetes probes must target HTTPS. For ALBs, set the target group protocol to HTTPS and point the health check to `/_api/ready`. For Kubernetes probes, set the probe `scheme: HTTPS`. If the certificate is self-signed or internally issued, the LB / kubelet must be willing to skip chain validation (ALB target group HTTPS health checks do this automatically; `httpGet` probes do too).
+
+### What TLS on the gateway does NOT do
+
+- No HSTS or OCSP stapling — do that at the edge.
+- No ACME / auto-renewal — certificate management is external.
+- No mTLS / client certificate verification — the gateway only terminates TLS, it does not authenticate peers.
+- No hot reload — rotating certificates requires a restart.
+
+Do not use a self-signed cert as the public TLS terminator for an internet-facing deployment. Browsers and API clients will not trust it. Put a load balancer or CDN with a real CA-issued cert in front.
+
 ## Environment Variables
 
 | Variable | Required | Description |
@@ -445,4 +495,6 @@ Forge extracts the `traceparent` header from inbound requests per the W3C Trace 
 - [ ] `terminationGracePeriodSeconds` exceeds drain timeout
 - [ ] Log aggregation configured (`RUST_LOG=info`)
 - [ ] OTLP endpoint configured if using observability (`[observability] enabled = true`)
+- [ ] TLS configured (edge load balancer, or `[gateway.tls]` for ALB-backend HTTPS)
+- [ ] If using `[gateway.tls]`: key file permissions locked down (e.g. `0400`, owned by the app user), health checks target HTTPS, certificate rotation plan in place
 - [ ] Backup strategy for PostgreSQL

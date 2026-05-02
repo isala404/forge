@@ -25,6 +25,10 @@ pub struct Item { ... }
 - `ctx.env_require()` / `ctx.env_or()` — **not** `std::env::var()`. See [API Reference](./api.md#environment-variables). Mocks only hook the context methods.
 - `ctx.http()` for outbound RPC; `ctx.raw_http()` only when you need streaming or custom redirects.
 - Don't copy-paste config helpers (`app_url()`, etc.) across handlers. Extract to `src/utils/`.
+- **TLS cert/key must be set together**: `[gateway.tls]` rejects configs that set only `cert_path` or only `key_path`. Set both to enable TLS, or neither to serve plain HTTP. Startup fails fast with a clear config error.
+- **TLS cert/key files must be readable and valid PEM**: Startup fails fast if paths are missing, unreadable, or malformed. The error message includes the offending path. Fix at deploy time, not at first request.
+- **Health checks must switch to HTTPS when TLS is enabled**: Load balancer / Kubernetes probes targeting `/_api/ready` will fail with TLS handshake errors if they're still configured for HTTP. Update target group protocol (ALB) or probe `scheme: HTTPS` (k8s) when enabling `[gateway.tls]`.
+- **Certificate rotation requires restart**: `[gateway.tls]` does not hot-reload. Rolling deployment is the intended rotation mechanism.
 
 ## 3. Macros & Registration
 

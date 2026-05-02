@@ -36,6 +36,7 @@ use super::sse::{
     SseState, sse_handler, sse_job_subscribe_handler, sse_subscribe_handler,
     sse_unsubscribe_handler, sse_workflow_subscribe_handler,
 };
+use super::tls::{TlsListenConfig, bind_listener};
 use super::tracing::{REQUEST_ID_HEADER, SPAN_ID_HEADER, TRACE_ID_HEADER, TracingState};
 use crate::db::Database;
 use crate::function::FunctionRegistry;
@@ -79,6 +80,8 @@ pub struct GatewayConfig {
     /// Default per-file cap in bytes for multipart uploads. Applies when
     /// a mutation does not declare its own `max_size`. Defaults to 10 MB.
     pub max_file_size_bytes: usize,
+    /// Optional TLS configuration. When `None`, the gateway serves plain HTTP.
+    pub tls: Option<TlsListenConfig>,
     /// Maximum requests in a single RPC batch call.
     pub max_rpc_batch_size: usize,
     /// Maximum file fields in a single multipart upload.
@@ -109,6 +112,7 @@ impl Default for GatewayConfig {
             project_name: "forge-app".to_string(),
             max_body_size_bytes: DEFAULT_MAX_MULTIPART_BODY_SIZE,
             max_file_size_bytes: DEFAULT_MAX_FILE_SIZE,
+            tls: None,
             max_rpc_batch_size: 100,
             max_multipart_fields: 20,
             reactor_config: ReactorConfig::default(),
@@ -298,6 +302,11 @@ impl GatewayServer {
     /// Get a reference to the reactor.
     pub fn reactor(&self) -> Arc<Reactor> {
         self.reactor.clone()
+    }
+
+    /// Get the TLS configuration, if any.
+    pub fn tls(&self) -> Option<&TlsListenConfig> {
+        self.config.tls.as_ref()
     }
 
     /// Build an OAuth router (bypasses auth middleware). Returns None if OAuth is disabled.
@@ -624,9 +633,11 @@ impl GatewayServer {
     /// Run the server (blocking).
     pub async fn run(self) -> Result<(), std::io::Error> {
         let addr = self.addr();
-        let router = self.router();
+        let tls = self.config.tls.clone();
+        let service = self
+            .router()
+            .into_make_service_with_connect_info::<super::PeerAddr>();
 
-        // Start the reactor for real-time updates
         self.reactor
             .start()
             .await
@@ -635,12 +646,8 @@ impl GatewayServer {
 
         tracing::info!("Gateway server listening on {}", addr);
 
-        let listener = tokio::net::TcpListener::bind(addr).await?;
-        axum::serve(
-            listener,
-            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
+        let listener = bind_listener(addr, tls.as_ref()).await?;
+        axum::serve(listener, service).await
     }
 }
 
@@ -783,7 +790,7 @@ async fn resolve_client_ip_middleware(
 ) -> axum::response::Response {
     let peer_ip = req
         .extensions()
-        .get::<axum::extract::connect_info::ConnectInfo<std::net::SocketAddr>>()
+        .get::<axum::extract::connect_info::ConnectInfo<super::PeerAddr>>()
         .map(|ci| ci.0.ip());
     let ip = super::resolve_client_ip(req.headers(), peer_ip, &trusted.0);
     req.extensions_mut().insert(super::ResolvedClientIp(ip));

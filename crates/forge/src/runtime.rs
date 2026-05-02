@@ -33,25 +33,27 @@ use forge_core::error::{ForgeError, Result};
 use forge_core::function::{ForgeMutation, ForgeQuery};
 use forge_runtime::migrations::{Migration, MigrationRunner, load_migrations_from_dir};
 
+#[cfg(feature = "gateway")]
+use forge_core::mcp::ForgeMcpTool;
 use forge_runtime::cluster::{
     GracefulShutdown, HeartbeatConfig, HeartbeatLoop, LeaderConfig, LeaderElection, NodeRegistry,
     ShutdownConfig,
 };
-use forge_runtime::db::Database;
-use forge_runtime::function::FunctionRegistry;
-
-#[cfg(feature = "gateway")]
-use forge_core::mcp::ForgeMcpTool;
 #[cfg(feature = "cron")]
 use forge_runtime::cron::{CronRegistry, CronRunner, CronRunnerConfig};
 #[cfg(feature = "daemons")]
 use forge_runtime::daemon::{DaemonRegistry, DaemonRunner};
+use forge_runtime::db::Database;
+use forge_runtime::function::FunctionRegistry;
 // CircuitBreakerClient wraps reqwest; used by cron/daemon/workflow for
 // outbound HTTP. (Gateway uses its own reqwest path.)
 #[cfg(any(feature = "cron", feature = "daemons", feature = "workflows"))]
 use forge_core::CircuitBreakerClient;
 #[cfg(feature = "gateway")]
-use forge_runtime::gateway::{AuthConfig, GatewayConfig as RuntimeGatewayConfig, GatewayServer};
+use forge_runtime::gateway::{
+    AuthConfig, GatewayConfig as RuntimeGatewayConfig, GatewayServer, TlsListenConfig,
+    bind_listener,
+};
 #[cfg(feature = "jobs")]
 use forge_runtime::jobs::{JobDispatcher, JobQueue, JobRegistry, Worker, WorkerConfig};
 #[cfg(feature = "gateway")]
@@ -675,6 +677,12 @@ impl Forge {
         // Start HTTP gateway if gateway role
         #[cfg(feature = "gateway")]
         if roles.contains(&NodeRole::Gateway) {
+            // `from_core` enforces the both-or-neither contract here too, so
+            // a programmatically constructed `ForgeConfig` that bypasses
+            // `validate()` still can't slip a half-set TLS config through.
+            let tls: Option<TlsListenConfig> =
+                TlsListenConfig::from_core(&self.config.gateway.tls)?;
+
             // Fail early if handlers require auth but no usable credentials are configured.
             // The registry is populated at this point so we can inspect every handler.
             let any_requires_auth = self
@@ -713,6 +721,7 @@ impl Forge {
                     self.config.auth.refresh_token_ttl_days(),
                 ),
                 project_name: self.config.project.name.clone(),
+                tls,
                 reactor_config: {
                     let rt = &self.config.realtime;
                     ReactorConfig {
@@ -986,6 +995,7 @@ impl Forge {
             }
 
             let addr = gateway.addr();
+            let tls = gateway.tls().cloned();
             // Hand the gateway a shutdown signal so Axum stops accepting new
             // connections and waits for in-flight requests to finish before
             // we release leadership. This is what drains the outbox: each
@@ -995,9 +1005,13 @@ impl Forge {
 
             handles.push(tokio::spawn(async move {
                 tracing::debug!(addr = %addr, "Gateway server binding");
-                let listener = tokio::net::TcpListener::bind(addr)
-                    .await
-                    .expect("Failed to bind");
+                let listener = match bind_listener(addr, tls.as_ref()).await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        tracing::error!(error = %e, "Failed to bind gateway listener");
+                        return;
+                    }
+                };
                 let serve = axum::serve(listener, router).with_graceful_shutdown(async move {
                     let _ = gateway_shutdown_rx.recv().await;
                     tracing::debug!("Gateway draining in-flight requests");

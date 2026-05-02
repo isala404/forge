@@ -148,6 +148,29 @@ When `cors_enabled = true`, `cors_origins` must be non-empty. You can use `["*"]
 
 When a mutation declares `max_size`, that value becomes both the total and per-file limit for that endpoint — treat it as an explicit opt-in for large single files. Without an override, the total falls back to `max_body_size` and any single file is capped by `max_file_size`. Other fixed limits: 20 upload fields per request, 32 concurrent in-flight uploads.
 
+#### [gateway.tls]
+
+Optional TLS termination on the gateway listener. Off by default. Use this when you need encrypted traffic between a load balancer and the app (ALB backend HTTPS, compliance requirements) or for internal services without a fronting proxy.
+
+| Option      | Type   | Default | Description                                  |
+| ----------- | ------ | ------- | -------------------------------------------- |
+| `cert_path` | string | -       | Path to a PEM-encoded certificate chain file |
+| `key_path`  | string | -       | Path to a PEM-encoded private key file       |
+
+Both paths set → TLS is on. Both omitted → plain HTTP. Setting only one is a configuration error — `forge check` and startup both reject it.
+
+```toml
+[gateway.tls]
+cert_path = "${GATEWAY_TLS_CERT_PATH}"
+key_path = "${GATEWAY_TLS_KEY_PATH}"
+```
+
+Use a certificate from a CA (cert-manager, ACM Private CA, mounted Kubernetes secret, etc.) for production. For internal or development use, generate a throwaway cert with `openssl` — see the [TLS section of the deploy guide](/docs/ship/deploy#tls) for the exact recipe.
+
+:::caution
+Forge's gateway TLS is for internal / backend-of-load-balancer use. It has no HSTS, OCSP stapling, ACME, or hot-reload. For public-facing edge TLS, terminate at a load balancer, CDN, or reverse proxy. Certificate rotation requires a process restart.
+:::
+
 ### [function]
 
 Controls query and mutation execution limits.
