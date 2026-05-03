@@ -127,7 +127,7 @@ pub async fn confirm_verification(
     .bind(&input.workflow_id)
     .execute(ctx.conn().await?.as_mut())
     .await
-    .map_err(|e| ForgeError::Database(e.to_string()))?;
+    .map_err(ForgeError::Database)?;
 
     Ok(true)
 }

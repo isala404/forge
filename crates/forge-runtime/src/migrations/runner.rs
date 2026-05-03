@@ -161,7 +161,7 @@ impl MigrationRunner {
         if let (Some(applied_max), Some(known_max)) = (max_applied_version, max_known_version)
             && applied_max > known_max
         {
-            return Err(ForgeError::Database(format!(
+            return Err(ForgeError::Internal(format!(
                 "Database is at system migration v{applied_max} but this binary only knows up to v{known_max}. \
                  Refusing to start — running an older binary on a newer schema risks data loss. \
                  Upgrade the binary or restore the database to a compatible version."
@@ -209,14 +209,14 @@ impl MigrationRunner {
     async fn acquire_lock_connection(&self) -> Result<sqlx::pool::PoolConnection<Postgres>> {
         debug!("Acquiring migration lock...");
         let mut conn = self.pool.acquire().await.map_err(|e| {
-            ForgeError::Database(format!("Failed to acquire lock connection: {}", e))
+            ForgeError::Internal(format!("Failed to acquire lock connection: {}", e))
         })?;
 
         sqlx::query_scalar!("SELECT pg_advisory_lock($1)", MIGRATION_LOCK_ID)
             .fetch_one(&mut *conn)
             .await
             .map_err(|e| {
-                ForgeError::Database(format!("Failed to acquire migration lock: {}", e))
+                ForgeError::Internal(format!("Failed to acquire migration lock: {}", e))
             })?;
         debug!("Migration lock acquired");
         Ok(conn)
@@ -230,7 +230,7 @@ impl MigrationRunner {
             .fetch_one(&mut **conn)
             .await
             .map_err(|e| {
-                ForgeError::Database(format!("Failed to release migration lock: {}", e))
+                ForgeError::Internal(format!("Failed to release migration lock: {}", e))
             })?;
         debug!("Migration lock released");
         Ok(())
@@ -252,7 +252,7 @@ impl MigrationRunner {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| ForgeError::Database(format!("Failed to create migrations table: {}", e)))?;
+        .map_err(|e| ForgeError::Internal(format!("Failed to create migrations table: {}", e)))?;
 
         Ok(())
     }
@@ -262,7 +262,7 @@ impl MigrationRunner {
             .fetch_all(&self.pool)
             .await
             .map_err(|e| {
-                ForgeError::Database(format!("Failed to get applied migrations: {}", e))
+                ForgeError::Internal(format!("Failed to get applied migrations: {}", e))
             })?;
 
         Ok(rows.into_iter().map(|row| row.name).collect())
@@ -291,7 +291,7 @@ impl MigrationRunner {
                 .execute(&self.pool)
                 .await
                 .map_err(|e| {
-                    ForgeError::Database(format!(
+                    ForgeError::Internal(format!(
                         "Failed to apply migration '{}': {}",
                         migration.name, e
                     ))
@@ -312,7 +312,7 @@ impl MigrationRunner {
         .execute(&self.pool)
         .await
         .map_err(|e| {
-            ForgeError::Database(format!(
+            ForgeError::Internal(format!(
                 "Failed to record migration '{}': {}",
                 migration.name, e
             ))
@@ -351,7 +351,7 @@ impl MigrationRunner {
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| ForgeError::Database(format!("Failed to get migrations: {}", e)))?;
+        .map_err(|e| ForgeError::Internal(format!("Failed to get migrations: {}", e)))?;
 
         if rows.is_empty() {
             info!("No migrations to rollback");
@@ -384,7 +384,7 @@ impl MigrationRunner {
                         .execute(&self.pool)
                         .await
                         .map_err(|e| {
-                            ForgeError::Database(format!(
+                            ForgeError::Internal(format!(
                                 "Failed to rollback migration '{}': {}",
                                 name, e
                             ))
@@ -399,7 +399,7 @@ impl MigrationRunner {
                 .execute(&self.pool)
                 .await
                 .map_err(|e| {
-                    ForgeError::Database(format!(
+                    ForgeError::Internal(format!(
                         "Failed to remove migration record '{}': {}",
                         name, e
                     ))
@@ -424,7 +424,7 @@ impl MigrationRunner {
             )
             .fetch_all(&self.pool)
             .await
-            .map_err(|e| ForgeError::Database(format!("Failed to get migrations: {}", e)))?;
+            .map_err(|e| ForgeError::Internal(format!("Failed to get migrations: {}", e)))?;
 
             rows.into_iter()
                 .map(

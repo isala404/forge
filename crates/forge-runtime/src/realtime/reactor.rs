@@ -896,7 +896,7 @@ impl Reactor {
         )
         .fetch_optional(db_pool)
         .await
-        .map_err(forge_core::ForgeError::Sql)?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         match row {
             Some(row) => Ok(JobData {
@@ -922,7 +922,7 @@ impl Reactor {
             sqlx::query_scalar!("SELECT owner_subject FROM forge_jobs WHERE id = $1", job_id)
                 .fetch_optional(db_pool)
                 .await
-                .map_err(forge_core::ForgeError::Sql)?;
+                .map_err(forge_core::ForgeError::Database)?;
 
         owner_subject
             .ok_or_else(|| forge_core::ForgeError::NotFound(format!("Job {} not found", job_id)))
@@ -942,7 +942,7 @@ impl Reactor {
         )
         .fetch_optional(db_pool)
         .await
-        .map_err(forge_core::ForgeError::Sql)?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         let row = match row {
             Some(r) => r,
@@ -965,7 +965,7 @@ impl Reactor {
         )
         .fetch_all(db_pool)
         .await
-        .map_err(forge_core::ForgeError::Sql)?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         let steps = step_rows
             .into_iter()
@@ -997,7 +997,7 @@ impl Reactor {
         )
         .fetch_optional(db_pool)
         .await
-        .map_err(forge_core::ForgeError::Sql)?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         owner_subject.ok_or_else(|| {
             forge_core::ForgeError::NotFound(format!("Workflow {} not found", workflow_id))
@@ -1104,7 +1104,7 @@ impl Reactor {
         )
         .fetch_optional(db_pool)
         .await
-        .map_err(forge_core::ForgeError::Sql)?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         let owner_subject = owner_subject_row
             .ok_or_else(|| forge_core::ForgeError::NotFound(format!("Job {} not found", job_id)))?;
@@ -1123,7 +1123,7 @@ impl Reactor {
         )
         .fetch_optional(db_pool)
         .await
-        .map_err(forge_core::ForgeError::Sql)?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         let owner_subject = owner_subject_row.ok_or_else(|| {
             forge_core::ForgeError::NotFound(format!("Workflow {} not found", workflow_id))

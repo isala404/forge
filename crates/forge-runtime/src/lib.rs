@@ -86,9 +86,8 @@ pub use jobs::{
 pub use mcp::{McpToolEntry, McpToolRegistry};
 #[cfg(feature = "gateway")]
 pub use realtime::{
-    AdaptiveTracker, AdaptiveTrackingConfig, AdaptiveTrackingStats, ChangeListener,
-    InvalidationEngine, RealtimeConfig, RealtimeMessage, SessionManager, SessionServer,
-    SubscriptionManager,
+    ChangeListener, InvalidationEngine, RealtimeConfig, RealtimeMessage, SessionManager,
+    SessionServer, SubscriptionManager,
 };
 #[cfg(feature = "gateway")]
 pub use webhook::{WebhookEntry, WebhookRegistry, WebhookState, webhook_handler};

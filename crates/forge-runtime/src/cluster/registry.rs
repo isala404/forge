@@ -68,7 +68,7 @@ impl NodeRegistry {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        .map_err(ForgeError::Database)?;
 
         Ok(())
     }
@@ -86,7 +86,7 @@ impl NodeRegistry {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        .map_err(ForgeError::Database)?;
 
         Ok(())
     }
@@ -101,7 +101,7 @@ impl NodeRegistry {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        .map_err(ForgeError::Database)?;
 
         Ok(())
     }
@@ -127,7 +127,7 @@ impl NodeRegistry {
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        .map_err(ForgeError::Database)?;
 
         rows.into_iter()
             .map(|row| {
@@ -167,7 +167,7 @@ impl NodeRegistry {
         )
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        .map_err(ForgeError::Database)?;
 
         row.map(|row| {
             parse_node_fields(
@@ -206,7 +206,7 @@ impl NodeRegistry {
         )
         .fetch_one(&self.pool)
         .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        .map_err(ForgeError::Database)?;
 
         Ok(NodeCounts {
             active: row.active as usize,
@@ -232,7 +232,7 @@ impl NodeRegistry {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        .map_err(ForgeError::Database)?;
 
         Ok(result.rows_affected())
     }
@@ -251,7 +251,7 @@ impl NodeRegistry {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        .map_err(ForgeError::Database)?;
 
         Ok(result.rows_affected())
     }

@@ -63,12 +63,6 @@ fn parse_webhook_attrs(attr: TokenStream) -> syn::Result<WebhookAttrs> {
 
         if remaining.contains("hmac_sha256") {
             result.signature_algorithm = Some("HmacSha256".to_string());
-        } else if remaining.contains("hmac_sha1") {
-            result.signature_algorithm = Some("HmacSha1".to_string());
-        } else if remaining.contains("hmac_sha512") {
-            result.signature_algorithm = Some("HmacSha512".to_string());
-        } else if remaining.contains("standard_webhooks") {
-            result.signature_algorithm = Some("StandardWebhooks".to_string());
         } else if remaining.contains("stripe_webhooks") {
             result.signature_algorithm = Some("StripeWebhooks".to_string());
         } else if remaining.contains("shopify_webhooks") {
@@ -101,7 +95,6 @@ fn parse_webhook_attrs(attr: TokenStream) -> syn::Result<WebhookAttrs> {
             let quotes: Vec<_> = args_str.match_indices('"').collect();
             // Single-arg variants: secret only, header is hardcoded per spec
             let single_arg_header = match result.signature_algorithm.as_deref() {
-                Some("StandardWebhooks") => Some("webhook-signature"),
                 Some("StripeWebhooks") => Some("stripe-signature"),
                 Some("HmacSha256Base64") => Some("x-shopify-hmac-sha256"),
                 _ => None,
@@ -225,11 +218,6 @@ pub fn webhook_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     ) {
         let alg_token = match alg.as_str() {
             "HmacSha256" => quote! { forge::forge_core::webhook::SignatureAlgorithm::HmacSha256 },
-            "HmacSha1" => quote! { forge::forge_core::webhook::SignatureAlgorithm::HmacSha1 },
-            "HmacSha512" => quote! { forge::forge_core::webhook::SignatureAlgorithm::HmacSha512 },
-            "StandardWebhooks" => {
-                quote! { forge::forge_core::webhook::SignatureAlgorithm::StandardWebhooks }
-            }
             "StripeWebhooks" => {
                 quote! { forge::forge_core::webhook::SignatureAlgorithm::StripeWebhooks }
             }

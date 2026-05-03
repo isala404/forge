@@ -775,7 +775,7 @@ impl WorkflowContext {
         )
         .fetch_optional(&self.db_pool)
         .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        .map_err(ForgeError::Database)?;
 
         Ok(result.map(|row| WorkflowEvent {
             id: row.id,
@@ -806,7 +806,7 @@ impl WorkflowContext {
         )
         .fetch_optional(&self.db_pool)
         .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        .map_err(ForgeError::Database)?;
 
         Ok(result.map(|row| WorkflowEvent {
             id: row.id,
@@ -830,7 +830,7 @@ impl WorkflowContext {
         )
         .execute(&self.db_pool)
         .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        .map_err(ForgeError::Database)?;
         Ok(())
     }
 
@@ -852,7 +852,7 @@ impl WorkflowContext {
         )
         .execute(&self.db_pool)
         .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        .map_err(ForgeError::Database)?;
         Ok(())
     }
 

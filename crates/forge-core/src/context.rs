@@ -19,7 +19,7 @@
 //!     sqlx::query_scalar!("SELECT COUNT(*) FROM items")
 //!         .fetch_one(ctx.db())
 //!         .await
-//!         .map_err(|e| forge_core::ForgeError::Database(e.to_string()))
+//!         .map_err(forge_core::ForgeError::Database)
 //! }
 //! ```
 

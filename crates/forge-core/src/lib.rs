@@ -85,9 +85,9 @@ pub use rate_limit::{
     ParseRateLimitKeyError, RateLimitConfig, RateLimitHeaders, RateLimitKey, RateLimitResult,
 };
 pub use realtime::{
-    AuthScope, BloomFilter, Change, ChangeOperation, Delta, QueryGroup, QueryGroupId, ReadSet,
-    SessionId, SessionInfo, SessionStatus, Subscriber, SubscriberId, SubscriptionId,
-    SubscriptionState, TrackingMode,
+    AuthScope, Change, ChangeOperation, Delta, QueryGroup, QueryGroupId, ReadSet, SessionId,
+    SessionInfo, SessionStatus, Subscriber, SubscriberId, SubscriptionId, SubscriptionState,
+    TrackingMode,
 };
 pub use schema::{FieldDef, ModelMeta, SchemaRegistry, TableDef};
 pub use schemars;

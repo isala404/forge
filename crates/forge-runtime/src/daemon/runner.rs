@@ -225,7 +225,7 @@ impl DaemonRunner {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         Ok(())
     }
@@ -242,7 +242,7 @@ impl DaemonRunner {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         Ok(())
     }
@@ -517,7 +517,7 @@ async fn try_acquire_leadership(pool: &PgPool, daemon_name: &str, node_id: Uuid)
     let result = sqlx::query_scalar!(r#"SELECT pg_try_advisory_lock($1) as "acquired!""#, lock_id)
         .fetch_one(pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
     if result {
         // Update daemon record with our node_id
@@ -528,7 +528,7 @@ async fn try_acquire_leadership(pool: &PgPool, daemon_name: &str, node_id: Uuid)
         )
         .execute(pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
     }
 
     Ok(result)
@@ -542,7 +542,7 @@ async fn release_leadership(pool: &PgPool, daemon_name: &str, _node_id: Uuid) ->
     sqlx::query_scalar!("SELECT pg_advisory_unlock($1)", lock_id)
         .fetch_one(pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
     Ok(())
 }
@@ -555,7 +555,7 @@ async fn update_daemon_status(pool: &PgPool, name: &str, status: DaemonStatus) -
     )
     .execute(pool)
     .await
-    .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+    .map_err(forge_core::ForgeError::Database)?;
 
     Ok(())
 }
@@ -568,7 +568,7 @@ async fn record_daemon_error(pool: &PgPool, name: &str, error: &str) -> Result<(
     )
     .execute(pool)
     .await
-    .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+    .map_err(forge_core::ForgeError::Database)?;
 
     Ok(())
 }

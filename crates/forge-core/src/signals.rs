@@ -17,8 +17,6 @@ pub enum SignalEventType {
     RpcCall,
     /// Custom event from user code.
     Track,
-    /// User identification (links anonymous activity to a user).
-    Identify,
     /// Session started.
     SessionStart,
     /// Session ended (timeout or explicit close).
@@ -27,8 +25,6 @@ pub enum SignalEventType {
     Error,
     /// Diagnostic breadcrumb for error reproduction.
     Breadcrumb,
-    /// Web Vitals performance metric (LCP, CLS, INP, FCP, TTFB, etc.).
-    WebVital,
     /// Background execution (job, cron, workflow step, webhook, daemon tick).
     ServerExecution,
 }
@@ -39,12 +35,10 @@ impl std::fmt::Display for SignalEventType {
             Self::PageView => write!(f, "page_view"),
             Self::RpcCall => write!(f, "rpc_call"),
             Self::Track => write!(f, "track"),
-            Self::Identify => write!(f, "identify"),
             Self::SessionStart => write!(f, "session_start"),
             Self::SessionEnd => write!(f, "session_end"),
             Self::Error => write!(f, "error"),
             Self::Breadcrumb => write!(f, "breadcrumb"),
-            Self::WebVital => write!(f, "web_vital"),
             Self::ServerExecution => write!(f, "server_execution"),
         }
     }
@@ -271,14 +265,6 @@ pub struct PageViewPayload {
     pub correlation_id: Option<String>,
 }
 
-/// User identification payload.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IdentifyPayload {
-    pub user_id: String,
-    #[serde(default)]
-    pub traits: serde_json::Value,
-}
-
 /// Diagnostic error report from client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagnosticReport {
@@ -313,35 +299,6 @@ pub struct ClientContext {
     pub session_id: Option<String>,
 }
 
-/// Batch of Web Vitals / navigation metrics from a client tracker.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WebVitalBatch {
-    pub vitals: Vec<WebVitalEntry>,
-    pub context: Option<ClientContext>,
-}
-
-/// A single Web Vitals sample (LCP, CLS, INP, FCP, TTFB, navigation, etc.).
-///
-/// `name` is the metric name (e.g. "lcp", "cls", "inp", "fcp", "ttfb",
-/// "navigation", "long_task"). `value` is the numeric measurement (ms for
-/// timings, unitless for CLS, etc.). Optional fields carry diagnostic
-/// detail (rating, navigation type, attribution).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WebVitalEntry {
-    pub name: String,
-    pub value: f64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rating: Option<String>,
-    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
-    pub attribution: serde_json::Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub correlation_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub page_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
-}
-
 /// Response from signal ingestion endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignalResponse {
@@ -360,12 +317,10 @@ mod tests {
         assert_eq!(SignalEventType::PageView.to_string(), "page_view");
         assert_eq!(SignalEventType::RpcCall.to_string(), "rpc_call");
         assert_eq!(SignalEventType::Track.to_string(), "track");
-        assert_eq!(SignalEventType::Identify.to_string(), "identify");
         assert_eq!(SignalEventType::SessionStart.to_string(), "session_start");
         assert_eq!(SignalEventType::SessionEnd.to_string(), "session_end");
         assert_eq!(SignalEventType::Error.to_string(), "error");
         assert_eq!(SignalEventType::Breadcrumb.to_string(), "breadcrumb");
-        assert_eq!(SignalEventType::WebVital.to_string(), "web_vital");
         assert_eq!(
             SignalEventType::ServerExecution.to_string(),
             "server_execution"
@@ -378,12 +333,10 @@ mod tests {
             SignalEventType::PageView,
             SignalEventType::RpcCall,
             SignalEventType::Track,
-            SignalEventType::Identify,
             SignalEventType::SessionStart,
             SignalEventType::SessionEnd,
             SignalEventType::Error,
             SignalEventType::Breadcrumb,
-            SignalEventType::WebVital,
             SignalEventType::ServerExecution,
         ];
 
@@ -573,28 +526,6 @@ mod tests {
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("\"ok\":false"));
         assert!(json.contains("\"session_id\":null"));
-    }
-
-    #[tokio::test]
-    async fn identify_payload_deserializes_with_traits() {
-        let json = r#"{
-            "user_id": "user-42",
-            "traits": {"plan": "pro", "team_size": 5}
-        }"#;
-
-        let payload: IdentifyPayload = serde_json::from_str(json).unwrap();
-        assert_eq!(payload.user_id, "user-42");
-        assert_eq!(payload.traits["plan"], "pro");
-        assert_eq!(payload.traits["team_size"], 5);
-    }
-
-    #[tokio::test]
-    async fn identify_payload_deserializes_without_traits() {
-        let json = r#"{"user_id": "user-99"}"#;
-
-        let payload: IdentifyPayload = serde_json::from_str(json).unwrap();
-        assert_eq!(payload.user_id, "user-99");
-        assert_eq!(payload.traits, serde_json::Value::Null);
     }
 
     #[tokio::test]

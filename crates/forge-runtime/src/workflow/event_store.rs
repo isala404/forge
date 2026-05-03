@@ -37,7 +37,7 @@ impl EventStore {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        .map_err(ForgeError::Database)?;
 
         // Send notification for immediate processing
         sqlx::query_scalar!(
@@ -46,7 +46,7 @@ impl EventStore {
         )
         .fetch_one(&self.pool)
         .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        .map_err(ForgeError::Database)?;
 
         tracing::debug!(
             event_id = %id,
@@ -84,7 +84,7 @@ impl EventStore {
         )
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        .map_err(ForgeError::Database)?;
 
         Ok(result.map(|row| WorkflowEvent {
             id: row.id,
@@ -107,7 +107,7 @@ impl EventStore {
         )
         .fetch_one(&self.pool)
         .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        .map_err(ForgeError::Database)?;
 
         Ok(result.unwrap_or(0) > 0)
     }
@@ -126,7 +126,7 @@ impl EventStore {
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        .map_err(ForgeError::Database)?;
 
         Ok(results
             .into_iter()
@@ -151,7 +151,7 @@ impl EventStore {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        .map_err(ForgeError::Database)?;
 
         Ok(result.rows_affected())
     }

@@ -17,16 +17,6 @@ pub struct SignatureConfig {
 pub enum SignatureAlgorithm {
     /// HMAC-SHA256 (e.g., GitHub)
     HmacSha256,
-    /// HMAC-SHA1 (legacy, e.g., older GitHub)
-    HmacSha1,
-    /// HMAC-SHA512
-    HmacSha512,
-    /// Standard Webhooks (https://www.standardwebhooks.com) — used by Polar, Svix, Clerk, and others.
-    ///
-    /// Signs `{webhook-id}\n{webhook-timestamp}\n{body}` with HMAC-SHA256.
-    /// Signature header is always `webhook-signature` with format `v1,<base64>`.
-    /// Secret prefixes `whsec_` and `polar_whs_` are stripped before base64 decoding.
-    StandardWebhooks,
     /// Stripe webhook format.
     ///
     /// Signs `{timestamp}.{body}` with HMAC-SHA256. Timestamp and signatures are
@@ -51,9 +41,6 @@ impl SignatureAlgorithm {
     pub fn prefix(&self) -> &'static str {
         match self {
             Self::HmacSha256 => "sha256=",
-            Self::HmacSha1 => "sha1=",
-            Self::HmacSha512 => "sha512=",
-            Self::StandardWebhooks => "v1,",
             Self::StripeWebhooks | Self::HmacSha256Base64 | Self::Ed25519 => "",
         }
     }
@@ -149,50 +136,6 @@ impl WebhookSignature {
         }
     }
 
-    /// Create HMAC-SHA1 signature config.
-    ///
-    /// # Arguments
-    /// * `header` - The HTTP header containing the signature
-    /// * `secret_env` - Environment variable containing the secret
-    pub const fn hmac_sha1(header: &'static str, secret_env: &'static str) -> SignatureConfig {
-        SignatureConfig {
-            algorithm: SignatureAlgorithm::HmacSha1,
-            header_name: header,
-            secret_env,
-        }
-    }
-
-    /// Create HMAC-SHA512 signature config.
-    ///
-    /// # Arguments
-    /// * `header` - The HTTP header containing the signature
-    /// * `secret_env` - Environment variable containing the secret
-    pub const fn hmac_sha512(header: &'static str, secret_env: &'static str) -> SignatureConfig {
-        SignatureConfig {
-            algorithm: SignatureAlgorithm::HmacSha512,
-            header_name: header,
-            secret_env,
-        }
-    }
-
-    /// Create a Standard Webhooks signature config (https://www.standardwebhooks.com).
-    ///
-    /// Used by Polar and other services that implement the Standard Webhooks spec.
-    /// The signature header is always `webhook-signature`; no need to specify it.
-    ///
-    /// The secret may have a `whsec_` or `polar_whs_` prefix — both are stripped
-    /// and the remainder is base64-decoded to obtain the raw HMAC key.
-    ///
-    /// # Arguments
-    /// * `secret_env` - Environment variable containing the webhook secret
-    pub const fn standard_webhooks(secret_env: &'static str) -> SignatureConfig {
-        SignatureConfig {
-            algorithm: SignatureAlgorithm::StandardWebhooks,
-            header_name: "webhook-signature",
-            secret_env,
-        }
-    }
-
     /// Create a Stripe webhook signature config.
     ///
     /// Signs `{timestamp}.{body}` with HMAC-SHA256. The `Stripe-Signature` header
@@ -258,8 +201,8 @@ mod tests {
     #[test]
     fn test_algorithm_prefix() {
         assert_eq!(SignatureAlgorithm::HmacSha256.prefix(), "sha256=");
-        assert_eq!(SignatureAlgorithm::HmacSha1.prefix(), "sha1=");
-        assert_eq!(SignatureAlgorithm::HmacSha512.prefix(), "sha512=");
+        assert_eq!(SignatureAlgorithm::StripeWebhooks.prefix(), "");
+        assert_eq!(SignatureAlgorithm::Ed25519.prefix(), "");
     }
 
     #[test]

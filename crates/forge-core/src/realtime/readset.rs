@@ -10,12 +10,8 @@ pub enum TrackingMode {
     /// No tracking (disabled).
     None,
     /// Track only tables (coarse-grained).
-    Table,
-    /// Track individual rows (fine-grained).
-    Row,
-    /// Adaptive mode - automatically choose based on query characteristics.
     #[default]
-    Adaptive,
+    Table,
 }
 
 impl TrackingMode {
@@ -24,8 +20,6 @@ impl TrackingMode {
         match self {
             Self::None => "none",
             Self::Table => "table",
-            Self::Row => "row",
-            Self::Adaptive => "adaptive",
         }
     }
 }
@@ -48,93 +42,16 @@ impl FromStr for TrackingMode {
         match s.to_lowercase().as_str() {
             "none" => Ok(Self::None),
             "table" => Ok(Self::Table),
-            "row" => Ok(Self::Row),
-            "adaptive" => Ok(Self::Adaptive),
             _ => Err(ParseTrackingModeError(s.to_string())),
         }
     }
 }
 
-/// Bloom filter for probabilistic row-level tracking.
-/// False positives cause one unnecessary re-execution (caught by result hash comparison).
-/// False negatives never happen.
-#[derive(Debug, Clone)]
-pub struct BloomFilter {
-    bits: Vec<u64>,
-    num_hashes: u32,
-    num_bits: u64,
-}
-
-impl BloomFilter {
-    /// Create a bloom filter sized for `expected_items` with ~1% false positive rate.
-    pub fn new(expected_items: usize) -> Self {
-        // ~10 bits per element for ~1% FPR
-        let num_bits = (expected_items as u64 * 10).max(64);
-        let num_words = num_bits.div_ceil(64) as usize;
-        // Optimal number of hash functions: (m/n) * ln(2) ~ 7 for 10 bits/element
-        let num_hashes = 7;
-
-        Self {
-            bits: vec![0u64; num_words],
-            num_hashes,
-            num_bits,
-        }
-    }
-
-    /// Insert an item into the bloom filter.
-    pub fn insert(&mut self, item: Uuid) {
-        let bytes = item.as_bytes();
-        for i in 0..self.num_hashes {
-            let idx = self.hash(bytes, i);
-            let word = (idx / 64) as usize;
-            let bit = idx % 64;
-            if let Some(w) = self.bits.get_mut(word) {
-                *w |= 1u64 << bit;
-            }
-        }
-    }
-
-    /// Test if an item might be in the filter (probabilistic).
-    pub fn might_contain(&self, item: Uuid) -> bool {
-        let bytes = item.as_bytes();
-        for i in 0..self.num_hashes {
-            let idx = self.hash(bytes, i);
-            let word = (idx / 64) as usize;
-            let bit = idx % 64;
-            match self.bits.get(word) {
-                Some(w) if (w >> bit) & 1 == 1 => continue,
-                _ => return false,
-            }
-        }
-        true
-    }
-
-    fn hash(&self, bytes: &[u8; 16], seed: u32) -> u64 {
-        // Double hashing: h(i) = h1 + i*h2
-        let h1 = u64::from_le_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-        ]);
-        let h2 = u64::from_le_bytes([
-            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
-        ]);
-        h1.wrapping_add((seed as u64).wrapping_mul(h2)) % self.num_bits
-    }
-
-    /// Approximate memory usage in bytes.
-    pub fn memory_bytes(&self) -> usize {
-        self.bits.len() * 8 + 16
-    }
-}
-
-/// Read set tracking tables and rows read during query execution.
+/// Read set tracking tables read during query execution.
 #[derive(Debug, Clone, Default)]
 pub struct ReadSet {
     /// Tables accessed (stack-allocated for common case of 1-4 tables).
     pub tables: Vec<String>,
-    /// Probabilistic row tracking per table. None means table-level only.
-    pub row_filter: HashMap<String, BloomFilter>,
-    /// Row counts per table (for memory estimation).
-    pub row_counts: HashMap<String, usize>,
     /// Columns used in filters.
     pub filter_columns: HashMap<String, HashSet<String>>,
     /// Tracking mode used.
@@ -155,34 +72,12 @@ impl ReadSet {
         }
     }
 
-    /// Create a read set with row-level tracking.
-    pub fn row_level() -> Self {
-        Self {
-            mode: TrackingMode::Row,
-            ..Default::default()
-        }
-    }
-
     /// Add a table to the read set.
     pub fn add_table(&mut self, table: impl Into<String>) {
         let table = table.into();
         if !self.tables.contains(&table) {
             self.tables.push(table);
         }
-    }
-
-    /// Add a row to the read set using bloom filter.
-    pub fn add_row(&mut self, table: impl Into<String>, row_id: Uuid) {
-        let table = table.into();
-        if !self.tables.contains(&table) {
-            self.tables.push(table.clone());
-        }
-        let filter = self
-            .row_filter
-            .entry(table.clone())
-            .or_insert_with(|| BloomFilter::new(1000));
-        filter.insert(row_id);
-        *self.row_counts.entry(table).or_insert(0) += 1;
     }
 
     /// Add a filter column.
@@ -198,40 +93,16 @@ impl ReadSet {
         self.tables.iter().any(|t| t == table)
     }
 
-    /// Check if this read set includes a specific row.
-    pub fn includes_row(&self, table: &str, row_id: Uuid) -> bool {
-        if !self.includes_table(table) {
-            return false;
-        }
-
-        if self.mode == TrackingMode::Table {
-            return true;
-        }
-
-        if let Some(filter) = self.row_filter.get(table) {
-            filter.might_contain(row_id)
-        } else {
-            // No bloom filter means all rows tracked at table level
-            true
-        }
-    }
-
     /// Estimate memory usage in bytes.
     pub fn memory_bytes(&self) -> usize {
         let table_bytes = self.tables.iter().map(|s| s.len() + 24).sum::<usize>();
-        let filter_bytes: usize = self.row_filter.values().map(|f| f.memory_bytes()).sum();
         let col_bytes = self
             .filter_columns
             .values()
             .map(|set| set.iter().map(|s| s.len() + 24).sum::<usize>())
             .sum::<usize>();
 
-        table_bytes + filter_bytes + col_bytes + 64
-    }
-
-    /// Get total row count tracked.
-    pub fn row_count(&self) -> usize {
-        self.row_counts.values().sum()
+        table_bytes + col_bytes + 64
     }
 
     /// Merge another read set into this one.
@@ -337,24 +208,7 @@ impl Change {
     /// Check if this change should invalidate a read set, optionally filtering
     /// by compile-time selected columns from the query.
     pub fn invalidates(&self, read_set: &ReadSet) -> bool {
-        if !read_set.includes_table(&self.table) {
-            return false;
-        }
-
-        // For row-level tracking, check if the specific row was read
-        if read_set.mode == TrackingMode::Row
-            && let Some(row_id) = self.row_id
-        {
-            match self.operation {
-                ChangeOperation::Update | ChangeOperation::Delete => {
-                    return read_set.includes_row(&self.table, row_id);
-                }
-                // Inserts always potentially invalidate (new row might match filter)
-                ChangeOperation::Insert => {}
-            }
-        }
-
-        true
+        read_set.includes_table(&self.table)
     }
 
     /// Column-aware invalidation: returns false if the changed columns don't
@@ -384,11 +238,6 @@ mod tests {
     #[test]
     fn test_tracking_mode_conversion() {
         assert_eq!("table".parse::<TrackingMode>(), Ok(TrackingMode::Table));
-        assert_eq!("row".parse::<TrackingMode>(), Ok(TrackingMode::Row));
-        assert_eq!(
-            "adaptive".parse::<TrackingMode>(),
-            Ok(TrackingMode::Adaptive)
-        );
         assert!("invalid".parse::<TrackingMode>().is_err());
     }
 
@@ -402,57 +251,6 @@ mod tests {
     }
 
     #[test]
-    fn test_read_set_add_row() {
-        let mut read_set = ReadSet::row_level();
-        let row_id = Uuid::new_v4();
-        read_set.add_row("projects", row_id);
-
-        assert!(read_set.includes_table("projects"));
-        assert!(read_set.includes_row("projects", row_id));
-        // Bloom filter: might_contain could return true for other IDs (false positive)
-        // but never false for inserted IDs (no false negatives)
-    }
-
-    #[test]
-    fn test_bloom_filter_no_false_negatives() {
-        let mut filter = BloomFilter::new(100);
-        let ids: Vec<Uuid> = (0..100).map(|_| Uuid::new_v4()).collect();
-
-        for id in &ids {
-            filter.insert(*id);
-        }
-
-        for id in &ids {
-            assert!(
-                filter.might_contain(*id),
-                "bloom filter should never miss an inserted item"
-            );
-        }
-    }
-
-    #[test]
-    fn test_bloom_filter_false_positive_rate() {
-        let mut filter = BloomFilter::new(1000);
-        let inserted: Vec<Uuid> = (0..1000).map(|_| Uuid::new_v4()).collect();
-        for id in &inserted {
-            filter.insert(*id);
-        }
-
-        let not_inserted: Vec<Uuid> = (0..10000).map(|_| Uuid::new_v4()).collect();
-        let false_positives = not_inserted
-            .iter()
-            .filter(|id| filter.might_contain(**id))
-            .count();
-
-        // Expect <2% FPR (we target ~1%)
-        assert!(
-            false_positives < 200,
-            "false positive rate too high: {}/10000",
-            false_positives
-        );
-    }
-
-    #[test]
     fn test_change_invalidates_table_level() {
         let mut read_set = ReadSet::table_level();
         read_set.add_table("projects");
@@ -462,22 +260,6 @@ mod tests {
 
         let change = Change::new("users", ChangeOperation::Insert);
         assert!(!change.invalidates(&read_set));
-    }
-
-    #[test]
-    fn test_change_invalidates_row_level() {
-        let mut read_set = ReadSet::row_level();
-        let tracked_id = Uuid::new_v4();
-        read_set.add_row("projects", tracked_id);
-
-        // Update to tracked row should invalidate
-        let change = Change::new("projects", ChangeOperation::Update).with_row_id(tracked_id);
-        assert!(change.invalidates(&read_set));
-
-        // Insert always potentially invalidates
-        let other_id = Uuid::new_v4();
-        let change = Change::new("projects", ChangeOperation::Insert).with_row_id(other_id);
-        assert!(change.invalidates(&read_set));
     }
 
     #[test]

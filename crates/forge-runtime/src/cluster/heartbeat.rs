@@ -163,7 +163,7 @@ impl HeartbeatLoop {
         let row = sqlx::query_scalar!("SELECT COUNT(*) FROM forge_nodes WHERE status = 'active'")
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+            .map_err(forge_core::ForgeError::Database)?;
 
         Ok(row.unwrap_or(0) as u32)
     }
@@ -211,7 +211,7 @@ impl HeartbeatLoop {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         Ok(())
     }
@@ -234,7 +234,7 @@ impl HeartbeatLoop {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         let count = result.rows_affected();
         if count > 0 {
@@ -275,7 +275,7 @@ impl HeartbeatLoop {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         Ok(())
     }

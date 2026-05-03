@@ -38,7 +38,7 @@ impl TestDatabase {
             .max_connections(10)
             .connect(url)
             .await
-            .map_err(ForgeError::Sql)?;
+            .map_err(ForgeError::Database)?;
 
         Ok(Self {
             pool,
@@ -60,7 +60,7 @@ impl TestDatabase {
                 }
                 #[cfg(not(feature = "testcontainers"))]
                 {
-                    Err(ForgeError::Database(
+                    Err(ForgeError::Internal(
                         "TEST_DATABASE_URL not set. Set it explicitly for database tests, \
                          or enable the `testcontainers` feature for automatic provisioning."
                             .to_string(),
@@ -81,12 +81,12 @@ impl TestDatabase {
             .with_tag("18-alpine")
             .start()
             .await
-            .map_err(|e| ForgeError::Database(format!("Failed to start PG container: {e}")))?;
+            .map_err(|e| ForgeError::Internal(format!("Failed to start PG container: {e}")))?;
 
         let port = container
             .get_host_port_ipv4(5432)
             .await
-            .map_err(|e| ForgeError::Database(format!("Failed to get container port: {e}")))?;
+            .map_err(|e| ForgeError::Internal(format!("Failed to get container port: {e}")))?;
 
         let url = format!("postgres://postgres:postgres@localhost:{port}/postgres");
         let pool = sqlx::postgres::PgPoolOptions::new()
@@ -94,7 +94,7 @@ impl TestDatabase {
             .acquire_timeout(std::time::Duration::from_secs(30))
             .connect(&url)
             .await
-            .map_err(ForgeError::Sql)?;
+            .map_err(ForgeError::Database)?;
 
         Ok(Self {
             pool,
@@ -118,7 +118,7 @@ impl TestDatabase {
         sqlx::query(sql)
             .execute(&self.pool)
             .await
-            .map_err(ForgeError::Sql)?;
+            .map_err(ForgeError::Database)?;
         Ok(())
     }
 
@@ -140,13 +140,13 @@ impl TestDatabase {
             .max_connections(1)
             .connect(&base_url)
             .await
-            .map_err(ForgeError::Sql)?;
+            .map_err(ForgeError::Database)?;
 
         // Double-quoted identifier handles special characters in generated name
         sqlx::query(&format!("CREATE DATABASE \"{}\"", db_name))
             .execute(&pool)
             .await
-            .map_err(ForgeError::Sql)?;
+            .map_err(ForgeError::Database)?;
 
         // Build URL for the new database by replacing the database name component
         let test_url = replace_db_name(&base_url, &db_name);
@@ -155,7 +155,7 @@ impl TestDatabase {
             .max_connections(5)
             .connect(&test_url)
             .await
-            .map_err(ForgeError::Sql)?;
+            .map_err(ForgeError::Database)?;
 
         Ok(IsolatedTestDb {
             pool: test_pool,
@@ -217,7 +217,7 @@ impl IsolatedTestDb {
         sqlx::query(sql)
             .execute(&self.pool)
             .await
-            .map_err(ForgeError::Sql)?;
+            .map_err(ForgeError::Database)?;
         Ok(())
     }
 
@@ -234,7 +234,7 @@ impl IsolatedTestDb {
             sqlx::query(stmt)
                 .execute(&self.pool)
                 .await
-                .map_err(|e| ForgeError::Database(format!("Failed to execute SQL: {e}")))?;
+                .map_err(|e| ForgeError::Internal(format!("Failed to execute SQL: {e}")))?;
         }
         Ok(())
     }
@@ -252,7 +252,7 @@ impl IsolatedTestDb {
             .max_connections(1)
             .connect(&self.base_url)
             .await
-            .map_err(ForgeError::Sql)?;
+            .map_err(ForgeError::Database)?;
 
         // Force disconnect other connections and drop
         let _ = sqlx::query(
@@ -265,7 +265,7 @@ impl IsolatedTestDb {
         sqlx::query(&format!("DROP DATABASE IF EXISTS \"{}\"", self.db_name))
             .execute(&pool)
             .await
-            .map_err(ForgeError::Sql)?;
+            .map_err(ForgeError::Database)?;
 
         Ok(())
     }
@@ -326,7 +326,7 @@ impl IsolatedTestDb {
                     continue;
                 }
                 sqlx::query(stmt).execute(&self.pool).await.map_err(|e| {
-                    ForgeError::Database(format!("Failed to apply migration '{name}': {e}"))
+                    ForgeError::Internal(format!("Failed to apply migration '{name}': {e}"))
                 })?;
             }
         }

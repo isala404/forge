@@ -45,7 +45,7 @@ impl Database {
         service_name: &str,
     ) -> Result<Self> {
         if config.url.is_empty() {
-            return Err(ForgeError::Database(
+            return Err(ForgeError::Internal(
                 "database.url cannot be empty. Provide a PostgreSQL connection URL.".into(),
             ));
         }
@@ -94,7 +94,7 @@ impl Database {
             service_name,
         )
         .await
-        .map_err(|e| ForgeError::Database(format!("Failed to connect to primary: {}", e)))?;
+        .map_err(|e| ForgeError::Internal(format!("Failed to connect to primary: {}", e)))?;
 
         let mut replicas = Vec::new();
         for replica_url in &config.replica_urls {
@@ -105,7 +105,7 @@ impl Database {
                 service_name,
             )
             .await
-            .map_err(|e| ForgeError::Database(format!("Failed to connect to replica: {}", e)))?;
+            .map_err(|e| ForgeError::Internal(format!("Failed to connect to replica: {}", e)))?;
             replicas.push(ReplicaEntry {
                 pool: Arc::new(pool),
                 healthy: Arc::new(AtomicBool::new(true)),
@@ -230,7 +230,7 @@ impl Database {
             service_name,
         )
         .await
-        .map_err(|e| ForgeError::Database(format!("Failed to create isolated pool: {}", e)))?;
+        .map_err(|e| ForgeError::Internal(format!("Failed to create isolated pool: {}", e)))?;
         Ok(Some(Arc::new(pool)))
     }
 
@@ -328,7 +328,7 @@ impl Database {
         sqlx::query_scalar!("SELECT 1 as \"v!\"")
             .fetch_one(self.primary.as_ref())
             .await
-            .map_err(|e| ForgeError::Database(format!("Health check failed: {}", e)))?;
+            .map_err(|e| ForgeError::Internal(format!("Health check failed: {}", e)))?;
         Ok(())
     }
 

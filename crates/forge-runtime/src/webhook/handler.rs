@@ -10,18 +10,14 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use base64::{
-    Engine as _,
-    engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig, general_purpose},
-};
+use base64::{Engine as _, engine::general_purpose};
 use ed25519_dalek::{Signature as Ed25519Signature, Verifier as _, VerifyingKey};
 use forge_core::CircuitBreakerClient;
 use forge_core::function::JobDispatch;
 use forge_core::webhook::{IdempotencySource, SignatureAlgorithm, WebhookContext};
 use hmac::{Hmac, Mac};
 use serde_json::{Value, json};
-use sha1::Sha1;
-use sha2::{Sha256, Sha512};
+use sha2::Sha256;
 use sqlx::PgPool;
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -369,112 +365,30 @@ fn validate_signature(
     body: &[u8],
     secret: &str,
     signature: &str,
-    headers: &HeaderMap,
+    _headers: &HeaderMap,
 ) -> bool {
     match algorithm {
-        SignatureAlgorithm::StandardWebhooks => {
-            validate_standard_webhooks(body, secret, signature, headers)
-        }
         SignatureAlgorithm::StripeWebhooks => validate_stripe_webhooks(body, secret, signature),
         SignatureAlgorithm::HmacSha256Base64 => {
             validate_hmac_sha256_base64(body, secret, signature)
         }
         SignatureAlgorithm::Ed25519 => validate_ed25519(body, secret, signature),
-        alg => {
-            // HMAC variants: decode hex, verify
-            let sig_hex = signature.strip_prefix(alg.prefix()).unwrap_or(signature);
+        SignatureAlgorithm::HmacSha256 => {
+            let sig_hex = signature
+                .strip_prefix(SignatureAlgorithm::HmacSha256.prefix())
+                .unwrap_or(signature);
             let expected = match decode_hex(sig_hex) {
                 Some(b) => b,
                 None => return false,
             };
-            match alg {
-                SignatureAlgorithm::HmacSha256 => {
-                    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
-                        .expect("HMAC can take key of any size");
-                    mac.update(body);
-                    mac.verify_slice(&expected).is_ok()
-                }
-                SignatureAlgorithm::HmacSha1 => {
-                    let mut mac = Hmac::<Sha1>::new_from_slice(secret.as_bytes())
-                        .expect("HMAC can take key of any size");
-                    mac.update(body);
-                    mac.verify_slice(&expected).is_ok()
-                }
-                SignatureAlgorithm::HmacSha512 => {
-                    let mut mac = Hmac::<Sha512>::new_from_slice(secret.as_bytes())
-                        .expect("HMAC can take key of any size");
-                    mac.update(body);
-                    mac.verify_slice(&expected).is_ok()
-                }
-                _ => unreachable!(),
-            }
+            let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+                .expect("HMAC can take key of any size");
+            mac.update(body);
+            mac.verify_slice(&expected).is_ok()
         }
+        // Future variants added to SignatureAlgorithm are caught here until handler support lands.
+        _ => false,
     }
-}
-
-/// Validate a Standard Webhooks signature (https://www.standardwebhooks.com).
-///
-/// - Secret: strip `whsec_` or `polar_whs_` prefix, then base64-decode.
-/// - Signed content: `{webhook-id}\n{webhook-timestamp}\n{body}`.
-/// - Signature header format: `v1,<base64>` (space-separated for multiple).
-fn validate_standard_webhooks(
-    body: &[u8],
-    secret: &str,
-    signature_header: &str,
-    headers: &HeaderMap,
-) -> bool {
-    let msg_id = match headers.get("webhook-id").and_then(|v| v.to_str().ok()) {
-        Some(v) => v,
-        None => return false,
-    };
-
-    let msg_timestamp = match headers
-        .get("webhook-timestamp")
-        .and_then(|v| v.to_str().ok())
-    {
-        Some(v) => v,
-        None => return false,
-    };
-
-    // Strip known prefixes and base64-decode the raw key.
-    // Use a permissive decoder: accept both padded and unpadded input, and allow
-    // non-zero trailing bits. Polar (and some other providers) emit base64 keys
-    // whose last group has non-canonical trailing bits that strict decoders reject.
-    let decoder = GeneralPurpose::new(
-        &base64::alphabet::STANDARD,
-        GeneralPurposeConfig::new()
-            .with_decode_padding_mode(DecodePaddingMode::Indifferent)
-            .with_decode_allow_trailing_bits(true),
-    );
-    let b64_key = secret
-        .strip_prefix("whsec_")
-        .or_else(|| secret.strip_prefix("polar_whs_"))
-        .unwrap_or(secret);
-
-    let key_bytes = match decoder.decode(b64_key) {
-        Ok(b) => b,
-        Err(_) => return false,
-    };
-
-    // Build the signed content per Standard Webhooks spec: "{id}.{timestamp}.{body}"
-    let mut signed = Vec::with_capacity(msg_id.len() + msg_timestamp.len() + body.len() + 2);
-    signed.extend_from_slice(msg_id.as_bytes());
-    signed.push(b'.');
-    signed.extend_from_slice(msg_timestamp.as_bytes());
-    signed.push(b'.');
-    signed.extend_from_slice(body);
-
-    let mut mac =
-        Hmac::<Sha256>::new_from_slice(&key_bytes).expect("HMAC can take key of any size");
-    mac.update(&signed);
-    let computed = mac.finalize().into_bytes();
-    let computed_b64 = general_purpose::STANDARD.encode(computed);
-
-    // The header may contain multiple space-separated signatures: "v1,<b64> v1,<b64>"
-    signature_header
-        .split_whitespace()
-        .filter_map(|s| s.strip_prefix("v1,"))
-        .any(|sig| sig == computed_b64)
 }
 
 /// Validate a Stripe webhook signature.
@@ -894,58 +808,5 @@ mod tests {
         let other_key = SigningKey::from_bytes(&other_seed).verifying_key();
         let other_pub_b64 = general_purpose::STANDARD.encode(other_key.as_bytes());
         assert!(!validate_ed25519(body, &other_pub_b64, &signature_b64));
-    }
-
-    #[test]
-    fn test_validate_standard_webhooks() {
-        use base64::{Engine as _, engine::general_purpose};
-        use hmac::{Hmac, Mac};
-        use sha2::Sha256;
-
-        let msg_id = "msg_test_123";
-        let msg_timestamp = "1234567890";
-        let body = b"{\"event\":\"subscription.created\"}";
-        // raw key bytes, base64-encoded as the "secret"
-        let raw_key = b"super_secret_key_bytes_32_chars!!";
-        let secret = format!("whsec_{}", general_purpose::STANDARD.encode(raw_key));
-
-        let mut signed = Vec::new();
-        signed.extend_from_slice(msg_id.as_bytes());
-        signed.push(b'.');
-        signed.extend_from_slice(msg_timestamp.as_bytes());
-        signed.push(b'.');
-        signed.extend_from_slice(body);
-
-        let mut mac = Hmac::<Sha256>::new_from_slice(raw_key).unwrap();
-        mac.update(&signed);
-        let sig_b64 = general_purpose::STANDARD.encode(mac.finalize().into_bytes());
-        let signature_header = format!("v1,{}", sig_b64);
-
-        let mut headers = HeaderMap::new();
-        headers.insert("webhook-id", msg_id.parse().unwrap());
-        headers.insert("webhook-timestamp", msg_timestamp.parse().unwrap());
-
-        assert!(validate_standard_webhooks(
-            body,
-            &secret,
-            &signature_header,
-            &headers
-        ));
-
-        // Wrong signature should fail
-        assert!(!validate_standard_webhooks(
-            body,
-            &secret,
-            "v1,invalidsig",
-            &headers
-        ));
-
-        // Missing headers should fail
-        assert!(!validate_standard_webhooks(
-            body,
-            &secret,
-            &signature_header,
-            &HeaderMap::new()
-        ));
     }
 }

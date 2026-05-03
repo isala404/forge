@@ -203,7 +203,7 @@ impl From<forge_core::error::ForgeError> for RpcError {
                 tracing::warn!(error = %msg, "Deserialization error in RPC handler");
                 Self::new("INVALID_ARGUMENT", "Invalid input format")
             }
-            ref e @ E::Database(_) | ref e @ E::Sql(_) => {
+            ref e @ E::Database(_) => {
                 tracing::error!(error = %e, "Database error in RPC handler");
                 Self::internal("Internal server error")
             }
@@ -225,9 +225,6 @@ impl From<forge_core::error::ForgeError> for RpcError {
             E::Conflict(msg) => Self::new("CONFLICT", msg),
             E::UnprocessableEntity(msg) => Self::new("UNPROCESSABLE_ENTITY", msg),
             E::ServiceUnavailable(msg) => Self::new("SERVICE_UNAVAILABLE", msg),
-            E::PayloadTooLarge(msg) => Self::new("PAYLOAD_TOO_LARGE", msg),
-            E::ResultTooLarge(msg) => Self::new("RESULT_TOO_LARGE", msg),
-            E::SubscriptionGapped(msg) => Self::new("SUBSCRIPTION_GAPPED", msg),
             E::RateLimitExceeded { retry_after, .. } => Self::rate_limited(retry_after.as_secs()),
             ref e => {
                 tracing::error!(error = %e, "Unmapped ForgeError variant");
@@ -244,6 +241,7 @@ impl From<forge_core::error::ForgeError> for RpcError {
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
     use super::*;
+    use sqlx;
 
     #[test]
     fn test_success_response() {
@@ -363,8 +361,7 @@ mod tests {
 
     #[test]
     fn forge_database_error_hides_internals() {
-        let rpc: RpcError =
-            forge_core::ForgeError::Database("relation foo does not exist".into()).into();
+        let rpc: RpcError = forge_core::ForgeError::Database(sqlx::Error::RowNotFound).into();
         assert_eq!(rpc.code, "INTERNAL_ERROR");
         assert_eq!(rpc.message, "Internal server error");
         assert_eq!(rpc.status_code(), StatusCode::INTERNAL_SERVER_ERROR);

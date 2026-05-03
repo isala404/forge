@@ -81,13 +81,13 @@ impl ChangeListener {
         // Create a dedicated listener connection
         let mut listener = sqlx::postgres::PgListener::connect_with(&self.pool)
             .await
-            .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+            .map_err(forge_core::ForgeError::Database)?;
 
         // Subscribe to the change channel
         listener
             .listen(&self.config.channel)
             .await
-            .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+            .map_err(forge_core::ForgeError::Database)?;
 
         tracing::debug!(channel = %self.config.channel, "Listening for changes");
 

@@ -350,7 +350,7 @@ impl CronRunner {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         if result.rows_affected() > 0 {
             Ok(Some(claim_id))
@@ -529,7 +529,7 @@ impl CronRunner {
             )
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+            .map_err(forge_core::ForgeError::Database)?;
 
             let start_time = last_run.unwrap_or(now - chrono::Duration::days(1));
 

@@ -101,7 +101,7 @@ impl JobDispatcher {
         self.queue
             .enqueue(job)
             .await
-            .map_err(|e| forge_core::ForgeError::Database(e.to_string()))
+            .map_err(forge_core::ForgeError::Database)
     }
 
     /// Request cancellation for a job.
@@ -117,7 +117,7 @@ impl JobDispatcher {
         self.queue
             .request_cancel(job_id, reason, caller_subject)
             .await
-            .map_err(|e| forge_core::ForgeError::Database(e.to_string()))
+            .map_err(forge_core::ForgeError::Database)
     }
 
     /// Dispatch job at specific time with explicit info.
@@ -142,7 +142,7 @@ impl JobDispatcher {
         self.queue
             .enqueue(job)
             .await
-            .map_err(|e| forge_core::ForgeError::Database(e.to_string()))
+            .map_err(forge_core::ForgeError::Database)
     }
 
     /// Dispatch job with idempotency key.
@@ -170,7 +170,7 @@ impl JobDispatcher {
         self.queue
             .enqueue(job)
             .await
-            .map_err(|e| forge_core::ForgeError::Database(e.to_string()))
+            .map_err(forge_core::ForgeError::Database)
     }
 
     /// Dispatch job with custom priority.
@@ -197,7 +197,7 @@ impl JobDispatcher {
         self.queue
             .enqueue(job)
             .await
-            .map_err(|e| forge_core::ForgeError::Database(e.to_string()))
+            .map_err(forge_core::ForgeError::Database)
     }
 }
 

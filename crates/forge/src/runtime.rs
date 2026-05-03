@@ -283,7 +283,7 @@ impl Forge {
             )
             .fetch_optional(pool)
             .await
-            .map_err(|e| ForgeError::Database(e.to_string()))?;
+            .map_err(ForgeError::Database)?;
 
             if let Some(row) = existing {
                 if row.workflow_signature != info.signature {
@@ -304,7 +304,7 @@ impl Forge {
                 )
                 .execute(pool)
                 .await
-                .map_err(|e| ForgeError::Database(e.to_string()))?;
+                .map_err(ForgeError::Database)?;
             } else {
                 sqlx::query!(
                     r#"
@@ -318,7 +318,7 @@ impl Forge {
                 )
                 .execute(pool)
                 .await
-                .map_err(|e| ForgeError::Database(e.to_string()))?;
+                .map_err(ForgeError::Database)?;
             }
 
             tracing::debug!(

@@ -240,7 +240,7 @@ impl WorkflowRegistry {
         )
         .fetch_all(pool)
         .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        .map_err(ForgeError::Database)?;
 
         let mut stranded = Vec::new();
         for row in rows {

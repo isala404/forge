@@ -728,29 +728,21 @@ pub enum JwtAlgorithm {
     /// HMAC using SHA-256 (symmetric, requires jwt_secret).
     #[default]
     HS256,
-    /// HMAC using SHA-384 (symmetric, requires jwt_secret).
-    HS384,
-    /// HMAC using SHA-512 (symmetric, requires jwt_secret).
-    HS512,
     /// RSA using SHA-256 (asymmetric, requires jwks_url).
     RS256,
-    /// RSA using SHA-384 (asymmetric, requires jwks_url).
-    RS384,
-    /// RSA using SHA-512 (asymmetric, requires jwks_url).
-    RS512,
 }
 
 /// Authentication configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct AuthConfig {
-    /// JWT secret for HMAC algorithms (HS256, HS384, HS512).
+    /// JWT secret for HMAC algorithms (HS256).
     /// Required when using HMAC algorithms.
     pub jwt_secret: Option<String>,
 
     /// JWT signing algorithm.
-    /// HMAC algorithms (HS256, HS384, HS512) require jwt_secret.
-    /// RSA algorithms (RS256, RS384, RS512) require jwks_url.
+    /// HS256 (default) requires jwt_secret.
+    /// RS256 requires jwks_url.
     #[serde(default)]
     pub jwt_algorithm: JwtAlgorithm,
 
@@ -770,7 +762,7 @@ pub struct AuthConfig {
     /// Used by `ctx.issue_token_pair()`. Defaults to "30d".
     pub refresh_token_ttl: Option<String>,
 
-    /// JWKS URL for RSA algorithms (RS256, RS384, RS512).
+    /// JWKS URL for RSA algorithms (RS256).
     /// Keys are fetched and cached automatically.
     pub jwks_url: Option<String>,
 
@@ -896,10 +888,10 @@ impl AuthConfig {
         }
 
         match self.jwt_algorithm {
-            JwtAlgorithm::HS256 | JwtAlgorithm::HS384 | JwtAlgorithm::HS512 => {
+            JwtAlgorithm::HS256 => {
                 if self.jwt_secret.is_none() {
                     return Err(ForgeError::Config(
-                        "auth.jwt_secret is required for HMAC algorithms (HS256, HS384, HS512). \
+                        "auth.jwt_secret is required for HMAC algorithms (HS256). \
                          Set auth.jwt_secret to a secure random string, \
                          or switch to RS256 and provide auth.jwks_url for external identity providers."
                             .into(),
@@ -916,10 +908,10 @@ impl AuthConfig {
                     )));
                 }
             }
-            JwtAlgorithm::RS256 | JwtAlgorithm::RS384 | JwtAlgorithm::RS512 => {
+            JwtAlgorithm::RS256 => {
                 if self.jwks_url.is_none() {
                     return Err(ForgeError::Config(
-                        "auth.jwks_url is required for RSA algorithms (RS256, RS384, RS512). \
+                        "auth.jwks_url is required for RSA algorithms (RS256). \
                          Set auth.jwks_url to your identity provider's JWKS endpoint, \
                          or switch to HS256 and provide auth.jwt_secret for symmetric signing."
                             .into(),
@@ -942,18 +934,12 @@ impl AuthConfig {
 
     /// Check if this config uses HMAC (symmetric) algorithms.
     pub fn is_hmac(&self) -> bool {
-        matches!(
-            self.jwt_algorithm,
-            JwtAlgorithm::HS256 | JwtAlgorithm::HS384 | JwtAlgorithm::HS512
-        )
+        matches!(self.jwt_algorithm, JwtAlgorithm::HS256)
     }
 
     /// Check if this config uses RSA (asymmetric) algorithms.
     pub fn is_rsa(&self) -> bool {
-        matches!(
-            self.jwt_algorithm,
-            JwtAlgorithm::RS256 | JwtAlgorithm::RS384 | JwtAlgorithm::RS512
-        )
+        matches!(self.jwt_algorithm, JwtAlgorithm::RS256)
     }
 }
 

@@ -55,7 +55,7 @@ impl StrictRateLimiter {
         )
         .fetch_one(&self.pool)
         .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        .map_err(ForgeError::Database)?;
 
         let tokens = result.tokens;
         let last_refill = result.last_refill;
@@ -166,7 +166,7 @@ impl StrictRateLimiter {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        .map_err(ForgeError::Database)?;
         Ok(())
     }
 
@@ -181,7 +181,7 @@ impl StrictRateLimiter {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        .map_err(ForgeError::Database)?;
 
         Ok(result.rows_affected())
     }

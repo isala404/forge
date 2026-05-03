@@ -90,7 +90,7 @@ impl TestContext {
                     .acquire_timeout(Duration::from_secs(30))
                     .connect(url)
                     .await
-                    .map_err(|e| ForgeError::Database(e.to_string()))?,
+                    .map_err(ForgeError::Database)?,
             )
         } else {
             None

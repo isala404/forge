@@ -261,7 +261,7 @@ impl JobContext {
         )
         .fetch_optional(&self.db_pool)
         .await
-        .map_err(|e| crate::ForgeError::Database(e.to_string()))?;
+        .map_err(crate::ForgeError::Database)?;
 
         Ok(matches!(
             row.as_deref(),
@@ -292,7 +292,7 @@ impl JobContext {
         )
         .execute(&self.db_pool)
         .await
-        .map_err(|e| crate::ForgeError::Database(e.to_string()))?;
+        .map_err(crate::ForgeError::Database)?;
 
         Ok(())
     }
@@ -327,7 +327,7 @@ impl JobContext {
         )
         .execute(&self.db_pool)
         .await
-        .map_err(|e| crate::ForgeError::Database(e.to_string()))?;
+        .map_err(crate::ForgeError::Database)?;
 
         Ok(())
     }

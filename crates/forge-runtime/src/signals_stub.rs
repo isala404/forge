@@ -32,20 +32,6 @@ pub fn emit_diagnostic(
 ) {
 }
 
-#[inline]
-#[allow(clippy::too_many_arguments)]
-pub fn emit_web_vital(
-    _name: &str,
-    _value: f64,
-    _rating: Option<String>,
-    _client_ip: Option<String>,
-    _user_agent: Option<String>,
-    _visitor_id: Option<String>,
-    _user_id: Option<uuid::Uuid>,
-    _is_bot: bool,
-) {
-}
-
 /// Stub `install` — accepts `None` always, ignores `Some` (the
 /// `SignalsCollector` type doesn't exist without `gateway`).
 #[inline]

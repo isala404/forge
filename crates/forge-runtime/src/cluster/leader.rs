@@ -117,7 +117,7 @@ impl LeaderElection {
             .pool
             .acquire()
             .await
-            .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+            .map_err(forge_core::ForgeError::Database)?;
 
         // Try to acquire advisory lock (non-blocking)
         let acquired = sqlx::query_scalar!(
@@ -126,7 +126,7 @@ impl LeaderElection {
         )
         .fetch_one(&mut *conn)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         super::metrics::record_leader_election_attempt(self.role.as_str(), acquired);
 
@@ -155,7 +155,7 @@ impl LeaderElection {
             )
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?
+            .map_err(forge_core::ForgeError::Database)?
             .term;
 
             self.current_term.store(new_term, Ordering::SeqCst);
@@ -193,7 +193,7 @@ impl LeaderElection {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         Ok(())
     }
@@ -210,7 +210,7 @@ impl LeaderElection {
             sqlx::query_scalar!("SELECT pg_advisory_unlock($1)", self.role.lock_id())
                 .fetch_one(&mut *conn)
                 .await
-                .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+                .map_err(forge_core::ForgeError::Database)?;
         } else {
             tracing::warn!(
                 role = self.role.as_str(),
@@ -230,7 +230,7 @@ impl LeaderElection {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         self.is_leader.store(false, Ordering::SeqCst);
         self.current_term.store(0, Ordering::SeqCst);
@@ -248,7 +248,7 @@ impl LeaderElection {
         )
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         match result {
             Some(lease_until) => Ok(lease_until > Utc::now()),
@@ -268,7 +268,7 @@ impl LeaderElection {
         )
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         match row {
             Some(row) => {

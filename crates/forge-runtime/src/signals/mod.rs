@@ -17,9 +17,7 @@ pub mod views;
 pub mod visitor;
 
 pub use collector::SignalsCollector;
-pub use emit::{
-    emit_diagnostic, emit_raw, emit_server_execution, emit_web_vital, install as install_global,
-};
+pub use emit::{emit_diagnostic, emit_raw, emit_server_execution, install as install_global};
 
 #[cfg(all(test, feature = "testcontainers"))]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]

@@ -156,7 +156,7 @@ impl WorkflowScheduler {
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         let count = workflows.len();
         if count > 0 {
@@ -204,7 +204,7 @@ impl WorkflowScheduler {
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         for workflow in workflows {
             let workflow_id = workflow.id;

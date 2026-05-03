@@ -12,8 +12,8 @@ use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue};
 use axum::response::IntoResponse;
 use forge_core::signals::{
-    ClientContext, ClientEvent, DiagnosticError, DiagnosticReport, IdentifyPayload,
-    PageViewPayload, SignalEvent, SignalEventBatch, SignalEventType,
+    ClientContext, ClientEvent, DiagnosticError, DiagnosticReport, PageViewPayload, SignalEvent,
+    SignalEventBatch, SignalEventType,
 };
 use forge_core::testing::IsolatedTestDb;
 use sqlx::PgPool;
@@ -270,53 +270,6 @@ async fn test_session_device_fields_populated() {
 }
 
 #[tokio::test]
-async fn test_identify_links_user() {
-    let db = setup("identify_user").await;
-    let pool = db.pool();
-
-    let sid = session::upsert_session(
-        pool,
-        None,
-        "visitor-anon",
-        None,
-        None,
-        Some("/"),
-        None,
-        None,
-        None,
-        false,
-        "page_view",
-        None,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-
-    // Session starts without user_id
-    let user_id_before: (Option<Uuid>,) =
-        sqlx::query_as("SELECT user_id FROM forge_signals_sessions WHERE id = $1")
-            .bind(sid)
-            .fetch_one(pool)
-            .await
-            .unwrap();
-    assert!(user_id_before.0.is_none());
-
-    let user_id = Uuid::new_v4();
-    session::identify_session(pool, sid, user_id).await;
-
-    let user_id_after: (Option<Uuid>,) =
-        sqlx::query_as("SELECT user_id FROM forge_signals_sessions WHERE id = $1")
-            .bind(sid)
-            .fetch_one(pool)
-            .await
-            .unwrap();
-    assert_eq!(user_id_after.0, Some(user_id));
-
-    db.cleanup().await.unwrap();
-}
-
-#[tokio::test]
 async fn test_close_stale_sessions() {
     let db = setup("close_stale").await;
     let pool = db.pool();
@@ -362,82 +315,6 @@ async fn test_close_stale_sessions() {
     assert!(row.0.is_some(), "ended_at should be set");
     assert!(row.1.is_some(), "duration_secs should be set");
     assert!(row.1.unwrap() > 0, "duration should be positive");
-
-    db.cleanup().await.unwrap();
-}
-
-// ── User profiles ───────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn test_upsert_user_creates_profile() {
-    let db = setup("upsert_user").await;
-    let pool = db.pool();
-    let user_id = Uuid::new_v4();
-    let traits = serde_json::json!({"plan": "pro", "company": "Acme"});
-
-    session::upsert_user(
-        pool,
-        user_id,
-        &traits,
-        Some("https://google.com"),
-        Some("google"),
-        Some("cpc"),
-        Some("spring"),
-    )
-    .await;
-
-    let row = sqlx::query_as::<_, (serde_json::Value, Option<String>, Option<String>)>(
-        "SELECT traits, first_utm_source, first_referrer FROM forge_signals_users WHERE id = $1",
-    )
-    .bind(user_id)
-    .fetch_one(pool)
-    .await
-    .unwrap();
-
-    assert_eq!(row.0["plan"], "pro");
-    assert_eq!(row.1.as_deref(), Some("google"));
-    assert_eq!(row.2.as_deref(), Some("https://google.com"));
-
-    db.cleanup().await.unwrap();
-}
-
-#[tokio::test]
-async fn test_upsert_user_merges_traits() {
-    let db = setup("merge_traits").await;
-    let pool = db.pool();
-    let user_id = Uuid::new_v4();
-
-    session::upsert_user(
-        pool,
-        user_id,
-        &serde_json::json!({"plan": "free"}),
-        None,
-        None,
-        None,
-        None,
-    )
-    .await;
-    session::upsert_user(
-        pool,
-        user_id,
-        &serde_json::json!({"company": "Acme"}),
-        None,
-        None,
-        None,
-        None,
-    )
-    .await;
-
-    let traits: (serde_json::Value,) =
-        sqlx::query_as("SELECT traits FROM forge_signals_users WHERE id = $1")
-            .bind(user_id)
-            .fetch_one(pool)
-            .await
-            .unwrap();
-
-    // JSONB || merges: both keys should be present
-    assert_eq!(traits.0["plan"], "free");
-    assert_eq!(traits.0["company"], "Acme");
 
     db.cleanup().await.unwrap();
 }
@@ -779,35 +656,6 @@ async fn test_report_handler_stores_errors() {
     assert_eq!(row.0.as_deref(), Some("TypeError: null is not an object"));
     assert_eq!(row.1.as_deref(), Some("at render (app.js:42)"));
     assert_eq!(row.2.as_deref(), Some("corr-err-1"));
-
-    db.cleanup().await.unwrap();
-}
-
-#[tokio::test]
-async fn test_user_handler_rejects_invalid_uuid() {
-    let db = setup("handler_user_invalid").await;
-    let state = make_signals_state(db.pool());
-
-    let payload = IdentifyPayload {
-        user_id: "not-a-uuid".to_string(),
-        traits: serde_json::json!({}),
-    };
-
-    let response = endpoints::user_handler(
-        State(state.clone()),
-        None,
-        None,
-        make_headers(),
-        Json(payload),
-    )
-    .await
-    .into_response();
-
-    let body: serde_json::Value = axum::body::to_bytes(response.into_body(), 1024)
-        .await
-        .map(|b| serde_json::from_slice(&b).unwrap())
-        .unwrap();
-    assert_eq!(body["ok"], false);
 
     db.cleanup().await.unwrap();
 }

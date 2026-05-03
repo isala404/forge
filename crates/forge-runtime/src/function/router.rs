@@ -392,10 +392,7 @@ impl FunctionRouter {
 
         async {
             let primary = self.db.primary();
-            let tx = primary
-                .begin()
-                .await
-                .map_err(|e| ForgeError::Database(e.to_string()))?;
+            let tx = primary.begin().await.map_err(ForgeError::Database)?;
 
             let job_dispatcher = self.job_dispatcher.clone();
             let job_lookup: forge_core::JobInfoLookup =
@@ -452,9 +449,7 @@ impl FunctionRouter {
                         Self::insert_workflow(&mut tx, workflow).await?;
                     }
 
-                    tx.commit()
-                        .await
-                        .map_err(|e| ForgeError::Database(e.to_string()))?;
+                    tx.commit().await.map_err(ForgeError::Database)?;
 
                     Ok(RouteResult::Mutation(value))
                 }
@@ -495,7 +490,7 @@ impl FunctionRouter {
         )
         .execute(&mut **tx)
         .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        .map_err(ForgeError::Database)?;
 
         Ok(())
     }
@@ -527,7 +522,7 @@ impl FunctionRouter {
         )
         .execute(&mut **tx)
         .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        .map_err(ForgeError::Database)?;
 
         Ok(())
     }

@@ -18,7 +18,7 @@ use super::jwks::JwksClient;
 /// Authentication configuration for the runtime.
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
-    /// JWT secret for HMAC algorithms (HS256, HS384, HS512).
+    /// JWT secret for HMAC algorithms (HS256).
     pub jwt_secret: Option<String>,
     /// JWT algorithm.
     pub algorithm: JwtAlgorithm,
@@ -126,18 +126,12 @@ impl AuthConfig {
 
     /// Check if this config uses HMAC (symmetric) algorithms.
     pub fn is_hmac(&self) -> bool {
-        matches!(
-            self.algorithm,
-            JwtAlgorithm::HS256 | JwtAlgorithm::HS384 | JwtAlgorithm::HS512
-        )
+        matches!(self.algorithm, JwtAlgorithm::HS256)
     }
 
     /// Check if this config uses RSA (asymmetric) algorithms.
     pub fn is_rsa(&self) -> bool {
-        matches!(
-            self.algorithm,
-            JwtAlgorithm::RS256 | JwtAlgorithm::RS384 | JwtAlgorithm::RS512
-        )
+        matches!(self.algorithm, JwtAlgorithm::RS256)
     }
 }
 
@@ -146,22 +140,14 @@ impl AuthConfig {
 pub enum JwtAlgorithm {
     #[default]
     HS256,
-    HS384,
-    HS512,
     RS256,
-    RS384,
-    RS512,
 }
 
 impl From<JwtAlgorithm> for Algorithm {
     fn from(alg: JwtAlgorithm) -> Self {
         match alg {
             JwtAlgorithm::HS256 => Algorithm::HS256,
-            JwtAlgorithm::HS384 => Algorithm::HS384,
-            JwtAlgorithm::HS512 => Algorithm::HS512,
             JwtAlgorithm::RS256 => Algorithm::RS256,
-            JwtAlgorithm::RS384 => Algorithm::RS384,
-            JwtAlgorithm::RS512 => Algorithm::RS512,
         }
     }
 }
@@ -170,11 +156,7 @@ impl From<CoreJwtAlgorithm> for JwtAlgorithm {
     fn from(alg: CoreJwtAlgorithm) -> Self {
         match alg {
             CoreJwtAlgorithm::HS256 => JwtAlgorithm::HS256,
-            CoreJwtAlgorithm::HS384 => JwtAlgorithm::HS384,
-            CoreJwtAlgorithm::HS512 => JwtAlgorithm::HS512,
             CoreJwtAlgorithm::RS256 => JwtAlgorithm::RS256,
-            CoreJwtAlgorithm::RS384 => JwtAlgorithm::RS384,
-            CoreJwtAlgorithm::RS512 => JwtAlgorithm::RS512,
             // CoreJwtAlgorithm is #[non_exhaustive]; refuse to silently coerce
             // a future variant to HS256, log and fall back conservatively.
             _ => {
@@ -892,14 +874,8 @@ mod tests {
 
     #[test]
     fn test_algorithm_conversion() {
-        // HMAC algorithms
         assert_eq!(Algorithm::from(JwtAlgorithm::HS256), Algorithm::HS256);
-        assert_eq!(Algorithm::from(JwtAlgorithm::HS384), Algorithm::HS384);
-        assert_eq!(Algorithm::from(JwtAlgorithm::HS512), Algorithm::HS512);
-        // RSA algorithms
         assert_eq!(Algorithm::from(JwtAlgorithm::RS256), Algorithm::RS256);
-        assert_eq!(Algorithm::from(JwtAlgorithm::RS384), Algorithm::RS384);
-        assert_eq!(Algorithm::from(JwtAlgorithm::RS512), Algorithm::RS512);
     }
 
     #[test]
@@ -1033,5 +1009,63 @@ mod tests {
 
         let result = middleware.validate_token_async(&token).await;
         assert!(matches!(result, Err(AuthError::InvalidToken(_))));
+    }
+
+    /// Craft a raw JWT with a given `alg` string in the header (no signature
+    /// verification intended — the test exercises the pre-check, not decode).
+    fn raw_jwt_with_alg(alg: &str) -> String {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+
+        let header = URL_SAFE_NO_PAD.encode(format!(r#"{{"alg":"{alg}","typ":"JWT"}}"#));
+        // Minimal payload with required exp/sub claims (well in the future)
+        let exp = chrono::Utc::now().timestamp() + 3600;
+        let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"sub":"test","exp":{exp},"iat":0}}"#));
+        // Signature is garbage — the pre-check fires before signature verification.
+        let sig = URL_SAFE_NO_PAD.encode(b"fakesignature");
+        format!("{header}.{payload}.{sig}")
+    }
+
+    /// G3.10: The algorithm pre-check must reject a token whose header `alg`
+    /// differs from the configured algorithm BEFORE attempting key selection or
+    /// signature verification. This blocks the RS256→HS256 confusion attack
+    /// where an attacker uses the RSA public key as an HMAC secret.
+    #[tokio::test]
+    async fn g3_10_jwt_algorithm_pre_check() {
+        // Validator is configured for HS256 but the token header claims RS256.
+        let middleware = AuthMiddleware::new(AuthConfig::with_secret(
+            "test-secret-key-32-bytes-minimum!!",
+        ));
+
+        let token = raw_jwt_with_alg("RS256");
+        let result = middleware.validate_token_async(&token).await;
+
+        match result {
+            Err(AuthError::InvalidToken(msg)) => {
+                assert!(
+                    msg.contains("does not match"),
+                    "expected alg-mismatch message, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidToken from alg pre-check, got: {other:?}"),
+        }
+    }
+
+    /// G3.10 (alg=none): A token with `alg: none` must be rejected. The
+    /// `JwtAlgorithm` enum has no `None` variant, so `decode_header` will fail
+    /// to deserialize the algorithm string — the token never reaches the
+    /// pre-check comparison, let alone signature verification.
+    #[tokio::test]
+    async fn g1_jwt_alg_none_rejected() {
+        let middleware = AuthMiddleware::new(AuthConfig::with_secret(
+            "test-secret-key-32-bytes-minimum!!",
+        ));
+
+        let token = raw_jwt_with_alg("none");
+        let result = middleware.validate_token_async(&token).await;
+
+        assert!(
+            matches!(result, Err(AuthError::InvalidToken(_))),
+            "alg=none token must be rejected, got: {result:?}"
+        );
     }
 }

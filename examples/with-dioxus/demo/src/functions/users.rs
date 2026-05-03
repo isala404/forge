@@ -60,10 +60,7 @@ pub async fn create_user(
     let now = Utc::now();
     let role = role.unwrap_or_default();
 
-    let mut conn = ctx
-        .conn()
-        .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+    let mut conn = ctx.conn().await.map_err(ForgeError::Database)?;
     sqlx::query_as!(
         User,
         r#"
@@ -99,10 +96,7 @@ pub async fn update_user(
     name: Option<String>,
     role: Option<UserRole>,
 ) -> Result<User> {
-    let mut conn = ctx
-        .conn()
-        .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+    let mut conn = ctx.conn().await.map_err(ForgeError::Database)?;
     sqlx::query_as!(
         User,
         r#"
@@ -135,10 +129,7 @@ pub async fn update_user(
 /// Delete user by ID
 #[forge::mutation(public)]
 pub async fn delete_user(ctx: &MutationContext, id: Uuid) -> Result<bool> {
-    let mut conn = ctx
-        .conn()
-        .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+    let mut conn = ctx.conn().await.map_err(ForgeError::Database)?;
     let result = sqlx::query!("DELETE FROM users WHERE id = $1", id)
         .execute(&mut conn)
         .await?;

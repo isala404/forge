@@ -562,16 +562,8 @@ impl GatewayServer {
                     post(crate::signals::endpoints::view_handler),
                 )
                 .route(
-                    "/signal/user",
-                    post(crate::signals::endpoints::user_handler),
-                )
-                .route(
                     "/signal/report",
                     post(crate::signals::endpoints::report_handler),
-                )
-                .route(
-                    "/signal/vital",
-                    post(crate::signals::endpoints::vital_handler),
                 )
                 .with_state(signals_state);
         }

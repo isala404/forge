@@ -522,12 +522,12 @@ impl WorkflowExecutor {
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         rows.into_iter()
             .map(|row| {
                 let status = row.status.parse().map_err(|e| {
-                    forge_core::ForgeError::Database(format!(
+                    forge_core::ForgeError::Internal(format!(
                         "Invalid step status '{}': {}",
                         row.status, e
                     ))
@@ -565,7 +565,7 @@ impl WorkflowExecutor {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         Ok(())
     }
@@ -598,7 +598,7 @@ impl WorkflowExecutor {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
         Ok(())
     }
 
@@ -617,7 +617,7 @@ impl WorkflowExecutor {
         )
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         match row.and_then(|r| r.compensation_state) {
             Some(json) => {
@@ -645,7 +645,7 @@ impl WorkflowExecutor {
             .bind(run_id)
             .execute(&self.pool)
             .await
-            .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+            .map_err(forge_core::ForgeError::Database)?;
         Ok(())
     }
 
@@ -659,7 +659,7 @@ impl WorkflowExecutor {
                 .bind(run_id)
                 .fetch_optional(&self.pool)
                 .await
-                .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+                .map_err(forge_core::ForgeError::Database)?;
 
         match row {
             Some((json,)) => serde_json::from_value(json)
@@ -680,7 +680,7 @@ impl WorkflowExecutor {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
         Ok(())
     }
 
@@ -708,7 +708,7 @@ impl WorkflowExecutor {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         Ok(())
     }
@@ -728,14 +728,14 @@ impl WorkflowExecutor {
         )
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         let row = row.ok_or_else(|| {
             forge_core::ForgeError::NotFound(format!("Workflow run {} not found", run_id))
         })?;
 
         let status = row.status.parse().map_err(|e| {
-            forge_core::ForgeError::Database(format!(
+            forge_core::ForgeError::Internal(format!(
                 "Invalid workflow status '{}': {}",
                 row.status, e
             ))
@@ -809,7 +809,7 @@ impl WorkflowExecutor {
             )
             .execute(&self.pool)
             .await
-            .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+            .map_err(forge_core::ForgeError::Database)?;
         } else {
             // Fetch current status, then atomically update only if the row
             // still has the expected status, closing the TOCTOU window.
@@ -819,7 +819,7 @@ impl WorkflowExecutor {
             )
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+            .map_err(forge_core::ForgeError::Database)?;
 
             let current_status = match current {
                 Some(ref s) if valid_from.contains(&s.as_str()) => s.clone(),
@@ -848,7 +848,7 @@ impl WorkflowExecutor {
             )
             .execute(&self.pool)
             .await
-            .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+            .map_err(forge_core::ForgeError::Database)?;
 
             if result.rows_affected() == 0 {
                 return Err(forge_core::ForgeError::InvalidState(format!(
@@ -874,7 +874,7 @@ impl WorkflowExecutor {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         if result.rows_affected() == 0 {
             return Err(forge_core::ForgeError::InvalidState(format!(
@@ -895,7 +895,7 @@ impl WorkflowExecutor {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         if result.rows_affected() == 0 {
             return Err(forge_core::ForgeError::InvalidState(format!(
@@ -922,7 +922,7 @@ impl WorkflowExecutor {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         Ok(())
     }
@@ -936,7 +936,7 @@ impl WorkflowExecutor {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         if result.rows_affected() == 0 {
             return Err(forge_core::ForgeError::InvalidState(format!(
@@ -957,7 +957,7 @@ impl WorkflowExecutor {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         if result.rows_affected() == 0 {
             return Err(forge_core::ForgeError::InvalidState(format!(
@@ -994,7 +994,7 @@ impl WorkflowExecutor {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         Ok(())
     }
