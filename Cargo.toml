@@ -78,6 +78,7 @@ opentelemetry-appender-tracing = "0.27"
 
 # Proc macros
 syn = { version = "2.0", features = ["full", "extra-traits", "visit"] }
+darling = { version = "0.20" }
 quote = "1.0"
 inventory = "0.3"
 sha2 = "0.10"
@@ -99,7 +100,8 @@ testcontainers-modules = { version = "0.15", features = ["postgres"] }
 
 # Example dependencies
 dotenvy = "0.15"
-bcrypt = "0.17"
+argon2 = "0.5"
+password-hash = "0.5"
 jsonwebtoken = "9"
 rust-embed = "8"
 mime_guess = "2"

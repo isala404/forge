@@ -2,19 +2,34 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{ItemFn, parse_macro_input};
 
-use crate::utils::{
-    has_attr_flag, parse_attr_value, parse_duration_tokens, to_pascal_case, validate_attr_keys,
-};
+use darling::FromMeta;
+use darling::ast::NestedMeta;
 
-const ALLOWED_WEBHOOK_KEYS: &[&str] = &[
-    "name",
-    "description",
-    "path",
-    "signature",
-    "allow_unsigned",
-    "idempotency",
-    "timeout",
-];
+use crate::utils::{parse_duration_tokens, to_pascal_case};
+
+/// Darling-parsed webhook attributes.
+///
+/// Note: `signature` is NOT parsed by darling because its value is a Rust
+/// expression (`WebhookSignature::hmac_sha256("Header", "secret_env")`), not
+/// a meta item. We extract it manually from the raw token stream.
+#[derive(Debug, Default, FromMeta)]
+struct DarlingWebhookAttrs {
+    /// Override the registry name (default: function name).
+    #[darling(default)]
+    name: Option<String>,
+    #[darling(default)]
+    description: Option<String>,
+    #[darling(default)]
+    path: Option<String>,
+    #[darling(default)]
+    allow_unsigned: bool,
+    #[darling(default)]
+    idempotency: Option<String>,
+    #[darling(default)]
+    timeout: Option<String>,
+    // `signature` is handled manually - darling will see it as unknown, so we
+    // parse the raw token stream for it before handing to darling.
+}
 
 #[derive(Debug, Default)]
 struct WebhookAttrs {
@@ -30,143 +45,149 @@ struct WebhookAttrs {
     timeout: Option<String>,
 }
 
-fn parse_webhook_attrs(attr: TokenStream) -> syn::Result<WebhookAttrs> {
-    let mut result = WebhookAttrs::default();
-    let attr_str = attr.to_string();
+/// Parse the `signature = WebhookSignature::...` attribute manually from the
+/// raw attribute string. This is a Rust expression, not a meta item.
+fn parse_signature_from_attr_str(attr_str: &str) -> WebhookSignatureInfo {
+    let mut info = WebhookSignatureInfo::default();
 
-    if let Some(name) = parse_attr_value(&attr_str, "name") {
-        result.name = Some(name);
+    let Some(sig_start) = attr_str.find("signature") else {
+        return info;
+    };
+    let remaining = &attr_str[sig_start..];
+
+    if remaining.contains("hmac_sha256") {
+        info.algorithm = Some("HmacSha256".to_string());
+    } else if remaining.contains("stripe_webhooks") {
+        info.algorithm = Some("StripeWebhooks".to_string());
+    } else if remaining.contains("shopify_webhooks") {
+        info.algorithm = Some("HmacSha256Base64".to_string());
+    } else if remaining.contains("ed25519") {
+        info.algorithm = Some("Ed25519".to_string());
     }
 
-    if let Some(description) = parse_attr_value(&attr_str, "description") {
-        result.description = Some(description);
-    }
+    if let Some(paren_start) = remaining.find('(') {
+        let inside_parens = &remaining[paren_start + 1..];
 
-    if has_attr_flag(&attr_str, "allow_unsigned") {
-        result.allow_unsigned = true;
-    }
-
-    if let Some(path_start) = attr_str.find("path")
-        && let Some(eq_pos) = attr_str[path_start..].find('=')
-    {
-        let after_eq = &attr_str[path_start + eq_pos + 1..];
-        if let Some(quote_start) = after_eq.find('"') {
-            let after_quote = &after_eq[quote_start + 1..];
-            if let Some(quote_end) = after_quote.find('"') {
-                result.path = Some(after_quote[..quote_end].to_string());
-            }
-        }
-    }
-
-    if let Some(sig_start) = attr_str.find("signature") {
-        let remaining = &attr_str[sig_start..];
-
-        if remaining.contains("hmac_sha256") {
-            result.signature_algorithm = Some("HmacSha256".to_string());
-        } else if remaining.contains("stripe_webhooks") {
-            result.signature_algorithm = Some("StripeWebhooks".to_string());
-        } else if remaining.contains("shopify_webhooks") {
-            result.signature_algorithm = Some("HmacSha256Base64".to_string());
-        } else if remaining.contains("ed25519") {
-            result.signature_algorithm = Some("Ed25519".to_string());
-        }
-
-        if let Some(paren_start) = remaining.find('(') {
-            let inside_parens = &remaining[paren_start + 1..];
-
-            let mut depth = 1;
-            let mut end_pos = 0;
-            for (i, c) in inside_parens.char_indices() {
-                match c {
-                    '(' => depth += 1,
-                    ')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            end_pos = i;
-                            break;
-                        }
+        let mut depth = 1;
+        let mut end_pos = 0;
+        for (i, c) in inside_parens.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end_pos = i;
+                        break;
                     }
-                    _ => {}
                 }
-            }
-
-            let args_str = &inside_parens[..end_pos];
-
-            let quotes: Vec<_> = args_str.match_indices('"').collect();
-            // Single-arg variants: secret only, header is hardcoded per spec
-            let single_arg_header = match result.signature_algorithm.as_deref() {
-                Some("StripeWebhooks") => Some("stripe-signature"),
-                Some("HmacSha256Base64") => Some("x-shopify-hmac-sha256"),
-                _ => None,
-            };
-            if let Some(fixed_header) = single_arg_header {
-                if quotes.len() >= 2 {
-                    let secret_start = quotes[0].0 + 1;
-                    let secret_end = quotes[1].0;
-                    result.signature_secret_env =
-                        Some(args_str[secret_start..secret_end].to_string());
-                    result.signature_header = Some(fixed_header.to_string());
-                }
-            } else if quotes.len() >= 4 {
-                // Two-arg variants: header name then secret/public-key env
-                let header_start = quotes[0].0 + 1;
-                let header_end = quotes[1].0;
-                result.signature_header = Some(args_str[header_start..header_end].to_string());
-
-                let secret_start = quotes[2].0 + 1;
-                let secret_end = quotes[3].0;
-                result.signature_secret_env = Some(args_str[secret_start..secret_end].to_string());
+                _ => {}
             }
         }
-    }
 
-    if let Some(idem_start) = attr_str.find("idempotency")
-        && let Some(eq_pos) = attr_str[idem_start..].find('=')
-    {
-        let after_eq = &attr_str[idem_start + eq_pos + 1..];
-        if let Some(quote_start) = after_eq.find('"') {
-            let after_quote = &after_eq[quote_start + 1..];
-            if let Some(quote_end) = after_quote.find('"') {
-                result.idempotency = Some(after_quote[..quote_end].to_string());
+        let args_str = &inside_parens[..end_pos];
+
+        let quotes: Vec<_> = args_str.match_indices('"').collect();
+        // Single-arg variants: secret only, header is hardcoded per spec
+        let single_arg_header = match info.algorithm.as_deref() {
+            Some("StripeWebhooks") => Some("stripe-signature"),
+            Some("HmacSha256Base64") => Some("x-shopify-hmac-sha256"),
+            _ => None,
+        };
+        if let Some(fixed_header) = single_arg_header {
+            if quotes.len() >= 2 {
+                let secret_start = quotes[0].0 + 1;
+                let secret_end = quotes[1].0;
+                info.secret_env = Some(args_str[secret_start..secret_end].to_string());
+                info.header = Some(fixed_header.to_string());
             }
+        } else if quotes.len() >= 4 {
+            // Two-arg variants: header name then secret/public-key env
+            let header_start = quotes[0].0 + 1;
+            let header_end = quotes[1].0;
+            info.header = Some(args_str[header_start..header_end].to_string());
+
+            let secret_start = quotes[2].0 + 1;
+            let secret_end = quotes[3].0;
+            info.secret_env = Some(args_str[secret_start..secret_end].to_string());
         }
     }
 
-    if let Some(timeout) = parse_attr_value(&attr_str, "timeout") {
-        result.timeout = Some(timeout);
-    }
+    info
+}
 
-    match &result.path {
-        None => {
-            return Err(syn::Error::new(
-                proc_macro2::Span::call_site(),
-                "webhook requires path attribute",
-            ));
-        }
-        Some(p) if p.trim().is_empty() || !p.starts_with('/') => {
-            return Err(syn::Error::new(
-                proc_macro2::Span::call_site(),
-                "webhook path must start with '/' (example: path = \"/webhooks/stripe\")",
-            ));
-        }
-        _ => {}
-    }
-
-    Ok(result)
+#[derive(Debug, Default)]
+struct WebhookSignatureInfo {
+    algorithm: Option<String>,
+    header: Option<String>,
+    secret_env: Option<String>,
 }
 
 pub fn webhook_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
+
+    // Parse the raw attribute string for the signature expression before darling
     let attr_str = attr.to_string();
+    let sig_info = parse_signature_from_attr_str(&attr_str);
 
-    if let Err(e) = validate_attr_keys(&attr_str, ALLOWED_WEBHOOK_KEYS, "webhook") {
-        return e.to_compile_error().into();
-    }
-
-    let attrs = match parse_webhook_attrs(attr) {
-        Ok(attrs) => attrs,
-        Err(e) => return e.to_compile_error().into(),
+    // Filter out the `signature = ...` meta item from the list since darling
+    // can't parse Rust expressions. We need to handle it carefully: the
+    // signature value contains `::` and `(...)` which makes it tricky.
+    // Strategy: parse with NestedMeta, then filter out unknown items darling
+    // would reject, and let the manual parser handle them.
+    let attr_args = match NestedMeta::parse_meta_list(attr.into()) {
+        Ok(v) => v,
+        Err(e) => return TokenStream::from(e.into_compile_error()),
     };
+
+    // Filter out `signature = <expr>` since it's a Rust expression darling can't handle
+    let filtered_args: Vec<NestedMeta> = attr_args
+        .into_iter()
+        .filter(|meta| {
+            if let NestedMeta::Meta(syn::Meta::NameValue(nv)) = meta {
+                !nv.path.is_ident("signature")
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    let darling_attrs = match DarlingWebhookAttrs::from_list(&filtered_args) {
+        Ok(v) => v,
+        Err(e) => return TokenStream::from(e.write_errors()),
+    };
+
+    let attrs = WebhookAttrs {
+        name: darling_attrs.name,
+        description: darling_attrs.description,
+        path: darling_attrs.path,
+        signature_algorithm: sig_info.algorithm,
+        signature_header: sig_info.header,
+        signature_secret_env: sig_info.secret_env,
+        allow_unsigned: darling_attrs.allow_unsigned,
+        idempotency: darling_attrs.idempotency,
+        timeout: darling_attrs.timeout,
+    };
+
+    // Validate path
+    match &attrs.path {
+        None => {
+            return syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "webhook requires path attribute",
+            )
+            .to_compile_error()
+            .into();
+        }
+        Some(p) if p.trim().is_empty() || !p.starts_with('/') => {
+            return syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "webhook path must start with '/' (example: path = \"/webhooks/stripe\")",
+            )
+            .to_compile_error()
+            .into();
+        }
+        _ => {}
+    }
 
     let fn_name = &input.sig.ident;
     let fn_name_str = fn_name.to_string();
@@ -301,8 +322,8 @@ pub fn webhook_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
             }
 
-            forge::inventory::submit!(forge::AutoWebhook(|registry| {
-                registry.register::<#struct_name>();
+            forge::inventory::submit!(forge::AutoHandler(|registries| {
+                registries.webhooks.register::<#struct_name>();
             }));
         }
     };

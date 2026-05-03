@@ -272,6 +272,24 @@ impl MigrationRunner {
         info!("Applying migration: {}", migration.name);
         let start = std::time::Instant::now();
 
+        let mut tx = self.pool.begin().await.map_err(|e| {
+            ForgeError::Internal(format!(
+                "Failed to begin migration transaction for '{}': {e}",
+                migration.name
+            ))
+        })?;
+
+        // SET LOCAL only takes effect inside a transaction; it scopes these
+        // timeouts to this migration and never leaks to other pool connections.
+        sqlx::query("SET LOCAL lock_timeout = '5s'")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| ForgeError::Internal(format!("Failed to set lock_timeout: {e}")))?;
+        sqlx::query("SET LOCAL statement_timeout = '5min'")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| ForgeError::Internal(format!("Failed to set statement_timeout: {e}")))?;
+
         let statements = split_sql_statements(&migration.up_sql);
 
         for statement in statements {
@@ -288,12 +306,12 @@ impl MigrationRunner {
             }
 
             sqlx::query(statement)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(|e| {
                     ForgeError::Internal(format!(
-                        "Failed to apply migration '{}': {}",
-                        migration.name, e
+                        "Failed to apply migration '{}': {e}",
+                        migration.name
                     ))
                 })?;
         }
@@ -301,6 +319,8 @@ impl MigrationRunner {
         let elapsed = start.elapsed();
         let checksum = crate::stable_hash::sha256_hex(migration.up_sql.as_bytes());
 
+        // Record the migration inside the same transaction so a mid-flight
+        // crash can't leave the migration applied but unrecorded.
         sqlx::query(
             "INSERT INTO forge_migrations (version, name, checksum, execution_time_ms, down_sql) VALUES ($1, $2, $3, $4, $5)",
         )
@@ -309,16 +329,23 @@ impl MigrationRunner {
         .bind(&checksum)
         .bind(elapsed.as_millis() as i32)
         .bind(&migration.down_sql)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| {
             ForgeError::Internal(format!(
-                "Failed to record migration '{}': {}",
-                migration.name, e
+                "Failed to record migration '{}': {e}",
+                migration.name
             ))
         })?;
 
-        info!("Migration applied: {}", migration.name);
+        tx.commit().await.map_err(|e| {
+            ForgeError::Internal(format!(
+                "Failed to commit migration '{}': {e}",
+                migration.name
+            ))
+        })?;
+
+        info!("Migration applied: {} ({:?})", migration.name, elapsed);
         Ok(())
     }
 
@@ -366,8 +393,25 @@ impl MigrationRunner {
             let down_sql = row.down_sql;
             info!("Rolling back migration: {}", name);
 
+            let mut tx = self.pool.begin().await.map_err(|e| {
+                ForgeError::Internal(format!(
+                    "Failed to begin rollback transaction for '{name}': {e}"
+                ))
+            })?;
+
+            // Same timeouts as apply: cap any single DDL statement.
+            sqlx::query("SET LOCAL lock_timeout = '5s'")
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| ForgeError::Internal(format!("Failed to set lock_timeout: {e}")))?;
+            sqlx::query("SET LOCAL statement_timeout = '5min'")
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| {
+                    ForgeError::Internal(format!("Failed to set statement_timeout: {e}"))
+                })?;
+
             if let Some(down) = down_sql {
-                // Execute down SQL
                 let statements = split_sql_statements(&down);
                 for statement in statements {
                     let statement = statement.trim();
@@ -381,31 +425,32 @@ impl MigrationRunner {
                     }
 
                     sqlx::query(statement)
-                        .execute(&self.pool)
+                        .execute(&mut *tx)
                         .await
                         .map_err(|e| {
                             ForgeError::Internal(format!(
-                                "Failed to rollback migration '{}': {}",
-                                name, e
+                                "Failed to rollback migration '{name}': {e}"
                             ))
                         })?;
                 }
             } else {
-                warn!("Migration '{}' has no down SQL, removing record only", name);
+                warn!("Migration '{name}' has no down SQL, removing record only");
             }
 
-            // Remove from migrations table
+            // Remove record in the same transaction so a crash can't leave
+            // the schema rolled back but the record still present.
             sqlx::query!("DELETE FROM forge_migrations WHERE id = $1", id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(|e| {
-                    ForgeError::Internal(format!(
-                        "Failed to remove migration record '{}': {}",
-                        name, e
-                    ))
+                    ForgeError::Internal(format!("Failed to remove migration record '{name}': {e}"))
                 })?;
 
-            info!("Rolled back migration: {}", name);
+            tx.commit().await.map_err(|e| {
+                ForgeError::Internal(format!("Failed to commit rollback of '{name}': {e}"))
+            })?;
+
+            info!("Rolled back migration: {name}");
             rolled_back.push(name);
         }
 

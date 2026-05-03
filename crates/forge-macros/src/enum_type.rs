@@ -16,7 +16,13 @@ pub fn expand_enum(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 fn expand_enum_impl(attr: TokenStream2, input: DeriveInput) -> syn::Result<TokenStream2> {
     let attr_str = attr.to_string();
-    crate::utils::validate_attr_keys(&attr_str, &[], "forge_enum")?;
+    let trimmed = attr_str.trim();
+    if !trimmed.is_empty() {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!("Unknown attribute `{trimmed}` for #[forge_enum]. This macro accepts no attributes."),
+        ));
+    }
     let enum_name = &input.ident;
     let vis = &input.vis;
     let sql_name = to_snake_case(&enum_name.to_string());

@@ -15,7 +15,7 @@ pub struct UpdateTodoInput {
     pub completed: Option<bool>,
 }
 
-#[forge::query(public, tables = ["todos"])]
+#[forge::query(public, tables("todos"))]
 pub async fn list_todos(ctx: &QueryContext) -> Result<Vec<Todo>> {
     sqlx::query_as!(Todo, "SELECT * FROM todos ORDER BY created_at DESC")
         .fetch_all(ctx.db())

@@ -36,15 +36,15 @@ use forge_runtime::migrations::{Migration, MigrationRunner, load_migrations_from
 #[cfg(feature = "gateway")]
 use forge_core::mcp::ForgeMcpTool;
 use forge_runtime::cluster::{
-    GracefulShutdown, HeartbeatConfig, HeartbeatLoop, LeaderConfig, LeaderElection, NodeRegistry,
-    ShutdownConfig,
+    GracefulShutdown, HeartbeatConfig, HeartbeatLoop, NodeRegistry, ShutdownConfig,
 };
 #[cfg(feature = "cron")]
 use forge_runtime::cron::{CronRegistry, CronRunner, CronRunnerConfig};
 #[cfg(feature = "daemons")]
 use forge_runtime::daemon::{DaemonRegistry, DaemonRunner};
-use forge_runtime::db::Database;
 use forge_runtime::function::FunctionRegistry;
+use forge_runtime::pg::Database;
+use forge_runtime::pg::{LeaderConfig, LeaderElection};
 // CircuitBreakerClient wraps reqwest; used by cron/daemon/workflow for
 // outbound HTTP. (Gateway uses its own reqwest path.)
 #[cfg(any(feature = "cron", feature = "daemons", feature = "workflows"))]
@@ -369,15 +369,14 @@ impl Forge {
             Database::from_config_with_service(&self.config.database, &self.config.project.name)
                 .await?;
         let pool = db.primary().clone();
-        // jobs_pool only used by background subsystems (worker, scheduler).
         #[cfg(any(
             feature = "jobs",
             feature = "cron",
             feature = "workflows",
             feature = "daemons",
         ))]
-        let jobs_pool = db.jobs_pool().clone();
-        let observability_pool = db.observability_pool().clone();
+        let jobs_pool = pool.clone();
+        let observability_pool = pool.clone();
         if let Some(handle) = db.start_health_monitor() {
             let mut shutdown_rx = self.shutdown_tx.subscribe();
             tokio::spawn(async move {
@@ -800,7 +799,7 @@ impl Forge {
 
             // Wire signals (product analytics + diagnostics)
             if self.config.signals.enabled {
-                let signals_pool = std::sync::Arc::new(db_ref.analytics_pool().clone());
+                let signals_pool = std::sync::Arc::new(db_ref.primary().clone());
                 let collector = forge_runtime::signals::SignalsCollector::spawn(
                     signals_pool.clone(),
                     self.config.signals.batch_size,
@@ -1289,21 +1288,44 @@ impl ForgeBuilder {
     /// This replaces the need to manually call `.register_query::<T>()` etc.
     /// for every function in your application.
     pub fn auto_register(mut self) -> Self {
-        crate::auto_register::auto_register_all(
-            &mut self.function_registry,
+        let mut registries = crate::auto_register::HandlerRegistries {
+            functions: std::mem::take(&mut self.function_registry),
             #[cfg(feature = "jobs")]
-            &mut self.job_registry,
+            jobs: std::mem::take(&mut self.job_registry),
             #[cfg(feature = "cron")]
-            &mut self.cron_registry,
+            crons: std::mem::take(&mut self.cron_registry),
             #[cfg(feature = "workflows")]
-            &mut self.workflow_registry,
+            workflows: std::mem::take(&mut self.workflow_registry),
             #[cfg(feature = "daemons")]
-            &mut self.daemon_registry,
+            daemons: std::mem::take(&mut self.daemon_registry),
             #[cfg(feature = "gateway")]
-            &mut self.webhook_registry,
+            webhooks: std::mem::take(&mut self.webhook_registry),
             #[cfg(feature = "gateway")]
-            &mut self.mcp_registry,
-        );
+            mcp_tools: std::mem::take(&mut self.mcp_registry),
+        };
+        crate::auto_register::auto_register_all(&mut registries);
+        self.function_registry = registries.functions;
+        #[cfg(feature = "jobs")]
+        {
+            self.job_registry = registries.jobs;
+        }
+        #[cfg(feature = "cron")]
+        {
+            self.cron_registry = registries.crons;
+        }
+        #[cfg(feature = "workflows")]
+        {
+            self.workflow_registry = registries.workflows;
+        }
+        #[cfg(feature = "daemons")]
+        {
+            self.daemon_registry = registries.daemons;
+        }
+        #[cfg(feature = "gateway")]
+        {
+            self.webhook_registry = registries.webhooks;
+            self.mcp_registry = registries.mcp_tools;
+        }
         self
     }
 

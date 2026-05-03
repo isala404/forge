@@ -652,17 +652,25 @@ pub async fn oauth_authorize_post(
         .fetch_optional(&state.pool)
         .await;
 
-        // Constant-time login: always run bcrypt even if user not found to
-        // prevent timing side-channels that reveal valid email addresses.
-        // Cost 10 dummy hash generated via: bcrypt::hash("dummy", 10)
-        const DUMMY_HASH: &str = "$2b$10$x5F0VyTQ6qjX5YKr.WPmXuGNQzGqGN1pYnHvMBRz5bFm3VUSqJGi";
+        // Constant-time login: always run argon2id verify even if user not
+        // found to prevent timing side-channels that reveal valid emails.
+        const DUMMY_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$BVZdp6MuG5LPIhHn/YNmhk/MWyLDoR//ljnfCNAr8Wg";
         let (found_id, hash) = match &row {
             Ok(Some(r)) if r.password_hash.is_some() => {
                 (Some(r.id), r.password_hash.as_deref().unwrap_or(DUMMY_HASH))
             }
             _ => (None, DUMMY_HASH),
         };
-        let password_valid = bcrypt::verify(password, hash).unwrap_or(false);
+        let password_valid = {
+            use password_hash::PasswordHash;
+            PasswordHash::new(hash)
+                .ok()
+                .and_then(|parsed| {
+                    use argon2::PasswordVerifier;
+                    argon2::Argon2::default().verify_password(password.as_bytes(), &parsed).ok()
+                })
+                .is_some()
+        };
         if password_valid {
             if let Some(id) = found_id {
                 user_id = id;

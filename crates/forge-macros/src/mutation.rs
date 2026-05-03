@@ -3,61 +3,68 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{FnArg, ItemFn, Pat, ReturnType, Type, parse_macro_input};
 
-use crate::utils::{
-    has_attr_flag, parse_attr_value, parse_duration_secs, parse_size_bytes, parse_tables_attr,
-    reject_reserved_keys, to_pascal_case, validate_attr_keys,
-};
+use darling::FromMeta;
+use darling::ast::NestedMeta;
 
-const ALLOWED_MUTATION_KEYS: &[&str] = &[
-    "name",
-    "description",
-    "transactional",
-    "public",
-    "unscoped",
-    "require_role",
-    "timeout",
-    "rate_limit",
-    "log",
-    "max_size",
-    "tables",
-    // Reserved for future Forge releases. Parsed here so apps fail loudly
-    // (via `reject_reserved_keys` below) until coalescing lands.
-    "coalesce_window",
-    "coalesce_by",
-];
+use crate::attrs::{
+    RateLimitMeta, RequireRole, TablesList, parse_rate_limit_per, reject_reserved,
+    validate_rate_limit,
+};
+use crate::utils::{parse_duration_secs, parse_size_bytes, to_pascal_case};
 
 /// Attribute keys whose names are reserved for upcoming mutation-coalescing
 /// support (cursor positions, autosave, etc). Using one today is a hard
 /// compile error to surface that the feature isn't wired up yet.
 const RESERVED_MUTATION_KEYS: &[&str] = &["coalesce_window", "coalesce_by"];
 
-/// Expand the #[forge::mutation] attribute.
-///
-/// This transforms an async function into a mutation handler that:
-/// - Takes a MutationContext as the first parameter
-/// - Returns a Result<T>
-/// - Runs within a database transaction
-/// - Generates a struct implementing ForgeMutation trait
-pub fn expand_mutation(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(item as ItemFn);
-    let attr_str = attr.to_string();
+/// Darling-parsed mutation attributes.
+#[derive(Debug, FromMeta)]
+#[darling(and_then = DarlingMutationAttrs::validate)]
+#[allow(dead_code)]
+struct DarlingMutationAttrs {
+    #[darling(default)]
+    name: Option<String>,
+    #[darling(default)]
+    description: Option<String>,
+    /// Defaults to `true`. `transactional = false` opts out.
+    #[darling(default)]
+    transactional: Option<bool>,
+    #[darling(default)]
+    public: bool,
+    #[darling(default)]
+    unscoped: bool,
+    #[darling(default)]
+    require_role: Option<RequireRole>,
+    #[darling(default)]
+    timeout: Option<String>,
+    #[darling(default)]
+    rate_limit: Option<RateLimitMeta>,
+    #[darling(default)]
+    log: Option<String>,
+    #[darling(default)]
+    max_size: Option<String>,
+    #[darling(default)]
+    tables: Option<TablesList>,
+    // Reserved keys
+    #[darling(default)]
+    coalesce_window: Option<String>,
+    #[darling(default)]
+    coalesce_by: Option<String>,
+}
 
-    if let Err(e) = reject_reserved_keys(&attr_str, RESERVED_MUTATION_KEYS, "mutation") {
-        return e.to_compile_error().into();
+impl DarlingMutationAttrs {
+    fn validate(self) -> darling::Result<Self> {
+        reject_reserved(
+            RESERVED_MUTATION_KEYS,
+            &[
+                ("coalesce_window", self.coalesce_window.is_some()),
+                ("coalesce_by", self.coalesce_by.is_some()),
+            ],
+            "mutation",
+        )
+        .map_err(|e| darling::Error::custom(e.to_string()))?;
+        Ok(self)
     }
-
-    if let Err(e) = validate_attr_keys(&attr_str, ALLOWED_MUTATION_KEYS, "mutation") {
-        return e.to_compile_error().into();
-    }
-
-    let attrs = match parse_mutation_attrs(attr) {
-        Ok(a) => a,
-        Err(e) => return e.to_compile_error().into(),
-    };
-
-    expand_mutation_impl(input, attrs)
-        .unwrap_or_else(|e| e.to_compile_error())
-        .into()
 }
 
 struct MutationAttrs {
@@ -66,7 +73,6 @@ struct MutationAttrs {
     description: Option<String>,
     required_role: Option<String>,
     is_public: bool,
-    is_unscoped: bool,
     timeout: Option<u64>,
     rate_limit_requests: Option<u32>,
     rate_limit_per_secs: Option<u64>,
@@ -87,7 +93,6 @@ impl Default for MutationAttrs {
             description: None,
             required_role: None,
             is_public: false,
-            is_unscoped: false,
             timeout: None,
             rate_limit_requests: None,
             rate_limit_per_secs: None,
@@ -100,164 +105,69 @@ impl Default for MutationAttrs {
     }
 }
 
-fn parse_mutation_attrs(attr: TokenStream) -> Result<MutationAttrs, syn::Error> {
-    let mut attrs = MutationAttrs::default();
+/// Expand the #[forge::mutation] attribute.
+///
+/// This transforms an async function into a mutation handler that:
+/// - Takes a MutationContext as the first parameter
+/// - Returns a Result<T>
+/// - Runs within a database transaction
+/// - Generates a struct implementing ForgeMutation trait
+pub fn expand_mutation(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as ItemFn);
 
-    let attr_str = attr.to_string();
+    let attr_args = match NestedMeta::parse_meta_list(attr.into()) {
+        Ok(v) => v,
+        Err(e) => return TokenStream::from(e.into_compile_error()),
+    };
 
-    if let Some(name) = parse_attr_value(&attr_str, "name") {
-        attrs.name = Some(name);
-    }
+    let darling_attrs = match DarlingMutationAttrs::from_list(&attr_args) {
+        Ok(v) => v,
+        Err(e) => return TokenStream::from(e.write_errors()),
+    };
 
-    if let Some(desc) = parse_attr_value(&attr_str, "description") {
-        attrs.description = Some(desc);
-    }
+    let attrs = match convert_mutation_attrs(darling_attrs) {
+        Ok(a) => a,
+        Err(e) => return e.to_compile_error().into(),
+    };
 
-    // `transactional = false` opts out; bare `transactional` flag is a no-op
-    // (the default is already true, but we accept it for clarity).
-    if let Some(val) = parse_attr_value(&attr_str, "transactional")
-        && val == "false"
-    {
-        attrs.transactional = false;
-    }
+    expand_mutation_impl(input, attrs)
+        .unwrap_or_else(|e| e.to_compile_error())
+        .into()
+}
 
-    if has_attr_flag(&attr_str, "public") {
-        attrs.is_public = true;
-    }
+fn convert_mutation_attrs(darling: DarlingMutationAttrs) -> Result<MutationAttrs, syn::Error> {
+    let timeout = match darling.timeout {
+        Some(ref s) => Some(parse_duration_secs(s).ok_or_else(|| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!("invalid timeout \"{s}\": use a duration string like \"30s\", \"5m\", or \"1h\""),
+            )
+        })?),
+        None => None,
+    };
 
-    if has_attr_flag(&attr_str, "unscoped") {
-        attrs.is_unscoped = true;
-    }
+    let (rate_limit_requests, rate_limit_per_secs, rate_limit_key) =
+        if let Some(ref rl) = darling.rate_limit {
+            validate_rate_limit(rl)?;
+            (rl.requests, parse_rate_limit_per(rl)?, rl.key.clone())
+        } else {
+            (None, None, None)
+        };
 
-    if let Some(role_start) = attr_str.find("require_role")
-        && let Some(paren_start) = attr_str[role_start..].find('(')
-    {
-        let remaining = &attr_str[role_start + paren_start + 1..];
-        if let Some(paren_end) = remaining.find(')') {
-            let role = remaining[..paren_end].trim().trim_matches('"');
-            attrs.required_role = Some(role.to_string());
-        }
-    }
-
-    if let Some(timeout) = parse_attr_value(&attr_str, "timeout") {
-        match parse_duration_secs(&timeout) {
-            Some(secs) => attrs.timeout = Some(secs),
-            None => {
-                return Err(syn::Error::new(
-                    proc_macro2::Span::call_site(),
-                    format!(
-                        "invalid timeout \"{timeout}\": use a duration string like \"30s\", \"5m\", or \"1h\""
-                    ),
-                ));
-            }
-        }
-    }
-
-    if let Some(rl_start) = attr_str.find("rate_limit")
-        && let Some(paren_start) = attr_str[rl_start..].find('(')
-    {
-        let remaining = &attr_str[rl_start + paren_start + 1..];
-        if let Some(paren_end) = remaining.find(')') {
-            let rl_content = &remaining[..paren_end];
-
-            if let Some(req_start) = rl_content.find("requests")
-                && let Some(eq_pos) = rl_content[req_start..].find('=')
-            {
-                let after_eq = rl_content[req_start + eq_pos + 1..]
-                    .split(',')
-                    .next()
-                    .unwrap_or("")
-                    .trim();
-                match after_eq.parse::<u32>() {
-                    Ok(0) => {
-                        return Err(syn::Error::new(
-                            proc_macro2::Span::call_site(),
-                            "rate_limit requests must be at least 1",
-                        ));
-                    }
-                    Ok(n) => attrs.rate_limit_requests = Some(n),
-                    Err(_) => {
-                        return Err(syn::Error::new(
-                            proc_macro2::Span::call_site(),
-                            format!(
-                                "invalid rate_limit requests value \"{after_eq}\": expected a positive integer"
-                            ),
-                        ));
-                    }
-                }
-            }
-
-            if let Some(per_start) = rl_content.find("per")
-                && let Some(quote_start) = rl_content[per_start..].find('"')
-            {
-                let after_quote = &rl_content[per_start + quote_start + 1..];
-                if let Some(quote_end) = after_quote.find('"') {
-                    let per_str = &after_quote[..quote_end];
-                    match parse_duration_secs(per_str) {
-                        Some(secs) => attrs.rate_limit_per_secs = Some(secs),
-                        None => {
-                            return Err(syn::Error::new(
-                                proc_macro2::Span::call_site(),
-                                format!(
-                                    "invalid rate_limit per duration \"{per_str}\": use a duration like \"1m\", \"30s\", or \"1h\""
-                                ),
-                            ));
-                        }
-                    }
-                }
-            }
-
-            if let Some(key_start) = rl_content.find("key")
-                && let Some(quote_start) = rl_content[key_start..].find('"')
-            {
-                let after_quote = &rl_content[key_start + quote_start + 1..];
-                if let Some(quote_end) = after_quote.find('"') {
-                    let key = &after_quote[..quote_end];
-                    if !["user", "ip", "tenant", "global"].contains(&key)
-                        && !key.starts_with("custom(")
-                    {
-                        return Err(syn::Error::new(
-                            proc_macro2::Span::call_site(),
-                            format!(
-                                "invalid rate_limit key \"{key}\". Valid keys: \"user\", \"ip\", \"tenant\", \"global\", or \"custom(...)\""
-                            ),
-                        ));
-                    }
-                    attrs.rate_limit_key = Some(key.to_string());
-                }
-            }
-
-            let has_any_rl = attrs.rate_limit_requests.is_some()
-                || attrs.rate_limit_per_secs.is_some()
-                || attrs.rate_limit_key.is_some();
-            if has_any_rl && attrs.rate_limit_requests.is_none() {
-                return Err(syn::Error::new(
-                    proc_macro2::Span::call_site(),
-                    "rate_limit requires `requests` field (e.g. rate_limit(requests = 100, per = \"1m\", key = \"user\"))",
-                ));
-            }
-            if has_any_rl && attrs.rate_limit_per_secs.is_none() {
-                return Err(syn::Error::new(
-                    proc_macro2::Span::call_site(),
-                    "rate_limit requires `per` field (e.g. rate_limit(requests = 100, per = \"1m\", key = \"user\"))",
-                ));
-            }
-        }
-    }
-
-    if let Some(level) = parse_attr_value(&attr_str, "log") {
-        attrs.log_level = Some(level);
-    }
-
-    if let Some(size_str) = parse_attr_value(&attr_str, "max_size") {
-        attrs.max_upload_size_bytes = parse_size_bytes(&size_str);
-    }
-
-    if let Some(tables) = parse_tables_attr(&attr_str) {
-        attrs.tables = Some(tables);
-    }
-
-    Ok(attrs)
+    Ok(MutationAttrs {
+        name: darling.name,
+        description: darling.description,
+        required_role: darling.require_role.map(|r| r.0),
+        is_public: darling.public,
+        timeout,
+        rate_limit_requests,
+        rate_limit_per_secs,
+        rate_limit_key,
+        log_level: darling.log,
+        transactional: darling.transactional.unwrap_or(true),
+        max_upload_size_bytes: darling.max_size.and_then(|s| parse_size_bytes(&s)),
+        tables: darling.tables.map(|t| t.0),
+    })
 }
 
 fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<TokenStream2> {
@@ -604,8 +514,8 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
                 }
             }
 
-            forge::inventory::submit!(forge::AutoMutation(|registry| {
-                registry.register_mutation::<#struct_name>();
+            forge::inventory::submit!(forge::AutoHandler(|registries| {
+                registries.functions.register_mutation::<#struct_name>();
             }));
         }
     })
@@ -617,8 +527,8 @@ mod tests {
     use super::*;
 
     // Note: proc_macro::TokenStream cannot be created outside the compiler bridge,
-    // so we test parse_mutation_attrs indirectly through the has_attr_flag/parse_attr_value
-    // utilities and test expand_mutation_impl directly with syn::ItemFn + MutationAttrs.
+    // so we test parse_mutation_attrs indirectly and test expand_mutation_impl directly
+    // with syn::ItemFn + MutationAttrs.
 
     // --- MutationAttrs default ---
 
@@ -627,7 +537,6 @@ mod tests {
         let attrs = MutationAttrs::default();
         assert!(attrs.transactional, "transactional defaults to true");
         assert!(!attrs.is_public);
-        assert!(!attrs.is_unscoped);
         assert!(attrs.required_role.is_none());
         assert!(attrs.timeout.is_none());
         assert!(attrs.rate_limit_requests.is_none());

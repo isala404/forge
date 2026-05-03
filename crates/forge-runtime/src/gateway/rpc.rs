@@ -12,14 +12,14 @@ use forge_core::function::{
 use super::request::{BatchRpcRequest, BatchRpcResponse, RpcRequest};
 use super::response::{RpcError, RpcResponse};
 use super::tracing::TracingState;
-use crate::db::Database;
-use crate::function::{FunctionExecutor, FunctionRegistry};
+use crate::function::{FunctionRegistry, FunctionRouter};
+use crate::pg::Database;
 
 /// RPC handler for function invocations.
 #[derive(Clone)]
 pub struct RpcHandler {
-    /// Function executor.
-    executor: Arc<FunctionExecutor>,
+    /// Function router.
+    router: Arc<FunctionRouter>,
     /// Maximum requests in a single batch call.
     max_batch_size: usize,
 }
@@ -27,9 +27,9 @@ pub struct RpcHandler {
 impl RpcHandler {
     /// Create a new RPC handler.
     pub fn new(registry: FunctionRegistry, db: Database) -> Self {
-        let executor = FunctionExecutor::new(Arc::new(registry), db);
+        let router = FunctionRouter::new(Arc::new(registry), db);
         Self {
-            executor: Arc::new(executor),
+            router: Arc::new(router),
             max_batch_size: 100,
         }
     }
@@ -52,7 +52,7 @@ impl RpcHandler {
         workflow_dispatcher: Option<Arc<dyn WorkflowDispatch>>,
         token_issuer: Option<Arc<dyn forge_core::TokenIssuer>>,
     ) -> Self {
-        let executor = FunctionExecutor::with_dispatch_and_issuer(
+        let router = FunctionRouter::with_dispatch_and_issuer(
             Arc::new(registry),
             db,
             job_dispatcher,
@@ -60,7 +60,7 @@ impl RpcHandler {
             token_issuer,
         );
         Self {
-            executor: Arc::new(executor),
+            router: Arc::new(router),
             max_batch_size: 100,
         }
     }
@@ -72,8 +72,8 @@ impl RpcHandler {
 
     /// Set the token TTL config. Must be called before any requests are handled.
     pub fn set_token_ttl(&mut self, ttl: forge_core::AuthTokenTtl) {
-        if let Some(executor) = Arc::get_mut(&mut self.executor) {
-            executor.set_token_ttl(ttl);
+        if let Some(router) = Arc::get_mut(&mut self.router) {
+            router.set_token_ttl(ttl);
         }
     }
 
@@ -82,21 +82,21 @@ impl RpcHandler {
         &mut self,
         rate_limiter: Arc<dyn forge_core::rate_limit::RateLimiterBackend>,
     ) {
-        if let Some(executor) = Arc::get_mut(&mut self.executor) {
-            executor.set_rate_limiter(rate_limiter);
+        if let Some(router) = Arc::get_mut(&mut self.router) {
+            router.set_rate_limiter(rate_limiter);
         }
     }
 
     /// Set a custom role resolver. Call before handling requests.
     pub fn set_role_resolver(&mut self, resolver: forge_core::SharedRoleResolver) {
-        if let Some(executor) = Arc::get_mut(&mut self.executor) {
-            executor.set_role_resolver(resolver);
+        if let Some(router) = Arc::get_mut(&mut self.router) {
+            router.set_role_resolver(resolver);
         }
     }
 
     /// Look up function metadata by name.
     pub fn function_info(&self, name: &str) -> Option<FunctionInfo> {
-        self.executor.function_info(name)
+        self.router.function_info(name)
     }
 
     /// Set the signals collector for auto-capturing RPC events.
@@ -105,8 +105,8 @@ impl RpcHandler {
         collector: crate::signals::SignalsCollector,
         server_secret: String,
     ) {
-        if let Some(executor) = Arc::get_mut(&mut self.executor) {
-            executor.set_signals_collector(collector, server_secret);
+        if let Some(router) = Arc::get_mut(&mut self.router) {
+            router.set_signals_collector(collector, server_secret);
         }
     }
 
@@ -117,14 +117,15 @@ impl RpcHandler {
         auth: AuthContext,
         metadata: RequestMetadata,
     ) -> RpcResponse {
-        // Don't check has_function early - let executor try jobs/workflows too
+        // Don't check has_function early - let router try jobs/workflows too
         match self
-            .executor
+            .router
             .execute(&request.function, request.args, auth, metadata.clone())
             .await
         {
-            Ok(exec_result) => RpcResponse::success(exec_result.result)
-                .with_request_id(metadata.request_id().to_string()),
+            Ok(value) => {
+                RpcResponse::success(value).with_request_id(metadata.request_id().to_string())
+            }
             Err(e) => RpcResponse::error(RpcError::from(e))
                 .with_request_id(metadata.request_id().to_string()),
         }

@@ -40,20 +40,7 @@ pub use forge_core::schemars;
 pub use inventory;
 
 // Re-export auto-registration types for macro-generated code.
-// Each type is feature-gated; using e.g. `#[forge::job]` without the `jobs`
-// feature gives a compile error from the missing `forge::AutoJob` import.
-pub use auto_register::{AutoMutation, AutoQuery};
-
-#[cfg(feature = "cron")]
-pub use auto_register::AutoCron;
-#[cfg(feature = "daemons")]
-pub use auto_register::AutoDaemon;
-#[cfg(feature = "jobs")]
-pub use auto_register::AutoJob;
-#[cfg(feature = "workflows")]
-pub use auto_register::AutoWorkflow;
-#[cfg(feature = "gateway")]
-pub use auto_register::{AutoMcpTool, AutoWebhook};
+pub use auto_register::{AutoHandler, HandlerRegistries};
 
 // Re-export embedded frontend handler
 #[cfg(feature = "embedded-frontend")]

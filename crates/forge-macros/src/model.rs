@@ -19,7 +19,13 @@ fn expand_model_impl(
     _original_tokens: TokenStream2,
 ) -> syn::Result<TokenStream2> {
     let attr_str = attr.to_string();
-    crate::utils::validate_attr_keys(&attr_str, &[], "model")?;
+    let trimmed = attr_str.trim();
+    if !trimmed.is_empty() {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!("Unknown attribute `{trimmed}` for #[model]. This macro accepts no attributes."),
+        ));
+    }
     let struct_name = &input.ident;
     let vis = &input.vis;
     let table_name = get_table_name(&input)?;

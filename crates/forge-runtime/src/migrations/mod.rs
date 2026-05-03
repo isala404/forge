@@ -11,17 +11,13 @@
 //! - **User migrations**: Application schema, named `XXXX_name.sql`.
 //!   Sorted alphabetically and applied after system migrations.
 
-mod builtin;
-mod diff;
-mod generator;
-mod runner;
+pub(crate) mod builtin;
+pub(crate) mod runner;
 
 pub use builtin::{
     SYSTEM_MIGRATION_PREFIX, SystemMigration, extract_version, get_all_system_sql,
     get_builtin_migrations, get_system_migrations, is_system_migration,
 };
-pub use diff::{DiffAction, DiffEntry, SchemaDiff};
-pub use generator::MigrationGenerator;
 pub use runner::{
     AppliedMigration, Migration, MigrationRunner, MigrationStatus, load_migrations_from_dir,
 };

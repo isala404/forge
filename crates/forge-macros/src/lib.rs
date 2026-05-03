@@ -2,6 +2,7 @@
 
 use proc_macro::TokenStream;
 
+pub(crate) mod attrs;
 mod cron;
 mod daemon;
 mod enum_type;
@@ -61,7 +62,7 @@ pub fn forge_enum(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// - `log` - Enable logging for this query
 /// - `timeout = 30` - Timeout in seconds. For HTTP-capable handlers, an
 ///   explicit timeout also becomes the default outbound HTTP timeout for `ctx.http()`
-/// - `tables = ["users", "projects"]` - Explicit table dependencies (for dynamic SQL)
+/// - `tables("users", "projects")` - Explicit table dependencies (for dynamic SQL)
 ///
 /// # Table Dependency Extraction
 /// By default, table dependencies are automatically extracted from SQL strings
@@ -88,7 +89,7 @@ pub fn forge_enum(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///     // Requires admin role
 /// }
 ///
-/// #[forge::query(tables = ["users", "audit_log"])]
+/// #[forge::query(tables("users", "audit_log"))]
 /// pub async fn dynamic_query(ctx: &QueryContext, table: String) -> Result<Vec<Row>> {
 ///     // Explicit tables for dynamic SQL
 /// }

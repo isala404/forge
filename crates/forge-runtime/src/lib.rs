@@ -19,10 +19,10 @@ pub use sqlx;
 
 // Always-on infrastructure
 pub mod cluster;
-pub mod db;
 pub mod function;
 pub mod migrations;
 pub mod observability;
+pub mod pg;
 pub mod rate_limit;
 pub(crate) mod stable_hash;
 pub mod testing;
@@ -58,15 +58,18 @@ pub mod signals;
 // --- Re-exports follow the same gating ---
 
 pub use cluster::{
-    GracefulShutdown, HeartbeatConfig, HeartbeatLoop, InFlightGuard, LeaderConfig, LeaderElection,
-    LeaderGuard, NodeCounts, NodeRegistry, ShutdownConfig,
+    GracefulShutdown, HeartbeatConfig, HeartbeatLoop, InFlightGuard, NodeCounts, NodeRegistry,
+    ShutdownConfig,
 };
-pub use db::Database;
-pub use function::{FunctionExecutor, FunctionRegistry, FunctionRouter, RouteResult};
-pub use migrations::{MigrationGenerator, SchemaDiff};
+pub use function::{FunctionRegistry, FunctionRouter, RouteResult};
 pub use observability::{
     TelemetryConfig, TelemetryError, build_env_filter, init_telemetry, shutdown_telemetry,
 };
+pub use pg::{
+    AppliedMigration, Database, Migration, MigrationRunner, MigrationStatus,
+    load_migrations_from_dir,
+};
+pub use pg::{LeaderConfig, LeaderElection, LeaderGuard};
 pub use rate_limit::{HybridRateLimiter, StrictRateLimiter};
 
 #[cfg(feature = "cron")]

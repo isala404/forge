@@ -7,7 +7,7 @@ use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use tokio::task::JoinHandle;
 use tracing::log::LevelFilter;
 
-use forge_core::config::{DatabaseConfig, PoolConfig};
+use forge_core::config::DatabaseConfig;
 use forge_core::error::{ForgeError, Result};
 
 struct ReplicaEntry {
@@ -15,19 +15,13 @@ struct ReplicaEntry {
     healthy: Arc<AtomicBool>,
 }
 
-/// Database connection wrapper with health-aware replica routing and workload isolation.
+/// Database connection wrapper with health-aware replica routing.
 #[derive(Clone)]
 pub struct Database {
     primary: Arc<PgPool>,
     replicas: Arc<Vec<ReplicaEntry>>,
     config: DatabaseConfig,
     replica_counter: Arc<AtomicUsize>,
-    /// Isolated pool for background jobs, cron, daemons, workflows.
-    jobs_pool: Option<Arc<PgPool>>,
-    /// Isolated pool for observability writes.
-    observability_pool: Option<Arc<PgPool>>,
-    /// Isolated pool for long-running analytics queries.
-    analytics_pool: Option<Arc<PgPool>>,
 }
 
 impl Database {
@@ -50,7 +44,6 @@ impl Database {
             ));
         }
 
-        // If pools.default overrides the primary pool size, use it
         let primary_size = config
             .pools
             .default
@@ -63,7 +56,6 @@ impl Database {
             .as_ref()
             .map(|p| p.timeout_secs())
             .unwrap_or_else(|| config.pool_timeout_secs());
-
         let primary_min = config
             .pools
             .default
@@ -76,7 +68,6 @@ impl Database {
             .as_ref()
             .map(|p| p.test_before_acquire)
             .unwrap_or(config.test_before_acquire);
-
         let statement_timeout = config
             .pools
             .default
@@ -112,27 +103,11 @@ impl Database {
             });
         }
 
-        let jobs_pool =
-            Self::create_isolated_pool(&config.url, config.pools.jobs.as_ref(), service_name)
-                .await?;
-        let observability_pool = Self::create_isolated_pool(
-            &config.url,
-            config.pools.observability.as_ref(),
-            service_name,
-        )
-        .await?;
-        let analytics_pool =
-            Self::create_isolated_pool(&config.url, config.pools.analytics.as_ref(), service_name)
-                .await?;
-
         Ok(Self {
             primary: Arc::new(primary),
             replicas: Arc::new(replicas),
             config: config.clone(),
             replica_counter: Arc::new(AtomicUsize::new(0)),
-            jobs_pool,
-            observability_pool,
-            analytics_pool,
         })
     }
 
@@ -213,27 +188,6 @@ impl Database {
             .await
     }
 
-    async fn create_isolated_pool(
-        url: &str,
-        config: Option<&PoolConfig>,
-        service_name: &str,
-    ) -> Result<Option<Arc<PgPool>>> {
-        let Some(cfg) = config else {
-            return Ok(None);
-        };
-        let pool = Self::create_pool_with_opts(
-            url,
-            cfg.size,
-            cfg.min_size,
-            cfg.timeout_secs(),
-            cfg.test_before_acquire,
-            service_name,
-        )
-        .await
-        .map_err(|e| ForgeError::Internal(format!("Failed to create isolated pool: {}", e)))?;
-        Ok(Some(Arc::new(pool)))
-    }
-
     /// Get the primary pool for writes.
     pub fn primary(&self) -> &PgPool {
         &self.primary
@@ -260,24 +214,6 @@ impl Database {
 
         // All replicas unhealthy, fall back to primary
         &self.primary
-    }
-
-    /// Pool for background jobs, cron, daemons, and workflows.
-    /// Falls back to primary if no isolated pool is configured.
-    pub fn jobs_pool(&self) -> &PgPool {
-        self.jobs_pool.as_deref().unwrap_or(&self.primary)
-    }
-
-    /// Pool for observability writes (metrics, slow query logs).
-    /// Falls back to primary if no isolated pool is configured.
-    pub fn observability_pool(&self) -> &PgPool {
-        self.observability_pool.as_deref().unwrap_or(&self.primary)
-    }
-
-    /// Pool for long-running analytics queries.
-    /// Falls back to primary if no isolated pool is configured.
-    pub fn analytics_pool(&self) -> &PgPool {
-        self.analytics_pool.as_deref().unwrap_or(&self.primary)
     }
 
     /// Start background health monitoring for replicas. Returns None if no replicas configured.
@@ -317,9 +253,6 @@ impl Database {
             replicas: Arc::new(Vec::new()),
             config: DatabaseConfig::default(),
             replica_counter: Arc::new(AtomicUsize::new(0)),
-            jobs_pool: None,
-            observability_pool: None,
-            analytics_pool: None,
         }
     }
 
@@ -337,15 +270,6 @@ impl Database {
         self.primary.close().await;
         for entry in self.replicas.iter() {
             entry.pool.close().await;
-        }
-        if let Some(ref p) = self.jobs_pool {
-            p.close().await;
-        }
-        if let Some(ref p) = self.observability_pool {
-            p.close().await;
-        }
-        if let Some(ref p) = self.analytics_pool {
-            p.close().await;
         }
     }
 }

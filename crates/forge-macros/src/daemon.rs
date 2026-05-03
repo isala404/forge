@@ -2,17 +2,30 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{ItemFn, parse_macro_input};
 
-use crate::utils::{parse_attr_value, parse_duration_tokens, to_pascal_case, validate_attr_keys};
+use darling::FromMeta;
+use darling::ast::NestedMeta;
 
-const ALLOWED_DAEMON_KEYS: &[&str] = &[
-    "name",
-    "leader_elected",
-    "restart_on_panic",
-    "timeout",
-    "restart_delay",
-    "startup_delay",
-    "max_restarts",
-];
+use crate::utils::{parse_duration_tokens, to_pascal_case};
+
+/// Darling-parsed daemon attributes.
+#[derive(Debug, Default, FromMeta)]
+struct DarlingDaemonAttrs {
+    /// Override the registry name (default: function name).
+    #[darling(default)]
+    name: Option<String>,
+    #[darling(default)]
+    leader_elected: Option<bool>,
+    #[darling(default)]
+    restart_on_panic: Option<bool>,
+    #[darling(default)]
+    timeout: Option<String>,
+    #[darling(default)]
+    restart_delay: Option<String>,
+    #[darling(default)]
+    startup_delay: Option<String>,
+    #[darling(default)]
+    max_restarts: Option<u32>,
+}
 
 #[derive(Debug, Default)]
 struct DaemonAttrs {
@@ -26,83 +39,28 @@ struct DaemonAttrs {
     max_restarts: Option<u32>,
 }
 
-fn parse_daemon_attrs(attr: TokenStream) -> DaemonAttrs {
-    let mut result = DaemonAttrs::default();
-    let attr_str = attr.to_string();
-
-    if let Some(name) = parse_attr_value(&attr_str, "name") {
-        result.name = Some(name);
-    }
-
-    if let Some(le_start) = attr_str.find("leader_elected")
-        && let Some(eq_pos) = attr_str[le_start..].find('=')
-    {
-        let after_eq = &attr_str[le_start + eq_pos + 1..];
-        let value = after_eq.split(&[',', ')']).next().unwrap_or("").trim();
-        result.leader_elected = Some(value == "true");
-    }
-
-    if let Some(rop_start) = attr_str.find("restart_on_panic")
-        && let Some(eq_pos) = attr_str[rop_start..].find('=')
-    {
-        let after_eq = &attr_str[rop_start + eq_pos + 1..];
-        let value = after_eq.split(&[',', ')']).next().unwrap_or("").trim();
-        result.restart_on_panic = Some(value == "true");
-    }
-
-    if let Some(timeout) = parse_attr_value(&attr_str, "timeout") {
-        result.timeout = Some(timeout);
-    }
-
-    if let Some(rd_start) = attr_str.find("restart_delay")
-        && let Some(eq_pos) = attr_str[rd_start..].find('=')
-    {
-        let after_eq = &attr_str[rd_start + eq_pos + 1..];
-        if let Some(quote_start) = after_eq.find('"')
-            && let Some(quote_end) = after_eq[quote_start + 1..].find('"')
-        {
-            result.restart_delay = Some(after_eq[quote_start + 1..][..quote_end].to_string());
-        }
-    }
-
-    if let Some(sd_start) = attr_str.find("startup_delay")
-        && let Some(eq_pos) = attr_str[sd_start..].find('=')
-    {
-        let after_eq = &attr_str[sd_start + eq_pos + 1..];
-        if let Some(quote_start) = after_eq.find('"')
-            && let Some(quote_end) = after_eq[quote_start + 1..].find('"')
-        {
-            result.startup_delay = Some(after_eq[quote_start + 1..][..quote_end].to_string());
-        }
-    }
-
-    if let Some(mr_start) = attr_str.find("max_restarts")
-        && let Some(eq_pos) = attr_str[mr_start..].find('=')
-    {
-        let after_eq = &attr_str[mr_start + eq_pos + 1..];
-        if let Ok(n) = after_eq
-            .split(&[',', ')'])
-            .next()
-            .unwrap_or("")
-            .trim()
-            .parse::<u32>()
-        {
-            result.max_restarts = Some(n);
-        }
-    }
-
-    result
-}
-
 pub fn daemon_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
-    let attr_str = attr.to_string();
 
-    if let Err(e) = validate_attr_keys(&attr_str, ALLOWED_DAEMON_KEYS, "daemon") {
-        return e.to_compile_error().into();
-    }
+    let attr_args = match NestedMeta::parse_meta_list(attr.into()) {
+        Ok(v) => v,
+        Err(e) => return TokenStream::from(e.into_compile_error()),
+    };
 
-    let attrs = parse_daemon_attrs(attr);
+    let darling_attrs = match DarlingDaemonAttrs::from_list(&attr_args) {
+        Ok(v) => v,
+        Err(e) => return TokenStream::from(e.write_errors()),
+    };
+
+    let attrs = DaemonAttrs {
+        name: darling_attrs.name,
+        leader_elected: darling_attrs.leader_elected,
+        restart_on_panic: darling_attrs.restart_on_panic,
+        timeout: darling_attrs.timeout,
+        restart_delay: darling_attrs.restart_delay,
+        startup_delay: darling_attrs.startup_delay,
+        max_restarts: darling_attrs.max_restarts,
+    };
 
     let fn_name = &input.sig.ident;
     let fn_name_str = fn_name.to_string();
@@ -173,8 +131,8 @@ pub fn daemon_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
             }
 
-            forge::inventory::submit!(forge::AutoDaemon(|registry| {
-                registry.register::<#struct_name>();
+            forge::inventory::submit!(forge::AutoHandler(|registries| {
+                registries.daemons.register::<#struct_name>();
             }));
         }
     };

@@ -8,7 +8,7 @@ use tracing::{Instrument, Span, field};
 use uuid::Uuid;
 
 use super::registry::CronRegistry;
-use crate::cluster::LeaderElection;
+use crate::pg::LeaderElection;
 use forge_core::CircuitBreakerClient;
 use forge_core::cron::CronContext;
 
@@ -311,13 +311,9 @@ impl CronRunner {
         let stale_threshold = chrono::Duration::from_std(self.config.run_stale_threshold)
             .unwrap_or(chrono::Duration::minutes(15));
 
-        // -1 disables the fence: query becomes `WHERE TRUE` for single-node setups.
-        let fence_term: i64 = self
-            .config
-            .leader_election
-            .as_ref()
-            .and_then(|e| e.current_term())
-            .unwrap_or(-1);
+        // -1 disables the DB-side term fence; leadership is already gated by the
+        // in-memory is_leader() check before tick() runs.
+        let fence_term: i64 = -1;
 
         // Insert new run, or reclaim stale running row if previous node crashed.
         let result = sqlx::query!(

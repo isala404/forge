@@ -5,20 +5,11 @@ use syn::{ExprAwait, ExprCall, ItemFn, Lit, parse_macro_input};
 
 use std::collections::BTreeSet;
 
-use crate::utils::{
-    has_attr_flag, parse_attr_value, parse_duration_tokens, to_pascal_case, validate_attr_keys,
-};
+use darling::FromMeta;
+use darling::ast::NestedMeta;
 
-const ALLOWED_WORKFLOW_KEYS: &[&str] = &[
-    "name",
-    "version",
-    "timeout",
-    "public",
-    "active",
-    "deprecated",
-    "status",
-    "require_role",
-];
+use crate::attrs::RequireRole;
+use crate::utils::{parse_duration_tokens, to_pascal_case};
 
 /// Minimum sleep duration (in seconds) that triggers the tokio::sleep warning.
 /// Sleeps shorter than this are allowed since they're typically used for polling/retry loops.
@@ -151,6 +142,57 @@ impl<'ast> Visit<'ast> for TokioSleepDetector {
     }
 }
 
+/// Darling-parsed workflow attributes.
+#[derive(Debug, FromMeta)]
+#[darling(and_then = DarlingWorkflowAttrs::validate)]
+struct DarlingWorkflowAttrs {
+    #[darling(default)]
+    name: Option<String>,
+    #[darling(default)]
+    version: Option<String>,
+    #[darling(default)]
+    timeout: Option<String>,
+    #[darling(default)]
+    public: bool,
+    #[darling(default)]
+    active: bool,
+    #[darling(default)]
+    deprecated: bool,
+    #[darling(default)]
+    status: Option<String>,
+    #[darling(default)]
+    require_role: Option<RequireRole>,
+}
+
+impl DarlingWorkflowAttrs {
+    fn validate(self) -> darling::Result<Self> {
+        // Validate status value if provided
+        if let Some(ref s) = self.status
+            && !["active", "deprecated", "staging"].contains(&s.as_str())
+        {
+            return Err(darling::Error::custom(format!(
+                "invalid workflow status \"{s}\": expected one of \"active\", \"deprecated\", \"staging\""
+            )));
+        }
+
+        // Can't use both status= and legacy flags
+        if self.status.is_some() && (self.active || self.deprecated) {
+            return Err(darling::Error::custom(
+                "use either `status = \"...\"` or the legacy `active`/`deprecated` flag, not both",
+            ));
+        }
+
+        // Can't be both active and deprecated
+        if self.active && self.deprecated {
+            return Err(darling::Error::custom(
+                "workflow cannot be both `active` and `deprecated`",
+            ));
+        }
+
+        Ok(self)
+    }
+}
+
 /// Workflow attributes.
 #[derive(Debug)]
 struct WorkflowAttrs {
@@ -182,77 +224,27 @@ impl Default for WorkflowAttrs {
     }
 }
 
-fn parse_workflow_attrs(attr: TokenStream) -> Result<WorkflowAttrs, syn::Error> {
-    let mut result = WorkflowAttrs::default();
-    let attr_str = attr.to_string();
-
-    if let Some(name) = parse_attr_value(&attr_str, "name") {
-        result.name = Some(name);
-    }
-
-    if let Some(version) = parse_attr_value(&attr_str, "version") {
-        result.version = Some(version);
-    }
-
-    if let Some(timeout) = parse_attr_value(&attr_str, "timeout") {
-        result.timeout = Some(timeout);
-    }
-
-    if has_attr_flag(&attr_str, "public") {
-        result.is_public = true;
-    }
-
-    // status = "active" | "deprecated" | "staging"
-    let has_status_value = parse_attr_value(&attr_str, "status").is_some();
-    if let Some(s) = parse_attr_value(&attr_str, "status") {
+fn convert_workflow_attrs(darling: DarlingWorkflowAttrs) -> WorkflowAttrs {
+    let status = if let Some(ref s) = darling.status {
         match s.as_str() {
-            "active" => result.status = WorkflowStatus::Active,
-            "deprecated" => result.status = WorkflowStatus::Deprecated,
-            "staging" => result.status = WorkflowStatus::Staging,
-            other => {
-                return Err(syn::Error::new(
-                    proc_macro2::Span::call_site(),
-                    format!(
-                        "invalid workflow status \"{other}\": expected one of \"active\", \"deprecated\", \"staging\""
-                    ),
-                ));
-            }
+            "deprecated" => WorkflowStatus::Deprecated,
+            "staging" => WorkflowStatus::Staging,
+            _ => WorkflowStatus::Active,
         }
-    }
+    } else if darling.deprecated {
+        WorkflowStatus::Deprecated
+    } else {
+        WorkflowStatus::Active
+    };
 
-    let active_flag = has_attr_flag(&attr_str, "active");
-    let deprecated_flag = has_attr_flag(&attr_str, "deprecated");
-    if has_status_value && (active_flag || deprecated_flag) {
-        return Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "use either `status = \"...\"` or the legacy `active`/`deprecated` flag, not both",
-        ));
+    WorkflowAttrs {
+        name: darling.name,
+        version: darling.version,
+        timeout: darling.timeout,
+        is_public: darling.public,
+        status,
+        required_role: darling.require_role.map(|r| r.0),
     }
-    if active_flag && deprecated_flag {
-        return Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "workflow cannot be both `active` and `deprecated`",
-        ));
-    }
-    if !has_status_value {
-        if active_flag {
-            result.status = WorkflowStatus::Active;
-        } else if deprecated_flag {
-            result.status = WorkflowStatus::Deprecated;
-        }
-    }
-
-    if let Some(role_start) = attr_str.find("require_role")
-        && let Some(paren_start) = attr_str[role_start..].find('(')
-    {
-        let remaining = &attr_str[role_start + paren_start + 1..];
-        if let Some(paren_end) = remaining.find(')') {
-            let role = remaining[..paren_end].trim().trim_matches('"');
-            result.required_role = Some(role.to_string());
-        }
-    }
-
-    Ok(result)
 }
 
 /// Extract step and wait keys from the workflow function body for signature derivation.
@@ -355,16 +347,18 @@ fn derive_signature(
 
 pub fn workflow_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
-    let attr_str = attr.to_string();
 
-    if let Err(e) = validate_attr_keys(&attr_str, ALLOWED_WORKFLOW_KEYS, "workflow") {
-        return e.to_compile_error().into();
-    }
-
-    let attrs = match parse_workflow_attrs(attr) {
-        Ok(attrs) => attrs,
-        Err(e) => return e.to_compile_error().into(),
+    let attr_args = match NestedMeta::parse_meta_list(attr.into()) {
+        Ok(v) => v,
+        Err(e) => return TokenStream::from(e.into_compile_error()),
     };
+
+    let darling_attrs = match DarlingWorkflowAttrs::from_list(&attr_args) {
+        Ok(v) => v,
+        Err(e) => return TokenStream::from(e.write_errors()),
+    };
+
+    let attrs = convert_workflow_attrs(darling_attrs);
 
     let fn_name = &input.sig.ident;
     let fn_name_str = fn_name.to_string();
@@ -534,8 +528,8 @@ pub fn workflow_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
             }
 
-            forge::inventory::submit!(forge::AutoWorkflow(|registry| {
-                registry.register::<#struct_name>();
+            forge::inventory::submit!(forge::AutoHandler(|registries| {
+                registries.workflows.register::<#struct_name>();
             }));
         }
     };

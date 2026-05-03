@@ -53,7 +53,7 @@ pub async fn increment(ctx: &MutationContext, input: IncrementInput) -> Result<C
 }
 
 /// Single counter read. Hot read path.
-#[forge::query(unscoped, tables = ["counters"])]
+#[forge::query(unscoped, tables("counters"))]
 pub async fn get_counter(ctx: &QueryContext, input: GetCounterInput) -> Result<Counter> {
     sqlx::query_as!(Counter, "SELECT * FROM counters WHERE id = $1", input.id)
         .fetch_optional(ctx.db())
@@ -62,7 +62,7 @@ pub async fn get_counter(ctx: &QueryContext, input: GetCounterInput) -> Result<C
 }
 
 /// Paginated counter list. Capped to 20 rows like a real endpoint.
-#[forge::query(unscoped, tables = ["counters"])]
+#[forge::query(unscoped, tables("counters"))]
 pub async fn list_counters(ctx: &QueryContext) -> Result<Vec<Counter>> {
     sqlx::query_as!(Counter, "SELECT * FROM counters ORDER BY name LIMIT 20")
         .fetch_all(ctx.db())

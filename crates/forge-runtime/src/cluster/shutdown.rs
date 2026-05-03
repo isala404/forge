@@ -5,8 +5,8 @@ use std::time::Duration;
 use forge_core::cluster::NodeStatus;
 use tokio::sync::broadcast;
 
-use super::leader::LeaderElection;
 use super::registry::NodeRegistry;
+use crate::pg::LeaderElection;
 
 /// Graceful shutdown configuration.
 #[derive(Debug, Clone)]

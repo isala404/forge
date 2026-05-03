@@ -38,9 +38,9 @@ use super::sse::{
 };
 use super::tls::{TlsListenConfig, bind_listener};
 use super::tracing::{REQUEST_ID_HEADER, SPAN_ID_HEADER, TRACE_ID_HEADER, TracingState};
-use crate::db::Database;
 use crate::function::FunctionRegistry;
 use crate::mcp::McpToolRegistry;
+use crate::pg::Database;
 use crate::realtime::{Reactor, ReactorConfig};
 
 const DEFAULT_MAX_JSON_BODY_SIZE: usize = 1024 * 1024;
@@ -535,7 +535,7 @@ impl GatewayServer {
         if let Some(collector) = &self.signals_collector {
             let signals_state = Arc::new(crate::signals::endpoints::SignalsState {
                 collector: collector.clone(),
-                pool: self.db.analytics_pool().clone(),
+                pool: self.db.primary().clone(),
                 server_secret: self
                     .config
                     .auth

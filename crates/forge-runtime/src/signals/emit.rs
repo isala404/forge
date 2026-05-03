@@ -1,6 +1,6 @@
 //! Process-wide signal emission helpers for background executions.
 //!
-//! The RPC path threads a [`SignalsCollector`] through [`FunctionExecutor`]
+//! The RPC path threads a [`SignalsCollector`] through [`FunctionRouter`]
 //! directly, but jobs, crons, workflows, daemons, webhooks, and middleware
 //! don't have that plumbing. This module lets them emit signals without
 //! changing their call signatures.

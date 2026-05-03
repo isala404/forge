@@ -43,7 +43,15 @@ pub async fn register(ctx: &MutationContext, input: RegisterInput) -> Result<Aut
     }
 
     let password_hash =
-        bcrypt::hash(&input.password, 10).map_err(|e| ForgeError::Internal(e.to_string()))?;
+    {
+        use argon2::PasswordHasher;
+        use password_hash::SaltString;
+        let salt = SaltString::generate(&mut password_hash::rand_core::OsRng);
+        argon2::Argon2::default()
+            .hash_password(input.password.as_bytes(), &salt)
+            .map_err(|e| ForgeError::Internal(e.to_string()))?
+            .to_string()
+    };
 
     let id = Uuid::new_v4();
     let now = Utc::now();
@@ -108,7 +116,15 @@ pub async fn login(ctx: &MutationContext, input: LoginInput) -> Result<AuthRespo
         .ok_or_else(|| ForgeError::Validation("Invalid email or password".into()))?;
 
     let valid =
-        bcrypt::verify(&input.password, hash).map_err(|e| ForgeError::Internal(e.to_string()))?;
+    {
+        use argon2::PasswordVerifier;
+        let parsed = password_hash::PasswordHash::new(hash)
+            .map_err(|e| ForgeError::Internal(e.to_string()))?;
+        argon2::Argon2::default()
+            .verify_password(input.password.as_bytes(), &parsed)
+            .map_err(|_| ForgeError::Validation("Invalid email or password".into()))?;
+        true
+    };
 
     if !valid {
         return Err(ForgeError::Validation("Invalid email or password".into()));
