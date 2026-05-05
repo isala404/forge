@@ -373,6 +373,14 @@ impl FunctionRouter {
         self.registry.get(function_name).map(|e| e.kind())
     }
 
+    /// Return info for all registered query and mutation functions.
+    pub fn function_infos(&self) -> Vec<FunctionInfo> {
+        self.registry
+            .functions()
+            .map(|(_, entry)| entry.info().clone())
+            .collect()
+    }
+
     pub async fn route(
         &self,
         function_name: &str,
@@ -386,6 +394,15 @@ impl FunctionRouter {
                 .await?;
 
             return match entry {
+                FunctionEntry::Webhook { info } => {
+                    // Webhooks are registered in the function registry for
+                    // metadata access only. They must be called via their
+                    // dedicated HTTP path which performs signature validation.
+                    return Err(ForgeError::InvalidArgument(format!(
+                        "Webhook '{}' cannot be called via RPC; use its dedicated HTTP endpoint",
+                        info.name
+                    )));
+                }
                 FunctionEntry::Query { handler, info, .. } => {
                     let pool = if info.consistent {
                         self.db.primary().clone()
@@ -685,6 +702,7 @@ impl FunctionRouter {
                 entry.info().log_level.unwrap_or(match entry.kind() {
                     forge_core::FunctionKind::Mutation => forge_core::LogLevel::Info,
                     forge_core::FunctionKind::Query => forge_core::LogLevel::Debug,
+                    forge_core::FunctionKind::Webhook => forge_core::LogLevel::Info,
                     _ => forge_core::LogLevel::Info,
                 })
             })

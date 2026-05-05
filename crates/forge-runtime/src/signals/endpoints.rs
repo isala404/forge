@@ -1,13 +1,11 @@
-//! HTTP ingestion endpoints for client-side signal events.
+//! HTTP ingestion endpoint for client-side signal events.
 //!
-//! Routes (under /_api/):
-//! - POST /signal/event  -- custom events
-//! - POST /signal/view   -- page views
-//! - POST /signal/report -- diagnostic error reports
+//! Route (under /_api/):
+//! - POST /signal -- unified signal ingestion, discriminated by `type` field
 //!
-//! Every endpoint except `/signal/report` short-circuits when the request
-//! carries `DNT: 1` or `Sec-GPC: 1`. Error reports still land so production
-//! crashes from opted-out browsers remain visible.
+//! The `event` and `view` subtypes short-circuit when the request carries
+//! `DNT: 1` or `Sec-GPC: 1`. Error reports still land so production crashes
+//! from opted-out browsers remain visible.
 
 use std::sync::Arc;
 
@@ -18,7 +16,7 @@ use axum::response::IntoResponse;
 use forge_core::AuthContext;
 use forge_core::signals::{
     DiagnosticReport, PageViewPayload, SignalEvent, SignalEventBatch, SignalEventType,
-    SignalResponse, UtmParams,
+    SignalPayload, SignalResponse, UtmParams,
 };
 use serde_json::Value;
 use sqlx::PgPool;
@@ -35,7 +33,7 @@ use super::visitor;
 const MAX_BATCH_SIZE: usize = 50;
 
 /// Check the client's Do-Not-Track header. We honor DNT: 1 by short-circuiting
-/// signal ingestion — the browser has explicitly opted out of tracking.
+/// signal ingestion -- the browser has explicitly opted out of tracking.
 /// Sec-GPC (Global Privacy Control) is also respected.
 fn dnt_opted_out(headers: &HeaderMap) -> bool {
     let dnt = extract_header(headers, "dnt");
@@ -49,14 +47,17 @@ fn dnt_opted_out(headers: &HeaderMap) -> bool {
 /// Shared state for signal endpoints.
 #[derive(Clone)]
 pub struct SignalsState {
+    /// Collector that buffers signal events for batch insertion.
     pub collector: SignalsCollector,
+    /// Database pool for session upserts.
     pub pool: PgPool,
+    /// Server secret used for visitor ID hashing.
     pub server_secret: String,
     /// When true, strip raw client IP from stored events (GDPR-compliant).
     pub anonymize_ip: bool,
     /// Optional GeoIP resolver for country code lookups from client IP.
     pub geoip: Option<super::geoip::GeoIpResolver>,
-    /// Per-IP fixed-window limiter shared across all signal endpoints.
+    /// Per-IP fixed-window limiter shared across all signal subtypes.
     pub rate_limiter: Arc<SignalRateLimiter>,
 }
 
@@ -81,15 +82,47 @@ fn rate_limited_response() -> Json<SignalResponse> {
     })
 }
 
-/// POST /signal/event -- batch custom events.
-pub async fn event_handler(
+/// POST /signal -- unified signal ingestion endpoint.
+///
+/// Accepts a discriminated payload with `type` and `payload` fields:
+/// - `type: "event"` -- batch of custom/tracked events
+/// - `type: "view"` -- page view with UTM and referrer context
+/// - `type: "report"` -- diagnostic error report (bypasses DNT/Sec-GPC)
+pub async fn signal_handler(
     State(state): State<Arc<SignalsState>>,
     resolved_ip: Option<axum::Extension<crate::gateway::ResolvedClientIp>>,
     auth: Option<axum::Extension<AuthContext>>,
     headers: HeaderMap,
-    Json(batch): Json<SignalEventBatch>,
+    Json(payload): Json<SignalPayload>,
 ) -> impl IntoResponse {
-    if dnt_opted_out(&headers) {
+    // Rate limiting applies to all subtypes.
+    let limiter_ip = resolve_rate_limit_ip(&resolved_ip, &headers);
+    if !state.rate_limiter.check(limiter_ip.as_deref()) {
+        return rate_limited_response();
+    }
+
+    match payload {
+        SignalPayload::Event(batch) => {
+            handle_event(&state, resolved_ip, &auth, &headers, batch).await
+        }
+        SignalPayload::View(view) => {
+            handle_view(&state, resolved_ip, &auth, &headers, view).await
+        }
+        SignalPayload::Report(report) => {
+            handle_report(&state, resolved_ip, &auth, &headers, report).await
+        }
+    }
+}
+
+/// Process a batch of custom events.
+async fn handle_event(
+    state: &SignalsState,
+    resolved_ip: Option<axum::Extension<crate::gateway::ResolvedClientIp>>,
+    auth: &Option<axum::Extension<AuthContext>>,
+    headers: &HeaderMap,
+    batch: SignalEventBatch,
+) -> Json<SignalResponse> {
+    if dnt_opted_out(headers) {
         return Json(SignalResponse {
             ok: true,
             session_id: None,
@@ -98,15 +131,11 @@ pub async fn event_handler(
     if batch.events.len() > MAX_BATCH_SIZE {
         return rate_limited_response();
     }
-    let limiter_ip = resolve_rate_limit_ip(&resolved_ip, &headers);
-    if !state.rate_limiter.check(limiter_ip.as_deref()) {
-        return rate_limited_response();
-    }
 
     let ctx = extract_request_ctx(
-        &headers,
+        headers,
         resolved_ip.and_then(|r| r.0.0.clone()),
-        &auth,
+        auth,
         &state.server_secret,
         state.anonymize_ip,
         state.geoip.as_ref(),
@@ -172,33 +201,29 @@ pub async fn event_handler(
     })
 }
 
-/// POST /signal/view -- page view event.
-pub async fn view_handler(
-    State(state): State<Arc<SignalsState>>,
+/// Process a page view event.
+async fn handle_view(
+    state: &SignalsState,
     resolved_ip: Option<axum::Extension<crate::gateway::ResolvedClientIp>>,
-    auth: Option<axum::Extension<AuthContext>>,
-    headers: HeaderMap,
-    Json(payload): Json<PageViewPayload>,
-) -> impl IntoResponse {
-    if dnt_opted_out(&headers) {
+    auth: &Option<axum::Extension<AuthContext>>,
+    headers: &HeaderMap,
+    payload: PageViewPayload,
+) -> Json<SignalResponse> {
+    if dnt_opted_out(headers) {
         return Json(SignalResponse {
             ok: true,
             session_id: None,
         });
     }
-    let limiter_ip = resolve_rate_limit_ip(&resolved_ip, &headers);
-    if !state.rate_limiter.check(limiter_ip.as_deref()) {
-        return rate_limited_response();
-    }
     let ctx = extract_request_ctx(
-        &headers,
+        headers,
         resolved_ip.and_then(|r| r.0.0.clone()),
-        &auth,
+        auth,
         &state.server_secret,
         state.anonymize_ip,
         state.geoip.as_ref(),
     );
-    let session_id_header = extract_header(&headers, "x-session-id");
+    let session_id_header = extract_header(headers, "x-session-id");
     let session_id = resolve_session_id(session_id_header.as_deref());
 
     let session_id = session::upsert_session(
@@ -271,36 +296,32 @@ pub async fn view_handler(
     })
 }
 
-/// POST /signal/report -- diagnostic error reports.
+/// Process a diagnostic error report.
 ///
 /// Error reports are never dropped on DNT: users explicitly opted out of
 /// *tracking*, not of crash reporting. Without this exception, production
 /// crashes from DNT-enabled browsers would be invisible. Reports carry no
 /// persistent identifier by default.
-pub async fn report_handler(
-    State(state): State<Arc<SignalsState>>,
+async fn handle_report(
+    state: &SignalsState,
     resolved_ip: Option<axum::Extension<crate::gateway::ResolvedClientIp>>,
-    auth: Option<axum::Extension<AuthContext>>,
-    headers: HeaderMap,
-    Json(report): Json<DiagnosticReport>,
-) -> impl IntoResponse {
+    auth: &Option<axum::Extension<AuthContext>>,
+    headers: &HeaderMap,
+    report: DiagnosticReport,
+) -> Json<SignalResponse> {
     if report.errors.len() > MAX_BATCH_SIZE {
-        return rate_limited_response();
-    }
-    let limiter_ip = resolve_rate_limit_ip(&resolved_ip, &headers);
-    if !state.rate_limiter.check(limiter_ip.as_deref()) {
         return rate_limited_response();
     }
 
     let ctx = extract_request_ctx(
-        &headers,
+        headers,
         resolved_ip.and_then(|r| r.0.0.clone()),
-        &auth,
+        auth,
         &state.server_secret,
         state.anonymize_ip,
         state.geoip.as_ref(),
     );
-    let session_id_header = extract_header(&headers, "x-session-id");
+    let session_id_header = extract_header(headers, "x-session-id");
     let session_id = resolve_session_id(session_id_header.as_deref());
 
     if let Some(sid) = session_id {
@@ -362,7 +383,7 @@ pub async fn report_handler(
     })
 }
 
-/// Shared request context extracted from headers and auth for all signal endpoints.
+/// Shared request context extracted from headers and auth for all signal subtypes.
 struct RequestCtx {
     user_agent: Option<String>,
     client_ip: Option<String>,

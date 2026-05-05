@@ -234,6 +234,26 @@ pub struct UtmParams {
     pub content: Option<String>,
 }
 
+/// Unified signal ingestion payload. Discriminated by `type` field.
+///
+/// Clients send a single `POST /_api/signal` with one of three subtypes:
+/// - `event`: batch of custom/tracked events
+/// - `view`: page view with UTM and referrer context
+/// - `report`: diagnostic error report (bypasses DNT)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload")]
+pub enum SignalPayload {
+    /// Batch of custom events from the client tracker.
+    #[serde(rename = "event")]
+    Event(SignalEventBatch),
+    /// Page view event with URL, referrer, and UTM parameters.
+    #[serde(rename = "view")]
+    View(PageViewPayload),
+    /// Diagnostic error report. Bypasses DNT/Sec-GPC checks.
+    #[serde(rename = "report")]
+    Report(DiagnosticReport),
+}
+
 /// Batch of events sent from client trackers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignalEventBatch {
@@ -540,5 +560,90 @@ mod tests {
         assert!(ctx.page_url.is_none());
         assert!(ctx.referrer.is_none());
         assert!(ctx.session_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn signal_payload_deserializes_event_variant() {
+        let json = r#"{
+            "type": "event",
+            "payload": {
+                "events": [{"event": "click"}],
+                "context": null
+            }
+        }"#;
+
+        let payload: SignalPayload = serde_json::from_str(json).unwrap();
+        assert!(matches!(payload, SignalPayload::Event(_)));
+    }
+
+    #[tokio::test]
+    async fn signal_payload_deserializes_view_variant() {
+        let json = r#"{
+            "type": "view",
+            "payload": {
+                "url": "https://example.com/page"
+            }
+        }"#;
+
+        let payload: SignalPayload = serde_json::from_str(json).unwrap();
+        assert!(matches!(payload, SignalPayload::View(_)));
+    }
+
+    #[tokio::test]
+    async fn signal_payload_deserializes_report_variant() {
+        let json = r#"{
+            "type": "report",
+            "payload": {
+                "errors": [{"message": "boom"}]
+            }
+        }"#;
+
+        let payload: SignalPayload = serde_json::from_str(json).unwrap();
+        assert!(matches!(payload, SignalPayload::Report(_)));
+    }
+
+    #[tokio::test]
+    async fn signal_payload_round_trips_all_variants() {
+        let event_payload = SignalPayload::Event(SignalEventBatch {
+            events: vec![ClientEvent {
+                event: "test".to_string(),
+                properties: serde_json::Value::Null,
+                correlation_id: None,
+                timestamp: None,
+            }],
+            context: None,
+        });
+        let json = serde_json::to_string(&event_payload).unwrap();
+        let deserialized: SignalPayload = serde_json::from_str(&json).unwrap();
+        assert!(matches!(deserialized, SignalPayload::Event(_)));
+
+        let view_payload = SignalPayload::View(PageViewPayload {
+            url: "https://example.com".to_string(),
+            referrer: None,
+            title: None,
+            utm_source: None,
+            utm_medium: None,
+            utm_campaign: None,
+            utm_term: None,
+            utm_content: None,
+            correlation_id: None,
+        });
+        let json = serde_json::to_string(&view_payload).unwrap();
+        let deserialized: SignalPayload = serde_json::from_str(&json).unwrap();
+        assert!(matches!(deserialized, SignalPayload::View(_)));
+
+        let report_payload = SignalPayload::Report(DiagnosticReport {
+            errors: vec![DiagnosticError {
+                message: "test error".to_string(),
+                stack: None,
+                context: None,
+                correlation_id: None,
+                breadcrumbs: None,
+                page_url: None,
+            }],
+        });
+        let json = serde_json::to_string(&report_payload).unwrap();
+        let deserialized: SignalPayload = serde_json::from_str(&json).unwrap();
+        assert!(matches!(deserialized, SignalPayload::Report(_)));
     }
 }

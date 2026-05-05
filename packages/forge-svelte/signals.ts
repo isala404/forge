@@ -35,21 +35,10 @@ interface Breadcrumb {
   timestamp: string;
 }
 
-interface WebVital {
-  name: string;
-  value: number;
-  rating?: string;
-  attribution?: Record<string, unknown>;
-  correlation_id?: string;
-  page_url?: string;
-  timestamp?: string;
-}
-
 const DEFAULT_FLUSH_INTERVAL = 5000;
 const DEFAULT_MAX_BATCH = 20;
 const MAX_BREADCRUMBS = 20;
 const MAX_QUEUE_SIZE = 1000;
-const MAX_VITAL_BATCH = 20;
 const PERSIST_KEY = "forge_signals_queue_v1";
 
 /** Generate a short unique ID for correlation (nanoid-style) */
@@ -80,7 +69,6 @@ function hasOptedOut(): boolean {
 
 export class ForgeSignals {
   private queue: SignalEvent[] = [];
-  private vitalQueue: WebVital[] = [];
   private breadcrumbs: Breadcrumb[] = [];
   private sessionId: string | null = null;
   private lastCorrelationId: string | null = null;
@@ -142,17 +130,13 @@ export class ForgeSignals {
   }
 
   /** Identify the current user (links anonymous session to user). */
-  async identify(userId: string, traits?: Record<string, unknown>): Promise<void> {
+  identify(userId: string, traits?: Record<string, unknown>): void {
     if (!this.config.enabled) return;
-    try {
-      await fetch(`${this.client.getUrl()}/_api/signal/user`, {
-        method: "POST",
-        ...this.signalFetchOptions(),
-        body: JSON.stringify({ user_id: userId, traits: traits ?? {} }),
-      });
-    } catch {
-      // Silently fail, analytics should never break the app
-    }
+    this.enqueue({
+      event: "identify",
+      properties: { user_id: userId, traits: traits ?? {} },
+      correlation_id: this.lastCorrelationId ?? undefined,
+    });
   }
 
   /** Track a page view. Called automatically on navigation when autoPageViews is enabled. */
@@ -167,10 +151,10 @@ export class ForgeSignals {
         ...properties,
       };
 
-      const response = await fetch(`${this.client.getUrl()}/_api/signal/view`, {
+      const response = await fetch(`${this.client.getUrl()}/_api/signal`, {
         method: "POST",
         ...this.signalFetchOptions(),
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ type: "view", payload }),
       });
 
       const result = await response.json();
@@ -224,21 +208,19 @@ export class ForgeSignals {
     return this.sessionId;
   }
 
-  /** Send a single Web Vitals measurement. Batched and flushed with track events. */
+  /** Send a single Web Vitals measurement. Enqueued as a track event. */
   vital(name: string, value: number, extra?: { rating?: string; attribution?: Record<string, unknown> }): void {
     if (!this.config.enabled) return;
-    this.vitalQueue.push({
-      name,
-      value,
-      rating: extra?.rating,
-      attribution: extra?.attribution,
+    this.enqueue({
+      event: `webvital.${name}`,
+      properties: {
+        value,
+        rating: extra?.rating,
+        attribution: extra?.attribution,
+        page_url: typeof location !== "undefined" ? location.href : undefined,
+      },
       correlation_id: this.lastCorrelationId ?? undefined,
-      page_url: typeof location !== "undefined" ? location.href : undefined,
-      timestamp: new Date().toISOString(),
     });
-    if (this.vitalQueue.length >= MAX_VITAL_BATCH) {
-      this.flushVitals();
-    }
   }
 
   /** Clean up timers and event listeners. */
@@ -246,7 +228,6 @@ export class ForgeSignals {
     this.destroyed = true;
     if (this.flushTimer) clearInterval(this.flushTimer);
     this.flushBeacon();
-    this.flushVitalsBeacon();
     this.teardownAutoCapture();
   }
 
@@ -284,14 +265,17 @@ export class ForgeSignals {
     if (this.queue.length === 0) return;
     const events = this.queue.splice(0, this.config.maxBatchSize);
     try {
-      const response = await fetch(`${this.client.getUrl()}/_api/signal/event`, {
+      const response = await fetch(`${this.client.getUrl()}/_api/signal`, {
         method: "POST",
         ...this.signalFetchOptions(),
         body: JSON.stringify({
-          events,
-          context: {
-            page_url: typeof location !== "undefined" ? location.href : undefined,
-            session_id: this.sessionId,
+          type: "event",
+          payload: {
+            events,
+            context: {
+              page_url: typeof location !== "undefined" ? location.href : undefined,
+              session_id: this.sessionId,
+            },
           },
         }),
       });
@@ -314,19 +298,22 @@ export class ForgeSignals {
     if (this.queue.length === 0) return;
     const events = this.queue.splice(0);
     const body = JSON.stringify({
-      events,
-      context: {
-        page_url: typeof location !== "undefined" ? location.href : undefined,
-        session_id: this.sessionId,
+      type: "event",
+      payload: {
+        events,
+        context: {
+          page_url: typeof location !== "undefined" ? location.href : undefined,
+          session_id: this.sessionId,
+        },
       },
     });
     try {
       const sent = typeof navigator !== "undefined" && navigator.sendBeacon
-        ? navigator.sendBeacon(`${this.client.getUrl()}/_api/signal/event`, new Blob([body], { type: "application/json" }))
+        ? navigator.sendBeacon(`${this.client.getUrl()}/_api/signal`, new Blob([body], { type: "application/json" }))
         : false;
       if (!sent) {
         // Fall back to keepalive fetch if beacon isn't available / over quota
-        fetch(`${this.client.getUrl()}/_api/signal/event`, {
+        fetch(`${this.client.getUrl()}/_api/signal`, {
           method: "POST",
           ...this.signalFetchOptions(),
           body,
@@ -338,55 +325,12 @@ export class ForgeSignals {
     }
   }
 
-  private async flushVitals(): Promise<void> {
-    if (this.vitalQueue.length === 0) return;
-    const vitals = this.vitalQueue.splice(0, MAX_VITAL_BATCH);
-    try {
-      await fetch(`${this.client.getUrl()}/_api/signal/vital`, {
-        method: "POST",
-        ...this.signalFetchOptions(),
-        body: JSON.stringify({
-          vitals,
-          context: {
-            page_url: typeof location !== "undefined" ? location.href : undefined,
-            session_id: this.sessionId,
-          },
-        }),
-      });
-    } catch {
-      // Requeue on failure; drop oldest if over limit.
-      this.vitalQueue.unshift(...vitals);
-      if (this.vitalQueue.length > MAX_QUEUE_SIZE) {
-        this.vitalQueue.length = MAX_QUEUE_SIZE;
-      }
-    }
-  }
-
-  private flushVitalsBeacon(): void {
-    if (this.vitalQueue.length === 0) return;
-    const vitals = this.vitalQueue.splice(0);
-    const body = JSON.stringify({
-      vitals,
-      context: {
-        page_url: typeof location !== "undefined" ? location.href : undefined,
-        session_id: this.sessionId,
-      },
-    });
-    try {
-      if (typeof navigator !== "undefined" && navigator.sendBeacon) {
-        navigator.sendBeacon(`${this.client.getUrl()}/_api/signal/vital`, new Blob([body], { type: "application/json" }));
-      }
-    } catch {
-      // drop
-    }
-  }
-
   private async reportErrors(errors: Array<Record<string, unknown>>): Promise<void> {
     try {
-      await fetch(`${this.client.getUrl()}/_api/signal/report`, {
+      await fetch(`${this.client.getUrl()}/_api/signal`, {
         method: "POST",
         ...this.signalFetchOptions(),
-        body: JSON.stringify({ errors }),
+        body: JSON.stringify({ type: "report", payload: { errors } }),
       });
     } catch {
       // Silent
@@ -397,7 +341,6 @@ export class ForgeSignals {
     this.flushTimer = setInterval(() => {
       if (this.destroyed) return;
       this.flush();
-      this.flushVitals();
     }, this.config.flushInterval);
   }
 
@@ -480,13 +423,11 @@ export class ForgeSignals {
     this.addEventListener(document, "visibilitychange", () => {
       if (document.visibilityState === "hidden") {
         this.flushBeacon();
-        this.flushVitalsBeacon();
       }
     });
     if (typeof window !== "undefined") {
       this.addEventListener(window, "pagehide", () => {
         this.flushBeacon();
-        this.flushVitalsBeacon();
       });
     }
   }
@@ -606,7 +547,6 @@ export class ForgeSignals {
       this.track("network.online");
       // A recovered connection is the ideal time to drain the offline queue.
       this.flush();
-      this.flushVitals();
     });
     this.addEventListener(window, "offline", () => {
       this.track("network.offline");

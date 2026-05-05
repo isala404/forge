@@ -95,6 +95,9 @@ cron = ["forge-runtime/cron"]
 # Long-running daemon runner.
 daemons = ["forge-runtime/daemons"]
 
+# OAuth 2.1 + PKCE for MCP authentication.
+mcp-oauth = ["gateway", "forge-runtime/mcp-oauth"]
+
 # GeoIP enrichment for signals (heavy build-time download).
 geoip = ["gateway", "forge-runtime/geoip"]
 
@@ -112,6 +115,7 @@ otel = [
 # Everything. Mirrors today's behavior; no opt-out needed for existing apps.
 full = [
     "gateway",
+    "mcp-oauth",
     "jobs",
     "workflows",
     "cron",

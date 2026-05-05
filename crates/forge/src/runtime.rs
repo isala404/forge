@@ -744,6 +744,8 @@ impl Forge {
                 },
                 max_rpc_batch_size: self.config.gateway.max_rpc_batch_size,
                 max_multipart_fields: self.config.gateway.max_multipart_fields,
+                max_sessions_per_user: self.config.realtime.max_sessions_per_user,
+                max_subscriptions_per_user: self.config.realtime.max_subscriptions_per_user,
                 security_headers: self.config.gateway.security_headers,
                 hsts: self.config.gateway.hsts,
                 trusted_proxies: self
@@ -945,6 +947,20 @@ impl Forge {
             if self.config.mcp.enabled {
                 use axum::routing::get;
 
+                // Well-known discovery routes: either live OAuth metadata (when
+                // `mcp-oauth` is compiled in and configured) or a parseable JSON 404
+                // that tells clients this server does not support OAuth.
+                async fn oauth_not_supported() -> impl axum::response::IntoResponse {
+                    (
+                        axum::http::StatusCode::NOT_FOUND,
+                        axum::Json(serde_json::json!({
+                            "error": "oauth_not_supported",
+                            "error_description": "This server does not support OAuth. Connect without authentication."
+                        })),
+                    )
+                }
+
+                #[cfg(feature = "mcp-oauth")]
                 if let Some((oauth_api_router, oauth_state)) = gateway.oauth_router() {
                     // OAuth API routes under /_api/oauth/* (bypass auth middleware)
                     router = router.nest("/_api", oauth_api_router);
@@ -964,16 +980,19 @@ impl Forge {
 
                     tracing::info!("OAuth 2.1 endpoints enabled for MCP");
                 } else {
-                    // OAuth not configured: return parseable JSON 404
-                    async fn oauth_not_supported() -> impl axum::response::IntoResponse {
-                        (
-                            axum::http::StatusCode::NOT_FOUND,
-                            axum::Json(serde_json::json!({
-                                "error": "oauth_not_supported",
-                                "error_description": "This server does not support OAuth. Connect without authentication."
-                            })),
+                    router = router
+                        .route(
+                            "/.well-known/oauth-authorization-server",
+                            get(oauth_not_supported),
                         )
-                    }
+                        .route(
+                            "/.well-known/oauth-protected-resource",
+                            get(oauth_not_supported),
+                        );
+                }
+
+                #[cfg(not(feature = "mcp-oauth"))]
+                {
                     router = router
                         .route(
                             "/.well-known/oauth-authorization-server",

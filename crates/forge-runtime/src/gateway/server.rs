@@ -86,6 +86,10 @@ pub struct GatewayConfig {
     pub max_rpc_batch_size: usize,
     /// Maximum file fields in a single multipart upload.
     pub max_multipart_fields: usize,
+    /// Maximum concurrent SSE sessions per authenticated user.
+    pub max_sessions_per_user: usize,
+    /// Cap on a user's total subscriptions across every active session.
+    pub max_subscriptions_per_user: usize,
     /// Reactor, invalidation, listener, and SSE knobs. Defaults match production.
     pub reactor_config: ReactorConfig,
     /// Add standard security headers to all responses.
@@ -115,6 +119,8 @@ impl Default for GatewayConfig {
             tls: None,
             max_rpc_batch_size: 100,
             max_multipart_fields: 20,
+            max_sessions_per_user: 8,
+            max_subscriptions_per_user: 500,
             reactor_config: ReactorConfig::default(),
             security_headers: true,
             hsts: false,
@@ -310,6 +316,9 @@ impl GatewayServer {
     }
 
     /// Build an OAuth router (bypasses auth middleware). Returns None if OAuth is disabled.
+    ///
+    /// Only available when the `mcp-oauth` feature is enabled.
+    #[cfg(feature = "mcp-oauth")]
     pub fn oauth_router(&self) -> Option<(Router, Arc<super::oauth::OAuthState>)> {
         if !self.config.mcp.oauth {
             return None;
@@ -345,6 +354,12 @@ impl GatewayServer {
             .with_state(oauth_state.clone());
 
         Some((router, oauth_state))
+    }
+
+    /// Stub when `mcp-oauth` is not enabled — always returns `None`.
+    #[cfg(not(feature = "mcp-oauth"))]
+    pub fn oauth_router(&self) -> Option<(Router, ())> {
+        None
     }
 
     /// Build the Axum router.
@@ -448,6 +463,8 @@ impl GatewayServer {
                     .reactor_config
                     .realtime
                     .max_subscriptions_per_session,
+                max_sessions_per_user: self.config.max_sessions_per_user,
+                max_subscriptions_per_user: self.config.max_subscriptions_per_user,
                 ..Default::default()
             },
         ));
@@ -501,7 +518,7 @@ impl GatewayServer {
             .layer(Extension(mp_config))
             // Cap upload fan-out; each request buffers data in memory.
             .layer(ConcurrencyLimitLayer::new(MAX_MULTIPART_CONCURRENCY))
-            .with_state(rpc_handler_state);
+            .with_state(rpc_handler_state.clone());
 
         // SSE router
         let sse_router = Router::new()
@@ -521,6 +538,7 @@ impl GatewayServer {
                 self.db.primary().clone(),
                 self.job_dispatcher.clone(),
                 self.workflow_dispatcher.clone(),
+                Some(rpc_handler_state.router()),
             ));
             mcp_router = mcp_router.route(
                 &path,
@@ -554,16 +572,8 @@ impl GatewayServer {
             });
             signals_router = Router::new()
                 .route(
-                    "/signal/event",
-                    post(crate::signals::endpoints::event_handler),
-                )
-                .route(
-                    "/signal/view",
-                    post(crate::signals::endpoints::view_handler),
-                )
-                .route(
-                    "/signal/report",
-                    post(crate::signals::endpoints::report_handler),
+                    "/signal",
+                    post(crate::signals::endpoints::signal_handler),
                 )
                 .with_state(signals_state);
         }

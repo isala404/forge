@@ -18,6 +18,7 @@ use futures_util::Stream;
 use serde_json::Value;
 use tokio::sync::RwLock;
 
+use crate::function::FunctionRouter;
 use crate::mcp::McpToolRegistry;
 use crate::rate_limit::StrictRateLimiter;
 
@@ -46,6 +47,9 @@ pub struct McpState {
     job_dispatcher: Option<Arc<dyn JobDispatch>>,
     workflow_dispatcher: Option<Arc<dyn WorkflowDispatch>>,
     rate_limiter: Arc<StrictRateLimiter>,
+    /// When set, all registered queries and mutations are also exposed as MCP
+    /// tools without requiring a separate `#[mcp_tool]` declaration.
+    function_router: Option<Arc<FunctionRouter>>,
 }
 
 impl McpState {
@@ -55,6 +59,7 @@ impl McpState {
         pool: sqlx::PgPool,
         job_dispatcher: Option<Arc<dyn JobDispatch>>,
         workflow_dispatcher: Option<Arc<dyn WorkflowDispatch>>,
+        function_router: Option<Arc<FunctionRouter>>,
     ) -> Self {
         Self {
             config,
@@ -64,6 +69,7 @@ impl McpState {
             job_dispatcher,
             workflow_dispatcher,
             rate_limiter: Arc::new(StrictRateLimiter::new(pool)),
+            function_router,
         }
     }
 
@@ -417,13 +423,12 @@ fn handle_tools_list(state: &Arc<McpState>, id: Option<Value>, params: &Value) -
         None => 0,
     };
 
-    let mut tools: Vec<_> = state.registry.list().collect();
-    tools.sort_by(|a, b| a.info.name.cmp(b.info.name));
+    // Collect explicit MCP tool entries as JSON objects, sorted by name.
+    let mut mcp_tools: Vec<_> = state.registry.list().collect();
+    mcp_tools.sort_by(|a, b| a.info.name.cmp(b.info.name));
 
-    let page: Vec<_> = tools
+    let mut all_tools: Vec<Value> = mcp_tools
         .iter()
-        .skip(start)
-        .take(DEFAULT_PAGE_SIZE)
         .map(|entry| {
             // Only include annotation fields that are set (non-null).
             // Claude Code's MCP client rejects null booleans.
@@ -485,11 +490,73 @@ fn handle_tools_list(state: &Arc<McpState>, id: Option<Value>, params: &Value) -
         })
         .collect();
 
+    // Also expose all registered queries and mutations as MCP tools, unless
+    // they are already covered by an explicit `#[mcp_tool]` declaration.
+    if let Some(router) = &state.function_router {
+        let mut fn_infos = router.function_infos();
+        fn_infos.sort_by(|a, b| a.name.cmp(b.name));
+
+        for info in fn_infos {
+            // Skip if an explicit MCP tool with the same name already exists.
+            if state.registry.get(info.name).is_some() {
+                continue;
+            }
+
+            let kind_str = match info.kind {
+                forge_core::function::FunctionKind::Query => "query",
+                forge_core::function::FunctionKind::Mutation => "mutation",
+                _ => "function",
+            };
+            let description = info
+                .description
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| format!("Forge {} '{}'", kind_str, info.name));
+
+            // Use a permissive schema — FunctionRouter handles type-safe
+            // deserialization at call time via serde.
+            let input_schema = serde_json::json!({
+                "type": "object",
+                "additionalProperties": true
+            });
+
+            let mut tool = serde_json::json!({
+                "name": info.name,
+                "description": description,
+                "inputSchema": input_schema,
+            });
+
+            // Annotate queries as read-only hints for MCP clients.
+            if info.kind == forge_core::function::FunctionKind::Query {
+                let obj = tool.as_object_mut().expect("json! object literal");
+                obj.insert(
+                    "annotations".into(),
+                    serde_json::json!({ "readOnlyHint": true }),
+                );
+            }
+
+            all_tools.push(tool);
+        }
+
+        // Re-sort combined list so the final page is in stable alphabetical order.
+        all_tools.sort_by(|a, b| {
+            let name_a = a.get("name").and_then(Value::as_str).unwrap_or("");
+            let name_b = b.get("name").and_then(Value::as_str).unwrap_or("");
+            name_a.cmp(name_b)
+        });
+    }
+
+    let page: Vec<Value> = all_tools
+        .iter()
+        .skip(start)
+        .take(DEFAULT_PAGE_SIZE)
+        .cloned()
+        .collect();
+
     let end = start.saturating_add(page.len());
 
     // Build result: omit nextCursor when null (Claude Code expects string or absent)
     let mut result = serde_json::json!({ "tools": page });
-    if end < tools.len() && result.is_object() {
+    if end < all_tools.len() && result.is_object() {
         // json!({}) always produces Value::Object
         result
             .as_object_mut()
@@ -550,6 +617,22 @@ async fn handle_tools_call(
     };
 
     let Some(entry) = state.registry.get(tool_name) else {
+        // Fall through to FunctionRouter: expose registered queries/mutations
+        // as MCP tools without requiring a separate `#[mcp_tool]` declaration.
+        if let Some(router) = &state.function_router
+            && router.has_function(tool_name)
+        {
+            return handle_proxied_function_call(
+                state,
+                router,
+                id,
+                tool_name,
+                params,
+                auth,
+                request_metadata,
+            )
+            .await;
+        }
         return (
             StatusCode::OK,
             Json(json_rpc_error(id, -32602, "Unknown tool", None)),
@@ -558,6 +641,7 @@ async fn handle_tools_call(
     };
 
     if !entry.info.is_public && !auth.is_authenticated() {
+        #[cfg(feature = "mcp-oauth")]
         if state.config.oauth {
             // Return HTTP 401 with discovery header so MCP clients trigger OAuth flow
             let mut response = (
@@ -693,6 +777,86 @@ async fn handle_tools_call(
             _ => (
                 StatusCode::OK,
                 Json(json_rpc_error(id, -32603, "Internal server error", None)),
+            )
+                .into_response(),
+        },
+    }
+}
+
+/// Proxy a `tools/call` request to the [`FunctionRouter`] for a registered
+/// query or mutation that has no explicit `#[mcp_tool]` declaration.
+///
+/// Auth enforcement (public flag, required role, rate limits) is handled
+/// entirely by [`FunctionRouter::execute`], so we only need to map the result
+/// back to the MCP wire format.
+async fn handle_proxied_function_call(
+    _state: &Arc<McpState>,
+    router: &Arc<FunctionRouter>,
+    id: Option<Value>,
+    tool_name: &str,
+    params: &Value,
+    auth: &AuthContext,
+    request_metadata: RequestMetadata,
+) -> Response {
+    let args = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or(Value::Object(Default::default()));
+
+    match router
+        .execute(tool_name, args, auth.clone(), request_metadata)
+        .await
+    {
+        Ok(output) => {
+            let result = tool_success_result(output);
+            (
+                StatusCode::OK,
+                Json(json_rpc_success(id, serde_json::json!(result))),
+            )
+                .into_response()
+        }
+        Err(e) => match e {
+            forge_core::ForgeError::Validation(msg)
+            | forge_core::ForgeError::InvalidArgument(msg) => (
+                StatusCode::OK,
+                Json(json_rpc_success(
+                    id,
+                    serde_json::json!({
+                        "content": [{ "type": "text", "text": msg }],
+                        "isError": true
+                    }),
+                )),
+            )
+                .into_response(),
+            forge_core::ForgeError::Unauthorized(_) => (
+                StatusCode::OK,
+                Json(json_rpc_error(id, -32001, "Authentication required", None)),
+            )
+                .into_response(),
+            forge_core::ForgeError::Forbidden(_) => (
+                StatusCode::OK,
+                Json(json_rpc_error(id, -32003, "Forbidden", None)),
+            )
+                .into_response(),
+            forge_core::ForgeError::RateLimitExceeded { .. } => (
+                StatusCode::OK,
+                Json(json_rpc_error(id, -32029, e.to_string(), None)),
+            )
+                .into_response(),
+            forge_core::ForgeError::Timeout(_) => (
+                StatusCode::OK,
+                Json(json_rpc_error(id, -32000, "Function timed out", None)),
+            )
+                .into_response(),
+            other => (
+                StatusCode::OK,
+                Json(json_rpc_success(
+                    id,
+                    serde_json::json!({
+                        "content": [{ "type": "text", "text": other.to_string() }],
+                        "isError": true
+                    }),
+                )),
             )
                 .into_response(),
         },
@@ -1106,7 +1270,7 @@ mod tests {
             .max_connections(1)
             .connect_lazy("postgres://localhost/nonexistent")
             .expect("lazy pool must build");
-        Arc::new(McpState::new(config, registry, pool, None, None))
+        Arc::new(McpState::new(config, registry, pool, None, None, None))
     }
 
     async fn response_json(response: Response) -> Value {

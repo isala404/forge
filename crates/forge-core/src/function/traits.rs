@@ -68,6 +68,11 @@ pub struct FunctionInfo {
 pub enum FunctionKind {
     Query,
     Mutation,
+    /// An inbound webhook endpoint. Registered in `FunctionRegistry` for
+    /// metadata access (info, MCP tool list, observability) but executed
+    /// exclusively through the dedicated webhook HTTP route with signature
+    /// validation — never via the RPC dispatcher.
+    Webhook,
 }
 
 /// Log level for per-function access logging.
@@ -101,6 +106,7 @@ impl std::fmt::Display for FunctionKind {
         match self {
             FunctionKind::Query => write!(f, "query"),
             FunctionKind::Mutation => write!(f, "mutation"),
+            FunctionKind::Webhook => write!(f, "webhook"),
         }
     }
 }
@@ -171,6 +177,7 @@ mod tests {
     fn test_function_kind_display() {
         assert_eq!(format!("{}", FunctionKind::Query), "query");
         assert_eq!(format!("{}", FunctionKind::Mutation), "mutation");
+        assert_eq!(format!("{}", FunctionKind::Webhook), "webhook");
     }
 
     #[test]

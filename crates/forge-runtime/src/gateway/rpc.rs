@@ -94,6 +94,12 @@ impl RpcHandler {
         }
     }
 
+    /// Expose the underlying [`FunctionRouter`] so other components (e.g. MCP)
+    /// can delegate calls to all registered queries and mutations.
+    pub fn router(&self) -> Arc<FunctionRouter> {
+        Arc::clone(&self.router)
+    }
+
     /// Look up function metadata by name.
     pub fn function_info(&self, name: &str) -> Option<FunctionInfo> {
         self.router.function_info(name)

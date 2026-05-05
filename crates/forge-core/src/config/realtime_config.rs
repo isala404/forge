@@ -55,64 +55,22 @@ pub struct RealtimeConfig {
     #[serde(default = "default_shard_count")]
     pub shard_count: usize,
 
-    // -- Reserved 1.0 quota fields -------------------------------------------------
-    // These names are reserved so apps can't squat on them with their own meaning.
-    // Forge parses them today but does not act on them; behavior lands in 1.0.x.
-    /// RESERVED. Maximum concurrent SSE sessions per authenticated user.
-    /// Parsed today, not yet enforced; will be honored in a 1.0.x release.
-    #[serde(default)]
-    pub max_sessions_per_user: Option<usize>,
+    /// Maximum concurrent SSE sessions per authenticated user.
+    #[serde(default = "default_max_sessions_per_user")]
+    pub max_sessions_per_user: usize,
 
-    /// RESERVED. Maximum concurrent SSE sessions per source IP.
-    /// Parsed today, not yet enforced; will be honored in a 1.0.x release.
-    #[serde(default)]
-    pub max_sessions_per_ip: Option<usize>,
+    /// Maximum concurrent SSE sessions per source IP.
+    #[serde(default = "default_max_sessions_per_ip")]
+    pub max_sessions_per_ip: usize,
 
-    /// RESERVED. Cap on a user's total subscriptions across every active session.
-    /// Parsed today, not yet enforced; will be honored in a 1.0.x release.
-    #[serde(default)]
-    pub max_subscriptions_per_user: Option<usize>,
+    /// Cap on a user's total subscriptions across every active session.
+    #[serde(default = "default_max_subscriptions_per_user")]
+    pub max_subscriptions_per_user: usize,
 
-    /// RESERVED. Per-query cached-result memory ceiling (bytes). Cached results
-    /// exceeding this size are dropped after re-execution. Parsed today, not yet
-    /// enforced; will be honored in a 1.0.x release.
-    #[serde(default)]
-    pub max_cached_result_bytes: Option<usize>,
-
-    /// RESERVED. Rate limit on `POST /_api/subscribe`. Parsed today, not yet
-    /// enforced; will be honored in a 1.0.x release.
-    #[serde(default)]
-    pub subscribe_rate_limit: Option<RateLimit>,
-}
-
-/// Per-route rate limit specification used in `[realtime].subscribe_rate_limit`
-/// and reserved for future config sections that gate request rates.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct RateLimit {
-    /// Maximum requests per `per` window.
-    pub requests: u32,
-    /// Window duration string (e.g. `"1m"`, `"30s"`).
-    pub per: String,
-    /// Bucket key. One of `"user"`, `"ip"`, `"tenant"`, `"global"`.
-    /// Defaults to `"user"` when omitted.
-    #[serde(default)]
-    pub key: Option<String>,
-}
-
-impl RateLimit {
-    /// Parse the window duration into seconds.
-    pub fn per_secs(&self) -> u64 {
-        super::parse_duration_secs(&self.per, 60)
-    }
-
-    /// Resolve the bucket key, defaulting to `User`.
-    pub fn rate_limit_key(&self) -> crate::rate_limit::RateLimitKey {
-        self.key
-            .as_deref()
-            .and_then(|k| k.parse().ok())
-            .unwrap_or_default()
-    }
+    /// Per-query cached-result memory ceiling (bytes). Cached results
+    /// exceeding this size are dropped after re-execution.
+    #[serde(default = "default_max_cached_result_bytes")]
+    pub max_cached_result_bytes: usize,
 }
 
 fn default_max_concurrent_reexecutions() -> usize {
@@ -142,6 +100,18 @@ fn default_change_tracking_row_threshold() -> usize {
 fn default_shard_count() -> usize {
     64
 }
+fn default_max_sessions_per_user() -> usize {
+    8
+}
+fn default_max_sessions_per_ip() -> usize {
+    32
+}
+fn default_max_subscriptions_per_user() -> usize {
+    500
+}
+fn default_max_cached_result_bytes() -> usize {
+    1_048_576
+}
 
 impl Default for RealtimeConfig {
     fn default() -> Self {
@@ -155,11 +125,10 @@ impl Default for RealtimeConfig {
             subscription_max_per_session: default_subscription_max_per_session(),
             change_tracking_row_threshold: default_change_tracking_row_threshold(),
             shard_count: default_shard_count(),
-            max_sessions_per_user: None,
-            max_sessions_per_ip: None,
-            max_subscriptions_per_user: None,
-            max_cached_result_bytes: None,
-            subscribe_rate_limit: None,
+            max_sessions_per_user: default_max_sessions_per_user(),
+            max_sessions_per_ip: default_max_sessions_per_ip(),
+            max_subscriptions_per_user: default_max_subscriptions_per_user(),
+            max_cached_result_bytes: default_max_cached_result_bytes(),
         }
     }
 }

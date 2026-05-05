@@ -99,6 +99,7 @@ impl From<&crate::function::FunctionInfo> for HandlerMetadata {
         let kind = match info.kind {
             crate::function::FunctionKind::Query => HandlerKind::Query,
             crate::function::FunctionKind::Mutation => HandlerKind::Mutation,
+            crate::function::FunctionKind::Webhook => HandlerKind::Webhook,
         };
         Self {
             kind,

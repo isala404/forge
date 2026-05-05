@@ -2,6 +2,7 @@ mod auth;
 pub mod jwks;
 mod mcp;
 mod multipart;
+#[cfg(feature = "mcp-oauth")]
 pub mod oauth;
 mod request;
 mod response;
@@ -15,6 +16,7 @@ pub use auth::{AuthConfig, AuthMiddleware, HmacTokenIssuer, build_auth_context_f
 pub use jwks::{JwksClient, JwksError};
 pub use mcp::{McpState, mcp_get_handler, mcp_post_handler};
 pub use multipart::rpc_multipart_handler;
+#[cfg(feature = "mcp-oauth")]
 pub use oauth::OAuthState;
 pub use request::{BatchRpcRequest, BatchRpcResponse, RpcRequest};
 pub use response::{RpcError, RpcResponse};

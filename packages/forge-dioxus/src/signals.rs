@@ -352,15 +352,11 @@ impl ForgeSignals {
     }
 
     /// Identify the current user (links session to user).
-    pub async fn identify(&self, user_id: &str, traits: Value) {
-        let (url, session_id) = {
-            let inner = self.inner.borrow();
-            if !inner.config.enabled { return; }
-            (inner.client.get_url().to_string(), inner.session_id.clone())
-        };
-
-        let body = json!({ "user_id": user_id, "traits": traits });
-        let _ = post_signal(&url, "signal/user", &body, session_id.as_deref()).await;
+    pub fn identify(&self, user_id: &str, traits: Value) {
+        self.track_with_properties(
+            "identify",
+            json!({ "user_id": user_id, "traits": traits }),
+        );
     }
 
     /// Track a page view.
@@ -381,7 +377,8 @@ impl ForgeSignals {
             }
         }
 
-        if let Ok(resp) = post_signal(&base_url, "signal/view", &payload, session_id.as_deref()).await
+        let wrapped = json!({ "type": "view", "payload": payload });
+        if let Ok(resp) = post_signal(&base_url, "signal", &wrapped, session_id.as_deref()).await
             && let Some(sid) = resp.get("session_id").and_then(|v| v.as_str())
         {
             self.inner.borrow_mut().session_id = Some(sid.to_string());
@@ -425,13 +422,8 @@ impl ForgeSignals {
                 page_url,
             }],
         };
-        let _ = post_signal(
-            &url,
-            "signal/report",
-            &serde_json::to_value(&body).unwrap_or_default(),
-            session_id.as_deref(),
-        )
-        .await;
+        let wrapped = json!({ "type": "report", "payload": serde_json::to_value(&body).unwrap_or_default() });
+        let _ = post_signal(&url, "signal", &wrapped, session_id.as_deref()).await;
     }
 
     /// Add a breadcrumb for error reproduction context.
@@ -479,13 +471,8 @@ impl ForgeSignals {
             }),
         };
 
-        match post_signal(
-            &url,
-            "signal/event",
-            &serde_json::to_value(&batch).unwrap_or_default(),
-            session_id.as_deref(),
-        )
-        .await
+        let wrapped = json!({ "type": "event", "payload": serde_json::to_value(&batch).unwrap_or_default() });
+        match post_signal(&url, "signal", &wrapped, session_id.as_deref()).await
         {
             Ok(resp) => {
                 if let Some(sid) = resp.get("session_id").and_then(|v| v.as_str()) {
@@ -552,11 +539,12 @@ fn flush_beacon(signals: &ForgeSignals) {
         }),
     };
 
-    let body = serde_json::to_string(&batch).unwrap_or_default();
+    let wrapped = json!({ "type": "event", "payload": &batch });
+    let body = serde_json::to_string(&wrapped).unwrap_or_default();
 
     #[cfg(target_arch = "wasm32")]
     {
-        let url = format!("{url}/_api/signal/event");
+        let url = format!("{url}/_api/signal");
         if let Some(navigator) = web_sys::window().map(|w| w.navigator()) {
             let _ = navigator.send_beacon_with_opt_str(&url, Some(&body));
         }
@@ -862,20 +850,24 @@ pub(crate) fn setup_auto_capture(signals: ForgeSignals) {
                             function send(name, value, rating, attribution) {
                                 try {
                                     const body = JSON.stringify({
-                                        vitals: [{
-                                            name: name,
-                                            value: value,
-                                            rating: rating || null,
-                                            attribution: attribution || {},
-                                            page_url: location.href,
-                                            timestamp: new Date().toISOString(),
-                                        }],
-                                        context: {
-                                            page_url: location.href,
-                                            session_id: getSessionId() || null,
+                                        type: 'event',
+                                        payload: {
+                                            events: [{
+                                                event: 'webvital.' + name,
+                                                properties: {
+                                                    value: value,
+                                                    rating: rating || null,
+                                                    attribution: attribution || {},
+                                                },
+                                                timestamp: new Date().toISOString(),
+                                            }],
+                                            context: {
+                                                page_url: location.href,
+                                                session_id: getSessionId() || null,
+                                            }
                                         }
                                     });
-                                    const url = baseUrl + '/_api/signal/vital';
+                                    const url = baseUrl + '/_api/signal';
                                     const headers = { 'Content-Type': 'application/json', 'x-forge-platform': 'web' };
                                     if (navigator.sendBeacon) {
                                         navigator.sendBeacon(url, body);
@@ -1012,12 +1004,15 @@ pub(crate) fn setup_auto_capture(signals: ForgeSignals) {
                 .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
                 .unwrap_or("panic");
             let location = info.location().map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()));
-            let url = format!("{}/_api/signal/report", base_url);
+            let url = format!("{}/_api/signal", base_url);
             let body = serde_json::json!({
-                "errors": [{
-                    "message": msg,
-                    "context": { "location": location, "kind": "panic" },
-                }]
+                "type": "report",
+                "payload": {
+                    "errors": [{
+                        "message": msg,
+                        "context": { "location": location, "kind": "panic" },
+                    }]
+                }
             });
             // Fire-and-forget on a background thread since we can't use the
             // single-threaded Dioxus runtime from inside a panic hook.

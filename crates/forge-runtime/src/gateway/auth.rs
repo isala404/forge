@@ -671,6 +671,9 @@ pub fn sign_session_cookie(subject: &str, secret: &str, ttl_secs: i64) -> String
 
 /// Verify and extract the subject from a session cookie.
 /// Returns None if expired, tampered, or malformed.
+///
+/// Only used by the OAuth flow; gated behind `mcp-oauth`.
+#[cfg(feature = "mcp-oauth")]
 pub fn verify_session_cookie(cookie_value: &str, secret: &str) -> Option<String> {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use hmac::{Hmac, Mac};
@@ -925,6 +928,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "mcp-oauth")]
     #[test]
     fn test_verify_session_cookie_round_trip_and_tamper_detection() {
         let cookie = sign_session_cookie("user-123", "session-secret", 86400);
@@ -943,6 +947,7 @@ mod tests {
         assert_eq!(verify_session_cookie(&cookie, "wrong-secret"), None);
     }
 
+    #[cfg(feature = "mcp-oauth")]
     #[test]
     fn test_verify_session_cookie_rejects_expired_cookie() {
         let expired_cookie = session_cookie_with_expiry(

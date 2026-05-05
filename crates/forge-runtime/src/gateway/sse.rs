@@ -90,6 +90,52 @@ fn authorize_session_access(
     Ok(session.auth_context.clone())
 }
 
+/// Validate that a client subscription ID does not exceed the maximum length.
+#[allow(clippy::result_large_err)]
+fn validate_client_sub_id(id: &str) -> Result<(), (StatusCode, Json<SseSubscribeResponse>)> {
+    if id.len() > MAX_CLIENT_SUB_ID_LEN {
+        return Err(subscribe_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ID",
+            format!("Subscription ID too long (max {} chars)", MAX_CLIENT_SUB_ID_LEN),
+        ));
+    }
+    Ok(())
+}
+
+/// Parse, look up, and authorize a session from a subscribe-style request.
+///
+/// Returns `(session_id, session_auth_context)` on success, or an error
+/// response that can be returned directly from the handler.
+#[allow(clippy::result_large_err)]
+async fn validate_session(
+    state: &SseState,
+    session_id_str: &str,
+    session_secret: &str,
+    request_auth: &AuthContext,
+) -> Result<(SessionId, AuthContext), (StatusCode, Json<SseSubscribeResponse>)> {
+    let Some(session_id) = try_parse_session_id(session_id_str) else {
+        return Err(subscribe_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_SESSION",
+            "Invalid session ID format",
+        ));
+    };
+
+    let sessions = state.sessions.read().await;
+    match sessions.get(&session_id) {
+        Some(session) => {
+            let auth = authorize_session_access(session, session_secret, request_auth)?;
+            Ok((session_id, auth))
+        }
+        None => Err(subscribe_error(
+            StatusCode::NOT_FOUND,
+            "SESSION_NOT_FOUND",
+            "Session not found or expired",
+        )),
+    }
+}
+
 /// SSE configuration.
 #[derive(Debug, Clone)]
 pub struct SseConfig {
@@ -101,6 +147,10 @@ pub struct SseConfig {
     pub keepalive_interval_secs: u64,
     /// Maximum subscriptions per session.
     pub max_subscriptions_per_session: usize,
+    /// Maximum concurrent SSE sessions per authenticated user.
+    pub max_sessions_per_user: usize,
+    /// Cap on a user's total subscriptions across every active session.
+    pub max_subscriptions_per_user: usize,
 }
 
 impl Default for SseConfig {
@@ -110,6 +160,8 @@ impl Default for SseConfig {
             channel_buffer_size: 256,
             keepalive_interval_secs: 30,
             max_subscriptions_per_session: 100,
+            max_sessions_per_user: 8,
+            max_subscriptions_per_user: 500,
         }
     }
 }
@@ -454,6 +506,35 @@ pub async fn sse_handler(
         None
     };
     let auth_context = resolve_sse_auth_context(&request_auth, query_auth);
+
+    // Enforce per-user session limit for authenticated connections.
+    if let Some(user_id) = auth_context.user_id() {
+        let sessions = state.sessions.read().await;
+        let user_session_count = sessions
+            .values()
+            .filter(|s| s.auth_context.user_id() == Some(user_id))
+            .count();
+        if user_session_count >= state.config.max_sessions_per_user {
+            let body = SseError::new(
+                "TOO_MANY_SESSIONS",
+                format!(
+                    "User has reached the maximum of {} concurrent sessions",
+                    state.config.max_sessions_per_user
+                ),
+            )
+            .with_retry_after(SSE_AT_CAPACITY_RETRY_SECS);
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(
+                    axum::http::header::RETRY_AFTER,
+                    SSE_AT_CAPACITY_RETRY_SECS_STR,
+                )],
+                Json(body),
+            )
+                .into_response();
+        }
+    }
+
     let session_secret = uuid::Uuid::new_v4().to_string();
 
     let token_exp = auth_context.token_exp();
@@ -698,15 +779,8 @@ pub async fn sse_subscribe_handler(
     Json(request): Json<SseSubscribeRequest>,
 ) -> impl IntoResponse {
     // Validate subscription ID length to prevent memory bloat
-    if request.id.len() > MAX_CLIENT_SUB_ID_LEN {
-        return subscribe_error(
-            StatusCode::BAD_REQUEST,
-            "INVALID_ID",
-            format!(
-                "Subscription ID too long (max {} chars)",
-                MAX_CLIENT_SUB_ID_LEN
-            ),
-        );
+    if let Err(resp) = validate_client_sub_id(&request.id) {
+        return resp;
     }
 
     let Some(session_id) = try_parse_session_id(&request.session_id) else {
@@ -731,6 +805,24 @@ pub async fn sse_subscribe_handler(
                         state.config.max_subscriptions_per_session
                     ),
                 );
+            }
+            // Enforce per-user subscription limit across all sessions.
+            if let Some(user_id) = data.auth_context.user_id() {
+                let user_sub_count: usize = sessions
+                    .values()
+                    .filter(|s| s.auth_context.user_id() == Some(user_id))
+                    .map(|s| s.subscriptions.len())
+                    .sum();
+                if user_sub_count >= state.config.max_subscriptions_per_user {
+                    return subscribe_error(
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "TOO_MANY_SUBSCRIPTIONS",
+                        format!(
+                            "User has reached the maximum of {} total subscriptions",
+                            state.config.max_subscriptions_per_user
+                        ),
+                    );
+                }
             }
             match authorize_session_access(data, &request.session_secret, &request_auth) {
                 Ok(auth) => auth,
@@ -911,44 +1003,17 @@ pub async fn sse_job_subscribe_handler(
     Extension(request_auth): Extension<AuthContext>,
     Json(request): Json<SseJobSubscribeRequest>,
 ) -> impl IntoResponse {
-    if request.id.len() > MAX_CLIENT_SUB_ID_LEN {
-        return subscribe_error(
-            StatusCode::BAD_REQUEST,
-            "INVALID_ID",
-            format!(
-                "Subscription ID too long (max {} chars)",
-                MAX_CLIENT_SUB_ID_LEN
-            ),
-        );
+    if let Err(resp) = validate_client_sub_id(&request.id) {
+        return resp;
     }
 
-    let Some(session_id) = try_parse_session_id(&request.session_id) else {
-        return subscribe_error(
-            StatusCode::BAD_REQUEST,
-            "INVALID_SESSION",
-            "Invalid session ID format",
-        );
-    };
-
-    // Validate session exists + principal binding
-    let session_auth = {
-        let sessions = state.sessions.read().await;
-        match sessions.get(&session_id) {
-            Some(session) => {
-                match authorize_session_access(session, &request.session_secret, &request_auth) {
-                    Ok(auth) => auth,
-                    Err(resp) => return resp,
-                }
-            }
-            None => {
-                return subscribe_error(
-                    StatusCode::NOT_FOUND,
-                    "SESSION_NOT_FOUND",
-                    "Session not found or expired",
-                );
-            }
-        }
-    };
+    let (session_id, session_auth) =
+        match validate_session(&state, &request.session_id, &request.session_secret, &request_auth)
+            .await
+        {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
 
     // Parse job ID
     let job_uuid = match uuid::Uuid::parse_str(&request.job_id) {
@@ -1020,44 +1085,17 @@ pub async fn sse_workflow_subscribe_handler(
     Extension(request_auth): Extension<AuthContext>,
     Json(request): Json<SseWorkflowSubscribeRequest>,
 ) -> impl IntoResponse {
-    if request.id.len() > MAX_CLIENT_SUB_ID_LEN {
-        return subscribe_error(
-            StatusCode::BAD_REQUEST,
-            "INVALID_ID",
-            format!(
-                "Subscription ID too long (max {} chars)",
-                MAX_CLIENT_SUB_ID_LEN
-            ),
-        );
+    if let Err(resp) = validate_client_sub_id(&request.id) {
+        return resp;
     }
 
-    let Some(session_id) = try_parse_session_id(&request.session_id) else {
-        return subscribe_error(
-            StatusCode::BAD_REQUEST,
-            "INVALID_SESSION",
-            "Invalid session ID format",
-        );
-    };
-
-    // Validate session exists + principal binding
-    let session_auth = {
-        let sessions = state.sessions.read().await;
-        match sessions.get(&session_id) {
-            Some(session) => {
-                match authorize_session_access(session, &request.session_secret, &request_auth) {
-                    Ok(auth) => auth,
-                    Err(resp) => return resp,
-                }
-            }
-            None => {
-                return subscribe_error(
-                    StatusCode::NOT_FOUND,
-                    "SESSION_NOT_FOUND",
-                    "Session not found or expired",
-                );
-            }
-        }
-    };
+    let (session_id, session_auth) =
+        match validate_session(&state, &request.session_id, &request.session_secret, &request_auth)
+            .await
+        {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
 
     // Parse workflow ID
     let workflow_uuid = match uuid::Uuid::parse_str(&request.workflow_id) {

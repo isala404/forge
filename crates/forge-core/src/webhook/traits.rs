@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::Result;
+use crate::function::{FunctionInfo, FunctionKind};
 use crate::metadata::HandlerMetadata;
 
 use super::context::WebhookContext;
@@ -76,6 +77,34 @@ impl Default for WebhookInfo {
             idempotency: None,
             timeout: Duration::from_secs(30),
             http_timeout: None,
+        }
+    }
+}
+
+impl From<&WebhookInfo> for FunctionInfo {
+    /// Convert webhook metadata to a `FunctionInfo` for registration in the
+    /// `FunctionRegistry`. Webhooks are always public (they bypass JWT auth
+    /// and rely on signature validation instead). Fields that are not
+    /// applicable to webhooks are set to their zero/false defaults.
+    fn from(webhook: &WebhookInfo) -> Self {
+        Self {
+            name: webhook.name,
+            description: webhook.description,
+            kind: FunctionKind::Webhook,
+            required_role: None,
+            is_public: true,
+            cache_ttl: None,
+            timeout: Some(webhook.timeout),
+            http_timeout: webhook.http_timeout,
+            rate_limit_requests: None,
+            rate_limit_per_secs: None,
+            rate_limit_key: None,
+            log_level: None,
+            table_dependencies: &[],
+            selected_columns: &[],
+            transactional: false,
+            consistent: false,
+            max_upload_size_bytes: None,
         }
     }
 }

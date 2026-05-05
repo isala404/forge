@@ -213,10 +213,7 @@ fn default_quiet_paths() -> Vec<String> {
     vec![
         "/_api/health".to_string(),
         "/_api/ready".to_string(),
-        "/_api/signal/event".to_string(),
-        "/_api/signal/view".to_string(),
-        "/_api/signal/user".to_string(),
-        "/_api/signal/report".to_string(),
+        "/_api/signal".to_string(),
     ]
 }
 

@@ -29,7 +29,7 @@ pub use node::{NodeConfig, NodeRole};
 pub use observability::ObservabilityConfig;
 pub use project::ProjectConfig;
 pub use rate_limit::{RateLimitMode, RateLimitSettings};
-pub use realtime_config::{RateLimit, RealtimeConfig};
+pub use realtime_config::RealtimeConfig;
 pub use security::SecurityConfig;
 pub use signals::SignalsConfig;
 pub use worker::WorkerConfig;
@@ -1051,9 +1051,7 @@ mod tests {
     }
 
     #[test]
-    fn reserved_realtime_quota_fields_parse_today() {
-        // Reserved field names must be parseable now so 1.0.x can light them
-        // up without a config-format break. They aren't enforced yet.
+    fn realtime_quota_fields_parse_and_enforce() {
         let toml = r#"
             [database]
             url = "postgres://localhost/test"
@@ -1062,16 +1060,11 @@ mod tests {
             max_sessions_per_ip = 16
             max_subscriptions_per_user = 200
             max_cached_result_bytes = 1048576
-            subscribe_rate_limit = { requests = 10, per = "1m", key = "user" }
         "#;
         let config = ForgeConfig::parse_toml(toml).unwrap();
-        assert_eq!(config.realtime.max_sessions_per_user, Some(4));
-        assert_eq!(config.realtime.max_sessions_per_ip, Some(16));
-        assert_eq!(config.realtime.max_subscriptions_per_user, Some(200));
-        assert_eq!(config.realtime.max_cached_result_bytes, Some(1024 * 1024));
-        let rl = config.realtime.subscribe_rate_limit.unwrap();
-        assert_eq!(rl.requests, 10);
-        assert_eq!(rl.per, "1m");
-        assert_eq!(rl.key.as_deref(), Some("user"));
+        assert_eq!(config.realtime.max_sessions_per_user, 4);
+        assert_eq!(config.realtime.max_sessions_per_ip, 16);
+        assert_eq!(config.realtime.max_subscriptions_per_user, 200);
+        assert_eq!(config.realtime.max_cached_result_bytes, 1024 * 1024);
     }
 }

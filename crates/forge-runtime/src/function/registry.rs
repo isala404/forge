@@ -51,6 +51,12 @@ pub enum FunctionEntry {
         info: FunctionInfo,
         handler: BoxedMutationFn,
     },
+    /// Webhook registered for metadata access (info lookup, MCP tool list,
+    /// observability). Execution always goes through the dedicated webhook HTTP
+    /// route with signature validation — this entry carries no handler.
+    Webhook {
+        info: FunctionInfo,
+    },
 }
 
 impl FunctionEntry {
@@ -58,6 +64,7 @@ impl FunctionEntry {
         match self {
             FunctionEntry::Query { info, .. } => info,
             FunctionEntry::Mutation { info, .. } => info,
+            FunctionEntry::Webhook { info } => info,
         }
     }
 
@@ -65,6 +72,7 @@ impl FunctionEntry {
         match self {
             FunctionEntry::Query { .. } => FunctionKind::Query,
             FunctionEntry::Mutation { .. } => FunctionKind::Mutation,
+            FunctionEntry::Webhook { .. } => FunctionKind::Webhook,
         }
     }
 }
@@ -85,6 +93,9 @@ impl Clone for FunctionEntry {
             FunctionEntry::Mutation { info, handler } => FunctionEntry::Mutation {
                 info: info.clone(),
                 handler: Arc::clone(handler),
+            },
+            FunctionEntry::Webhook { info } => FunctionEntry::Webhook {
+                info: info.clone(),
             },
         }
     }
@@ -180,10 +191,33 @@ impl FunctionRegistry {
         })
     }
 
+    /// Register a webhook's metadata into the function registry.
+    ///
+    /// Webhooks are registered here for metadata access (info lookup, MCP tool
+    /// list, observability) only. They carry no executable handler because
+    /// execution requires signature validation that lives in the dedicated
+    /// webhook HTTP route. Direct RPC calls to webhook names are rejected by
+    /// `FunctionRouter`.
+    pub fn register_webhook_info(&mut self, info: FunctionInfo) {
+        let name = info.name.to_string();
+        self.functions.insert(name, FunctionEntry::Webhook { info });
+    }
+
     /// Get all mutations.
     pub fn mutations(&self) -> impl Iterator<Item = (&str, &FunctionInfo)> {
         self.functions.iter().filter_map(|(name, entry)| {
             if let FunctionEntry::Mutation { info, .. } = entry {
+                Some((name.as_str(), info))
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Get all webhooks.
+    pub fn webhooks(&self) -> impl Iterator<Item = (&str, &FunctionInfo)> {
+        self.functions.iter().filter_map(|(name, entry)| {
+            if let FunctionEntry::Webhook { info } = entry {
                 Some((name.as_str(), info))
             } else {
                 None

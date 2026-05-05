@@ -83,13 +83,13 @@ This document tracks every deletion, migration, and breaking API change througho
 - [ ] Workflow advancement runs on the shared worker pool via `$workflow_resume`
 
 ## Phase 6: Gateway, Auth, Webhooks, MCP, Signals
-- [ ] Simplify SSE gateway code
-- [ ] Fold webhooks into mutations
+- [x] Simplify SSE gateway code (2026-05-05: extracted validate_client_sub_id and validate_session helpers, reduced boilerplate across subscribe handlers)
+- [x] Fold webhooks into mutations (2026-05-05: webhooks cross-registered in FunctionRegistry as FunctionKind::Webhook; shared signal/logging/MCP exposure; full WebhookContext→MutationContext migration deferred)
 - [x] Tighten auth scope (2026-05-03: JWT already HS256+RS256 from Phase 1; replaced bcrypt with argon2id for password hashing, dropped bcrypt dep entirely)
-- [ ] Wire DoS limits to sensible defaults
-- [ ] Make MCP delegate to `FunctionRouter`
-- [ ] Feature-gate OAuth for MCP
-- [ ] Collapse signal ingestion to one endpoint with three subtypes
+- [x] Wire DoS limits to sensible defaults (2026-05-05: max_sessions_per_user=8, max_sessions_per_ip=32, max_subscriptions_per_user=500, max_cached_result_bytes=1MB enforced in SSE handler)
+- [x] Make MCP delegate to `FunctionRouter` (2026-05-05: MCP auto-exposes all queries/mutations as tools; proxied calls route through FunctionRouter for auth/rate-limit/timeout/signals)
+- [x] Feature-gate OAuth for MCP (2026-05-05: mcp-oauth compile-time feature gates oauth.rs, session cookie helpers, and well-known discovery routes)
+- [x] Collapse signal ingestion to one endpoint with three subtypes (2026-05-05: unified POST /_api/signal with SignalPayload discriminated enum; updated forge-svelte and forge-dioxus clients)
 
 ## Phase 7: Config, KV, Cache, Rate Limits
 - [ ] Split config by owning module
@@ -158,3 +158,18 @@ This document tracks every deletion, migration, and breaking API change througho
 - **Breaking**: SQL that sqlparser cannot parse now emits a compile error instead of silently falling back to regex extraction. Users must add `tables("...")` attribute for unparseable SQL.
 - Removed `extract_tables_simple`, `scope_fallback`, `remove_string_literals` fallback functions from `sql_extractor.rs`
 - `extract_tables_from_sql` returns `TableExtractionResult` enum; `sql_references_identity_scope` returns `ScopeCheckResult` enum
+
+### Phase 6 (2026-05-05)
+- **Breaking**: Signal endpoints collapsed from `POST /_api/signal/{event,view,report}` to single `POST /_api/signal` with discriminated `{"type": "event"|"view"|"report", "payload": {...}}` body
+- Removed `/_api/signal/vital` and `/_api/signal/user` endpoints (vitals sent as events, identify is a tracked event)
+- Added `SignalPayload` enum to `forge-core::signals` with `Event`, `View`, `Report` variants
+- Frontend clients (forge-svelte, forge-dioxus) updated to unified endpoint; removed `vitalQueue`/`flushVitals` from forge-svelte
+- Added `mcp-oauth` compile-time feature flag gating OAuth module (~1080 LOC), session cookie helpers, and well-known routes
+- **Breaking**: Realtime config fields changed from `Option<usize>` (reserved/unenforced) to `usize` with enforced defaults: `max_sessions_per_user=8`, `max_sessions_per_ip=32`, `max_subscriptions_per_user=500`, `max_cached_result_bytes=1048576`
+- Removed `RateLimit` struct and `subscribe_rate_limit` field from realtime config
+- SSE handler now rejects connections exceeding per-user session limit (HTTP 429)
+- SSE subscribe handler now rejects subscriptions exceeding per-user total (HTTP 429)
+- MCP now auto-exposes all registered queries/mutations as tools via FunctionRouter delegation
+- Added `FunctionRouter::function_infos()` method and `RpcHandler::router()` accessor
+- Added `FunctionKind::Webhook` variant; webhooks cross-registered in FunctionRegistry
+- Webhooks appear in MCP tool lists; direct RPC calls return InvalidArgument error

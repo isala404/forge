@@ -13,7 +13,7 @@ use axum::http::{HeaderMap, HeaderValue};
 use axum::response::IntoResponse;
 use forge_core::signals::{
     ClientContext, ClientEvent, DiagnosticError, DiagnosticReport, PageViewPayload, SignalEvent,
-    SignalEventBatch, SignalEventType,
+    SignalEventBatch, SignalEventType, SignalPayload,
 };
 use forge_core::testing::IsolatedTestDb;
 use sqlx::PgPool;
@@ -502,12 +502,12 @@ async fn test_event_handler_roundtrip() {
         }),
     };
 
-    let response = endpoints::event_handler(
+    let response = endpoints::signal_handler(
         State(state.clone()),
         None,
         None,
         make_headers(),
-        Json(batch),
+        Json(SignalPayload::Event(batch)),
     )
     .await
     .into_response();
@@ -562,12 +562,12 @@ async fn test_view_handler_with_utm() {
         correlation_id: None,
     };
 
-    let response = endpoints::view_handler(
+    let response = endpoints::signal_handler(
         State(state.clone()),
         None,
         None,
         make_headers(),
-        Json(payload),
+        Json(SignalPayload::View(payload)),
     )
     .await
     .into_response();
@@ -621,12 +621,12 @@ async fn test_report_handler_stores_errors() {
         ],
     };
 
-    let response = endpoints::report_handler(
+    let response = endpoints::signal_handler(
         State(state.clone()),
         None,
         None,
         make_headers(),
-        Json(report),
+        Json(SignalPayload::Report(report)),
     )
     .await
     .into_response();
@@ -677,12 +677,12 @@ async fn test_event_handler_populates_device_fields() {
         context: None,
     };
 
-    endpoints::event_handler(
+    endpoints::signal_handler(
         State(state.clone()),
         None,
         None,
         make_headers_with_platform("desktop-macos"),
-        Json(batch),
+        Json(SignalPayload::Event(batch)),
     )
     .await;
 

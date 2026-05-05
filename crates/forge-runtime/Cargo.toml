@@ -111,6 +111,10 @@ cron = []
 # Long-running daemon runner (singletons, leader-elected).
 daemons = []
 
+# OAuth 2.1 + PKCE for MCP authentication. Without this, MCP tools use
+# only JWT bearer auth (token passed directly in the request).
+mcp-oauth = ["gateway"]
+
 # GeoIP enrichment (sub-feature of `gateway` since signals lives there).
 # Bundles a ~10MB IP-to-country database; pulls a build-time download for
 # `db_ip`. Skip if you don't run signals or want offline builds.
@@ -132,6 +136,7 @@ otel = [
 # Everything except testcontainers. What `forgex` activates by default.
 full = [
     "gateway",
+    "mcp-oauth",
     "jobs",
     "workflows",
     "cron",

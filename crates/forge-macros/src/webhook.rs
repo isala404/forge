@@ -324,6 +324,9 @@ pub fn webhook_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
             forge::inventory::submit!(forge::AutoHandler(|registries| {
                 registries.webhooks.register::<#struct_name>();
+                registries.functions.register_webhook_info(
+                    forge::forge_core::FunctionInfo::from(&#struct_name::info())
+                );
             }));
         }
     };
