@@ -1,6 +1,6 @@
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use tokio::sync::RwLock;
@@ -9,8 +9,6 @@ use uuid::Uuid;
 
 use super::registry::CronRegistry;
 use crate::pg::LeaderElection;
-use forge_core::CircuitBreakerClient;
-use forge_core::cron::CronContext;
 
 /// Cron run status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,10 +136,15 @@ impl Default for CronRunnerConfig {
 }
 
 /// Cron scheduler and executor.
+///
+/// The scheduler calculates run times and claims execution slots via
+/// `forge_cron_runs`. Actual execution is dispatched as a `$cron:{name}`
+/// job through the shared worker pool, giving crons retry, timeout,
+/// and distributed execution for free.
 pub struct CronRunner {
     registry: Arc<CronRegistry>,
     pool: sqlx::PgPool,
-    http_client: CircuitBreakerClient,
+    job_queue: crate::jobs::JobQueue,
     config: CronRunnerConfig,
     is_running: Arc<RwLock<bool>>,
 }
@@ -151,13 +154,13 @@ impl CronRunner {
     pub fn new(
         registry: Arc<CronRegistry>,
         pool: sqlx::PgPool,
-        http_client: CircuitBreakerClient,
+        job_queue: crate::jobs::JobQueue,
         config: CronRunnerConfig,
     ) -> Self {
         Self {
             registry,
             pool,
-            http_client,
+            job_queue,
             config,
             is_running: Arc::new(RwLock::new(false)),
         }
@@ -355,7 +358,7 @@ impl CronRunner {
         }
     }
 
-    /// Execute a cron job.
+    /// Dispatch a cron run as a job on the shared worker pool.
     async fn execute_cron(
         &self,
         entry: &super::registry::CronEntry,
@@ -364,119 +367,42 @@ impl CronRunner {
         is_catch_up: bool,
     ) {
         let info = &entry.info;
-        let start_time = Instant::now();
+        let job_type = format!("$cron:{}", info.name);
 
-        let exec_span = tracing::info_span!(
-            "cron.execute",
-            cron.name = info.name,
-            cron.run_id = %run_id,
-            cron.schedule = info.schedule.expression(),
-            cron.timezone = info.timezone,
-            cron.scheduled_time = %scheduled_time,
-            cron.is_catch_up = is_catch_up,
-            cron.duration_ms = field::Empty,
-            cron.status = field::Empty,
-            otel.name = %format!("cron {}", info.name),
+        let input = serde_json::json!({
+            "run_id": run_id,
+            "cron_name": info.name,
+            "scheduled_time": scheduled_time.to_rfc3339(),
+            "timezone": info.timezone,
+            "is_catch_up": is_catch_up,
+        });
+
+        let job = crate::jobs::JobRecord::new(
+            job_type.clone(),
+            input,
+            forge_core::job::JobPriority::Normal,
+            1,
         );
 
-        async {
-            tracing::trace!("Executing cron");
-
-            if is_catch_up {
-                tracing::info!(
+        match self.job_queue.enqueue(job).await {
+            Ok(job_id) => {
+                tracing::debug!(
                     cron.name = info.name,
-                    cron.scheduled_time = %scheduled_time,
-                    "Executing catch-up run"
+                    cron.run_id = %run_id,
+                    job_id = %job_id,
+                    is_catch_up,
+                    "Cron dispatched as job"
                 );
             }
-
-            let mut ctx = CronContext::new(
-                run_id,
-                info.name.to_string(),
-                scheduled_time,
-                info.timezone.to_string(),
-                is_catch_up,
-                self.pool.clone(),
-                self.http_client.clone(),
-            );
-            ctx.set_http_timeout(info.http_timeout);
-
-            // Execute with timeout
-            let handler = entry.handler.clone();
-            let result = tokio::time::timeout(info.timeout, handler(&ctx)).await;
-
-            let duration_ms = start_time.elapsed().as_millis() as u64;
-            Span::current().record("cron.duration_ms", duration_ms);
-
-            let signal_duration_ms = duration_ms.min(i32::MAX as u64) as i32;
-            match result {
-                Ok(Ok(())) => {
-                    Span::current().record("cron.status", "completed");
-                    tracing::debug!(cron.duration_ms = duration_ms, "Cron executed");
-                    self.mark_completed(run_id, info.name).await;
-                    crate::signals::emit_server_execution(
-                        info.name,
-                        "cron",
-                        signal_duration_ms,
-                        true,
-                        None,
-                    );
-                }
-                Ok(Err(e)) => {
-                    Span::current().record("cron.status", "failed");
-                    let err_str = e.to_string();
-                    tracing::error!(
-                        cron.duration_ms = duration_ms,
-                        error = %e,
-                        "Cron failed"
-                    );
-                    self.mark_failed(run_id, info.name, &err_str).await;
-                    crate::signals::emit_server_execution(
-                        info.name,
-                        "cron",
-                        signal_duration_ms,
-                        false,
-                        Some(err_str),
-                    );
-                }
-                Err(_) => {
-                    Span::current().record("cron.status", "timeout");
-                    tracing::error!(
-                        cron.duration_ms = duration_ms,
-                        cron.timeout_ms = info.timeout.as_millis() as u64,
-                        "Cron timed out"
-                    );
-                    self.mark_failed(run_id, info.name, "Execution timed out")
-                        .await;
-                    crate::signals::emit_server_execution(
-                        info.name,
-                        "cron",
-                        signal_duration_ms,
-                        false,
-                        Some("Execution timed out".to_string()),
-                    );
-                }
+            Err(e) => {
+                tracing::error!(
+                    cron.name = info.name,
+                    cron.run_id = %run_id,
+                    error = %e,
+                    "Failed to enqueue cron job"
+                );
+                self.mark_failed(run_id, info.name, &e.to_string()).await;
             }
-        }
-        .instrument(exec_span)
-        .await
-    }
-
-    /// Mark a cron run as completed.
-    async fn mark_completed(&self, run_id: Uuid, cron_name: &str) {
-        if let Err(e) = sqlx::query!(
-            r#"
-            UPDATE forge_cron_runs
-            SET status = 'completed', completed_at = NOW()
-            WHERE id = $1 AND node_id = $2
-            "#,
-            run_id,
-            self.config.node_id,
-        )
-        .execute(&self.pool)
-        .await
-        {
-            tracing::error!(cron = cron_name, error = %e, "Failed to mark cron completed");
         }
     }
 

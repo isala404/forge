@@ -5,8 +5,9 @@ use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use super::bridge::WORKFLOW_RESUME_JOB;
 use super::event_store::EventStore;
-use super::executor::WorkflowExecutor;
+use crate::jobs::JobQueue;
 use forge_core::Result;
 
 /// Configuration for the workflow scheduler.
@@ -33,12 +34,13 @@ impl Default for WorkflowSchedulerConfig {
 /// Scheduler for durable workflows.
 ///
 /// Polls the database for suspended workflows that are ready to resume
-/// (timer expired or event received) and triggers their execution.
-/// Also listens for NOTIFY events on the `forge_workflow_wakeup` channel
-/// for immediate wakeup when a workflow event is inserted.
+/// (timer expired or event received) and enqueues `$workflow_resume` jobs
+/// for the worker pool. Also listens for NOTIFY events on the
+/// `forge_workflow_wakeup` channel for immediate wakeup when a workflow
+/// event is inserted.
 pub struct WorkflowScheduler {
     pool: PgPool,
-    executor: Arc<WorkflowExecutor>,
+    job_queue: JobQueue,
     event_store: Arc<EventStore>,
     config: WorkflowSchedulerConfig,
 }
@@ -47,13 +49,13 @@ impl WorkflowScheduler {
     /// Create a new workflow scheduler.
     pub fn new(
         pool: PgPool,
-        executor: Arc<WorkflowExecutor>,
+        job_queue: JobQueue,
         event_store: Arc<EventStore>,
         config: WorkflowSchedulerConfig,
     ) -> Self {
         Self {
             pool,
-            executor,
+            job_queue,
             event_store,
             config,
         }
@@ -240,9 +242,8 @@ impl WorkflowScheduler {
         Ok(())
     }
 
-    /// Resume a workflow after timer expiry.
+    /// Resume a workflow after timer expiry by enqueuing a job.
     async fn resume_workflow(&self, workflow_run_id: Uuid) {
-        // Clear wake state
         if let Err(e) = sqlx::query!(
             r#"
             UPDATE forge_workflow_runs
@@ -258,17 +259,11 @@ impl WorkflowScheduler {
             return;
         }
 
-        // Resume execution - use resume_from_sleep so ctx.sleep() returns immediately
-        if let Err(e) = self.executor.resume_from_sleep(workflow_run_id).await {
-            tracing::warn!(workflow_run_id = %workflow_run_id, error = %e, "Failed to resume workflow");
-        } else {
-            tracing::debug!(workflow_run_id = %workflow_run_id, "Workflow resumed after timer");
-        }
+        self.enqueue_resume(workflow_run_id, true, "timer").await;
     }
 
-    /// Resume a workflow after event timeout.
+    /// Resume a workflow after event timeout by enqueuing a job.
     async fn resume_with_timeout(&self, workflow_run_id: Uuid) {
-        // Clear waiting state
         if let Err(e) = sqlx::query!(
             r#"
             UPDATE forge_workflow_runs
@@ -284,17 +279,12 @@ impl WorkflowScheduler {
             return;
         }
 
-        // Resume execution - the workflow will get a timeout error
-        if let Err(e) = self.executor.resume(workflow_run_id).await {
-            tracing::warn!(workflow_run_id = %workflow_run_id, error = %e, "Failed to resume workflow after timeout");
-        } else {
-            tracing::debug!(workflow_run_id = %workflow_run_id, "Workflow resumed after event timeout");
-        }
+        self.enqueue_resume(workflow_run_id, false, "event_timeout")
+            .await;
     }
 
-    /// Resume a workflow that received an event.
+    /// Resume a workflow that received an event by enqueuing a job.
     async fn resume_with_event(&self, workflow_run_id: Uuid) {
-        // Clear waiting state
         if let Err(e) = sqlx::query!(
             r#"
             UPDATE forge_workflow_runs
@@ -310,11 +300,38 @@ impl WorkflowScheduler {
             return;
         }
 
-        // Resume execution
-        if let Err(e) = self.executor.resume(workflow_run_id).await {
-            tracing::warn!(workflow_run_id = %workflow_run_id, error = %e, "Failed to resume workflow after event");
-        } else {
-            tracing::debug!(workflow_run_id = %workflow_run_id, "Workflow resumed after event");
+        self.enqueue_resume(workflow_run_id, false, "event").await;
+    }
+
+    /// Enqueue a `$workflow_resume` job for the worker pool.
+    async fn enqueue_resume(&self, workflow_run_id: Uuid, from_sleep: bool, trigger: &str) {
+        let input = serde_json::json!({
+            "run_id": workflow_run_id.to_string(),
+            "from_sleep": from_sleep,
+        });
+        let job = crate::jobs::JobRecord::new(
+            WORKFLOW_RESUME_JOB.to_string(),
+            input,
+            forge_core::job::JobPriority::High,
+            1,
+        );
+        match self.job_queue.enqueue(job).await {
+            Ok(job_id) => {
+                tracing::debug!(
+                    workflow_run_id = %workflow_run_id,
+                    job_id = %job_id,
+                    trigger,
+                    "Enqueued workflow resume job"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    workflow_run_id = %workflow_run_id,
+                    error = %e,
+                    trigger,
+                    "Failed to enqueue workflow resume job"
+                );
+            }
         }
     }
 }

@@ -149,6 +149,8 @@ pub struct SseConfig {
     pub max_subscriptions_per_session: usize,
     /// Maximum concurrent SSE sessions per authenticated user.
     pub max_sessions_per_user: usize,
+    /// Maximum concurrent SSE sessions per source IP.
+    pub max_sessions_per_ip: usize,
     /// Cap on a user's total subscriptions across every active session.
     pub max_subscriptions_per_user: usize,
 }
@@ -161,6 +163,7 @@ impl Default for SseConfig {
             keepalive_interval_secs: 30,
             max_subscriptions_per_session: 100,
             max_sessions_per_user: 8,
+            max_sessions_per_ip: 32,
             max_subscriptions_per_user: 500,
         }
     }
@@ -176,6 +179,7 @@ pub struct SseQuery {
 struct SseSessionData {
     auth_context: AuthContext,
     session_secret: String,
+    client_ip: Option<String>,
     /// Maps client subscription ID -> internal SubscriptionId
     subscriptions: HashMap<String, SubscriptionId>,
 }
@@ -467,6 +471,7 @@ fn unsubscribe_error(
 pub async fn sse_handler(
     State(state): State<Arc<SseState>>,
     Extension(request_auth): Extension<AuthContext>,
+    Extension(resolved_ip): Extension<super::ResolvedClientIp>,
     Query(query): Query<SseQuery>,
 ) -> impl IntoResponse {
     // Check session limit. Body matches the standard SseError shape so
@@ -507,37 +512,77 @@ pub async fn sse_handler(
     };
     let auth_context = resolve_sse_auth_context(&request_auth, query_auth);
 
-    // Enforce per-user session limit for authenticated connections.
-    if let Some(user_id) = auth_context.user_id() {
-        let sessions = state.sessions.read().await;
-        let user_session_count = sessions
-            .values()
-            .filter(|s| s.auth_context.user_id() == Some(user_id))
-            .count();
-        if user_session_count >= state.config.max_sessions_per_user {
-            let body = SseError::new(
-                "TOO_MANY_SESSIONS",
-                format!(
-                    "User has reached the maximum of {} concurrent sessions",
-                    state.config.max_sessions_per_user
-                ),
-            )
-            .with_retry_after(SSE_AT_CAPACITY_RETRY_SECS);
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                [(
-                    axum::http::header::RETRY_AFTER,
-                    SSE_AT_CAPACITY_RETRY_SECS_STR,
-                )],
-                Json(body),
-            )
-                .into_response();
-        }
-    }
-
+    let client_ip = resolved_ip.0;
     let session_secret = uuid::Uuid::new_v4().to_string();
-
     let token_exp = auth_context.token_exp();
+
+    // Atomic check-and-insert under a single write lock to prevent TOCTOU
+    // races on per-user and per-IP session limits.
+    {
+        let mut sessions = state.sessions.write().await;
+
+        if let Some(user_id) = auth_context.user_id() {
+            let user_session_count = sessions
+                .values()
+                .filter(|s| s.auth_context.user_id() == Some(user_id))
+                .count();
+            if user_session_count >= state.config.max_sessions_per_user {
+                let body = SseError::new(
+                    "TOO_MANY_SESSIONS",
+                    format!(
+                        "User has reached the maximum of {} concurrent sessions",
+                        state.config.max_sessions_per_user
+                    ),
+                )
+                .with_retry_after(SSE_AT_CAPACITY_RETRY_SECS);
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [(
+                        axum::http::header::RETRY_AFTER,
+                        SSE_AT_CAPACITY_RETRY_SECS_STR,
+                    )],
+                    Json(body),
+                )
+                    .into_response();
+            }
+        }
+
+        if let Some(ip) = &client_ip {
+            let ip_session_count = sessions
+                .values()
+                .filter(|s| s.client_ip.as_deref() == Some(ip))
+                .count();
+            if ip_session_count >= state.config.max_sessions_per_ip {
+                let body = SseError::new(
+                    "TOO_MANY_SESSIONS",
+                    format!(
+                        "IP has reached the maximum of {} concurrent sessions",
+                        state.config.max_sessions_per_ip
+                    ),
+                )
+                .with_retry_after(SSE_AT_CAPACITY_RETRY_SECS);
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [(
+                        axum::http::header::RETRY_AFTER,
+                        SSE_AT_CAPACITY_RETRY_SECS_STR,
+                    )],
+                    Json(body),
+                )
+                    .into_response();
+            }
+        }
+
+        sessions.insert(
+            session_id,
+            SseSessionData {
+                auth_context: auth_context.clone(),
+                session_secret: session_secret.clone(),
+                client_ip,
+                subscriptions: HashMap::new(),
+            },
+        );
+    }
 
     // Register session with reactor
     let reactor = state.reactor.clone();
@@ -546,19 +591,6 @@ pub async fn sse_handler(
     // Create a bridge channel for the reactor's message format
     let (rt_tx, mut rt_rx) = mpsc::channel(buffer_size);
     reactor.register_session(session_id, rt_tx, token_exp);
-
-    // Store session data for subscription handlers
-    {
-        let mut sessions = state.sessions.write().await;
-        sessions.insert(
-            session_id,
-            SseSessionData {
-                auth_context: auth_context.clone(),
-                session_secret: session_secret.clone(),
-                subscriptions: HashMap::new(),
-            },
-        );
-    }
 
     // Capture sessions for cleanup guard
     let sessions = state.sessions.clone();
@@ -767,8 +799,12 @@ fn convert_realtime_to_sse(msg: RealtimeMessage) -> Option<SseMessage> {
         | RealtimeMessage::Ping
         | RealtimeMessage::Pong
         | RealtimeMessage::AuthSuccess
-        | RealtimeMessage::AuthFailed { .. }
         | RealtimeMessage::Lagging => None,
+        RealtimeMessage::AuthFailed { reason } => Some(SseMessage::Error {
+            target: "session".to_string(),
+            code: "SESSION_EXPIRED".to_string(),
+            message: reason,
+        }),
     }
 }
 

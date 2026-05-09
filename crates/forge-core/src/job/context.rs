@@ -136,6 +136,17 @@ impl JobContext {
         self.http_timeout = timeout;
     }
 
+    /// Get the raw database pool for bridge handlers that need to construct
+    /// other context types (e.g., CronContext from a cron bridge job).
+    pub fn pool(&self) -> &sqlx::PgPool {
+        &self.db_pool
+    }
+
+    /// Get the circuit breaker HTTP client for bridge handlers.
+    pub fn circuit_breaker_client(&self) -> &CircuitBreakerClient {
+        &self.http_client
+    }
+
     /// Report job progress.
     pub fn progress(&self, percentage: u8, message: impl Into<String>) -> crate::Result<()> {
         let update = ProgressUpdate {

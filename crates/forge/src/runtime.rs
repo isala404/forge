@@ -542,10 +542,20 @@ impl Forge {
             }));
         }
 
+        // Register cron bridge handlers so the worker pool can execute cron jobs.
+        #[cfg(feature = "cron")]
+        {
+            forge_runtime::cron::register_cron_bridges(
+                &self.cron_registry,
+                &mut self.job_registry,
+            );
+        }
+
+        let job_queue = JobQueue::new(jobs_pool.clone());
+
         // Start job worker if worker role
         #[cfg(feature = "jobs")]
         if roles.contains(&NodeRole::Worker) {
-            let job_queue = JobQueue::new(jobs_pool.clone());
             let worker_config = WorkerConfig {
                 id: Some(node_id.as_uuid()),
                 capabilities: self.config.node.worker_capabilities.clone(),
@@ -556,7 +566,7 @@ impl Forge {
 
             let mut worker = Worker::new(
                 worker_config,
-                job_queue,
+                job_queue.clone(),
                 self.job_registry.clone(),
                 jobs_pool.clone(),
             );
@@ -575,7 +585,6 @@ impl Forge {
         if roles.contains(&NodeRole::Scheduler) {
             let cron_registry = self.cron_registry.clone();
             let cron_pool = jobs_pool.clone();
-            let cron_http = http_client.clone();
             let cron_leader_election = leader_election.clone();
 
             let cron_config = CronRunnerConfig {
@@ -586,7 +595,12 @@ impl Forge {
                 run_stale_threshold: Duration::from_secs(15 * 60),
             };
 
-            let cron_runner = CronRunner::new(cron_registry, cron_pool, cron_http, cron_config);
+            let cron_runner = CronRunner::new(
+                cron_registry,
+                cron_pool,
+                job_queue.clone(),
+                cron_config,
+            );
 
             handles.push(tokio::spawn(async move {
                 if let Err(e) = cron_runner.run().await {
@@ -597,20 +611,30 @@ impl Forge {
             tracing::debug!("Cron scheduler started");
         }
 
+        // Register workflow bridge handler so workers can execute resume jobs.
+        #[cfg(feature = "workflows")]
+        let workflow_bridge_executor = Arc::new(WorkflowExecutor::new(
+            Arc::new(self.workflow_registry.clone()),
+            jobs_pool.clone(),
+            http_client.clone(),
+        ));
+        #[cfg(feature = "workflows")]
+        {
+            forge_runtime::workflow::register_workflow_bridge(
+                workflow_bridge_executor.clone(),
+                &mut self.job_registry,
+            );
+        }
+
         // Start workflow scheduler if scheduler role
         #[cfg(feature = "workflows")]
         let workflow_shutdown_token = CancellationToken::new();
         #[cfg(feature = "workflows")]
         if roles.contains(&NodeRole::Scheduler) {
-            let scheduler_executor = Arc::new(WorkflowExecutor::new(
-                Arc::new(self.workflow_registry.clone()),
-                jobs_pool.clone(),
-                http_client.clone(),
-            ));
             let event_store = Arc::new(EventStore::new(jobs_pool.clone()));
             let scheduler = WorkflowScheduler::new(
                 jobs_pool.clone(),
-                scheduler_executor,
+                job_queue.clone(),
                 event_store,
                 WorkflowSchedulerConfig::default(),
             );
@@ -632,13 +656,9 @@ impl Forge {
                 self.job_registry.clone(),
             ))
         };
-        // Create workflow executor for dispatch (used by daemon and gateway).
+        // Reuse the bridge executor for dispatch (daemon, gateway).
         #[cfg(feature = "workflows")]
-        let workflow_executor = Arc::new(WorkflowExecutor::new(
-            Arc::new(self.workflow_registry.clone()),
-            jobs_pool.clone(),
-            http_client.clone(),
-        ));
+        let workflow_executor = workflow_bridge_executor;
 
         // Start daemon runner if scheduler role (daemons run as singletons)
         #[cfg(feature = "daemons")]
@@ -745,6 +765,7 @@ impl Forge {
                 max_rpc_batch_size: self.config.gateway.max_rpc_batch_size,
                 max_multipart_fields: self.config.gateway.max_multipart_fields,
                 max_sessions_per_user: self.config.realtime.max_sessions_per_user,
+                max_sessions_per_ip: self.config.realtime.max_sessions_per_ip,
                 max_subscriptions_per_user: self.config.realtime.max_subscriptions_per_user,
                 security_headers: self.config.gateway.security_headers,
                 hsts: self.config.gateway.hsts,

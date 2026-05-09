@@ -11,7 +11,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use base64::{Engine as _, engine::general_purpose};
-use ed25519_dalek::{Signature as Ed25519Signature, Verifier as _, VerifyingKey};
+use ring::signature::{self, UnparsedPublicKey};
 use forge_core::CircuitBreakerClient;
 use forge_core::function::JobDispatch;
 use forge_core::webhook::{IdempotencySource, SignatureAlgorithm, WebhookContext};
@@ -467,26 +467,14 @@ fn validate_ed25519(body: &[u8], public_key_b64: &str, signature_b64: &str) -> b
         Ok(b) => b,
         Err(_) => return false,
     };
-    let pub_key_array: [u8; 32] = match pub_key_bytes.as_slice().try_into() {
-        Ok(b) => b,
-        Err(_) => return false,
-    };
-    let verifying_key = match VerifyingKey::from_bytes(&pub_key_array) {
-        Ok(k) => k,
-        Err(_) => return false,
-    };
 
     let sig_bytes = match general_purpose::STANDARD.decode(signature_b64) {
         Ok(b) => b,
         Err(_) => return false,
     };
-    let sig_array: [u8; 64] = match sig_bytes.as_slice().try_into() {
-        Ok(b) => b,
-        Err(_) => return false,
-    };
-    let signature = Ed25519Signature::from_bytes(&sig_array);
 
-    verifying_key.verify(body, &signature).is_ok()
+    let peer_public_key = UnparsedPublicKey::new(&signature::ED25519, &pub_key_bytes);
+    peer_public_key.verify(body, &sig_bytes).is_ok()
 }
 
 fn decode_hex(s: &str) -> Option<Vec<u8>> {
@@ -779,17 +767,16 @@ mod tests {
     #[test]
     fn test_validate_ed25519() {
         use base64::{Engine as _, engine::general_purpose};
-        use ed25519_dalek::{Signer, SigningKey};
+        use ring::signature::{Ed25519KeyPair, KeyPair};
 
         let body = b"{\"event\":\"user.created\"}";
-        // Deterministic key from a fixed seed
         let seed = [42u8; 32];
-        let signing_key = SigningKey::from_bytes(&seed);
-        let verifying_key = signing_key.verifying_key();
-
-        let public_key_b64 = general_purpose::STANDARD.encode(verifying_key.as_bytes());
-        let signature = signing_key.sign(body);
-        let signature_b64 = general_purpose::STANDARD.encode(signature.to_bytes());
+        let key_pair =
+            Ed25519KeyPair::from_seed_unchecked(&seed).expect("valid seed");
+        let public_key_b64 =
+            general_purpose::STANDARD.encode(key_pair.public_key().as_ref());
+        let sig = key_pair.sign(body);
+        let signature_b64 = general_purpose::STANDARD.encode(sig.as_ref());
 
         assert!(validate_ed25519(body, &public_key_b64, &signature_b64));
 
@@ -805,8 +792,10 @@ mod tests {
 
         // Wrong public key
         let other_seed = [99u8; 32];
-        let other_key = SigningKey::from_bytes(&other_seed).verifying_key();
-        let other_pub_b64 = general_purpose::STANDARD.encode(other_key.as_bytes());
+        let other_pair =
+            Ed25519KeyPair::from_seed_unchecked(&other_seed).expect("valid seed");
+        let other_pub_b64 =
+            general_purpose::STANDARD.encode(other_pair.public_key().as_ref());
         assert!(!validate_ed25519(body, &other_pub_b64, &signature_b64));
     }
 }

@@ -174,12 +174,19 @@ impl QueryGroup {
     }
 
     /// Check if a change should invalidate this group.
+    /// Uses the runtime read set when populated, otherwise falls back to the
+    /// compile-time table dependencies from macro extraction.
     pub fn should_invalidate(&self, change: &super::readset::Change) -> bool {
-        if !change.invalidates(&self.read_set) {
+        let table_matches = if self.read_set.tables.is_empty() {
+            self.table_deps.iter().any(|t| *t == change.table)
+        } else {
+            change.invalidates(&self.read_set)
+        };
+
+        if !table_matches {
             return false;
         }
 
-        // Column-level filtering: skip if changed columns don't overlap with selected
         if !change.invalidates_columns(self.selected_cols) {
             return false;
         }

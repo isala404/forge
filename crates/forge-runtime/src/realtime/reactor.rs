@@ -75,7 +75,16 @@ pub struct WorkflowSubscription {
 /// ChangeListener -> InvalidationEngine -> Group Re-execution -> SSE Fan-out
 pub struct Reactor {
     node_id: NodeId,
-    db_pool: sqlx::PgPool,
+    /// Pool for read operations (query re-execution, job/workflow fetches).
+    /// Routes to replicas when configured, falls back to primary otherwise.
+    /// The ChangeListener uses the primary pool (LISTEN requires it), passed
+    /// at construction time.
+    ///
+    /// Replication lag tradeoff: a NOTIFY may arrive before the replica has
+    /// the committed data. The debounce window (50ms+) and periodic resync
+    /// sweep (60s) compensate. For deployments with high replication lag,
+    /// disable read-from-replica in config to route all reads to primary.
+    read_pool: sqlx::PgPool,
     registry: FunctionRegistry,
     subscription_manager: Arc<SubscriptionManager>,
     session_server: Arc<SessionServer>,
@@ -98,6 +107,7 @@ impl Reactor {
     pub fn new(
         node_id: NodeId,
         db_pool: sqlx::PgPool,
+        read_pool: sqlx::PgPool,
         registry: FunctionRegistry,
         config: ReactorConfig,
     ) -> Self {
@@ -115,7 +125,7 @@ impl Reactor {
 
         Self {
             node_id,
-            db_pool,
+            read_pool,
             registry,
             subscription_manager,
             session_server,
@@ -284,7 +294,7 @@ impl Reactor {
         job_id: Uuid,
         auth_context: &forge_core::function::AuthContext,
     ) -> forge_core::Result<JobData> {
-        Self::ensure_job_access(&self.db_pool, job_id, auth_context).await?;
+        Self::ensure_job_access(&self.read_pool, job_id, auth_context).await?;
         let job_data = self.fetch_job_data(job_id).await?;
 
         let subscription = JobSubscription {
@@ -318,7 +328,7 @@ impl Reactor {
         workflow_id: Uuid,
         auth_context: &forge_core::function::AuthContext,
     ) -> forge_core::Result<WorkflowData> {
-        Self::ensure_workflow_access(&self.db_pool, workflow_id, auth_context).await?;
+        Self::ensure_workflow_access(&self.read_pool, workflow_id, auth_context).await?;
         let workflow_data = self.fetch_workflow_data(workflow_id).await?;
 
         let subscription = WorkflowSubscription {
@@ -346,11 +356,11 @@ impl Reactor {
 
     #[allow(clippy::type_complexity)]
     async fn fetch_job_data(&self, job_id: Uuid) -> forge_core::Result<JobData> {
-        Self::fetch_job_data_static(job_id, &self.db_pool).await
+        Self::fetch_job_data_static(job_id, &self.read_pool).await
     }
 
     async fn fetch_workflow_data(&self, workflow_id: Uuid) -> forge_core::Result<WorkflowData> {
-        Self::fetch_workflow_data_static(workflow_id, &self.db_pool).await
+        Self::fetch_workflow_data_static(workflow_id, &self.read_pool).await
     }
 
     /// Execute a query and return data with read set.
@@ -362,7 +372,7 @@ impl Reactor {
     ) -> forge_core::Result<(serde_json::Value, ReadSet)> {
         Self::execute_query_static(
             &self.registry,
-            &self.db_pool,
+            &self.read_pool,
             query_name,
             args,
             auth_context,
@@ -403,6 +413,24 @@ impl Reactor {
             max_concurrent,
         )
         .await;
+    }
+
+    /// Trim old entries from the durable change log. Runs on the cleanup
+    /// interval (default 60s). Silently skips if the table doesn't exist yet.
+    async fn trim_change_log(db_pool: &sqlx::PgPool) {
+        let result: Result<(i64,), _> =
+            sqlx::query_as("SELECT forge_trim_change_log('1 hour'::INTERVAL)")
+                .fetch_one(db_pool)
+                .await;
+        match result {
+            Ok((deleted,)) if deleted > 0 => {
+                tracing::debug!(deleted, "Trimmed change log");
+            }
+            Err(e) => {
+                tracing::trace!(error = %e, "Change log trim skipped (table may not exist)");
+            }
+            _ => {}
+        }
     }
 
     /// Resync sweep: re-evaluate every active subscription group. Recovers
@@ -544,7 +572,7 @@ impl Reactor {
         let workflow_subscriptions = self.workflow_subscriptions.clone();
         let session_server = self.session_server.clone();
         let registry = self.registry.clone();
-        let db_pool = self.db_pool.clone();
+        let db_pool = self.read_pool.clone();
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let max_restarts = self.max_listener_restarts;
         let base_delay_ms = self.listener_restart_delay_ms;
@@ -614,6 +642,16 @@ impl Reactor {
                         }
                     }
                     _ = flush_interval.tick() => {
+                        if listener.take_needs_resync() {
+                            tracing::info!("Change log gap detected, running immediate full resync");
+                            Self::resync_all_groups(
+                                &subscription_manager,
+                                &session_server,
+                                &registry,
+                                &db_pool,
+                                max_concurrent,
+                            ).await;
+                        }
                         Self::flush_invalidations(
                             &invalidation_engine,
                             &subscription_manager,
@@ -625,6 +663,8 @@ impl Reactor {
                     }
                     _ = cleanup_interval.tick() => {
                         session_server.cleanup_stale(std::time::Duration::from_secs(300));
+                        session_server.cleanup_expired_tokens();
+                        Self::trim_change_log(&db_pool).await;
                     }
                     _ = resync_interval.tick(), if resync_secs != 0 => {
                         Self::resync_all_groups(

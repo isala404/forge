@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -117,6 +117,9 @@ pub struct SubscriptionManager {
     groups: DashMap<QueryGroupId, QueryGroup>,
     /// Lookup: hash(query_name+args+auth_scope) -> QueryGroupId for dedup.
     group_lookup: DashMap<SubscriptionKey, QueryGroupId>,
+    /// Inverted index: table name -> set of group IDs that depend on that table.
+    /// Maintained on subscribe/unsubscribe for O(1) affected-group lookups.
+    table_index: DashMap<String, HashSet<QueryGroupId>>,
     /// Subscribers indexed by auto-incrementing key.
     subscribers: Arc<Mutex<SubscriberStore>>,
     /// Session -> subscriber IDs for fast cleanup on disconnect.
@@ -172,10 +175,27 @@ impl SubscriptionManager {
         Self {
             groups: DashMap::with_shard_amount(shard_count),
             group_lookup: DashMap::with_shard_amount(shard_count),
+            table_index: DashMap::with_shard_amount(shard_count),
             subscribers: Arc::new(Mutex::new(SubscriberStore::new())),
             session_subscribers: DashMap::with_shard_amount(shard_count),
             next_group_id: AtomicU32::new(0),
             max_per_session,
+        }
+    }
+
+    /// Remove a group from the inverted table index. Covers both compile-time
+    /// `table_deps` and runtime-discovered tables from the read set.
+    fn remove_from_table_index(&self, group: &QueryGroup) {
+        let runtime_tables = group.read_set.tables.iter().map(String::as_str);
+        let compile_tables = group.table_deps.iter().copied();
+        for table in compile_tables.chain(runtime_tables) {
+            if let Some(mut set) = self.table_index.get_mut(table) {
+                set.remove(&group.id);
+                if set.is_empty() {
+                    drop(set);
+                    self.table_index.remove(table);
+                }
+            }
         }
     }
 
@@ -227,6 +247,16 @@ impl SubscriptionManager {
             self.groups.insert(id, group);
             id
         });
+
+        // Populate the inverted table index for new groups
+        if is_new {
+            for table in table_deps {
+                self.table_index
+                    .entry((*table).to_string())
+                    .or_default()
+                    .insert(group_id);
+            }
+        }
 
         // Create subscriber in the store
         let subscription_id = SubscriptionId::new();
@@ -283,13 +313,14 @@ impl SubscriptionManager {
             if let Some(mut group) = self.groups.get_mut(&group_id) {
                 group.subscribers.retain(|s| *s != subscriber_id);
 
-                // If group is empty, remove it
+                // If group is empty, remove it and its table index entries
                 if group.subscribers.is_empty() {
                     let lookup_key = QueryGroup::compute_lookup_key(
                         &group.query_name,
                         &group.args,
                         &group.auth_scope,
                     );
+                    self.remove_from_table_index(&group);
                     drop(group);
                     self.groups.remove(&group_id);
                     self.group_lookup.remove(&lookup_key);
@@ -332,6 +363,7 @@ impl SubscriptionManager {
                             &group.args,
                             &group.auth_scope,
                         );
+                        self.remove_from_table_index(&group);
                         drop(group);
                         self.groups.remove(&sub.group_id);
                         self.group_lookup.remove(&lookup_key);
@@ -343,13 +375,21 @@ impl SubscriptionManager {
         removed_sub_ids
     }
 
-    /// Find all groups affected by a change. Returns group IDs (not subscription IDs).
-    /// This is O(groups_for_table), not O(all_subscriptions).
+    /// Find all groups affected by a change via the inverted table index.
+    /// O(groups_for_table) with column-level filtering, not O(all_groups).
     pub fn find_affected_groups(&self, change: &Change) -> Vec<QueryGroupId> {
-        self.groups
-            .iter()
-            .filter(|entry| entry.should_invalidate(change))
-            .map(|entry| entry.id)
+        let candidates = match self.table_index.get(&change.table) {
+            Some(set) => set.clone(),
+            None => return Vec::new(),
+        };
+
+        candidates
+            .into_iter()
+            .filter(|gid| {
+                self.groups
+                    .get(gid)
+                    .is_some_and(|g| g.should_invalidate(change))
+            })
             .collect()
     }
 
@@ -391,9 +431,20 @@ impl SubscriptionManager {
             .collect()
     }
 
-    /// Update a group after re-execution.
+    /// Update a group after re-execution. Extends the table index with any
+    /// runtime-discovered tables from the read set that weren't in the
+    /// compile-time `table_deps`.
     pub fn update_group(&self, group_id: QueryGroupId, read_set: ReadSet, result_hash: String) {
         if let Some(mut group) = self.groups.get_mut(&group_id) {
+            for table in &read_set.tables {
+                let already_indexed = group.table_deps.iter().any(|t| *t == table);
+                if !already_indexed {
+                    self.table_index
+                        .entry(table.clone())
+                        .or_default()
+                        .insert(group_id);
+                }
+            }
             group.record_execution(read_set, result_hash);
         }
     }
@@ -403,18 +454,23 @@ impl SubscriptionManager {
         let total_subscribers: usize = self.groups.iter().map(|g| g.subscribers.len()).sum();
         let groups_count = self.groups.len();
         let sessions_count = self.session_subscribers.len();
+        let indexed_tables = self.table_index.len();
 
         // Estimate memory usage:
         // - Each QueryGroup: ~256 bytes (name, args, auth, read_set, subscribers vec)
         // - Each subscriber entry in the store: ~128 bytes
         // - Each session mapping entry: ~64 bytes + subscriber ID vec
-        let estimated_bytes =
-            (groups_count * 256) + (total_subscribers * 128) + (sessions_count * 64);
+        // - Each table index entry: ~64 bytes + HashSet overhead
+        let estimated_bytes = (groups_count * 256)
+            + (total_subscribers * 128)
+            + (sessions_count * 64)
+            + (indexed_tables * 96);
 
         SubscriptionCounts {
             total: total_subscribers,
             unique_queries: groups_count,
             sessions: sessions_count,
+            indexed_tables,
             memory_bytes: estimated_bytes,
         }
     }
@@ -438,6 +494,7 @@ pub struct SubscriptionCounts {
     pub total: usize,
     pub unique_queries: usize,
     pub sessions: usize,
+    pub indexed_tables: usize,
     pub memory_bytes: usize,
 }
 
@@ -610,5 +667,63 @@ mod tests {
         let counts = manager.counts();
         assert_eq!(counts.total, 0);
         assert_eq!(counts.unique_queries, 0);
+    }
+
+    #[test]
+    fn test_table_index_lookup() {
+        let manager = SubscriptionManager::new(50);
+        let s1 = SessionId::new();
+        let s2 = SessionId::new();
+        let auth = AuthContext::unauthenticated();
+
+        // Two queries reading different tables
+        static PROJECTS: &[&str] = &["projects"];
+        static USERS: &[&str] = &["users"];
+
+        let (g1, _, _) = manager
+            .subscribe(s1, "a".into(), "get_projects", &serde_json::json!({}), &auth, PROJECTS, &[])
+            .unwrap();
+        let (g2, _, _) = manager
+            .subscribe(s2, "b".into(), "get_users", &serde_json::json!({}), &auth, USERS, &[])
+            .unwrap();
+
+        // Change on projects should only find g1
+        let change = Change::new("projects", forge_core::realtime::ChangeOperation::Insert);
+        let affected = manager.find_affected_groups(&change);
+        assert_eq!(affected, vec![g1]);
+
+        // Change on users should only find g2
+        let change = Change::new("users", forge_core::realtime::ChangeOperation::Update);
+        let affected = manager.find_affected_groups(&change);
+        assert_eq!(affected, vec![g2]);
+
+        // Change on unrelated table should find nothing
+        let change = Change::new("orders", forge_core::realtime::ChangeOperation::Delete);
+        let affected = manager.find_affected_groups(&change);
+        assert!(affected.is_empty());
+
+        assert_eq!(manager.counts().indexed_tables, 2);
+    }
+
+    #[test]
+    fn test_table_index_cleanup_on_unsubscribe() {
+        let manager = SubscriptionManager::new(50);
+        let session = SessionId::new();
+        let auth = AuthContext::unauthenticated();
+        static PROJECTS: &[&str] = &["projects"];
+
+        let (_, sub_id, _) = manager
+            .subscribe(session, "a".into(), "get_projects", &serde_json::json!({}), &auth, PROJECTS, &[])
+            .unwrap();
+
+        assert_eq!(manager.counts().indexed_tables, 1);
+
+        manager.unsubscribe(sub_id);
+
+        // Table index should be cleaned up when the last group for that table is removed
+        assert_eq!(manager.counts().indexed_tables, 0);
+
+        let change = Change::new("projects", forge_core::realtime::ChangeOperation::Insert);
+        assert!(manager.find_affected_groups(&change).is_empty());
     }
 }

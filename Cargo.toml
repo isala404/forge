@@ -47,7 +47,7 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.9"
-schemars = { version = "0.8", features = ["chrono", "uuid1"] }
+schemars = { version = "=0.8.22", features = ["chrono", "uuid1"] }
 jsonschema = "0.28"
 
 # HTTP/WebSocket

@@ -44,7 +44,7 @@ bytes = { workspace = true, optional = true }
 jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto", "use_pem"], optional = true }
 argon2 = { workspace = true, optional = true }
 password-hash = { workspace = true, optional = true }
-ed25519-dalek = { version = "2", optional = true }
+ring = { version = "0.17", optional = true }
 serde_urlencoded = { version = "0.7", optional = true }
 hmac = { version = "0.12", optional = true }
 sha1 = { version = "0.10", optional = true }
@@ -88,7 +88,7 @@ gateway = [
     "dep:jsonwebtoken",
     "dep:argon2",
     "dep:password-hash",
-    "dep:ed25519-dalek",
+    "dep:ring",
     "dep:serde_urlencoded",
     "dep:hmac",
     "dep:sha1",

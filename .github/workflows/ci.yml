@@ -56,6 +56,32 @@ jobs:
       - name: test
         run: cargo test --workspace
 
+  guardrails:
+    name: Guardrails
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          save-if: "false"
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: cargo deny
+        run: cargo deny check
+
+      - name: Lint raw SQL
+        run: bash scripts/ci/lint-raw-sql.sh
+
+      - name: cargo audit
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+
   workspace-integration:
     name: Workspace integration
     needs: validate

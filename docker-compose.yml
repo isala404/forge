@@ -1,13 +1,19 @@
 services:
-  build:
-    image: rust:1.92-bookworm
-    working_dir: /app
-    command: >
-      sh -c "cargo build --workspace && cargo test --workspace"
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: forge
+      POSTGRES_DB: forge_dev
+    ports:
+      - "5432:5432"
     volumes:
-      - .:/app
-      - cargo_cache:/usr/local/cargo/registry
-      - ./target:/app/target
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d forge_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
 volumes:
-  cargo_cache:
+  postgres_data:

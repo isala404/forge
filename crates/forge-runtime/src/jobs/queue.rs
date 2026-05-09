@@ -123,6 +123,9 @@ pub struct JobQueue {
 }
 
 impl JobQueue {
+    /// Default retention for terminal jobs (completed, failed, cancelled).
+    const DEFAULT_RETENTION: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+
     /// Create a new job queue.
     pub fn new(pool: sqlx::PgPool) -> Self {
         Self { pool }
@@ -290,16 +293,19 @@ impl JobQueue {
 
     /// Mark job as completed.
     ///
-    /// If `ttl` is provided, sets `expires_at` for automatic cleanup.
+    /// Sets `expires_at` for automatic cleanup. Uses the provided TTL or
+    /// defaults to 7 days so completed jobs don't accumulate forever.
     pub async fn complete(
         &self,
         job_id: Uuid,
         output: serde_json::Value,
         ttl: Option<std::time::Duration>,
     ) -> Result<(), sqlx::Error> {
-        let expires_at = ttl.map(|d| {
-            chrono::Utc::now() + chrono::Duration::from_std(d).unwrap_or(chrono::Duration::days(7))
-        });
+        let retention = ttl.unwrap_or(Self::DEFAULT_RETENTION);
+        let expires_at = Some(
+            chrono::Utc::now()
+                + chrono::Duration::from_std(retention).unwrap_or(chrono::Duration::days(7)),
+        );
 
         sqlx::query!(
             r#"
@@ -359,10 +365,11 @@ impl JobQueue {
             .await?;
         } else {
             // Move to dead letter
-            let expires_at = ttl.map(|d| {
+            let retention = ttl.unwrap_or(Self::DEFAULT_RETENTION);
+            let expires_at = Some(
                 chrono::Utc::now()
-                    + chrono::Duration::from_std(d).unwrap_or(chrono::Duration::days(7))
-            });
+                    + chrono::Duration::from_std(retention).unwrap_or(chrono::Duration::days(7)),
+            );
 
             sqlx::query!(
                 r#"
@@ -537,16 +544,19 @@ impl JobQueue {
 
     /// Mark job as cancelled.
     ///
-    /// If `ttl` is provided, sets `expires_at` for automatic cleanup.
+    /// Sets `expires_at` for automatic cleanup. Uses the provided TTL or
+    /// defaults to 7 days.
     pub async fn cancel(
         &self,
         job_id: Uuid,
         reason: Option<&str>,
         ttl: Option<std::time::Duration>,
     ) -> Result<(), sqlx::Error> {
-        let expires_at = ttl.map(|d| {
-            chrono::Utc::now() + chrono::Duration::from_std(d).unwrap_or(chrono::Duration::days(7))
-        });
+        let retention = ttl.unwrap_or(Self::DEFAULT_RETENTION);
+        let expires_at = Some(
+            chrono::Utc::now()
+                + chrono::Duration::from_std(retention).unwrap_or(chrono::Duration::days(7)),
+        );
 
         sqlx::query!(
             r#"

@@ -737,6 +737,7 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(feature = "mcp-oauth")]
     fn session_cookie_with_expiry(subject: &str, secret: &str, expiry: i64) -> String {
         let payload = format!("{subject}.{expiry}");
         let mut mac =

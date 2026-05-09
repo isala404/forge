@@ -1,0 +1,92 @@
+# Reactivity Internals
+
+How Forge keeps subscriptions up to date after mutations, and the operational knobs you can tune.
+
+## Architecture
+
+When a client subscribes to a query via SSE, the server remembers the query, its arguments, and which tables it touches. When any of those tables change, the server re-executes the query and pushes the new result if it differs from the last one sent.
+
+The pipeline has four stages:
+
+1. **Change detection** (PostgreSQL NOTIFY)
+2. **Debounce and batching** (InvalidationEngine)
+3. **Re-execution** (Reactor)
+4. **Fan-out** (SSE push)
+
+Each stage runs per-node. There is no global coordinator for reactivity.
+
+## Change Detection
+
+Every table with reactivity enabled has a `forge_notify_change()` trigger. On INSERT, UPDATE, or DELETE, the trigger:
+
+1. Inserts a row into `forge_change_log` (a durable log with a BIGSERIAL sequence)
+2. Sends a `NOTIFY forge_changes` with payload `v1:{table}:{OP}:{row_id}[:changed_cols]#{seq}`
+
+Each node runs a `ChangeListener` on a dedicated PostgreSQL connection. The listener tracks the last-seen sequence number from the change log. If the connection drops and reconnects, missed changes are replayed from `forge_change_log` using the stored sequence position.
+
+If the change log has been trimmed past the listener's last-seen position (retention expired during downtime), the listener signals the reactor to perform a full resync of all active subscriptions.
+
+The change log is automatically trimmed every 60 seconds by `forge_trim_change_log()`, keeping entries for 10 minutes by default.
+
+## Debounce and Batching
+
+The `InvalidationEngine` collects incoming changes and batches them before passing to the reactor. This prevents a burst of row-level changes from triggering individual re-executions.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| Quiet window | 50ms | Wait this long after the last change before flushing |
+| Max window | 200ms | Flush at most this often, even if changes keep arriving |
+
+Changes are coalesced by table name. If 100 rows in the `users` table change within 50ms, the reactor sees one invalidation for `users`, not 100.
+
+## Re-execution
+
+The `Reactor` determines which subscriptions are affected by a batch of table changes using an inverted index: a map from table name to the set of query groups that depend on that table.
+
+For each affected query group, the reactor:
+
+1. Re-executes the query against the read replica (falls back to primary if no replicas configured)
+2. Hashes the result and compares to the last-sent hash
+3. Pushes an `update` SSE event only if the result changed
+
+Re-execution runs with bounded concurrency (default: 64 concurrent queries). This prevents a large invalidation from overwhelming the database.
+
+### Read Replica Routing
+
+Re-execution queries and data fetches run against the read pool by default. This keeps subscription load off the primary. The tradeoff is that recently-committed writes may not be visible for a short replication lag window (typically under 10ms for synchronous replicas, up to a few seconds for async replicas).
+
+For queries marked `#[query(consistent)]`, reads always go to the primary.
+
+## Subscription Deduplication
+
+Multiple clients subscribing to the same query with the same arguments and auth scope share a single query group. The reactor re-executes once and fans out the result to all subscribers. Query groups are keyed by a hash of (function name, serialized args, auth scope).
+
+The `SubscriptionManager` uses a `DashMap` with 64 shards for concurrent access.
+
+## Gap Detection
+
+If the SSE send buffer fills up (slow client), the server drops the update and sends a `gap` event instead. The client should re-subscribe or re-fetch to recover. The generated client libraries handle this automatically with a re-subscribe.
+
+## Periodic Resync
+
+Every 60 seconds, the reactor performs a sweep of all active subscriptions, re-executing each one to catch any changes that NOTIFY may have missed. This is a safety net, not the primary update path.
+
+## Operational Limits
+
+Configure these in `forge.toml` under `[realtime]`:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `max_sessions_per_user` | 8 | Max concurrent SSE connections per authenticated user |
+| `max_sessions_per_ip` | 32 | Max concurrent SSE connections per source IP |
+| `max_subscriptions_per_user` | 500 | Max total subscriptions across all of a user's sessions |
+| `max_cached_result_bytes` | 1048576 | Max size of a cached query result (1 MB) |
+
+Exceeding any limit returns HTTP 429 with a `retry_after_secs` hint.
+
+## What Reactivity Does Not Do
+
+- **No delta/patch delivery.** The server sends the full query result on each update, not a diff. Clients always get the complete current state.
+- **No cross-node coordination.** Each node runs its own invalidation pipeline. Nodes share the same PostgreSQL NOTIFY channel but maintain independent subscription state.
+- **No logical replication.** Change detection uses triggers and NOTIFY, not PostgreSQL logical replication slots. This keeps the setup simple and avoids replication slot management overhead.
+- **No ephemeral pub-sub (yet).** The `channel` SSE event type and `forge_channels` NOTIFY channel are reserved but not yet active.

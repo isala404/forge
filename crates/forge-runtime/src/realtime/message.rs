@@ -382,6 +382,34 @@ impl SessionServer {
             self.remove_connection(session_id);
         }
     }
+
+    /// Evict sessions whose JWT has expired. Sends an auth error event to each
+    /// so the client knows to re-authenticate rather than just reconnecting.
+    pub fn cleanup_expired_tokens(&self) {
+        let now = chrono::Utc::now().timestamp();
+
+        let expired: Vec<SessionId> = self
+            .connections
+            .iter()
+            .filter(|entry| entry.token_exp.is_some_and(|exp| exp < now))
+            .map(|entry| *entry.key())
+            .collect();
+
+        if expired.is_empty() {
+            return;
+        }
+
+        tracing::debug!(count = expired.len(), "Evicting sessions with expired tokens");
+
+        for session_id in expired {
+            if let Some(conn) = self.connections.get(&session_id) {
+                let _ = conn.sender.try_send(RealtimeMessage::AuthFailed {
+                    reason: "Token expired".to_string(),
+                });
+            }
+            self.evict_session(session_id);
+        }
+    }
 }
 
 /// Error type for try_send operations.

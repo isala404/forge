@@ -88,6 +88,8 @@ pub struct GatewayConfig {
     pub max_multipart_fields: usize,
     /// Maximum concurrent SSE sessions per authenticated user.
     pub max_sessions_per_user: usize,
+    /// Maximum concurrent SSE sessions per source IP.
+    pub max_sessions_per_ip: usize,
     /// Cap on a user's total subscriptions across every active session.
     pub max_subscriptions_per_user: usize,
     /// Reactor, invalidation, listener, and SSE knobs. Defaults match production.
@@ -120,6 +122,7 @@ impl Default for GatewayConfig {
             max_rpc_batch_size: 100,
             max_multipart_fields: 20,
             max_sessions_per_user: 8,
+            max_sessions_per_ip: 32,
             max_subscriptions_per_user: 500,
             reactor_config: ReactorConfig::default(),
             security_headers: true,
@@ -197,6 +200,7 @@ impl GatewayServer {
         let reactor = Arc::new(Reactor::new(
             node_id,
             db.primary().clone(),
+            db.read_pool().clone(),
             registry.clone(),
             config.reactor_config.clone(),
         ));
@@ -464,6 +468,7 @@ impl GatewayServer {
                     .realtime
                     .max_subscriptions_per_session,
                 max_sessions_per_user: self.config.max_sessions_per_user,
+                max_sessions_per_ip: self.config.max_sessions_per_ip,
                 max_subscriptions_per_user: self.config.max_subscriptions_per_user,
                 ..Default::default()
             },

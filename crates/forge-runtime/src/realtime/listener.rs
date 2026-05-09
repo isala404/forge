@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use tokio::sync::{broadcast, watch};
 
@@ -33,6 +33,10 @@ impl Default for ListenerConfig {
 }
 
 /// Listens for database changes via PostgreSQL LISTEN/NOTIFY.
+///
+/// Tracks the last-seen change log sequence number so reconnects can
+/// replay missed changes from `forge_change_log` instead of triggering
+/// a full resync of all active subscriptions.
 pub struct ChangeListener {
     pool: sqlx::PgPool,
     config: ListenerConfig,
@@ -40,6 +44,11 @@ pub struct ChangeListener {
     change_tx: broadcast::Sender<Change>,
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
+    last_seq: AtomicI64,
+    /// Set when replay_missed detects the change log was trimmed past our
+    /// last_seq. The reactor checks this to trigger an immediate full resync
+    /// instead of waiting for the periodic sweep.
+    needs_resync: AtomicBool,
 }
 
 impl ChangeListener {
@@ -55,6 +64,8 @@ impl ChangeListener {
             change_tx,
             shutdown_tx,
             shutdown_rx,
+            last_seq: AtomicI64::new(0),
+            needs_resync: AtomicBool::new(false),
         }
     }
 
@@ -72,6 +83,88 @@ impl ChangeListener {
     pub fn stop(&self) {
         let _ = self.shutdown_tx.send(true);
         self.running.store(false, Ordering::SeqCst);
+    }
+
+    /// Last-seen change log sequence number.
+    pub fn last_seq(&self) -> i64 {
+        self.last_seq.load(Ordering::Relaxed)
+    }
+
+    /// Returns true if the listener detected that change log entries were
+    /// trimmed past our last-seen position, meaning replay couldn't recover
+    /// all missed events. The reactor should trigger an immediate full resync.
+    pub fn take_needs_resync(&self) -> bool {
+        self.needs_resync.swap(false, Ordering::Relaxed)
+    }
+
+    /// Replay changes missed while disconnected by querying the durable
+    /// change log. Returns the number of replayed changes, or `None` if
+    /// the log table doesn't exist yet (first boot before v002 migration).
+    async fn replay_missed(&self) -> Option<usize> {
+        let since = self.last_seq.load(Ordering::Relaxed);
+        if since == 0 {
+            return None;
+        }
+
+        // Runtime query: forge_change_log is a system table created by
+        // v002 migration, not present in all .sqlx offline caches.
+        type ChangeRow = (i64, String, String, Option<String>, Option<String>);
+        let rows: Vec<ChangeRow> = sqlx::query_as(
+            "SELECT seq, table_name, op, row_id, changed_cols \
+             FROM forge_change_log WHERE seq > $1 ORDER BY seq",
+        )
+        .bind(since)
+        .fetch_all(&self.pool)
+        .await
+        .ok()?;
+
+        let count = rows.len();
+        for (seq, table_name, op, row_id, changed_cols) in &rows {
+            let operation = match op.as_str() {
+                "INSERT" => forge_core::realtime::ChangeOperation::Insert,
+                "UPDATE" => forge_core::realtime::ChangeOperation::Update,
+                "DELETE" => forge_core::realtime::ChangeOperation::Delete,
+                _ => continue,
+            };
+
+            let mut change = Change::new(table_name.clone(), operation);
+            if let Some(rid) = row_id
+                && let Ok(uuid) = uuid::Uuid::parse_str(rid)
+            {
+                change = change.with_row_id(uuid);
+            }
+            if let Some(cols) = changed_cols {
+                let columns: Vec<String> = cols.split(',').map(|s| s.to_string()).collect();
+                change = change.with_columns(columns);
+            }
+
+            let _ = self.change_tx.send(change);
+            self.last_seq.store(*seq, Ordering::Relaxed);
+        }
+
+        if count > 0 {
+            tracing::info!(replayed = count, from_seq = since, "Replayed missed changes from log");
+        } else {
+            // Zero rows returned but we had a position. Check if our position
+            // was trimmed (change log retention expired while we were down).
+            let min_seq: Option<(Option<i64>,)> =
+                sqlx::query_as("SELECT MIN(seq) FROM forge_change_log")
+                    .fetch_optional(&self.pool)
+                    .await
+                    .ok()
+                    .flatten();
+            if let Some((Some(min),)) = min_seq
+                && min > since
+            {
+                tracing::warn!(
+                    last_seen = since, log_min = min,
+                    "Change log trimmed past our position, requesting full resync"
+                );
+                self.needs_resync.store(true, Ordering::Relaxed);
+            }
+        }
+
+        Some(count)
     }
 
     /// Run the listener loop.
@@ -99,18 +192,21 @@ impl ChangeListener {
                     match notification {
                         Ok(notification) => {
                             let recv_time = std::time::Instant::now();
-                            if let Some(change) = self.parse_notification(notification.payload()) {
-                                tracing::trace!(table = %change.table, op = ?change.operation, "Change received");
+                            if let Some((change, seq)) = self.parse_notification(notification.payload()) {
+                                tracing::trace!(table = %change.table, op = ?change.operation, seq, "Change received");
                                 crate::cluster::metrics::record_notification_processed(&change.table);
                                 let _ = self.change_tx.send(change);
+                                if seq > 0 {
+                                    self.last_seq.store(seq, Ordering::Relaxed);
+                                }
                                 crate::cluster::metrics::record_notification_latency(recv_time.elapsed().as_secs_f64());
                             } else {
                                 tracing::debug!(payload = %notification.payload(), "Failed to parse notification");
                             }
                         }
                         Err(e) => {
-                            tracing::debug!(error = %e, "Error receiving notification");
-                            // Try to reconnect
+                            tracing::debug!(error = %e, "Error receiving notification, attempting recovery");
+                            self.replay_missed().await;
                             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                         }
                     }
@@ -128,14 +224,23 @@ impl ChangeListener {
         Ok(())
     }
 
-    /// Parse a notification payload into a Change.
+    /// Parse a notification payload into a Change and optional sequence number.
     ///
-    /// Expected format: `v1:table:OP:row_id[:col1,col2,...]`. The leading
-    /// version tag lets future schema bumps coexist with v1 listeners during
-    /// a rolling cluster upgrade. Payloads without a recognized version tag
-    /// are dropped — they can't be safely interpreted by this build.
-    fn parse_notification(&self, payload: &str) -> Option<Change> {
-        let body = payload.strip_prefix("v1:")?;
+    /// v1 format: `v1:table:OP:row_id[:col1,col2,...][#seq]`
+    /// The `#seq` suffix is appended by the v002 trigger and enables gap
+    /// recovery from `forge_change_log`. Pre-v002 payloads without `#seq`
+    /// still parse correctly (seq = 0).
+    fn parse_notification(&self, payload: &str) -> Option<(Change, i64)> {
+        // Split off the optional #seq suffix
+        let (body_with_version, seq) = match payload.rsplit_once('#') {
+            Some((prefix, seq_str)) => {
+                let seq = seq_str.parse::<i64>().unwrap_or(0);
+                (prefix, seq)
+            }
+            None => (payload, 0),
+        };
+
+        let body = body_with_version.strip_prefix("v1:")?;
         let parts: Vec<&str> = body.split(':').collect();
 
         let table = parts.first()?;
@@ -154,7 +259,7 @@ impl ChangeListener {
             change = change.with_columns(columns);
         }
 
-        Some(change)
+        Some((change, seq))
     }
 
     /// Manually emit a change (for testing or manual triggering).
@@ -182,24 +287,40 @@ mod tests {
         let listener = ChangeListener::new(pool, ListenerConfig::default());
 
         let payload = "v1:projects:INSERT:550e8400-e29b-41d4-a716-446655440000";
-        let change = listener.parse_notification(payload).unwrap();
+        let (change, seq) = listener.parse_notification(payload).unwrap();
 
         assert_eq!(change.table, "projects");
         assert_eq!(change.operation, ChangeOperation::Insert);
         assert!(change.row_id.is_some());
+        assert_eq!(seq, 0);
     }
 
     #[tokio::test]
-    async fn test_parse_notification_update_with_columns() {
+    async fn test_parse_notification_with_seq() {
         let pool = sqlx::PgPool::connect_lazy("postgres://localhost/test").unwrap();
         let listener = ChangeListener::new(pool, ListenerConfig::default());
 
-        let payload = "v1:projects:UPDATE:550e8400-e29b-41d4-a716-446655440000:name,status";
-        let change = listener.parse_notification(payload).unwrap();
+        let payload = "v1:projects:INSERT:550e8400-e29b-41d4-a716-446655440000#42";
+        let (change, seq) = listener.parse_notification(payload).unwrap();
+
+        assert_eq!(change.table, "projects");
+        assert_eq!(change.operation, ChangeOperation::Insert);
+        assert!(change.row_id.is_some());
+        assert_eq!(seq, 42);
+    }
+
+    #[tokio::test]
+    async fn test_parse_notification_update_with_columns_and_seq() {
+        let pool = sqlx::PgPool::connect_lazy("postgres://localhost/test").unwrap();
+        let listener = ChangeListener::new(pool, ListenerConfig::default());
+
+        let payload = "v1:projects:UPDATE:550e8400-e29b-41d4-a716-446655440000:name,status#1337";
+        let (change, seq) = listener.parse_notification(payload).unwrap();
 
         assert_eq!(change.table, "projects");
         assert_eq!(change.operation, ChangeOperation::Update);
         assert_eq!(change.changed_columns, vec!["name", "status"]);
+        assert_eq!(seq, 1337);
     }
 
     #[tokio::test]
@@ -214,9 +335,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_parse_notification_rejects_unversioned() {
-        // Drop pre-v1 payloads (or anything without a recognized version tag).
-        // A peer running a different Forge version may emit a tag we don't
-        // understand; better to drop than to misinterpret.
         let pool = sqlx::PgPool::connect_lazy("postgres://localhost/test").unwrap();
         let listener = ChangeListener::new(pool, ListenerConfig::default());
 
@@ -225,5 +343,19 @@ mod tests {
 
         let payload = "v2:projects:INSERT:550e8400-e29b-41d4-a716-446655440000";
         assert!(listener.parse_notification(payload).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_last_seq_tracking() {
+        let pool = sqlx::PgPool::connect_lazy("postgres://localhost/test").unwrap();
+        let listener = ChangeListener::new(pool, ListenerConfig::default());
+
+        assert_eq!(listener.last_seq(), 0);
+
+        let payload = "v1:projects:INSERT:550e8400-e29b-41d4-a716-446655440000#99";
+        let (_, seq) = listener.parse_notification(payload).unwrap();
+        listener.last_seq.store(seq, Ordering::Relaxed);
+
+        assert_eq!(listener.last_seq(), 99);
     }
 }

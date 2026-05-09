@@ -142,4 +142,24 @@ impl JobRegistry {
     pub fn is_empty(&self) -> bool {
         self.jobs.is_empty()
     }
+
+    /// Register a system job handler with a raw name and handler function.
+    /// Used for internal bridge handlers (`$cron:*`, `$daemon:*`, `$workflow_resume`).
+    pub fn register_system(
+        &mut self,
+        name: impl Into<String>,
+        info: JobInfo,
+        handler: BoxedJobHandler,
+    ) {
+        let noop_compensation: BoxedJobCompensation =
+            Arc::new(|_ctx, _args, _reason| Box::pin(async { Ok(()) }));
+        self.jobs.insert(
+            name.into(),
+            Arc::new(JobEntry {
+                info,
+                handler,
+                compensation: noop_compensation,
+            }),
+        );
+    }
 }
