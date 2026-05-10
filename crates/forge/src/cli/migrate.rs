@@ -5,7 +5,7 @@ use std::path::Path;
 
 use forge_core::config::ForgeConfig;
 use forge_runtime::Database;
-use forge_runtime::migrations::{DriftStatus, MigrationRunner, load_migrations_from_dir};
+use forge_runtime::pg::migration::{DriftStatus, MigrationRunner, load_migrations_from_dir};
 
 use super::ui;
 

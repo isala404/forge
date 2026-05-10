@@ -90,6 +90,7 @@ use std::time::Duration;
 
 use sqlx::ConnectOptions;
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
+use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tracing::log::LevelFilter;
 
@@ -271,8 +272,14 @@ impl Database {
         &self.primary
     }
 
-    /// Start background health monitoring for replicas. Returns None if no replicas configured.
-    pub fn start_health_monitor(&self) -> Option<JoinHandle<()>> {
+    /// Start background health monitoring for replicas. Returns None when no
+    /// replicas are configured. The task exits when `shutdown_rx` receives a
+    /// message or the broadcast channel closes, so callers can join the handle
+    /// during graceful shutdown without leaking the loop.
+    pub fn start_health_monitor(
+        &self,
+        mut shutdown_rx: broadcast::Receiver<()>,
+    ) -> Option<JoinHandle<()>> {
         if self.replicas.is_empty() {
             return None;
         }
@@ -281,17 +288,24 @@ impl Database {
         let handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(15));
             loop {
-                interval.tick().await;
-                for entry in replicas.iter() {
-                    let ok = sqlx::query_scalar!("SELECT 1 as \"v!\"")
-                        .fetch_one(entry.pool.as_ref())
-                        .await
-                        .is_ok();
-                    let was_healthy = entry.healthy.swap(ok, Ordering::Relaxed);
-                    if was_healthy && !ok {
-                        tracing::warn!("Replica marked unhealthy");
-                    } else if !was_healthy && ok {
-                        tracing::info!("Replica recovered");
+                tokio::select! {
+                    _ = shutdown_rx.recv() => {
+                        tracing::debug!("Replica health monitor shutting down");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        for entry in replicas.iter() {
+                            let ok = sqlx::query_scalar!("SELECT 1 as \"v!\"")
+                                .fetch_one(entry.pool.as_ref())
+                                .await
+                                .is_ok();
+                            let was_healthy = entry.healthy.swap(ok, Ordering::Relaxed);
+                            if was_healthy && !ok {
+                                tracing::warn!("Replica marked unhealthy");
+                            } else if !was_healthy && ok {
+                                tracing::info!("Replica recovered");
+                            }
+                        }
                     }
                 }
             }
@@ -300,8 +314,10 @@ impl Database {
         Some(handle)
     }
 
-    /// Create a Database wrapper from an existing pool (for testing).
-    #[cfg(test)]
+    /// Create a Database wrapper from an existing pool. Hidden from rustdoc:
+    /// production code goes through `from_config`, this exists for in-crate
+    /// tests and external integration harnesses that already own a `PgPool`.
+    #[doc(hidden)]
     pub fn from_pool(pool: PgPool) -> Self {
         Self {
             primary: Arc::new(pool),

@@ -4,9 +4,9 @@
 //! daemon runner, reactivity system, cluster coordination, rate limiting,
 //! observability, and product analytics (signals).
 //!
-//! Subsystems are feature-gated. Always-on infrastructure: `db`, `cluster`,
-//! `migrations`, `function` (dispatch core), `rate_limit`, `observability`
-//! (with no-op stubs when `otel` is off), `testing`.
+//! Subsystems are feature-gated. Always-on infrastructure: `pg` (pool, leader
+//! election, migrations), `cluster`, `function` (dispatch core), `rate_limit`,
+//! `observability` (with no-op stubs when `otel` is off), `testing`.
 //!
 //! Opt-in features:
 //! - `gateway` bundles HTTP server + SSE realtime + MCP + OAuth + webhooks +
@@ -21,7 +21,6 @@ pub use sqlx;
 pub mod cluster;
 pub mod function;
 pub mod kv;
-pub mod migrations;
 pub mod observability;
 pub mod pg;
 pub mod rate_limit;
@@ -71,7 +70,7 @@ pub use pg::{
     AppliedMigration, Database, DriftStatus, Migration, MigrationRunner, MigrationStatus,
     load_migrations_from_dir,
 };
-pub use pg::{LeaderConfig, LeaderElection, LeaderGuard};
+pub use pg::{LeaderConfig, LeaderElection};
 pub use rate_limit::{HybridRateLimiter, StrictRateLimiter};
 
 #[cfg(feature = "cron")]

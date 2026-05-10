@@ -52,7 +52,7 @@ pub use forge_macros::{
 };
 
 // Re-export Migration type for programmatic migrations
-pub use forge_runtime::migrations::Migration;
+pub use forge_runtime::pg::migration::Migration;
 
 // Re-export testing utilities
 pub use forge_core::testing;
@@ -68,7 +68,7 @@ pub use forge_core::{
 ///
 /// For tests: apply before user migrations. In production, migration runner handles versioning.
 pub fn get_internal_sql() -> String {
-    forge_runtime::migrations::get_all_system_sql()
+    forge_runtime::pg::migration::get_all_system_sql()
 }
 
 pub use runtime::prelude;

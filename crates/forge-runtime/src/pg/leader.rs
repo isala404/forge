@@ -9,10 +9,17 @@ use tokio::sync::{Mutex, watch};
 /// Leader election configuration.
 #[derive(Debug, Clone)]
 pub struct LeaderConfig {
-    /// How often standbys check leader health and leaders refresh leases.
+    /// How often standbys check leader health and leaders refresh the
+    /// `forge_leaders` lease row.
     pub check_interval: Duration,
-    /// Lease duration (leader must refresh before expiry).
+    /// Lease duration. The leader must refresh before expiry or standbys
+    /// will assume the seat is vacant.
     pub lease_duration: Duration,
+    /// How often the leader re-checks `pg_locks` to confirm it still holds
+    /// the advisory lock on its lock-owning connection. Defaults to 1s so
+    /// a long lease (60s) still detects an out-of-band lock loss within a
+    /// second instead of waiting for the next refresh tick.
+    pub lock_validate_interval: Duration,
 }
 
 impl Default for LeaderConfig {
@@ -20,6 +27,7 @@ impl Default for LeaderConfig {
         Self {
             check_interval: Duration::from_secs(5),
             lease_duration: Duration::from_secs(60),
+            lock_validate_interval: Duration::from_secs(1),
         }
     }
 }
@@ -145,14 +153,14 @@ impl LeaderElection {
         Ok(acquired)
     }
 
-    /// Refresh the leadership lease.
+    /// Confirm the advisory lock is still held on the lock-owning connection.
     ///
-    /// Validates the advisory lock is still held on the lock-owning connection
-    /// before refreshing the lease. If PostgreSQL released the lock (backend
-    /// terminated, sqlx reconnected, etc.) we drop leadership locally and
-    /// surface an error — keeping the lease alive without the underlying lock
-    /// would risk split brain.
-    pub async fn refresh_lease(&self) -> forge_core::Result<()> {
+    /// Runs on its own cadence (`lock_validate_interval`, default 1s) so a
+    /// long lease (60s) still detects an out-of-band lock loss promptly. If
+    /// PostgreSQL released the lock (backend terminated, sqlx reconnected,
+    /// etc.) we drop leadership locally and surface an error: keeping the
+    /// lease alive without the underlying lock would risk split brain.
+    pub async fn validate_lock_held(&self) -> forge_core::Result<()> {
         if !self.is_leader() {
             return Ok(());
         }
@@ -164,7 +172,7 @@ impl LeaderElection {
                 drop(lock_connection);
                 self.drop_leadership_locally();
                 return Err(forge_core::ForgeError::Cluster(
-                    "Lock connection missing during lease refresh; dropped leadership".into(),
+                    "Lock connection missing during validation; dropped leadership".into(),
                 ));
             }
         };
@@ -206,6 +214,36 @@ impl LeaderElection {
                 "Advisory lock no longer held; dropped leadership".into(),
             ));
         }
+
+        Ok(())
+    }
+
+    /// Refresh the leadership lease.
+    ///
+    /// Validates the advisory lock first (`validate_lock_held`), then
+    /// extends `forge_leaders.lease_until`. Both queries run against the
+    /// same PG backend (the lock-owning connection), but the Mutex is
+    /// released between them and re-acquired here, so they are *not* a
+    /// single critical section. That's fine: the only racer is `validate`
+    /// itself on a faster cadence, which is idempotent when the lock is
+    /// held and drops leadership atomically when it isn't.
+    pub async fn refresh_lease(&self) -> forge_core::Result<()> {
+        self.validate_lock_held().await?;
+        if !self.is_leader() {
+            return Ok(());
+        }
+
+        let mut lock_connection = self.lock_connection.lock().await;
+        let conn = match lock_connection.as_mut() {
+            Some(conn) => conn,
+            None => {
+                drop(lock_connection);
+                self.drop_leadership_locally();
+                return Err(forge_core::ForgeError::Cluster(
+                    "Lock connection missing during lease refresh; dropped leadership".into(),
+                ));
+            }
+        };
 
         let lease_until =
             Utc::now() + chrono::Duration::seconds(self.config.lease_duration.as_secs() as i64);
@@ -346,29 +384,45 @@ impl LeaderElection {
     }
 
     /// Run the leader election loop.
+    ///
+    /// Three independent cadences:
+    /// - `lock_validate_interval` (leader only): re-check `pg_locks` to confirm
+    ///   the advisory lock is still held. Faster than `check_interval` so a
+    ///   long lease detects an out-of-band lock loss within seconds.
+    /// - `check_interval` (leader): refresh the lease row. Validates first
+    ///   inside `refresh_lease`, so the validate is idempotent with the
+    ///   faster timer above.
+    /// - `check_interval` (standby): check whether the current leader's
+    ///   lease is healthy and try to take over if not.
     pub async fn run(&self) {
         let mut shutdown_rx = self.shutdown_rx.clone();
+        let mut validate_timer = tokio::time::interval(self.config.lock_validate_interval);
+        validate_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut check_timer = tokio::time::interval(self.config.check_interval);
+        check_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
             tokio::select! {
-                _ = tokio::time::sleep(self.config.check_interval) => {
+                _ = validate_timer.tick() => {
+                    // validate_lock_held is a no-op for standbys, so we don't
+                    // need an outer is_leader() guard here.
+                    if let Err(e) = self.validate_lock_held().await {
+                        tracing::debug!(error = %e, "Lock validation failed");
+                    }
+                }
+                _ = check_timer.tick() => {
                     if self.is_leader() {
-                        // We're the leader, refresh lease
                         if let Err(e) = self.refresh_lease().await {
                             tracing::debug!(error = %e, "Failed to refresh lease");
                         }
                     } else {
-                        // We're a standby, check if we should try to become leader
                         match self.check_leader_health().await {
                             Ok(false) => {
-                                // No healthy leader, try to become one
                                 if let Err(e) = self.try_become_leader().await {
                                     tracing::debug!(error = %e, "Failed to acquire leadership");
                                 }
                             }
-                            Ok(true) => {
-                                // Leader is healthy, stay as standby
-                            }
+                            Ok(true) => {}
                             Err(e) => {
                                 tracing::debug!(error = %e, "Failed to check leader health");
                             }
@@ -389,28 +443,6 @@ impl LeaderElection {
     }
 }
 
-/// RAII guard for leader-only operations.
-pub struct LeaderGuard<'a> {
-    election: &'a LeaderElection,
-}
-
-impl<'a> LeaderGuard<'a> {
-    /// Try to create a leader guard.
-    /// Returns None if not the leader.
-    pub fn try_new(election: &'a LeaderElection) -> Option<Self> {
-        if election.is_leader() {
-            Some(Self { election })
-        } else {
-            None
-        }
-    }
-
-    /// Check if still leader.
-    pub fn is_leader(&self) -> bool {
-        self.election.is_leader()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,6 +452,11 @@ mod tests {
         let config = LeaderConfig::default();
         assert_eq!(config.check_interval, Duration::from_secs(5));
         assert_eq!(config.lease_duration, Duration::from_secs(60));
+        assert_eq!(config.lock_validate_interval, Duration::from_secs(1));
+        assert!(
+            config.lock_validate_interval < config.check_interval,
+            "validate must run faster than check or it serves no purpose",
+        );
     }
 }
 
@@ -442,7 +479,7 @@ mod integration_tests {
             .isolated(test_name)
             .await
             .expect("Failed to create isolated db");
-        let system_sql = crate::migrations::get_all_system_sql();
+        let system_sql = crate::pg::migration::get_all_system_sql();
         db.run_sql(&system_sql)
             .await
             .expect("Failed to apply system schema");
@@ -562,5 +599,68 @@ mod integration_tests {
             election.get_leader().await.unwrap().is_none(),
             "leader row removed even when unlock returned false"
         );
+    }
+
+    /// validate_lock_held detects an out-of-band lock loss and drops
+    /// leadership without touching the lease row. The separate validate
+    /// path is what lets the run loop catch a lost lock within
+    /// `lock_validate_interval` even when `check_interval` is much larger.
+    #[tokio::test]
+    async fn validate_lock_held_drops_leadership_when_lock_lost() {
+        let db = setup_db("leader_validate_lock_lost").await;
+        let election = LeaderElection::new(
+            db.pool().clone(),
+            NodeId::new(),
+            LeaderRole::Scheduler,
+            LeaderConfig::default(),
+        );
+
+        assert!(election.try_become_leader().await.unwrap());
+
+        {
+            let mut conn_guard = election.lock_connection.lock().await;
+            let conn = conn_guard.as_mut().expect("lock connection present");
+            sqlx::query_scalar!(
+                "SELECT pg_advisory_unlock($1) as \"released!\"",
+                LeaderRole::Scheduler.lock_id()
+            )
+            .fetch_one(&mut **conn)
+            .await
+            .unwrap();
+        }
+
+        let err = election.validate_lock_held().await.unwrap_err();
+        assert!(matches!(err, forge_core::ForgeError::Cluster(_)));
+        assert!(!election.is_leader());
+    }
+
+    /// validate_lock_held is a no-op for standbys and an OK for held leaders.
+    /// Calling it many times in a row must not require a lease refresh.
+    #[tokio::test]
+    async fn validate_lock_held_is_idempotent_when_held() {
+        let db = setup_db("leader_validate_idempotent").await;
+        let election = LeaderElection::new(
+            db.pool().clone(),
+            NodeId::new(),
+            LeaderRole::Scheduler,
+            LeaderConfig::default(),
+        );
+
+        // Standby case: no error, no state change.
+        election
+            .validate_lock_held()
+            .await
+            .expect("standby validate must be a no-op");
+        assert!(!election.is_leader());
+
+        // Leader case: many validates between lease refreshes.
+        assert!(election.try_become_leader().await.unwrap());
+        for _ in 0..5 {
+            election
+                .validate_lock_held()
+                .await
+                .expect("validate must succeed while lock held");
+            assert!(election.is_leader());
+        }
     }
 }

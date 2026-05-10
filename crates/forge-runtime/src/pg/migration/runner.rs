@@ -31,7 +31,7 @@ const MIGRATION_LOCK_ID: i64 = 0x464F524745; // "FORGE" in hex
 
 /// Bootstrap SQL embedded at compile time. Creates `forge_system_migrations`.
 /// Runs idempotently on every startup before any tracked migration applies.
-const BOOTSTRAP_SQL: &str = include_str!("../../migrations/system/v000_bootstrap.sql");
+const BOOTSTRAP_SQL: &str = include_str!("../../../migrations/system/v000_bootstrap.sql");
 
 /// Tunable knobs for the migration runner. Defaults match the deploy-friendly
 /// values: bounded lock-acquire wait so a stuck lock fails CI loudly instead of

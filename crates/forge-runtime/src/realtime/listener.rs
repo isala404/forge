@@ -99,72 +99,55 @@ impl ChangeListener {
 
     /// Replay changes missed while disconnected by querying the durable
     /// change log. Returns the number of replayed changes, or `None` if
-    /// the log table doesn't exist yet (first boot before v002 migration).
-    // forge_change_log lives in the runtime's system migration v002 and is
-    // missing from the offline .sqlx cache, so the macros can't validate it.
-    #[allow(clippy::disallowed_methods)]
+    /// the log read failed (e.g. the table is absent on first boot before
+    /// v002 has applied).
     async fn replay_missed(&self) -> Option<usize> {
+        use futures_util::stream::TryStreamExt;
+
         let since = self.last_seq.load(Ordering::Relaxed);
         if since == 0 {
             return None;
         }
 
-        // Runtime query: forge_change_log is a system table created by
-        // v002 migration, not present in all .sqlx offline caches.
-        type ChangeRow = (i64, String, String, Option<String>, Option<String>);
-        let rows: Vec<ChangeRow> = sqlx::query_as(
-            "SELECT seq, table_name, op, row_id, changed_cols \
-             FROM forge_change_log WHERE seq > $1 ORDER BY seq",
-        )
-        .bind(since)
-        .fetch_all(&self.pool)
-        .await
-        .ok()?;
+        let rows = crate::pg::drain_change_log(&self.pool, since)
+            .try_collect::<Vec<_>>()
+            .await
+            .ok()?;
 
         let count = rows.len();
-        for (seq, table_name, op, row_id, changed_cols) in &rows {
-            let operation = match op.as_str() {
-                "INSERT" => forge_core::realtime::ChangeOperation::Insert,
-                "UPDATE" => forge_core::realtime::ChangeOperation::Update,
-                "DELETE" => forge_core::realtime::ChangeOperation::Delete,
-                _ => continue,
+        for row in &rows {
+            let Ok(operation) = row.op.parse::<forge_core::realtime::ChangeOperation>() else {
+                continue;
             };
 
-            let mut change = Change::new(table_name.clone(), operation);
-            if let Some(rid) = row_id
+            let mut change = Change::new(row.table_name.clone(), operation);
+            if let Some(rid) = &row.row_id
                 && let Ok(uuid) = uuid::Uuid::parse_str(rid)
             {
                 change = change.with_row_id(uuid);
             }
-            if let Some(cols) = changed_cols {
+            if let Some(cols) = &row.changed_cols {
                 let columns: Vec<String> = cols.split(',').map(|s| s.to_string()).collect();
                 change = change.with_columns(columns);
             }
 
             let _ = self.change_tx.send(change);
-            self.last_seq.store(*seq, Ordering::Relaxed);
+            self.last_seq.store(row.seq, Ordering::Relaxed);
         }
 
         if count > 0 {
             tracing::info!(replayed = count, from_seq = since, "Replayed missed changes from log");
-        } else {
-            // Zero rows returned but we had a position. Check if our position
-            // was trimmed (change log retention expired while we were down).
-            let min_seq: Option<(Option<i64>,)> =
-                sqlx::query_as("SELECT MIN(seq) FROM forge_change_log")
-                    .fetch_optional(&self.pool)
-                    .await
-                    .ok()
-                    .flatten();
-            if let Some((Some(min),)) = min_seq
-                && min > since
-            {
-                tracing::warn!(
-                    last_seen = since, log_min = min,
-                    "Change log trimmed past our position, requesting full resync"
-                );
-                self.needs_resync.store(true, Ordering::Relaxed);
-            }
+        } else if let Ok(Some(min)) = crate::pg::min_seq(&self.pool).await
+            && min > since
+        {
+            // Zero rows but a non-zero high-water mark — retention has
+            // trimmed past our position. Trigger a full resync.
+            tracing::warn!(
+                last_seen = since,
+                log_min = min,
+                "Change log trimmed past our position, requesting full resync"
+            );
+            self.needs_resync.store(true, Ordering::Relaxed);
         }
 
         Some(count)

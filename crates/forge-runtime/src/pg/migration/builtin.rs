@@ -18,10 +18,10 @@ use super::runner::Migration;
 /// System migration prefix. All forge internal migrations use this prefix.
 pub const SYSTEM_MIGRATION_PREFIX: &str = "__forge_v";
 
-const V001_INITIAL: &str = include_str!("../../migrations/system/v001_initial.sql");
-const V002_CHANGE_LOG: &str = include_str!("../../migrations/system/v002_change_log.sql");
-const V003_JOB_WAKEUP: &str = include_str!("../../migrations/system/v003_job_wakeup.sql");
-const V004_KV: &str = include_str!("../../migrations/system/v004_kv.sql");
+const V001_INITIAL: &str = include_str!("../../../migrations/system/v001_initial.sql");
+const V002_CHANGE_LOG: &str = include_str!("../../../migrations/system/v002_change_log.sql");
+const V003_JOB_WAKEUP: &str = include_str!("../../../migrations/system/v003_job_wakeup.sql");
+const V004_KV: &str = include_str!("../../../migrations/system/v004_kv.sql");
 
 /// A system migration with a version number.
 #[derive(Debug, Clone)]

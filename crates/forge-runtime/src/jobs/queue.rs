@@ -798,7 +798,7 @@ mod integration_tests {
             .isolated(test_name)
             .await
             .expect("Failed to create isolated db");
-        let system_sql = crate::migrations::get_all_system_sql();
+        let system_sql = crate::pg::migration::get_all_system_sql();
         db.run_sql(&system_sql)
             .await
             .expect("Failed to apply system schema");

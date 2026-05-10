@@ -418,14 +418,10 @@ impl Reactor {
     /// Trim old entries from the durable change log. Runs on the cleanup
     /// interval (default 60s). Silently skips if the table doesn't exist yet.
     async fn trim_change_log(db_pool: &sqlx::PgPool) {
-        let result = sqlx::query!(
-            "SELECT forge_trim_change_log('1 hour'::INTERVAL) AS deleted"
-        )
-        .fetch_one(db_pool)
-        .await;
-        match result {
-            Ok(row) if row.deleted.unwrap_or(0) > 0 => {
-                tracing::debug!(deleted = row.deleted.unwrap_or(0), "Trimmed change log");
+        let cutoff = chrono::Utc::now() - chrono::Duration::hours(1);
+        match crate::pg::trim_change_log(db_pool, cutoff).await {
+            Ok(deleted) if deleted > 0 => {
+                tracing::debug!(deleted, "Trimmed change log");
             }
             Err(e) => {
                 tracing::trace!(error = %e, "Change log trim skipped (table may not exist)");

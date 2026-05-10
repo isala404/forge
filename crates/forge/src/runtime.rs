@@ -31,7 +31,7 @@ use forge_core::cluster::{LeaderRole, NodeId, NodeInfo, NodeRole, NodeStatus};
 use forge_core::config::{ForgeConfig, NodeRole as ConfigNodeRole};
 use forge_core::error::{ForgeError, Result};
 use forge_core::function::{ForgeMutation, ForgeQuery};
-use forge_runtime::migrations::{Migration, MigrationRunner, load_migrations_from_dir};
+use forge_runtime::pg::migration::{Migration, MigrationRunner, load_migrations_from_dir};
 
 #[cfg(feature = "gateway")]
 use forge_core::mcp::ForgeMcpTool;
@@ -116,7 +116,6 @@ pub mod prelude {
     pub use forge_core::config::ForgeConfig;
     pub use forge_core::cron::{CronContext, ForgeCron};
     pub use forge_core::daemon::{DaemonContext, ForgeDaemon};
-    pub use forge_core::db::ForgePool;
     // EnvAccess is a trait that adds `ctx.env(...)` / `ctx.env_require(...)`
     // methods — keeping it in the glob avoids forcing every handler to import
     // it explicitly.
@@ -177,7 +176,7 @@ pub struct Forge {
     /// the full middleware stack (auth, CORS, tracing, concurrency, timeouts)
     /// applies automatically.
     #[cfg(feature = "gateway")]
-    custom_routes_factory: Option<Box<dyn FnOnce(forge_core::ForgePool) -> Router + Send + Sync>>,
+    custom_routes_factory: Option<Box<dyn FnOnce(sqlx::PgPool) -> Router + Send + Sync>>,
     /// Optional pluggable role resolver for RBAC.
     #[cfg(feature = "gateway")]
     role_resolver: Option<forge_core::SharedRoleResolver>,
@@ -369,15 +368,9 @@ impl Forge {
             Database::from_config_with_service(&self.config.database, &self.config.project.name)
                 .await?;
         let pool = db.primary().clone();
-        if let Some(handle) = db.start_health_monitor() {
-            let mut shutdown_rx = self.shutdown_tx.subscribe();
-            tokio::spawn(async move {
-                tokio::select! {
-                    _ = shutdown_rx.recv() => {}
-                    _ = handle => {}
-                }
-            });
-        }
+        // Health monitor self-terminates on shutdown_tx, so we don't need to
+        // hold the JoinHandle. Drop it and let the broadcast signal stop it.
+        let _ = db.start_health_monitor(self.shutdown_tx.subscribe());
         self.db = Some(db);
 
         tracing::debug!("Database connected");
@@ -861,8 +854,7 @@ impl Forge {
             }
 
             if let Some(factory) = self.custom_routes_factory.take() {
-                let forge_pool = forge_core::ForgePool::from_sqlx(pool.clone());
-                gateway = gateway.with_custom_routes(factory(forge_pool));
+                gateway = gateway.with_custom_routes(factory(pool.clone()));
                 tracing::debug!("Custom routes merged into gateway middleware stack");
             }
 
@@ -1204,7 +1196,7 @@ pub struct ForgeBuilder {
     #[cfg(feature = "gateway")]
     frontend_handler: Option<FrontendHandler>,
     #[cfg(feature = "gateway")]
-    custom_routes_factory: Option<Box<dyn FnOnce(forge_core::ForgePool) -> Router + Send + Sync>>,
+    custom_routes_factory: Option<Box<dyn FnOnce(sqlx::PgPool) -> Router + Send + Sync>>,
 }
 
 impl ForgeBuilder {
@@ -1292,11 +1284,8 @@ impl ForgeBuilder {
     /// `/events`, `/subscribe`, `/unsubscribe`, `/subscribe-job`,
     /// `/subscribe-workflow`, `/signal/*`, `/mcp`, and `/oauth/*`.
     ///
-    /// The factory receives a [`forge_core::ForgePool`] — Forge's stable
-    /// wrapper around the underlying database pool. Drop down to sqlx with
-    /// `pool.as_sqlx_pool()` when you need to issue queries directly.
-    /// Pinning the wrapper lets Forge change its sqlx version (or swap
-    /// the driver entirely) without breaking your custom routes.
+    /// The factory receives the framework's `sqlx::PgPool`. Cloning it is
+    /// cheap (`PgPool` is internally an `Arc`).
     ///
     /// If your handlers don't need the pool, ignore the argument:
     ///
@@ -1307,20 +1296,18 @@ impl ForgeBuilder {
     /// With pool access:
     ///
     /// ```ignore
-    /// use axum::{Router, routing::get, extract::State};
-    /// use std::sync::Arc;
+    /// use axum::{Router, routing::get};
     ///
     /// builder.custom_routes(|pool| {
-    ///     // Use `pool.as_sqlx_pool()` inside handlers when you need sqlx.
     ///     Router::new()
     ///         .route("/export/csv", get(export_handler))
-    ///         .with_state(Arc::new(pool))
+    ///         .with_state(pool)
     /// });
     /// ```
     #[cfg(feature = "gateway")]
     pub fn custom_routes<F>(mut self, f: F) -> Self
     where
-        F: FnOnce(forge_core::ForgePool) -> Router + Send + Sync + 'static,
+        F: FnOnce(sqlx::PgPool) -> Router + Send + Sync + 'static,
     {
         self.custom_routes_factory = Some(Box::new(f));
         self

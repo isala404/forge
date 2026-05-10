@@ -30,7 +30,6 @@ pub mod config;
 pub mod context;
 pub mod cron;
 pub mod daemon;
-pub mod db;
 pub mod env;
 pub mod error;
 pub mod function;
@@ -62,7 +61,6 @@ pub use config::{ForgeConfig, McpConfig, SignalsConfig};
 pub use context::{AuthenticatedContext, HandlerContext};
 pub use cron::{CronContext, CronInfo, CronSchedule, ForgeCron};
 pub use daemon::{DaemonContext, DaemonInfo, DaemonStatus, ForgeDaemon};
-pub use db::ForgePool;
 pub use env::{EnvAccess, EnvProvider, MockEnvProvider, RealEnvProvider};
 pub use error::{ForgeError, Result};
 pub use function::{
