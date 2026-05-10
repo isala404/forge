@@ -74,17 +74,14 @@ jobs:
       - name: cargo deny
         run: cargo deny check
 
-      - name: Lint raw SQL
-        run: bash scripts/ci/lint-raw-sql.sh
-
       - name: cargo audit
         run: |
           cargo install cargo-audit --locked
-          cargo audit
+          cargo audit --deny warnings
 
   workspace-integration:
     name: Workspace integration
-    needs: validate
+    needs: [validate, guardrails]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
@@ -115,7 +112,7 @@ jobs:
 
   pr-smoke:
     name: PR Smoke
-    needs: validate
+    needs: [validate, guardrails]
     if: github.event_name == 'pull_request'
     strategy:
       fail-fast: false
@@ -130,7 +127,7 @@ jobs:
 
   integration:
     name: Integration
-    needs: validate
+    needs: [validate, guardrails]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     strategy:
       fail-fast: false

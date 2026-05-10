@@ -1,12 +1,14 @@
 services:
   db:
     image: postgres:18
+    restart: unless-stopped
+    shm_size: 1gb
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: forge
       POSTGRES_DB: forge_dev
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:

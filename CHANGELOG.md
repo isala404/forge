@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Observability is now a no-op stub when `otel` is disabled.** Call sites (`record_fn_execution`, `record_pool_metrics`, etc.) compile to nothing without the feature; `tracing-subscriber` still emits structured logs to stderr.
 - **GeoIP support is opt-in.** Disabling the `geoip` feature skips the build-time `db_ip` database download — unblocks builds in air-gapped environments and shaves several minutes off cold builds.
 
+### Removed
+
+- **`[realtime] change_tracking_row_threshold` config knob** (and its `adaptive_row_threshold` alias). The adaptive row-vs-table tracker that consumed this value was removed earlier in the v2 rewrite, leaving the field as a silent no-op. Operators who set it in `forge.toml` should delete the line.
+
 ### Notes
 
 - Existing apps see no behavior change: `default = ["full"]` activates every subsystem just like before.

@@ -282,19 +282,6 @@ curl -X POST https://example.com/_api/rpc/export_users \
 
 Authentication is enforced identically to the standard `/rpc` endpoint.
 
-### Batch calls
-
-POST to `/_api/rpc/batch` with an array of call objects to reduce round-trips:
-
-```json
-[
-  { "fn": "get_user", "args": { "id": "abc-123" } },
-  { "fn": "get_team", "args": { "team_id": "t-456" } }
-]
-```
-
-The server executes queries in parallel and mutations serially. The generated client does not yet expose a typed `batch()` helper.
-
 ## Under the Hood
 
 **SSE transport**: Job updates arrive over the same SSE connection used for query subscriptions. The client registers for job-specific updates via `/_api/subscribe-job`:

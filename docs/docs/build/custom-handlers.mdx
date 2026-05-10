@@ -80,9 +80,9 @@ The factory runs after the pool is connected and before the gateway starts. Forg
 Custom routes share the `/_api` namespace with built-in Forge endpoints. Registering a path that already belongs to Forge panics at startup. Avoid:
 
 - `/health`, `/ready`
-- `/rpc`, `/rpc/batch`, `/rpc/{function}`, `/rpc/{function}/upload`
+- `/rpc`, `/rpc/{function}`, `/rpc/{function}/upload`
 - `/events`, `/subscribe`, `/unsubscribe`, `/subscribe-job`, `/subscribe-workflow`
-- `/signal/event`, `/signal/view`, `/signal/user`, `/signal/report`
+- `/signal`
 - `/webhooks/*`
 - `/mcp` (if MCP is enabled)
 - `/oauth/authorize`, `/oauth/token`, `/oauth/register` (if MCP OAuth is enabled)

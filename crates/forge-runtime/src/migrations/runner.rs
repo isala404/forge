@@ -12,6 +12,10 @@
 //! 2. **User migrations** (`XXXX_name.sql`): Application-specific schema changes.
 //!    These are sorted alphabetically by name.
 
+// Migrations execute user-supplied DDL/DML strings, so the compile-time query
+// macros can't see the schema. Runtime sqlx::query is required here.
+#![allow(clippy::disallowed_methods)]
+
 use forge_core::error::{ForgeError, Result};
 use sqlx::{PgPool, Postgres};
 use std::collections::HashSet;

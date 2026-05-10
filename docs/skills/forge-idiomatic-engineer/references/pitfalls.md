@@ -131,6 +131,7 @@ sqlx::query_as!(User, "...", id).fetch_one(&mut conn).await?
 - **`serde_json::Value` webhooks**: untyped payloads defer validation to runtime. Declare a typed struct — the macro deserialises for you.
 - **String-matching error messages**: match `ForgeError` variants in Rust, internal codes (`"NOT_FOUND"`, `"UNAUTHORIZED"`) on the frontend. See [API Reference](./api.md#forgeerror-variants).
 - **Hand-rolled HMAC verification**: use the `WebhookSignature` constructors. See [API Reference](./api.md#signature-constructors).
+- **Forgetting `x-webhook-timestamp`**: non-Stripe schemes (`hmac_sha256`, `shopify_webhooks`, `ed25519`) reject any request without a fresh `x-webhook-timestamp: <unix-seconds>` header. If you control the sender, stamp the header. If you don't, set `replay_window_secs = 0` on the macro to disable enforcement (last-resort — you lose replay protection). Stripe is unaffected.
 - **Provider SDKs for payments / AI / S3**: stay neutral — standard protocols (HMAC, S3 API, HTTP JSON) work everywhere. See [Recipes](./recipes.md).
 
 ## 13. Number Precision Across the Wire

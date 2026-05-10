@@ -9,7 +9,7 @@ use forge_core::function::{
     AuthContext, FunctionInfo, JobDispatch, RequestMetadata, WorkflowDispatch,
 };
 
-use super::request::{BatchRpcRequest, BatchRpcResponse, RpcRequest};
+use super::request::RpcRequest;
 use super::response::{RpcError, RpcResponse};
 use super::tracing::TracingState;
 use crate::function::{FunctionRegistry, FunctionRouter};
@@ -20,8 +20,6 @@ use crate::pg::Database;
 pub struct RpcHandler {
     /// Function router.
     router: Arc<FunctionRouter>,
-    /// Maximum requests in a single batch call.
-    max_batch_size: usize,
 }
 
 impl RpcHandler {
@@ -30,7 +28,6 @@ impl RpcHandler {
         let router = FunctionRouter::new(Arc::new(registry), db);
         Self {
             router: Arc::new(router),
-            max_batch_size: 100,
         }
     }
 
@@ -61,13 +58,7 @@ impl RpcHandler {
         );
         Self {
             router: Arc::new(router),
-            max_batch_size: 100,
         }
-    }
-
-    /// Set the maximum batch size for RPC batch requests.
-    pub fn set_max_batch_size(&mut self, max: usize) {
-        self.max_batch_size = max;
     }
 
     /// Set the token TTL config. Must be called before any requests are handled.
@@ -236,54 +227,6 @@ pub async fn rpc_function_handler(
             build_metadata(tracing, resolved_ip.0, &headers),
         )
         .await
-}
-
-/// Axum handler for POST /rpc/batch.
-pub async fn rpc_batch_handler(
-    State(handler): State<Arc<RpcHandler>>,
-    Extension(auth): Extension<AuthContext>,
-    Extension(tracing): Extension<TracingState>,
-    Extension(resolved_ip): Extension<ResolvedClientIp>,
-    headers: HeaderMap,
-    Json(batch): Json<BatchRpcRequest>,
-) -> BatchRpcResponse {
-    // Prevent DoS via unbounded batch size
-    if batch.requests.len() > handler.max_batch_size {
-        return BatchRpcResponse {
-            results: vec![RpcResponse::error(RpcError::validation(format!(
-                "Batch size {} exceeds maximum of {}",
-                batch.requests.len(),
-                handler.max_batch_size
-            )))],
-        };
-    }
-
-    let client_ip = resolved_ip.0;
-    let user_agent = extract_user_agent(&headers);
-    let correlation_id = extract_correlation_id(&headers);
-    let mut results = Vec::with_capacity(batch.requests.len());
-
-    for request in batch.requests {
-        // Validate function names in batch requests
-        if !is_valid_function_name(&request.function) {
-            results.push(RpcResponse::error(RpcError::validation(
-                "Invalid function name: must be 1-256 alphanumeric characters, underscores, dots, colons, or hyphens",
-            )));
-            continue;
-        }
-        let metadata = RequestMetadata::__build_internal(
-            uuid::Uuid::new_v4(),
-            tracing.trace_id.clone(),
-            client_ip.clone(),
-            user_agent.clone(),
-            correlation_id.clone(),
-        );
-
-        let response = handler.handle(request, auth.clone(), metadata).await;
-        results.push(response);
-    }
-
-    BatchRpcResponse { results }
 }
 
 #[cfg(test)]

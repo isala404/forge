@@ -144,6 +144,9 @@ async fn flush_loop(
 /// Flush a batch of events into PostgreSQL using UNNEST for single-roundtrip INSERT.
 /// Uses runtime sqlx::query() because UNNEST with typed arrays is not supported by
 /// the compile-time sqlx::query!() macro.
+// UNNEST batch insert binds 31 parallel arrays; the macro form can't model the
+// shape, and the table is part of the runtime's signals subsystem.
+#[allow(clippy::disallowed_methods)]
 async fn flush_batch(pool: &PgPool, buffer: &mut Vec<SignalEvent>) {
     let count = buffer.len();
 

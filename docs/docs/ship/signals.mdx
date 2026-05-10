@@ -187,17 +187,13 @@ When the user navigates away or closes the tab, pending events are flushed via t
 
 ## Endpoints
 
-The server exposes four ingestion endpoints. These are added to `quiet_paths` internally so they don't generate their own telemetry noise.
+The server exposes a single ingestion endpoint. It is added to `quiet_paths` internally so it doesn't generate its own telemetry noise.
 
 | Endpoint | Method | Purpose |
 | --- | --- | --- |
-| `/_api/signal/event` | POST | Batch custom events (max 50 per request) |
-| `/_api/signal/view` | POST | Page view with referrer and UTM params |
-| `/_api/signal/user` | POST | Identify user and store traits |
-| `/_api/signal/report` | POST | Frontend error reports with breadcrumbs |
-| `/_api/signal/vital` | POST | Web Vitals / performance metrics (max 50 per request) |
+| `/_api/signal` | POST | Discriminated by top-level `type` field: `event` (batch custom events, identify, web vitals, breadcrumbs — max 50 per request), `view` (page view with referrer and UTM params), `report` (frontend error reports with breadcrumbs) |
 
-All endpoints return:
+The endpoint returns:
 
 ```json
 { "ok": true, "session_id": "uuid" }
@@ -245,7 +241,7 @@ Signals are designed around GDPR compliance without cookie banners:
 - Visitor identity is a daily-rotating SHA-256 hash of `IP + UA + daily_salt`. The salt is derived from `auth.jwt_secret` and the current UTC date, so cross-day correlation is impossible without access to the secret. Rotate `auth.jwt_secret` to break correlation across deployments
 - With `anonymize_ip = true`, the raw IP is hashed into the visitor ID and then zeroed before storage; the `client_ip` column always ends up empty
 - `identify()` is opt-in and only links sessions you explicitly associate
-- The server short-circuits `/signal/view`, `/signal/event`, `/signal/user`, and `/signal/vital` for requests carrying `DNT: 1` or `Sec-GPC: 1`. The client SDKs disable themselves when the browser has set those signals. Crash reports (`/signal/report`) still land so production errors from DNT users don't disappear, but they carry no `visitor_id` and no `user_id`
+- The server short-circuits `event` and `view` payloads to `/_api/signal` for requests carrying `DNT: 1` or `Sec-GPC: 1`. The client SDKs disable themselves when the browser has set those signals. Crash reports (`type: "report"`) still land so production errors from DNT users don't disappear, but they carry no `visitor_id` and no `user_id`
 - Bot traffic is tagged but not filtered, so you retain full data for debugging
 
 ### Data retention and right-to-delete

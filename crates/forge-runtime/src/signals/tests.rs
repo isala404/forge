@@ -4,6 +4,9 @@
 //! the full path: session management, event collection, handler round-trips,
 //! and partition management.
 
+// Tests assert via ad-hoc queries that aren't part of the .sqlx offline cache.
+#![allow(clippy::disallowed_methods)]
+
 use std::sync::Arc;
 use std::time::Duration;
 

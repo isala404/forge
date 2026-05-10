@@ -43,22 +43,40 @@ Webhooks do not use JWT authentication; the signature serves as the authenticati
 | `allow_unsigned` | flag | `false` | Accept requests without signature verification |
 | `idempotency` | `"source:key"` | none | Idempotency key extraction |
 | `timeout` | `"duration"` | `"30s"` | Request timeout |
+| `replay_window_secs` | `u64` | `300` | Max age (in seconds) of an `x-webhook-timestamp` header for non-Stripe schemes. `0` disables enforcement. Stripe ignores this and uses its own header timestamp. |
 
 ### Signature Configuration
 
 ```rust
 WebhookSignature::hmac_sha256("X-Hub-Signature-256", "GITHUB_SECRET")
-WebhookSignature::hmac_sha1("X-Hub-Signature", "LEGACY_SECRET")
-WebhookSignature::hmac_sha512("X-Signature-512", "SECURE_SECRET")
+WebhookSignature::stripe_webhooks("STRIPE_WEBHOOK_SECRET")
+WebhookSignature::shopify_webhooks("SHOPIFY_WEBHOOK_SECRET")
+WebhookSignature::ed25519("X-Webhook-Signature", "WEBHOOK_PUBLIC_KEY")
 ```
 
-| Algorithm | Prefix | Common Providers |
-|-----------|--------|------------------|
-| `hmac_sha256` | `sha256=` | GitHub, Stripe, Shopify |
-| `hmac_sha1` | `sha1=` | Legacy GitHub, older services |
-| `hmac_sha512` | `sha512=` | Custom implementations |
+| Constructor | Algorithm | Header | Notes |
+|---|---|---|---|
+| `hmac_sha256(header, env)` | HMAC-SHA256, hex | caller-supplied | GitHub and most providers using `sha256=...` |
+| `stripe_webhooks(env)` | HMAC-SHA256 over `{ts}.{body}`, hex | `Stripe-Signature` | Stripe-specific format with built-in 5-minute replay guard |
+| `shopify_webhooks(env)` | HMAC-SHA256, base64 | `X-Shopify-Hmac-Sha256` | Shopify storefront and admin webhooks |
+| `ed25519(header, env)` | Ed25519 asymmetric | caller-supplied | Service publishes the public key; env holds the base64-encoded 32-byte key |
 
-First argument is the header name. Second is the environment variable containing your secret.
+For HMAC schemes the env var holds the shared secret. For Ed25519 it holds the **base64-encoded 32-byte public key**, not a secret.
+
+### Replay Protection
+
+Non-Stripe schemes (`hmac_sha256`, `shopify_webhooks`, `ed25519`) require senders to attach an `x-webhook-timestamp: <unix-seconds>` header. Requests are rejected with HTTP 401 when the header is missing, malformed, dated in the future, or older than `replay_window_secs` (default 300s).
+
+```rust
+#[forge::webhook(
+    path = "/webhooks/internal",
+    signature = WebhookSignature::hmac_sha256("X-Signature", "INTERNAL_SECRET"),
+    replay_window_secs = 60,  // tighter window for low-latency callers
+)]
+pub async fn internal(ctx: &WebhookContext, payload: Value) -> Result<WebhookResult> { /* ... */ }
+```
+
+Set `replay_window_secs = 0` to disable the check when integrating with a legacy provider that cannot stamp the header. Not recommended in production. Stripe is unaffected — it carries its own `t=` field and continues to enforce a 5-minute window regardless of this attribute.
 
 ### Idempotency Sources
 
@@ -80,7 +98,7 @@ Verify Stripe signatures and dispatch payment processing.
 ```rust
 #[forge::webhook(
     path = "/webhooks/stripe",
-    signature = WebhookSignature::hmac_sha256("Stripe-Signature", "STRIPE_WEBHOOK_SECRET"),
+    signature = WebhookSignature::stripe_webhooks("STRIPE_WEBHOOK_SECRET"),
     idempotency = "body:$.id",
 )]
 pub async fn stripe_webhook(ctx: &WebhookContext, payload: Value) -> Result<WebhookResult> {

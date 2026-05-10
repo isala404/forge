@@ -7,12 +7,12 @@ Forge exposes a small HTTP+SSE protocol. Every endpoint lives under `/_api/` and
 | Method | Path | Purpose |
 |--------|------|---------|
 | `POST` | `/_api/rpc/{function}` | Call a query or mutation |
-| `POST` | `/_api/rpc` | Batch call (multiple functions) |
+| `POST` | `/_api/rpc/{function}/upload` | Call a mutation with multipart upload |
 | `GET` | `/_api/events` | Open an SSE stream |
 | `POST` | `/_api/subscribe` | Subscribe to a query |
 | `POST` | `/_api/unsubscribe` | Unsubscribe from a query |
-| `POST` | `/_api/subscribe/job/{job_id}` | Subscribe to job status |
-| `POST` | `/_api/subscribe/workflow/{workflow_id}` | Subscribe to workflow status |
+| `POST` | `/_api/subscribe-job` | Subscribe to job status |
+| `POST` | `/_api/subscribe-workflow` | Subscribe to workflow status |
 | `POST` | `/_api/signal` | Send analytics signal |
 | `GET` | `/_api/health` | Liveness check |
 | `GET` | `/_api/ready` | Readiness check |
@@ -47,31 +47,6 @@ Response:
   "data": [{ "id": "u1", "name": "Alice" }],
   "error": null,
   "request_id": "trace-id-here"
-}
-```
-
-### Batch Call
-
-```http
-POST /_api/rpc
-Content-Type: application/json
-
-{
-  "requests": [
-    { "function": "get_users", "args": { "team_id": "abc" } },
-    { "function": "get_projects", "args": {} }
-  ]
-}
-```
-
-Response:
-
-```json
-{
-  "results": [
-    { "success": true, "data": [...], "error": null },
-    { "success": true, "data": [...], "error": null }
-  ]
 }
 ```
 
@@ -175,13 +150,14 @@ When underlying data changes, the server re-executes your query and pushes the n
 ### Subscribing to Job Status
 
 ```http
-POST /_api/subscribe/job/550e8400-...
+POST /_api/subscribe-job
 Content-Type: application/json
 
 {
   "session_id": "...",
   "session_secret": "...",
-  "id": "my-job-sub"
+  "id": "my-job-sub",
+  "job_id": "550e8400-..."
 }
 ```
 
@@ -205,13 +181,14 @@ Job updates arrive as:
 ### Subscribing to Workflow Status
 
 ```http
-POST /_api/subscribe/workflow/550e8400-...
+POST /_api/subscribe-workflow
 Content-Type: application/json
 
 {
   "session_id": "...",
   "session_secret": "...",
-  "id": "my-workflow-sub"
+  "id": "my-workflow-sub",
+  "workflow_id": "550e8400-..."
 }
 ```
 

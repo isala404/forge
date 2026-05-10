@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO forge_leaders (role, node_id, acquired_at, lease_until)\n                VALUES ($1, $2, NOW(), $3)\n                ON CONFLICT (role) DO UPDATE SET\n                    node_id = EXCLUDED.node_id,\n                    acquired_at = NOW(),\n                    lease_until = EXCLUDED.lease_until\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dfebce526dfc7487aa5fb1870578fb526eb8bcfb6a753ebb66fe0c4d0ef64f9f"
+}

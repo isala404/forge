@@ -100,6 +100,9 @@ impl ChangeListener {
     /// Replay changes missed while disconnected by querying the durable
     /// change log. Returns the number of replayed changes, or `None` if
     /// the log table doesn't exist yet (first boot before v002 migration).
+    // forge_change_log lives in the runtime's system migration v002 and is
+    // missing from the offline .sqlx cache, so the macros can't validate it.
+    #[allow(clippy::disallowed_methods)]
     async fn replay_missed(&self) -> Option<usize> {
         let since = self.last_seq.load(Ordering::Relaxed);
         if since == 0 {

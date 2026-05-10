@@ -31,6 +31,21 @@ fn secret_kid(secret: &[u8]) -> String {
     out
 }
 
+/// Operating mode for the auth middleware.
+///
+/// `Production` is the only mode that runs JWT signature verification.
+/// `Development` accepts unsigned tokens for local iteration and is constructed
+/// only via `AuthConfig::dev_mode()`, which refuses to build when
+/// `FORGE_ENV=production`. There is no parsed config field that selects this —
+/// the variant is chosen by the constructor, so production never has a chance
+/// to land in `Development` accidentally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AuthMode {
+    #[default]
+    Production,
+    Development,
+}
+
 /// Authentication configuration for the runtime.
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
@@ -53,10 +68,9 @@ pub struct AuthConfig {
     pub legacy_secrets: Vec<forge_core::config::LegacySecret>,
     /// JWT spec claims that must be present. Derived from `required_claims` in forge.toml.
     pub required_claims: Vec<String>,
-    /// Skip signature verification (DEV MODE ONLY - NEVER USE IN PRODUCTION).
-    /// This field is intentionally not public. Use `dev_mode()` constructor which
-    /// includes a runtime guard against production use.
-    pub(crate) skip_verification: bool,
+    /// Auth mode. Only `Development` skips signature verification, and the only
+    /// constructor that yields `Development` already refuses production env.
+    pub(crate) mode: AuthMode,
 }
 
 impl Default for AuthConfig {
@@ -71,7 +85,7 @@ impl Default for AuthConfig {
             session_cookie_ttl_secs: 3600,
             legacy_secrets: Vec::new(),
             required_claims: vec!["exp".into(), "sub".into()],
-            skip_verification: false,
+            mode: AuthMode::Production,
         }
     }
 }
@@ -99,7 +113,7 @@ impl AuthConfig {
             session_cookie_ttl_secs: config.session_cookie_ttl_secs(),
             legacy_secrets: config.legacy_secrets.clone(),
             required_claims: config.required_claims.clone(),
-            skip_verification: false,
+            mode: AuthMode::Production,
         })
     }
 
@@ -141,7 +155,7 @@ impl AuthConfig {
             session_cookie_ttl_secs: 3600,
             legacy_secrets: Vec::new(),
             required_claims: vec!["exp".into(), "sub".into()],
-            skip_verification: true,
+            mode: AuthMode::Development,
         })
     }
 
@@ -153,6 +167,12 @@ impl AuthConfig {
     /// Check if this config uses RSA (asymmetric) algorithms.
     pub fn is_rsa(&self) -> bool {
         matches!(self.algorithm, JwtAlgorithm::RS256)
+    }
+
+    /// True when running in development mode, which bypasses signature checks.
+    /// Always false for configs built from `from_forge_config` or `with_secret`.
+    pub fn skips_verification(&self) -> bool {
+        matches!(self.mode, AuthMode::Development)
     }
 }
 
@@ -274,12 +294,12 @@ impl std::fmt::Debug for AuthMiddleware {
 impl AuthMiddleware {
     /// Create a new auth middleware.
     pub fn new(config: AuthConfig) -> Self {
-        if config.skip_verification {
+        if config.skips_verification() {
             tracing::warn!("JWT signature verification is DISABLED. Do not use in production.");
         }
 
         // Pre-compute HMAC key if using HMAC algorithm
-        let active_secret = if !config.skip_verification && config.is_hmac() {
+        let active_secret = if !config.skips_verification() && config.is_hmac() {
             config.jwt_secret.as_deref().filter(|s| !s.is_empty())
         } else {
             None
@@ -287,7 +307,7 @@ impl AuthMiddleware {
         let hmac_key = active_secret.map(|s| DecodingKey::from_secret(s.as_bytes()));
         let hmac_kid = active_secret.map(|s| secret_kid(s.as_bytes()));
 
-        let legacy_hmac_keys = if config.is_hmac() && !config.skip_verification {
+        let legacy_hmac_keys = if config.is_hmac() && !config.skips_verification() {
             let now = chrono::Utc::now();
             config
                 .legacy_secrets
@@ -338,7 +358,7 @@ impl AuthMiddleware {
 
     /// Validate a JWT token and extract claims.
     pub async fn validate_token_async(&self, token: &str) -> Result<Claims, AuthError> {
-        if self.config.skip_verification {
+        if self.config.skips_verification() {
             return self.decode_without_verification(token);
         }
 
@@ -820,19 +840,21 @@ mod tests {
     fn test_auth_config_default() {
         let config = AuthConfig::default();
         assert_eq!(config.algorithm, JwtAlgorithm::HS256);
-        assert!(!config.skip_verification);
+        assert_eq!(config.mode, AuthMode::Production);
+        assert!(!config.skips_verification());
     }
 
     #[test]
     fn test_auth_config_dev_mode() {
         let config = AuthConfig::dev_mode().expect("dev_mode outside production");
-        assert!(config.skip_verification);
+        assert_eq!(config.mode, AuthMode::Development);
+        assert!(config.skips_verification());
     }
 
     #[test]
     fn test_auth_middleware_permissive() {
         let middleware = AuthMiddleware::permissive().expect("permissive outside production");
-        assert!(middleware.config.skip_verification);
+        assert!(middleware.config.skips_verification());
     }
 
     #[test]

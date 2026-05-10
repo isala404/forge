@@ -117,6 +117,7 @@ panic = "deny"
 unimplemented = "deny"
 unwrap_used = "deny"
 indexing_slicing = "deny"
+disallowed_methods = "deny"
 
 [profile.dev]
 # Smaller debug info keeps incremental builds and target/ size in check.

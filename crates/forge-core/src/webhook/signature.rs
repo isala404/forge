@@ -72,24 +72,6 @@ pub enum IdempotencySource {
     Body(&'static str),
 }
 
-impl IdempotencySource {
-    /// Parse from attribute string (e.g., "header:X-Request-Id" or "body:$.id").
-    ///
-    /// NOTE: This uses `Box::leak` to produce `&'static str` references, so it
-    /// must only be called at startup/registration time (e.g., from proc macros),
-    /// never in request-handling hot paths. Calling this in a loop will leak memory.
-    pub fn parse(s: &str) -> Option<Self> {
-        let (prefix, value) = s.split_once(':')?;
-        // SAFETY: This is intended to be called only at startup during webhook registration.
-        // The leaked strings live for the program's lifetime, matching webhook configurations.
-        match prefix {
-            "header" => Some(Self::Header(Box::leak(value.to_string().into_boxed_str()))),
-            "body" => Some(Self::Body(Box::leak(value.to_string().into_boxed_str()))),
-            _ => None,
-        }
-    }
-}
-
 /// Configuration for webhook idempotency.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -223,21 +205,6 @@ mod tests {
         assert_eq!(SignatureAlgorithm::HmacSha256.prefix(), "sha256=");
         assert_eq!(SignatureAlgorithm::StripeWebhooks.prefix(), "");
         assert_eq!(SignatureAlgorithm::Ed25519.prefix(), "");
-    }
-
-    #[test]
-    fn test_idempotency_source_parsing() {
-        let header = IdempotencySource::parse("header:X-Request-Id");
-        assert!(matches!(
-            header,
-            Some(IdempotencySource::Header("X-Request-Id"))
-        ));
-
-        let body = IdempotencySource::parse("body:$.id");
-        assert!(matches!(body, Some(IdempotencySource::Body("$.id"))));
-
-        let invalid = IdempotencySource::parse("invalid");
-        assert!(invalid.is_none());
     }
 
     #[test]

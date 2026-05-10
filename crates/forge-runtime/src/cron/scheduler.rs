@@ -299,11 +299,9 @@ impl CronRunner {
     /// Try to claim a cron run.
     ///
     /// Returns the run ID if claimed (or stale-reclaimed), otherwise None.
-    /// When a leader-election handle is configured, the INSERT is fenced on
-    /// the leader's current term: if a new leader has taken over since this
-    /// node last acquired the lock, the INSERT silently no-ops (rows_affected
-    /// = 0) and we don't execute. Single-node mode (no election handle) skips
-    /// the fence.
+    /// Leadership is already gated by `is_leader()` in `tick()`, and the
+    /// `(cron_name, scheduled_time)` UNIQUE constraint provides the
+    /// exactly-once guarantee against concurrent claimers.
     async fn try_claim(
         &self,
         cron_name: &str,
@@ -314,21 +312,11 @@ impl CronRunner {
         let stale_threshold = chrono::Duration::from_std(self.config.run_stale_threshold)
             .unwrap_or(chrono::Duration::minutes(15));
 
-        // -1 disables the DB-side term fence; leadership is already gated by the
-        // in-memory is_leader() check before tick() runs.
-        let fence_term: i64 = -1;
-
         // Insert new run, or reclaim stale running row if previous node crashed.
         let result = sqlx::query!(
             r#"
             INSERT INTO forge_cron_runs (id, cron_name, scheduled_time, status, node_id, started_at)
-            SELECT $1, $2, $3, 'running', $4, NOW()
-            WHERE ($6::bigint) = -1 OR EXISTS (
-                SELECT 1 FROM forge_leaders
-                WHERE role = 'scheduler'
-                  AND node_id = $4
-                  AND term = $6
-            )
+            VALUES ($1, $2, $3, 'running', $4, NOW())
             ON CONFLICT (cron_name, scheduled_time) DO UPDATE
             SET
                 id = EXCLUDED.id,
@@ -345,7 +333,6 @@ impl CronRunner {
             scheduled_time,
             self.config.node_id,
             stale_threshold.num_seconds() as f64,
-            fence_term,
         )
         .execute(&self.pool)
         .await

@@ -3,6 +3,10 @@
 //! Creates partitions for upcoming months and drops partitions
 //! older than the configured retention period.
 
+// Partition DDL constructs table names from runtime dates, so the query macros
+// can't validate them at compile time.
+#![allow(clippy::disallowed_methods)]
+
 use sqlx::PgPool;
 use tracing::{debug, error, info};
 

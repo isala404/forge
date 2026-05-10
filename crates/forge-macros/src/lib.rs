@@ -344,10 +344,11 @@ pub fn daemon(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   HTTP timeout for `ctx.http()` when explicitly set
 ///
 /// # Signature Validation
-/// Use `WebhookSignature` helper for common patterns:
-/// - `WebhookSignature::hmac_sha256("X-Hub-Signature-256", "GITHUB_SECRET")` - GitHub
-/// - `WebhookSignature::hmac_sha256("X-Stripe-Signature", "STRIPE_SECRET")` - Stripe
-/// - `WebhookSignature::hmac_sha1("X-Signature", "SECRET")` - Legacy SHA1
+/// Use `WebhookSignature` helper. Pick the constructor that matches the sender:
+/// - `WebhookSignature::hmac_sha256("Header", "SECRET_ENV")` - HMAC-SHA256 (e.g. GitHub)
+/// - `WebhookSignature::stripe_webhooks("SECRET_ENV")` - Stripe (`stripe-signature` header, 300s replay window)
+/// - `WebhookSignature::shopify_webhooks("SECRET_ENV")` - Shopify (`x-shopify-hmac-sha256`, base64)
+/// - `WebhookSignature::ed25519("Header", "PUBKEY_ENV")` - Ed25519 with a base64-encoded public key
 ///
 /// # Idempotency
 /// Specify source as `"header:Header-Name"` or `"body:$.json.path"`:

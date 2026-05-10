@@ -175,6 +175,7 @@ The restriction exists to prevent duplicate-keyed tokens where structural fields
 ### Webhooks
 - Always set a `signature` constructor. Never `allow_unsigned` in production. Full table: [API Reference](./api.md#forgewebhook).
 - Set `idempotency` — `"header:..."` for providers that send a delivery ID, `"body:$.id"` to extract from the payload.
+- Non-Stripe schemes require senders to ship `x-webhook-timestamp: <unix-seconds>`. Forge rejects (401) anything missing, malformed, future-dated, or older than `replay_window_secs` (default 300). Tighten the window via `replay_window_secs = N` for low-latency callers; set `0` only when integrating with a sender that cannot stamp the header.
 - Ack fast: return `WebhookResult::Accepted` and dispatch a job for any work over a few hundred ms. Webhook senders have short timeouts and retry on slow responses.
 - Decode into a typed struct, not `serde_json::Value` — the macro deserialises the parameter type automatically.
 - **Race condition**: webhooks and sync confirmation paths can arrive in any order. Use `COALESCE($1, column)` in updates so a slow webhook can't clobber data the faster path already set.
@@ -183,7 +184,6 @@ The restriction exists to prevent duplicate-keyed tokens where structural fields
 
 | Provider | Constructor | Idempotency |
 |---|---|---|
-| Polar / Svix / Clerk | `standard_webhooks("ENV")` | `"header:webhook-id"` |
 | Stripe | `stripe_webhooks("ENV")` | `"header:stripe-request-id"` |
 | Shopify | `shopify_webhooks("ENV")` | `"body:$.id"` |
 | GitHub | `hmac_sha256("X-Hub-Signature-256", "ENV")` | `"header:X-GitHub-Delivery"` |

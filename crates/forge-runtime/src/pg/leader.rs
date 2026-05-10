@@ -112,30 +112,26 @@ impl LeaderElection {
         crate::cluster::metrics::record_leader_election_attempt(self.role.as_str(), acquired);
 
         if acquired {
-            // Record leadership in database for visibility. The term column is a
-            // monotonic counter that increments on every failover, useful for
-            // diagnostics and for the cron scheduler's stale-claim fence.
+            // Record leadership for visibility only. The advisory lock above is
+            // the single source of truth; this row exists so operators can see
+            // which node owns the role and when its lease expires.
             let lease_until =
                 Utc::now() + chrono::Duration::seconds(self.config.lease_duration.as_secs() as i64);
 
-            // RETURNING term keeps the sqlx cache entry identical to the original query.
-            // The term column is a monotonic diagnostic counter; v2 does not use it for fencing.
             sqlx::query!(
                 r#"
-                INSERT INTO forge_leaders (role, node_id, term, acquired_at, lease_until)
-                VALUES ($1, $2, 1, NOW(), $3)
+                INSERT INTO forge_leaders (role, node_id, acquired_at, lease_until)
+                VALUES ($1, $2, NOW(), $3)
                 ON CONFLICT (role) DO UPDATE SET
                     node_id = EXCLUDED.node_id,
-                    term = forge_leaders.term + 1,
                     acquired_at = NOW(),
                     lease_until = EXCLUDED.lease_until
-                RETURNING term as "term!: i64"
                 "#,
                 self.role.as_str(),
                 self.node_id.as_uuid(),
                 lease_until,
             )
-            .fetch_one(&self.pool)
+            .execute(&self.pool)
             .await
             .map_err(forge_core::ForgeError::Database)?;
 

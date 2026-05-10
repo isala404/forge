@@ -45,15 +45,6 @@ pub struct RealtimeConfig {
     #[serde(default = "default_subscription_max_per_session")]
     pub subscription_max_per_session: usize,
 
-    /// Row-count threshold for switching from row-level to table-level
-    /// change tracking per table. Lowering reduces memory; raising reduces
-    /// false-positive invalidations on write-heavy tables.
-    #[serde(
-        default = "default_change_tracking_row_threshold",
-        alias = "adaptive_row_threshold"
-    )]
-    pub change_tracking_row_threshold: usize,
-
     /// Number of DashMap shards for the subscription manager. Higher values
     /// reduce lock contention at the cost of memory.
     #[serde(default = "default_shard_count")]
@@ -98,9 +89,6 @@ fn default_sse_max_sessions() -> usize {
 fn default_subscription_max_per_session() -> usize {
     100
 }
-fn default_change_tracking_row_threshold() -> usize {
-    200
-}
 fn default_shard_count() -> usize {
     64
 }
@@ -127,7 +115,6 @@ impl Default for RealtimeConfig {
             debounce_max_wait: default_debounce_max_wait(),
             sse_max_sessions: default_sse_max_sessions(),
             subscription_max_per_session: default_subscription_max_per_session(),
-            change_tracking_row_threshold: default_change_tracking_row_threshold(),
             shard_count: default_shard_count(),
             max_sessions_per_user: default_max_sessions_per_user(),
             max_sessions_per_ip: default_max_sessions_per_ip(),

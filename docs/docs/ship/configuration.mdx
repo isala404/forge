@@ -221,7 +221,7 @@ openssl rand -base64 32
 | `jwt_audience`        | string   | -                | Expected audience claim; required when auth is enabled unless `audience_required = false` |
 | `audience_required`   | bool     | `true`           | When true, `jwt_audience` must be set whenever auth is configured               |
 | `required_claims`     | string[] | `["exp", "sub"]` | JWT claims that must be present in every token                                  |
-| `legacy_secrets`      | string[] | `[]`             | Old HMAC secrets still accepted for validation during secret rotation           |
+| `legacy_secrets`      | array of `{secret, valid_until}` | `[]` | Retired HMAC secrets still accepted for validation. Each entry needs a `valid_until` RFC 3339 timestamp; expired entries are dropped at startup with a `tracing::warn`. |
 | `jwt_leeway`          | string   | `"60s"`          | Clock-skew tolerance for `exp`/`nbf` validation                                 |
 | `access_token_ttl`    | string   | `"1h"`           | Access token lifetime                                                           |
 | `refresh_token_ttl`   | string   | `"30d"`          | Refresh token lifetime                                                          |
@@ -271,14 +271,21 @@ required_claims = ["exp", "sub", "email"]
 
 #### Secret Rotation
 
-Add the outgoing secret to `legacy_secrets` while deploying the new one. Remove it after one `access_token_ttl` elapses so in-flight tokens issued under the old secret can still be validated.
+Move the outgoing secret to `legacy_secrets` while deploying the new one. Each retired entry must carry a `valid_until` timestamp — pick a date past your longest in-flight token's expiry (typically `now + access_token_ttl`). Tokens are now issued with a `kid` header derived from the signing secret, so validation routes a presented token to its matching key directly. Expired entries are dropped at startup so a forgotten rotation can't extend a key's effective lifetime.
 
 ```toml
 [auth]
 jwt_algorithm = "HS256"
 jwt_secret = "${JWT_SECRET_NEW}"
-legacy_secrets = ["${JWT_SECRET_OLD}"]
+
+[[auth.legacy_secrets]]
+secret = "${JWT_SECRET_OLD}"
+valid_until = "2026-06-01T00:00:00Z"
 ```
+
+#### Dev Mode and `FORGE_ENV`
+
+`AuthConfig::dev_mode()` and `AuthMiddleware::permissive()` are intended for local development and tests. They now return `Result` and refuse construction with `ForgeError::Config` when `FORGE_ENV=production` so a stray dev override can't accidentally ship without authentication. Set `FORGE_ENV=production` (or any case-insensitive variant) on every production deployment.
 
 ### [realtime]
 
@@ -293,7 +300,6 @@ Controls the real-time subscription engine, SSE session limits, and invalidation
 | `max_concurrent_reexecutions` | usize  | `64`     | Bounded parallelism for query re-executions during an invalidation flush                      |
 | `resync_interval`             | string | `"60s"`  | Periodic re-evaluation of all active query groups to recover from dropped NOTIFY payloads. Set `"0s"` to disable. |
 | `postgres_change_buffer_size` | usize  | `1024`   | Broadcast channel buffer for raw change notifications arriving from PostgreSQL                |
-| `change_tracking_row_threshold` | usize | `200`   | Switch from row-level to table-level change tracking per table above this subscription count  |
 
 ```toml
 [realtime]
@@ -304,9 +310,9 @@ max_concurrent_reexecutions = 64
 resync_interval = "60s"
 ```
 
-The debounce window matters for write-heavy workloads: `debounce_quiet_window` prevents re-execution storms when rows are updated in rapid succession, while `debounce_max_wait` puts a ceiling on how long a client can wait for an update. The `change_tracking_row_threshold` trades memory for precision: tables with fewer than that many subscriptions track individual row changes; above it, the engine tracks at table granularity (faster, slightly more false-positive invalidations).
+The debounce window matters for write-heavy workloads: `debounce_quiet_window` prevents re-execution storms when rows are updated in rapid succession, while `debounce_max_wait` puts a ceiling on how long a client can wait for an update.
 
-The old field names (`debounce_quiet`, `debounce_max`, `listener_channel_buffer`, `adaptive_row_threshold`) are still accepted as aliases for backward compatibility.
+The old field names (`debounce_quiet`, `debounce_max`, `listener_channel_buffer`) are still accepted as aliases for backward compatibility.
 
 ### [mcp]
 

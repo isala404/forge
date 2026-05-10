@@ -61,7 +61,7 @@ jsonschema = { workspace = true, optional = true }
 # `geoip` feature: bundled IP-to-country DB (~10MB) + MaxMind reader.
 # Network access is required at compile time to fetch the DB; opt-in only.
 db_ip = { version = "0.3", default-features = false, features = ["ipv4", "ipv6", "include-country-code-lite"], optional = true }
-maxminddb = { version = "0.24", optional = true }
+maxminddb = { version = "0.28", optional = true }
 
 # `otel` feature: OpenTelemetry exporters (heavy — ~5 OTel crates + protobuf).
 opentelemetry = { workspace = true, optional = true }

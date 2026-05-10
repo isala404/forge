@@ -31,7 +31,7 @@ use super::auth::{AuthConfig, AuthMiddleware, HmacTokenIssuer, auth_middleware};
 use super::mcp::{McpState, mcp_get_handler, mcp_post_handler};
 use super::multipart::{MultipartConfig, rpc_multipart_handler};
 use super::response::{RpcError, RpcResponse};
-use super::rpc::{RpcHandler, rpc_batch_handler, rpc_function_handler, rpc_handler};
+use super::rpc::{RpcHandler, rpc_function_handler, rpc_handler};
 use super::sse::{
     SseState, sse_handler, sse_job_subscribe_handler, sse_subscribe_handler,
     sse_unsubscribe_handler, sse_workflow_subscribe_handler,
@@ -82,8 +82,6 @@ pub struct GatewayConfig {
     pub max_file_size_bytes: usize,
     /// Optional TLS configuration. When `None`, the gateway serves plain HTTP.
     pub tls: Option<TlsListenConfig>,
-    /// Maximum requests in a single RPC batch call.
-    pub max_rpc_batch_size: usize,
     /// Maximum file fields in a single multipart upload.
     pub max_multipart_fields: usize,
     /// Maximum concurrent SSE sessions per authenticated user.
@@ -119,7 +117,6 @@ impl Default for GatewayConfig {
             max_body_size_bytes: DEFAULT_MAX_MULTIPART_BODY_SIZE,
             max_file_size_bytes: DEFAULT_MAX_FILE_SIZE,
             tls: None,
-            max_rpc_batch_size: 100,
             max_multipart_fields: 20,
             max_sessions_per_user: 8,
             max_sessions_per_ip: 32,
@@ -379,7 +376,6 @@ impl GatewayServer {
             token_issuer,
         );
         rpc.set_token_ttl(self.token_ttl.clone());
-        rpc.set_max_batch_size(self.config.max_rpc_batch_size);
         if let Some(rate_limiter) = &self.rate_limiter {
             rpc.set_rate_limiter(rate_limiter.clone());
         }
@@ -492,8 +488,6 @@ impl GatewayServer {
             .route("/ready", get(readiness_handler).with_state(readiness_state))
             // RPC endpoint
             .route("/rpc", post(rpc_handler))
-            // Batch RPC endpoint
-            .route("/rpc/batch", post(rpc_batch_handler))
             // REST-style function endpoint (JSON)
             .route("/rpc/{function}", post(rpc_function_handler))
             // Prevent oversized JSON payloads from exhausting memory.

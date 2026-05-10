@@ -58,10 +58,6 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub tls: TlsConfig,
 
-    /// Maximum requests in a single RPC batch call.
-    #[serde(default = "default_max_rpc_batch_size")]
-    pub max_rpc_batch_size: usize,
-
     /// Maximum file fields in a single multipart upload.
     #[serde(default = "default_max_multipart_fields")]
     pub max_multipart_fields: usize,
@@ -97,7 +93,6 @@ impl Default for GatewayConfig {
             max_body_size: default_max_body_size(),
             max_file_size: default_max_file_size(),
             tls: TlsConfig::default(),
-            max_rpc_batch_size: default_max_rpc_batch_size(),
             max_multipart_fields: default_max_multipart_fields(),
             security_headers: true,
             hsts: false,
@@ -200,10 +195,6 @@ fn default_max_body_size() -> SizeStr {
 
 fn default_max_file_size() -> SizeStr {
     SizeStr::new(10 * 1024 * 1024)
-}
-
-fn default_max_rpc_batch_size() -> usize {
-    100
 }
 
 fn default_max_multipart_fields() -> usize {

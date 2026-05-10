@@ -18,7 +18,7 @@ pub use mcp::{McpState, mcp_get_handler, mcp_post_handler};
 pub use multipart::rpc_multipart_handler;
 #[cfg(feature = "mcp-oauth")]
 pub use oauth::OAuthState;
-pub use request::{BatchRpcRequest, BatchRpcResponse, RpcRequest};
+pub use request::RpcRequest;
 pub use response::{RpcError, RpcResponse};
 pub use rpc::RpcHandler;
 pub use server::{GatewayConfig, GatewayServer, TrustedProxies};

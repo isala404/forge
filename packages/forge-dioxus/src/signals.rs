@@ -29,6 +29,127 @@ const MAX_QUEUE_SIZE: usize = 1000;
 #[cfg(target_arch = "wasm32")]
 const AUTO_CAPTURE_DELAY_MS: u64 = 2000;
 
+// Inline JS shims compiled by wasm-bindgen at build time. Avoids runtime
+// `eval()` so the tracker keeps working under strict CSP (`script-src 'self'`).
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(inline_js = r#"
+export function forge_patch_history() {
+    var origPush = history.pushState;
+    var origReplace = history.replaceState;
+    history.pushState = function() {
+        var before = location.href;
+        origPush.apply(this, arguments);
+        if (location.href !== before) {
+            window.dispatchEvent(new Event('forge-pushstate'));
+        }
+    };
+    history.replaceState = function() {
+        var before = location.href;
+        origReplace.apply(this, arguments);
+        if (location.href !== before) {
+            window.dispatchEvent(new Event('forge-pushstate'));
+        }
+    };
+}
+
+export function forge_install_web_vitals(baseUrl, getSessionId) {
+    try {
+        function send(name, value, rating, attribution) {
+            try {
+                const body = JSON.stringify({
+                    type: 'event',
+                    payload: {
+                        events: [{
+                            event: 'webvital.' + name,
+                            properties: {
+                                value: value,
+                                rating: rating || null,
+                                attribution: attribution || {},
+                            },
+                            timestamp: new Date().toISOString(),
+                        }],
+                        context: {
+                            page_url: location.href,
+                            session_id: getSessionId() || null,
+                        }
+                    }
+                });
+                const url = baseUrl + '/_api/signal';
+                const headers = { 'Content-Type': 'application/json', 'x-forge-platform': 'web' };
+                if (navigator.sendBeacon) {
+                    navigator.sendBeacon(url, body);
+                } else {
+                    fetch(url, { method: 'POST', headers: headers, body: body, keepalive: true });
+                }
+            } catch (_) {}
+        }
+        function obs(type, cb) {
+            try {
+                new PerformanceObserver(function(list) {
+                    list.getEntries().forEach(cb);
+                }).observe({ type: type, buffered: true });
+            } catch (_) {}
+        }
+        var lcp = 0;
+        obs('largest-contentful-paint', function(e) { lcp = e.renderTime || e.loadTime || e.startTime; });
+        var cls = 0;
+        obs('layout-shift', function(e) { if (!e.hadRecentInput) cls += e.value; });
+        obs('paint', function(e) {
+            if (e.name === 'first-contentful-paint') {
+                var r = e.startTime < 1800 ? 'good' : e.startTime < 3000 ? 'needs-improvement' : 'poor';
+                send('fcp', e.startTime, r);
+            }
+        });
+        obs('event', function(e) {
+            if (e.interactionId && e.duration > 40) {
+                var r = e.duration < 200 ? 'good' : e.duration < 500 ? 'needs-improvement' : 'poor';
+                send('inp', e.duration, r, { name: e.name });
+            }
+        });
+        obs('longtask', function(e) {
+            send('long_task', e.duration, null, { name: e.name, startTime: e.startTime });
+        });
+        function onLoad() {
+            try {
+                var nav = performance.getEntriesByType('navigation')[0];
+                if (nav) {
+                    if (nav.responseStart > 0) {
+                        var r = nav.responseStart < 800 ? 'good' : nav.responseStart < 1800 ? 'needs-improvement' : 'poor';
+                        send('ttfb', nav.responseStart, r);
+                    }
+                    send('navigation', nav.loadEventEnd - nav.startTime, null, {
+                        dom_content_loaded: nav.domContentLoadedEventEnd - nav.startTime,
+                        dom_interactive: nav.domInteractive - nav.startTime,
+                        transfer_size: nav.transferSize,
+                        type: nav.type,
+                    });
+                }
+            } catch (_) {}
+        }
+        if (document.readyState === 'complete') onLoad();
+        else window.addEventListener('load', onLoad);
+        document.addEventListener('visibilitychange', function() {
+            if (document.visibilityState === 'hidden') {
+                if (lcp > 0) {
+                    var r = lcp < 2500 ? 'good' : lcp < 4000 ? 'needs-improvement' : 'poor';
+                    send('lcp', lcp, r);
+                    lcp = 0;
+                }
+                if (cls > 0) {
+                    var r = cls < 0.1 ? 'good' : cls < 0.25 ? 'needs-improvement' : 'poor';
+                    send('cls', cls, r);
+                    cls = 0;
+                }
+            }
+        });
+    } catch (_) {}
+}
+"#)]
+extern "C" {
+    fn forge_patch_history();
+    fn forge_install_web_vitals(base_url: &str, get_session: &js_sys::Function);
+}
+
 fn now_iso() -> String {
     #[cfg(target_arch = "wasm32")]
     {
@@ -723,27 +844,7 @@ pub(crate) fn setup_auto_capture(signals: ForgeSignals) {
 
                 // Monkey-patch pushState/replaceState to dispatch custom events
                 // Only fires when the URL actually changes to avoid redundant page views
-                let patch_js = r#"
-                    (function() {
-                        var origPush = history.pushState;
-                        var origReplace = history.replaceState;
-                        history.pushState = function() {
-                            var before = location.href;
-                            origPush.apply(this, arguments);
-                            if (location.href !== before) {
-                                window.dispatchEvent(new Event('forge-pushstate'));
-                            }
-                        };
-                        history.replaceState = function() {
-                            var before = location.href;
-                            origReplace.apply(this, arguments);
-                            if (location.href !== before) {
-                                window.dispatchEvent(new Event('forge-pushstate'));
-                            }
-                        };
-                    })()
-                "#;
-                let _ = js_sys::eval(patch_js);
+                forge_patch_history();
             }
 
             // Auto error capture
@@ -844,100 +945,6 @@ pub(crate) fn setup_auto_capture(signals: ForgeSignals) {
             // so we don't hard-depend on any bindings that the caller might not
             // have enabled in web-sys features.
             if signals.auto_web_vitals() {
-                let js = r#"
-                    (function(baseUrl, getSessionId) {
-                        try {
-                            function send(name, value, rating, attribution) {
-                                try {
-                                    const body = JSON.stringify({
-                                        type: 'event',
-                                        payload: {
-                                            events: [{
-                                                event: 'webvital.' + name,
-                                                properties: {
-                                                    value: value,
-                                                    rating: rating || null,
-                                                    attribution: attribution || {},
-                                                },
-                                                timestamp: new Date().toISOString(),
-                                            }],
-                                            context: {
-                                                page_url: location.href,
-                                                session_id: getSessionId() || null,
-                                            }
-                                        }
-                                    });
-                                    const url = baseUrl + '/_api/signal';
-                                    const headers = { 'Content-Type': 'application/json', 'x-forge-platform': 'web' };
-                                    if (navigator.sendBeacon) {
-                                        navigator.sendBeacon(url, body);
-                                    } else {
-                                        fetch(url, { method: 'POST', headers: headers, body: body, keepalive: true });
-                                    }
-                                } catch (_) {}
-                            }
-                            function obs(type, cb) {
-                                try {
-                                    new PerformanceObserver(function(list) {
-                                        list.getEntries().forEach(cb);
-                                    }).observe({ type: type, buffered: true });
-                                } catch (_) {}
-                            }
-                            var lcp = 0;
-                            obs('largest-contentful-paint', function(e) { lcp = e.renderTime || e.loadTime || e.startTime; });
-                            var cls = 0;
-                            obs('layout-shift', function(e) { if (!e.hadRecentInput) cls += e.value; });
-                            obs('paint', function(e) {
-                                if (e.name === 'first-contentful-paint') {
-                                    var r = e.startTime < 1800 ? 'good' : e.startTime < 3000 ? 'needs-improvement' : 'poor';
-                                    send('fcp', e.startTime, r);
-                                }
-                            });
-                            obs('event', function(e) {
-                                if (e.interactionId && e.duration > 40) {
-                                    var r = e.duration < 200 ? 'good' : e.duration < 500 ? 'needs-improvement' : 'poor';
-                                    send('inp', e.duration, r, { name: e.name });
-                                }
-                            });
-                            obs('longtask', function(e) {
-                                send('long_task', e.duration, null, { name: e.name, startTime: e.startTime });
-                            });
-                            function onLoad() {
-                                try {
-                                    var nav = performance.getEntriesByType('navigation')[0];
-                                    if (nav) {
-                                        if (nav.responseStart > 0) {
-                                            var r = nav.responseStart < 800 ? 'good' : nav.responseStart < 1800 ? 'needs-improvement' : 'poor';
-                                            send('ttfb', nav.responseStart, r);
-                                        }
-                                        send('navigation', nav.loadEventEnd - nav.startTime, null, {
-                                            dom_content_loaded: nav.domContentLoadedEventEnd - nav.startTime,
-                                            dom_interactive: nav.domInteractive - nav.startTime,
-                                            transfer_size: nav.transferSize,
-                                            type: nav.type,
-                                        });
-                                    }
-                                } catch (_) {}
-                            }
-                            if (document.readyState === 'complete') onLoad();
-                            else window.addEventListener('load', onLoad);
-                            document.addEventListener('visibilitychange', function() {
-                                if (document.visibilityState === 'hidden') {
-                                    if (lcp > 0) {
-                                        var r = lcp < 2500 ? 'good' : lcp < 4000 ? 'needs-improvement' : 'poor';
-                                        send('lcp', lcp, r);
-                                        lcp = 0;
-                                    }
-                                    if (cls > 0) {
-                                        var r = cls < 0.1 ? 'good' : cls < 0.25 ? 'needs-improvement' : 'poor';
-                                        send('cls', cls, r);
-                                        cls = 0;
-                                    }
-                                }
-                            });
-                        } catch (_) {}
-                    })
-                "#;
                 let base_url = {
                     let inner = signals.inner.borrow();
                     inner.client.get_url().to_string()
@@ -951,15 +958,7 @@ pub(crate) fn setup_auto_capture(signals: ForgeSignals) {
                         }
                     })
                 };
-                if let Ok(factory) = js_sys::eval(js)
-                    && let Ok(function) = factory.dyn_into::<js_sys::Function>()
-                {
-                    let _ = function.call2(
-                        &wasm_bindgen::JsValue::NULL,
-                        &wasm_bindgen::JsValue::from_str(&base_url),
-                        get_session.as_ref().unchecked_ref(),
-                    );
-                }
+                forge_install_web_vitals(&base_url, get_session.as_ref().unchecked_ref());
                 get_session.forget();
             }
         });

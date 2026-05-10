@@ -778,7 +778,14 @@ mod tests {
 /// Integration tests requiring a real PostgreSQL database.
 /// Run with: cargo test -p forge-runtime --features testcontainers
 #[cfg(all(test, feature = "testcontainers"))]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::disallowed_methods
+)]
+// Integration tests run ad-hoc verification queries that aren't part of the
+// .sqlx cache; runtime sqlx::query is fine here.
 mod integration_tests {
     use super::*;
     use forge_core::testing::{IsolatedTestDb, TestDatabase};

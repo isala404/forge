@@ -86,31 +86,29 @@ Defines an HTTP endpoint for receiving events from external services. The handle
 | `allow_unsigned` | Accept requests with no signature. Only use this during local development or for sources that cannot sign requests. |
 | `idempotency = "header:X-Id"` | Extracts a deduplication key from the given header. Use `"body:$.id"` to extract from the request body via JSONPath. |
 | `timeout = "30s"` | Sets the handler timeout. Also applies to `ctx.http()` calls within the handler. |
+| `replay_window_secs = 300` | Max age in seconds of the `x-webhook-timestamp` header for non-Stripe schemes. Default `300`. Set `0` to disable. Stripe ignores this — it uses its own `t=` field. |
 
 #### Signature Constructors
 
 Use `WebhookSignature` (from `forge::prelude::*`) to configure signature verification. Each constructor sets the algorithm, the header to read the signature from, and the environment variable holding the secret.
 
-| Constructor | Algorithm | Notes |
-|---|---|---|
-| `WebhookSignature::hmac_sha256("Header", "ENV")` | HMAC-SHA256, hex-encoded | GitHub, most generic providers |
-| `WebhookSignature::hmac_sha1("Header", "ENV")` | HMAC-SHA1, hex-encoded | Legacy GitHub |
-| `WebhookSignature::hmac_sha512("Header", "ENV")` | HMAC-SHA512, hex-encoded | Uncommon |
-| `WebhookSignature::standard_webhooks("ENV")` | HMAC-SHA256, base64, `{id}\n{ts}\n{body}` | Polar, Svix, Clerk — header always `webhook-signature` |
-| `WebhookSignature::stripe_webhooks("ENV")` | HMAC-SHA256, hex, `{ts}.{body}`, 5-min replay guard | Stripe — header always `Stripe-Signature` |
-| `WebhookSignature::shopify_webhooks("ENV")` | HMAC-SHA256, base64-encoded | Shopify — header always `X-Shopify-Hmac-Sha256` |
-| `WebhookSignature::ed25519("Header", "ENV")` | Ed25519 asymmetric verification | For services that publish a public key instead of a shared secret |
+| Constructor | Algorithm | Header | Notes |
+|---|---|---|---|
+| `WebhookSignature::hmac_sha256("Header", "ENV")` | HMAC-SHA256, hex | caller-supplied | GitHub and most providers using `sha256=...` |
+| `WebhookSignature::stripe_webhooks("ENV")` | HMAC-SHA256 over `{ts}.{body}`, hex | `Stripe-Signature` | Stripe; built-in 5-min replay guard via the header's `t=` field |
+| `WebhookSignature::shopify_webhooks("ENV")` | HMAC-SHA256, base64 | `X-Shopify-Hmac-Sha256` | Shopify storefront and admin webhooks |
+| `WebhookSignature::ed25519("Header", "ENV")` | Ed25519 asymmetric | caller-supplied | Service publishes the public key; ENV holds the base64-encoded 32-byte key |
 
-For `ed25519`, the `ENV` variable holds a **base64-encoded Ed25519 public key** (32 bytes), not a shared secret.
+Non-Stripe schemes also require senders to attach `x-webhook-timestamp: <unix-seconds>`. Requests with a missing, malformed, future, or older-than-`replay_window_secs` header are rejected with 401. Set `replay_window_secs = 0` to opt out (not recommended).
 
 ```rust
-// Polar / Standard Webhooks
+// GitHub
 #[forge::webhook(
-    path = "/webhooks/polar",
-    signature = WebhookSignature::standard_webhooks("POLAR_WEBHOOK_SECRET"),
-    idempotency = "header:webhook-id"
+    path = "/webhooks/github",
+    signature = WebhookSignature::hmac_sha256("X-Hub-Signature-256", "GITHUB_WEBHOOK_SECRET"),
+    idempotency = "header:X-GitHub-Delivery"
 )]
-pub async fn polar_webhook(ctx: &WebhookContext, payload: Value) -> Result<WebhookResult> { ... }
+pub async fn github_webhook(ctx: &WebhookContext, payload: Value) -> Result<WebhookResult> { ... }
 
 // Stripe
 #[forge::webhook(
@@ -172,7 +170,16 @@ jwt_secret = "${JWT_SECRET}"   # must be ≥ 32 bytes; startup fails otherwise w
 jwt_audience = "https://api.example.com"  # required by default (audience_required = true)
 # audience_required = false    # set during migration if clients don't send aud yet
 # required_claims = ["exp", "sub"]         # default; add "aud" for claim-level enforcement too
-# legacy_secrets = ["${OLD_JWT_SECRET}"]   # accepted for validation only; rotate by removing after one TTL
+
+# Retired HMAC secrets — accepted for validation only. Each entry needs a valid_until
+# timestamp; expired entries are dropped at startup. JWTs carry a `kid` derived from
+# the signing secret so validation routes a token to its key directly.
+# [[auth.legacy_secrets]]
+# secret = "${OLD_JWT_SECRET}"
+# valid_until = "2026-06-01T00:00:00Z"
+
+# AuthConfig::dev_mode() / AuthMiddleware::permissive() return Result and refuse
+# construction when FORGE_ENV=production. Don't ship dev-mode auth to prod.
 
 [database]
 url = "${DATABASE_URL}"
@@ -197,7 +204,6 @@ max_concurrent_reexecutions = 64     # parallel query re-runs during invalidatio
 resync_interval = "60s"              # periodic sweep to recover dropped NOTIFYs; "0s" disables
 postgres_change_buffer_size = 1024   # broadcast channel buffer for raw PG change events
 subscription_max_per_session = 100   # max subscriptions a single SSE client may hold
-change_tracking_row_threshold = 200  # switches from row-level to table-level tracking above this
 sse_max_sessions = 10000             # max concurrent SSE sessions across all clients
 
 [observability]
@@ -208,7 +214,7 @@ metrics_interval = "15s"      # metrics export period
 [signals]
 enabled = true                # master switch; set false to disable analytics
 auto_capture = true           # auto-emit rpc_call events for RPC and server_execution events for jobs/crons/workflows/webhooks/daemons
-diagnostics = true            # accept frontend error reports at /_api/signal/report
+diagnostics = true            # accept frontend error reports at /_api/signal (type: "report")
 session_timeout_mins = 30     # inactivity window before a session closes
 retention_days = 90           # drop monthly partitions older than this
 anonymize_ip = false          # drop raw client IPs from stored events (visitor_id stays hashed)
@@ -234,17 +240,15 @@ key_path = "${GATEWAY_TLS_KEY_PATH}"
 
 `gateway.max_body_size` caps the total HTTP body. `gateway.max_file_size` caps any single file when the target mutation does not declare its own `max_size`. When a mutation sets `max_size = "200mb"`, that value becomes both the total and per-file limit for that endpoint (explicit opt-in). Validation requires `max_file_size <= max_body_size`.
 
-### Signal Endpoints
+### Signal Endpoint
 
-The server short-circuits `/_api/signal/view`, `/_api/signal/event`, `/_api/signal/user`, and `/_api/signal/vital` when the request carries `DNT: 1` or `Sec-GPC: 1`. Crash reports still land so production errors from DNT users don't disappear.
+A single `POST /_api/signal` endpoint accepts a discriminated payload via the top-level `type` field. The server short-circuits `event` and `view` payloads when the request carries `DNT: 1` or `Sec-GPC: 1`. Crash reports (`type: "report"`) still land so production errors from DNT users don't disappear.
 
-| Endpoint | Method | Purpose |
+| `type` | Payload | Purpose |
 |---|---|---|
-| `/_api/signal/event` | POST | Batch custom events (max 50 per request) |
-| `/_api/signal/view` | POST | Page view with referrer and UTM params |
-| `/_api/signal/user` | POST | Identify user and store traits |
-| `/_api/signal/report` | POST | Frontend error reports with breadcrumbs |
-| `/_api/signal/vital` | POST | Web Vitals / performance metrics (max 50 per request) |
+| `event` | `{ events: [...] }` (max 50) | Batch of custom events, including `track`, `identify`, `web_vital`, `error`, `breadcrumb`, `page_view` |
+| `view` | `{ url, referrer?, utm?, ... }` | Page view with referrer and UTM params |
+| `report` | `{ error, breadcrumbs?, context? }` | Frontend error report (bypasses DNT) |
 
 ### Auto-captured Event Types
 
@@ -288,7 +292,7 @@ builder.custom_routes(|pool| {
 - Returned router is merged into the gateway's `/_api` namespace, so `/export/csv` is reachable at `/_api/export/csv`.
 - Full middleware applies automatically: JWT auth, CORS, tracing, concurrency limits, request timeouts.
 - Handlers read `Extension<AuthContext>` to access the authenticated user. Unauthenticated requests still arrive with an unauthenticated context — check `auth.user_id()` if login is required.
-- Avoid paths that conflict with built-ins: `/health`, `/ready`, `/rpc`, `/rpc/*`, `/events`, `/subscribe`, `/unsubscribe`, `/subscribe-job`, `/subscribe-workflow`, `/signal/*`, `/webhooks/*`, `/mcp`, `/oauth/*`. Conflicts panic at startup.
+- Avoid paths that conflict with built-ins: `/health`, `/ready`, `/rpc`, `/rpc/*`, `/events`, `/subscribe`, `/unsubscribe`, `/subscribe-job`, `/subscribe-workflow`, `/signal`, `/webhooks/*`, `/mcp`, `/oauth/*`. Conflicts panic at startup.
 
 ## API Versioning
 

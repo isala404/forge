@@ -287,6 +287,10 @@ impl JobExecutor {
         (entry.compensation)(ctx, input.clone(), reason).await
     }
 
+    // Internal write to forge_workflow_runs uses runtime sqlx::query because the
+    // table is owned by the runtime crate and the macro path picks up the wrong
+    // .sqlx cache when this crate is built standalone.
+    #[allow(clippy::disallowed_methods)]
     async fn flush_pending_dispatches(
         &self,
         pending: &forge_core::function::OutboxBuffer,

@@ -3,6 +3,10 @@
 //! Sessions are created when the first event arrives for a visitor_id.
 //! They are closed after `session_timeout_mins` of inactivity.
 
+// Signals tables are owned by the runtime crate and aren't always present in
+// the user's .sqlx cache; runtime queries are required.
+#![allow(clippy::disallowed_methods)]
+
 use std::sync::Arc;
 
 use sqlx::PgPool;

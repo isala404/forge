@@ -3,6 +3,7 @@ name = "forge-svelte-minimal-template"
 version = "0.9.0"
 edition = "2024"
 rust-version = "1.92"
+publish = false
 
 [features]
 default = ["embedded-frontend"]

@@ -112,6 +112,9 @@ pub struct ConfirmVerificationInput {
 }
 
 #[forge::mutation(public)]
+// forge_workflow_events is owned by the runtime, so the framework user's .sqlx
+// cache doesn't see it. Runtime sqlx::query is the right tool here.
+#[allow(clippy::disallowed_methods)]
 pub async fn confirm_verification(
     ctx: &MutationContext,
     input: ConfirmVerificationInput,

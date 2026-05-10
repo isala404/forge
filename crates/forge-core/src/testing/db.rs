@@ -2,7 +2,13 @@
 //!
 //! Deliberately avoids reading DATABASE_URL to prevent accidental production use.
 
-#![allow(clippy::unwrap_used, clippy::indexing_slicing)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::disallowed_methods
+)]
+// Test harness runs dynamic DDL (CREATE/DROP DATABASE, schema reset) where the
+// query macros can't see the table at compile time.
 
 use sqlx::PgPool;
 use std::path::Path;

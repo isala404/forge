@@ -567,9 +567,9 @@ async fn claim_idempotency(
 ) -> Result<bool, sqlx::Error> {
     let expires_at =
         chrono::Utc::now() + chrono::Duration::from_std(ttl).unwrap_or(chrono::Duration::hours(24));
-    let processing_timeout_secs = processing_timeout.as_secs().try_into().unwrap_or(i32::MAX);
+    let processing_timeout_secs = processing_timeout.as_secs_f64();
 
-    let result = sqlx::query(
+    let result = sqlx::query!(
         r#"
         INSERT INTO forge_webhook_events (idempotency_key, webhook_name, status, processed_at, expires_at)
         VALUES ($1, $2, 'claimed', NOW(), $3)
@@ -579,13 +579,13 @@ async fn claim_idempotency(
                 expires_at = EXCLUDED.expires_at
         WHERE forge_webhook_events.expires_at < NOW()
            OR (forge_webhook_events.status = 'claimed'
-               AND forge_webhook_events.processed_at + make_interval(secs => $4::double precision) < NOW())
+               AND forge_webhook_events.processed_at + make_interval(secs => $4) < NOW())
         "#,
+        key,
+        webhook_name,
+        expires_at,
+        processing_timeout_secs,
     )
-    .bind(key)
-    .bind(webhook_name)
-    .bind(expires_at)
-    .bind(processing_timeout_secs)
     .execute(pool)
     .await?;
 
@@ -598,15 +598,15 @@ async fn complete_idempotency(
     webhook_name: &str,
     key: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE forge_webhook_events
         SET status = 'completed'
         WHERE webhook_name = $1 AND idempotency_key = $2
         "#,
+        webhook_name,
+        key,
     )
-    .bind(webhook_name)
-    .bind(key)
     .execute(pool)
     .await?;
 
@@ -619,14 +619,14 @@ async fn release_idempotency(
     webhook_name: &str,
     key: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query!(
         r#"
         DELETE FROM forge_webhook_events
         WHERE webhook_name = $1 AND idempotency_key = $2
         "#,
+        webhook_name,
+        key,
     )
-    .bind(webhook_name)
-    .bind(key)
     .execute(pool)
     .await?;
 

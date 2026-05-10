@@ -776,7 +776,6 @@ impl Forge {
                         ..ReactorConfig::default()
                     }
                 },
-                max_rpc_batch_size: self.config.gateway.max_rpc_batch_size,
                 max_multipart_fields: self.config.gateway.max_multipart_fields,
                 max_sessions_per_user: self.config.realtime.max_sessions_per_user,
                 max_sessions_per_ip: self.config.realtime.max_sessions_per_ip,

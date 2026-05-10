@@ -630,6 +630,9 @@ impl WorkflowExecutor {
     }
 
     /// Persist user-defined saved_state to the database on suspension.
+    // forge_workflow_runs is a runtime-owned system table; offline .sqlx cache
+    // doesn't always include it.
+    #[allow(clippy::disallowed_methods)]
     async fn persist_saved_state(
         &self,
         run_id: Uuid,
@@ -650,6 +653,7 @@ impl WorkflowExecutor {
     }
 
     /// Load user-defined saved_state from the database on resume.
+    #[allow(clippy::disallowed_methods)]
     async fn load_saved_state(
         &self,
         run_id: Uuid,
