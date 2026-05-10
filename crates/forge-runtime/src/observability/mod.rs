@@ -19,8 +19,8 @@ mod telemetry;
 pub use db::{extract_table_name, instrumented_query, record_pool_metrics, record_query_duration};
 #[cfg(feature = "otel")]
 pub use metrics::{
-    ActiveConnectionsGauge, FnMetrics, HttpMetrics, JobMetrics, record_fn_execution,
-    record_http_request, record_job_execution, set_active_connections,
+    ActiveConnectionsGauge, FnCacheMetrics, FnMetrics, HttpMetrics, JobMetrics, record_fn_cache,
+    record_fn_execution, record_http_request, record_job_execution, set_active_connections,
 };
 #[cfg(feature = "otel")]
 pub use telemetry::{
@@ -102,7 +102,17 @@ mod stub {
     pub fn record_query_duration(_operation: &str, _duration: Duration) {}
 
     #[inline]
-    pub fn record_fn_execution(_function: &str, _kind: &str, _success: bool, _duration_secs: f64) {}
+    pub fn record_fn_execution(
+        _function: &str,
+        _kind: &str,
+        _success: bool,
+        _cached: bool,
+        _duration_secs: f64,
+    ) {
+    }
+
+    #[inline]
+    pub fn record_fn_cache(_function: &str, _hit: bool) {}
 
     #[inline]
     pub fn record_http_request(_method: &str, _path: &str, _status: u16, _duration_secs: f64) {}
@@ -133,6 +143,7 @@ mod stub {
 #[cfg(not(feature = "otel"))]
 pub use stub::{
     TelemetryConfig, TelemetryError, build_env_filter, extract_table_name, init_telemetry,
-    instrumented_query, record_fn_execution, record_http_request, record_job_execution,
-    record_pool_metrics, record_query_duration, set_active_connections, shutdown_telemetry,
+    instrumented_query, record_fn_cache, record_fn_execution, record_http_request,
+    record_job_execution, record_pool_metrics, record_query_duration, set_active_connections,
+    shutdown_telemetry,
 };

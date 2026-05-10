@@ -399,7 +399,10 @@ impl SessionServer {
             return;
         }
 
-        tracing::debug!(count = expired.len(), "Evicting sessions with expired tokens");
+        tracing::debug!(
+            count = expired.len(),
+            "Evicting sessions with expired tokens"
+        );
 
         for session_id in expired {
             if let Some(conn) = self.connections.get(&session_id) {

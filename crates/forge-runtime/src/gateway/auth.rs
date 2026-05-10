@@ -377,9 +377,7 @@ impl AuthMiddleware {
             AuthError::InvalidToken("JWT secret not configured for HMAC".to_string())
         })?;
 
-        let token_kid = jsonwebtoken::decode_header(token)
-            .ok()
-            .and_then(|h| h.kid);
+        let token_kid = jsonwebtoken::decode_header(token).ok().and_then(|h| h.kid);
 
         if let Some(tkid) = token_kid.as_deref() {
             if self.hmac_kid.as_deref() == Some(tkid) {
@@ -1083,7 +1081,10 @@ mod tests {
         assert!(matches!(result, Err(AuthError::InvalidToken(_))));
     }
 
-    fn legacy_secret(secret: &str, valid_for: chrono::Duration) -> forge_core::config::LegacySecret {
+    fn legacy_secret(
+        secret: &str,
+        valid_for: chrono::Duration,
+    ) -> forge_core::config::LegacySecret {
         forge_core::config::LegacySecret {
             secret: secret.into(),
             valid_until: chrono::Utc::now() + valid_for,
@@ -1323,8 +1324,12 @@ mod tests {
         // Sign with the active secret but stamp a kid that doesn't match any key
         let mut header = Header::new(Algorithm::HS256);
         header.kid = Some("deadbeef".to_string());
-        let token = encode(&header, &claims, &EncodingKey::from_secret(secret.as_bytes()))
-            .expect("encode token with unknown kid");
+        let token = encode(
+            &header,
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .expect("encode token with unknown kid");
 
         let result = middleware.validate_token_async(&token).await;
         assert!(

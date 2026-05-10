@@ -20,20 +20,20 @@
 //! # Transactional Mutations
 //!
 //! When `transactional = true` (default), mutations run in a transaction.
-//! Jobs and workflows dispatched during the mutation are buffered and only
-//! inserted after the transaction commits successfully.
+//! Jobs and workflows dispatched during the mutation insert their rows on
+//! the same transaction, so they only become visible to workers once the
+//! mutation commits and are rolled back if it fails.
 //!
 //! ```text
 //! BEGIN
 //!   ├── ctx.db().execute(...)
-//!   ├── ctx.dispatch_job("send_email", ...)  // buffered
+//!   ├── ctx.dispatch_job("send_email", ...)  // INSERT into forge_jobs on this tx
 //!   └── return Ok(result)
 //! COMMIT
-//!   └── INSERT INTO forge_jobs (buffered jobs)
 //! ```
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_core::future::BoxFuture;
@@ -49,7 +49,6 @@ use super::dispatch::{JobDispatch, WorkflowDispatch};
 use crate::auth::Claims;
 use crate::env::{EnvAccess, EnvProvider, RealEnvProvider};
 use crate::http::CircuitBreakerClient;
-use crate::job::JobInfo;
 
 /// Token issuer for signing JWTs.
 ///
@@ -74,7 +73,7 @@ pub trait TokenIssuer: Send + Sync {
 /// ```
 pub enum ForgeConn<'a> {
     Pool(sqlx::pool::PoolConnection<Postgres>),
-    Tx(tokio::sync::MutexGuard<'a, Transaction<'static, Postgres>>),
+    Tx(tokio::sync::MutexGuard<'a, Option<Transaction<'static, Postgres>>>),
 }
 
 impl std::ops::Deref for ForgeConn<'_> {
@@ -82,7 +81,9 @@ impl std::ops::Deref for ForgeConn<'_> {
     fn deref(&self) -> &PgConnection {
         match self {
             ForgeConn::Pool(c) => c,
-            ForgeConn::Tx(g) => g,
+            ForgeConn::Tx(g) => g
+                .as_ref()
+                .expect("ForgeConn::Tx held while transaction was already taken"),
         }
     }
 }
@@ -91,7 +92,9 @@ impl std::ops::DerefMut for ForgeConn<'_> {
     fn deref_mut(&mut self) -> &mut PgConnection {
         match self {
             ForgeConn::Pool(c) => c,
-            ForgeConn::Tx(g) => g,
+            ForgeConn::Tx(g) => g
+                .as_mut()
+                .expect("ForgeConn::Tx held while transaction was already taken"),
         }
     }
 }
@@ -229,7 +232,7 @@ pub enum DbConn<'a> {
     Pool(sqlx::PgPool),
     /// Transaction handle (transactional mutations).
     Transaction(
-        Arc<AsyncMutex<Transaction<'static, Postgres>>>,
+        Arc<AsyncMutex<Option<Transaction<'static, Postgres>>>>,
         &'a sqlx::PgPool,
     ),
 }
@@ -247,7 +250,8 @@ impl DbConn<'_> {
             DbConn::Pool(pool) => query.fetch_one(pool).await,
             DbConn::Transaction(tx, _) => {
                 let mut guard = tx.lock().await;
-                query.fetch_one(&mut **guard).await
+                let conn = guard.as_mut().ok_or(sqlx::Error::PoolClosed)?;
+                query.fetch_one(&mut **conn).await
             }
         }
     }
@@ -264,7 +268,8 @@ impl DbConn<'_> {
             DbConn::Pool(pool) => query.fetch_optional(pool).await,
             DbConn::Transaction(tx, _) => {
                 let mut guard = tx.lock().await;
-                query.fetch_optional(&mut **guard).await
+                let conn = guard.as_mut().ok_or(sqlx::Error::PoolClosed)?;
+                query.fetch_optional(&mut **conn).await
             }
         }
     }
@@ -281,7 +286,8 @@ impl DbConn<'_> {
             DbConn::Pool(pool) => query.fetch_all(pool).await,
             DbConn::Transaction(tx, _) => {
                 let mut guard = tx.lock().await;
-                query.fetch_all(&mut **guard).await
+                let conn = guard.as_mut().ok_or(sqlx::Error::PoolClosed)?;
+                query.fetch_all(&mut **conn).await
             }
         }
     }
@@ -295,7 +301,8 @@ impl DbConn<'_> {
             DbConn::Pool(pool) => query.execute(pool).await,
             DbConn::Transaction(tx, _) => {
                 let mut guard = tx.lock().await;
-                query.execute(&mut **guard).await
+                let conn = guard.as_mut().ok_or(sqlx::Error::PoolClosed)?;
+                query.execute(&mut **conn).await
             }
         }
     }
@@ -858,9 +865,6 @@ impl EnvAccess for QueryContext {
     }
 }
 
-/// Callback type for looking up job info by name.
-pub type JobInfoLookup = Arc<dyn Fn(&str) -> Option<JobInfo> + Send + Sync>;
-
 /// Token TTL configuration resolved from `[auth]` in forge.toml.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -911,11 +915,10 @@ pub struct MutationContext {
     /// Environment variable provider.
     env_provider: Arc<dyn EnvProvider>,
     /// Transaction handle for transactional mutations.
-    tx: Option<Arc<AsyncMutex<Transaction<'static, Postgres>>>>,
-    /// Outbox buffer for jobs/workflows dispatched during transaction.
-    outbox: Option<Arc<Mutex<OutboxBuffer>>>,
-    /// Job info lookup for transactional dispatch.
-    job_info_lookup: Option<JobInfoLookup>,
+    ///
+    /// Wrapped in `Option` so the executor can `take()` the transaction back
+    /// after the handler returns without ever needing `Arc::try_unwrap`.
+    tx: Option<Arc<AsyncMutex<Option<Transaction<'static, Postgres>>>>>,
     /// Optional token issuer for signing JWTs (available when HMAC auth is configured).
     token_issuer: Option<Arc<dyn TokenIssuer>>,
     /// Token TTL config from forge.toml.
@@ -935,8 +938,6 @@ impl MutationContext {
             workflow_dispatch: None,
             env_provider: Arc::new(RealEnvProvider::new()),
             tx: None,
-            outbox: None,
-            job_info_lookup: None,
             token_issuer: None,
             token_ttl: AuthTokenTtl::default(),
         }
@@ -961,8 +962,6 @@ impl MutationContext {
             workflow_dispatch,
             env_provider: Arc::new(RealEnvProvider::new()),
             tx: None,
-            outbox: None,
-            job_info_lookup: None,
             token_issuer: None,
             token_ttl: AuthTokenTtl::default(),
         }
@@ -988,29 +987,32 @@ impl MutationContext {
             workflow_dispatch,
             env_provider,
             tx: None,
-            outbox: None,
-            job_info_lookup: None,
             token_issuer: None,
             token_ttl: AuthTokenTtl::default(),
         }
     }
 
-    /// Returns handles to transaction and outbox for the caller to commit/flush.
-    #[allow(clippy::type_complexity)]
+    /// Build a transactional mutation context.
+    ///
+    /// Jobs/workflows dispatched through the returned context insert their
+    /// rows directly on `tx`, so they commit atomically with the mutation
+    /// and are rolled back on failure.
+    ///
+    /// The caller retains ownership of the transaction via the returned
+    /// handle; commit it after the handler returns successfully.
     pub fn with_transaction(
         db_pool: sqlx::PgPool,
         tx: Transaction<'static, Postgres>,
         auth: AuthContext,
         request: RequestMetadata,
         http_client: CircuitBreakerClient,
-        job_info_lookup: JobInfoLookup,
+        job_dispatch: Option<Arc<dyn JobDispatch>>,
+        workflow_dispatch: Option<Arc<dyn WorkflowDispatch>>,
     ) -> (
         Self,
-        Arc<AsyncMutex<Transaction<'static, Postgres>>>,
-        Arc<Mutex<OutboxBuffer>>,
+        Arc<AsyncMutex<Option<Transaction<'static, Postgres>>>>,
     ) {
-        let tx_handle = Arc::new(AsyncMutex::new(tx));
-        let outbox = Arc::new(Mutex::new(OutboxBuffer::default()));
+        let tx_handle = Arc::new(AsyncMutex::new(Some(tx)));
 
         let ctx = Self {
             auth,
@@ -1018,17 +1020,15 @@ impl MutationContext {
             db_pool,
             http_client,
             http_timeout: None,
-            job_dispatch: None,
-            workflow_dispatch: None,
+            job_dispatch,
+            workflow_dispatch,
             env_provider: Arc::new(RealEnvProvider::new()),
             tx: Some(tx_handle.clone()),
-            outbox: Some(outbox.clone()),
-            job_info_lookup: Some(job_info_lookup),
             token_issuer: None,
             token_ttl: AuthTokenTtl::default(),
         };
 
-        (ctx, tx_handle, outbox)
+        (ctx, tx_handle)
     }
 
     pub fn is_transactional(&self) -> bool {
@@ -1244,86 +1244,33 @@ impl MutationContext {
         crate::auth::tokens::revoke_all_refresh_tokens(&self.db_pool, user_id).await
     }
 
-    /// In transactional mode, buffers for atomic commit; otherwise dispatches immediately.
+    /// Dispatch a background job.
+    ///
+    /// In transactional mutations the job row is inserted on the active
+    /// transaction, so it only becomes visible to workers after commit.
+    /// Outside a transaction the dispatcher writes through the pool directly.
     pub async fn dispatch_job<T: serde::Serialize>(
         &self,
         job_type: &str,
         args: T,
     ) -> crate::error::Result<Uuid> {
         let args_json = serde_json::to_value(args)?;
-
-        // Transactional mode: buffer the job for atomic commit
-        if let (Some(outbox), Some(job_info_lookup)) = (&self.outbox, &self.job_info_lookup) {
-            let job_info = job_info_lookup(job_type).ok_or_else(|| {
-                crate::error::ForgeError::NotFound(format!("Job type '{}' not found", job_type))
-            })?;
-
-            let pending = PendingJob {
-                id: Uuid::new_v4(),
-                job_type: job_type.to_string(),
-                args: args_json,
-                context: serde_json::json!({}),
-                owner_subject: self.auth.principal_id(),
-                priority: job_info.priority.as_i32(),
-                max_attempts: job_info.retry.max_attempts as i32,
-                worker_capability: job_info.worker_capability.map(|s| s.to_string()),
-            };
-
-            let job_id = pending.id;
-            outbox
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .jobs
-                .push(pending);
-            return Ok(job_id);
-        }
-
-        // Non-transactional mode: dispatch immediately
         let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
             crate::error::ForgeError::Internal("Job dispatch not available".into())
         })?;
-        dispatcher
-            .dispatch_by_name(job_type, args_json, self.auth.principal_id())
-            .await
-    }
 
-    /// Dispatch a job with initial context.
-    pub async fn dispatch_job_with_context<T: serde::Serialize>(
-        &self,
-        job_type: &str,
-        args: T,
-        context: serde_json::Value,
-    ) -> crate::error::Result<Uuid> {
-        let args_json = serde_json::to_value(args)?;
-
-        if let (Some(outbox), Some(job_info_lookup)) = (&self.outbox, &self.job_info_lookup) {
-            let job_info = job_info_lookup(job_type).ok_or_else(|| {
-                crate::error::ForgeError::NotFound(format!("Job type '{}' not found", job_type))
+        if let Some(tx) = &self.tx {
+            let mut guard = tx.lock().await;
+            let conn = guard.as_mut().ok_or_else(|| {
+                crate::error::ForgeError::Internal(
+                    "Transaction already taken; cannot dispatch job".into(),
+                )
             })?;
-
-            let pending = PendingJob {
-                id: Uuid::new_v4(),
-                job_type: job_type.to_string(),
-                args: args_json,
-                context,
-                owner_subject: self.auth.principal_id(),
-                priority: job_info.priority.as_i32(),
-                max_attempts: job_info.retry.max_attempts as i32,
-                worker_capability: job_info.worker_capability.map(|s| s.to_string()),
-            };
-
-            let job_id = pending.id;
-            outbox
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .jobs
-                .push(pending);
-            return Ok(job_id);
+            return dispatcher
+                .dispatch_in_conn(conn, job_type, args_json, self.auth.principal_id())
+                .await;
         }
 
-        let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::Internal("Job dispatch not available".into())
-        })?;
         dispatcher
             .dispatch_by_name(job_type, args_json, self.auth.principal_id())
             .await
@@ -1341,54 +1288,49 @@ impl MutationContext {
         dispatcher.cancel(job_id, reason).await
     }
 
-    /// In transactional mode, buffers for atomic commit; otherwise starts immediately.
+    /// Start a durable workflow.
+    ///
+    /// In transactional mutations the run row and its `$workflow_resume`
+    /// job are written on the active transaction, so the worker only picks
+    /// the run up after commit. Outside a transaction the dispatcher writes
+    /// through the pool directly.
     pub async fn start_workflow<T: serde::Serialize>(
         &self,
         workflow_name: &str,
         input: T,
     ) -> crate::error::Result<Uuid> {
         let input_json = serde_json::to_value(input)?;
-
-        // Transactional mode: buffer the workflow for atomic commit
-        if let Some(outbox) = &self.outbox {
-            // Resolve version and signature eagerly so the INSERT has them ready.
-            // The executor would do this anyway on flush, but doing it here surfaces
-            // "no active version" errors at call time rather than after commit.
-            let info = self
-                .workflow_dispatch
-                .as_ref()
-                .and_then(|d| d.get_info(workflow_name))
-                .ok_or_else(|| {
-                    crate::error::ForgeError::NotFound(format!(
-                        "No active version of workflow '{}'",
-                        workflow_name
-                    ))
-                })?;
-
-            let pending = PendingWorkflow {
-                id: Uuid::new_v4(),
-                workflow_name: workflow_name.to_string(),
-                workflow_version: info.version.to_string(),
-                workflow_signature: info.signature.to_string(),
-                input: input_json,
-                owner_subject: self.auth.principal_id(),
-            };
-
-            let workflow_id = pending.id;
-            outbox
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .workflows
-                .push(pending);
-            return Ok(workflow_id);
-        }
-
-        // Non-transactional mode: start immediately
         let dispatcher = self.workflow_dispatch.as_ref().ok_or_else(|| {
             crate::error::ForgeError::Internal("Workflow dispatch not available".into())
         })?;
+
+        let trace_id = Some(self.request.trace_id().to_string());
+
+        if let Some(tx) = &self.tx {
+            let mut guard = tx.lock().await;
+            let conn = guard.as_mut().ok_or_else(|| {
+                crate::error::ForgeError::Internal(
+                    "Transaction already taken; cannot start workflow".into(),
+                )
+            })?;
+            return dispatcher
+                .start_in_conn(
+                    conn,
+                    workflow_name,
+                    input_json,
+                    self.auth.principal_id(),
+                    trace_id,
+                )
+                .await;
+        }
+
         dispatcher
-            .start_by_name(workflow_name, input_json, self.auth.principal_id())
+            .start_by_name(
+                workflow_name,
+                input_json,
+                self.auth.principal_id(),
+                trace_id,
+            )
             .await
     }
 }

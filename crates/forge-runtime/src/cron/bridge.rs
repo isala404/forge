@@ -19,49 +19,48 @@ pub fn register_cron_bridges(cron_registry: &Arc<CronRegistry>, job_registry: &m
         let handler_clone = entry.handler.clone();
         let timeout = entry.info.timeout;
 
-        let handler: BoxedJobHandler =
-            Arc::new(move |ctx: &JobContext, args: Value| {
-                let handler = handler_clone.clone();
-                let cron_name = cron_name.clone();
-                Box::pin(async move {
-                    let run_id: uuid::Uuid = args
-                        .get("run_id")
-                        .and_then(serde_json::Value::as_str)
-                        .and_then(|s| uuid::Uuid::parse_str(s).ok())
-                        .unwrap_or_else(uuid::Uuid::new_v4);
+        let handler: BoxedJobHandler = Arc::new(move |ctx: &JobContext, args: Value| {
+            let handler = handler_clone.clone();
+            let cron_name = cron_name.clone();
+            Box::pin(async move {
+                let run_id: uuid::Uuid = args
+                    .get("run_id")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                    .unwrap_or_else(uuid::Uuid::new_v4);
 
-                    let scheduled_time: chrono::DateTime<chrono::Utc> = args
-                        .get("scheduled_time")
-                        .and_then(serde_json::Value::as_str)
-                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                        .map(|dt| dt.with_timezone(&chrono::Utc))
-                        .unwrap_or_else(chrono::Utc::now);
+                let scheduled_time: chrono::DateTime<chrono::Utc> = args
+                    .get("scheduled_time")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(chrono::Utc::now);
 
-                    let timezone: String = args
-                        .get("timezone")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("UTC")
-                        .to_string();
+                let timezone: String = args
+                    .get("timezone")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("UTC")
+                    .to_string();
 
-                    let is_catch_up: bool = args
-                        .get("is_catch_up")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false);
+                let is_catch_up: bool = args
+                    .get("is_catch_up")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
 
-                    let cron_ctx = CronContext::new(
-                        run_id,
-                        cron_name,
-                        scheduled_time,
-                        timezone,
-                        is_catch_up,
-                        ctx.pool().clone(),
-                        ctx.circuit_breaker_client().clone(),
-                    );
+                let cron_ctx = CronContext::new(
+                    run_id,
+                    cron_name,
+                    scheduled_time,
+                    timezone,
+                    is_catch_up,
+                    ctx.pool().clone(),
+                    ctx.circuit_breaker_client().clone(),
+                );
 
-                    handler(&cron_ctx).await?;
-                    Ok(serde_json::Value::Null)
-                })
-            });
+                handler(&cron_ctx).await?;
+                Ok(serde_json::Value::Null)
+            })
+        });
 
         let info = JobInfo {
             name: Box::leak(job_name.clone().into_boxed_str()),

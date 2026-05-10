@@ -136,7 +136,11 @@ impl ChangeListener {
         }
 
         if count > 0 {
-            tracing::info!(replayed = count, from_seq = since, "Replayed missed changes from log");
+            tracing::info!(
+                replayed = count,
+                from_seq = since,
+                "Replayed missed changes from log"
+            );
         } else if let Ok(Some(min)) = crate::pg::min_seq(&self.pool).await
             && min > since
         {

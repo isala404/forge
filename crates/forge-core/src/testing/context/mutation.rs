@@ -3,7 +3,7 @@
 #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -13,7 +13,7 @@ use super::super::mock_http::{MockHttp, MockRequest, MockResponse};
 use super::build_test_auth;
 use crate::Result;
 use crate::env::{EnvAccess, EnvProvider, MockEnvProvider};
-use crate::function::{AuthContext, OutboxBuffer, PendingJob, PendingWorkflow, RequestMetadata};
+use crate::function::{AuthContext, RequestMetadata};
 
 /// Test context for mutation functions.
 ///
@@ -48,8 +48,6 @@ pub struct TestMutationContext {
     workflow_dispatch: Arc<MockWorkflowDispatch>,
     /// Mock environment provider.
     env_provider: Arc<MockEnvProvider>,
-    /// Outbox buffer for transactional mode simulation.
-    outbox: Arc<Mutex<OutboxBuffer>>,
 }
 
 impl TestMutationContext {
@@ -112,41 +110,6 @@ impl TestMutationContext {
     /// Get the mock env provider for verification.
     pub fn env_mock(&self) -> &MockEnvProvider {
         &self.env_provider
-    }
-
-    /// Get pending jobs from the outbox buffer.
-    pub fn pending_jobs(&self) -> Vec<PendingJob> {
-        self.outbox.lock().unwrap().jobs.clone()
-    }
-
-    /// Get pending workflows from the outbox buffer.
-    pub fn pending_workflows(&self) -> Vec<PendingWorkflow> {
-        self.outbox.lock().unwrap().workflows.clone()
-    }
-
-    /// Assert that a job was buffered in the outbox.
-    pub fn assert_job_buffered(&self, job_type: &str) {
-        let jobs = self.pending_jobs();
-        assert!(
-            jobs.iter().any(|j| j.job_type == job_type),
-            "Expected job '{}' to be buffered, but it was not. Buffered jobs: {:?}",
-            job_type,
-            jobs.iter().map(|j| &j.job_type).collect::<Vec<_>>()
-        );
-    }
-
-    /// Assert that a workflow was buffered in the outbox.
-    pub fn assert_workflow_buffered(&self, workflow_name: &str) {
-        let workflows = self.pending_workflows();
-        assert!(
-            workflows.iter().any(|w| w.workflow_name == workflow_name),
-            "Expected workflow '{}' to be buffered, but it was not. Buffered workflows: {:?}",
-            workflow_name,
-            workflows
-                .iter()
-                .map(|w| &w.workflow_name)
-                .collect::<Vec<_>>()
-        );
     }
 }
 
@@ -270,7 +233,6 @@ impl TestMutationContextBuilder {
             job_dispatch: self.job_dispatch,
             workflow_dispatch: self.workflow_dispatch,
             env_provider: Arc::new(MockEnvProvider::with_vars(self.env_vars)),
-            outbox: Arc::new(Mutex::new(OutboxBuffer::default())),
         }
     }
 }

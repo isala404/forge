@@ -236,6 +236,88 @@ fn extract_columns_from_set_expr(set_expr: &SetExpr, columns: &mut HashSet<Strin
     }
 }
 
+/// Parse SQL strings and extract columns written by INSERT/UPDATE statements.
+///
+/// Used by the mutation macro to populate [`FunctionInfo::changed_columns`],
+/// which lets the cache invalidator skip queries whose `selected_columns`
+/// don't overlap with what the mutation actually changed.
+///
+/// Returns an empty set if any statement uses dynamic column lists or a form
+/// the extractor can't reason about — empty signals "could touch anything",
+/// which the invalidator treats as a conservative full invalidation.
+pub fn extract_changed_columns_from_sql(sql_strings: &[String]) -> HashSet<String> {
+    let mut columns = HashSet::new();
+    let dialect = PostgreSqlDialect {};
+
+    for sql in sql_strings {
+        match Parser::parse_sql(&dialect, sql) {
+            Ok(statements) => {
+                for stmt in statements {
+                    if !extract_changed_columns_from_statement(&stmt, &mut columns) {
+                        // Statement touches unknown columns; widen to "any".
+                        columns.clear();
+                        return columns;
+                    }
+                }
+            }
+            Err(_) => {
+                columns.clear();
+                return columns;
+            }
+        }
+    }
+
+    columns
+}
+
+/// Walk a single statement, recording any column it writes. Returns `false`
+/// when the statement might mutate columns the extractor can't enumerate
+/// (e.g. UPDATE without a SET list, DELETE which touches every column).
+fn extract_changed_columns_from_statement(stmt: &Statement, columns: &mut HashSet<String>) -> bool {
+    match stmt {
+        Statement::Insert(insert) => {
+            if insert.columns.is_empty() {
+                // INSERT without column list relies on table column order; we
+                // can't know which columns are written without schema info.
+                return false;
+            }
+            for col in &insert.columns {
+                columns.insert(col.value.clone());
+            }
+            true
+        }
+        Statement::Update { assignments, .. } => {
+            if assignments.is_empty() {
+                return false;
+            }
+            for assignment in assignments {
+                match &assignment.target {
+                    sqlparser::ast::AssignmentTarget::ColumnName(name) => {
+                        if let Some(last) = name.0.last() {
+                            columns.insert(last.value.clone());
+                        }
+                    }
+                    sqlparser::ast::AssignmentTarget::Tuple(tuples) => {
+                        for name in tuples {
+                            if let Some(last) = name.0.last() {
+                                columns.insert(last.value.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            true
+        }
+        Statement::Delete(_) => {
+            // DELETE removes the row, which conceptually invalidates every
+            // column. Widen to full invalidation.
+            false
+        }
+        Statement::Query(_) => true,
+        _ => true,
+    }
+}
+
 /// Parse SQL strings and extract all referenced tables.
 /// Result of SQL table extraction.
 pub enum TableExtractionResult {
@@ -720,7 +802,6 @@ fn is_scope_col(name: &str) -> bool {
     SCOPE_COLS.iter().any(|&c| name.eq_ignore_ascii_case(c))
 }
 
-
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
@@ -736,7 +817,9 @@ mod tests {
 
     #[test]
     fn test_simple_select() {
-        let tables = unwrap_tables(extract_tables_from_sql(&["SELECT * FROM users".to_string()]));
+        let tables = unwrap_tables(extract_tables_from_sql(
+            &["SELECT * FROM users".to_string()],
+        ));
         assert!(tables.contains("users"));
     }
 
@@ -760,8 +843,9 @@ mod tests {
 
     #[test]
     fn test_schema_qualified() {
-        let tables =
-            unwrap_tables(extract_tables_from_sql(&["SELECT * FROM public.users".to_string()]));
+        let tables = unwrap_tables(extract_tables_from_sql(&[
+            "SELECT * FROM public.users".to_string()
+        ]));
         assert!(tables.contains("users"));
     }
 
@@ -831,7 +915,7 @@ mod tests {
     #[test]
     fn test_delete() {
         let tables = unwrap_tables(extract_tables_from_sql(&[
-            "DELETE FROM users WHERE id = 1".to_string(),
+            "DELETE FROM users WHERE id = 1".to_string()
         ]));
         assert!(tables.contains("users"));
     }
@@ -930,9 +1014,7 @@ mod tests {
     #[test]
     fn test_scope_check_owner_id() {
         assert!(matches!(
-            sql_references_identity_scope(&[
-                "DELETE FROM posts WHERE owner_id = $1".to_string()
-            ]),
+            sql_references_identity_scope(&["DELETE FROM posts WHERE owner_id = $1".to_string()]),
             ScopeCheckResult::Scoped
         ));
     }
@@ -950,9 +1032,7 @@ mod tests {
     #[test]
     fn test_scope_check_select_only_no_where() {
         assert!(matches!(
-            sql_references_identity_scope(&[
-                "SELECT user_id, name FROM tasks".to_string()
-            ]),
+            sql_references_identity_scope(&["SELECT user_id, name FROM tasks".to_string()]),
             ScopeCheckResult::Unscoped
         ));
     }
@@ -960,9 +1040,7 @@ mod tests {
     #[test]
     fn test_scope_check_no_scope_column() {
         assert!(matches!(
-            sql_references_identity_scope(&[
-                "SELECT * FROM tasks WHERE id = $1".to_string()
-            ]),
+            sql_references_identity_scope(&["SELECT * FROM tasks WHERE id = $1".to_string()]),
             ScopeCheckResult::Unscoped
         ));
     }
@@ -989,9 +1067,9 @@ mod tests {
     #[test]
     fn scope_check_tenant_id() {
         assert!(matches!(
-            sql_references_identity_scope(&[
-                "SELECT * FROM tasks WHERE tenant_id = $1".to_string()
-            ]),
+            sql_references_identity_scope(
+                &["SELECT * FROM tasks WHERE tenant_id = $1".to_string()]
+            ),
             ScopeCheckResult::Scoped
         ));
     }

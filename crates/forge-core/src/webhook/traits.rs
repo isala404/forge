@@ -102,6 +102,7 @@ impl From<&WebhookInfo> for FunctionInfo {
             log_level: None,
             table_dependencies: &[],
             selected_columns: &[],
+            changed_columns: &[],
             transactional: false,
             consistent: false,
             max_upload_size_bytes: None,

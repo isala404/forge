@@ -59,10 +59,7 @@ pub struct ChangeRow {
 /// Errors from PG flow through the stream as `Err(ForgeError::Database)`. The
 /// caller decides whether a transient error ends recovery or triggers a
 /// retry.
-pub fn drain_change_log(
-    pool: &PgPool,
-    since: i64,
-) -> impl Stream<Item = Result<ChangeRow>> + '_ {
+pub fn drain_change_log(pool: &PgPool, since: i64) -> impl Stream<Item = Result<ChangeRow>> + '_ {
     sqlx::query_as!(
         ChangeRow,
         r#"SELECT seq, table_name, op, row_id, changed_cols, created_at
@@ -80,13 +77,10 @@ pub fn drain_change_log(
 /// needs the recent tail. Default retention in the framework is 1 hour, set
 /// by passing `Utc::now() - chrono::Duration::hours(1)`.
 pub async fn trim_change_log(pool: &PgPool, before: DateTime<Utc>) -> Result<u64> {
-    let result = sqlx::query!(
-        "DELETE FROM forge_change_log WHERE created_at < $1",
-        before,
-    )
-    .execute(pool)
-    .await
-    .map_err(ForgeError::Database)?;
+    let result = sqlx::query!("DELETE FROM forge_change_log WHERE created_at < $1", before,)
+        .execute(pool)
+        .await
+        .map_err(ForgeError::Database)?;
     Ok(result.rows_affected())
 }
 
@@ -155,11 +149,12 @@ mod integration_tests {
                 .unwrap();
         }
         // Capture the seq of the first insert; we'll drain after it.
-        let first_seq: i64 =
-            sqlx::query_scalar("SELECT MIN(seq) FROM forge_change_log WHERE table_name='drain_items'")
-                .fetch_one(db.pool())
-                .await
-                .unwrap();
+        let first_seq: i64 = sqlx::query_scalar(
+            "SELECT MIN(seq) FROM forge_change_log WHERE table_name='drain_items'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
 
         let rows: Vec<ChangeRow> = drain_change_log(db.pool(), first_seq)
             .try_collect()
@@ -186,11 +181,12 @@ mod integration_tests {
         let cutoff = Utc::now() + chrono::Duration::seconds(10);
         let deleted = trim_change_log(db.pool(), cutoff).await.unwrap();
         assert_eq!(deleted, 1);
-        let remaining: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM forge_change_log WHERE table_name='trim_items'")
-                .fetch_one(db.pool())
-                .await
-                .unwrap();
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM forge_change_log WHERE table_name='trim_items'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
         assert_eq!(remaining, 0);
     }
 
@@ -225,11 +221,10 @@ mod integration_tests {
             .unwrap();
 
         let min = min_seq(db.pool()).await.unwrap();
-        let actual: i64 =
-            sqlx::query_scalar("SELECT MIN(seq) FROM forge_change_log")
-                .fetch_one(db.pool())
-                .await
-                .unwrap();
+        let actual: i64 = sqlx::query_scalar("SELECT MIN(seq) FROM forge_change_log")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
         assert_eq!(min, Some(actual));
     }
 }

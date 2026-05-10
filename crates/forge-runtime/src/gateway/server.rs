@@ -570,10 +570,7 @@ impl GatewayServer {
                 rate_limiter: Arc::new(crate::signals::rate_limit::SignalRateLimiter::new()),
             });
             signals_router = Router::new()
-                .route(
-                    "/signal",
-                    post(crate::signals::endpoints::signal_handler),
-                )
+                .route("/signal", post(crate::signals::endpoints::signal_handler))
                 .with_state(signals_state);
         }
 

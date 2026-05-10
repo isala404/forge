@@ -23,7 +23,9 @@ fn expand_model_impl(
     if !trimmed.is_empty() {
         return Err(syn::Error::new(
             proc_macro2::Span::call_site(),
-            format!("Unknown attribute `{trimmed}` for #[model]. This macro accepts no attributes."),
+            format!(
+                "Unknown attribute `{trimmed}` for #[model]. This macro accepts no attributes."
+            ),
         ));
     }
     let struct_name = &input.ident;

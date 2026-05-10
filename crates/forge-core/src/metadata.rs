@@ -74,6 +74,8 @@ pub struct HandlerMetadata {
     pub table_dependencies: Vec<String>,
     /// Columns referenced in SELECT clauses (queries only).
     pub selected_columns: Vec<String>,
+    /// Columns written by INSERT/UPDATE statements (mutations only).
+    pub changed_columns: Vec<String>,
     /// Whether the mutation runs inside a database transaction.
     pub transactional: bool,
     /// Whether the query always reads from the primary replica.
@@ -124,6 +126,7 @@ impl From<&crate::function::FunctionInfo> for HandlerMetadata {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
+            changed_columns: info.changed_columns.iter().map(|s| s.to_string()).collect(),
             transactional: info.transactional,
             consistent: info.consistent,
             max_upload_size_bytes: info.max_upload_size_bytes,
@@ -154,6 +157,7 @@ impl From<&crate::job::JobInfo> for HandlerMetadata {
             log_level: None,
             table_dependencies: Vec::new(),
             selected_columns: Vec::new(),
+            changed_columns: Vec::new(),
             transactional: false,
             consistent: false,
             max_upload_size_bytes: None,
@@ -184,6 +188,7 @@ impl From<&crate::cron::CronInfo> for HandlerMetadata {
             log_level: None,
             table_dependencies: Vec::new(),
             selected_columns: Vec::new(),
+            changed_columns: Vec::new(),
             transactional: false,
             consistent: false,
             max_upload_size_bytes: None,
@@ -214,6 +219,7 @@ impl From<&crate::workflow::WorkflowInfo> for HandlerMetadata {
             log_level: None,
             table_dependencies: Vec::new(),
             selected_columns: Vec::new(),
+            changed_columns: Vec::new(),
             transactional: false,
             consistent: false,
             max_upload_size_bytes: None,
@@ -244,6 +250,7 @@ impl From<&crate::daemon::DaemonInfo> for HandlerMetadata {
             log_level: None,
             table_dependencies: Vec::new(),
             selected_columns: Vec::new(),
+            changed_columns: Vec::new(),
             transactional: false,
             consistent: false,
             max_upload_size_bytes: None,
@@ -274,6 +281,7 @@ impl From<&crate::webhook::WebhookInfo> for HandlerMetadata {
             log_level: None,
             table_dependencies: Vec::new(),
             selected_columns: Vec::new(),
+            changed_columns: Vec::new(),
             transactional: false,
             consistent: false,
             max_upload_size_bytes: None,
@@ -304,6 +312,7 @@ impl From<&crate::mcp::McpToolInfo> for HandlerMetadata {
             log_level: None,
             table_dependencies: Vec::new(),
             selected_columns: Vec::new(),
+            changed_columns: Vec::new(),
             transactional: false,
             consistent: false,
             max_upload_size_bytes: None,
@@ -351,6 +360,7 @@ mod tests {
             log_level: None,
             table_dependencies: &["users"],
             selected_columns: &["id", "name"],
+            changed_columns: &[],
             transactional: false,
             consistent: false,
             max_upload_size_bytes: None,
@@ -382,6 +392,7 @@ mod tests {
             log_level: None,
             table_dependencies: &["users"],
             selected_columns: &[],
+            changed_columns: &["name", "email"],
             transactional: true,
             consistent: false,
             max_upload_size_bytes: None,

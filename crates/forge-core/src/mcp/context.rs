@@ -111,7 +111,12 @@ impl McpToolContext {
 
         let input_json = serde_json::to_value(input)?;
         dispatcher
-            .start_by_name(workflow_name, input_json, self.auth.principal_id())
+            .start_by_name(
+                workflow_name,
+                input_json,
+                self.auth.principal_id(),
+                Some(self.request.trace_id().to_string()),
+            )
             .await
     }
 }

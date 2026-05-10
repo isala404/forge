@@ -7,10 +7,13 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use super::bridge::WORKFLOW_RESUME_JOB;
 use super::registry::WorkflowRegistry;
 use super::state::{WorkflowRecord, WorkflowStepRecord};
+use crate::jobs::{JobQueue, JobRecord};
 use forge_core::CircuitBreakerClient;
 use forge_core::function::WorkflowDispatch;
+use forge_core::job::JobPriority;
 use forge_core::workflow::{CompensationHandler, StepStatus, WorkflowContext, WorkflowStatus};
 
 /// Workflow execution result.
@@ -45,6 +48,7 @@ struct CompensationMetadata {
 pub struct WorkflowExecutor {
     registry: Arc<WorkflowRegistry>,
     pool: sqlx::PgPool,
+    job_queue: JobQueue,
     http_client: CircuitBreakerClient,
     /// Compensation state for active workflows (run_id -> state).
     compensation_state: Arc<RwLock<HashMap<Uuid, CompensationState>>>,
@@ -55,11 +59,13 @@ impl WorkflowExecutor {
     pub fn new(
         registry: Arc<WorkflowRegistry>,
         pool: sqlx::PgPool,
+        job_queue: JobQueue,
         http_client: CircuitBreakerClient,
     ) -> Self {
         Self {
             registry,
             pool,
+            job_queue,
             http_client,
             compensation_state: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -72,6 +78,7 @@ impl WorkflowExecutor {
         workflow_name: &str,
         input: I,
         owner_subject: Option<String>,
+        trace_id: Option<String>,
     ) -> forge_core::Result<Uuid> {
         let entry = self.registry.get_active(workflow_name).ok_or_else(|| {
             forge_core::ForgeError::NotFound(format!(
@@ -82,13 +89,16 @@ impl WorkflowExecutor {
 
         let input_value = serde_json::to_value(input)?;
 
-        let record = WorkflowRecord::new(
+        let mut record = WorkflowRecord::new(
             workflow_name,
             entry.info.version,
             entry.info.signature,
             input_value.clone(),
             owner_subject,
         );
+        if let Some(tid) = trace_id {
+            record = record.with_trace_id(tid);
+        }
         let run_id = record.id;
 
         // Clone entry data for background execution
@@ -101,6 +111,7 @@ impl WorkflowExecutor {
         // Execute workflow in background
         let registry = self.registry.clone();
         let pool = self.pool.clone();
+        let job_queue = self.job_queue.clone();
         let http_client = self.http_client.clone();
         let compensation_state = self.compensation_state.clone();
 
@@ -108,6 +119,7 @@ impl WorkflowExecutor {
             let executor = WorkflowExecutor {
                 registry,
                 pool,
+                job_queue,
                 http_client,
                 compensation_state,
             };
@@ -358,9 +370,12 @@ impl WorkflowExecutor {
     ) -> forge_core::Result<WorkflowResult> {
         let record = self.get_workflow(run_id).await?;
 
-        // Check if workflow is resumable
+        // Check if workflow is resumable. `Created` is included so that runs
+        // started inside a transactional mutation — which only INSERT the row
+        // and enqueue a `$workflow_resume` job — pick up cleanly when the
+        // worker fires the bridge handler post-commit.
         match record.status {
-            WorkflowStatus::Running | WorkflowStatus::Waiting => {
+            WorkflowStatus::Created | WorkflowStatus::Running | WorkflowStatus::Waiting => {
                 // Can resume
             }
             status if status.is_terminal() || status.is_blocked() => {
@@ -690,6 +705,19 @@ impl WorkflowExecutor {
 
     /// Save workflow record to database.
     async fn save_workflow(&self, record: &WorkflowRecord) -> forge_core::Result<()> {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(forge_core::ForgeError::Database)?;
+        Self::insert_workflow_record(&mut conn, record).await
+    }
+
+    /// Insert a workflow run row on the supplied connection.
+    async fn insert_workflow_record(
+        conn: &mut sqlx::PgConnection,
+        record: &WorkflowRecord,
+    ) -> forge_core::Result<()> {
         sqlx::query!(
             r#"
             INSERT INTO forge_workflow_runs (
@@ -710,7 +738,7 @@ impl WorkflowExecutor {
             record.started_at,
             record.trace_id.as_deref(),
         )
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .map_err(forge_core::ForgeError::Database)?;
 
@@ -1009,8 +1037,10 @@ impl WorkflowExecutor {
         workflow_name: &str,
         input: serde_json::Value,
         owner_subject: Option<String>,
+        trace_id: Option<String>,
     ) -> forge_core::Result<Uuid> {
-        self.start(workflow_name, input, owner_subject).await
+        self.start(workflow_name, input, owner_subject, trace_id)
+            .await
     }
 }
 
@@ -1026,11 +1056,63 @@ impl WorkflowDispatch for WorkflowExecutor {
         workflow_name: &str,
         input: serde_json::Value,
         owner_subject: Option<String>,
+        trace_id: Option<String>,
     ) -> Pin<Box<dyn Future<Output = forge_core::Result<Uuid>> + Send + '_>> {
         let workflow_name = workflow_name.to_string();
         Box::pin(async move {
-            self.start_by_name(&workflow_name, input, owner_subject)
+            self.start_by_name(&workflow_name, input, owner_subject, trace_id)
                 .await
+        })
+    }
+
+    fn start_in_conn<'a>(
+        &'a self,
+        conn: &'a mut sqlx::PgConnection,
+        workflow_name: &'a str,
+        input: serde_json::Value,
+        owner_subject: Option<String>,
+        trace_id: Option<String>,
+    ) -> Pin<Box<dyn Future<Output = forge_core::Result<Uuid>> + Send + 'a>> {
+        Box::pin(async move {
+            let entry = self.registry.get_active(workflow_name).ok_or_else(|| {
+                forge_core::ForgeError::NotFound(format!(
+                    "No active version of workflow '{}'",
+                    workflow_name
+                ))
+            })?;
+
+            let mut record = WorkflowRecord::new(
+                workflow_name,
+                entry.info.version,
+                entry.info.signature,
+                input,
+                owner_subject,
+            );
+            if let Some(tid) = trace_id {
+                record = record.with_trace_id(tid);
+            }
+            let run_id = record.id;
+
+            Self::insert_workflow_record(conn, &record).await?;
+
+            // Enqueue the resume job in the same transaction so the worker
+            // only sees it once the mutation commits.
+            let resume_input = serde_json::json!({
+                "run_id": run_id.to_string(),
+                "from_sleep": false,
+            });
+            let job = JobRecord::new(
+                WORKFLOW_RESUME_JOB.to_string(),
+                resume_input,
+                JobPriority::High,
+                3,
+            );
+            self.job_queue
+                .enqueue_in_conn(conn, job)
+                .await
+                .map_err(forge_core::ForgeError::Database)?;
+
+            Ok(run_id)
         })
     }
 }

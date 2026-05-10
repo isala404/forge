@@ -20,7 +20,9 @@ fn expand_enum_impl(attr: TokenStream2, input: DeriveInput) -> syn::Result<Token
     if !trimmed.is_empty() {
         return Err(syn::Error::new(
             proc_macro2::Span::call_site(),
-            format!("Unknown attribute `{trimmed}` for #[forge_enum]. This macro accepts no attributes."),
+            format!(
+                "Unknown attribute `{trimmed}` for #[forge_enum]. This macro accepts no attributes."
+            ),
         ));
     }
     let enum_name = &input.ident;

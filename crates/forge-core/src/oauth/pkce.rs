@@ -14,10 +14,7 @@ pub fn verify_s256(code_verifier: &str, code_challenge: &str) -> bool {
     let mut hasher = Sha256::new();
     hasher.update(code_verifier.as_bytes());
     let computed = URL_SAFE_NO_PAD.encode(hasher.finalize());
-    computed
-        .as_bytes()
-        .ct_eq(code_challenge.as_bytes())
-        .into()
+    computed.as_bytes().ct_eq(code_challenge.as_bytes()).into()
 }
 
 /// Compute S256 challenge from a verifier.

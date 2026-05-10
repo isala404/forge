@@ -30,6 +30,18 @@ pub trait JobDispatch: Send + Sync {
         owner_subject: Option<String>,
     ) -> Pin<Box<dyn Future<Output = Result<Uuid>> + Send + '_>>;
 
+    /// Dispatch a job on an existing connection — typically the live
+    /// transaction inside a `MutationContext`. The insert participates in
+    /// the surrounding transaction, so the job only becomes visible to
+    /// workers after commit and is rolled back on failure.
+    fn dispatch_in_conn<'a>(
+        &'a self,
+        conn: &'a mut sqlx::PgConnection,
+        job_type: &'a str,
+        args: serde_json::Value,
+        owner_subject: Option<String>,
+    ) -> Pin<Box<dyn Future<Output = Result<Uuid>> + Send + 'a>>;
+
     /// Request cancellation for a job.
     fn cancel(
         &self,
@@ -51,13 +63,26 @@ pub trait WorkflowDispatch: Send + Sync {
     /// # Arguments
     /// * `workflow_name` - The registered name of the workflow
     /// * `input` - JSON-serialized input for the workflow
-    ///
-    /// # Returns
-    /// The UUID of the started workflow run
+    /// * `trace_id` - Trace identifier from the caller's request, propagated
+    ///   onto the run row so observability links request → workflow.
     fn start_by_name(
         &self,
         workflow_name: &str,
         input: serde_json::Value,
         owner_subject: Option<String>,
+        trace_id: Option<String>,
     ) -> Pin<Box<dyn Future<Output = Result<Uuid>> + Send + '_>>;
+
+    /// Start a workflow on an existing connection — typically the live
+    /// transaction inside a `MutationContext`. The run row and its
+    /// `$workflow_resume` job are written in the same transaction so the
+    /// worker only picks the run up after commit.
+    fn start_in_conn<'a>(
+        &'a self,
+        conn: &'a mut sqlx::PgConnection,
+        workflow_name: &'a str,
+        input: serde_json::Value,
+        owner_subject: Option<String>,
+        trace_id: Option<String>,
+    ) -> Pin<Box<dyn Future<Output = Result<Uuid>> + Send + 'a>>;
 }

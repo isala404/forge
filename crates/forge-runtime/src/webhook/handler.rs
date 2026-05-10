@@ -11,13 +11,13 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use base64::{Engine as _, engine::general_purpose};
-use ring::signature::{self, UnparsedPublicKey};
 use forge_core::CircuitBreakerClient;
 use forge_core::function::JobDispatch;
 use forge_core::webhook::{
     IdempotencySource, REPLAY_TIMESTAMP_HEADER, SignatureAlgorithm, WebhookContext,
 };
 use hmac::{Hmac, Mac};
+use ring::signature::{self, UnparsedPublicKey};
 use serde_json::{Value, json};
 use sha2::Sha256;
 use sqlx::PgPool;
@@ -965,10 +965,8 @@ mod tests {
 
         let body = b"{\"event\":\"user.created\"}";
         let seed = [42u8; 32];
-        let key_pair =
-            Ed25519KeyPair::from_seed_unchecked(&seed).expect("valid seed");
-        let public_key_b64 =
-            general_purpose::STANDARD.encode(key_pair.public_key().as_ref());
+        let key_pair = Ed25519KeyPair::from_seed_unchecked(&seed).expect("valid seed");
+        let public_key_b64 = general_purpose::STANDARD.encode(key_pair.public_key().as_ref());
         let sig = key_pair.sign(body);
         let signature_b64 = general_purpose::STANDARD.encode(sig.as_ref());
 
@@ -986,10 +984,8 @@ mod tests {
 
         // Wrong public key
         let other_seed = [99u8; 32];
-        let other_pair =
-            Ed25519KeyPair::from_seed_unchecked(&other_seed).expect("valid seed");
-        let other_pub_b64 =
-            general_purpose::STANDARD.encode(other_pair.public_key().as_ref());
+        let other_pair = Ed25519KeyPair::from_seed_unchecked(&other_seed).expect("valid seed");
+        let other_pub_b64 = general_purpose::STANDARD.encode(other_pair.public_key().as_ref());
         assert!(!validate_ed25519(body, &other_pub_b64, &signature_b64));
     }
 }

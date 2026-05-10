@@ -54,9 +54,7 @@ pub enum FunctionEntry {
     /// Webhook registered for metadata access (info lookup, MCP tool list,
     /// observability). Execution always goes through the dedicated webhook HTTP
     /// route with signature validation — this entry carries no handler.
-    Webhook {
-        info: FunctionInfo,
-    },
+    Webhook { info: FunctionInfo },
 }
 
 impl FunctionEntry {
@@ -94,9 +92,7 @@ impl Clone for FunctionEntry {
                 info: info.clone(),
                 handler: Arc::clone(handler),
             },
-            FunctionEntry::Webhook { info } => FunctionEntry::Webhook {
-                info: info.clone(),
-            },
+            FunctionEntry::Webhook { info } => FunctionEntry::Webhook { info: info.clone() },
         }
     }
 }

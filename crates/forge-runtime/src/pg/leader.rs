@@ -591,9 +591,10 @@ mod integration_tests {
 
         // release_leadership should not error on the second unlock returning
         // false; it should still clear local state and the leader row.
-        election.release_leadership().await.expect(
-            "release path must tolerate pg_advisory_unlock returning false",
-        );
+        election
+            .release_leadership()
+            .await
+            .expect("release path must tolerate pg_advisory_unlock returning false");
         assert!(!election.is_leader());
         assert!(
             election.get_leader().await.unwrap().is_none(),

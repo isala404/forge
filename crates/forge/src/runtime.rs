@@ -615,6 +615,7 @@ impl Forge {
         let workflow_bridge_executor = Arc::new(WorkflowExecutor::new(
             Arc::new(self.workflow_registry.clone()),
             pool.clone(),
+            job_queue.clone(),
             http_client.clone(),
         ));
         #[cfg(feature = "workflows")]

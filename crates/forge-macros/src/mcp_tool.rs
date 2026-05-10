@@ -7,8 +7,7 @@ use darling::FromMeta;
 use darling::ast::NestedMeta;
 
 use crate::attrs::{
-    RateLimitMeta, RequireRole, parse_rate_limit_per, validate_rate_limit,
-    validate_rate_limit_key,
+    RateLimitMeta, RequireRole, parse_rate_limit_per, validate_rate_limit, validate_rate_limit_key,
 };
 use crate::utils::{parse_duration_secs, to_pascal_case};
 
@@ -81,9 +80,9 @@ struct McpToolAttrs {
 }
 
 fn convert_mcp_tool_attrs(darling: DarlingMcpToolAttrs) -> Result<McpToolAttrs, syn::Error> {
-    let timeout = darling.timeout.and_then(|s| {
-        parse_duration_secs(&s).or_else(|| s.parse::<u64>().ok())
-    });
+    let timeout = darling
+        .timeout
+        .and_then(|s| parse_duration_secs(&s).or_else(|| s.parse::<u64>().ok()));
 
     let (rate_limit_requests, rate_limit_per_secs, rate_limit_key) =
         if let Some(ref rl) = darling.rate_limit {
@@ -110,7 +109,11 @@ fn convert_mcp_tool_attrs(darling: DarlingMcpToolAttrs) -> Result<McpToolAttrs, 
         rate_limit_per_secs,
         rate_limit_key,
         read_only_hint: if darling.read_only { Some(true) } else { None },
-        destructive_hint: if darling.destructive { Some(true) } else { None },
+        destructive_hint: if darling.destructive {
+            Some(true)
+        } else {
+            None
+        },
         idempotent_hint: if darling.idempotent { Some(true) } else { None },
         open_world_hint: if darling.open_world { Some(true) } else { None },
     })

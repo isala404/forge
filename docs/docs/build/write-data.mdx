@@ -213,7 +213,6 @@ Rate limit keys: `user` (per authenticated user), `ip` (per client IP), `tenant`
 | `ctx.cancel_job(job_id, reason)` | `Result<bool>` | Request cancellation for a job (`reason` is `Option<String>`) |
 | `ctx.issue_token(claims)` | `Result<String>` | Issue HMAC-signed JWT token (requires HMAC auth config) |
 | `ctx.start_workflow(name, input)` | `Result<Uuid>` | Start workflow |
-| `ctx.dispatch_job_with_context(name, args, context)` | `Result<Uuid>` | Dispatch job with additional JSON context |
 | `ctx.http_with_circuit_breaker()` | `&CircuitBreakerClient` | HTTP client with circuit breaker |
 | `ctx.env(key)` | `Option<String>` | Environment variable |
 | `ctx.env_or(key, default)` | `String` | Environment variable with default |

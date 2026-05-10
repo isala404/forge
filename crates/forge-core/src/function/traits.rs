@@ -50,6 +50,12 @@ pub struct FunctionInfo {
     /// Used for fine-grained invalidation: skip re-execution when changed columns
     /// don't intersect with selected columns. Empty means unknown (invalidate always).
     pub selected_columns: &'static [&'static str],
+    /// Columns written by INSERT/UPDATE statements, extracted at compile time.
+    /// For mutations, lets the cache invalidator skip queries whose
+    /// `selected_columns` don't overlap with what the mutation actually changed.
+    /// Empty for queries; empty on a mutation means "could touch any column"
+    /// (treated as full invalidation).
+    pub changed_columns: &'static [&'static str],
     /// Whether this mutation should be wrapped in a database transaction.
     /// Only applies to mutations. When true, jobs are buffered and inserted
     /// atomically with the mutation via the outbox pattern.
@@ -197,6 +203,7 @@ mod tests {
             log_level: Some(LogLevel::Debug),
             table_dependencies: &["users"],
             selected_columns: &["id", "name", "email"],
+            changed_columns: &[],
             transactional: false,
             consistent: false,
             max_upload_size_bytes: None,

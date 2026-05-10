@@ -1,6 +1,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
+use syn::visit::Visit;
 use syn::{FnArg, ItemFn, Pat, ReturnType, Type, parse_macro_input};
 
 use darling::FromMeta;
@@ -10,6 +11,7 @@ use crate::attrs::{
     RateLimitMeta, RequireRole, TablesList, parse_rate_limit_per, reject_reserved,
     validate_rate_limit,
 };
+use crate::sql_extractor::{SqlStringExtractor, extract_changed_columns_from_sql};
 use crate::utils::{parse_duration_secs, parse_size_bytes, to_pascal_case};
 
 /// Attribute keys whose names are reserved for upcoming mutation-coalescing
@@ -140,7 +142,9 @@ fn convert_mutation_attrs(darling: DarlingMutationAttrs) -> Result<MutationAttrs
         Some(ref s) => Some(parse_duration_secs(s).ok_or_else(|| {
             syn::Error::new(
                 proc_macro2::Span::call_site(),
-                format!("invalid timeout \"{s}\": use a duration string like \"30s\", \"5m\", or \"1h\""),
+                format!(
+                    "invalid timeout \"{s}\": use a duration string like \"30s\", \"5m\", or \"1h\""
+                ),
             )
         })?),
         None => None,
@@ -199,10 +203,7 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         impl<'ast> syn::visit::Visit<'ast> for DispatchCallVisitor {
             fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
                 let method = node.method.to_string();
-                if method == "dispatch_job"
-                    || method == "dispatch_job_with_context"
-                    || method == "start_workflow"
-                {
+                if method == "dispatch_job" || method == "start_workflow" {
                     self.found = true;
                 }
                 syn::visit::visit_expr_method_call(self, node);
@@ -390,6 +391,24 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         None => quote! { &[] },
     };
 
+    // Extract written columns from INSERT/UPDATE statements in the body.
+    // Empty result is intentional — it signals "could touch any column" to
+    // the cache invalidator, which then falls back to invalidating every
+    // dependent query rather than skipping ones it can't reason about.
+    let changed_columns_tokens: TokenStream2 = {
+        let mut extractor = SqlStringExtractor::new();
+        extractor.visit_block(fn_block);
+        let mut cols: Vec<String> = extract_changed_columns_from_sql(&extractor.sql_strings)
+            .into_iter()
+            .collect();
+        cols.sort();
+        if cols.is_empty() {
+            quote! { &[] }
+        } else {
+            quote! { &[#(#cols),*] }
+        }
+    };
+
     let transactional = attrs.transactional;
     let is_public = attrs.is_public;
 
@@ -498,6 +517,7 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
                         log_level: #log_level,
                         table_dependencies: #table_deps_tokens,
                         selected_columns: &[],
+                        changed_columns: #changed_columns_tokens,
                         transactional: #transactional,
                         consistent: false,
                         max_upload_size_bytes: #max_upload_size_bytes,

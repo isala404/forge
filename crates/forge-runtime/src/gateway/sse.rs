@@ -103,7 +103,10 @@ fn validate_client_sub_id(id: &str) -> Result<(), (StatusCode, Json<SseSubscribe
         return Err(subscribe_error(
             StatusCode::BAD_REQUEST,
             "INVALID_ID",
-            format!("Subscription ID too long (max {} chars)", MAX_CLIENT_SUB_ID_LEN),
+            format!(
+                "Subscription ID too long (max {} chars)",
+                MAX_CLIENT_SUB_ID_LEN
+            ),
         ));
     }
     Ok(())
@@ -1052,13 +1055,17 @@ pub async fn sse_job_subscribe_handler(
         return resp;
     }
 
-    let (session_id, session_auth) =
-        match validate_session(&state, &request.session_id, &request.session_secret, &request_auth)
-            .await
-        {
-            Ok(v) => v,
-            Err(resp) => return resp,
-        };
+    let (session_id, session_auth) = match validate_session(
+        &state,
+        &request.session_id,
+        &request.session_secret,
+        &request_auth,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
 
     // Parse job ID
     let job_uuid = match uuid::Uuid::parse_str(&request.job_id) {
@@ -1134,13 +1141,17 @@ pub async fn sse_workflow_subscribe_handler(
         return resp;
     }
 
-    let (session_id, session_auth) =
-        match validate_session(&state, &request.session_id, &request.session_secret, &request_auth)
-            .await
-        {
-            Ok(v) => v,
-            Err(resp) => return resp,
-        };
+    let (session_id, session_auth) = match validate_session(
+        &state,
+        &request.session_id,
+        &request.session_secret,
+        &request_auth,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
 
     // Parse workflow ID
     let workflow_uuid = match uuid::Uuid::parse_str(&request.workflow_id) {

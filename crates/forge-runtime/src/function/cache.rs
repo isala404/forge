@@ -1,10 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use forge_core::{AuthContext, FunctionInfo};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+
+use super::registry::FunctionRegistry;
 
 /// `Hasher` adapter that funnels writes into a SHA-256 digest. Used to keep
 /// cache keys deterministic across rolling deploys; the standard library
@@ -208,6 +211,180 @@ impl Default for QueryCache {
     }
 }
 
+/// Coordinates query-result caching: owns the [`QueryCache`], the reverse
+/// table -> query index used for mutation invalidation, and the auth-scope
+/// derivation that keys cache entries per principal.
+///
+/// Splitting these out of [`super::router::FunctionRouter`] keeps the router
+/// focused on dispatch and lets the cache concerns be tested in isolation.
+pub struct QueryCacheCoordinator {
+    cache: QueryCache,
+    /// Reverse index: table name -> dependent queries with the columns each one
+    /// reads. Carrying the column set here lets `invalidate_for_mutation` skip
+    /// queries whose read set doesn't overlap the mutation's write set without
+    /// re-traversing the registry.
+    table_to_queries: HashMap<String, Vec<QueryDep>>,
+}
+
+/// A query that depends on a table, with the columns it reads from that table.
+/// Empty `selected_columns` means "could read any column" — treated as a wildcard
+/// so the query is always invalidated when the table is touched.
+#[derive(Clone)]
+struct QueryDep {
+    name: String,
+    selected_columns: HashSet<String>,
+}
+
+impl QueryCacheCoordinator {
+    /// Create a coordinator from the function registry. The reverse index is
+    /// built once at construction so mutation invalidation is a hash lookup.
+    pub fn new(registry: &FunctionRegistry) -> Self {
+        Self {
+            cache: QueryCache::new(),
+            table_to_queries: build_table_index(registry),
+        }
+    }
+
+    /// Lookup a cached value with an already-derived scope. Use this when the
+    /// caller has computed [`Self::auth_scope`] up front (e.g. before `auth` is
+    /// moved into a context).
+    pub fn get_by_scope(
+        &self,
+        function_name: &str,
+        args: &Value,
+        scope: Option<&str>,
+    ) -> Option<Arc<Value>> {
+        self.cache.get(function_name, args, scope)
+    }
+
+    /// Store a value with an already-derived scope.
+    pub fn set_by_scope(
+        &self,
+        function_name: &str,
+        args: &Value,
+        scope: Option<&str>,
+        value: Value,
+        ttl: Duration,
+    ) {
+        self.cache.set(function_name, args, scope, value, ttl);
+    }
+
+    /// Invalidate cached queries whose table dependencies overlap with the
+    /// mutation's write set, narrowed by column intersection when both sides
+    /// know which columns they touch.
+    ///
+    /// Conservative on uncertainty: when either the mutation's `changed_columns`
+    /// or the candidate query's `selected_columns` is empty (extractor couldn't
+    /// determine columns from the SQL), the query is invalidated. False positives
+    /// are cheap (re-execute a query); false negatives would serve stale data.
+    pub fn invalidate_for_mutation(&self, info: &FunctionInfo) {
+        if info.table_dependencies.is_empty() {
+            return;
+        }
+        let mutation_cols: HashSet<&str> = info.changed_columns.iter().copied().collect();
+        let mutation_cols_unknown = mutation_cols.is_empty();
+
+        let mut affected: HashSet<&str> = HashSet::new();
+        for table in info.table_dependencies {
+            let Some(queries) = self.table_to_queries.get(*table) else {
+                continue;
+            };
+            for dep in queries {
+                if mutation_cols_unknown
+                    || dep.selected_columns.is_empty()
+                    || dep
+                        .selected_columns
+                        .iter()
+                        .any(|c| mutation_cols.contains(c.as_str()))
+                {
+                    affected.insert(dep.name.as_str());
+                }
+            }
+        }
+        if !affected.is_empty() {
+            let names: Vec<&str> = affected.into_iter().collect();
+            self.cache.invalidate_by_tables(&names);
+            tracing::trace!(
+                mutation = info.name,
+                invalidated_queries = ?names,
+                "Cache invalidated after mutation"
+            );
+        }
+    }
+
+    /// Derive a stable cache scope from auth context. Anonymous callers share
+    /// the `"anon"` scope; authenticated callers get a hash that mixes role +
+    /// claims so cross-tenant cache bleed is impossible.
+    ///
+    /// Volatile JWT claims (`iat`, `nbf`, `exp`, `jti`, `auth_time`, `sid`,
+    /// `nonce`) are excluded — they change on every token refresh for the
+    /// same logical principal and would otherwise fragment the cache, killing
+    /// hit rate for any system using refresh tokens.
+    pub fn auth_scope(auth: &AuthContext) -> Option<String> {
+        if !auth.is_authenticated() {
+            return Some("anon".to_string());
+        }
+
+        let mut roles = auth.roles().to_vec();
+        roles.sort();
+        roles.dedup();
+
+        let mut claims = BTreeMap::new();
+        for (k, v) in auth.claims() {
+            if is_volatile_claim(k) {
+                continue;
+            }
+            claims.insert(k.clone(), v.clone());
+        }
+
+        let claims_json = serde_json::to_string(&claims).unwrap_or_default();
+        let mut buf = String::with_capacity(64 + claims_json.len());
+        for role in &roles {
+            buf.push_str(role);
+            buf.push('\x1f');
+        }
+        buf.push('\x1e');
+        buf.push_str(&claims_json);
+        let scope = crate::stable_hash::stable_u64(buf.as_bytes());
+
+        let principal = auth
+            .principal_id()
+            .unwrap_or_else(|| "authenticated".to_string());
+
+        Some(format!("subject:{principal}:scope:{scope:016x}"))
+    }
+}
+
+/// Standard JWT claims that vary across token refreshes for the same
+/// principal and must not influence the per-principal cache scope.
+fn is_volatile_claim(name: &str) -> bool {
+    matches!(
+        name,
+        "iat" | "nbf" | "exp" | "jti" | "auth_time" | "sid" | "nonce"
+    )
+}
+
+fn build_table_index(registry: &FunctionRegistry) -> HashMap<String, Vec<QueryDep>> {
+    let mut index: HashMap<String, Vec<QueryDep>> = HashMap::new();
+    for (name, info) in registry.queries() {
+        let selected_columns: HashSet<String> = info
+            .selected_columns
+            .iter()
+            .map(|c| (*c).to_string())
+            .collect();
+        for table in info.table_dependencies {
+            index
+                .entry((*table).to_string())
+                .or_default()
+                .push(QueryDep {
+                    name: name.to_string(),
+                    selected_columns: selected_columns.clone(),
+                });
+        }
+    }
+    index
+}
+
 fn hash_value(value: &Value) -> u64 {
     let mut hasher = Sha256Hasher::new();
     hash_value_recursive(value, &mut hasher);
@@ -353,6 +530,206 @@ mod tests {
 
         // Object keys should be sorted for consistent hashing
         assert_eq!(hash_value(&v1), hash_value(&v2));
+    }
+
+    #[test]
+    fn test_auth_scope_stable_across_token_refresh() {
+        let user_id = uuid::Uuid::new_v4();
+        let mut claims_t1 = std::collections::HashMap::new();
+        claims_t1.insert(
+            "sub".to_string(),
+            serde_json::Value::String(user_id.to_string()),
+        );
+        claims_t1.insert(
+            "tenant_id".to_string(),
+            serde_json::Value::String("acme".to_string()),
+        );
+        claims_t1.insert("iat".to_string(), serde_json::Value::from(1_700_000_000));
+        claims_t1.insert("exp".to_string(), serde_json::Value::from(1_700_003_600));
+        claims_t1.insert("nbf".to_string(), serde_json::Value::from(1_700_000_000));
+        claims_t1.insert(
+            "jti".to_string(),
+            serde_json::Value::String("token-uuid-1".to_string()),
+        );
+
+        let mut claims_t2 = claims_t1.clone();
+        claims_t2.insert("iat".to_string(), serde_json::Value::from(1_700_010_000));
+        claims_t2.insert("exp".to_string(), serde_json::Value::from(1_700_013_600));
+        claims_t2.insert("nbf".to_string(), serde_json::Value::from(1_700_010_000));
+        claims_t2.insert(
+            "jti".to_string(),
+            serde_json::Value::String("token-uuid-2".to_string()),
+        );
+
+        let auth_t1 = AuthContext::authenticated(user_id, vec!["member".to_string()], claims_t1);
+        let auth_t2 = AuthContext::authenticated(user_id, vec!["member".to_string()], claims_t2);
+
+        assert_eq!(
+            QueryCacheCoordinator::auth_scope(&auth_t1),
+            QueryCacheCoordinator::auth_scope(&auth_t2),
+            "Token refresh must not change cache scope for the same principal"
+        );
+    }
+
+    #[test]
+    fn test_auth_scope_differs_by_tenant() {
+        let user_id = uuid::Uuid::new_v4();
+        let mut claims_a = std::collections::HashMap::new();
+        claims_a.insert(
+            "sub".to_string(),
+            serde_json::Value::String(user_id.to_string()),
+        );
+        claims_a.insert(
+            "tenant_id".to_string(),
+            serde_json::Value::String("tenant-a".to_string()),
+        );
+
+        let mut claims_b = std::collections::HashMap::new();
+        claims_b.insert(
+            "sub".to_string(),
+            serde_json::Value::String(user_id.to_string()),
+        );
+        claims_b.insert(
+            "tenant_id".to_string(),
+            serde_json::Value::String("tenant-b".to_string()),
+        );
+
+        let auth_a = AuthContext::authenticated(user_id, vec!["member".to_string()], claims_a);
+        let auth_b = AuthContext::authenticated(user_id, vec!["member".to_string()], claims_b);
+
+        assert_ne!(
+            QueryCacheCoordinator::auth_scope(&auth_a),
+            QueryCacheCoordinator::auth_scope(&auth_b),
+            "Different tenant claims must produce distinct scopes"
+        );
+    }
+
+    /// Build a coordinator with a pre-populated table -> dependent-queries
+    /// index. Lets the invalidation tests assert behaviour without standing
+    /// up a full FunctionRegistry of fake handlers.
+    fn coordinator_with_deps(deps: Vec<(&str, &str, &[&str])>) -> QueryCacheCoordinator {
+        let mut index: HashMap<String, Vec<QueryDep>> = HashMap::new();
+        for (table, name, cols) in deps {
+            index.entry(table.to_string()).or_default().push(QueryDep {
+                name: name.to_string(),
+                selected_columns: cols.iter().map(|c| (*c).to_string()).collect(),
+            });
+        }
+        QueryCacheCoordinator {
+            cache: QueryCache::new(),
+            table_to_queries: index,
+        }
+    }
+
+    fn mutation_info(
+        name: &'static str,
+        tables: &'static [&'static str],
+        changed: &'static [&'static str],
+    ) -> FunctionInfo {
+        FunctionInfo {
+            name,
+            description: None,
+            kind: forge_core::FunctionKind::Mutation,
+            required_role: None,
+            is_public: false,
+            cache_ttl: None,
+            timeout: None,
+            http_timeout: None,
+            rate_limit_requests: None,
+            rate_limit_per_secs: None,
+            rate_limit_key: None,
+            log_level: None,
+            table_dependencies: tables,
+            selected_columns: &[],
+            changed_columns: changed,
+            transactional: true,
+            consistent: false,
+            max_upload_size_bytes: None,
+        }
+    }
+
+    #[test]
+    fn invalidate_skips_query_when_columns_disjoint() {
+        let coord = coordinator_with_deps(vec![
+            ("users", "list_user_emails", &["id", "email"]),
+            ("users", "list_user_names", &["id", "name"]),
+        ]);
+        coord.set_by_scope(
+            "list_user_emails",
+            &json!({}),
+            Some("anon"),
+            json!([]),
+            Duration::from_secs(60),
+        );
+        coord.set_by_scope(
+            "list_user_names",
+            &json!({}),
+            Some("anon"),
+            json!([]),
+            Duration::from_secs(60),
+        );
+
+        // Mutation changes only `name`. Email-only query should survive.
+        coord.invalidate_for_mutation(&mutation_info("rename_user", &["users"], &["name"]));
+
+        assert!(
+            coord
+                .get_by_scope("list_user_emails", &json!({}), Some("anon"))
+                .is_some(),
+            "email query must survive a name-only mutation"
+        );
+        assert!(
+            coord
+                .get_by_scope("list_user_names", &json!({}), Some("anon"))
+                .is_none(),
+            "name query must be invalidated"
+        );
+    }
+
+    #[test]
+    fn invalidate_falls_back_when_mutation_columns_unknown() {
+        let coord = coordinator_with_deps(vec![("users", "list_user_emails", &["id", "email"])]);
+        coord.set_by_scope(
+            "list_user_emails",
+            &json!({}),
+            Some("anon"),
+            json!([]),
+            Duration::from_secs(60),
+        );
+
+        // Empty changed_columns => we don't know what the mutation touched,
+        // so every dependent query has to go.
+        coord.invalidate_for_mutation(&mutation_info("opaque_mutation", &["users"], &[]));
+
+        assert!(
+            coord
+                .get_by_scope("list_user_emails", &json!({}), Some("anon"))
+                .is_none(),
+            "unknown column set must fall back to full invalidation"
+        );
+    }
+
+    #[test]
+    fn invalidate_falls_back_when_query_columns_unknown() {
+        // Query with no extracted columns means dynamic SQL; we can't reason
+        // about what it reads, so any mutation on the table invalidates it.
+        let coord = coordinator_with_deps(vec![("users", "dynamic_query", &[])]);
+        coord.set_by_scope(
+            "dynamic_query",
+            &json!({}),
+            Some("anon"),
+            json!([]),
+            Duration::from_secs(60),
+        );
+
+        coord.invalidate_for_mutation(&mutation_info("rename_user", &["users"], &["name"]));
+
+        assert!(
+            coord
+                .get_by_scope("dynamic_query", &json!({}), Some("anon"))
+                .is_none(),
+            "queries with unknown selected columns must always be invalidated"
+        );
     }
 
     #[test]

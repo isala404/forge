@@ -90,8 +90,8 @@ where
     where
         E: PgExecutor<'e>,
     {
-        let body = serde_json::to_string(payload)
-            .map_err(|e| ForgeError::Serialization(e.to_string()))?;
+        let body =
+            serde_json::to_string(payload).map_err(|e| ForgeError::Serialization(e.to_string()))?;
         if body.len() > MAX_PAYLOAD_BYTES {
             return Err(ForgeError::InvalidArgument(format!(
                 "NotifyChannel `{}` payload is {} bytes, exceeds {} byte limit; \

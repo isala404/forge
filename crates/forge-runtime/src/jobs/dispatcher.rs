@@ -216,6 +216,36 @@ impl JobDispatch for JobDispatcher {
         Box::pin(async move { self.dispatch_by_name(&job_type, args, owner_subject).await })
     }
 
+    fn dispatch_in_conn<'a>(
+        &'a self,
+        conn: &'a mut sqlx::PgConnection,
+        job_type: &'a str,
+        args: serde_json::Value,
+        owner_subject: Option<String>,
+    ) -> Pin<Box<dyn Future<Output = forge_core::Result<Uuid>> + Send + 'a>> {
+        Box::pin(async move {
+            let entry = self.registry.get(job_type).ok_or_else(|| {
+                forge_core::ForgeError::NotFound(format!("Job type '{}' not found", job_type))
+            })?;
+
+            let mut record = JobRecord::new(
+                entry.info.name,
+                args,
+                entry.info.priority,
+                entry.info.retry.max_attempts as i32,
+            )
+            .with_owner_subject(owner_subject);
+            if let Some(cap) = entry.info.worker_capability {
+                record = record.with_capability(cap);
+            }
+
+            self.queue
+                .enqueue_in_conn(conn, record)
+                .await
+                .map_err(forge_core::ForgeError::Database)
+        })
+    }
+
     fn cancel(
         &self,
         job_id: Uuid,

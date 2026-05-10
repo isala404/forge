@@ -70,9 +70,7 @@ struct WebhookSignatureInfo {
 /// so we pattern-match the syn AST instead of substring-scanning the token
 /// string (which previously misclassified env names like "MY_HMAC_SHA256_KEY"
 /// because they happened to contain a method substring).
-fn parse_signature_from_meta(
-    attr_args: &[NestedMeta],
-) -> Result<WebhookSignatureInfo, syn::Error> {
+fn parse_signature_from_meta(attr_args: &[NestedMeta]) -> Result<WebhookSignatureInfo, syn::Error> {
     let mut info = WebhookSignatureInfo::default();
 
     let Some(value_expr) = attr_args.iter().find_map(|meta| {
@@ -153,9 +151,7 @@ fn parse_signature_from_meta(
         if args.len() != 2 {
             return Err(syn::Error::new_spanned(
                 &call.args,
-                format!(
-                    "`{method_name}` takes 2 arguments (header name, secret env name)"
-                ),
+                format!("`{method_name}` takes 2 arguments (header name, secret env name)"),
             ));
         }
         info.header = Some(extract_str(args[0])?);

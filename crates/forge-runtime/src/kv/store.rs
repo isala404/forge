@@ -103,7 +103,12 @@ impl KvStore {
 
     /// Set a key only if it doesn't already exist (or is expired).
     /// Returns `true` if the key was set, `false` if it already existed.
-    pub async fn set_if_absent(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<bool> {
+    pub async fn set_if_absent(
+        &self,
+        key: &str,
+        value: &[u8],
+        ttl: Option<Duration>,
+    ) -> Result<bool> {
         let expires_at = ttl.map(|d| Utc::now() + d);
         // Atomic: clear expired then insert in a single statement.
         let rows = sqlx::query!(
@@ -190,13 +195,10 @@ impl KvStore {
 
     /// Reset a counter to zero. Returns `true` if the counter existed.
     pub async fn reset_counter(&self, key: &str) -> Result<bool> {
-        let result = sqlx::query!(
-            "DELETE FROM forge_kv_counters WHERE key = $1",
-            key,
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(ForgeError::Database)?;
+        let result = sqlx::query!("DELETE FROM forge_kv_counters WHERE key = $1", key,)
+            .execute(&self.pool)
+            .await
+            .map_err(ForgeError::Database)?;
 
         Ok(result.rows_affected() > 0)
     }
@@ -224,25 +226,23 @@ impl KvStore {
 
     /// Delete all keys matching a prefix.
     pub async fn delete_prefix(&self, prefix: &str) -> Result<u64> {
-        let escaped = prefix.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let escaped = prefix
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
         let pattern = format!("{escaped}%");
-        let kv_deleted = sqlx::query!(
-            "DELETE FROM forge_kv WHERE key LIKE $1",
-            pattern,
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(ForgeError::Database)?
-        .rows_affected();
+        let kv_deleted = sqlx::query!("DELETE FROM forge_kv WHERE key LIKE $1", pattern,)
+            .execute(&self.pool)
+            .await
+            .map_err(ForgeError::Database)?
+            .rows_affected();
 
-        let counter_deleted = sqlx::query!(
-            "DELETE FROM forge_kv_counters WHERE key LIKE $1",
-            pattern,
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(ForgeError::Database)?
-        .rows_affected();
+        let counter_deleted =
+            sqlx::query!("DELETE FROM forge_kv_counters WHERE key LIKE $1", pattern,)
+                .execute(&self.pool)
+                .await
+                .map_err(ForgeError::Database)?
+                .rows_affected();
 
         Ok(kv_deleted + counter_deleted)
     }

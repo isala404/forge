@@ -134,6 +134,27 @@ impl JobQueue {
     /// Enqueue a new job. If the job has an idempotency key that matches
     /// an existing non-terminal job, returns the existing job's ID.
     pub async fn enqueue(&self, job: JobRecord) -> Result<Uuid, sqlx::Error> {
+        let mut conn = self.pool.acquire().await?;
+        Self::enqueue_inner(&mut conn, &job).await
+    }
+
+    /// Enqueue a job on an existing connection (typically a transaction).
+    ///
+    /// Use when the dispatch must be atomic with other writes — e.g. a
+    /// mutation handler buffering a job that should only become visible
+    /// to workers after the surrounding transaction commits.
+    pub async fn enqueue_in_conn(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        job: JobRecord,
+    ) -> Result<Uuid, sqlx::Error> {
+        Self::enqueue_inner(conn, &job).await
+    }
+
+    async fn enqueue_inner(
+        conn: &mut sqlx::PgConnection,
+        job: &JobRecord,
+    ) -> Result<Uuid, sqlx::Error> {
         // Fast path: check for existing idempotent job before attempting INSERT.
         // The UNIQUE partial index on idempotency_key guards against races.
         if let Some(ref key) = job.idempotency_key {
@@ -145,7 +166,7 @@ impl JobQueue {
                 "#,
                 key
             )
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *conn)
             .await?;
 
             if let Some(id) = existing {
@@ -177,7 +198,7 @@ impl JobQueue {
             job.scheduled_at,
             job.created_at,
         )
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await?;
 
         // If ON CONFLICT fired (race with another enqueue), fetch the winner's ID.
@@ -190,7 +211,7 @@ impl JobQueue {
                 "#,
                 key
             )
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *conn)
             .await?;
 
             if let Some(winner) = id {

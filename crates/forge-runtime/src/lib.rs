@@ -61,7 +61,7 @@ pub use cluster::{
     GracefulShutdown, HeartbeatConfig, HeartbeatLoop, InFlightGuard, NodeCounts, NodeRegistry,
     ShutdownConfig,
 };
-pub use function::{FunctionRegistry, FunctionRouter, RouteResult};
+pub use function::{FunctionRegistry, FunctionRouter, RouteOutcome, RouteResult};
 pub use kv::KvStore;
 pub use observability::{
     TelemetryConfig, TelemetryError, build_env_filter, init_telemetry, shutdown_telemetry,

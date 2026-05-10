@@ -105,9 +105,7 @@ pub async fn signal_handler(
         SignalPayload::Event(batch) => {
             handle_event(&state, resolved_ip, &auth, &headers, batch).await
         }
-        SignalPayload::View(view) => {
-            handle_view(&state, resolved_ip, &auth, &headers, view).await
-        }
+        SignalPayload::View(view) => handle_view(&state, resolved_ip, &auth, &headers, view).await,
         SignalPayload::Report(report) => {
             handle_report(&state, resolved_ip, &auth, &headers, report).await
         }

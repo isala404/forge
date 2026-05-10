@@ -816,10 +816,7 @@ mod tests {
         assert_eq!(config.auth.legacy_secrets.len(), 1);
         let entry = &config.auth.legacy_secrets[0];
         assert_eq!(entry.secret, "retired-secret-key-32-bytes-pad!!");
-        assert_eq!(
-            entry.valid_until.to_rfc3339(),
-            "2099-01-01T00:00:00+00:00"
-        );
+        assert_eq!(entry.valid_until.to_rfc3339(), "2099-01-01T00:00:00+00:00");
     }
 
     #[test]

@@ -210,6 +210,16 @@ impl crate::function::JobDispatch for MockJobDispatch {
         Box::pin(async move { self.dispatch(&job_type, args).await })
     }
 
+    fn dispatch_in_conn<'a>(
+        &'a self,
+        _conn: &'a mut sqlx::PgConnection,
+        job_type: &'a str,
+        args: serde_json::Value,
+        _owner_subject: Option<String>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Uuid>> + Send + 'a>> {
+        Box::pin(async move { self.dispatch(job_type, args).await })
+    }
+
     fn cancel(
         &self,
         job_id: Uuid,

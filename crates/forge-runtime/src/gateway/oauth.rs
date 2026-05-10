@@ -672,7 +672,9 @@ pub async fn oauth_authorize_post(
                 .ok()
                 .and_then(|parsed| {
                     use argon2::PasswordVerifier;
-                    argon2::Argon2::default().verify_password(password.as_bytes(), &parsed).ok()
+                    argon2::Argon2::default()
+                        .verify_password(password.as_bytes(), &parsed)
+                        .ok()
                 })
                 .is_some()
         };

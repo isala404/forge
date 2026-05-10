@@ -152,7 +152,9 @@ fn convert_query_attrs(darling: DarlingQueryAttrs) -> Result<QueryAttrs, syn::Er
         Some(ref s) => Some(parse_duration_secs(s).ok_or_else(|| {
             syn::Error::new(
                 proc_macro2::Span::call_site(),
-                format!("invalid timeout \"{s}\": use a duration string like \"30s\", \"5m\", or \"1h\""),
+                format!(
+                    "invalid timeout \"{s}\": use a duration string like \"30s\", \"5m\", or \"1h\""
+                ),
             )
         })?),
         None => None,
@@ -279,7 +281,9 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
 
     // Compile-time scope check: private queries that touch tables must filter by user identity.
     // Skip when tables were explicitly specified (user takes responsibility for scoping).
-    if !attrs.is_public && !attrs.is_unscoped && !table_dependencies.is_empty()
+    if !attrs.is_public
+        && !attrs.is_unscoped
+        && !table_dependencies.is_empty()
         && !has_explicit_tables
     {
         let mut scope_extractor = SqlStringExtractor::new();
@@ -567,6 +571,7 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
                         log_level: #log_level,
                         table_dependencies: #table_deps_tokens,
                         selected_columns: #selected_cols_tokens,
+                        changed_columns: &[],
                         transactional: false,
                         consistent: #consistent,
                         max_upload_size_bytes: None,

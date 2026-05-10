@@ -681,10 +681,26 @@ mod tests {
         static USERS: &[&str] = &["users"];
 
         let (g1, _, _) = manager
-            .subscribe(s1, "a".into(), "get_projects", &serde_json::json!({}), &auth, PROJECTS, &[])
+            .subscribe(
+                s1,
+                "a".into(),
+                "get_projects",
+                &serde_json::json!({}),
+                &auth,
+                PROJECTS,
+                &[],
+            )
             .unwrap();
         let (g2, _, _) = manager
-            .subscribe(s2, "b".into(), "get_users", &serde_json::json!({}), &auth, USERS, &[])
+            .subscribe(
+                s2,
+                "b".into(),
+                "get_users",
+                &serde_json::json!({}),
+                &auth,
+                USERS,
+                &[],
+            )
             .unwrap();
 
         // Change on projects should only find g1
@@ -713,7 +729,15 @@ mod tests {
         static PROJECTS: &[&str] = &["projects"];
 
         let (_, sub_id, _) = manager
-            .subscribe(session, "a".into(), "get_projects", &serde_json::json!({}), &auth, PROJECTS, &[])
+            .subscribe(
+                session,
+                "a".into(),
+                "get_projects",
+                &serde_json::json!({}),
+                &auth,
+                PROJECTS,
+                &[],
+            )
             .unwrap();
 
         assert_eq!(manager.counts().indexed_tables, 1);

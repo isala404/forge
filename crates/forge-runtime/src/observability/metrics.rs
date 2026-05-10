@@ -8,6 +8,7 @@ const METER_NAME: &str = "forge-runtime";
 
 static HTTP_METRICS: OnceLock<HttpMetrics> = OnceLock::new();
 static FN_METRICS: OnceLock<FnMetrics> = OnceLock::new();
+static FN_CACHE_METRICS: OnceLock<FnCacheMetrics> = OnceLock::new();
 static JOB_METRICS: OnceLock<JobMetrics> = OnceLock::new();
 static CONNECTIONS_GAUGE: OnceLock<ActiveConnectionsGauge> = OnceLock::new();
 
@@ -77,16 +78,61 @@ impl FnMetrics {
         }
     }
 
-    pub fn record(&self, function: &str, kind: &str, success: bool, duration_secs: f64) {
+    pub fn record(
+        &self,
+        function: &str,
+        kind: &str,
+        success: bool,
+        cached: bool,
+        duration_secs: f64,
+    ) {
         let status = if success { "ok" } else { "error" };
         let attributes = [
             KeyValue::new("function", function.to_string()),
             KeyValue::new("kind", kind.to_string()),
             KeyValue::new("status", status),
+            KeyValue::new("cached", cached),
         ];
 
         self.executions_total.add(1, &attributes);
         self.duration.record(duration_secs, &attributes);
+    }
+}
+
+pub struct FnCacheMetrics {
+    hits_total: Counter<u64>,
+    misses_total: Counter<u64>,
+}
+
+impl FnCacheMetrics {
+    fn new() -> Self {
+        let meter = global::meter(METER_NAME);
+
+        let hits_total = meter
+            .u64_counter("fn.cache.hits_total")
+            .with_description("Total query cache hits")
+            .with_unit("hits")
+            .build();
+
+        let misses_total = meter
+            .u64_counter("fn.cache.misses_total")
+            .with_description("Total query cache misses")
+            .with_unit("misses")
+            .build();
+
+        Self {
+            hits_total,
+            misses_total,
+        }
+    }
+
+    pub fn record(&self, function: &str, hit: bool) {
+        let attributes = [KeyValue::new("function", function.to_string())];
+        if hit {
+            self.hits_total.add(1, &attributes);
+        } else {
+            self.misses_total.add(1, &attributes);
+        }
     }
 }
 
@@ -169,6 +215,10 @@ fn fn_metrics() -> &'static FnMetrics {
     FN_METRICS.get_or_init(FnMetrics::new)
 }
 
+fn fn_cache_metrics() -> &'static FnCacheMetrics {
+    FN_CACHE_METRICS.get_or_init(FnCacheMetrics::new)
+}
+
 fn job_metrics() -> &'static JobMetrics {
     JOB_METRICS.get_or_init(JobMetrics::new)
 }
@@ -181,8 +231,18 @@ pub fn record_http_request(method: &str, path: &str, status: u16, duration_secs:
     http_metrics().record(method, path, status, duration_secs);
 }
 
-pub fn record_fn_execution(function: &str, kind: &str, success: bool, duration_secs: f64) {
-    fn_metrics().record(function, kind, success, duration_secs);
+pub fn record_fn_execution(
+    function: &str,
+    kind: &str,
+    success: bool,
+    cached: bool,
+    duration_secs: f64,
+) {
+    fn_metrics().record(function, kind, success, cached, duration_secs);
+}
+
+pub fn record_fn_cache(function: &str, hit: bool) {
+    fn_cache_metrics().record(function, hit);
 }
 
 pub fn record_job_execution(job_type: &str, status: &str, duration_secs: f64) {

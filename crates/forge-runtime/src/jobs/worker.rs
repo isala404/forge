@@ -177,11 +177,11 @@ impl Worker {
 
             let batch_size = (available as i32).min(self.config.batch_size);
 
-            let jobs = match self.queue.claim(
-                self.id,
-                &self.config.capabilities,
-                batch_size,
-            ).await {
+            let jobs = match self
+                .queue
+                .claim(self.id, &self.config.capabilities, batch_size)
+                .await
+            {
                 Ok(jobs) => jobs,
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to claim jobs");
@@ -216,24 +216,44 @@ impl Worker {
                     match &result {
                         super::executor::ExecutionResult::Completed { .. } => {
                             tracing::info!(job_id = %job_id, job_type = %job_type, duration_ms = (duration_secs * 1000.0) as u64, "Job completed");
-                            crate::observability::record_job_execution(&job_type, "completed", duration_secs);
+                            crate::observability::record_job_execution(
+                                &job_type,
+                                "completed",
+                                duration_secs,
+                            );
                         }
                         super::executor::ExecutionResult::Failed { error, retryable } => {
                             if *retryable {
                                 tracing::warn!(job_id = %job_id, job_type = %job_type, error = %error, "Job failed, will retry");
-                                crate::observability::record_job_execution(&job_type, "retrying", duration_secs);
+                                crate::observability::record_job_execution(
+                                    &job_type,
+                                    "retrying",
+                                    duration_secs,
+                                );
                             } else {
                                 tracing::error!(job_id = %job_id, job_type = %job_type, error = %error, "Job failed permanently");
-                                crate::observability::record_job_execution(&job_type, "failed", duration_secs);
+                                crate::observability::record_job_execution(
+                                    &job_type,
+                                    "failed",
+                                    duration_secs,
+                                );
                             }
                         }
                         super::executor::ExecutionResult::TimedOut { retryable } => {
                             tracing::error!(job_id = %job_id, job_type = %job_type, will_retry = %retryable, "Job timed out");
-                            crate::observability::record_job_execution(&job_type, "timeout", duration_secs);
+                            crate::observability::record_job_execution(
+                                &job_type,
+                                "timeout",
+                                duration_secs,
+                            );
                         }
                         super::executor::ExecutionResult::Cancelled { reason } => {
                             tracing::info!(job_id = %job_id, job_type = %job_type, reason = %reason, "Job cancelled");
-                            crate::observability::record_job_execution(&job_type, "cancelled", duration_secs);
+                            crate::observability::record_job_execution(
+                                &job_type,
+                                "cancelled",
+                                duration_secs,
+                            );
                         }
                     }
 
