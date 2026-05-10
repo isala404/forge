@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            WITH cleared AS (\n                DELETE FROM forge_kv\n                WHERE key = $1 AND expires_at IS NOT NULL AND expires_at <= NOW()\n            )\n            INSERT INTO forge_kv (key, value, expires_at, updated_at)\n            VALUES ($1, $2, $3, NOW())\n            ON CONFLICT (key) DO NOTHING\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bytea",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "14a5eaba33a3e0099b9e7c8f9c8c72fac7c21bcaa74043ba8bff336101547965"
+}

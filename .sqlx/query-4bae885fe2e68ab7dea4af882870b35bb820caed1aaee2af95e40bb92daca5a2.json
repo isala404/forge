@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE forge_jobs\n                SET\n                    status = 'pending',\n                    worker_id = NULL,\n                    claimed_at = NULL,\n                    started_at = NULL,\n                    last_error = $2,\n                    scheduled_at = NOW() + make_interval(secs => $3),\n                    cancel_requested_at = NULL,\n                    cancelled_at = NULL,\n                    cancel_reason = NULL\n                WHERE id = $1 AND status = 'running'\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4bae885fe2e68ab7dea4af882870b35bb820caed1aaee2af95e40bb92daca5a2"
+}

@@ -1,6 +1,10 @@
 //! Observability configuration for OTLP telemetry export.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
+
+use super::types::DurationStr;
 
 /// Observability configuration for OTLP telemetry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,7 +39,7 @@ pub struct ObservabilityConfig {
 
     /// Metrics export interval duration (e.g. "15s", "1m"). OTLP collectors typically prefer 15s-60s.
     #[serde(default = "default_metrics_interval")]
-    pub metrics_interval: String,
+    pub metrics_interval: DurationStr,
 
     /// Log level for the tracing subscriber (e.g., "debug", "info", "warn").
     #[serde(default = "default_log_level")]
@@ -63,11 +67,6 @@ impl ObservabilityConfig {
     pub fn otlp_active(&self) -> bool {
         self.enabled && (self.enable_traces || self.enable_metrics || self.enable_logs)
     }
-
-    /// Metrics export interval in seconds, parsed from the `metrics_interval` string.
-    pub fn metrics_interval_secs(&self) -> u64 {
-        super::parse_duration_secs(&self.metrics_interval, 15)
-    }
 }
 
 fn default_otlp_endpoint() -> String {
@@ -84,8 +83,8 @@ fn default_sampling_ratio() -> f64 {
     1.0
 }
 
-fn default_metrics_interval() -> String {
-    "15s".to_string()
+fn default_metrics_interval() -> DurationStr {
+    DurationStr::new(Duration::from_secs(15))
 }
 
 fn default_log_level() -> String {

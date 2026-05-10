@@ -9,6 +9,7 @@ pub mod cluster;
 mod database;
 mod function;
 mod gateway;
+pub(crate) mod loader;
 mod mcp_config;
 mod node;
 mod observability;
@@ -17,9 +18,10 @@ mod rate_limit;
 mod realtime_config;
 mod security;
 pub mod signals;
+pub mod types;
 mod worker;
 
-pub use auth::{AuthConfig, JwtAlgorithm};
+pub use auth::{AuthConfig, JwtAlgorithm, LegacySecret};
 pub use cluster::ClusterConfig;
 pub use database::{DatabaseConfig, PoolConfig};
 pub use function::FunctionConfig;
@@ -32,7 +34,10 @@ pub use rate_limit::{RateLimitMode, RateLimitSettings};
 pub use realtime_config::RealtimeConfig;
 pub use security::SecurityConfig;
 pub use signals::SignalsConfig;
+pub use types::{DurationStr, SizeStr};
 pub use worker::WorkerConfig;
+
+pub use loader::substitute_env_vars;
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -110,10 +115,9 @@ impl ForgeConfig {
 
     /// Parse configuration from a TOML string.
     pub fn parse_toml(content: &str) -> Result<Self> {
-        reject_secret_defaults(content)?;
+        loader::reject_secret_defaults(content)?;
 
-        // Substitute environment variables
-        let content = substitute_env_vars(content);
+        let content = loader::substitute_env_vars(content);
 
         let config: Self = toml::from_str(&content)
             .map_err(|e| ForgeError::Config(format!("Failed to parse config: {}", e)))?;
@@ -127,8 +131,8 @@ impl ForgeConfig {
         self.database.validate()?;
         self.auth.validate()?;
         self.mcp.validate()?;
-        let body_limit = self.gateway.max_body_size_bytes()?;
-        let file_limit = self.gateway.max_file_size_bytes()?;
+        let body_limit = self.gateway.max_body_size.as_bytes();
+        let file_limit = self.gateway.max_file_size.as_bytes();
         if file_limit > body_limit {
             return Err(ForgeError::Config(format!(
                 "gateway.max_file_size ({}) cannot exceed gateway.max_body_size ({})",
@@ -205,8 +209,8 @@ impl ForgeConfig {
             ));
         }
 
-        let quiet_ms = self.realtime.debounce_quiet_ms();
-        let max_ms = self.realtime.debounce_max_ms();
+        let quiet_ms = self.realtime.debounce_quiet_window.as_millis();
+        let max_ms = self.realtime.debounce_max_wait.as_millis();
         if quiet_ms > max_ms {
             return Err(ForgeError::Config(format!(
                 "realtime.debounce_quiet_window ({}) cannot exceed \
@@ -221,74 +225,6 @@ impl ForgeConfig {
                 return Err(ForgeError::Config(format!(
                     "gateway.trusted_proxies contains invalid entry \"{entry}\". \
                      Expected an IP address (e.g. \"10.0.0.1\") or CIDR range (e.g. \"10.0.0.0/8\")."
-                )));
-            }
-        }
-
-        self.validate_durations()?;
-
-        Ok(())
-    }
-
-    /// Validate all duration string fields parse correctly instead of silently
-    /// falling back to defaults.
-    fn validate_durations(&self) -> Result<()> {
-        let fields: &[(&str, &str)] = &[
-            ("gateway.request_timeout", &self.gateway.request_timeout),
-            ("function.timeout", &self.function.timeout),
-            ("worker.job_timeout", &self.worker.job_timeout),
-            ("worker.poll_interval", &self.worker.poll_interval),
-            ("auth.jwks_cache_ttl", &self.auth.jwks_cache_ttl),
-            ("auth.session_ttl", &self.auth.session_ttl),
-            ("auth.jwt_leeway", &self.auth.jwt_leeway),
-            ("mcp.session_ttl", &self.mcp.session_ttl),
-            (
-                "observability.metrics_interval",
-                &self.observability.metrics_interval,
-            ),
-            ("realtime.resync_interval", &self.realtime.resync_interval),
-            (
-                "realtime.debounce_quiet_window",
-                &self.realtime.debounce_quiet_window,
-            ),
-            (
-                "realtime.debounce_max_wait",
-                &self.realtime.debounce_max_wait,
-            ),
-            (
-                "cluster.heartbeat_interval",
-                &self.cluster.heartbeat_interval,
-            ),
-            ("cluster.dead_threshold", &self.cluster.dead_threshold),
-            ("database.pool_timeout", &self.database.pool_timeout),
-            (
-                "database.statement_timeout",
-                &self.database.statement_timeout,
-            ),
-        ];
-
-        for (name, value) in fields {
-            if crate::util::parse_duration(value).is_none() {
-                return Err(ForgeError::Config(format!(
-                    "{name} = \"{value}\" is not a valid duration. \
-                     Use a suffix like \"30s\", \"5m\", \"1h\", or \"200ms\"."
-                )));
-            }
-        }
-
-        let optional_fields: &[(&str, &Option<String>)] = &[
-            ("auth.access_token_ttl", &self.auth.access_token_ttl),
-            ("auth.refresh_token_ttl", &self.auth.refresh_token_ttl),
-            ("auth.session_cookie_ttl", &self.auth.session_cookie_ttl),
-        ];
-
-        for (name, value) in optional_fields {
-            if let Some(v) = value
-                && crate::util::parse_duration(v).is_none()
-            {
-                return Err(ForgeError::Config(format!(
-                    "{name} = \"{v}\" is not a valid duration. \
-                     Use a suffix like \"30s\", \"5m\", \"1h\", or \"200ms\"."
                 )));
             }
         }
@@ -317,141 +253,16 @@ impl ForgeConfig {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Duration / size parsing helpers (used by sub-module `impl` blocks via
-// `super::parse_duration_secs` etc.)
-// ---------------------------------------------------------------------------
-
-pub(crate) fn parse_duration_secs(s: &str, default_secs: u64) -> u64 {
-    crate::util::parse_duration(s)
-        .map(|d| d.as_secs())
-        .unwrap_or(default_secs)
-}
-
-pub(crate) fn parse_duration_millis(s: &str, default_ms: u64) -> u64 {
-    crate::util::parse_duration(s)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(default_ms)
-}
-
 /// `default_true` serde helper re-exported for sub-modules.
 pub(crate) fn default_true() -> bool {
     true
 }
 
-// ---------------------------------------------------------------------------
-// Env-var substitution and secret-default rejection
-// ---------------------------------------------------------------------------
-
-/// Reject config patterns where secret-like env vars have hardcoded defaults.
-/// Catches `${JWT_SECRET-my-default}` before it silently becomes a production secret.
-fn reject_secret_defaults(content: &str) -> crate::Result<()> {
-    const SECRET_KEYWORDS: &[&str] = &["secret", "password", "key"];
-
-    let bytes = content.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-
-    while i < len {
-        if i + 1 < len
-            && bytes.get(i) == Some(&b'$')
-            && bytes.get(i + 1) == Some(&b'{')
-            && let Some(end) = content.get(i + 2..).and_then(|s| s.find('}'))
-        {
-            let inner = &content[i + 2..i + 2 + end];
-            let (var_name, default_value) = parse_var_with_default(inner);
-
-            if default_value.is_some() {
-                let var_lower = var_name.to_lowercase();
-                for keyword in SECRET_KEYWORDS {
-                    if var_lower.contains(keyword) {
-                        return Err(ForgeError::Config(format!(
-                            "${{{inner}}} uses a hardcoded default for a secret. \
-                             Remove the default value and set {var_name} as an environment variable."
-                        )));
-                    }
-                }
-            }
-
-            i += 2 + end + 1;
-            continue;
-        }
-        i += 1;
-    }
-
-    Ok(())
-}
-
-/// Substitute environment variables in the format `${VAR_NAME}`.
-///
-/// Supports default values with `${VAR-default}` or `${VAR:-default}`.
-/// When the env var is unset, the default is used. Without a default,
-/// the literal `${VAR}` is preserved (so TOML parsing can still fail
-/// loudly if a required variable is missing).
-#[allow(clippy::indexing_slicing)]
-pub fn substitute_env_vars(content: &str) -> String {
-    let mut result = String::with_capacity(content.len());
-    let bytes = content.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-
-    while i < len {
-        if i + 1 < len
-            && bytes[i] == b'$'
-            && bytes[i + 1] == b'{'
-            && let Some(end) = content[i + 2..].find('}')
-        {
-            let inner = &content[i + 2..i + 2 + end];
-
-            // Split on first `-` or `:-` for default value support
-            let (var_name, default_value) = parse_var_with_default(inner);
-
-            if is_valid_env_var_name(var_name) {
-                if let Ok(value) = std::env::var(var_name) {
-                    result.push_str(&value);
-                } else if let Some(default) = default_value {
-                    result.push_str(default);
-                } else {
-                    result.push_str(&content[i..i + 2 + end + 1]);
-                }
-                i += 2 + end + 1;
-                continue;
-            }
-        }
-        result.push(bytes[i] as char);
-        i += 1;
-    }
-
-    result
-}
-
-/// Parse `VAR-default` or `VAR:-default` into (name, optional default).
-/// Both forms behave identically (fallback when unset). `:-` is checked
-/// first so its `-` doesn't get matched by the plain `-` branch.
-fn parse_var_with_default(inner: &str) -> (&str, Option<&str>) {
-    if let Some(pos) = inner.find(":-") {
-        return (&inner[..pos], Some(&inner[pos + 2..]));
-    }
-    if let Some(pos) = inner.find('-') {
-        return (&inner[..pos], Some(&inner[pos + 1..]));
-    }
-    (inner, None)
-}
-
-fn is_valid_env_var_name(name: &str) -> bool {
-    let first = match name.as_bytes().first() {
-        Some(b) => b,
-        None => return false,
-    };
-    (first.is_ascii_uppercase() || *first == b'_')
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, unsafe_code)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -608,66 +419,6 @@ mod tests {
     }
 
     #[test]
-    fn test_env_var_default_used_when_unset() {
-        // Ensure the var is definitely not set
-        unsafe {
-            std::env::remove_var("TEST_FORGE_OTEL_UNSET");
-        }
-
-        let input = r#"enabled = ${TEST_FORGE_OTEL_UNSET-false}"#;
-        let result = substitute_env_vars(input);
-        assert_eq!(result, "enabled = false");
-    }
-
-    #[test]
-    fn test_env_var_default_overridden_when_set() {
-        unsafe {
-            std::env::set_var("TEST_FORGE_OTEL_SET", "true");
-        }
-
-        let input = r#"enabled = ${TEST_FORGE_OTEL_SET-false}"#;
-        let result = substitute_env_vars(input);
-        assert_eq!(result, "enabled = true");
-
-        unsafe {
-            std::env::remove_var("TEST_FORGE_OTEL_SET");
-        }
-    }
-
-    #[test]
-    fn test_env_var_colon_dash_default() {
-        unsafe {
-            std::env::remove_var("TEST_FORGE_ENDPOINT_UNSET");
-        }
-
-        let input = r#"endpoint = "${TEST_FORGE_ENDPOINT_UNSET:-http://localhost:4318}""#;
-        let result = substitute_env_vars(input);
-        assert_eq!(result, r#"endpoint = "http://localhost:4318""#);
-    }
-
-    #[test]
-    fn test_env_var_no_default_preserves_literal() {
-        unsafe {
-            std::env::remove_var("TEST_FORGE_MISSING");
-        }
-
-        let input = r#"url = "${TEST_FORGE_MISSING}""#;
-        let result = substitute_env_vars(input);
-        assert_eq!(result, r#"url = "${TEST_FORGE_MISSING}""#);
-    }
-
-    #[test]
-    fn test_env_var_default_empty_string() {
-        unsafe {
-            std::env::remove_var("TEST_FORGE_EMPTY_DEFAULT");
-        }
-
-        let input = r#"val = "${TEST_FORGE_EMPTY_DEFAULT-}""#;
-        let result = substitute_env_vars(input);
-        assert_eq!(result, r#"val = """#);
-    }
-
-    #[test]
     fn test_observability_config_default_disabled() {
         let toml = r#"
             [database]
@@ -726,8 +477,8 @@ mod tests {
     #[test]
     fn test_access_token_ttl_custom() {
         let auth = AuthConfig {
-            access_token_ttl: Some("15m".into()),
-            refresh_token_ttl: Some("7d".into()),
+            access_token_ttl: Some(DurationStr::new(Duration::from_secs(900))),
+            refresh_token_ttl: Some(DurationStr::new(Duration::from_secs(7 * 86400))),
             ..Default::default()
         };
         assert_eq!(auth.access_token_ttl_secs(), 900);
@@ -737,7 +488,7 @@ mod tests {
     #[test]
     fn test_access_token_ttl_minimum_enforced() {
         let auth = AuthConfig {
-            access_token_ttl: Some("0s".into()),
+            access_token_ttl: Some(DurationStr::new(Duration::from_secs(0))),
             ..Default::default()
         };
         // Should floor at 1, not 0
@@ -747,7 +498,7 @@ mod tests {
     #[test]
     fn test_refresh_token_ttl_minimum_enforced() {
         let auth = AuthConfig {
-            refresh_token_ttl: Some("1h".into()),
+            refresh_token_ttl: Some(DurationStr::new(Duration::from_secs(3600))),
             ..Default::default()
         };
         // 1 hour < 1 day, so should floor at 1 day
@@ -757,50 +508,47 @@ mod tests {
     #[test]
     fn test_max_body_size_defaults() {
         let gw = GatewayConfig::default();
-        assert_eq!(gw.max_body_size_bytes().unwrap(), 20 * 1024 * 1024);
+        assert_eq!(gw.max_body_size.as_bytes(), 20 * 1024 * 1024);
     }
 
     #[test]
     fn test_max_body_size_custom() {
         let gw = GatewayConfig {
-            max_body_size: "100mb".into(),
+            max_body_size: SizeStr::new(100 * 1024 * 1024),
             ..Default::default()
         };
-        assert_eq!(gw.max_body_size_bytes().unwrap(), 100 * 1024 * 1024);
+        assert_eq!(gw.max_body_size.as_bytes(), 100 * 1024 * 1024);
     }
 
     #[test]
-    fn test_max_body_size_invalid_errors() {
-        let gw = GatewayConfig {
-            max_body_size: "not-a-size".into(),
-            ..Default::default()
-        };
-        assert!(gw.max_body_size_bytes().is_err());
+    fn test_max_body_size_from_toml() {
+        let toml = r#"
+            [database]
+            url = "postgres://localhost/test"
+            [gateway]
+            max_body_size = "100mb"
+        "#;
+        let config = ForgeConfig::parse_toml(toml).unwrap();
+        assert_eq!(config.gateway.max_body_size.as_bytes(), 100 * 1024 * 1024);
     }
 
     #[test]
     fn test_max_file_size_defaults() {
         let gw = GatewayConfig::default();
-        assert_eq!(gw.max_file_size_bytes().unwrap(), 10 * 1024 * 1024);
+        assert_eq!(gw.max_file_size.as_bytes(), 10 * 1024 * 1024);
     }
 
     #[test]
-    fn test_max_file_size_custom() {
-        let gw = GatewayConfig {
-            max_file_size: "200mb".into(),
-            max_body_size: "500mb".into(),
-            ..Default::default()
-        };
-        assert_eq!(gw.max_file_size_bytes().unwrap(), 200 * 1024 * 1024);
-    }
-
-    #[test]
-    fn test_max_file_size_invalid_errors() {
-        let gw = GatewayConfig {
-            max_file_size: "nope".into(),
-            ..Default::default()
-        };
-        assert!(gw.max_file_size_bytes().is_err());
+    fn test_max_file_size_from_toml() {
+        let toml = r#"
+            [database]
+            url = "postgres://localhost/test"
+            [gateway]
+            max_body_size = "500mb"
+            max_file_size = "200mb"
+        "#;
+        let config = ForgeConfig::parse_toml(toml).unwrap();
+        assert_eq!(config.gateway.max_file_size.as_bytes(), 200 * 1024 * 1024);
     }
 
     #[test]
@@ -1048,6 +796,30 @@ mod tests {
             cors_enabled = false
         "#;
         assert!(ForgeConfig::parse_toml(toml).is_ok());
+    }
+
+    #[test]
+    fn legacy_secrets_parse_with_valid_until_from_toml() {
+        let toml = r#"
+            [database]
+            url = "postgres://localhost/test"
+
+            [auth]
+            jwt_secret = "active-secret-key-32-bytes-pad!!"
+            jwt_audience = "https://api.example.com"
+
+            [[auth.legacy_secrets]]
+            secret = "retired-secret-key-32-bytes-pad!!"
+            valid_until = "2099-01-01T00:00:00Z"
+        "#;
+        let config = ForgeConfig::parse_toml(toml).unwrap();
+        assert_eq!(config.auth.legacy_secrets.len(), 1);
+        let entry = &config.auth.legacy_secrets[0];
+        assert_eq!(entry.secret, "retired-secret-key-32-bytes-pad!!");
+        assert_eq!(
+            entry.valid_until.to_rfc3339(),
+            "2099-01-01T00:00:00+00:00"
+        );
     }
 
     #[test]

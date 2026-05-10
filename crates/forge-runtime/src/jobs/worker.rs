@@ -34,7 +34,7 @@ impl Default for WorkerConfig {
             id: None,
             capabilities: vec!["general".to_string()],
             max_concurrent: 10,
-            poll_interval: Duration::from_millis(100),
+            poll_interval: Duration::from_secs(5),
             batch_size: 10,
             stale_cleanup_interval: Duration::from_secs(60),
             stale_threshold: chrono::Duration::minutes(5),

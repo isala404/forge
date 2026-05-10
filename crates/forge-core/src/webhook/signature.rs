@@ -1,5 +1,15 @@
 use std::time::Duration;
 
+/// Default replay window for non-Stripe webhook signature schemes (5 minutes).
+/// Stripe enforces its own 5-minute window via the `t=` field in its header
+/// and ignores this value.
+pub const DEFAULT_REPLAY_WINDOW_SECS: u64 = 300;
+
+/// Header used by non-Stripe schemes to convey the request's unix-seconds
+/// timestamp. Senders that don't ship this header are rejected when the
+/// scheme requires replay protection.
+pub const REPLAY_TIMESTAMP_HEADER: &str = "x-webhook-timestamp";
+
 /// Configuration for webhook signature validation.
 #[derive(Debug, Clone)]
 pub struct SignatureConfig {
@@ -9,6 +19,12 @@ pub struct SignatureConfig {
     pub header_name: &'static str,
     /// Environment variable name containing the secret.
     pub secret_env: &'static str,
+    /// Maximum age, in seconds, that a request may have before it is rejected
+    /// as a replay. For non-Stripe schemes the runtime reads
+    /// `x-webhook-timestamp` and compares to `now`. A value of `0` disables
+    /// replay enforcement (not recommended). Stripe always uses its own
+    /// 300s window from the `t=` field and ignores this setting.
+    pub replay_window_secs: u64,
 }
 
 /// Supported signature algorithms.
@@ -133,6 +149,7 @@ impl WebhookSignature {
             algorithm: SignatureAlgorithm::HmacSha256,
             header_name: header,
             secret_env,
+            replay_window_secs: DEFAULT_REPLAY_WINDOW_SECS,
         }
     }
 
@@ -149,6 +166,7 @@ impl WebhookSignature {
             algorithm: SignatureAlgorithm::StripeWebhooks,
             header_name: "stripe-signature",
             secret_env,
+            replay_window_secs: DEFAULT_REPLAY_WINDOW_SECS,
         }
     }
 
@@ -164,6 +182,7 @@ impl WebhookSignature {
             algorithm: SignatureAlgorithm::HmacSha256Base64,
             header_name: "x-shopify-hmac-sha256",
             secret_env,
+            replay_window_secs: DEFAULT_REPLAY_WINDOW_SECS,
         }
     }
 
@@ -181,6 +200,7 @@ impl WebhookSignature {
             algorithm: SignatureAlgorithm::Ed25519,
             header_name: header,
             secret_env: public_key_env,
+            replay_window_secs: DEFAULT_REPLAY_WINDOW_SECS,
         }
     }
 }

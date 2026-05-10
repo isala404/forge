@@ -5,6 +5,7 @@
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
 /// Verify a PKCE code verifier against a stored code challenge (S256).
 ///
@@ -13,7 +14,10 @@ pub fn verify_s256(code_verifier: &str, code_challenge: &str) -> bool {
     let mut hasher = Sha256::new();
     hasher.update(code_verifier.as_bytes());
     let computed = URL_SAFE_NO_PAD.encode(hasher.finalize());
-    constant_time_eq(computed.as_bytes(), code_challenge.as_bytes())
+    computed
+        .as_bytes()
+        .ct_eq(code_challenge.as_bytes())
+        .into()
 }
 
 /// Compute S256 challenge from a verifier.
@@ -21,18 +25,6 @@ pub fn compute_s256_challenge(code_verifier: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(code_verifier.as_bytes());
     URL_SAFE_NO_PAD.encode(hasher.finalize())
-}
-
-/// Constant-time byte comparison to prevent timing attacks.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 #[cfg(test)]

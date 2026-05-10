@@ -11,9 +11,25 @@ use forge_core::auth::Claims;
 use forge_core::config::JwtAlgorithm as CoreJwtAlgorithm;
 use forge_core::function::AuthContext;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, dangerous, decode, encode};
+use sha2::{Digest, Sha256};
 use tracing::debug;
 
 use super::jwks::JwksClient;
+
+/// Derive a stable, opaque key id from an HMAC secret. We take the first
+/// 8 hex chars of `SHA-256(secret_bytes)` — short enough to keep token
+/// headers small, deterministic so the same secret always produces the
+/// same kid, and one-way so it leaks nothing useful about the secret.
+fn secret_kid(secret: &[u8]) -> String {
+    let hash = Sha256::digest(secret);
+    let prefix = hash.as_slice().get(..4).unwrap_or(&[]);
+    let mut out = String::with_capacity(prefix.len() * 2);
+    for byte in prefix {
+        use std::fmt::Write;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
 
 /// Authentication configuration for the runtime.
 #[derive(Debug, Clone)]
@@ -32,8 +48,9 @@ pub struct AuthConfig {
     pub leeway_secs: u64,
     /// Session cookie lifetime in seconds. Defaults to the access token TTL.
     pub session_cookie_ttl_secs: i64,
-    /// Old HMAC secrets still accepted for validation (never signing). See `legacy_secrets` in forge.toml.
-    pub legacy_secrets: Vec<String>,
+    /// Old HMAC secrets still accepted for validation (never signing). Each entry has a
+    /// mandatory `valid_until`; expired entries are dropped at middleware construction.
+    pub legacy_secrets: Vec<forge_core::config::LegacySecret>,
     /// JWT spec claims that must be present. Derived from `required_claims` in forge.toml.
     pub required_claims: Vec<String>,
     /// Skip signature verification (DEV MODE ONLY - NEVER USE IN PRODUCTION).
@@ -69,7 +86,7 @@ impl AuthConfig {
         let jwks_client = config
             .jwks_url
             .as_ref()
-            .map(|url| JwksClient::new(url.clone(), config.jwks_cache_ttl_secs()).map(Arc::new))
+            .map(|url| JwksClient::new(url.clone(), config.jwks_cache_ttl.as_secs()).map(Arc::new))
             .transpose()?;
 
         Ok(Self {
@@ -78,7 +95,7 @@ impl AuthConfig {
             jwks_client,
             issuer: config.jwt_issuer.clone(),
             audience: config.jwt_audience.clone(),
-            leeway_secs: config.jwt_leeway_secs(),
+            leeway_secs: config.jwt_leeway.as_secs(),
             session_cookie_ttl_secs: config.session_cookie_ttl_secs(),
             legacy_secrets: config.legacy_secrets.clone(),
             required_claims: config.required_claims.clone(),
@@ -95,22 +112,26 @@ impl AuthConfig {
     }
 
     /// Create a dev mode config that skips signature verification.
-    /// WARNING: Only use this for development and testing!
+    /// WARNING: Only use this for development and testing.
     ///
-    /// Returns a production-safe config (verification enabled, no secret) if
-    /// `FORGE_ENV` is set to `"production"`, preventing accidental misuse.
-    pub fn dev_mode() -> Self {
-        if std::env::var("FORGE_ENV")
-            .map(|v| v.eq_ignore_ascii_case("production"))
-            .unwrap_or(false)
-        {
-            tracing::error!(
-                "AuthConfig::dev_mode() called with FORGE_ENV=production. \
-                 Returning default config with verification enabled."
-            );
-            return Self::default();
+    /// Fails closed in production: returns `ForgeError::Config` when
+    /// `FORGE_ENV=production`. The startup must abort, not auto-correct.
+    pub fn dev_mode() -> forge_core::Result<Self> {
+        Self::dev_mode_with_env(std::env::var("FORGE_ENV").ok().as_deref())
+    }
+
+    /// Inner constructor that takes the resolved environment value. Split out
+    /// from `dev_mode()` so tests can exercise the production guard without
+    /// touching process-global env state.
+    fn dev_mode_with_env(forge_env: Option<&str>) -> forge_core::Result<Self> {
+        if forge_env.is_some_and(|v| v.eq_ignore_ascii_case("production")) {
+            return Err(forge_core::ForgeError::Config(
+                "AuthConfig::dev_mode() refused: FORGE_ENV=production. \
+                 Configure a real jwt_secret or jwks_url instead."
+                    .into(),
+            ));
         }
-        Self {
+        Ok(Self {
             jwt_secret: None,
             algorithm: JwtAlgorithm::HS256,
             jwks_client: None,
@@ -121,7 +142,7 @@ impl AuthConfig {
             legacy_secrets: Vec::new(),
             required_claims: vec!["exp".into(), "sub".into()],
             skip_verification: true,
-        }
+        })
     }
 
     /// Check if this config uses HMAC (symmetric) algorithms.
@@ -177,6 +198,9 @@ impl From<CoreJwtAlgorithm> for JwtAlgorithm {
 #[derive(Clone)]
 pub struct HmacTokenIssuer {
     secret: String,
+    /// Stable kid emitted in every token header so verifiers can pick the
+    /// right key during rotation without trying every legacy secret.
+    kid: String,
     algorithm: Algorithm,
 }
 
@@ -199,8 +223,10 @@ impl HmacTokenIssuer {
                 "JWT secret is shorter than 32 bytes; startup validation should have caught this"
             );
         }
+        let kid = secret_kid(secret.as_bytes());
         Some(Self {
             secret,
+            kid,
             algorithm: config.algorithm.into(),
         })
     }
@@ -208,7 +234,8 @@ impl HmacTokenIssuer {
 
 impl forge_core::TokenIssuer for HmacTokenIssuer {
     fn sign(&self, claims: &Claims) -> forge_core::Result<String> {
-        let header = jsonwebtoken::Header::new(self.algorithm);
+        let mut header = jsonwebtoken::Header::new(self.algorithm);
+        header.kid = Some(self.kid.clone());
         encode(
             &header,
             claims,
@@ -224,8 +251,13 @@ pub struct AuthMiddleware {
     config: Arc<AuthConfig>,
     /// Pre-computed HMAC decoding key (for performance).
     hmac_key: Option<DecodingKey>,
-    /// Pre-computed decoding keys for legacy HMAC secrets (rotation grace).
-    legacy_hmac_keys: Vec<DecodingKey>,
+    /// Stable kid for the active HMAC secret. `None` when no HMAC secret is
+    /// configured (RSA, dev mode, or empty secret).
+    hmac_kid: Option<String>,
+    /// Pre-computed decoding keys for legacy HMAC secrets (rotation grace),
+    /// each paired with the kid of the underlying secret. The kid lets the
+    /// validator look up the right key directly when the token carries one.
+    legacy_hmac_keys: Vec<(String, DecodingKey)>,
 }
 
 impl std::fmt::Debug for AuthMiddleware {
@@ -233,6 +265,7 @@ impl std::fmt::Debug for AuthMiddleware {
         f.debug_struct("AuthMiddleware")
             .field("config", &self.config)
             .field("hmac_key", &self.hmac_key.is_some())
+            .field("hmac_kid", &self.hmac_kid)
             .field("legacy_hmac_keys", &self.legacy_hmac_keys.len())
             .finish()
     }
@@ -246,24 +279,38 @@ impl AuthMiddleware {
         }
 
         // Pre-compute HMAC key if using HMAC algorithm
-        let hmac_key = if config.skip_verification {
-            None
-        } else if config.is_hmac() {
-            config
-                .jwt_secret
-                .as_ref()
-                .filter(|s| !s.is_empty())
-                .map(|secret| DecodingKey::from_secret(secret.as_bytes()))
+        let active_secret = if !config.skip_verification && config.is_hmac() {
+            config.jwt_secret.as_deref().filter(|s| !s.is_empty())
         } else {
             None
         };
+        let hmac_key = active_secret.map(|s| DecodingKey::from_secret(s.as_bytes()));
+        let hmac_kid = active_secret.map(|s| secret_kid(s.as_bytes()));
 
         let legacy_hmac_keys = if config.is_hmac() && !config.skip_verification {
+            let now = chrono::Utc::now();
             config
                 .legacy_secrets
                 .iter()
-                .filter(|s| !s.is_empty())
-                .map(|s| DecodingKey::from_secret(s.as_bytes()))
+                .filter(|ls| {
+                    if ls.secret.is_empty() {
+                        return false;
+                    }
+                    if ls.valid_until <= now {
+                        tracing::warn!(
+                            valid_until = %ls.valid_until,
+                            "Legacy JWT secret is expired and will not be used for verification"
+                        );
+                        return false;
+                    }
+                    true
+                })
+                .map(|ls| {
+                    (
+                        secret_kid(ls.secret.as_bytes()),
+                        DecodingKey::from_secret(ls.secret.as_bytes()),
+                    )
+                })
                 .collect()
         } else {
             Vec::new()
@@ -272,14 +319,16 @@ impl AuthMiddleware {
         Self {
             config: Arc::new(config),
             hmac_key,
+            hmac_kid,
             legacy_hmac_keys,
         }
     }
 
     /// Create a middleware that allows all requests (development mode).
-    /// WARNING: This skips signature verification! Never use in production.
-    pub fn permissive() -> Self {
-        Self::new(AuthConfig::dev_mode())
+    /// WARNING: skips signature verification. Refuses to construct when
+    /// `FORGE_ENV=production`.
+    pub fn permissive() -> forge_core::Result<Self> {
+        Ok(Self::new(AuthConfig::dev_mode()?))
     }
 
     /// Get the config.
@@ -300,18 +349,35 @@ impl AuthMiddleware {
         }
     }
 
-    /// Validate HMAC-signed token. Falls back to legacy keys on signature failure.
+    /// Validate HMAC-signed token. Uses the token's `kid` header to look up
+    /// the right key directly when present; falls back to trying every key
+    /// when the kid is missing (external issuers) or unknown.
     fn validate_hmac(&self, token: &str) -> Result<Claims, AuthError> {
-        let key = self.hmac_key.as_ref().ok_or_else(|| {
+        let primary = self.hmac_key.as_ref().ok_or_else(|| {
             AuthError::InvalidToken("JWT secret not configured for HMAC".to_string())
         })?;
 
-        match self.decode_and_validate(token, key) {
+        let token_kid = jsonwebtoken::decode_header(token)
+            .ok()
+            .and_then(|h| h.kid);
+
+        if let Some(tkid) = token_kid.as_deref() {
+            if self.hmac_kid.as_deref() == Some(tkid) {
+                return self.decode_and_validate(token, primary);
+            }
+            for (kid, key) in &self.legacy_hmac_keys {
+                if kid == tkid {
+                    return self.decode_and_validate(token, key);
+                }
+            }
+            debug!(kid = %tkid, "Token kid not recognised; falling back to full key scan");
+        }
+
+        match self.decode_and_validate(token, primary) {
             Ok(claims) => Ok(claims),
             Err(AuthError::InvalidToken(_)) if !self.legacy_hmac_keys.is_empty() => {
-                // Primary key failed — try each legacy key (rotation grace window)
-                for legacy_key in &self.legacy_hmac_keys {
-                    if let Ok(claims) = self.decode_and_validate(token, legacy_key) {
+                for (_, key) in &self.legacy_hmac_keys {
+                    if let Ok(claims) = self.decode_and_validate(token, key) {
                         return Ok(claims);
                     }
                 }
@@ -709,9 +775,12 @@ pub fn verify_session_cookie(cookie_value: &str, secret: &str) -> Option<String>
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
     use super::*;
+    #[cfg(feature = "mcp-oauth")]
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    #[cfg(feature = "mcp-oauth")]
     use hmac::{Hmac, Mac};
     use jsonwebtoken::{EncodingKey, Header, encode};
+    #[cfg(feature = "mcp-oauth")]
     use sha2::Sha256;
 
     fn create_test_claims(expired: bool) -> Claims {
@@ -756,14 +825,36 @@ mod tests {
 
     #[test]
     fn test_auth_config_dev_mode() {
-        let config = AuthConfig::dev_mode();
+        let config = AuthConfig::dev_mode().expect("dev_mode outside production");
         assert!(config.skip_verification);
     }
 
     #[test]
     fn test_auth_middleware_permissive() {
-        let middleware = AuthMiddleware::permissive();
+        let middleware = AuthMiddleware::permissive().expect("permissive outside production");
         assert!(middleware.config.skip_verification);
+    }
+
+    #[test]
+    fn test_dev_mode_refuses_in_production() {
+        let result = AuthConfig::dev_mode_with_env(Some("production"));
+        assert!(matches!(result, Err(forge_core::ForgeError::Config(_))));
+    }
+
+    #[test]
+    fn test_dev_mode_refuses_case_insensitive() {
+        for v in ["Production", "PRODUCTION", "production"] {
+            let result = AuthConfig::dev_mode_with_env(Some(v));
+            assert!(matches!(result, Err(forge_core::ForgeError::Config(_))));
+        }
+    }
+
+    #[test]
+    fn test_dev_mode_allows_other_env_values() {
+        for v in [None, Some("development"), Some("staging"), Some("")] {
+            let result = AuthConfig::dev_mode_with_env(v);
+            assert!(result.is_ok());
+        }
     }
 
     #[tokio::test]
@@ -835,7 +926,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dev_mode_skips_signature() {
-        let config = AuthConfig::dev_mode();
+        let config = AuthConfig::dev_mode().expect("dev_mode outside production");
         let middleware = AuthMiddleware::new(config);
 
         // Create token with any secret
@@ -849,7 +940,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dev_mode_still_checks_expiration() {
-        let config = AuthConfig::dev_mode();
+        let config = AuthConfig::dev_mode().expect("dev_mode outside production");
         let middleware = AuthMiddleware::new(config);
 
         let claims = create_test_claims(true); // Expired
@@ -970,6 +1061,13 @@ mod tests {
         assert!(matches!(result, Err(AuthError::InvalidToken(_))));
     }
 
+    fn legacy_secret(secret: &str, valid_for: chrono::Duration) -> forge_core::config::LegacySecret {
+        forge_core::config::LegacySecret {
+            secret: secret.into(),
+            valid_until: chrono::Utc::now() + valid_for,
+        }
+    }
+
     #[tokio::test]
     async fn test_legacy_secret_validates_token_signed_by_old_key() {
         let old_secret = "old-secret-key-32-bytes-minimum!!";
@@ -977,7 +1075,7 @@ mod tests {
 
         let config = AuthConfig {
             jwt_secret: Some(new_secret.into()),
-            legacy_secrets: vec![old_secret.into()],
+            legacy_secrets: vec![legacy_secret(old_secret, chrono::Duration::hours(1))],
             ..AuthConfig::with_secret(new_secret)
         };
         let middleware = AuthMiddleware::new(config);
@@ -1005,7 +1103,10 @@ mod tests {
     #[tokio::test]
     async fn test_legacy_secret_still_rejects_unknown_key() {
         let config = AuthConfig {
-            legacy_secrets: vec!["known-legacy-secret-32bytes-pad!!".into()],
+            legacy_secrets: vec![legacy_secret(
+                "known-legacy-secret-32bytes-pad!!",
+                chrono::Duration::hours(1),
+            )],
             ..AuthConfig::with_secret("active-secret-key-32-bytes-pad!!")
         };
         let middleware = AuthMiddleware::new(config);
@@ -1015,6 +1116,32 @@ mod tests {
 
         let result = middleware.validate_token_async(&token).await;
         assert!(matches!(result, Err(AuthError::InvalidToken(_))));
+    }
+
+    #[tokio::test]
+    async fn test_expired_legacy_secret_is_dropped_at_construction() {
+        let active_secret = "active-secret-key-32-bytes-pad!!";
+        let retired_secret = "retired-secret-key-32-bytes-pad!!";
+
+        // valid_until in the past — must be filtered out, leaving zero legacy keys
+        let config = AuthConfig {
+            legacy_secrets: vec![legacy_secret(retired_secret, -chrono::Duration::seconds(1))],
+            ..AuthConfig::with_secret(active_secret)
+        };
+        let middleware = AuthMiddleware::new(config);
+        assert!(
+            middleware.legacy_hmac_keys.is_empty(),
+            "expired legacy secret should be dropped at construction"
+        );
+
+        // Tokens signed with the retired key must now fail
+        let claims = create_test_claims(false);
+        let token = create_test_token(&claims, retired_secret);
+        let result = middleware.validate_token_async(&token).await;
+        assert!(
+            matches!(result, Err(AuthError::InvalidToken(_))),
+            "expired legacy-signed token must not validate, got: {result:?}"
+        );
     }
 
     /// Craft a raw JWT with a given `alg` string in the header (no signature
@@ -1072,6 +1199,115 @@ mod tests {
         assert!(
             matches!(result, Err(AuthError::InvalidToken(_))),
             "alg=none token must be rejected, got: {result:?}"
+        );
+    }
+
+    /// `secret_kid` must be deterministic: same input bytes produce the same
+    /// kid every call (needed because issuer and verifier compute it
+    /// independently from the same secret).
+    #[test]
+    fn test_secret_kid_is_deterministic() {
+        let kid_a = secret_kid(b"some-secret");
+        let kid_b = secret_kid(b"some-secret");
+        assert_eq!(kid_a, kid_b);
+        assert_eq!(kid_a.len(), 8, "kid should be 8 hex chars (4 bytes)");
+        assert_ne!(kid_a, secret_kid(b"different-secret"));
+    }
+
+    /// `HmacTokenIssuer::sign` must stamp every minted token with a `kid`
+    /// header derived from the active secret. Without it, the verifier
+    /// cannot disambiguate active vs legacy keys during rotation.
+    #[tokio::test]
+    async fn test_issued_token_carries_kid_header() {
+        use forge_core::TokenIssuer;
+        let secret = "issuer-secret-key-32-bytes-pad!!!";
+        let config = AuthConfig::with_secret(secret);
+        let issuer = HmacTokenIssuer::from_config(&config).expect("issuer for hmac");
+
+        let claims = create_test_claims(false);
+        let token = issuer.sign(&claims).expect("signed token");
+
+        let header = jsonwebtoken::decode_header(&token).expect("decodable header");
+        assert_eq!(
+            header.kid.as_deref(),
+            Some(secret_kid(secret.as_bytes()).as_str()),
+            "kid in header must match SHA-256 prefix of the secret"
+        );
+    }
+
+    /// A token whose kid matches a legacy secret must validate by the direct
+    /// kid lookup path — even if the active key would also fail signature
+    /// verification (which it would, since the token was signed with the
+    /// legacy secret). This proves the kid is actually being consulted.
+    #[tokio::test]
+    async fn test_kid_matched_legacy_token_validates() {
+        let active_secret = "active-secret-key-32-bytes-pad!!!";
+        let retired_secret = "legacy-secret-key-32-bytes-pad!!!";
+        let retired_kid = secret_kid(retired_secret.as_bytes());
+
+        let config = AuthConfig {
+            legacy_secrets: vec![legacy_secret(retired_secret, chrono::Duration::hours(1))],
+            ..AuthConfig::with_secret(active_secret)
+        };
+        let middleware = AuthMiddleware::new(config);
+
+        // Hand-craft a token signed by the retired secret with the matching kid set
+        let claims = create_test_claims(false);
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some(retired_kid);
+        let token = encode(
+            &header,
+            &claims,
+            &EncodingKey::from_secret(retired_secret.as_bytes()),
+        )
+        .expect("encode legacy-signed token");
+
+        let result = middleware.validate_token_async(&token).await;
+        assert!(
+            result.is_ok(),
+            "kid-tagged legacy token must validate: {result:?}"
+        );
+    }
+
+    /// External issuers (e.g., third-party services minting HS256 tokens) may
+    /// not set a `kid`. Those tokens must still validate via the fallback
+    /// scan — the kid is an optimization, not a gate.
+    #[tokio::test]
+    async fn test_external_token_without_kid_still_validates() {
+        let secret = "shared-hmac-secret-32-bytes-pad!!";
+        let middleware = AuthMiddleware::new(AuthConfig::with_secret(secret));
+
+        // create_test_token uses Header::default() which leaves kid = None
+        let claims = create_test_claims(false);
+        let token = create_test_token(&claims, secret);
+        let header = jsonwebtoken::decode_header(&token).expect("decodable header");
+        assert!(header.kid.is_none(), "test fixture must not set kid");
+
+        let result = middleware.validate_token_async(&token).await;
+        assert!(
+            result.is_ok(),
+            "kidless external token must validate: {result:?}"
+        );
+    }
+
+    /// A token whose kid matches no configured key must still fall through to
+    /// the full signature scan rather than being rejected solely on kid.
+    #[tokio::test]
+    async fn test_unknown_kid_falls_back_to_full_scan() {
+        let secret = "active-secret-key-32-bytes-pad!!!";
+        let middleware = AuthMiddleware::new(AuthConfig::with_secret(secret));
+
+        let claims = create_test_claims(false);
+        // Sign with the active secret but stamp a kid that doesn't match any key
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some("deadbeef".to_string());
+        let token = encode(&header, &claims, &EncodingKey::from_secret(secret.as_bytes()))
+            .expect("encode token with unknown kid");
+
+        let result = middleware.validate_token_async(&token).await;
+        assert!(
+            result.is_ok(),
+            "unknown-kid token must still validate via fallback: {result:?}"
         );
     }
 }

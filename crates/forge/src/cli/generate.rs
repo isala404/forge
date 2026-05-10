@@ -79,6 +79,12 @@ impl GenerateCommand {
             || !registry.all_enums().is_empty()
             || !registry.all_functions().is_empty();
 
+        // Phase 1: emit forge.schema.json
+        let schema_path = Path::new("forge.schema.json");
+        let schema_json = forge_codegen::emit_schema_json(&registry)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize schema: {}", e))?;
+        std::fs::write(schema_path, &schema_json)?;
+
         eprint!(
             "  Generating {} bindings...",
             detected_target.display_name()

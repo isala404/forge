@@ -1,10 +1,8 @@
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
-fn parse_duration_secs(s: &str, default_secs: u64) -> u64 {
-    crate::util::parse_duration(s)
-        .map(|d| d.as_secs())
-        .unwrap_or(default_secs)
-}
+use super::types::DurationStr;
 
 /// Cluster configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,11 +18,11 @@ pub struct ClusterConfig {
 
     /// Heartbeat interval duration (e.g. "5s", "10s").
     #[serde(default = "default_heartbeat_interval")]
-    pub heartbeat_interval: String,
+    pub heartbeat_interval: DurationStr,
 
     /// Threshold duration for marking nodes as dead (e.g. "15s", "30s").
     #[serde(default = "default_dead_threshold")]
-    pub dead_threshold: String,
+    pub dead_threshold: DurationStr,
 
     /// Static seed nodes (for static discovery).
     #[serde(default)]
@@ -53,28 +51,18 @@ impl ClusterConfig {
         self.dns_name = Some(dns_name);
         self
     }
-
-    /// Heartbeat interval in seconds, parsed from the `heartbeat_interval` string.
-    pub fn heartbeat_interval_secs(&self) -> u64 {
-        parse_duration_secs(&self.heartbeat_interval, 5)
-    }
-
-    /// Dead threshold in seconds, parsed from the `dead_threshold` string.
-    pub fn dead_threshold_secs(&self) -> u64 {
-        parse_duration_secs(&self.dead_threshold, 15)
-    }
 }
 
 fn default_cluster_name() -> String {
     "default".to_string()
 }
 
-fn default_heartbeat_interval() -> String {
-    "5s".to_string()
+fn default_heartbeat_interval() -> DurationStr {
+    DurationStr::new(Duration::from_secs(5))
 }
 
-fn default_dead_threshold() -> String {
-    "15s".to_string()
+fn default_dead_threshold() -> DurationStr {
+    DurationStr::new(Duration::from_secs(15))
 }
 
 /// Cluster discovery method.
@@ -105,7 +93,7 @@ mod tests {
         let config = ClusterConfig::default();
         assert_eq!(config.name, "default");
         assert_eq!(config.discovery, DiscoveryMethod::Postgres);
-        assert_eq!(config.heartbeat_interval_secs(), 5);
+        assert_eq!(config.heartbeat_interval.as_secs(), 5);
     }
 
     #[test]

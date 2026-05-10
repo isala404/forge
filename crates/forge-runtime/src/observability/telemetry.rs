@@ -98,7 +98,7 @@ impl TelemetryConfig {
             enable_metrics: otlp_enabled && obs.enable_metrics,
             enable_logs: otlp_enabled && obs.enable_logs,
             sampling_ratio: obs.sampling_ratio,
-            metrics_interval_secs: obs.metrics_interval_secs(),
+            metrics_interval_secs: obs.metrics_interval.as_secs(),
         }
     }
 

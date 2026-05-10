@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE forge_workflow_runs\n            SET wake_at = NULL, waiting_for_event = NULL, event_timeout_at = NULL,\n                suspended_at = NULL, status = 'running'\n            WHERE id = $1 AND status = 'waiting'\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c61463428198a77febc660930664af348928fe65552c641f457cde69947bebe0"
+}

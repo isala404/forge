@@ -545,10 +545,7 @@ impl Forge {
         // Register cron bridge handlers so the worker pool can execute cron jobs.
         #[cfg(feature = "cron")]
         {
-            forge_runtime::cron::register_cron_bridges(
-                &self.cron_registry,
-                &mut self.job_registry,
-            );
+            forge_runtime::cron::register_cron_bridges(&self.cron_registry, &mut self.job_registry);
         }
 
         let job_queue = JobQueue::new(jobs_pool.clone());
@@ -560,7 +557,7 @@ impl Forge {
                 id: Some(node_id.as_uuid()),
                 capabilities: self.config.node.worker_capabilities.clone(),
                 max_concurrent: self.config.worker.max_concurrent_jobs,
-                poll_interval: Duration::from_millis(self.config.worker.poll_interval_ms()),
+                poll_interval: *self.config.worker.poll_interval,
                 ..Default::default()
             };
 
@@ -580,6 +577,27 @@ impl Forge {
             tracing::debug!("Job worker started");
         }
 
+        // KV TTL cleanup runs on every node with a worker role.
+        #[cfg(feature = "jobs")]
+        if roles.contains(&NodeRole::Worker) {
+            let kv_pool = jobs_pool.clone();
+            let mut kv_shutdown = self.shutdown_tx.subscribe();
+            handles.push(tokio::spawn(async move {
+                let kv = forge_runtime::KvStore::new(kv_pool);
+                loop {
+                    tokio::select! {
+                        _ = kv_shutdown.recv() => break,
+                        _ = tokio::time::sleep(Duration::from_secs(60)) => {}
+                    }
+                    match kv.cleanup_expired().await {
+                        Ok(n) if n > 0 => tracing::debug!(count = n, "KV TTL cleanup"),
+                        Err(e) => tracing::warn!(error = %e, "KV TTL cleanup failed"),
+                        _ => {}
+                    }
+                }
+            }));
+        }
+
         // Start cron runner if scheduler role and is leader
         #[cfg(feature = "cron")]
         if roles.contains(&NodeRole::Scheduler) {
@@ -595,12 +613,8 @@ impl Forge {
                 run_stale_threshold: Duration::from_secs(15 * 60),
             };
 
-            let cron_runner = CronRunner::new(
-                cron_registry,
-                cron_pool,
-                job_queue.clone(),
-                cron_config,
-            );
+            let cron_runner =
+                CronRunner::new(cron_registry, cron_pool, job_queue.clone(), cron_config);
 
             handles.push(tokio::spawn(async move {
                 if let Err(e) = cron_runner.run().await {
@@ -726,15 +740,15 @@ impl Forge {
                 port: self.config.gateway.port,
                 max_connections: self.config.gateway.max_connections,
                 sse_max_sessions: self.config.realtime.sse_max_sessions,
-                request_timeout_secs: self.config.gateway.request_timeout_secs(),
+                request_timeout_secs: self.config.gateway.request_timeout.as_secs(),
                 cors_enabled: self.config.gateway.cors_enabled,
                 cors_origins: self.config.gateway.cors_origins.clone(),
                 auth: AuthConfig::from_forge_config(&self.config.auth)
                     .map_err(|e| ForgeError::Config(e.to_string()))?,
                 mcp: self.config.mcp.clone(),
                 quiet_paths: self.config.gateway.quiet_paths.clone(),
-                max_body_size_bytes: self.config.gateway.max_body_size_bytes()?,
-                max_file_size_bytes: self.config.gateway.max_file_size_bytes()?,
+                max_body_size_bytes: self.config.gateway.max_body_size.as_bytes(),
+                max_file_size_bytes: self.config.gateway.max_file_size.as_bytes(),
                 token_ttl: forge_core::AuthTokenTtl::new(
                     self.config.auth.access_token_ttl_secs(),
                     self.config.auth.refresh_token_ttl_days(),
@@ -749,15 +763,15 @@ impl Forge {
                             ..ListenerConfig::default()
                         },
                         invalidation: InvalidationConfig {
-                            debounce_ms: rt.debounce_quiet_ms(),
-                            max_debounce_ms: rt.debounce_max_ms(),
+                            debounce_ms: rt.debounce_quiet_window.as_millis(),
+                            max_debounce_ms: rt.debounce_max_wait.as_millis(),
                             ..InvalidationConfig::default()
                         },
                         realtime: RuntimeRealtimeConfig {
                             max_subscriptions_per_session: rt.subscription_max_per_session,
                         },
                         max_concurrent_reexecutions: rt.max_concurrent_reexecutions,
-                        resync_interval_secs: rt.resync_interval_secs(),
+                        resync_interval_secs: rt.resync_interval.as_secs(),
                         shard_count: rt.shard_count,
                         ..ReactorConfig::default()
                     }
@@ -826,7 +840,7 @@ impl Forge {
                 let collector = forge_runtime::signals::SignalsCollector::spawn(
                     signals_pool.clone(),
                     self.config.signals.batch_size,
-                    self.config.signals.flush_interval_duration(),
+                    *self.config.signals.flush_interval,
                     self.config.signals.channel_capacity,
                 );
                 // Explicit MMDB path means the operator wants city-level data.
@@ -849,7 +863,7 @@ impl Forge {
                 // Spawn session reaper
                 forge_runtime::signals::session::spawn_session_reaper(
                     signals_pool,
-                    self.config.signals.session_timeout_mins(),
+                    (self.config.signals.session_timeout.as_secs() / 60) as u32,
                 );
 
                 tracing::info!("Signals enabled (analytics + diagnostics)");
@@ -951,7 +965,7 @@ impl Forge {
                                 self.config.gateway.max_connections,
                             ))
                             .layer(tower::timeout::TimeoutLayer::new(Duration::from_secs(
-                                self.config.gateway.request_timeout_secs(),
+                                self.config.gateway.request_timeout.as_secs(),
                             ))),
                     )
                     .layer(webhook_cors);

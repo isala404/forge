@@ -9,12 +9,10 @@ use tokio::sync::{Mutex, watch};
 /// Leader election configuration.
 #[derive(Debug, Clone)]
 pub struct LeaderConfig {
-    /// How often standbys check leader health.
+    /// How often standbys check leader health and leaders refresh leases.
     pub check_interval: Duration,
     /// Lease duration (leader must refresh before expiry).
     pub lease_duration: Duration,
-    /// Lease refresh interval.
-    pub refresh_interval: Duration,
 }
 
 impl Default for LeaderConfig {
@@ -22,7 +20,6 @@ impl Default for LeaderConfig {
         Self {
             check_interval: Duration::from_secs(5),
             lease_duration: Duration::from_secs(60),
-            refresh_interval: Duration::from_secs(30),
         }
     }
 }
@@ -250,7 +247,10 @@ impl LeaderElection {
 
         match row {
             Some(row) => {
-                let role = row.role.parse().unwrap_or(LeaderRole::Scheduler);
+                let role = row.role.parse().unwrap_or_else(|_| {
+                    tracing::warn!(role = %row.role, "Unknown leader role, defaulting to Scheduler");
+                    LeaderRole::Scheduler
+                });
 
                 Ok(Some(LeaderInfo {
                     role,
@@ -338,6 +338,5 @@ mod tests {
         let config = LeaderConfig::default();
         assert_eq!(config.check_interval, Duration::from_secs(5));
         assert_eq!(config.lease_duration, Duration::from_secs(60));
-        assert_eq!(config.refresh_interval, Duration::from_secs(30));
     }
 }

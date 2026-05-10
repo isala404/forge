@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT pg_notify('forge_workflow_events', $1)",
+  "query": "SELECT pg_notify('forge_workflow_wakeup', $1)",
   "describe": {
     "columns": [
       {
@@ -18,5 +18,5 @@
       null
     ]
   },
-  "hash": "5e5f2edea9eacf3fe0ce8d671932a6030d4b07eab737eef17e00be1cfd80075a"
+  "hash": "bdfee76088149c70221adc1bf5d3320eec4b0c32e5320511352f1ef3cc92a1c0"
 }

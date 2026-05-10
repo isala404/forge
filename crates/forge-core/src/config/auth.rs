@@ -1,7 +1,11 @@
 //! Authentication and JWT configuration.
 
+use std::time::Duration;
+
 use crate::error::{ForgeError, Result};
 use serde::{Deserialize, Serialize};
+
+use super::types::DurationStr;
 
 /// JWT signing algorithm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -13,6 +17,24 @@ pub enum JwtAlgorithm {
     HS256,
     /// RSA using SHA-256 (asymmetric, requires jwks_url).
     RS256,
+}
+
+/// A retired HMAC secret kept around for a bounded window so tokens minted
+/// before rotation still validate. After `valid_until` the entry is silently
+/// dropped at startup and never used for verification — leaked old keys
+/// cannot extend their reach indefinitely.
+///
+/// Rotate by adding the outgoing secret here with `valid_until` set one
+/// access-token TTL into the future, swap `jwt_secret` to the new value,
+/// then remove the entry once the window closes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LegacySecret {
+    /// HMAC secret bytes (treated as opaque; min length is not re-enforced
+    /// here — the active `jwt_secret` validation already covers minimum
+    /// strength, and a previously-active key already satisfied it).
+    pub secret: String,
+    /// RFC 3339 timestamp after which this key is no longer accepted.
+    pub valid_until: chrono::DateTime<chrono::Utc>,
 }
 
 /// Authentication configuration.
@@ -39,11 +61,11 @@ pub struct AuthConfig {
 
     /// Access token lifetime (e.g., "15m", "1h").
     /// Used by `ctx.issue_token_pair()`. Defaults to "1h".
-    pub access_token_ttl: Option<String>,
+    pub access_token_ttl: Option<DurationStr>,
 
     /// Refresh token lifetime (e.g., "7d", "30d").
     /// Used by `ctx.issue_token_pair()`. Defaults to "30d".
-    pub refresh_token_ttl: Option<String>,
+    pub refresh_token_ttl: Option<DurationStr>,
 
     /// JWKS URL for RSA algorithms (RS256).
     /// Keys are fetched and cached automatically.
@@ -51,17 +73,17 @@ pub struct AuthConfig {
 
     /// JWKS cache TTL duration (e.g. "1h", "30m").
     #[serde(default = "default_jwks_cache_ttl")]
-    pub jwks_cache_ttl: String,
+    pub jwks_cache_ttl: DurationStr,
 
     /// Session TTL duration (e.g. "7d", "24h"). Used for WebSocket sessions.
     #[serde(default = "default_session_ttl")]
-    pub session_ttl: String,
+    pub session_ttl: DurationStr,
 
     /// Clock-skew tolerance for `exp` / `nbf` validation (e.g. "60s", "5m").
     /// Sites with NTP-synchronized clocks can drop this to "5s"; older deployments
     /// or clients with drifting clocks may need higher. Defaults to "60s".
     #[serde(default = "default_jwt_leeway")]
-    pub jwt_leeway: String,
+    pub jwt_leeway: DurationStr,
 
     /// When `true` (default), `jwt_audience` must be set when auth is enabled.
     /// Set to `false` only during migration. Enforce it again once all clients
@@ -77,13 +99,13 @@ pub struct AuthConfig {
 
     /// Session cookie lifetime (e.g., "1h", "24h").
     /// Used for OAuth consent flow cookies. Defaults to the access token TTL.
-    pub session_cookie_ttl: Option<String>,
+    pub session_cookie_ttl: Option<DurationStr>,
 
     /// Old HMAC secrets still accepted for validation (never for signing).
-    /// Rotate by adding the outgoing secret here, swapping `jwt_secret` to the
-    /// new value, then removing it after one access-token TTL elapses.
+    /// Each entry carries a mandatory `valid_until` timestamp; expired entries
+    /// are silently dropped at middleware construction.
     #[serde(default)]
-    pub legacy_secrets: Vec<String>,
+    pub legacy_secrets: Vec<LegacySecret>,
 }
 
 impl Default for AuthConfig {
@@ -108,28 +130,11 @@ impl Default for AuthConfig {
 }
 
 impl AuthConfig {
-    /// JWKS cache TTL in seconds, parsed from the `jwks_cache_ttl` string.
-    pub fn jwks_cache_ttl_secs(&self) -> u64 {
-        super::parse_duration_secs(&self.jwks_cache_ttl, 3600)
-    }
-
-    /// Session TTL in seconds, parsed from the `session_ttl` string.
-    pub fn session_ttl_secs(&self) -> u64 {
-        super::parse_duration_secs(&self.session_ttl, 7 * 24 * 3600)
-    }
-
-    /// JWT clock-skew leeway in seconds, parsed from the `jwt_leeway` string.
-    pub fn jwt_leeway_secs(&self) -> u64 {
-        super::parse_duration_secs(&self.jwt_leeway, 60)
-    }
-
     /// Resolved access token TTL in seconds.
     /// Parses `access_token_ttl`, default 3600s (1h).
     /// Minimum 1 second to prevent zero-lifetime tokens.
     pub fn access_token_ttl_secs(&self) -> i64 {
         self.access_token_ttl
-            .as_deref()
-            .and_then(crate::util::parse_duration)
             .map(|d| (d.as_secs() as i64).max(1))
             .unwrap_or(3600)
     }
@@ -138,10 +143,10 @@ impl AuthConfig {
     /// Parses `refresh_token_ttl`, default 30 days.
     pub fn refresh_token_ttl_days(&self) -> i64 {
         self.refresh_token_ttl
-            .as_deref()
-            .and_then(crate::util::parse_duration)
-            .map(|d| (d.as_secs() / 86400) as i64)
-            .map(|d| if d == 0 { 1 } else { d })
+            .map(|d| {
+                let days = (d.as_secs() / 86400) as i64;
+                if days == 0 { 1 } else { days }
+            })
             .unwrap_or(30)
     }
 
@@ -149,8 +154,6 @@ impl AuthConfig {
     /// Falls back to `access_token_ttl_secs()` when not explicitly set.
     pub fn session_cookie_ttl_secs(&self) -> i64 {
         self.session_cookie_ttl
-            .as_deref()
-            .and_then(crate::util::parse_duration)
             .map(|d| (d.as_secs() as i64).max(1))
             .unwrap_or_else(|| self.access_token_ttl_secs())
     }
@@ -226,16 +229,16 @@ impl AuthConfig {
     }
 }
 
-fn default_jwks_cache_ttl() -> String {
-    "1h".to_string()
+fn default_jwks_cache_ttl() -> DurationStr {
+    DurationStr::new(Duration::from_secs(3600))
 }
 
-fn default_session_ttl() -> String {
-    "7d".to_string()
+fn default_session_ttl() -> DurationStr {
+    DurationStr::new(Duration::from_secs(604800))
 }
 
-fn default_jwt_leeway() -> String {
-    "60s".to_string()
+fn default_jwt_leeway() -> DurationStr {
+    DurationStr::new(Duration::from_secs(60))
 }
 
 fn default_audience_required() -> bool {

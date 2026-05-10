@@ -74,9 +74,10 @@ CREATE INDEX IF NOT EXISTS idx_forge_jobs_status_scheduled
     ON forge_jobs(status, scheduled_at)
     WHERE status = 'pending';
 
-CREATE INDEX IF NOT EXISTS idx_forge_jobs_idempotency
+CREATE UNIQUE INDEX IF NOT EXISTS idx_forge_jobs_idempotency
     ON forge_jobs(idempotency_key)
-    WHERE idempotency_key IS NOT NULL;
+    WHERE idempotency_key IS NOT NULL
+      AND status NOT IN ('completed', 'failed', 'dead_letter', 'cancelled');
 
 CREATE INDEX IF NOT EXISTS idx_forge_jobs_owner_subject
     ON forge_jobs(owner_subject)

@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO forge_jobs (\n                id, job_type, input, job_context, status, priority, attempts, max_attempts,\n                worker_capability, idempotency_key, owner_subject, scheduled_at, created_at\n            ) VALUES (\n                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13\n            )\n            ON CONFLICT DO NOTHING\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Varchar",
+        "Jsonb",
+        "Jsonb",
+        "Varchar",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Varchar",
+        "Varchar",
+        "Text",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c3cb3418090e16043a147419ef4e1817b610a6622d9b8024599ada90f1717e5f"
+}

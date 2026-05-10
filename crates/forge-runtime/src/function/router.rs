@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -80,6 +80,8 @@ pub struct FunctionRouter {
     rate_limiter: Arc<dyn RateLimiterBackend>,
     role_resolver: SharedRoleResolver,
     query_cache: QueryCache,
+    /// Reverse index: table name -> query function names that depend on it.
+    table_to_queries: HashMap<String, Vec<String>>,
     token_issuer: Option<Arc<dyn forge_core::TokenIssuer>>,
     token_ttl: forge_core::AuthTokenTtl,
     default_timeout: Duration,
@@ -90,10 +92,25 @@ pub struct FunctionRouter {
 }
 
 impl FunctionRouter {
+    /// Build the reverse index from table names to query function names.
+    fn build_table_index(registry: &FunctionRegistry) -> HashMap<String, Vec<String>> {
+        let mut index: HashMap<String, Vec<String>> = HashMap::new();
+        for (name, info) in registry.queries() {
+            for table in info.table_dependencies {
+                index
+                    .entry((*table).to_string())
+                    .or_default()
+                    .push(name.to_string());
+            }
+        }
+        index
+    }
+
     /// Create a new function router.
     pub fn new(registry: Arc<FunctionRegistry>, db: Database) -> Self {
         let rate_limiter: Arc<dyn RateLimiterBackend> =
             Arc::new(HybridRateLimiter::new(db.primary().clone()));
+        let table_to_queries = Self::build_table_index(&registry);
         Self {
             registry,
             db,
@@ -103,6 +120,7 @@ impl FunctionRouter {
             rate_limiter,
             role_resolver: default_role_resolver(),
             query_cache: QueryCache::new(),
+            table_to_queries,
             token_issuer: None,
             token_ttl: forge_core::AuthTokenTtl::default(),
             default_timeout: Duration::from_secs(30),
@@ -121,6 +139,7 @@ impl FunctionRouter {
     ) -> Self {
         let rate_limiter: Arc<dyn RateLimiterBackend> =
             Arc::new(HybridRateLimiter::new(db.primary().clone()));
+        let table_to_queries = Self::build_table_index(&registry);
         Self {
             registry,
             db,
@@ -130,6 +149,7 @@ impl FunctionRouter {
             rate_limiter,
             role_resolver: default_role_resolver(),
             query_cache: QueryCache::new(),
+            table_to_queries,
             token_issuer: None,
             token_ttl: forge_core::AuthTokenTtl::default(),
             default_timeout: Duration::from_secs(30),
@@ -438,11 +458,10 @@ impl FunctionRouter {
                     }
                 }
                 FunctionEntry::Mutation { handler, info } => {
-                    if info.transactional {
+                    let result = if info.transactional {
                         self.execute_transactional(info, handler, args, auth, request)
                             .await
                     } else {
-                        // Use primary for mutations
                         let mut ctx = MutationContext::with_dispatch(
                             self.db.primary().clone(),
                             auth,
@@ -456,9 +475,13 @@ impl FunctionRouter {
                         }
                         ctx.set_token_ttl(self.token_ttl.clone());
                         ctx.set_http_timeout(info.http_timeout);
-                        let result = handler(&ctx, args).await?;
-                        Ok(RouteResult::Mutation(result))
+                        let value = handler(&ctx, args).await?;
+                        Ok(RouteResult::Mutation(value))
+                    };
+                    if result.is_ok() {
+                        self.invalidate_cache_for_mutation(info);
                     }
+                    result
                 }
             };
         }
@@ -562,6 +585,31 @@ impl FunctionRouter {
         self.rate_limiter.enforce(&bucket_key, &config).await?;
 
         Ok(())
+    }
+
+    /// Invalidate cached queries whose table dependencies overlap with the
+    /// mutation's write set.
+    fn invalidate_cache_for_mutation(&self, info: &FunctionInfo) {
+        if info.table_dependencies.is_empty() {
+            return;
+        }
+        let mut affected: HashSet<&str> = HashSet::new();
+        for table in info.table_dependencies {
+            if let Some(queries) = self.table_to_queries.get(*table) {
+                for q in queries {
+                    affected.insert(q.as_str());
+                }
+            }
+        }
+        if !affected.is_empty() {
+            let names: Vec<&str> = affected.into_iter().collect();
+            self.query_cache.invalidate_by_tables(&names);
+            trace!(
+                mutation = info.name,
+                invalidated_queries = ?names,
+                "Cache invalidated after mutation"
+            );
+        }
     }
 
     fn auth_cache_scope(auth: &AuthContext) -> Option<String> {

@@ -15,6 +15,7 @@ use chrono::Utc;
 use forge_core::auth::Claims;
 use forge_core::oauth::{self, validate_redirect_uri};
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -526,7 +527,11 @@ pub async fn oauth_authorize_post(
     // Validate CSRF (T5): check both cookie and form value
     let csrf_from_cookie = extract_cookie(&headers, "forge_oauth_csrf");
     let csrf_valid = if let Some(cookie_csrf) = csrf_from_cookie {
-        cookie_csrf == form.csrf_token && state.validate_csrf(&form.csrf_token).await
+        let cookie_match: bool = cookie_csrf
+            .as_bytes()
+            .ct_eq(form.csrf_token.as_bytes())
+            .into();
+        cookie_match && state.validate_csrf(&form.csrf_token).await
     } else {
         false
     };

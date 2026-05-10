@@ -152,7 +152,6 @@ impl WorkflowScheduler {
             )
             ORDER BY COALESCE(wake_at, event_timeout_at) ASC
             LIMIT $1
-            FOR UPDATE SKIP LOCKED
             "#,
             self.config.batch_size as i64
         )
@@ -185,8 +184,8 @@ impl WorkflowScheduler {
 
     /// Process workflows that have pending events.
     async fn process_event_wakeups(&self) -> Result<()> {
-        // Find workflows waiting for events that have matching events
-        // Use a subquery to avoid DISTINCT with FOR UPDATE
+        // Find workflows waiting for events that have matching events.
+        // try_claim_waiting gates the actual state transition.
         let workflows = sqlx::query!(
             r#"
             SELECT wr.id, wr.waiting_for_event
@@ -200,7 +199,6 @@ impl WorkflowScheduler {
                     AND we.consumed_at IS NULL
                 )
             LIMIT $1
-            FOR UPDATE OF wr SKIP LOCKED
             "#,
             self.config.batch_size as i64
         )
@@ -244,63 +242,52 @@ impl WorkflowScheduler {
 
     /// Resume a workflow after timer expiry by enqueuing a job.
     async fn resume_workflow(&self, workflow_run_id: Uuid) {
-        if let Err(e) = sqlx::query!(
-            r#"
-            UPDATE forge_workflow_runs
-            SET wake_at = NULL, suspended_at = NULL, status = 'running'
-            WHERE id = $1
-            "#,
-            workflow_run_id,
-        )
-        .execute(&self.pool)
-        .await
-        {
-            tracing::warn!(workflow_run_id = %workflow_run_id, error = %e, "Failed to clear wake state");
+        if !self.try_claim_waiting(workflow_run_id).await {
             return;
         }
-
         self.enqueue_resume(workflow_run_id, true, "timer").await;
     }
 
     /// Resume a workflow after event timeout by enqueuing a job.
     async fn resume_with_timeout(&self, workflow_run_id: Uuid) {
-        if let Err(e) = sqlx::query!(
-            r#"
-            UPDATE forge_workflow_runs
-            SET waiting_for_event = NULL, event_timeout_at = NULL, suspended_at = NULL, status = 'running'
-            WHERE id = $1
-            "#,
-            workflow_run_id,
-        )
-        .execute(&self.pool)
-        .await
-        {
-            tracing::warn!(workflow_run_id = %workflow_run_id, error = %e, "Failed to clear waiting state");
+        if !self.try_claim_waiting(workflow_run_id).await {
             return;
         }
-
         self.enqueue_resume(workflow_run_id, false, "event_timeout")
             .await;
     }
 
     /// Resume a workflow that received an event by enqueuing a job.
     async fn resume_with_event(&self, workflow_run_id: Uuid) {
-        if let Err(e) = sqlx::query!(
+        if !self.try_claim_waiting(workflow_run_id).await {
+            return;
+        }
+        self.enqueue_resume(workflow_run_id, false, "event").await;
+    }
+
+    /// Atomically transition a workflow from `waiting` to `running`.
+    /// Returns `false` if the row was already claimed by another scheduler
+    /// or is no longer in `waiting` status.
+    async fn try_claim_waiting(&self, workflow_run_id: Uuid) -> bool {
+        match sqlx::query!(
             r#"
             UPDATE forge_workflow_runs
-            SET waiting_for_event = NULL, event_timeout_at = NULL, suspended_at = NULL, status = 'running'
-            WHERE id = $1
+            SET wake_at = NULL, waiting_for_event = NULL, event_timeout_at = NULL,
+                suspended_at = NULL, status = 'running'
+            WHERE id = $1 AND status = 'waiting'
             "#,
             workflow_run_id,
         )
         .execute(&self.pool)
         .await
+        .map(|r| r.rows_affected())
         {
-            tracing::warn!(workflow_run_id = %workflow_run_id, error = %e, "Failed to clear waiting state for event");
-            return;
+            Ok(n) => n > 0,
+            Err(e) => {
+                tracing::warn!(workflow_run_id = %workflow_run_id, error = %e, "Failed to claim workflow for resume");
+                false
+            }
         }
-
-        self.enqueue_resume(workflow_run_id, false, "event").await;
     }
 
     /// Enqueue a `$workflow_resume` job for the worker pool.
@@ -313,7 +300,7 @@ impl WorkflowScheduler {
             WORKFLOW_RESUME_JOB.to_string(),
             input,
             forge_core::job::JobPriority::High,
-            1,
+            3,
         );
         match self.job_queue.enqueue(job).await {
             Ok(job_id) => {

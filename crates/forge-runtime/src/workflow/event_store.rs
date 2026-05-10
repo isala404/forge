@@ -41,7 +41,7 @@ impl EventStore {
 
         // Send notification for immediate processing
         sqlx::query_scalar!(
-            "SELECT pg_notify('forge_workflow_events', $1)",
+            "SELECT pg_notify('forge_workflow_wakeup', $1)",
             format!("{}:{}", event_name, correlation_id),
         )
         .fetch_one(&self.pool)

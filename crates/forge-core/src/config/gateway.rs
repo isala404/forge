@@ -1,6 +1,10 @@
 //! Gateway configuration for the HTTP listener, CORS, TLS, and request limits.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
+
+use super::types::{DurationStr, SizeStr};
 
 /// Gateway configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,7 +28,7 @@ pub struct GatewayConfig {
 
     /// Request timeout duration (e.g. "30s", "1m").
     #[serde(default = "default_request_timeout")]
-    pub request_timeout: String,
+    pub request_timeout: DurationStr,
 
     /// Enable CORS handling.
     #[serde(default = "default_cors_enabled")]
@@ -41,14 +45,14 @@ pub struct GatewayConfig {
 
     /// Maximum request body size (e.g. "100mb", "1gb"). Defaults to "20mb".
     #[serde(default = "default_max_body_size")]
-    pub max_body_size: String,
+    pub max_body_size: SizeStr,
 
     /// Default per-file cap for multipart uploads (e.g. "10mb", "200mb").
     /// Applies when a mutation does not declare its own `max_size`. Set to
     /// the same value as `max_body_size` to disable the per-file guard.
     /// Defaults to "10mb".
     #[serde(default = "default_max_file_size")]
-    pub max_file_size: String,
+    pub max_file_size: SizeStr,
 
     /// TLS configuration for the gateway listener.
     #[serde(default)]
@@ -99,33 +103,6 @@ impl Default for GatewayConfig {
             hsts: false,
             trusted_proxies: Vec::new(),
         }
-    }
-}
-
-impl GatewayConfig {
-    /// Request timeout in seconds, parsed from the `request_timeout` string.
-    pub fn request_timeout_secs(&self) -> u64 {
-        super::parse_duration_secs(&self.request_timeout, 30)
-    }
-
-    /// Parse `max_body_size` into bytes.
-    pub fn max_body_size_bytes(&self) -> crate::Result<usize> {
-        crate::util::parse_size(&self.max_body_size).ok_or_else(|| {
-            crate::ForgeError::Config(format!(
-                "invalid gateway.max_body_size '{}'. Expected a size like '20mb', '1gb', or '1048576'",
-                self.max_body_size
-            ))
-        })
-    }
-
-    /// Parse `max_file_size` into bytes.
-    pub fn max_file_size_bytes(&self) -> crate::Result<usize> {
-        crate::util::parse_size(&self.max_file_size).ok_or_else(|| {
-            crate::ForgeError::Config(format!(
-                "invalid gateway.max_file_size '{}'. Expected a size like '10mb', '200mb', or '1048576'",
-                self.max_file_size
-            ))
-        })
     }
 }
 
@@ -197,8 +174,8 @@ fn default_max_connections() -> usize {
     4096
 }
 
-fn default_request_timeout() -> String {
-    "30s".to_string()
+fn default_request_timeout() -> DurationStr {
+    DurationStr::new(Duration::from_secs(30))
 }
 
 fn default_cors_enabled() -> bool {
@@ -217,12 +194,12 @@ fn default_quiet_paths() -> Vec<String> {
     ]
 }
 
-fn default_max_body_size() -> String {
-    "20mb".to_string()
+fn default_max_body_size() -> SizeStr {
+    SizeStr::new(20 * 1024 * 1024)
 }
 
-fn default_max_file_size() -> String {
-    "10mb".to_string()
+fn default_max_file_size() -> SizeStr {
+    SizeStr::new(10 * 1024 * 1024)
 }
 
 fn default_max_rpc_batch_size() -> usize {

@@ -124,7 +124,7 @@ impl QueryCache {
 
             // If still at capacity, evict oldest entries
             if entries.len() >= self.max_entries {
-                self.evict_oldest(&mut entries, self.max_entries / 10);
+                self.evict_oldest(&mut entries, (self.max_entries / 10).max(1));
             }
 
             entries.insert(key, entry);
@@ -145,6 +145,16 @@ impl QueryCache {
     pub fn invalidate_function(&self, function_name: &str) {
         if let Ok(mut entries) = self.entries.write() {
             entries.retain(|k, _| k.function_name != function_name);
+        }
+    }
+
+    /// Invalidate all cached queries that depend on any of the given tables.
+    pub fn invalidate_by_tables(&self, query_names: &[&str]) {
+        if query_names.is_empty() {
+            return;
+        }
+        if let Ok(mut entries) = self.entries.write() {
+            entries.retain(|k, _| !query_names.iter().any(|name| k.function_name == *name));
         }
     }
 

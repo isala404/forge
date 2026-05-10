@@ -1,6 +1,11 @@
 //! Signals configuration for product analytics and diagnostics.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
+
+use super::default_true;
+use super::types::DurationStr;
 
 /// Signals configuration for built-in product analytics and frontend diagnostics.
 ///
@@ -12,7 +17,7 @@ use serde::{Deserialize, Serialize};
 /// enabled = true
 /// auto_capture = true
 /// diagnostics = true
-/// session_timeout = 30
+/// session_timeout = "30m"
 /// retention_days = 90
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,7 +37,7 @@ pub struct SignalsConfig {
 
     /// Inactivity timeout before closing a session (e.g. "30m").
     #[serde(default = "default_session_timeout")]
-    pub session_timeout: String,
+    pub session_timeout: DurationStr,
 
     /// Days to retain event data before partition cleanup.
     #[serde(default = "default_retention_days")]
@@ -48,7 +53,7 @@ pub struct SignalsConfig {
 
     /// Max interval between flushes of the event buffer (e.g. "5s").
     #[serde(default = "default_flush_interval")]
-    pub flush_interval: String,
+    pub flush_interval: DurationStr,
 
     /// Internal mpsc channel capacity for event buffering.
     #[serde(default = "default_channel_capacity")]
@@ -88,24 +93,8 @@ impl Default for SignalsConfig {
     }
 }
 
-use super::{default_true, parse_duration_secs};
-
-impl SignalsConfig {
-    /// Session timeout in minutes, parsed from duration string.
-    pub fn session_timeout_mins(&self) -> u32 {
-        let secs = parse_duration_secs(&self.session_timeout, 1800);
-        (secs / 60) as u32
-    }
-
-    /// Flush interval as a Duration, parsed from duration string.
-    pub fn flush_interval_duration(&self) -> std::time::Duration {
-        let secs = parse_duration_secs(&self.flush_interval, 5);
-        std::time::Duration::from_secs(secs)
-    }
-}
-
-fn default_session_timeout() -> String {
-    "30m".to_string()
+fn default_session_timeout() -> DurationStr {
+    DurationStr::new(Duration::from_secs(1800))
 }
 
 fn default_retention_days() -> u32 {
@@ -116,8 +105,8 @@ fn default_batch_size() -> usize {
     100
 }
 
-fn default_flush_interval() -> String {
-    "5s".to_string()
+fn default_flush_interval() -> DurationStr {
+    DurationStr::new(Duration::from_secs(5))
 }
 
 fn default_channel_capacity() -> usize {
@@ -135,11 +124,11 @@ mod tests {
         assert!(config.enabled);
         assert!(config.auto_capture);
         assert!(config.diagnostics);
-        assert_eq!(config.session_timeout, "30m");
+        assert_eq!(config.session_timeout.as_secs(), 1800);
         assert_eq!(config.retention_days, 90);
         assert!(!config.anonymize_ip);
         assert_eq!(config.batch_size, 100);
-        assert_eq!(config.flush_interval, "5s");
+        assert_eq!(config.flush_interval.as_secs(), 5);
         assert!(config.excluded_functions.is_empty());
         assert!(config.bot_detection);
     }
@@ -159,11 +148,11 @@ mod tests {
             assert!(config.enabled);
             assert!(config.auto_capture);
             assert!(config.diagnostics);
-            assert_eq!(config.session_timeout, "30m");
+            assert_eq!(config.session_timeout.as_secs(), 1800);
             assert_eq!(config.retention_days, 90);
             assert!(!config.anonymize_ip);
             assert_eq!(config.batch_size, 100);
-            assert_eq!(config.flush_interval, "5s");
+            assert_eq!(config.flush_interval.as_secs(), 5);
             assert!(config.excluded_functions.is_empty());
             assert!(config.bot_detection);
         }
@@ -175,11 +164,11 @@ mod tests {
         assert!(!config.enabled);
         assert!(config.auto_capture);
         assert!(config.diagnostics);
-        assert_eq!(config.session_timeout, "30m");
+        assert_eq!(config.session_timeout.as_secs(), 1800);
         assert_eq!(config.retention_days, 90);
         assert!(!config.anonymize_ip);
         assert_eq!(config.batch_size, 100);
-        assert_eq!(config.flush_interval, "5s");
+        assert_eq!(config.flush_interval.as_secs(), 5);
         assert!(config.excluded_functions.is_empty());
         assert!(config.bot_detection);
     }
@@ -209,11 +198,11 @@ mod tests {
         assert!(!config.enabled);
         assert!(!config.auto_capture);
         assert!(!config.diagnostics);
-        assert_eq!(config.session_timeout, "60m");
+        assert_eq!(config.session_timeout.as_secs(), 3600);
         assert_eq!(config.retention_days, 30);
         assert!(config.anonymize_ip);
         assert_eq!(config.batch_size, 500);
-        assert_eq!(config.flush_interval, "10s");
+        assert_eq!(config.flush_interval.as_secs(), 10);
         assert_eq!(config.excluded_functions, vec!["ping"]);
         assert!(!config.bot_detection);
     }

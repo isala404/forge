@@ -1,7 +1,11 @@
 //! MCP (Model Context Protocol) server configuration.
 
+use std::time::Duration;
+
 use crate::error::{ForgeError, Result};
 use serde::{Deserialize, Serialize};
+
+use super::types::DurationStr;
 
 /// MCP server configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,7 +28,7 @@ pub struct McpConfig {
 
     /// Session TTL duration (e.g. "1h", "30m").
     #[serde(default = "default_mcp_session_ttl")]
-    pub session_ttl: String,
+    pub session_ttl: DurationStr,
 
     /// Allowed origins for Origin header validation.
     #[serde(default)]
@@ -87,11 +91,6 @@ impl McpConfig {
         "/metrics",
     ];
 
-    /// Session TTL in seconds, parsed from the `session_ttl` string.
-    pub fn session_ttl_secs(&self) -> u64 {
-        super::parse_duration_secs(&self.session_ttl, 3600)
-    }
-
     /// Validate the MCP configuration.
     pub fn validate(&self) -> Result<()> {
         if self.path.is_empty() || !self.path.starts_with('/') {
@@ -110,13 +109,7 @@ impl McpConfig {
                 self.path
             )));
         }
-        if crate::util::parse_duration(&self.session_ttl).is_none() {
-            return Err(ForgeError::Config(format!(
-                "mcp.session_ttl '{}' is not a valid duration (e.g. \"1h\", \"30m\")",
-                self.session_ttl
-            )));
-        }
-        if self.session_ttl_secs() == 0 {
+        if self.session_ttl.as_secs() == 0 {
             return Err(ForgeError::Config(
                 "mcp.session_ttl must be greater than 0".to_string(),
             ));
@@ -137,8 +130,8 @@ fn default_mcp_path() -> String {
     "/mcp".to_string()
 }
 
-fn default_mcp_session_ttl() -> String {
-    "1h".to_string()
+fn default_mcp_session_ttl() -> DurationStr {
+    DurationStr::new(Duration::from_secs(3600))
 }
 
 fn default_true() -> bool {

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM forge_kv_counters WHERE key = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8a1c07b8c2cada3544eb9a98d6b8c90e30ec2b4293b8f92bb346f216156fa617"
+}

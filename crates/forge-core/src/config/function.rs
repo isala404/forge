@@ -1,6 +1,10 @@
 //! Function execution configuration.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
+
+use super::types::DurationStr;
 
 /// Function execution configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -12,7 +16,7 @@ pub struct FunctionConfig {
 
     /// Function timeout duration (e.g. "30s", "5m").
     #[serde(default = "default_function_timeout")]
-    pub timeout: String,
+    pub timeout: DurationStr,
 
     /// Advisory memory limit per function execution (e.g. "512mb", "1gb").
     ///
@@ -36,11 +40,6 @@ impl Default for FunctionConfig {
 }
 
 impl FunctionConfig {
-    /// Function timeout in seconds, parsed from the `timeout` string.
-    pub fn timeout_secs(&self) -> u64 {
-        super::parse_duration_secs(&self.timeout, 30)
-    }
-
     /// Advisory memory limit in bytes, parsed from the size string.
     pub fn memory_limit_bytes(&self) -> crate::Result<usize> {
         crate::util::parse_size(&self.memory_limit).ok_or_else(|| {
@@ -56,8 +55,8 @@ fn default_max_concurrent() -> usize {
     1000
 }
 
-fn default_function_timeout() -> String {
-    "30s".to_string()
+fn default_function_timeout() -> DurationStr {
+    DurationStr::new(Duration::from_secs(30))
 }
 
 fn default_memory_limit() -> String {

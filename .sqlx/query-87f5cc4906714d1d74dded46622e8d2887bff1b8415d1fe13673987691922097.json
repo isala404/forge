@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE forge_jobs\n                SET\n                    status = 'dead_letter',\n                    last_error = $2,\n                    failed_at = NOW(),\n                    cancel_requested_at = NULL,\n                    cancelled_at = NULL,\n                    cancel_reason = NULL,\n                    expires_at = $3\n                WHERE id = $1 AND status = 'running'\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "87f5cc4906714d1d74dded46622e8d2887bff1b8415d1fe13673987691922097"
+}

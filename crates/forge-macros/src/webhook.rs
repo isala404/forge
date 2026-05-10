@@ -27,6 +27,10 @@ struct DarlingWebhookAttrs {
     idempotency: Option<String>,
     #[darling(default)]
     timeout: Option<String>,
+    /// Override the default replay window (300s) for non-Stripe schemes.
+    /// Set to `0` to disable replay enforcement (not recommended).
+    #[darling(default)]
+    replay_window_secs: Option<u64>,
     // `signature` is handled manually - darling will see it as unknown, so we
     // parse the raw token stream for it before handing to darling.
 }
@@ -43,6 +47,7 @@ struct WebhookAttrs {
     allow_unsigned: bool,
     idempotency: Option<String>,
     timeout: Option<String>,
+    replay_window_secs: Option<u64>,
 }
 
 /// Parse the `signature = WebhookSignature::...` attribute manually from the
@@ -166,6 +171,7 @@ pub fn webhook_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         allow_unsigned: darling_attrs.allow_unsigned,
         idempotency: darling_attrs.idempotency,
         timeout: darling_attrs.timeout,
+        replay_window_secs: darling_attrs.replay_window_secs,
     };
 
     // Validate path
@@ -248,11 +254,16 @@ pub fn webhook_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             "Ed25519" => quote! { forge::forge_core::webhook::SignatureAlgorithm::Ed25519 },
             _ => quote! { forge::forge_core::webhook::SignatureAlgorithm::HmacSha256 },
         };
+        let replay_window_tokens = match attrs.replay_window_secs {
+            Some(secs) => quote! { #secs },
+            None => quote! { forge::forge_core::webhook::DEFAULT_REPLAY_WINDOW_SECS },
+        };
         quote! {
             Some(forge::forge_core::webhook::SignatureConfig {
                 algorithm: #alg_token,
                 header_name: #header,
                 secret_env: #secret_env,
+                replay_window_secs: #replay_window_tokens,
             })
         }
     } else {

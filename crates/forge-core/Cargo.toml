@@ -28,6 +28,7 @@ tokio = { workspace = true, features = ["rt", "sync"] }
 base64 = "0.22"
 ipnet = { workspace = true }
 sha2 = { workspace = true }
+subtle = { workspace = true }
 testcontainers = { workspace = true, optional = true }
 testcontainers-modules = { workspace = true, optional = true }
 

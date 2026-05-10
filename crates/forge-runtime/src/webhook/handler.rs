@@ -14,7 +14,9 @@ use base64::{Engine as _, engine::general_purpose};
 use ring::signature::{self, UnparsedPublicKey};
 use forge_core::CircuitBreakerClient;
 use forge_core::function::JobDispatch;
-use forge_core::webhook::{IdempotencySource, SignatureAlgorithm, WebhookContext};
+use forge_core::webhook::{
+    IdempotencySource, REPLAY_TIMESTAMP_HEADER, SignatureAlgorithm, WebhookContext,
+};
 use hmac::{Hmac, Mac};
 use serde_json::{Value, json};
 use sha2::Sha256;
@@ -145,7 +147,14 @@ pub async fn webhook_handler(
             .filter(|s| !s.is_empty())
             .collect();
         let signature_valid = secrets.iter().any(|secret| {
-            validate_signature(sig_config.algorithm, &body, secret, signature, &headers)
+            validate_signature(
+                sig_config.algorithm,
+                &body,
+                secret,
+                signature,
+                &headers,
+                sig_config.replay_window_secs,
+            )
         });
         if !signature_valid {
             warn!(webhook = info.name, "Invalid signature");
@@ -360,13 +369,25 @@ pub async fn webhook_handler(
 }
 
 /// Validate webhook signature, dispatching to the appropriate algorithm.
+///
+/// Stripe handles its own timestamp via the `t=` field. All other schemes
+/// require an `x-webhook-timestamp` header carrying unix seconds; the request
+/// is rejected as a replay when the difference from `now` falls outside
+/// `replay_window_secs`. A `replay_window_secs` of 0 disables enforcement.
 fn validate_signature(
     algorithm: SignatureAlgorithm,
     body: &[u8],
     secret: &str,
     signature: &str,
-    _headers: &HeaderMap,
+    headers: &HeaderMap,
+    replay_window_secs: u64,
 ) -> bool {
+    if !matches!(algorithm, SignatureAlgorithm::StripeWebhooks)
+        && replay_window_secs > 0
+        && !timestamp_within_replay_window(headers, replay_window_secs)
+    {
+        return false;
+    }
     match algorithm {
         SignatureAlgorithm::StripeWebhooks => validate_stripe_webhooks(body, secret, signature),
         SignatureAlgorithm::HmacSha256Base64 => {
@@ -381,14 +402,35 @@ fn validate_signature(
                 Some(b) => b,
                 None => return false,
             };
-            let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
-                .expect("HMAC can take key of any size");
+            let mut mac = match Hmac::<Sha256>::new_from_slice(secret.as_bytes()) {
+                Ok(m) => m,
+                Err(_) => return false,
+            };
             mac.update(body);
             mac.verify_slice(&expected).is_ok()
         }
         // Future variants added to SignatureAlgorithm are caught here until handler support lands.
         _ => false,
     }
+}
+
+/// Reject requests whose `x-webhook-timestamp` header is missing, malformed,
+/// dated in the future, or older than `window_secs`. Returns `true` only when
+/// the request falls inside the window.
+fn timestamp_within_replay_window(headers: &HeaderMap, window_secs: u64) -> bool {
+    let Some(ts_str) = headers
+        .get(REPLAY_TIMESTAMP_HEADER)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return false;
+    };
+    let Ok(ts) = ts_str.parse::<i64>() else {
+        return false;
+    };
+    let now = chrono::Utc::now().timestamp();
+    let window = i64::try_from(window_secs).unwrap_or(i64::MAX);
+    let age = now.saturating_sub(ts);
+    age >= 0 && age <= window
 }
 
 /// Validate a Stripe webhook signature.
@@ -434,8 +476,10 @@ fn validate_stripe_webhooks(body: &[u8], secret: &str, signature_header: &str) -
         let Some(decoded) = decode_hex(sig) else {
             continue;
         };
-        let mut verifier = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
-            .expect("HMAC can take key of any size");
+        let mut verifier = match Hmac::<Sha256>::new_from_slice(secret.as_bytes()) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
         verifier.update(&signed);
         if verifier.verify_slice(&decoded).is_ok() {
             return true;
@@ -452,8 +496,10 @@ fn validate_hmac_sha256_base64(body: &[u8], secret: &str, signature: &str) -> bo
     let Ok(provided) = general_purpose::STANDARD.decode(signature) else {
         return false;
     };
-    let mut mac =
-        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
+    let mut mac = match Hmac::<Sha256>::new_from_slice(secret.as_bytes()) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
     mac.update(body);
     mac.verify_slice(&provided).is_ok()
 }
@@ -632,6 +678,13 @@ mod tests {
         assert_eq!(extract_json_path(&value, "$.id"), None);
     }
 
+    fn fresh_timestamp_headers() -> HeaderMap {
+        let mut h = HeaderMap::new();
+        let now = chrono::Utc::now().timestamp().to_string();
+        h.insert(REPLAY_TIMESTAMP_HEADER, now.parse().unwrap());
+        h
+    }
+
     #[test]
     fn test_validate_signature_sha256() {
         use hmac::{Hmac, Mac};
@@ -639,7 +692,7 @@ mod tests {
 
         let body = b"test payload";
         let secret = "test_secret";
-        let empty_headers = HeaderMap::new();
+        let headers = fresh_timestamp_headers();
 
         let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
         mac.update(body);
@@ -650,7 +703,8 @@ mod tests {
             body,
             secret,
             &signature,
-            &empty_headers,
+            &headers,
+            300,
         ));
 
         // With prefix
@@ -660,20 +714,33 @@ mod tests {
             body,
             secret,
             &sig_with_prefix,
+            &headers,
+            300,
+        ));
+
+        // Replay window disabled (0) — header presence no longer matters
+        let empty_headers = HeaderMap::new();
+        assert!(validate_signature(
+            SignatureAlgorithm::HmacSha256,
+            body,
+            secret,
+            &signature,
             &empty_headers,
+            0,
         ));
     }
 
     #[test]
     fn test_validate_signature_invalid() {
-        let empty_headers = HeaderMap::new();
+        let headers = fresh_timestamp_headers();
 
         assert!(!validate_signature(
             SignatureAlgorithm::HmacSha256,
             b"test",
             "secret",
             "invalid_hex",
-            &empty_headers,
+            &headers,
+            300,
         ));
 
         assert!(!validate_signature(
@@ -681,7 +748,134 @@ mod tests {
             b"test",
             "secret",
             "0000000000000000000000000000000000000000000000000000000000000000",
+            &headers,
+            300,
+        ));
+    }
+
+    #[test]
+    fn test_replay_window_rejects_when_header_missing() {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let body = b"test payload";
+        let secret = "test_secret";
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        let signature = encode_hex(&mac.finalize().into_bytes());
+
+        let headers = HeaderMap::new();
+        assert!(!validate_signature(
+            SignatureAlgorithm::HmacSha256,
+            body,
+            secret,
+            &signature,
+            &headers,
+            300,
+        ));
+    }
+
+    #[test]
+    fn test_replay_window_rejects_when_header_malformed() {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let body = b"test payload";
+        let secret = "test_secret";
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        let signature = encode_hex(&mac.finalize().into_bytes());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(REPLAY_TIMESTAMP_HEADER, "not-a-timestamp".parse().unwrap());
+        assert!(!validate_signature(
+            SignatureAlgorithm::HmacSha256,
+            body,
+            secret,
+            &signature,
+            &headers,
+            300,
+        ));
+    }
+
+    #[test]
+    fn test_replay_window_rejects_stale_timestamp() {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let body = b"test payload";
+        let secret = "test_secret";
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        let signature = encode_hex(&mac.finalize().into_bytes());
+
+        let stale = (chrono::Utc::now().timestamp() - 600).to_string();
+        let mut headers = HeaderMap::new();
+        headers.insert(REPLAY_TIMESTAMP_HEADER, stale.parse().unwrap());
+        assert!(!validate_signature(
+            SignatureAlgorithm::HmacSha256,
+            body,
+            secret,
+            &signature,
+            &headers,
+            300,
+        ));
+    }
+
+    #[test]
+    fn test_replay_window_rejects_future_timestamp() {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let body = b"test payload";
+        let secret = "test_secret";
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        let signature = encode_hex(&mac.finalize().into_bytes());
+
+        let future = (chrono::Utc::now().timestamp() + 3600).to_string();
+        let mut headers = HeaderMap::new();
+        headers.insert(REPLAY_TIMESTAMP_HEADER, future.parse().unwrap());
+        assert!(!validate_signature(
+            SignatureAlgorithm::HmacSha256,
+            body,
+            secret,
+            &signature,
+            &headers,
+            300,
+        ));
+    }
+
+    #[test]
+    fn test_replay_window_does_not_apply_to_stripe() {
+        // Stripe carries its own timestamp inside the header and ignores
+        // x-webhook-timestamp, so the window does not gate the dispatch.
+        // This test exercises that the dispatch reaches the Stripe validator
+        // regardless of the auxiliary header state.
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let body = b"{\"type\":\"event\"}";
+        let secret = "whsec_x";
+        let ts = chrono::Utc::now().timestamp().to_string();
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        let mut signed = Vec::new();
+        signed.extend_from_slice(ts.as_bytes());
+        signed.push(b'.');
+        signed.extend_from_slice(body);
+        mac.update(&signed);
+        let sig = encode_hex(&mac.finalize().into_bytes());
+        let header = format!("t={ts},v1={sig}");
+
+        // No x-webhook-timestamp at all — Stripe still validates
+        let empty_headers = HeaderMap::new();
+        assert!(validate_signature(
+            SignatureAlgorithm::StripeWebhooks,
+            body,
+            secret,
+            &header,
             &empty_headers,
+            300,
         ));
     }
 

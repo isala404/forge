@@ -131,9 +131,11 @@ impl JobQueue {
         Self { pool }
     }
 
-    /// Enqueue a new job.
+    /// Enqueue a new job. If the job has an idempotency key that matches
+    /// an existing non-terminal job, returns the existing job's ID.
     pub async fn enqueue(&self, job: JobRecord) -> Result<Uuid, sqlx::Error> {
-        // Check for duplicate if idempotency key is set
+        // Fast path: check for existing idempotent job before attempting INSERT.
+        // The UNIQUE partial index on idempotency_key guards against races.
         if let Some(ref key) = job.idempotency_key {
             let existing = sqlx::query_scalar!(
                 r#"
@@ -147,7 +149,7 @@ impl JobQueue {
             .await?;
 
             if let Some(id) = existing {
-                return Ok(id); // Return existing job ID
+                return Ok(id);
             }
         }
 
@@ -159,6 +161,7 @@ impl JobQueue {
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
             )
+            ON CONFLICT DO NOTHING
             "#,
             job.id,
             &job.job_type,
@@ -176,6 +179,24 @@ impl JobQueue {
         )
         .execute(&self.pool)
         .await?;
+
+        // If ON CONFLICT fired (race with another enqueue), fetch the winner's ID.
+        if let Some(ref key) = job.idempotency_key {
+            let id = sqlx::query_scalar!(
+                r#"
+                SELECT id FROM forge_jobs
+                WHERE idempotency_key = $1
+                  AND status NOT IN ('completed', 'failed', 'dead_letter', 'cancelled')
+                "#,
+                key
+            )
+            .fetch_optional(&self.pool)
+            .await?;
+
+            if let Some(winner) = id {
+                return Ok(winner);
+            }
+        }
 
         Ok(job.id)
     }
@@ -318,7 +339,7 @@ impl JobQueue {
                 cancelled_at = NULL,
                 cancel_reason = NULL,
                 expires_at = $3
-            WHERE id = $1
+            WHERE id = $1 AND status = 'running'
             "#,
             job_id,
             output as _,
@@ -355,7 +376,7 @@ impl JobQueue {
                     cancel_requested_at = NULL,
                     cancelled_at = NULL,
                     cancel_reason = NULL
-                WHERE id = $1
+                WHERE id = $1 AND status = 'running'
                 "#,
                 job_id,
                 error,
@@ -382,7 +403,7 @@ impl JobQueue {
                     cancelled_at = NULL,
                     cancel_reason = NULL,
                     expires_at = $3
-                WHERE id = $1
+                WHERE id = $1 AND status = 'running'
                 "#,
                 job_id,
                 error,
@@ -566,7 +587,7 @@ impl JobQueue {
                 cancelled_at = NOW(),
                 cancel_reason = COALESCE($2, cancel_reason),
                 expires_at = $3
-            WHERE id = $1
+            WHERE id = $1 AND status NOT IN ('completed', 'failed', 'dead_letter', 'cancelled')
             "#,
             job_id,
             reason,

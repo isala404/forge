@@ -14,6 +14,7 @@ use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::Stream;
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 use tokio::sync::{RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -71,7 +72,12 @@ fn authorize_session_access(
     session_secret: &str,
     requester_auth: &AuthContext,
 ) -> Result<AuthContext, (StatusCode, Json<SseSubscribeResponse>)> {
-    if session.session_secret != session_secret {
+    let secret_match: bool = session
+        .session_secret
+        .as_bytes()
+        .ct_eq(session_secret.as_bytes())
+        .into();
+    if !secret_match {
         return Err(subscribe_error(
             StatusCode::UNAUTHORIZED,
             "INVALID_SESSION_SECRET",
@@ -984,9 +990,12 @@ pub async fn sse_unsubscribe_handler(
         let sessions = state.sessions.read().await;
         match sessions.get(&session_id) {
             Some(session) => {
-                if session.session_secret != request.session_secret
-                    || !same_principal(&session.auth_context, &request_auth)
-                {
+                let secret_match: bool = session
+                    .session_secret
+                    .as_bytes()
+                    .ct_eq(request.session_secret.as_bytes())
+                    .into();
+                if !secret_match || !same_principal(&session.auth_context, &request_auth) {
                     return unsubscribe_error(
                         StatusCode::FORBIDDEN,
                         "SESSION_PRINCIPAL_MISMATCH",

@@ -1,6 +1,10 @@
 //! Real-time subscription engine and SSE transport configuration.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
+
+use super::types::DurationStr;
 
 /// Configuration for the real-time subscription engine and SSE transport.
 ///
@@ -15,7 +19,7 @@ pub struct RealtimeConfig {
     /// Periodic resync interval. Re-evaluates every active query group to recover
     /// from dropped NOTIFY payloads. "0s" disables the sweep (e.g. "60s", "5m").
     #[serde(default = "default_resync_interval")]
-    pub resync_interval: String,
+    pub resync_interval: DurationStr,
 
     /// Broadcast channel buffer for raw change notifications from PG.
     #[serde(
@@ -27,11 +31,11 @@ pub struct RealtimeConfig {
     /// Debounce quiet window duration. Changes arriving within this window are
     /// coalesced into a single flush (e.g. "50ms", "100ms").
     #[serde(default = "default_debounce_quiet_window", alias = "debounce_quiet")]
-    pub debounce_quiet_window: String,
+    pub debounce_quiet_window: DurationStr,
 
     /// Absolute maximum debounce wait before forcing a flush (e.g. "200ms", "1s").
     #[serde(default = "default_debounce_max_wait", alias = "debounce_max")]
-    pub debounce_max_wait: String,
+    pub debounce_max_wait: DurationStr,
 
     /// Maximum concurrent SSE sessions across all clients.
     #[serde(default = "default_sse_max_sessions")]
@@ -76,17 +80,17 @@ pub struct RealtimeConfig {
 fn default_max_concurrent_reexecutions() -> usize {
     64
 }
-fn default_resync_interval() -> String {
-    "60s".to_string()
+fn default_resync_interval() -> DurationStr {
+    DurationStr::new(Duration::from_secs(60))
 }
 fn default_postgres_change_buffer_size() -> usize {
     1024
 }
-fn default_debounce_quiet_window() -> String {
-    "50ms".to_string()
+fn default_debounce_quiet_window() -> DurationStr {
+    DurationStr::new(Duration::from_millis(50))
 }
-fn default_debounce_max_wait() -> String {
-    "200ms".to_string()
+fn default_debounce_max_wait() -> DurationStr {
+    DurationStr::new(Duration::from_millis(200))
 }
 fn default_sse_max_sessions() -> usize {
     10_000
@@ -130,22 +134,5 @@ impl Default for RealtimeConfig {
             max_subscriptions_per_user: default_max_subscriptions_per_user(),
             max_cached_result_bytes: default_max_cached_result_bytes(),
         }
-    }
-}
-
-impl RealtimeConfig {
-    /// Resync interval in seconds, parsed from the `resync_interval` string.
-    pub fn resync_interval_secs(&self) -> u64 {
-        super::parse_duration_secs(&self.resync_interval, 60)
-    }
-
-    /// Debounce quiet window in milliseconds, parsed from the `debounce_quiet_window` string.
-    pub fn debounce_quiet_ms(&self) -> u64 {
-        super::parse_duration_millis(&self.debounce_quiet_window, 50)
-    }
-
-    /// Absolute maximum debounce wait in milliseconds, parsed from the `debounce_max_wait` string.
-    pub fn debounce_max_ms(&self) -> u64 {
-        super::parse_duration_millis(&self.debounce_max_wait, 200)
     }
 }

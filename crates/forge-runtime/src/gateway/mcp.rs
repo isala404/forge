@@ -83,12 +83,12 @@ impl McpState {
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.get_mut(session_id) {
             session.expires_at =
-                Instant::now() + Duration::from_secs(self.config.session_ttl_secs());
+                Instant::now() + Duration::from_secs(self.config.session_ttl.as_secs());
         }
     }
 
     fn session_ttl(&self) -> Duration {
-        Duration::from_secs(self.config.session_ttl_secs())
+        Duration::from_secs(self.config.session_ttl.as_secs())
     }
 }
 

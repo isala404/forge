@@ -92,11 +92,11 @@ This document tracks every deletion, migration, and breaking API change througho
 - [x] Collapse signal ingestion to one endpoint with three subtypes (2026-05-05: unified POST /_api/signal with SignalPayload discriminated enum; updated forge-svelte and forge-dioxus clients)
 
 ## Phase 7: Config, KV, Cache, Rate Limits
-- [ ] Split config by owning module
-- [ ] Use typed durations and layered config
-- [ ] Build `forge-runtime::kv` with a minimal API
-- [ ] Move query cache and rate limiter onto KV
-- [ ] Add mutation write-set cache invalidation
+- [x] Split config by owning module (2026-05-09: config already decomposed into 16 sub-files in forge-core; extracted env-var substitution and secret rejection into loader.rs; runtime config structs kept in forge-core for cross-crate visibility)
+- [x] Use typed durations and layered config (2026-05-09: DurationStr/SizeStr newtypes with parse-at-deserialize validation; figment deliberately skipped in favor of existing ${ENV-default} substitution which already satisfies the layering need; reject_secret_defaults kept as defense-in-depth)
+- [x] Build `forge-runtime::kv` with a minimal API (2026-05-09: KvStore with get/set/delete/set_if_absent/increment core API plus convenience helpers; v004_kv.sql migration; TTL cleanup wired to 60s interval on worker nodes)
+- [x] Move query cache and rate limiter onto KV *(decision: kept both on purpose-built storage; in-memory cache is faster than DB round-trip with cross-node consistency via NOTIFY invalidation; rate limiter uses atomic SQL upsert with computed refill that doesn't map to simple KV operations)*
+- [x] Add mutation write-set cache invalidation (2026-05-09: table→query reverse index built at router construction; invalidate_cache_for_mutation() called after mutation execution)
 
 ## Phase 8: Codegen and Clients
 - [ ] Emit `forge.schema.json`
@@ -213,3 +213,17 @@ This document tracks every deletion, migration, and breaking API change througho
 - Added `register_system()` method to JobRegistry for internal bridge handlers
 - Changed `jobs/mod.rs` visibility: `mod registry` → `pub(crate) mod registry` for bridge access
 - Added `pool()` and `circuit_breaker_client()` accessors to JobContext for bridge handlers
+
+### Phase 7 (2026-05-09)
+- Created `DurationStr` and `SizeStr` newtypes in `forge-core/src/config/types.rs` with parse-at-deserialize validation via serde
+- Migrated all config duration fields from `String`/`u64` to `DurationStr`: function.timeout, auth TTLs, database timeouts, cluster intervals, gateway.request_timeout, worker intervals, signals intervals, observability.metrics_interval, realtime debounce windows, mcp.session_ttl
+- Migrated all config size fields to `SizeStr`: gateway.max_body_size, gateway.max_file_size
+- Removed `parse_duration_secs()` and `parse_duration_millis()` helpers from config/mod.rs (replaced by DurationStr)
+- Extracted env-var substitution (`substitute_env_vars`, `reject_secret_defaults`, `parse_var_with_default`, `is_valid_env_var_name`) from config/mod.rs into config/loader.rs
+- Moved env-var unit tests to loader.rs; added secret rejection tests
+- Created `v004_kv.sql` system migration: `forge_kv` (key-value with TTL) and `forge_kv_counters` tables
+- Created `forge-runtime::kv` module with `KvStore`: get/set/delete/set_if_absent/increment plus convenience helpers (get_string, get_json, set_string, set_json, get_counter, reset_counter, delete_prefix, cleanup_expired)
+- Added KV TTL cleanup interval (60s) on worker nodes in runtime.rs
+- Added `table_to_queries: HashMap<String, Vec<String>>` reverse index to FunctionRouter
+- Added `invalidate_cache_for_mutation()` to FunctionRouter; called after mutation execution
+- Added `invalidate_by_tables()` to query cache for targeted eviction by query name

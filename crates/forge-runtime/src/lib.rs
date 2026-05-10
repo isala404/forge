@@ -20,6 +20,7 @@ pub use sqlx;
 // Always-on infrastructure
 pub mod cluster;
 pub mod function;
+pub mod kv;
 pub mod migrations;
 pub mod observability;
 pub mod pg;
@@ -62,6 +63,7 @@ pub use cluster::{
     ShutdownConfig,
 };
 pub use function::{FunctionRegistry, FunctionRouter, RouteResult};
+pub use kv::KvStore;
 pub use observability::{
     TelemetryConfig, TelemetryError, build_env_filter, init_telemetry, shutdown_telemetry,
 };

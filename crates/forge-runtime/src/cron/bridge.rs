@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use forge_core::cron::CronContext;
 use forge_core::job::{JobContext, JobInfo};
@@ -66,7 +65,7 @@ pub fn register_cron_bridges(cron_registry: &Arc<CronRegistry>, job_registry: &m
 
         let info = JobInfo {
             name: Box::leak(job_name.clone().into_boxed_str()),
-            timeout: Duration::from_secs(timeout.as_secs().max(300)),
+            timeout,
             ..JobInfo::default()
         };
 

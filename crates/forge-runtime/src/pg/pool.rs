@@ -54,8 +54,8 @@ impl Database {
             .pools
             .default
             .as_ref()
-            .map(|p| p.timeout_secs())
-            .unwrap_or_else(|| config.pool_timeout_secs());
+            .map(|p| p.timeout.as_secs())
+            .unwrap_or_else(|| config.pool_timeout.as_secs());
         let primary_min = config
             .pools
             .default
@@ -72,8 +72,8 @@ impl Database {
             .pools
             .default
             .as_ref()
-            .and_then(|p| p.statement_timeout_secs())
-            .unwrap_or_else(|| config.statement_timeout_secs());
+            .and_then(|p| p.statement_timeout.map(|d| d.as_secs()))
+            .unwrap_or_else(|| config.statement_timeout.as_secs());
 
         let primary = Self::create_pool_with_statement_timeout(
             &config.url,
@@ -92,7 +92,7 @@ impl Database {
             let pool = Self::create_pool(
                 replica_url,
                 config.replica_pool_size.unwrap_or(config.pool_size / 2),
-                config.pool_timeout_secs(),
+                config.pool_timeout.as_secs(),
                 service_name,
             )
             .await

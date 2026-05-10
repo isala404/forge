@@ -1,12 +1,10 @@
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ForgeError, Result};
 
-fn parse_duration_secs(s: &str, default_secs: u64) -> u64 {
-    crate::util::parse_duration(s)
-        .map(|d| d.as_secs())
-        .unwrap_or(default_secs)
-}
+use super::types::DurationStr;
 
 /// Database configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,11 +20,11 @@ pub struct DatabaseConfig {
 
     /// Pool checkout timeout duration (e.g. "30s", "1m").
     #[serde(default = "default_pool_timeout")]
-    pub pool_timeout: String,
+    pub pool_timeout: DurationStr,
 
     /// Statement timeout duration (e.g. "30s", "5m").
     #[serde(default = "default_statement_timeout")]
-    pub statement_timeout: String,
+    pub statement_timeout: DurationStr,
 
     /// Read replica URLs for scaling reads.
     #[serde(default)]
@@ -85,16 +83,6 @@ impl DatabaseConfig {
         &self.url
     }
 
-    /// Pool checkout timeout in seconds, parsed from the `pool_timeout` string.
-    pub fn pool_timeout_secs(&self) -> u64 {
-        parse_duration_secs(&self.pool_timeout, 30)
-    }
-
-    /// Statement timeout in seconds, parsed from the `statement_timeout` string.
-    pub fn statement_timeout_secs(&self) -> u64 {
-        parse_duration_secs(&self.statement_timeout, 30)
-    }
-
     /// Validate the database configuration.
     pub fn validate(&self) -> Result<()> {
         if self.url.is_empty() {
@@ -113,12 +101,12 @@ fn default_pool_size() -> u32 {
     50
 }
 
-fn default_pool_timeout() -> String {
-    "30s".to_string()
+fn default_pool_timeout() -> DurationStr {
+    DurationStr::new(Duration::from_secs(30))
 }
 
-fn default_statement_timeout() -> String {
-    "30s".to_string()
+fn default_statement_timeout() -> DurationStr {
+    DurationStr::new(Duration::from_secs(30))
 }
 
 use super::default_true;
@@ -153,10 +141,10 @@ pub struct PoolConfig {
 
     /// Checkout timeout duration (e.g. "30s", "1m").
     #[serde(default = "default_pool_timeout")]
-    pub timeout: String,
+    pub timeout: DurationStr,
 
     /// Statement timeout duration override (e.g. "30s", "5m").
-    pub statement_timeout: Option<String>,
+    pub statement_timeout: Option<DurationStr>,
 
     /// Minimum connections to keep alive.
     #[serde(default)]
@@ -165,20 +153,6 @@ pub struct PoolConfig {
     /// Run a health check query before handing out connections.
     #[serde(default = "default_true")]
     pub test_before_acquire: bool,
-}
-
-impl PoolConfig {
-    /// Checkout timeout in seconds, parsed from the `timeout` string.
-    pub fn timeout_secs(&self) -> u64 {
-        parse_duration_secs(&self.timeout, 30)
-    }
-
-    /// Statement timeout in seconds, parsed from the `statement_timeout` string.
-    pub fn statement_timeout_secs(&self) -> Option<u64> {
-        self.statement_timeout
-            .as_deref()
-            .map(|s| parse_duration_secs(s, 30))
-    }
 }
 
 #[cfg(test)]
@@ -190,7 +164,7 @@ mod tests {
     fn test_default_database_config() {
         let config = DatabaseConfig::default();
         assert_eq!(config.pool_size, 50);
-        assert_eq!(config.pool_timeout_secs(), 30);
+        assert_eq!(config.pool_timeout.as_secs(), 30);
         assert!(config.url.is_empty());
     }
 

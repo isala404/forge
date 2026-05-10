@@ -60,10 +60,10 @@ impl HeartbeatConfig {
         }
 
         Self {
-            interval: Duration::from_secs(cluster.heartbeat_interval_secs()),
-            dead_threshold: Duration::from_secs(cluster.dead_threshold_secs()),
+            interval: *cluster.heartbeat_interval,
+            dead_threshold: *cluster.dead_threshold,
             mark_dead_nodes: true,
-            max_interval: Duration::from_secs(cluster.heartbeat_interval_secs() * 12),
+            max_interval: Duration::from_secs(cluster.heartbeat_interval.as_secs() * 12),
         }
     }
 }
@@ -297,8 +297,8 @@ mod tests {
     #[test]
     fn test_heartbeat_config_from_cluster_config() {
         let mut cluster = ClusterConfig::default();
-        cluster.heartbeat_interval = "10s".to_string();
-        cluster.dead_threshold = "30s".to_string();
+        cluster.heartbeat_interval = forge_core::config::DurationStr::new(Duration::from_secs(10));
+        cluster.dead_threshold = forge_core::config::DurationStr::new(Duration::from_secs(30));
 
         let config = HeartbeatConfig::from_cluster_config(&cluster);
         assert_eq!(config.interval, Duration::from_secs(10));

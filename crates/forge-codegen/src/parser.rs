@@ -4,8 +4,11 @@
 //! definitions without requiring compilation.
 //!
 //! Key design decisions:
-//! - Context arguments are detected structurally (type ends with "Context"),
-//!   not by string-searching the entire token stream.
+//! - Context arguments are matched against `KNOWN_CONTEXT_TYPES`, a fixed list
+//!   of the 8 Forge context types. User-defined types like `AppContext` are not
+//!   accidentally skipped.
+//! - `Result<T, E>` extraction uses `syn::TypePath` recursion, handling
+//!   arbitrarily nested generics.
 //! - Unparseable inner types become `RustType::Custom(original_string)` instead
 //!   of silently falling back to `String`.
 //! - `NaiveTime` correctly maps to `RustType::LocalTime`.
@@ -355,22 +358,31 @@ fn parse_function(item: &syn::ItemFn) -> Option<FunctionDef> {
     Some(func)
 }
 
-/// Check if a type is a Forge context type by examining the base type name.
+/// Known Forge context types. Only these are skipped as the first parameter.
+/// User-defined types like `AppContext` or `MyContext` are not matched.
+const KNOWN_CONTEXT_TYPES: &[&str] = &[
+    "QueryContext",
+    "MutationContext",
+    "JobContext",
+    "CronContext",
+    "WorkflowContext",
+    "DaemonContext",
+    "WebhookContext",
+    "McpToolContext",
+];
+
+/// Check if a type is a known Forge context type.
 ///
-/// Handles references (`&Context`, `&mut Context`) and qualified paths
-/// (`forge::QueryContext`). Only matches types whose final segment ends
-/// with "Context" — won't match `ContextManager` or `NoContextHere`.
+/// Handles references (`&QueryContext`, `&mut MutationContext`) and qualified
+/// paths (`forge::QueryContext`). Only matches the registered list above.
 fn is_context_type(ty: &syn::Type) -> bool {
-    // Get the type string, stripping whitespace for uniform matching.
     let type_str = ty.to_token_stream().to_string().replace(' ', "");
 
-    // Strip leading references: &, &mut
     let base = type_str.trim_start_matches('&').trim_start_matches("mut");
 
-    // Get the final path segment (after any :: qualifiers).
     let final_segment = base.rsplit("::").next().unwrap_or(base);
 
-    final_segment.ends_with("Context")
+    KNOWN_CONTEXT_TYPES.contains(&final_segment)
 }
 
 fn get_function_kind(attrs: &[Attribute]) -> Option<FunctionKind> {
@@ -402,42 +414,15 @@ fn get_function_kind(attrs: &[Attribute]) -> Option<FunctionKind> {
 // Type conversion
 // ---------------------------------------------------------------------------
 
-/// Extract the inner type from `Result<T, E>`.
+/// Extract the inner type from `Result<T, E>` using syn's AST.
 fn extract_result_type(ty: &syn::Type) -> RustType {
-    let type_str = quote::quote!(#ty).to_string().replace(' ', "");
-
-    if let Some(rest) = type_str.strip_prefix("Result<") {
-        // Find the inner type (T) before the comma or closing bracket.
-        let mut depth = 0;
-        let mut end_idx = 0;
-        for (i, c) in rest.chars().enumerate() {
-            match c {
-                '<' => depth += 1,
-                '>' => {
-                    if depth == 0 {
-                        end_idx = i;
-                        break;
-                    }
-                    depth -= 1;
-                }
-                ',' if depth == 0 => {
-                    end_idx = i;
-                    break;
-                }
-                _ => {}
-            }
-        }
-        let inner = &rest[..end_idx];
-        return match syn::parse_str::<syn::Type>(inner) {
-            Ok(inner_ty) => type_to_rust_type(&inner_ty),
-            Err(_) => {
-                tracing::warn!(
-                    "Could not parse Result inner type '{}', treating as custom type",
-                    inner
-                );
-                RustType::Custom(inner.to_string())
-            }
-        };
+    if let syn::Type::Path(type_path) = ty
+        && let Some(seg) = type_path.path.segments.last()
+        && seg.ident == "Result"
+        && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+        && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first()
+    {
+        return type_to_rust_type(inner_ty);
     }
 
     type_to_rust_type(ty)
@@ -743,6 +728,48 @@ mod tests {
             .expect("test function should be registered");
         // "ContextManager" ends with "Manager", not "Context", so both args kept.
         assert_eq!(func.args.len(), 2);
+    }
+
+    #[test]
+    fn test_user_defined_context_not_skipped() {
+        // User-defined "AppContext" is NOT a known Forge context type.
+        let source = r#"
+            #[query]
+            async fn test(ctx: AppContext, id: Uuid) -> Result<User> {
+                todo!()
+            }
+        "#;
+        let registry = SchemaRegistry::new();
+        parse_file(source, &registry).expect("user context should parse");
+        let func = registry
+            .get_function("test")
+            .expect("test function should be registered");
+        assert_eq!(func.args.len(), 2, "AppContext should not be skipped");
+    }
+
+    #[test]
+    fn test_nested_result_type_extraction() {
+        let source = r#"
+            #[query]
+            async fn nested(ctx: QueryContext) -> Result<Vec<Option<User>>> {
+                todo!()
+            }
+        "#;
+        let registry = SchemaRegistry::new();
+        parse_file(source, &registry).expect("nested result should parse");
+        let func = registry
+            .get_function("nested")
+            .expect("nested function should be registered");
+        match &func.return_type {
+            RustType::Vec(inner) => match inner.as_ref() {
+                RustType::Option(inner2) => match inner2.as_ref() {
+                    RustType::Custom(name) => assert_eq!(name, "User"),
+                    other => panic!("Expected Custom(User), got: {other:?}"),
+                },
+                other => panic!("Expected Option, got: {other:?}"),
+            },
+            other => panic!("Expected Vec, got: {other:?}"),
+        }
     }
 
     #[test]

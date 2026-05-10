@@ -607,7 +607,7 @@ impl Reactor {
             // `resync_secs == 0` disables the sweep. Use a far-future interval
             // so the select! arm is well-typed but never fires.
             let mut resync_interval = if resync_secs == 0 {
-                let mut i = tokio::time::interval(std::time::Duration::from_secs(u64::MAX / 2));
+                let mut i = tokio::time::interval(std::time::Duration::from_secs(86400 * 365));
                 i.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 i
             } else {

@@ -18,10 +18,10 @@ use super::runner::Migration;
 /// System migration prefix. All forge internal migrations use this prefix.
 pub const SYSTEM_MIGRATION_PREFIX: &str = "__forge_v";
 
-/// System migration v001: Complete FORGE schema.
-/// Creates all core tables for jobs, workflows, crons, observability, daemons,
-/// webhooks, auth, signals, and cluster coordination.
 const V001_INITIAL: &str = include_str!("../../migrations/system/v001_initial.sql");
+const V002_CHANGE_LOG: &str = include_str!("../../migrations/system/v002_change_log.sql");
+const V003_JOB_WAKEUP: &str = include_str!("../../migrations/system/v003_job_wakeup.sql");
+const V004_KV: &str = include_str!("../../migrations/system/v004_kv.sql");
 
 /// A system migration with a version number.
 #[derive(Debug, Clone)]
@@ -50,11 +50,28 @@ impl SystemMigration {
 ///
 /// These are applied in order before any user migrations.
 pub fn get_system_migrations() -> Vec<SystemMigration> {
-    vec![SystemMigration {
-        version: 1,
-        sql: V001_INITIAL,
-        description: "Complete FORGE schema",
-    }]
+    vec![
+        SystemMigration {
+            version: 1,
+            sql: V001_INITIAL,
+            description: "Complete FORGE schema",
+        },
+        SystemMigration {
+            version: 2,
+            sql: V002_CHANGE_LOG,
+            description: "Change log for gap-free reactivity",
+        },
+        SystemMigration {
+            version: 3,
+            sql: V003_JOB_WAKEUP,
+            description: "NOTIFY trigger for job wakeup",
+        },
+        SystemMigration {
+            version: 4,
+            sql: V004_KV,
+            description: "Key-value store tables",
+        },
+    ]
 }
 
 /// Get system migrations as Migration structs.
@@ -97,9 +114,12 @@ mod tests {
     #[test]
     fn test_get_system_migrations() {
         let migrations = get_system_migrations();
-        assert_eq!(migrations.len(), 1);
+        assert_eq!(migrations.len(), 4);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(migrations[0].name(), "__forge_v001");
+        assert_eq!(migrations[1].name(), "__forge_v002");
+        assert_eq!(migrations[2].name(), "__forge_v003");
+        assert_eq!(migrations[3].name(), "__forge_v004");
     }
 
     #[test]
@@ -113,31 +133,43 @@ mod tests {
     #[test]
     fn test_migration_sql_contains_tables() {
         let migrations = get_system_migrations();
-        let sql = migrations[0].sql;
 
-        assert!(sql.contains("forge_nodes"));
-        assert!(sql.contains("forge_leaders"));
-        assert!(sql.contains("forge_jobs"));
-        assert!(sql.contains("forge_cron_runs"));
-        assert!(sql.contains("forge_workflow_runs"));
-        assert!(sql.contains("forge_workflow_steps"));
-        assert!(sql.contains("forge_sessions"));
-        assert!(sql.contains("forge_subscriptions"));
-        assert!(sql.contains("forge_daemons"));
-        assert!(sql.contains("forge_webhook_events"));
-        assert!(sql.contains("forge_refresh_tokens"));
-        assert!(sql.contains("forge_oauth_clients"));
-        assert!(sql.contains("forge_oauth_codes"));
+        // v001: core schema
+        let v001 = migrations[0].sql;
+        assert!(v001.contains("forge_nodes"));
+        assert!(v001.contains("forge_leaders"));
+        assert!(v001.contains("forge_jobs"));
+        assert!(v001.contains("forge_cron_runs"));
+        assert!(v001.contains("forge_workflow_runs"));
+        assert!(v001.contains("forge_workflow_steps"));
+        assert!(v001.contains("forge_sessions"));
+        assert!(v001.contains("forge_subscriptions"));
+        assert!(v001.contains("forge_daemons"));
+        assert!(v001.contains("forge_webhook_events"));
+        assert!(v001.contains("forge_refresh_tokens"));
+        assert!(v001.contains("forge_oauth_clients"));
+        assert!(v001.contains("forge_oauth_codes"));
+        assert!(v001.contains("forge_signals_events"));
+        assert!(v001.contains("forge_signals_sessions"));
+        assert!(v001.contains("forge_signals_users"));
+        assert!(v001.contains("owner_subject"));
+        assert!(v001.contains("token_family"));
+        assert!(v001.contains("compensation_state"));
+        assert!(v001.contains("saved_state"));
 
-        assert!(sql.contains("forge_signals_events"));
-        assert!(sql.contains("forge_signals_sessions"));
-        assert!(sql.contains("forge_signals_users"));
+        // v002: change log
+        let v002 = migrations[1].sql;
+        assert!(v002.contains("forge_change_log"));
+        assert!(v002.contains("forge_trim_change_log"));
 
-        // Verify columns merged from v002-v004
-        assert!(sql.contains("owner_subject"));
-        assert!(sql.contains("token_family"));
-        assert!(sql.contains("compensation_state"));
-        assert!(sql.contains("saved_state"));
+        // v003: job wakeup
+        let v003 = migrations[2].sql;
+        assert!(v003.contains("forge_notify_job_available"));
+
+        // v004: KV store
+        let v004 = migrations[3].sql;
+        assert!(v004.contains("forge_kv"));
+        assert!(v004.contains("forge_kv_counters"));
     }
 
     #[test]

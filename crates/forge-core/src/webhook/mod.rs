@@ -41,6 +41,7 @@ mod traits;
 
 pub use context::WebhookContext;
 pub use signature::{
-    IdempotencyConfig, IdempotencySource, SignatureAlgorithm, SignatureConfig, WebhookSignature,
+    DEFAULT_REPLAY_WINDOW_SECS, IdempotencyConfig, IdempotencySource, REPLAY_TIMESTAMP_HEADER,
+    SignatureAlgorithm, SignatureConfig, WebhookSignature,
 };
 pub use traits::{ForgeWebhook, WebhookInfo, WebhookResult};
