@@ -299,12 +299,13 @@ forge migrate [action] [options]
 
 ### Actions
 
-| Action         | Description                                                     |
-| -------------- | --------------------------------------------------------------- |
-| `up`           | Run all pending migrations                                      |
-| `down [count]` | Rollback the last N migrations (default: 1)                     |
-| `status`       | Show migration status                                           |
-| `prepare`      | Run pending migrations, then refresh the `.sqlx/` offline cache. Requires `cargo-sqlx` (`cargo install sqlx-cli --locked`); prints install instructions if missing |
+| Action    | Description                                                     |
+| --------- | --------------------------------------------------------------- |
+| `up`      | Run all pending migrations                                      |
+| `status`  | Show migration status                                           |
+| `prepare` | Run pending migrations, then refresh the `.sqlx/` offline cache. Requires `cargo-sqlx` (`cargo install sqlx-cli --locked`); prints install instructions if missing |
+
+Forward-only — migrations don't have a rollback path. To undo something, write a new migration that reverses it.
 
 ### Automatic migrations
 
@@ -315,8 +316,8 @@ During development, migrations run automatically when the backend starts. Pendin
 Since PostgreSQL is only accessible inside the Docker network, use `docker compose exec` to run migration commands or interact with the database directly:
 
 ```bash
-docker compose exec db psql -U postgres -d my-app -c "SELECT * FROM forge_migrations ORDER BY id"
-docker compose exec backend forge migrate down
+docker compose exec db psql -U postgres -d my-app -c "SELECT * FROM forge_system_migrations ORDER BY applied_at"
+docker compose exec backend forge migrate status
 docker compose exec backend forge migrate prepare
 docker compose exec db psql -U postgres -d my-app
 ```
@@ -325,24 +326,20 @@ For production or CI, `forge migrate` connects via `DATABASE_URL` directly:
 
 ```bash
 forge migrate up
-forge migrate down
+forge migrate status
 forge migrate up --config ./config/forge.toml --migrations-dir ./db/migrations
 ```
 
 ### Migration File Format
 
-Migration files must be named `NNNN_name.sql` (e.g., `0001_initial.sql`) and contain `-- @up` marker.
+Migration files must be named `NNNN_name.sql` (e.g., `0001_initial.sql`). The optional `-- @up` marker is stripped if present, otherwise the entire file is treated as the upgrade SQL.
 
 ```sql
--- @up
 CREATE TABLE users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     email TEXT UNIQUE NOT NULL,
     created_at TIMESTAMPTZ DEFAULT now()
 );
-
--- @down
-DROP TABLE users;
 ```
 
 ---
@@ -383,7 +380,7 @@ Checks performed:
 - `bun` is available when `frontend/package.json` exists; `dx` (dioxus-cli) when `frontend/Cargo.toml` exists
 - `forge.toml` parses cleanly (when run inside a project)
 - `.sqlx/` cache is fresher than the newest `src/**/*.rs` file
-- The most recent migration has both `-- @up` and `-- @down` markers
+- The most recent migration file is non-empty
 
 Each result is one line, prefixed with `[OK]`, `[!]`, `[X]`, or `[i]`. The command exits non-zero if any check fails.
 

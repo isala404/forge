@@ -4,17 +4,25 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{ForgeError, Result};
 
+use super::default_true;
 use super::types::DurationStr;
 
-/// Database configuration.
+/// Database configuration. One pool, no per-workload isolation: workload
+/// separation belongs at the worker level, not the connection level. The
+/// single-pool contention model and sizing formula are documented at the
+/// runtime side in `forge_runtime::pg::pool` module docs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct DatabaseConfig {
     /// PostgreSQL connection URL.
     #[serde(default)]
     pub url: String,
 
-    /// Connection pool size.
+    /// Connection pool size. Should be sized as
+    /// `worker.max_concurrent + reactor cap + expected gateway concurrency
+    /// + ~6 for persistent listeners, leader holds, and headroom`. See
+    /// `forge_runtime::pg::pool` module docs.
     #[serde(default = "default_pool_size")]
     pub pool_size: u32,
 
@@ -46,10 +54,6 @@ pub struct DatabaseConfig {
     /// Disabling this halves round-trips for read queries.
     #[serde(default = "default_true")]
     pub test_before_acquire: bool,
-
-    /// Connection pool isolation configuration.
-    #[serde(default)]
-    pub pools: PoolsConfig,
 }
 
 impl Default for DatabaseConfig {
@@ -64,7 +68,6 @@ impl Default for DatabaseConfig {
             replica_pool_size: None,
             min_pool_size: 0,
             test_before_acquire: true,
-            pools: PoolsConfig::default(),
         }
     }
 }
@@ -107,52 +110,6 @@ fn default_pool_timeout() -> DurationStr {
 
 fn default_statement_timeout() -> DurationStr {
     DurationStr::new(Duration::from_secs(30))
-}
-
-use super::default_true;
-
-/// Pool isolation configuration for different workloads.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[non_exhaustive]
-pub struct PoolsConfig {
-    /// Default pool for queries/mutations.
-    #[serde(default)]
-    pub default: Option<PoolConfig>,
-
-    /// Pool for background jobs.
-    #[serde(default)]
-    pub jobs: Option<PoolConfig>,
-
-    /// Pool for observability writes.
-    #[serde(default)]
-    pub observability: Option<PoolConfig>,
-
-    /// Pool for long-running analytics.
-    #[serde(default)]
-    pub analytics: Option<PoolConfig>,
-}
-
-/// Individual pool configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct PoolConfig {
-    /// Pool size.
-    pub size: u32,
-
-    /// Checkout timeout duration (e.g. "30s", "1m").
-    #[serde(default = "default_pool_timeout")]
-    pub timeout: DurationStr,
-
-    /// Statement timeout duration override (e.g. "30s", "5m").
-    pub statement_timeout: Option<DurationStr>,
-
-    /// Minimum connections to keep alive.
-    #[serde(default)]
-    pub min_size: u32,
-
-    /// Run a health check query before handing out connections.
-    #[serde(default = "default_true")]
-    pub test_before_acquire: bool,
 }
 
 #[cfg(test)]
@@ -203,5 +160,20 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("database.url is required"));
+    }
+
+    #[test]
+    fn test_rejects_legacy_pools_blocks() {
+        let toml = r#"
+            url = "postgres://localhost/test"
+            [pools.jobs]
+            size = 10
+        "#;
+        let err = toml::from_str::<DatabaseConfig>(toml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown field"),
+            "expected unknown-field error, got: {msg}"
+        );
     }
 }

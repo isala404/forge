@@ -263,18 +263,9 @@ A single `POST /_api/signal` endpoint accepts a discriminated payload via the to
 | `error` | Client `captureError()` + auto-capture of `window.onerror` / `unhandledrejection` |
 | `breadcrumb` | Client `breadcrumb()` call |
 
-### Pool Routing
+### Single Pool
 
-Forge uses isolated connection pools to prevent jobs and analytics from starving web requests.
-
-| Pool | Used by |
-|---|---|
-| `default` | Queries, mutations, crons, webhooks |
-| `jobs` | Job worker polling and execution |
-| `observability` | OTLP metric writes |
-| `analytics` | Signals / `forge_signals_events` writes |
-
-Each pool can be sized independently under `[database.pools.jobs]`, etc.
+Forge runs one primary connection pool. Queries, mutations, jobs, cron, daemons, workflows, observability, and signals all share it. Workload separation belongs at the worker level (concurrency limits, dedicated worker nodes), not at the connection layer. Size `database.pool_size` for the union of expected concurrency and use `database.statement_timeout` to bound runaway queries.
 
 ## Custom Axum Routes
 
@@ -375,13 +366,13 @@ The canonical status mapping lives on `ForgeError::http_status() -> u16`. Downst
 | `forge new <name>` | Scaffolds a new project from a template. |
 | `forge generate` | Synchronizes backend changes with frontend bindings and types. |
 | `forge check` | Runs linting, formatting, and validates SQL and bindings. |
-| `forge migrate <up|down>`| Manages database migrations. |
+| `forge migrate <up|status|prepare>`| Manages database migrations. Forward-only; no `down`. |
 | `forge test` | Executes full-stack E2E tests using Playwright. |
 
 ## Project File Standards
 - **Source Code**: Editable logic resides in `src/functions/`, `src/schema/`, and `src/utils/`.
 - **Generated Code**: **MANDATE:** Never edit generated files. See [Pitfalls](./pitfalls.md#1-generated-code).
-- **Migrations**: Create new SQL files in `migrations/`. Always include `-- @up` and `-- @down` markers. Do not use `IF NOT EXISTS` clauses; migrations should be deterministic.
+- **Migrations**: Create new SQL files in `migrations/`. Forward-only; do not include `-- @down`. The optional `-- @up` marker is stripped if present. Do not use `IF NOT EXISTS` clauses; migrations should be deterministic.
 
 ## Cargo Features
 

@@ -473,13 +473,8 @@ Forge's auth system works with any identity provider. Instead of password valida
 Add a `google_sub` column to your users table:
 
 ```sql title="migrations/0002_google_auth.sql"
--- @up
 ALTER TABLE users ADD COLUMN google_sub TEXT UNIQUE;
 CREATE INDEX idx_users_google_sub ON users(google_sub);
-
--- @down
-DROP INDEX idx_users_google_sub;
-ALTER TABLE users DROP COLUMN google_sub;
 ```
 
 Create the sign-in mutation:

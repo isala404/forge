@@ -254,7 +254,6 @@ const todos = listTodosStore$();
 Enable reactivity per table in your migrations:
 
 ```sql
--- @up
 CREATE TABLE todos (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     title TEXT NOT NULL,
@@ -262,10 +261,6 @@ CREATE TABLE todos (
 );
 
 SELECT forge_enable_reactivity('todos');
-
--- @down
-SELECT forge_disable_reactivity('todos');
-DROP TABLE IF EXISTS todos;
 ```
 
 This creates triggers that emit changes to the `forge_changes` channel:

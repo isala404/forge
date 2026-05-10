@@ -37,8 +37,7 @@ Functions go in `src/functions/`. Types are generated for the frontend automatic
 forge generate              # regenerate TypeScript types from Rust models
 forge check                 # validate config, migrations, and project health
 forge migrate status        # check which migrations have run
-forge migrate up            # apply pending migrations
-forge migrate down          # rollback the last migration
+forge migrate up            # apply pending migrations (forward-only)
 ```
 
 ### Running Tests

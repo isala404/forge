@@ -1,5 +1,3 @@
--- @up
-
 CREATE TYPE user_role AS ENUM ('admin', 'member', 'guest');
 
 CREATE TABLE users (
@@ -69,17 +67,3 @@ VALUES (
     NOW(),
     NOW()
 );
-
--- @down
-
-SELECT forge_disable_reactivity('webhook_events');
-SELECT forge_disable_reactivity('trades');
-SELECT forge_disable_reactivity('iss_location');
-SELECT forge_disable_reactivity('users');
-DROP TABLE IF EXISTS demo_stats;
-DROP TABLE IF EXISTS webhook_events;
-DROP TABLE IF EXISTS trades;
-DROP TABLE IF EXISTS iss_location;
-DROP INDEX IF EXISTS idx_users_email;
-DROP TABLE IF EXISTS users;
-DROP TYPE IF EXISTS user_role;

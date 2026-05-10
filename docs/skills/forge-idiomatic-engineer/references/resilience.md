@@ -20,7 +20,7 @@ Assume every flow will be interrupted: tokens expire, entities vanish, networks 
 | Entity deleted during action | 404 with context (`format!("item {id}")`). | Remove from local state, toast the deletion. |
 | Concurrent update | `version` column → 409 on mismatch. | Show diff or force refresh. |
 | FK target deleted | Match `is_foreign_key_violation`, return `Validation` with context. | Inform which parent went missing. |
-| Pool exhaustion | Low `pool_timeout`, isolated pools per workload. | "System busy" toast. |
+| Pool exhaustion | Raise `pool_size`, lower `statement_timeout`, run heavy workloads on dedicated worker nodes. | "System busy" toast. |
 | Read replica lag | `#[query(consistent)]` after a write. | Prefer the mutation's response body. |
 
 ## 3. SSE and Realtime

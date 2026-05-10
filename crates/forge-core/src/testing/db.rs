@@ -322,10 +322,8 @@ impl IsolatedTestDb {
         for (name, content) in migrations {
             info!("Applying test migration: {}", name);
 
-            // Parse content to extract up SQL (everything before -- @down marker)
-            let up_sql = parse_up_sql(&content);
+            let up_sql = strip_up_markers(&content);
 
-            // Split into individual statements and execute
             for stmt in split_sql_statements(&up_sql) {
                 let stmt = stmt.trim();
                 if is_blank_sql(stmt) {
@@ -371,17 +369,6 @@ fn replace_db_name(url: &str, new_db: &str) -> String {
     } else {
         format!("{}/{}", url, new_db)
     }
-}
-
-/// Parse migration content, extracting only the up SQL (before -- @down marker).
-fn parse_up_sql(content: &str) -> String {
-    let down_markers = ["-- @down", "--@down", "-- @DOWN", "--@DOWN"];
-    let up_part = down_markers
-        .iter()
-        .find_map(|m| content.find(m).map(|idx| &content[..idx]))
-        .unwrap_or(content);
-
-    strip_up_markers(up_part)
 }
 
 fn strip_up_markers(sql: &str) -> String {
@@ -620,27 +607,10 @@ mod tests {
         assert!(stmts[0].contains("'a;b'"));
     }
 
-    // --- parse_up_sql ---
-
     #[test]
-    fn parse_up_sql_strips_down_section() {
-        let content = "CREATE TABLE a (id int);\n-- @down\nDROP TABLE a;";
-        let up = parse_up_sql(content);
-        assert!(up.contains("CREATE TABLE"));
-        assert!(!up.contains("DROP TABLE"), "Down SQL should be excluded");
-    }
-
-    #[test]
-    fn parse_up_sql_handles_no_down_marker() {
-        let content = "CREATE TABLE a (id int);";
-        let up = parse_up_sql(content);
-        assert!(up.contains("CREATE TABLE"));
-    }
-
-    #[test]
-    fn parse_up_sql_strips_up_markers() {
+    fn strip_up_markers_drops_marker() {
         let content = "-- @up\nCREATE TABLE a (id int);";
-        let up = parse_up_sql(content);
+        let up = strip_up_markers(content);
         assert!(!up.contains("@up"), "Up marker should be stripped");
         assert!(up.contains("CREATE TABLE"));
     }

@@ -89,6 +89,11 @@ impl LeaderElection {
     }
 
     /// Try to acquire leadership.
+    ///
+    /// The advisory lock and the `forge_leaders` INSERT run on the same
+    /// connection. If that connection dies between the lock acquire and the
+    /// INSERT, PostgreSQL releases the lock and the INSERT fails together —
+    /// no torn leader rows pointing at a node that holds nothing.
     pub async fn try_become_leader(&self) -> forge_core::Result<bool> {
         if self.is_leader() {
             return Ok(true);
@@ -100,7 +105,6 @@ impl LeaderElection {
             .await
             .map_err(forge_core::ForgeError::Database)?;
 
-        // Try to acquire advisory lock (non-blocking)
         let acquired = sqlx::query_scalar!(
             r#"SELECT pg_try_advisory_lock($1) as "acquired!""#,
             self.role.lock_id()
@@ -112,9 +116,6 @@ impl LeaderElection {
         crate::cluster::metrics::record_leader_election_attempt(self.role.as_str(), acquired);
 
         if acquired {
-            // Record leadership for visibility only. The advisory lock above is
-            // the single source of truth; this row exists so operators can see
-            // which node owns the role and when its lease expires.
             let lease_until =
                 Utc::now() + chrono::Duration::seconds(self.config.lease_duration.as_secs() as i64);
 
@@ -131,7 +132,7 @@ impl LeaderElection {
                 self.node_id.as_uuid(),
                 lease_until,
             )
-            .execute(&self.pool)
+            .execute(&mut *conn)
             .await
             .map_err(forge_core::ForgeError::Database)?;
 
@@ -145,9 +146,65 @@ impl LeaderElection {
     }
 
     /// Refresh the leadership lease.
+    ///
+    /// Validates the advisory lock is still held on the lock-owning connection
+    /// before refreshing the lease. If PostgreSQL released the lock (backend
+    /// terminated, sqlx reconnected, etc.) we drop leadership locally and
+    /// surface an error — keeping the lease alive without the underlying lock
+    /// would risk split brain.
     pub async fn refresh_lease(&self) -> forge_core::Result<()> {
         if !self.is_leader() {
             return Ok(());
+        }
+
+        let mut lock_connection = self.lock_connection.lock().await;
+        let conn = match lock_connection.as_mut() {
+            Some(conn) => conn,
+            None => {
+                drop(lock_connection);
+                self.drop_leadership_locally();
+                return Err(forge_core::ForgeError::Cluster(
+                    "Lock connection missing during lease refresh; dropped leadership".into(),
+                ));
+            }
+        };
+
+        // pg_locks splits a single-int8 advisory lock into classid (upper 32 bits)
+        // and objid (lower 32 bits), both stored as oid but exposed as int4. The
+        // signed-cast preserves the bit pattern that PostgreSQL stores internally.
+        let lock_id = self.role.lock_id();
+        let classid = (lock_id >> 32) as i32;
+        let objid = (lock_id & 0xFFFF_FFFF) as i32;
+
+        let still_held = sqlx::query_scalar!(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM pg_locks
+                WHERE locktype = 'advisory'
+                  AND classid::int = $1
+                  AND objid::int = $2
+                  AND pid = pg_backend_pid()
+                  AND granted
+            ) AS "held!"
+            "#,
+            classid,
+            objid,
+        )
+        .fetch_one(&mut **conn)
+        .await
+        .map_err(forge_core::ForgeError::Database)?;
+
+        if !still_held {
+            *lock_connection = None;
+            drop(lock_connection);
+            self.drop_leadership_locally();
+            tracing::error!(
+                role = self.role.as_str(),
+                "Advisory lock no longer held on leader connection; dropped leadership"
+            );
+            return Err(forge_core::ForgeError::Cluster(
+                "Advisory lock no longer held; dropped leadership".into(),
+            ));
         }
 
         let lease_until =
@@ -163,11 +220,16 @@ impl LeaderElection {
             self.node_id.as_uuid(),
             lease_until,
         )
-        .execute(&self.pool)
+        .execute(&mut **conn)
         .await
         .map_err(forge_core::ForgeError::Database)?;
 
         Ok(())
+    }
+
+    fn drop_leadership_locally(&self) {
+        self.is_leader.store(false, Ordering::SeqCst);
+        crate::cluster::metrics::set_is_leader(self.role.as_str(), false);
     }
 
     /// Release leadership.
@@ -177,13 +239,35 @@ impl LeaderElection {
         }
 
         // Release the advisory lock on the same session that acquired it.
+        // pg_advisory_unlock returns true iff this session held the lock and
+        // released it. A false result means we lost the lock between acquire
+        // and release without refresh_lease catching it (PG terminated the
+        // backend, sqlx reconnected, etc.) — warn so the operator sees the
+        // miss instead of silently swallowing it. Unlike refresh_lease, this
+        // is a shutdown path: we keep going to clear the leader row and local
+        // state, since the worst case is already a no-op (split brain is
+        // resolved by the lock being gone).
         let mut lock_connection = self.lock_connection.lock().await;
         if let Some(mut conn) = lock_connection.take() {
-            sqlx::query_scalar!("SELECT pg_advisory_unlock($1)", self.role.lock_id())
-                .fetch_one(&mut *conn)
-                .await
-                .map_err(forge_core::ForgeError::Database)?;
+            let released = sqlx::query_scalar!(
+                "SELECT pg_advisory_unlock($1) as \"released!\"",
+                self.role.lock_id()
+            )
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(forge_core::ForgeError::Database)?;
+
+            if !released {
+                tracing::warn!(
+                    role = self.role.as_str(),
+                    "pg_advisory_unlock returned false during release; \
+                     lock was not held by this session"
+                );
+            }
         } else {
+            // Reachable when try_become_leader failed mid-way after setting
+            // is_leader=true (shouldn't happen with current code) or after a
+            // refresh_lease detected loss and cleared the slot.
             tracing::warn!(
                 role = self.role.as_str(),
                 "Leader lock connection missing during release"
@@ -191,7 +275,9 @@ impl LeaderElection {
         }
         drop(lock_connection);
 
-        // Clear leadership record
+        // Clear leadership record. WHERE node_id = $2 makes this safe even
+        // when the lock was lost out-of-band and another node has already
+        // overwritten the row via ON CONFLICT — that node's row stays put.
         sqlx::query!(
             r#"
             DELETE FROM forge_leaders
@@ -334,5 +420,147 @@ mod tests {
         let config = LeaderConfig::default();
         assert_eq!(config.check_interval, Duration::from_secs(5));
         assert_eq!(config.lease_duration, Duration::from_secs(60));
+    }
+}
+
+#[cfg(all(test, feature = "testcontainers"))]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::disallowed_methods
+)]
+mod integration_tests {
+    use super::*;
+    use forge_core::testing::{IsolatedTestDb, TestDatabase};
+
+    async fn setup_db(test_name: &str) -> IsolatedTestDb {
+        let base = TestDatabase::from_env()
+            .await
+            .expect("Failed to create test database");
+        let db = base
+            .isolated(test_name)
+            .await
+            .expect("Failed to create isolated db");
+        let system_sql = crate::migrations::get_all_system_sql();
+        db.run_sql(&system_sql)
+            .await
+            .expect("Failed to apply system schema");
+        db
+    }
+
+    #[tokio::test]
+    async fn refresh_lease_drops_leadership_when_lock_lost() {
+        let db = setup_db("leader_refresh_lock_lost").await;
+        let election = LeaderElection::new(
+            db.pool().clone(),
+            NodeId::new(),
+            LeaderRole::Scheduler,
+            LeaderConfig::default(),
+        );
+
+        assert!(election.try_become_leader().await.unwrap());
+        assert!(election.is_leader());
+
+        // Simulate a connection-level loss of the advisory lock by manually
+        // unlocking on the same connection that holds it. This mirrors the
+        // failure mode the audit calls out (PG terminated the backend, sqlx
+        // reconnected, etc.).
+        {
+            let mut conn_guard = election.lock_connection.lock().await;
+            let conn = conn_guard.as_mut().expect("lock connection present");
+            sqlx::query_scalar!(
+                "SELECT pg_advisory_unlock($1) as \"released!\"",
+                LeaderRole::Scheduler.lock_id()
+            )
+            .fetch_one(&mut **conn)
+            .await
+            .unwrap();
+        }
+
+        let err = election.refresh_lease().await.unwrap_err();
+        assert!(matches!(err, forge_core::ForgeError::Cluster(_)));
+        assert!(!election.is_leader());
+    }
+
+    #[tokio::test]
+    async fn refresh_lease_succeeds_while_lock_held() {
+        let db = setup_db("leader_refresh_lock_held").await;
+        let election = LeaderElection::new(
+            db.pool().clone(),
+            NodeId::new(),
+            LeaderRole::Scheduler,
+            LeaderConfig::default(),
+        );
+
+        assert!(election.try_become_leader().await.unwrap());
+        for _ in 0..3 {
+            election.refresh_lease().await.expect("refresh succeeds");
+            assert!(election.is_leader());
+        }
+    }
+
+    #[tokio::test]
+    async fn try_become_leader_records_row_on_lock_connection() {
+        let db = setup_db("leader_row_atomic").await;
+        let election = LeaderElection::new(
+            db.pool().clone(),
+            NodeId::new(),
+            LeaderRole::Scheduler,
+            LeaderConfig::default(),
+        );
+
+        assert!(election.try_become_leader().await.unwrap());
+
+        let info = election
+            .get_leader()
+            .await
+            .unwrap()
+            .expect("leader row exists after acquire");
+        assert_eq!(info.role, LeaderRole::Scheduler);
+        assert_eq!(info.node_id, election.node_id);
+    }
+
+    /// release_leadership tolerates the lock having already gone away on
+    /// the held connection (e.g., a PG-side backend reset). It must still
+    /// clear local state and remove the leader row instead of erroring out
+    /// halfway through cleanup.
+    #[tokio::test]
+    async fn release_leadership_handles_lock_already_gone() {
+        let db = setup_db("leader_release_lock_gone").await;
+        let election = LeaderElection::new(
+            db.pool().clone(),
+            NodeId::new(),
+            LeaderRole::Scheduler,
+            LeaderConfig::default(),
+        );
+
+        assert!(election.try_become_leader().await.unwrap());
+
+        // Drop the lock on the held connection without going through
+        // release_leadership, simulating an out-of-band loss.
+        {
+            let mut conn_guard = election.lock_connection.lock().await;
+            let conn = conn_guard.as_mut().expect("lock connection present");
+            let released = sqlx::query_scalar!(
+                "SELECT pg_advisory_unlock($1) as \"released!\"",
+                LeaderRole::Scheduler.lock_id()
+            )
+            .fetch_one(&mut **conn)
+            .await
+            .unwrap();
+            assert!(released, "preflight unlock must succeed");
+        }
+
+        // release_leadership should not error on the second unlock returning
+        // false; it should still clear local state and the leader row.
+        election.release_leadership().await.expect(
+            "release path must tolerate pg_advisory_unlock returning false",
+        );
+        assert!(!election.is_leader());
+        assert!(
+            election.get_leader().await.unwrap().is_none(),
+            "leader row removed even when unlock returned false"
+        );
     }
 }

@@ -68,7 +68,7 @@ pub use observability::{
     TelemetryConfig, TelemetryError, build_env_filter, init_telemetry, shutdown_telemetry,
 };
 pub use pg::{
-    AppliedMigration, Database, Migration, MigrationRunner, MigrationStatus,
+    AppliedMigration, Database, DriftStatus, Migration, MigrationRunner, MigrationStatus,
     load_migrations_from_dir,
 };
 pub use pg::{LeaderConfig, LeaderElection, LeaderGuard};

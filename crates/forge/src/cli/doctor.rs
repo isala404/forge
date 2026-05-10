@@ -386,27 +386,20 @@ fn check_latest_migration_markers(report: &mut Report, root: &Path) {
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("(unknown)");
-    let has_up = content.contains("-- @up");
-    let has_down = content.contains("-- @down");
-    match (has_up, has_down) {
-        (true, true) => report.record(
+    if content.contains("-- @up") || !content.trim().is_empty() {
+        report.record(
             CheckStatus::Ok,
             "latest migration",
-            &format!("{name} has @up and @down"),
+            &format!("{name} present"),
             None,
-        ),
-        (true, false) => report.record(
-            CheckStatus::Warn,
-            "latest migration",
-            &format!("{name} missing @down"),
-            Some("Add a -- @down section so rollback works"),
-        ),
-        (false, _) => report.record(
+        );
+    } else {
+        report.record(
             CheckStatus::Fail,
             "latest migration",
-            &format!("{name} missing @up marker"),
-            Some("Add a -- @up section"),
-        ),
+            &format!("{name} is empty"),
+            Some("Migration file must contain SQL"),
+        );
     }
 }
 

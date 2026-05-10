@@ -369,14 +369,6 @@ impl Forge {
             Database::from_config_with_service(&self.config.database, &self.config.project.name)
                 .await?;
         let pool = db.primary().clone();
-        #[cfg(any(
-            feature = "jobs",
-            feature = "cron",
-            feature = "workflows",
-            feature = "daemons",
-        ))]
-        let jobs_pool = pool.clone();
-        let observability_pool = pool.clone();
         if let Some(handle) = db.start_health_monitor() {
             let mut shutdown_rx = self.shutdown_tx.subscribe();
             tokio::spawn(async move {
@@ -548,7 +540,7 @@ impl Forge {
             forge_runtime::cron::register_cron_bridges(&self.cron_registry, &mut self.job_registry);
         }
 
-        let job_queue = JobQueue::new(jobs_pool.clone());
+        let job_queue = JobQueue::new(pool.clone());
 
         // Start job worker if worker role
         #[cfg(feature = "jobs")]
@@ -565,7 +557,7 @@ impl Forge {
                 worker_config,
                 job_queue.clone(),
                 self.job_registry.clone(),
-                jobs_pool.clone(),
+                pool.clone(),
             );
 
             handles.push(tokio::spawn(async move {
@@ -580,7 +572,7 @@ impl Forge {
         // KV TTL cleanup runs on every node with a worker role.
         #[cfg(feature = "jobs")]
         if roles.contains(&NodeRole::Worker) {
-            let kv_pool = jobs_pool.clone();
+            let kv_pool = pool.clone();
             let mut kv_shutdown = self.shutdown_tx.subscribe();
             handles.push(tokio::spawn(async move {
                 let kv = forge_runtime::KvStore::new(kv_pool);
@@ -602,7 +594,7 @@ impl Forge {
         #[cfg(feature = "cron")]
         if roles.contains(&NodeRole::Scheduler) {
             let cron_registry = self.cron_registry.clone();
-            let cron_pool = jobs_pool.clone();
+            let cron_pool = pool.clone();
             let cron_leader_election = leader_election.clone();
 
             let cron_config = CronRunnerConfig {
@@ -629,7 +621,7 @@ impl Forge {
         #[cfg(feature = "workflows")]
         let workflow_bridge_executor = Arc::new(WorkflowExecutor::new(
             Arc::new(self.workflow_registry.clone()),
-            jobs_pool.clone(),
+            pool.clone(),
             http_client.clone(),
         ));
         #[cfg(feature = "workflows")]
@@ -645,9 +637,9 @@ impl Forge {
         let workflow_shutdown_token = CancellationToken::new();
         #[cfg(feature = "workflows")]
         if roles.contains(&NodeRole::Scheduler) {
-            let event_store = Arc::new(EventStore::new(jobs_pool.clone()));
+            let event_store = Arc::new(EventStore::new(pool.clone()));
             let scheduler = WorkflowScheduler::new(
-                jobs_pool.clone(),
+                pool.clone(),
                 job_queue.clone(),
                 event_store,
                 WorkflowSchedulerConfig::default(),
@@ -664,7 +656,7 @@ impl Forge {
         // Create job dispatcher (used by daemon, gateway, webhook routes).
         #[cfg(feature = "jobs")]
         let job_dispatcher = {
-            let job_queue_for_dispatch = JobQueue::new(jobs_pool.clone());
+            let job_queue_for_dispatch = JobQueue::new(pool.clone());
             Arc::new(JobDispatcher::new(
                 job_queue_for_dispatch,
                 self.job_registry.clone(),
@@ -678,7 +670,7 @@ impl Forge {
         #[cfg(feature = "daemons")]
         if roles.contains(&NodeRole::Scheduler) && !self.daemon_registry.is_empty() {
             let daemon_registry = self.daemon_registry.clone();
-            let daemon_pool = jobs_pool.clone();
+            let daemon_pool = pool.clone();
             let daemon_http = http_client.clone();
             let daemon_shutdown_rx = self.shutdown_tx.subscribe();
 
@@ -1113,11 +1105,11 @@ impl Forge {
         );
 
         {
-            let metrics_pool = observability_pool;
+            let pool = pool.clone();
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(Duration::from_secs(15)).await;
-                    forge_runtime::observability::record_pool_metrics(&metrics_pool);
+                    forge_runtime::observability::record_pool_metrics(&pool);
                 }
             });
         }

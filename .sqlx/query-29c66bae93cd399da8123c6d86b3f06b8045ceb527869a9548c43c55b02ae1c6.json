@@ -1,12 +1,12 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT pg_advisory_lock($1)",
+  "query": "SELECT pg_try_advisory_lock($1) AS \"ok!\"",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "pg_advisory_lock",
-        "type_info": "Void"
+        "name": "ok!",
+        "type_info": "Bool"
       }
     ],
     "parameters": {
@@ -18,5 +18,5 @@
       null
     ]
   },
-  "hash": "b895561dd1cdc3b47ea1f3c353f4d563bfbf45ab7892fd9e481f3f392c3cef05"
+  "hash": "29c66bae93cd399da8123c6d86b3f06b8045ceb527869a9548c43c55b02ae1c6"
 }

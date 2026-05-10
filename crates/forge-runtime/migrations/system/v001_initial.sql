@@ -279,13 +279,48 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- Validate a PostgreSQL identifier before splicing it into dynamic DDL.
+--
+-- `format('%I', ...)` already quotes the identifier, so this is not about
+-- SQL injection — it's about catching authoring mistakes that PG itself
+-- would either truncate silently (>63 chars) or reject with a confusing
+-- error far from the call site. Raising here gives the migration author
+-- a clear, actionable failure.
+--
+-- Rules (mirror PG's `NAMEDATALEN - 1 = 63` byte budget and the `pg_*`
+-- reservation policy from the docs):
+--   - non-empty
+--   - octet length <= 63 (so the identifier fits without truncation)
+--   - does not start with `pg_` (reserved for system catalogs)
+CREATE OR REPLACE FUNCTION forge_validate_identifier(name TEXT) RETURNS VOID AS $$
+BEGIN
+    IF name IS NULL OR name = '' THEN
+        RAISE EXCEPTION 'forge_validate_identifier: identifier must not be empty';
+    END IF;
+    IF octet_length(name) > 63 THEN
+        RAISE EXCEPTION
+            'forge_validate_identifier: identifier % exceeds 63 bytes (PG would silently truncate)',
+            name;
+    END IF;
+    IF name LIKE 'pg\_%' ESCAPE '\' THEN
+        RAISE EXCEPTION
+            'forge_validate_identifier: identifier % uses reserved pg_ prefix',
+            name;
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
 -- Helper function to enable reactivity on a table
 -- Usage: SELECT forge_enable_reactivity('my_table');
 CREATE OR REPLACE FUNCTION forge_enable_reactivity(table_name TEXT) RETURNS VOID AS $$
 DECLARE
     trigger_name TEXT;
 BEGIN
+    PERFORM forge_validate_identifier(table_name);
     trigger_name := 'forge_notify_' || table_name;
+    -- Validate the derived trigger name too: a 51+ char table_name would
+    -- pass the input check but push the prefixed trigger over 63 bytes.
+    PERFORM forge_validate_identifier(trigger_name);
 
     -- Drop existing trigger if any
     EXECUTE format('DROP TRIGGER IF EXISTS %I ON %I', trigger_name, table_name);
@@ -304,7 +339,9 @@ CREATE OR REPLACE FUNCTION forge_disable_reactivity(table_name TEXT) RETURNS VOI
 DECLARE
     trigger_name TEXT;
 BEGIN
+    PERFORM forge_validate_identifier(table_name);
     trigger_name := 'forge_notify_' || table_name;
+    PERFORM forge_validate_identifier(trigger_name);
     EXECUTE format('DROP TRIGGER IF EXISTS %I ON %I', trigger_name, table_name);
 END;
 $$ LANGUAGE plpgsql;

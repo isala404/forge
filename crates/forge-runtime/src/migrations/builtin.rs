@@ -35,7 +35,7 @@ pub struct SystemMigration {
 }
 
 impl SystemMigration {
-    /// Get the migration name used in the database (e.g., `__forge_v001`).
+    /// Get the migration version string used in the database (e.g., `__forge_v001`).
     pub fn name(&self) -> String {
         format!("{}{:03}", SYSTEM_MIGRATION_PREFIX, self.version)
     }
@@ -198,7 +198,7 @@ mod tests {
             description: "Test",
         };
         let m = sys.to_migration();
-        assert_eq!(m.name, "__forge_v001");
+        assert_eq!(m.version, "__forge_v001");
         assert_eq!(m.up_sql, "SELECT 1;");
     }
 }

@@ -64,7 +64,6 @@ pub struct Todo {
 Create `migrations/0001_todos.sql`:
 
 ```sql
--- @up
 CREATE TABLE todos (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     title TEXT NOT NULL,
@@ -73,10 +72,6 @@ CREATE TABLE todos (
 );
 
 SELECT forge_enable_reactivity('todos');
-
--- @down
-SELECT forge_disable_reactivity('todos');
-DROP TABLE IF EXISTS todos;
 ```
 
 `forge_enable_reactivity('todos')` installs a PostgreSQL trigger on the `todos` table. Whenever a row is inserted, updated, or deleted, the trigger fires a `NOTIFY` event. Forge listens for these events and automatically re-runs any subscribed queries, pushing updates to connected clients over SSE.

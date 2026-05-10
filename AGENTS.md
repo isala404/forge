@@ -44,7 +44,7 @@ scripts/ci/test-template.sh with-svelte/demo target/debug/forge .
 
 The `.sqlx/` directory holds compile-time query metadata for `SQLX_OFFLINE=true` builds. Regenerate it when queries change.
 
-The workspace has a shared schema problem: `benchmarks/app` and the demo examples both define a `users` table with different shapes. The solution is a single "super" database with all tables merged, plus a combined `forge_migrations` table that satisfies both `migrations/executor.rs` (uses `version` + `checksum`) and `migrations/runner.rs` (uses `name` + `down_sql`).
+The workspace shares a schema across `benchmarks/app` and the demo examples (different `users` shapes), so prepare runs against a single super-database that merges every example's tables.
 
 ```bash
 # 1. Start a temporary PG instance
@@ -52,15 +52,17 @@ docker run -d --name forge-sqlx-pg -e POSTGRES_PASSWORD=forge -e POSTGRES_DB=for
   -p 5433:5432 postgres:18
 until docker exec forge-sqlx-pg pg_isready -U postgres -d forge 2>/dev/null; do sleep 1; done
 
-# 2. Apply system schema
-docker exec -i forge-sqlx-pg psql -U postgres -d forge \
-  < crates/forge-runtime/migrations/system/v001_initial.sql
+# 2. Apply bootstrap + system schema in version order
+for f in v000_bootstrap.sql v001_initial.sql v002_change_log.sql v003_job_wakeup.sql v004_kv.sql; do
+  docker exec -i forge-sqlx-pg psql -U postgres -d forge \
+    < "crates/forge-runtime/migrations/system/$f"
+done
 
 # 3. Apply example migrations (demo covers users/trades/etc; todos adds todos table)
-sed '/^-- @down/,$d' examples/with-svelte/demo/migrations/0001_initial.sql \
-  | docker exec -i forge-sqlx-pg psql -U postgres -d forge
-sed '/^-- @down/,$d' examples/with-svelte/realtime-todo-list/migrations/0001_todos.sql \
-  | docker exec -i forge-sqlx-pg psql -U postgres -d forge
+docker exec -i forge-sqlx-pg psql -U postgres -d forge \
+  < examples/with-svelte/demo/migrations/0001_initial.sql
+docker exec -i forge-sqlx-pg psql -U postgres -d forge \
+  < examples/with-svelte/realtime-todo-list/migrations/0001_todos.sql
 
 # 4. Add benchmark-only tables (counters; skip its users — conflicts with demo)
 docker exec forge-sqlx-pg psql -U postgres -d forge -c "
@@ -72,23 +74,11 @@ docker exec forge-sqlx-pg psql -U postgres -d forge -c "
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   );"
 
-# 5. Create combined forge_migrations table (merges both internal schemas)
-docker exec forge-sqlx-pg psql -U postgres -d forge -c "
-  CREATE TABLE forge_migrations (
-    id SERIAL PRIMARY KEY,
-    version VARCHAR(255) NOT NULL DEFAULT '',
-    name VARCHAR(255) NOT NULL DEFAULT '',
-    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    checksum VARCHAR(64),
-    execution_time_ms INTEGER,
-    down_sql TEXT
-  );"
-
-# 6. Generate
+# 5. Generate (forge_system_migrations is created by v000_bootstrap.sql)
 DATABASE_URL="postgres://postgres:forge@localhost:5433/forge" \
   cargo sqlx prepare --workspace
 
-# 7. Cleanup
+# 6. Cleanup
 docker stop forge-sqlx-pg && docker rm forge-sqlx-pg
 ```
 
@@ -128,7 +118,7 @@ Contexts: `QueryContext` (db pool, auth, env), `MutationContext` (+ conn, http c
 
 ForgeError variants: Config, Database, Function, Job, JobCancelled, Cluster, Serialization, Deserialization, Io, Sql, InvalidArgument(400), NotFound(404), Unauthorized(401), Forbidden(403), Validation(400), Timeout(504), Internal(500), InvalidState, WorkflowSuspended, RateLimitExceeded(429).
 
-Config: `ForgeConfig` loaded from TOML with `${ENV_VAR}` and `${VAR-default}` substitution. Sections: project, database (pool isolation: default/jobs/observability/analytics), gateway, function, worker, cluster, auth, mcp, observability, signals.
+Config: `ForgeConfig` loaded from TOML with `${ENV_VAR}` and `${VAR-default}` substitution. Sections: project, database (single primary pool, optional replicas), gateway, function, worker, cluster, auth, mcp, observability, signals.
 
 Testing module: `TestQueryContext`, `TestMutationContext`, `TestJobContext`, `TestCronContext`, `TestWorkflowContext`, `TestDaemonContext`, `TestWebhookContext`. Builders with `.as_user()`, `.with_role()`, `.with_claim()`, `.with_tenant()`, `.with_pool()`, `.with_env()`, `.mock_http()`. Assertion macros: `assert_ok!`, `assert_err!`, `assert_err_variant!`, `assert_job_dispatched!`, `assert_workflow_started!`, `assert_http_called!`.
 
@@ -150,7 +140,7 @@ Testing module: `TestQueryContext`, `TestMutationContext`, `TestJobContext`, `Te
 
 **Cluster** (`cluster/`): `LeaderElection` via `pg_try_advisory_lock`. Lock held by connection. `NodeRegistry` for node discovery and heartbeat.
 
-**Database** (`db/`): `Database` struct with primary + replicas (round-robin, health-checked) + isolated pools (jobs, observability, analytics).
+**Database** (`db/`): `Database` struct with a single primary pool plus optional replicas (round-robin, health-checked). One pool serves queries, mutations, jobs, cron, daemons, workflows, observability, and signals — workload isolation belongs at the worker level.
 
 ### forge-codegen: Frontend Binding Generation
 
@@ -174,7 +164,7 @@ Context parameter detection: structural check for types ending with "Context". N
 
 `forge check`: Validates forge.toml, project structure, migrations, functions, schema, .sqlx cache, cargo check, clippy, frontend tooling.
 
-`forge migrate`: up/down/status/prepare subcommands. Advisory lock for cluster safety.
+`forge migrate`: up/status/prepare subcommands (forward-only, no rollback). Advisory lock for cluster safety.
 
 Builder: `Forge::builder().config(cfg).auto_register().build()?.run().await`. Auto-registration iterates `inventory::iter::<AutoQuery>` etc.
 

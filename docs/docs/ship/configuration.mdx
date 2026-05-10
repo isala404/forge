@@ -81,45 +81,9 @@ Queries route to healthy replicas via round-robin. Mutations always use the prim
 
 Queries that need read-after-write consistency can use `#[forge::query(consistent)]` to bypass replicas and read directly from the primary.
 
-#### Pool Isolation (Bulkhead)
+#### Single Pool
 
-Separate connection pools prevent runaway workloads from starving others:
-
-```toml
-[database]
-url = "${DATABASE_URL}"
-pool_size = 50
-
-[database.pools.default]
-size = 30
-timeout = "30s"
-
-[database.pools.jobs]
-size = 15
-timeout = "1m"
-statement_timeout = "5m"
-
-[database.pools.analytics]
-size = 5
-timeout = "2m"
-statement_timeout = "10m"
-
-[database.pools.observability]
-size = 3
-timeout = "5s"
-statement_timeout = "10s"
-```
-
-Available pool names and what uses them:
-
-| Pool            | Used By                                                             |
-| --------------- | ------------------------------------------------------------------- |
-| `default`       | Queries, mutations, rate limiter, reactor, cluster coordination     |
-| `jobs`          | Job workers, cron runners, daemon processes, workflow executors     |
-| `analytics`     | Available via `db.analytics_pool()` for user code                   |
-| `observability` | Internal metrics collection (pool utilization, slow query tracking) |
-
-Without pool isolation configured, everything shares the primary pool. With it configured, a spike in background job processing cannot starve user-facing query connections. Each pool enforces independent connection limits, checkout timeouts, and statement timeouts.
+Forge uses a single primary connection pool for queries, mutations, jobs, cron, daemons, workflows, and observability. Workload isolation belongs at the worker level (concurrency limits, dedicated nodes), not the connection level. Size `pool_size` for the union of expected concurrency and use `statement_timeout` to bound runaway queries.
 
 ### [gateway]
 
@@ -517,7 +481,7 @@ retention_days = 90
 excluded_functions = ["health_check"]
 ```
 
-Signal events are stored in monthly-partitioned tables on the analytics connection pool. The collector buffers events in memory and flushes them in batches using PostgreSQL's `UNNEST()` for efficient writes.
+Signal events are stored in monthly-partitioned tables. The collector buffers events in memory and flushes them in batches using PostgreSQL's `UNNEST()` for efficient writes.
 
 ## Patterns
 
@@ -566,11 +530,9 @@ API nodes:
 ```toml
 [database]
 url = "${DATABASE_URL}"
+pool_size = 40
 replica_urls = ["${DATABASE_REPLICA_URL}"]
 read_from_replica = true
-
-[database.pools.default]
-size = 40
 
 [node]
 roles = ["gateway", "function"]
@@ -584,9 +546,7 @@ Worker nodes:
 ```toml
 [database]
 url = "${DATABASE_URL}"
-
-[database.pools.jobs]
-size = 30
+pool_size = 30
 statement_timeout = "10m"
 
 [node]
@@ -626,30 +586,9 @@ let re = Regex::new(r"\$\{([A-Z_][A-Z0-9_]*)\}")?;
 
 Substitution happens at parse time. Unset variables remain as literal `${VAR_NAME}` strings (useful for detecting misconfiguration).
 
-### Bulkhead Isolation
+### Workload Separation
 
-Connection pools isolate workloads:
-
-```
-┌─────────────────────────────────────────────────┐
-│                   PostgreSQL                    │
-└─────────────────────────────────────────────────┘
-         ▲              ▲              ▲
-         │              │              │
-    ┌────┴────┐    ┌────┴────┐    ┌────┴────┐
-    │ default │    │  jobs   │    │analytics│
-    │ 30 conn │    │ 15 conn │    │  5 conn │
-    │  30s TO │    │ 300s TO │    │ 600s TO │
-    └────┬────┘    └────┬────┘    └────┬────┘
-         │              │              │
-         ▼              ▼              ▼
-    ┌─────────┐   ┌─────────┐   ┌─────────┐
-    │ Queries │   │  Jobs   │   │ Reports │
-    │Mutations│   │         │   │         │
-    └─────────┘   └─────────┘   └─────────┘
-```
-
-A runaway batch job cannot exhaust connections reserved for user requests.
+Forge runs one primary connection pool. Bulkheading happens at the worker level: dedicated worker nodes with their own `pool_size` and `max_concurrent_jobs` budgets, plus `statement_timeout` to bound runaway queries. The connection layer is not where you isolate workloads — at scale, that's just a knob that consumes the same finite database connection budget under another name.
 
 ### Cluster Discovery
 

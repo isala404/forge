@@ -377,15 +377,13 @@ Client errors (4xx) log at WARN level. Server errors (5xx) log at ERROR level.
 **Solutions:**
 1. Increase `pool_size` in forge.toml
 2. Check for long-running queries holding connections
-3. Use separate pools for different workloads (bulkhead pattern)
+3. Lower `statement_timeout` so runaway queries release connections sooner
+4. Move heavy workloads to dedicated worker nodes with their own `pool_size`
 
 ```toml
-[database.pools.default]
-size = 30
-
-[database.pools.analytics]
-size = 10
-statement_timeout = "10m"
+[database]
+pool_size = 60
+statement_timeout = "30s"
 ```
 
 #### "Unauthorized: Token expired"

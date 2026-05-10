@@ -110,16 +110,12 @@ Forge::builder()
 Create `migrations/0001_todos.sql`:
 
 ```sql
--- @up
 CREATE TABLE todos (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     title TEXT NOT NULL,
     completed BOOLEAN NOT NULL DEFAULT false,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-
--- @down
-DROP TABLE IF EXISTS todos;
 ```
 
 ## Test It
@@ -180,11 +176,7 @@ Two changes needed:
 Create `migrations/0002_todos_reactivity.sql`:
 
 ```sql
--- @up
 SELECT forge_enable_reactivity('todos');
-
--- @down
-SELECT forge_disable_reactivity('todos');
 ```
 
 This sets up PostgreSQL triggers that emit `NOTIFY` on changes.

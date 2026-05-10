@@ -23,7 +23,7 @@ mod worker;
 
 pub use auth::{AuthConfig, JwtAlgorithm, LegacySecret};
 pub use cluster::ClusterConfig;
-pub use database::{DatabaseConfig, PoolConfig};
+pub use database::DatabaseConfig;
 pub use function::FunctionConfig;
 pub use gateway::{GatewayConfig, TlsConfig};
 pub use mcp_config::McpConfig;

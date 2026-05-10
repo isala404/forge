@@ -11,6 +11,7 @@ mod pool;
 
 pub use leader::{LeaderConfig, LeaderElection, LeaderGuard};
 pub use migration::{
-    AppliedMigration, Migration, MigrationRunner, MigrationStatus, load_migrations_from_dir,
+    AppliedMigration, DriftStatus, Migration, MigrationRunner, MigrationStatus,
+    load_migrations_from_dir,
 };
 pub use pool::{Database, DatabasePool};

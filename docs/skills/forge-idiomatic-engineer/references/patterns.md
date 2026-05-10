@@ -219,7 +219,7 @@ Forge::builder()
 ## 4. Operations
 
 - **Consistent reads**: `#[query(consistent)]` forces the primary when eventual consistency is unacceptable.
-- **Pool isolation**: queries use `default`; jobs use `jobs`; OTLP uses `observability`; signals use `analytics`. Size in `[database.pools.<name>]`.
+- **Single pool**: queries, mutations, jobs, cron, daemons, workflows, observability, and signals all share `[database] pool_size`. Size for the union of expected concurrency. Use `statement_timeout` to bound runaway queries; isolate heavy workloads with dedicated worker nodes, not extra pools.
 - **Observability**: enable OTLP in `forge.toml`; `x-correlation-id` propagates across RPC boundaries. Full metric/span catalog: `docs/docs/reference/observability-catalog.mdx`.
 - **Workflow safety**: startup validates active versions against persisted signatures; run the binary before shipping or `/_api/ready` reports unhealthy.
 - **Cluster fencing**: leader-exclusive writes (cron scheduling, stale reclaim, workflow recovery) check `current_term` against the DB before executing. If a stale leader lost its election during a partition, the fencing check rejects the write. Custom leader-mode daemons should follow the same pattern.

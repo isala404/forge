@@ -1,3 +1,89 @@
+//! PostgreSQL connection pool management.
+//!
+//! # Single-pool concurrency model
+//!
+//! Forge runs every workload (gateway requests, job/cron workers, the
+//! workflow scheduler, the reactor, periodic cleanup, signals batch inserts)
+//! against a single primary pool. There are no per-workload pool slots and
+//! none are coming back: the previous multi-pool layout (`pools.jobs`,
+//! `pools.observability`, `pools.analytics`) was removed in Phase 2 because
+//! split pools made the connection budget impossible to reason about and
+//! produced nasty starvation modes when one pool was full and another idle.
+//!
+//! The single pool is fairer in steady state but exposes one real risk: a
+//! burst of slow background work can drain the budget that gateway requests
+//! need. Doctrine still says one pool, so the framework manages contention
+//! by throttling at the workload level instead:
+//!
+//! - **Job/cron worker**: capped at `worker.max_concurrent` running tasks
+//!   ([`crate::jobs::worker::WorkerConfig::max_concurrent`]). Each task
+//!   holds at most one connection at a time, so this directly bounds the
+//!   slice of the pool that workers can take.
+//! - **Reactor re-execution**: capped at the realtime semaphore
+//!   ([`crate::realtime::reactor`] uses a `Semaphore` sized to the configured
+//!   max). Live re-execution can't oversubscribe the pool beyond that.
+//! - **Cleanup crons** (refresh-token purge, oauth-code purge, expired-job
+//!   delete, invalidation purge, etc.) route through the same worker
+//!   semaphore via cron-as-job, so they share the worker cap.
+//! - **Workflow execution**: durable workflows run inside `$workflow_resume`
+//!   jobs, inheriting the worker semaphore transitively. The workflow
+//!   scheduler itself only polls and dispatches.
+//! - **Gateway requests**: not throttled at the pool level. They take from
+//!   whatever the workers and reactor have left.
+//!
+//! ## Persistent connection holders
+//!
+//! Several runtime components hold a connection for the process lifetime
+//! rather than acquiring per-operation. These come out of the pool budget
+//! the moment the runtime starts and never return until shutdown:
+//!
+//! - Change listener (`LISTEN forge_changes`), one connection per node.
+//! - Workflow scheduler listener (`LISTEN forge_workflow_wakeup`), one per
+//!   node when workflows are registered.
+//! - Job worker wakeup listener (`LISTEN forge_jobs_wakeup`), one per worker.
+//! - Leader election lock holder, one per leader role this node owns. A node
+//!   that wins both the cron and signals leader roles holds two.
+//!
+//! Plan for two to three persistent connections per node in steady state,
+//! plus one per leader role this node may win.
+//!
+//! ## Sizing formula
+//!
+//! The recommended `database.pool_size` is:
+//!
+//! ```text
+//! pool_size >= worker.max_concurrent
+//!            + realtime.max_concurrent_reexecution
+//!            + expected_concurrent_gateway_requests
+//!            + ~6   // persistent listeners, leader holds, migrations, health check
+//! ```
+//!
+//! For default worker (10) and reactor (64) caps and a steady gateway load
+//! of, say, 50 concurrent requests, that lands around 130. The 50-connection
+//! default fits a small deployment that scales worker/reactor caps down
+//! accordingly.
+//!
+//! Note that gateway's `max_connections` (default 512) is the request-level
+//! concurrency cap, not the pool-level one. A real deployment rarely sees
+//! 512 concurrent in-flight DB queries because most requests are cached or
+//! short-lived. Size by *expected concurrent active queries*, not by the
+//! gateway cap.
+//!
+//! ## What's NOT gated
+//!
+//! - Migration runner (one-shot at startup, takes one connection).
+//! - Replica health monitor (one query every 15s, brief).
+//! - Signals event batch flush (one task, batches via UNNEST so each insert
+//!   is one connection-trip even for large batches).
+//!
+//! ## When the model breaks
+//!
+//! If a production load test shows gateway acquisition timeouts under job
+//! load, the answer is to raise `pool_size` and/or lower
+//! `worker.max_concurrent`, not to introduce per-workload pools. Tagged
+//! semaphores at the acquire site will be added if a real workload is found
+//! that can't be sized via the existing knobs.
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -44,44 +130,13 @@ impl Database {
             ));
         }
 
-        let primary_size = config
-            .pools
-            .default
-            .as_ref()
-            .map(|p| p.size)
-            .unwrap_or(config.pool_size);
-        let primary_timeout = config
-            .pools
-            .default
-            .as_ref()
-            .map(|p| p.timeout.as_secs())
-            .unwrap_or_else(|| config.pool_timeout.as_secs());
-        let primary_min = config
-            .pools
-            .default
-            .as_ref()
-            .map(|p| p.min_size)
-            .unwrap_or(config.min_pool_size);
-        let primary_test = config
-            .pools
-            .default
-            .as_ref()
-            .map(|p| p.test_before_acquire)
-            .unwrap_or(config.test_before_acquire);
-        let statement_timeout = config
-            .pools
-            .default
-            .as_ref()
-            .and_then(|p| p.statement_timeout.map(|d| d.as_secs()))
-            .unwrap_or_else(|| config.statement_timeout.as_secs());
-
         let primary = Self::create_pool_with_statement_timeout(
             &config.url,
-            primary_size,
-            primary_min,
-            primary_timeout,
-            statement_timeout,
-            primary_test,
+            config.pool_size,
+            config.min_pool_size,
+            config.pool_timeout.as_secs(),
+            config.statement_timeout.as_secs(),
+            config.test_before_acquire,
             service_name,
         )
         .await

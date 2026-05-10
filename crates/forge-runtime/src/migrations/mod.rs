@@ -19,5 +19,6 @@ pub use builtin::{
     get_builtin_migrations, get_system_migrations, is_system_migration,
 };
 pub use runner::{
-    AppliedMigration, Migration, MigrationRunner, MigrationStatus, load_migrations_from_dir,
+    AppliedMigration, DriftStatus, Migration, MigrationConfig, MigrationRunner, MigrationStatus,
+    load_migrations_from_dir,
 };

@@ -32,8 +32,7 @@ forge add workflow user_onboarding # multi-step process
 forge generate                     # regenerate TypeScript types from Rust models
 forge check                        # validate config, migrations, project health
 forge migrate status               # check which migrations have run
-forge migrate up                   # apply pending migrations
-forge migrate down                 # rollback the last migration
+forge migrate up                   # apply pending migrations (forward-only)
 ```
 
 ### Running Tests

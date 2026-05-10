@@ -5,5 +5,6 @@
 //! infrastructure.
 
 pub use crate::migrations::runner::{
-    AppliedMigration, Migration, MigrationRunner, MigrationStatus, load_migrations_from_dir,
+    AppliedMigration, DriftStatus, Migration, MigrationRunner, MigrationStatus,
+    load_migrations_from_dir,
 };

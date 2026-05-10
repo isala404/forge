@@ -33,10 +33,7 @@ All cluster coordination happens through PostgreSQL. Nodes in different regions 
 | `read_from_replica` | `bool` | `false` | Route queries to replicas |
 | `pool_size` | `u32` | `50` | Primary pool size (replicas get half) |
 | `pool_timeout` | string | `"30s"` | Connection acquire timeout |
-| `pools.default` | config | none | Override primary pool size/timeout |
-| `pools.jobs` | config | none | Isolated pool for background work |
-| `pools.observability` | config | none | Isolated pool for metrics collection |
-| `pools.analytics` | config | none | Isolated pool for long-running reports |
+| `statement_timeout` | string | `"30s"` | Bound runaway query duration |
 
 ## Multi-Region Pattern
 
@@ -162,32 +159,20 @@ pub async fn get_order_receipt(ctx: &QueryContext, order_id: Uuid) -> Result<Ord
 
 Without `consistent`, this query would read from a replica which might not have the order yet if it was just created. With `consistent`, it reads from the primary.
 
-### Isolated Pools for Workloads
+### Sizing the Single Pool
 
-Separate connection pools prevent one workload from starving another:
+Forge uses one primary pool for everything: queries, mutations, jobs, cron, daemons, workflows, observability. Workload separation belongs at the worker level (concurrency limits, dedicated worker nodes), not the connection level.
 
 ```toml
 [database]
 url = "${PRIMARY_URL}"
 replica_urls = ["${REPLICA_LOCAL}"]
 read_from_replica = true
-
-[database.pools.default]
-size = 30
-timeout = "10s"
-
-[database.pools.jobs]
-size = 20
-timeout = "1m"
+pool_size = 60
 statement_timeout = "5m"
-
-[database.pools.analytics]
-size = 10
-timeout = "2m"
-statement_timeout = "10m"
 ```
 
-When configured, background jobs, cron runners, daemon processes, and workflow executors all use the `jobs` pool. The `observability` pool handles internal metrics collection. The `analytics` pool is available via `db.analytics_pool()` for user code. A runaway analytics query cannot exhaust connections needed for user requests.
+Size `pool_size` for the union of expected concurrent work, and use `statement_timeout` to bound runaway queries. To isolate heavy workloads, run them on dedicated worker nodes with their own pool budgets — the database connection layer is not where bulkheading belongs.
 
 ### Cross-Region Cluster Discovery
 
