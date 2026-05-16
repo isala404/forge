@@ -749,6 +749,10 @@ impl Reactor {
                     result = change_rx.recv() => {
                         match result {
                             Ok(change) => {
+                                // Any successful change means the listener is healthy
+                                // again; reset so a long-lived process can absorb more
+                                // transient failures over its lifetime.
+                                restart_count = 0;
                                 Self::handle_change(
                                     &change,
                                     &invalidation_engine,

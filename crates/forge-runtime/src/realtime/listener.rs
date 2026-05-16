@@ -173,11 +173,22 @@ impl ChangeListener {
             .await
             .map_err(forge_core::ForgeError::Database)?;
 
-        // Subscribe to the change channel
+        // Subscribe BEFORE seeding last_seq so the LISTEN buffer covers any
+        // changes appended after we snapshot max_seq.
         listener
             .listen(&self.config.channel)
             .await
             .map_err(forge_core::ForgeError::Database)?;
+
+        // Seed last_seq from the current log high-water mark so that if the
+        // listener disconnects shortly after startup, `replay_missed` can
+        // recover gaps relative to a meaningful baseline instead of giving up
+        // on its zero-sentinel check.
+        if self.last_seq.load(Ordering::Relaxed) == 0
+            && let Ok(Some(seq)) = crate::pg::max_seq(&self.pool).await
+        {
+            self.last_seq.store(seq, Ordering::Relaxed);
+        }
 
         tracing::debug!(channel = %self.config.channel, "Listening for changes");
 

@@ -447,11 +447,16 @@ async fn build_project(frontend_type: Option<FrontendTarget>) -> Result<std::pat
 
     // For Dioxus: build WASM first so frontend/dist/ has real files before cargo build.
     // build.rs only creates a placeholder in debug, and rust_embed needs the folder to exist.
+    //
+    // `--release` is intentional: dx debug WASM embeds a hot-reload WebSocket client
+    // that retries against the test backend, surfacing console errors that flake the
+    // Playwright suite. Release builds gate that runtime behind `cfg(debug_assertions)`
+    // and produce WASM representative of what users ship.
     if matches!(frontend_type, Some(FrontendTarget::Dioxus)) {
         println!("  {} Building Dioxus WASM frontend...", ui::step());
         let frontend_dir = Path::new("frontend");
         let status = Command::new("dx")
-            .args(["build", "--platform", "web"])
+            .args(["build", "--platform", "web", "--release"])
             .current_dir(frontend_dir)
             .env("FORGE_API_URL", "")
             .stdin(Stdio::inherit())
@@ -467,11 +472,11 @@ async fn build_project(frontend_type: Option<FrontendTarget>) -> Result<std::pat
             );
         }
 
-        // dx outputs to target/dx/{name}/{profile}/web/public/; copy to frontend/dist/
+        // dx outputs to target/dx/{name}/release/web/public/; copy to frontend/dist/
         let dx_target = frontend_dir.join("target/dx");
         if let Ok(entries) = std::fs::read_dir(&dx_target) {
             for entry in entries.flatten() {
-                for profile in ["debug", "release"] {
+                for profile in ["release", "debug"] {
                     let public_dir = entry.path().join(profile).join("web/public");
                     if public_dir.exists() {
                         let dist_dir = frontend_dir.join("dist");

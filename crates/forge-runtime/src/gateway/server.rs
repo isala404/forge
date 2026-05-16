@@ -51,6 +51,18 @@ const MAX_MULTIPART_CONCURRENCY: usize = 32;
 /// Fallback for visitor ID hashing when no JWT secret is configured (dev only).
 const DEFAULT_SIGNAL_SECRET: &str = "forge-default-signal-secret";
 
+/// Resolve the visitor-ID hashing secret, falling back to a stable dev value
+/// with a one-time warning when no JWT secret is configured.
+fn signal_visitor_secret(jwt_secret: &Option<String>) -> String {
+    jwt_secret.clone().unwrap_or_else(|| {
+        tracing::warn!(
+            "No jwt_secret configured; using default signal secret for visitor ID hashing. \
+             Visitor IDs will be predictable. Set [auth] jwt_secret in forge.toml."
+        );
+        DEFAULT_SIGNAL_SECRET.to_string()
+    })
+}
+
 /// Gateway server configuration.
 #[derive(Debug, Clone)]
 pub struct GatewayConfig {
@@ -393,13 +405,7 @@ impl GatewayServer {
             rpc.set_role_resolver(resolver.clone());
         }
         if let Some(collector) = &self.signals_collector {
-            let secret = self.config.auth.jwt_secret.clone().unwrap_or_else(|| {
-                tracing::warn!(
-                    "No jwt_secret configured; using default signal secret for visitor ID hashing. \
-                         Visitor IDs will be predictable. Set [auth] jwt_secret in forge.toml."
-                );
-                DEFAULT_SIGNAL_SECRET.to_string()
-            });
+            let secret = signal_visitor_secret(&self.config.auth.jwt_secret);
             rpc.set_signals_collector(collector.clone(), secret);
         }
         let rpc_handler_state = Arc::new(rpc);
@@ -580,18 +586,7 @@ impl GatewayServer {
             let signals_state = Arc::new(crate::signals::endpoints::SignalsState {
                 collector: collector.clone(),
                 pool: self.db.primary().clone(),
-                server_secret: self
-                    .config
-                    .auth
-                    .jwt_secret
-                    .clone()
-                    .unwrap_or_else(|| {
-                        tracing::warn!(
-                            "No jwt_secret configured; using default signal secret for visitor ID hashing. \
-                             Visitor IDs will be predictable. Set [auth] jwt_secret in forge.toml."
-                        );
-                        DEFAULT_SIGNAL_SECRET.to_string()
-                    }),
+                server_secret: signal_visitor_secret(&self.config.auth.jwt_secret),
                 anonymize_ip: self.signals_anonymize_ip,
                 geoip: self.signals_geoip.clone(),
                 rate_limiter: Arc::new(crate::signals::rate_limit::SignalRateLimiter::new()),

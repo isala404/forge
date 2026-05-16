@@ -89,41 +89,12 @@ impl SqlStringExtractor {
     }
 
     /// Extract the actual string content from a literal representation.
-    /// Handles both regular strings ("...") and raw strings (r#"..."#, r"...").
+    /// Delegates parsing and unescaping to syn so raw, byte, and escaped
+    /// forms all decode through the same canonical path.
     fn extract_string_content(lit: &str) -> Option<String> {
-        let lit = lit.trim();
-
-        // Raw string literal: r#"..."# or r##"..."## etc.
-        if lit.starts_with("r#") || lit.starts_with("r\"") {
-            // Find the opening quote pattern
-            let quote_start = lit.find('"')?;
-            // Count the # symbols before the quote
-            let hash_count = lit[1..quote_start].chars().filter(|&c| c == '#').count();
-            // Build the closing pattern
-            let closing = format!("\"{}", "#".repeat(hash_count));
-            // Find the content between opening and closing
-            let content_start = quote_start + 1;
-            let content_end = lit.rfind(&closing)?;
-            if content_start < content_end {
-                return Some(lit[content_start..content_end].to_string());
-            }
-        }
-        // Regular string literal: "..."
-        else if lit.starts_with('"') && lit.ends_with('"') && lit.len() >= 2 {
-            // Remove the surrounding quotes and unescape
-            let content = &lit[1..lit.len() - 1];
-            return Some(
-                content
-                    .replace("\\n", "\n")
-                    .replace("\\r", "\r")
-                    .replace("\\t", "\t")
-                    .replace("\\0", "")
-                    .replace("\\\"", "\"")
-                    .replace("\\\\", "\\"),
-            );
-        }
-
-        None
+        syn::parse_str::<syn::LitStr>(lit.trim())
+            .ok()
+            .map(|s| s.value())
     }
 }
 

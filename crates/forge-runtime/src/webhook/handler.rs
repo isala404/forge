@@ -389,7 +389,9 @@ fn validate_signature(
         return false;
     }
     match algorithm {
-        SignatureAlgorithm::StripeWebhooks => validate_stripe_webhooks(body, secret, signature),
+        SignatureAlgorithm::StripeWebhooks => {
+            validate_stripe_webhooks(body, secret, signature, replay_window_secs)
+        }
         SignatureAlgorithm::HmacSha256Base64 => {
             validate_hmac_sha256_base64(body, secret, signature)
         }
@@ -437,8 +439,13 @@ fn timestamp_within_replay_window(headers: &HeaderMap, window_secs: u64) -> bool
 ///
 /// - Header format: `t=1234567890,v1=<hex>,v1=<hex>`
 /// - Signed content: `{timestamp}.{body}`
-/// - Rejects requests where the timestamp is more than 5 minutes old.
-fn validate_stripe_webhooks(body: &[u8], secret: &str, signature_header: &str) -> bool {
+/// - Rejects requests outside `replay_window_secs` (0 disables the check).
+fn validate_stripe_webhooks(
+    body: &[u8],
+    secret: &str,
+    signature_header: &str,
+    replay_window_secs: u64,
+) -> bool {
     let mut timestamp: Option<&str> = None;
     let mut signatures: Vec<&str> = Vec::new();
 
@@ -455,12 +462,13 @@ fn validate_stripe_webhooks(body: &[u8], secret: &str, signature_header: &str) -
         None => return false,
     };
 
-    // Replay protection: reject if timestamp is more than 5 minutes off
     let ts: i64 = match timestamp.parse() {
         Ok(n) => n,
         Err(_) => return false,
     };
-    if (chrono::Utc::now().timestamp() - ts).abs() > 300 {
+    if replay_window_secs > 0
+        && (chrono::Utc::now().timestamp() - ts).unsigned_abs() > replay_window_secs
+    {
         return false;
     }
 
@@ -898,24 +906,26 @@ mod tests {
         let sig_hex = encode_hex(&mac.finalize().into_bytes());
 
         let header = format!("t={timestamp},v1={sig_hex}");
-        assert!(validate_stripe_webhooks(body, secret, &header));
+        assert!(validate_stripe_webhooks(body, secret, &header, 300));
 
         // Multiple signatures (Stripe can include both v1 and a legacy v0)
         let header_multi = format!("t={timestamp},v0=ignored,v1={sig_hex}");
-        assert!(validate_stripe_webhooks(body, secret, &header_multi));
+        assert!(validate_stripe_webhooks(body, secret, &header_multi, 300));
 
         // Wrong signature
         assert!(!validate_stripe_webhooks(
             body,
             secret,
-            &format!("t={timestamp},v1=deadbeef")
+            &format!("t={timestamp},v1=deadbeef"),
+            300,
         ));
 
         // Missing timestamp
         assert!(!validate_stripe_webhooks(
             body,
             secret,
-            &format!("v1={sig_hex}")
+            &format!("v1={sig_hex}"),
+            300,
         ));
 
         // Stale timestamp (replay attack)
@@ -930,7 +940,16 @@ mod tests {
         assert!(!validate_stripe_webhooks(
             body,
             secret,
-            &format!("t={old_ts},v1={old_sig}")
+            &format!("t={old_ts},v1={old_sig}"),
+            300,
+        ));
+
+        // replay_window_secs = 0 disables the check
+        assert!(validate_stripe_webhooks(
+            body,
+            secret,
+            &format!("t={old_ts},v1={old_sig}"),
+            0,
         ));
     }
 

@@ -747,23 +747,8 @@ fn convert_realtime_to_sse(msg: RealtimeMessage) -> Option<SseMessage> {
                 })
             }
         },
-        RealtimeMessage::Error { code, message } => Some(SseMessage::Error {
-            target: String::new(),
-            code,
-            message,
-        }),
-        RealtimeMessage::ErrorWithId { id, code, message } => Some(SseMessage::Error {
-            target: id,
-            code,
-            message,
-        }),
-        // Ignore control messages
-        RealtimeMessage::Subscribe { .. }
-        | RealtimeMessage::Unsubscribe { .. }
-        | RealtimeMessage::Ping
-        | RealtimeMessage::Pong
-        | RealtimeMessage::AuthSuccess
-        | RealtimeMessage::Lagging => None,
+        // Lagging is an internal signal to slow clients; no client-visible event.
+        RealtimeMessage::Lagging => None,
         RealtimeMessage::AuthFailed { reason } => Some(SseMessage::Error {
             target: "session".to_string(),
             code: "SESSION_EXPIRED".to_string(),

@@ -55,23 +55,13 @@ pub struct WorkflowStepData {
     pub error: Option<String>,
 }
 
-/// Message types for real-time communication.
+/// Server -> SSE-pipeline message envelope.
 ///
 /// `#[non_exhaustive]` so 1.0.x can add new variants without breaking
 /// downstream Rust matchers (forge-dioxus, custom integrations).
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum RealtimeMessage {
-    Subscribe {
-        id: String,
-        query: String,
-        args: serde_json::Value,
-    },
-    Unsubscribe {
-        subscription_id: SubscriptionId,
-    },
-    Ping,
-    Pong,
     Data {
         subscription_id: String,
         data: serde_json::Value,
@@ -88,16 +78,6 @@ pub enum RealtimeMessage {
         client_sub_id: String,
         workflow: WorkflowData,
     },
-    Error {
-        code: String,
-        message: String,
-    },
-    ErrorWithId {
-        id: String,
-        code: String,
-        message: String,
-    },
-    AuthSuccess,
     AuthFailed {
         reason: String,
     },
@@ -510,11 +490,11 @@ mod tests {
         server.register_connection(session_id, tx, None);
 
         // First send should succeed
-        let result = server.try_send_to_session(session_id, RealtimeMessage::Ping);
+        let result = server.try_send_to_session(session_id, RealtimeMessage::Lagging);
         assert!(result.is_ok());
 
         // Second send to full buffer should return Full
-        let result = server.try_send_to_session(session_id, RealtimeMessage::Ping);
+        let result = server.try_send_to_session(session_id, RealtimeMessage::Lagging);
         assert!(matches!(result, Err(SendError::Full)));
     }
 
@@ -550,7 +530,7 @@ mod tests {
         server.register_connection(session_id, tx, Some(1));
         assert_eq!(server.connection_count(), 1);
 
-        let result = server.try_send_to_session(session_id, RealtimeMessage::Ping);
+        let result = server.try_send_to_session(session_id, RealtimeMessage::Lagging);
 
         assert!(matches!(result, Err(SendError::TokenExpired)));
         // Session evicted — no longer tracked
@@ -568,7 +548,7 @@ mod tests {
         let future_exp = chrono::Utc::now().timestamp() + 3600;
         server.register_connection(session_id, tx, Some(future_exp));
 
-        let result = server.try_send_to_session(session_id, RealtimeMessage::Ping);
+        let result = server.try_send_to_session(session_id, RealtimeMessage::Lagging);
 
         assert!(result.is_ok());
         assert_eq!(server.connection_count(), 1);

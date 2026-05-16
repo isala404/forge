@@ -21,7 +21,8 @@ export function trackConsoleErrors(page: Page): string[] {
         !text.includes("net::ERR") &&
         !text.includes("favicon") &&
         !text.includes("EventSource") &&
-        !text.includes("_dioxus")
+        !text.includes("_dioxus") &&
+        !text.includes("WebSocket connection")
       ) {
         errors.push(text);
       }

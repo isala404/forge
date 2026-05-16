@@ -106,8 +106,7 @@ pub mod signals {
 // --- Re-exports follow the same gating ---
 
 pub use cluster::{
-    GracefulShutdown, HeartbeatConfig, HeartbeatLoop, InFlightGuard, NodeCounts, NodeRegistry,
-    ShutdownConfig,
+    GracefulShutdown, HeartbeatConfig, HeartbeatLoop, InFlightGuard, NodeRegistry, ShutdownConfig,
 };
 pub use function::{FunctionRegistry, FunctionRouter, RouteOutcome, RouteResult};
 pub use kv::KvStore;
@@ -138,8 +137,8 @@ pub use jobs::{
 pub use mcp::{McpToolEntry, McpToolRegistry};
 #[cfg(feature = "gateway")]
 pub use realtime::{
-    ChangeListener, InvalidationEngine, RealtimeConfig, RealtimeMessage, SessionManager,
-    SessionServer, SubscriptionManager,
+    ChangeListener, InvalidationEngine, RealtimeConfig, RealtimeMessage, SessionServer,
+    SubscriptionManager,
 };
 #[cfg(feature = "gateway")]
 pub use webhook::{WebhookEntry, WebhookRegistry, WebhookState, webhook_handler};

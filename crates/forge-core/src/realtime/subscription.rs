@@ -99,12 +99,11 @@ impl std::hash::Hash for AuthScope {
 
 impl AuthScope {
     pub fn from_auth(auth: &crate::function::AuthContext) -> Self {
-        use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
         let mut roles: Vec<&str> = auth.roles().iter().map(|s| s.as_str()).collect();
         roles.sort_unstable();
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = FnvHasher::new();
         roles.hash(&mut hasher);
         let role_hash = hasher.finish();
 

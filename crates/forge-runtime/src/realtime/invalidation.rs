@@ -13,18 +13,16 @@ use super::manager::SubscriptionManager;
 ///
 /// Uses debouncing to batch rapid changes into single re-executions per group.
 /// This prevents "thundering herd" scenarios where a batch insert triggers
-/// N subscription refreshes.
+/// N subscription refreshes. Changes to the same table within the debounce
+/// window are always merged into one invalidation per group (the underlying
+/// pending map is keyed by group id, so it is a structural property, not a
+/// configurable behavior).
 #[derive(Debug, Clone)]
 pub struct InvalidationConfig {
     /// Debounce window in milliseconds.
     pub debounce_ms: u64,
     /// Maximum debounce wait in milliseconds.
     pub max_debounce_ms: u64,
-    /// Whether to coalesce changes by table. When enabled, multiple changes
-    /// to the same table within the debounce window are merged into a single
-    /// invalidation per affected group, reducing redundant re-executions.
-    /// When disabled, each change is tracked independently per group.
-    pub coalesce_by_table: bool,
     /// Maximum changes to buffer before forcing flush.
     pub max_buffer_size: usize,
 }
@@ -34,7 +32,6 @@ impl Default for InvalidationConfig {
         Self {
             debounce_ms: 50,
             max_debounce_ms: 200,
-            coalesce_by_table: true,
             max_buffer_size: 1000,
         }
     }
@@ -86,33 +83,17 @@ impl InvalidationEngine {
         let mut pending = self.pending.write().await;
 
         for group_id in affected {
-            if self.config.coalesce_by_table {
-                // Coalesce: merge changes to the same table within the debounce window,
-                // extending the last_change timestamp to delay re-execution until
-                // the burst settles.
-                let entry = pending
-                    .entry(group_id)
-                    .or_insert_with(|| PendingInvalidation {
-                        group_id,
-                        changed_tables: HashSet::new(),
-                        first_change: now,
-                        last_change: now,
-                    });
+            let entry = pending
+                .entry(group_id)
+                .or_insert_with(|| PendingInvalidation {
+                    group_id,
+                    changed_tables: HashSet::new(),
+                    first_change: now,
+                    last_change: now,
+                });
 
-                entry.changed_tables.insert(change.table.clone());
-                entry.last_change = now;
-            } else {
-                // No coalescing: each change triggers its own invalidation entry,
-                // so the group will be re-executed once per change after debounce.
-                pending
-                    .entry(group_id)
-                    .or_insert_with(|| PendingInvalidation {
-                        group_id,
-                        changed_tables: HashSet::from([change.table.clone()]),
-                        first_change: now,
-                        last_change: now,
-                    });
-            }
+            entry.changed_tables.insert(change.table.clone());
+            entry.last_change = now;
         }
 
         if pending.len() >= self.config.max_buffer_size {
@@ -199,21 +180,12 @@ pub struct InvalidationStats {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_invalidation_config_default() {
-        let config = InvalidationConfig::default();
-        assert_eq!(config.debounce_ms, 50);
-        assert_eq!(config.max_debounce_ms, 200);
-        assert!(config.coalesce_by_table);
-    }
-
     #[tokio::test]
     async fn test_invalidation_engine_creation() {
         let subscription_manager = Arc::new(SubscriptionManager::new(50));
         let engine = InvalidationEngine::new(subscription_manager, InvalidationConfig::default());
 
         assert_eq!(engine.pending_count().await, 0);
-
         let stats = engine.stats().await;
         assert_eq!(stats.pending_groups, 0);
         assert_eq!(stats.pending_tables, 0);
@@ -229,32 +201,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_coalesce_by_table_enabled() {
+    async fn test_process_change_without_subscribers_is_noop() {
         let subscription_manager = Arc::new(SubscriptionManager::new(50));
         let config = InvalidationConfig {
-            coalesce_by_table: true,
             debounce_ms: 0,
             ..Default::default()
         };
         let engine = InvalidationEngine::new(subscription_manager, config);
 
-        // Without subscriptions, no groups are affected, so pending stays empty
-        let change = Change::new("users", forge_core::realtime::ChangeOperation::Insert);
-        engine.process_change(change).await;
-        assert_eq!(engine.pending_count().await, 0);
-    }
-
-    #[tokio::test]
-    async fn test_coalesce_by_table_disabled() {
-        let subscription_manager = Arc::new(SubscriptionManager::new(50));
-        let config = InvalidationConfig {
-            coalesce_by_table: false,
-            debounce_ms: 0,
-            ..Default::default()
-        };
-        let engine = InvalidationEngine::new(subscription_manager, config);
-
-        // Without subscriptions, no groups are affected
         let change = Change::new("users", forge_core::realtime::ChangeOperation::Insert);
         engine.process_change(change).await;
         assert_eq!(engine.pending_count().await, 0);

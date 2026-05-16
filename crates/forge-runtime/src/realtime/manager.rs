@@ -4,112 +4,11 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use dashmap::DashMap;
 
-use forge_core::cluster::NodeId;
 use forge_core::function::AuthContext;
 use forge_core::realtime::{
-    AuthScope, Change, QueryGroup, QueryGroupId, ReadSet, SessionId, SessionInfo, SessionStatus,
-    Subscriber, SubscriberId, SubscriptionId, SubscriptionKey,
+    AuthScope, Change, QueryGroup, QueryGroupId, ReadSet, SessionId, Subscriber, SubscriberId,
+    SubscriptionId, SubscriptionKey,
 };
-
-/// Session manager for tracking WebSocket connections.
-pub struct SessionManager {
-    sessions: DashMap<SessionId, SessionInfo>,
-    node_id: NodeId,
-}
-
-impl SessionManager {
-    /// Create a new session manager.
-    pub fn new(node_id: NodeId) -> Self {
-        Self {
-            sessions: DashMap::new(),
-            node_id,
-        }
-    }
-
-    /// Create a new session.
-    pub fn create_session(&self) -> SessionInfo {
-        let mut session = SessionInfo::new(self.node_id);
-        session.connect();
-        self.sessions.insert(session.id, session.clone());
-        session
-    }
-
-    /// Get a session by ID.
-    pub fn get_session(&self, session_id: SessionId) -> Option<SessionInfo> {
-        self.sessions.get(&session_id).map(|r| r.clone())
-    }
-
-    /// Update a session.
-    pub fn update_session(&self, session: SessionInfo) {
-        self.sessions.insert(session.id, session);
-    }
-
-    /// Remove a session.
-    pub fn remove_session(&self, session_id: SessionId) {
-        self.sessions.remove(&session_id);
-    }
-
-    /// Mark a session as disconnected.
-    pub fn disconnect_session(&self, session_id: SessionId) {
-        if let Some(mut session) = self.sessions.get_mut(&session_id) {
-            session.disconnect();
-        }
-    }
-
-    /// Get all connected sessions.
-    pub fn get_connected_sessions(&self) -> Vec<SessionInfo> {
-        self.sessions
-            .iter()
-            .filter(|r| r.is_connected())
-            .map(|r| r.clone())
-            .collect()
-    }
-
-    /// Count sessions by status.
-    pub fn count_by_status(&self) -> SessionCounts {
-        let mut counts = SessionCounts::default();
-
-        for entry in self.sessions.iter() {
-            match entry.status {
-                SessionStatus::Connecting => counts.connecting += 1,
-                SessionStatus::Connected => counts.connected += 1,
-                SessionStatus::Reconnecting => counts.reconnecting += 1,
-                SessionStatus::Disconnected => counts.disconnected += 1,
-                // SessionStatus is #[non_exhaustive]; future variants are
-                // counted in `total` only.
-                _ => {}
-            }
-            counts.total += 1;
-        }
-
-        counts
-    }
-
-    /// Clean up sessions that have been inactive beyond `max_age`.
-    /// Removes disconnected, connecting, and reconnecting sessions past the cutoff.
-    /// Only actively connected sessions are retained unconditionally.
-    pub fn cleanup_old_sessions(&self, max_age: std::time::Duration) {
-        let cutoff = chrono::Utc::now()
-            - chrono::Duration::from_std(max_age).unwrap_or(chrono::Duration::days(30));
-
-        self.sessions.retain(|_, session| {
-            if session.status == SessionStatus::Connected {
-                return true;
-            }
-            session.last_active_at > cutoff
-        });
-    }
-}
-
-/// Session count statistics.
-#[derive(Debug, Clone, Default)]
-pub struct SessionCounts {
-    pub connecting: usize,
-    pub connected: usize,
-    pub reconnecting: usize,
-    pub disconnected: usize,
-    pub total: usize,
-}
 
 /// Group-based subscription manager using sharded concurrent data structures.
 ///
@@ -127,6 +26,9 @@ pub struct SubscriptionManager {
     table_index: DashMap<String, HashSet<QueryGroupId>>,
     /// Subscribers indexed by auto-incrementing key. DashMap for lock-free access.
     subscribers: DashMap<usize, Subscriber>,
+    /// Reverse index from public `SubscriptionId` to the internal subscriber key.
+    /// Lets `unsubscribe` skip an O(n) scan of `subscribers`.
+    subscription_to_key: DashMap<SubscriptionId, usize>,
     /// Monotonic counter for subscriber keys.
     next_subscriber_key: AtomicUsize,
     /// Session -> subscriber IDs for fast cleanup on disconnect.
@@ -167,6 +69,7 @@ impl SubscriptionManager {
             group_lookup: DashMap::with_shard_amount(shard_count),
             table_index: DashMap::with_shard_amount(shard_count),
             subscribers: DashMap::with_shard_amount(shard_count),
+            subscription_to_key: DashMap::with_shard_amount(shard_count),
             next_subscriber_key: AtomicUsize::new(0),
             session_subscribers: DashMap::with_shard_amount(shard_count),
             next_group_id: AtomicU32::new(0),
@@ -265,6 +168,7 @@ impl SubscriptionManager {
                 subscription_id,
             },
         );
+        self.subscription_to_key.insert(subscription_id, key);
 
         // Add subscriber to group
         if let Some(mut group) = self.groups.get_mut(&group_id) {
@@ -282,45 +186,35 @@ impl SubscriptionManager {
 
     /// Remove a subscriber by its subscription ID.
     pub fn unsubscribe(&self, subscription_id: SubscriptionId) {
-        // Find the subscriber by subscription_id
-        let sub_key = self
-            .subscribers
-            .iter()
-            .find(|entry| entry.value().subscription_id == subscription_id)
-            .map(|entry| {
-                (
-                    *entry.key(),
-                    entry.value().group_id,
-                    entry.value().session_id,
-                )
-            });
+        let Some((_, key)) = self.subscription_to_key.remove(&subscription_id) else {
+            return;
+        };
+        let Some((_, sub)) = self.subscribers.remove(&key) else {
+            return;
+        };
+        let subscriber_id = sub.id;
+        let group_id = sub.group_id;
+        let session_id = sub.session_id;
 
-        if let Some((key, group_id, session_id)) = sub_key {
-            let subscriber_id = SubscriberId(key as u32);
-            self.subscribers.remove(&key);
+        if let Some(mut group) = self.groups.get_mut(&group_id) {
+            group.subscribers.retain(|s| *s != subscriber_id);
 
-            // Remove from group
-            if let Some(mut group) = self.groups.get_mut(&group_id) {
-                group.subscribers.retain(|s| *s != subscriber_id);
-
-                // If group is empty, remove it and its table index entries
-                if group.subscribers.is_empty() {
-                    let lookup_key = QueryGroup::compute_lookup_key(
-                        &group.query_name,
-                        &group.args,
-                        &group.auth_scope,
-                    );
-                    self.remove_from_table_index(&group);
-                    drop(group);
-                    self.groups.remove(&group_id);
-                    self.group_lookup.remove(&lookup_key);
-                }
+            // If the group is empty, evict it together with its table-index and lookup entries.
+            if group.subscribers.is_empty() {
+                let lookup_key = QueryGroup::compute_lookup_key(
+                    &group.query_name,
+                    &group.args,
+                    &group.auth_scope,
+                );
+                self.remove_from_table_index(&group);
+                drop(group);
+                self.groups.remove(&group_id);
+                self.group_lookup.remove(&lookup_key);
             }
+        }
 
-            // Remove from session mapping
-            if let Some(mut session_subs) = self.session_subscribers.get_mut(&session_id) {
-                session_subs.retain(|s| *s != subscriber_id);
-            }
+        if let Some(mut session_subs) = self.session_subscribers.get_mut(&session_id) {
+            session_subs.retain(|s| *s != subscriber_id);
         }
     }
 
@@ -337,6 +231,7 @@ impl SubscriptionManager {
         for sid in subscriber_ids {
             let key = sid.0 as usize;
             if let Some((_, sub)) = self.subscribers.remove(&key) {
+                self.subscription_to_key.remove(&sub.subscription_id);
                 removed_sub_ids.push(sub.subscription_id);
 
                 // Remove from group
@@ -537,30 +432,6 @@ pub struct SubscriptionCounts {
 mod tests {
     use super::*;
     use forge_core::function::AuthContext;
-
-    #[test]
-    fn test_session_manager_create() {
-        let node_id = NodeId::new();
-        let manager = SessionManager::new(node_id);
-
-        let session = manager.create_session();
-        assert!(session.is_connected());
-
-        let retrieved = manager.get_session(session.id);
-        assert!(retrieved.is_some());
-    }
-
-    #[test]
-    fn test_session_manager_disconnect() {
-        let node_id = NodeId::new();
-        let manager = SessionManager::new(node_id);
-
-        let session = manager.create_session();
-        manager.disconnect_session(session.id);
-
-        let retrieved = manager.get_session(session.id).unwrap();
-        assert!(!retrieved.is_connected());
-    }
 
     #[test]
     fn test_subscription_manager_create() {

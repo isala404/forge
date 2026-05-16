@@ -373,16 +373,20 @@ const KNOWN_CONTEXT_TYPES: &[&str] = &[
 
 /// Check if a type is a known Forge context type.
 ///
-/// Handles references (`&QueryContext`, `&mut MutationContext`) and qualified
-/// paths (`forge::QueryContext`). Only matches the registered list above.
+/// Walks through references (`&T`, `&mut T`) and uses the syn AST to read the
+/// final path segment, instead of stringifying the whole token stream.
 fn is_context_type(ty: &syn::Type) -> bool {
-    let type_str = ty.to_token_stream().to_string().replace(' ', "");
-
-    let base = type_str.trim_start_matches('&').trim_start_matches("mut");
-
-    let final_segment = base.rsplit("::").next().unwrap_or(base);
-
-    KNOWN_CONTEXT_TYPES.contains(&final_segment)
+    let mut inner = ty;
+    while let syn::Type::Reference(r) = inner {
+        inner = &r.elem;
+    }
+    let syn::Type::Path(type_path) = inner else {
+        return false;
+    };
+    let Some(last) = type_path.path.segments.last() else {
+        return false;
+    };
+    KNOWN_CONTEXT_TYPES.contains(&last.ident.to_string().as_str())
 }
 
 fn get_function_kind(attrs: &[Attribute]) -> Option<FunctionKind> {

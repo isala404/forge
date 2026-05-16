@@ -158,18 +158,6 @@ impl StrictRateLimiter {
         Ok(result)
     }
 
-    /// Reset a rate limit bucket.
-    pub async fn reset(&self, bucket_key: &str) -> Result<()> {
-        sqlx::query!(
-            "DELETE FROM forge_rate_limits WHERE bucket_key = $1",
-            bucket_key
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(ForgeError::Database)?;
-        Ok(())
-    }
-
     /// Clean up old rate limit entries.
     pub async fn cleanup(&self, older_than: DateTime<Utc>) -> Result<u64> {
         let result = sqlx::query!(
