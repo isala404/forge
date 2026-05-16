@@ -141,12 +141,6 @@ impl WorkflowRegistry {
         self.entries.get(&key)
     }
 
-    /// Get a workflow entry by name (returns the active version).
-    /// Backward-compatible with code that only knows the workflow name.
-    pub fn get(&self, name: &str) -> Option<&WorkflowEntry> {
-        self.get_active(name)
-    }
-
     /// Check if a specific version+signature combination is available.
     pub fn has_version_with_signature(&self, name: &str, version: &str, signature: &str) -> bool {
         self.get_version(name, version)
@@ -228,13 +222,7 @@ impl WorkflowRegistry {
                 MIN(started_at) AS "oldest_started_at!",
                 (ARRAY_AGG(id ORDER BY started_at ASC))[:10] AS "sample_run_ids!: Vec<Uuid>"
             FROM forge_workflow_runs
-            WHERE status NOT IN (
-                'completed',
-                'compensated',
-                'failed',
-                'retired_unresumable',
-                'cancelled_by_operator'
-            )
+            WHERE status NOT IN ('completed', 'failed')
             GROUP BY workflow_name, workflow_version
             "#
         )
@@ -289,18 +277,7 @@ pub enum ResumeBlockReason {
 }
 
 impl ResumeBlockReason {
-    /// Convert to the corresponding WorkflowStatus.
-    pub fn to_status(&self) -> forge_core::workflow::WorkflowStatus {
-        match self {
-            Self::MissingHandler => forge_core::workflow::WorkflowStatus::BlockedMissingHandler,
-            Self::MissingVersion => forge_core::workflow::WorkflowStatus::BlockedMissingVersion,
-            Self::SignatureMismatch { .. } => {
-                forge_core::workflow::WorkflowStatus::BlockedSignatureMismatch
-            }
-        }
-    }
-
-    /// Human-readable description for the blocking_reason column.
+    /// Human-readable description for the error column.
     pub fn description(&self) -> String {
         match self {
             Self::MissingHandler => "No handler registered for this workflow".to_string(),
@@ -340,19 +317,12 @@ mod tests {
     #[test]
     fn test_resume_block_reasons() {
         let reason = ResumeBlockReason::MissingHandler;
-        assert_eq!(
-            reason.to_status(),
-            forge_core::workflow::WorkflowStatus::BlockedMissingHandler
-        );
+        assert!(reason.description().contains("No handler"));
 
         let reason = ResumeBlockReason::SignatureMismatch {
             expected: "abc".to_string(),
             actual: "def".to_string(),
         };
-        assert_eq!(
-            reason.to_status(),
-            forge_core::workflow::WorkflowStatus::BlockedSignatureMismatch
-        );
         assert!(reason.description().contains("abc"));
         assert!(reason.description().contains("def"));
     }

@@ -130,7 +130,7 @@ impl TestWorkflowContext {
     }
 
     /// Record step start.
-    pub fn record_step_start(&self, name: &str) {
+    pub async fn record_step_start(&self, name: &str) {
         let mut states = self.step_states.write().unwrap();
         states
             .entry(name.to_string())
@@ -141,7 +141,7 @@ impl TestWorkflowContext {
     }
 
     /// Record step completion.
-    pub fn record_step_complete(&self, name: &str, result: serde_json::Value) {
+    pub async fn record_step_complete(&self, name: &str, result: serde_json::Value) {
         let mut states = self.step_states.write().unwrap();
         let state = states
             .entry(name.to_string())
@@ -159,9 +159,15 @@ impl TestWorkflowContext {
         }
     }
 
-    /// Record step completion (async version for API compatibility).
-    pub async fn record_step_complete_async(&self, name: &str, result: serde_json::Value) {
-        self.record_step_complete(name, result);
+    /// Record step failure.
+    pub async fn record_step_failure(&self, name: &str, _error: impl Into<String>) {
+        let mut states = self.step_states.write().unwrap();
+        states
+            .entry(name.to_string())
+            .or_insert_with(|| TestStepState {
+                completed: false,
+                result: None,
+            });
     }
 
     /// Get completed step names in order.
@@ -399,14 +405,15 @@ mod tests {
         assert!(!ctx.is_resumed());
     }
 
-    #[test]
-    fn test_step_tracking() {
+    #[tokio::test]
+    async fn test_step_tracking() {
         let ctx = TestWorkflowContext::builder("test").build();
 
         assert!(!ctx.is_step_completed("step1"));
 
-        ctx.record_step_start("step1");
-        ctx.record_step_complete("step1", serde_json::json!({"result": "ok"}));
+        ctx.record_step_start("step1").await;
+        ctx.record_step_complete("step1", serde_json::json!({"result": "ok"}))
+            .await;
 
         assert!(ctx.is_step_completed("step1"));
 
@@ -428,13 +435,16 @@ mod tests {
         assert!(!ctx.is_step_completed("step3"));
     }
 
-    #[test]
-    fn test_step_order() {
+    #[tokio::test]
+    async fn test_step_order() {
         let ctx = TestWorkflowContext::builder("test").build();
 
-        ctx.record_step_complete("step1", serde_json::json!({}));
-        ctx.record_step_complete("step2", serde_json::json!({}));
-        ctx.record_step_complete("step3", serde_json::json!({}));
+        ctx.record_step_complete("step1", serde_json::json!({}))
+            .await;
+        ctx.record_step_complete("step2", serde_json::json!({}))
+            .await;
+        ctx.record_step_complete("step3", serde_json::json!({}))
+            .await;
 
         let completed = ctx.completed_step_names();
         assert_eq!(completed, vec!["step1", "step2", "step3"]);

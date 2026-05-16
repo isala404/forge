@@ -15,6 +15,22 @@ This document tracks every deletion, migration, and breaking API change througho
 - Duplicate dep versions: 867 lines in `cargo tree -d`
 - Workspace crates: 33
 
+## v2 Metrics (recorded 2026-05-16)
+- Build time (release, warm cache): 1m 12s (-20.9%)
+- Test duration (workspace, SQLX_OFFLINE): ~2.1s (854 tests, 0 failures; 53 row-level reactivity tests removed with the feature)
+- Binary size (release, stripped): 6.2 MB (+1.6%)
+- Binary size (debug): 27 MB (flat)
+- Lines of code (Rust, `crates/` live framework only): 72,743 (-77.9% vs v1's mixed-in fixtures and dead crates)
+- Lines of code (TS+Svelte, `packages/` + `examples/` excluding generated): 7,598 (-19.9%)
+- Dependency tree lines: 1,369 (+0.4%)
+- Duplicate dep versions: 872 lines in `cargo tree -d` (+0.6%)
+- Workspace crates: 5 (-84.8%) — forge, forge-core, forge-macros, forge-runtime, forge-codegen
+- Hard PG floor: 18 (server_version_num checked at pool init; below = startup error)
+- Readiness probe: 5 flags (database, reactor, notify_queue_ok, migrations_ok, cluster_registered)
+- Admin surface: 15 routes under /_api/admin/* covering jobs/workflows/queues/nodes/leaders
+- Per-queue worker reservations: default=8, workflows=4, cron=2 (BTreeMap, overrideable)
+- Workflow cancel latency: <50ms (NOTIFY interrupts ctx.sleep)
+
 ## Decision Locks
 - [ ] Target audience and scaling target
 - [ ] Keep the five Rust crates
@@ -42,7 +58,7 @@ This document tracks every deletion, migration, and breaking API change througho
 - [x] Remove confirmed dead dependencies (2026-05-03: tracing-opentelemetry + opentelemetry from forge-core, anyhow from forge-runtime)
 - [x] Remove confirmed dead code (2026-05-03: AdaptiveTracker 304 LOC, BloomFilter + row-level tracking ~220 LOC)
 - [x] Remove unused signature, signal, auth, and KV surface (2026-05-03: HmacSha1/HmacSha512/StandardWebhooks webhook schemes, HS384/HS512/RS384/RS512 JWT algorithms, WebVital/Identify signal types + handlers + routes)
-- [ ] Fix existing correctness bugs before moving code *(deferred: workflow step persistence, atomic sub-job dispatch, daemon leader election all touch subsystems being restructured in Phase 3-5)*
+- [x] Fix existing correctness bugs before moving code (2026-05-15: workflow step persistence made synchronous, sub-job dispatch made atomic with job completion via single transaction, daemon leader election routed through canonical LeaderElection with dedicated connection)
 - [x] Collapse duplicate error and auth types (2026-05-03: Database(String)+Sql(sqlx::Error) → Database(sqlx::Error), removed 9 reserved error variants)
 - [x] Harden security carry-forward tests (2026-05-03: added g3_10_jwt_algorithm_pre_check, g1_jwt_alg_none_rejected)
 
@@ -106,16 +122,16 @@ This document tracks every deletion, migration, and breaking API change througho
 - [ ] Refactor Dioxus output and runtime
 
 ## Phase 9: Admin Endpoints, Observability, Operational Readiness
-- [ ] Build admin endpoint suite
-- [ ] Make readiness production-meaningful
+- [x] Build admin endpoint suite (2026-05-16: shipped `gateway/admin.rs` with `/_api/admin/{jobs,workflows,queues,nodes,leaders}` covering list/inspect/cancel/retry/force-abort; admin-gated via `AuthContext::has_role("admin")`; every state-changing call audited to `forge_admin_audit` capturing actor, roles, target, reason, request_id, trace_id)
+- [x] Make readiness production-meaningful (2026-05-16: `/_api/ready` now reports `database`, `reactor`, `notify_queue_ok` (fails ≥75% `pg_notification_queue_usage()`), `migrations_ok` (embedded count vs `forge_system_migrations`), `cluster_registered` (this node's row is `active` in `forge_nodes`); fails fast at startup when Postgres major < 18)
 - [ ] Implement graceful shutdown by subsystem
 - [ ] Default observability to stdout JSON; OTLP feature-gated
 
 ## Phase 10: Examples, Docs, Hardening, Release
 - [ ] Update all six examples
-- [ ] Write the agent dev loop guide
-- [ ] Write the scaling guide and overnight-success runbook
-- [ ] Update both documentation surfaces
+- [x] Write the agent dev loop guide (2026-05-16: docs/docs/agents/dev-loop.mdx)
+- [x] Write the scaling guide and overnight-success runbook (2026-05-16: docs/docs/scale/overnight-success.mdx)
+- [x] Update both documentation surfaces (2026-05-16: api.md gained admin endpoint + readiness schema; patterns.md gained admin/audit recipe; pitfalls.md gained NOTIFY queue + PG18-floor entries)
 - [ ] Run full security review
 - [ ] Run full CI and template smoke
 - [ ] Measure v2 targets

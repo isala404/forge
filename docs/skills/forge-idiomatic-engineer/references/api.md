@@ -191,7 +191,21 @@ max_file_size = "10mb"        # per-file cap when mutation has no max_size (defa
 # cors_enabled = true requires cors_origins to be non-empty. Mixing "*" with concrete origins fails at startup.
 
 [worker]
-concurrency = 10              # parallel job slots per node
+job_timeout = "1h"            # default per-job timeout
+poll_interval = "100ms"       # fallback poll cadence; wakeups are NOTIFY-driven otherwise
+
+# Per-queue worker pool reservations. Reserved queues:
+#   default   — untagged user jobs                  (default: 8 workers)
+#   workflows — $workflow_resume                    (default: 4 workers)
+#   cron      — $cron:<name>                        (default: 2 workers)
+# Heavy traffic on one queue cannot starve another. Add custom queues by
+# tagging jobs with worker_capability and configuring a matching entry.
+[worker.queues.default]
+workers = 8
+[worker.queues.workflows]
+workers = 4
+[worker.queues.cron]
+workers = 2
 
 [rate_limit]
 mode = "hybrid"               # "hybrid" (default, per-node DashMap for user/ip) or "strict" (PG counter every check, cluster-correct)
@@ -266,6 +280,54 @@ A single `POST /_api/signal` endpoint accepts a discriminated payload via the to
 ### Single Pool
 
 Forge runs one primary connection pool. Queries, mutations, jobs, cron, daemons, workflows, observability, and signals all share it. Workload separation belongs at the worker level (concurrency limits, dedicated worker nodes), not at the connection layer. Size `database.pool_size` for the union of expected concurrency and use `database.statement_timeout` to bound runaway queries.
+
+## Admin Endpoints
+
+All `/_api/admin/*` routes require the `admin` role on `AuthContext`. Every state-changing call appends a row to `forge_admin_audit` capturing actor, roles, target type/id, reason, request_id, and trace_id. Read-only list/inspect routes don't audit.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET`  | `/_api/admin/jobs?status=&job_type=&limit=` | List jobs (most recent first). |
+| `GET`  | `/_api/admin/jobs/{id}` | Inspect a single job. |
+| `POST` | `/_api/admin/jobs/{id}/cancel` | Mark job cancelled; worker observes on next poll. Body: `{ "reason": "..." }`. |
+| `POST` | `/_api/admin/jobs/{id}/retry` | Reset a failed job to `pending` for re-claim. |
+| `POST` | `/_api/admin/jobs/{id}/force-abort` | Move job to `dead_letter` regardless of state. Use sparingly. |
+| `GET`  | `/_api/admin/workflows?status=&workflow_name=&limit=` | List workflow runs. |
+| `GET`  | `/_api/admin/workflows/{id}` | Inspect a single run with step states. |
+| `POST` | `/_api/admin/workflows/{id}/cancel` | Set `cancel_requested_at` + NOTIFY `forge_workflow_cancelled`; sleeping runs wake within 50 ms and run compensation. Lands in `cancelled_by_operator`. |
+| `POST` | `/_api/admin/workflows/{id}/retry` | Re-pin a `blocked_*` run to the active version after signature reconciliation. |
+| `POST` | `/_api/admin/workflows/{id}/force-abort` | Move run to `retired_unresumable` without compensation. |
+| `GET`  | `/_api/admin/queues` | List queues with reserved worker pool size, paused flag, depth. |
+| `POST` | `/_api/admin/queues/{name}/pause` | Insert into `forge_paused_queues`; claim SQL skips entries via `NOT EXISTS`. In-flight work finishes. |
+| `POST` | `/_api/admin/queues/{name}/resume` | Remove the queue from `forge_paused_queues`. |
+| `GET`  | `/_api/admin/nodes` | List `forge_nodes` rows with status, heartbeat, load metrics. |
+| `GET`  | `/_api/admin/leaders` | Current advisory-lock holders per leader role. |
+
+State-changing routes accept an optional `reason` string; pass it — the audit log is searched after incidents.
+
+## Readiness Probe
+
+`GET /_api/ready` returns 200 only when every flag is `true`; otherwise 503 with the body identifying failures. The probe body is intentionally shallow — no version strings, row counts, or stuck workflow names leak to unauthenticated callers.
+
+```json
+{
+  "database":           true,
+  "reactor":            true,
+  "notify_queue_ok":    true,
+  "migrations_ok":      true,
+  "cluster_registered": true
+}
+```
+
+| Flag | Source | False means |
+|---|---|---|
+| `database` | `SELECT 1` on primary pool | Pool exhausted, network split, or PG down. |
+| `reactor` | NOTIFY listener attached and alive | Reactivity offline; new subscribes return 503. |
+| `notify_queue_ok` | `pg_notification_queue_usage() < 0.75` | A LISTEN consumer is stuck — restart the affected node or `pg_terminate_backend()`. |
+| `migrations_ok` | Embedded migration count == `forge_system_migrations` count | Code ahead of DB — run `forge migrate up` before traffic. |
+| `cluster_registered` | This node's row in `forge_nodes` has `status = 'active'` | Heartbeat hasn't landed yet (boot race) or row was marked dead. |
+
+Startup also hard-fails when PostgreSQL major < 18 (`MIN_POSTGRES_MAJOR` in `pg/pool.rs`) — Forge v2 relies on `pg_notification_queue_usage()`, partitioned `SET ACCESS METHOD`, `pg_stat_statements.toplevel`, and `NOWAIT` skip-locked semantics. No v1-style fallback.
 
 ## Custom Axum Routes
 

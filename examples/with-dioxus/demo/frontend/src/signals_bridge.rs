@@ -28,9 +28,7 @@ pub fn SignalsBridge() -> Element {
                     "email": viewer.email,
                     "name": viewer.name,
                 });
-                spawn(async move {
-                    signals.identify(&user_id, traits).await;
-                });
+                signals.identify(&user_id, traits);
             }
         }
     });
@@ -78,10 +76,7 @@ fn install_window_bridge(signals: forge_dioxus::ForgeSignals) {
             move |user: wasm_bindgen::JsValue, traits: wasm_bindgen::JsValue| {
                 let user_id = user.as_string().unwrap_or_default();
                 let traits = js_to_value(&traits);
-                let signals = signals.clone();
-                spawn_local(async move {
-                    signals.identify(&user_id, traits).await;
-                });
+                signals.identify(&user_id, traits);
             },
         )
     };

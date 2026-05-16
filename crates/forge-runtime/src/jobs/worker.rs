@@ -14,8 +14,14 @@ use super::registry::JobRegistry;
 pub struct WorkerConfig {
     /// Worker ID (auto-generated if not provided).
     pub id: Option<Uuid>,
-    /// Worker capabilities (e.g., ["general", "media"]).
+    /// Worker capabilities. Each capability is the name of a queue this
+    /// worker serves; jobs are claimed only when their `worker_capability`
+    /// matches one of these tags.
     pub capabilities: Vec<String>,
+    /// When true, also claim jobs whose `worker_capability` is NULL. Set on
+    /// the `default` queue worker so untagged user jobs run somewhere; other
+    /// queues must leave it false to preserve isolation.
+    pub claim_untagged: bool,
     /// Maximum concurrent jobs.
     pub max_concurrent: usize,
     /// Poll interval when queue is empty.
@@ -32,8 +38,9 @@ impl Default for WorkerConfig {
     fn default() -> Self {
         Self {
             id: None,
-            capabilities: vec!["general".to_string()],
-            max_concurrent: 10,
+            capabilities: vec!["default".to_string()],
+            claim_untagged: true,
+            max_concurrent: 8,
             poll_interval: Duration::from_secs(5),
             batch_size: 10,
             stale_cleanup_interval: Duration::from_secs(60),
@@ -179,7 +186,12 @@ impl Worker {
 
             let jobs = match self
                 .queue
-                .claim(self.id, &self.config.capabilities, batch_size)
+                .claim(
+                    self.id,
+                    &self.config.capabilities,
+                    self.config.claim_untagged,
+                    batch_size,
+                )
                 .await
             {
                 Ok(jobs) => jobs,
@@ -290,8 +302,9 @@ mod tests {
     #[test]
     fn test_worker_config_default() {
         let config = WorkerConfig::default();
-        assert_eq!(config.capabilities, vec!["general".to_string()]);
-        assert_eq!(config.max_concurrent, 10);
+        assert_eq!(config.capabilities, vec!["default".to_string()]);
+        assert!(config.claim_untagged);
+        assert_eq!(config.max_concurrent, 8);
         assert_eq!(config.batch_size, 10);
     }
 

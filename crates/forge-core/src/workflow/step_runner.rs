@@ -189,7 +189,7 @@ where
         }
 
         // Record step start
-        self.ctx.record_step_start(&self.name);
+        self.ctx.record_step_start(&self.name).await;
 
         // Execute with retry logic
         let total_attempts = self.retry_count + 1; // Initial attempt + retries
@@ -203,7 +203,7 @@ where
                     // Success - record completion
                     let json_value =
                         serde_json::to_value(&value).unwrap_or(serde_json::Value::Null);
-                    self.ctx.record_step_complete(&self.name, json_value);
+                    self.ctx.record_step_complete(&self.name, json_value).await;
 
                     // Register compensation handler if provided
                     if let Some(compensate_fn) = self.compensate_fn.take() {
@@ -240,7 +240,7 @@ where
         // All attempts failed (last_error always Some after the loop runs at least once)
         let error = last_error.expect("loop ran at least one attempt");
         let error_msg = error.to_string();
-        self.ctx.record_step_failure(&self.name, &error_msg);
+        self.ctx.record_step_failure(&self.name, &error_msg).await;
 
         if self.optional {
             tracing::warn!(

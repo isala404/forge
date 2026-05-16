@@ -132,10 +132,12 @@ test("webhook endpoint rejects bad signatures and surfaces accepted events", asy
   gotoReady,
   request,
 }) => {
+  const ts = () => Math.floor(Date.now() / 1000).toString();
   const badResponse = await request.post(`${API_URL}/_api/webhooks/demo`, {
     headers: {
       "Content-Type": "application/json",
       "X-Webhook-Signature": "invalid",
+      "X-Webhook-Timestamp": ts(),
       "X-Idempotency-Key": `bad-${Date.now()}`,
     },
     data: { action: "test" },
@@ -149,6 +151,7 @@ test("webhook endpoint rejects bad signatures and surfaces accepted events", asy
     headers: {
       "Content-Type": "application/json",
       "X-Webhook-Signature": signature,
+      "X-Webhook-Timestamp": ts(),
       "X-Idempotency-Key": key,
     },
     data: JSON.parse(body),

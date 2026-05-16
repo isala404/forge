@@ -27,6 +27,7 @@ use tracing::Instrument;
 #[cfg(feature = "otel")]
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
+use super::admin::{AdminState, admin_router};
 use super::auth::{AuthConfig, AuthMiddleware, HmacTokenIssuer, auth_middleware};
 use super::mcp::{McpState, mcp_get_handler, mcp_post_handler};
 use super::multipart::{MultipartConfig, rpc_multipart_handler};
@@ -145,15 +146,20 @@ pub struct HealthResponse {
 /// Intentionally minimal: load-balancer probes can call this without
 /// authentication and we don't want to leak internal deployment signals (queue
 /// depths, blocked-run counts, version skew) to anonymous callers. The
-/// `workflows` boolean folds in the blocked-run check; detailed per-subsystem
-/// state lives in tracing, metrics, and the operator dashboards.
+/// Readiness probe response. Covers DB connectivity and reactor health.
 #[derive(Debug, Serialize)]
 #[non_exhaustive]
 pub struct ReadinessResponse {
     pub ready: bool,
     pub database: bool,
     pub reactor: bool,
-    pub workflows: bool,
+    /// NOTIFY queue usage below the failure threshold (75%).
+    pub notify_queue_ok: bool,
+    /// All embedded system migrations applied to the database.
+    pub migrations_ok: bool,
+    /// This node has an `active` row in `forge_nodes`.
+    /// `None` when cluster registration is not enabled for this process.
+    pub cluster_registered: Option<bool>,
     pub version: String,
 }
 
@@ -162,11 +168,17 @@ pub struct ReadinessResponse {
 pub struct ReadinessState {
     db_pool: sqlx::PgPool,
     reactor: Arc<Reactor>,
-    #[cfg(feature = "workflows")]
-    workflow_readiness: Option<Arc<crate::workflow::WorkflowReadiness>>,
-    #[cfg(feature = "workflows")]
-    workflow_registry: Option<Arc<crate::workflow::WorkflowRegistry>>,
+    /// Local node id when cluster registration is enabled.
+    node_id: Option<uuid::Uuid>,
+    /// Count of embedded system migrations the process expects to be applied.
+    expected_system_migrations: i64,
 }
+
+/// pg_notification_queue_usage() returns a fraction in [0, 1].
+/// Above this fraction the probe reports the cluster as not ready so the
+/// load balancer drains traffic before the queue fills and NOTIFY starts
+/// dropping rows. Matches Postgres' own warning threshold.
+const NOTIFY_QUEUE_FAIL_THRESHOLD: f64 = 0.75;
 
 /// Gateway HTTP server.
 pub struct GatewayServer {
@@ -184,10 +196,7 @@ pub struct GatewayServer {
     custom_routes: Option<Router>,
     rate_limiter: Option<Arc<dyn forge_core::rate_limit::RateLimiterBackend>>,
     role_resolver: Option<forge_core::SharedRoleResolver>,
-    #[cfg(feature = "workflows")]
-    workflow_readiness: Option<Arc<crate::workflow::WorkflowReadiness>>,
-    #[cfg(feature = "workflows")]
-    workflow_registry: Option<Arc<crate::workflow::WorkflowRegistry>>,
+    cluster_node_id: Option<uuid::Uuid>,
 }
 
 impl GatewayServer {
@@ -218,11 +227,15 @@ impl GatewayServer {
             custom_routes: None,
             rate_limiter: None,
             role_resolver: None,
-            #[cfg(feature = "workflows")]
-            workflow_readiness: None,
-            #[cfg(feature = "workflows")]
-            workflow_registry: None,
+            cluster_node_id: None,
         }
+    }
+
+    /// Record this process's cluster node id so the readiness probe can
+    /// verify the node's row in `forge_nodes` is still `active`.
+    pub fn with_node_id(mut self, id: NodeId) -> Self {
+        self.cluster_node_id = Some(id.as_uuid());
+        self
     }
 
     /// Override the default rate limiter backend.
@@ -239,20 +252,6 @@ impl GatewayServer {
     /// See [`forge_core::RoleResolver`] for the trait contract.
     pub fn with_role_resolver(mut self, resolver: forge_core::SharedRoleResolver) -> Self {
         self.role_resolver = Some(resolver);
-        self
-    }
-
-    /// Wire the shared workflow readiness handle. Must be set when
-    /// the runtime registers workflows so the readiness probe can detect
-    /// stranded runs from removed `(name, version)` tuples.
-    #[cfg(feature = "workflows")]
-    pub fn with_workflow_readiness(
-        mut self,
-        registry: Arc<crate::workflow::WorkflowRegistry>,
-        readiness: Arc<crate::workflow::WorkflowReadiness>,
-    ) -> Self {
-        self.workflow_registry = Some(registry);
-        self.workflow_readiness = Some(readiness);
         self
     }
 
@@ -394,6 +393,14 @@ impl GatewayServer {
         }
         let rpc_handler_state = Arc::new(rpc);
 
+        // Cluster cache invalidation: peer-node mutations broadcast over PG
+        // NOTIFY, and each node evicts its local query cache for the changed
+        // tables/columns. Without this, every node would serve stale data
+        // until the per-entry TTL expired. Dropping the JoinHandle detaches
+        // the task; it exits when the broadcast channel closes during shutdown.
+        let cluster_cache = rpc_handler_state.router().cache();
+        drop(cluster_cache.spawn_cluster_invalidator(self.reactor.change_subscriber()));
+
         let auth_middleware_state = Arc::new(AuthMiddleware::new(self.config.auth.clone()));
 
         // Build CORS layer. When specific origins are configured, allow
@@ -471,13 +478,12 @@ impl GatewayServer {
         ));
 
         // Readiness state for DB + reactor health check
+        let expected_system_migrations = crate::pg::migration::get_system_migrations().len() as i64;
         let readiness_state = Arc::new(ReadinessState {
             db_pool: self.db.primary().clone(),
             reactor: self.reactor.clone(),
-            #[cfg(feature = "workflows")]
-            workflow_readiness: self.workflow_readiness.clone(),
-            #[cfg(feature = "workflows")]
-            workflow_registry: self.workflow_registry.clone(),
+            node_id: self.cluster_node_id,
+            expected_system_migrations,
         });
 
         // Build the main router with middleware
@@ -574,11 +580,16 @@ impl GatewayServer {
                 .with_state(signals_state);
         }
 
+        let admin_router = admin_router(AdminState {
+            db_pool: self.db.primary().clone(),
+        });
+
         main_router = main_router
             .merge(multipart_router)
             .merge(sse_router)
             .merge(mcp_router)
-            .merge(signals_router);
+            .merge(signals_router)
+            .merge(admin_router);
 
         if let Some(custom) = &self.custom_routes {
             main_router = main_router.merge(custom.clone());
@@ -658,76 +669,86 @@ async fn health_handler() -> Json<HealthResponse> {
 }
 
 /// Readiness check handler (readiness probe).
+///
+/// Reports green only when:
+/// - The primary pool can serve `SELECT 1`.
+/// - The reactor's change listener is connected.
+/// - `pg_notification_queue_usage()` is below 75% (NOTIFY won't start
+///   dropping events when reactivity bursts).
+/// - Every embedded system migration has a corresponding row in
+///   `forge_system_migrations` (no schema drift between binary and DB).
+/// - When cluster registration is enabled for this process, this node's
+///   row in `forge_nodes` exists with `status = 'active'`.
 async fn readiness_handler(
     axum::extract::State(state): axum::extract::State<Arc<ReadinessState>>,
 ) -> (axum::http::StatusCode, Json<ReadinessResponse>) {
-    // Check database connectivity
     let db_ok = sqlx::query_scalar!("SELECT 1 as \"v!\"")
         .fetch_one(&state.db_pool)
         .await
         .is_ok();
 
-    // Check reactor health (change listener must be running for real-time updates)
     let reactor_stats = state.reactor.stats().await;
     let reactor_ok = reactor_stats.listener_running;
 
-    // Check for blocked workflow runs (strict mode: unhealthy if any runs are blocked).
-    // The count is intentionally not exposed in the response — it would let
-    // anonymous callers probe for internal load. We log it so operators see
-    // the detail in tracing/metrics.
-    let workflows_ok =
-        if db_ok {
-            match sqlx::query_scalar!(
-            r#"SELECT COUNT(*) as "count!" FROM forge_workflow_runs WHERE status LIKE 'blocked_%'"#,
+    let notify_queue_ok = if db_ok {
+        match sqlx::query_scalar!("SELECT pg_notification_queue_usage() AS \"usage!\"")
+            .fetch_one(&state.db_pool)
+            .await
+        {
+            Ok(usage) => usage < NOTIFY_QUEUE_FAIL_THRESHOLD,
+            Err(err) => {
+                tracing::warn!(error = %err, "pg_notification_queue_usage() failed; failing readiness probe");
+                false
+            }
+        }
+    } else {
+        false
+    };
+
+    let migrations_ok = if db_ok {
+        match sqlx::query_scalar!(
+            "SELECT COUNT(*) AS \"count!\" FROM forge_system_migrations WHERE version LIKE '__forge_v%'"
         )
         .fetch_one(&state.db_pool)
         .await
         {
-            Ok(count) => {
-                if count > 0 {
-                    tracing::warn!(blocked_workflow_runs = count, "Blocked workflow runs present");
-                }
-                count == 0
-            }
-            Err(_) => true, // if query fails, don't block on this check
-        }
-        } else {
-            true
-        };
-
-    // Check for stranded workflow runs whose (name, version) is no longer
-    // in this binary's registry. Refresh the cached count if it has aged
-    // out, otherwise reuse it to avoid hammering PG on hot probe paths.
-    let drain_pending = {
-        #[cfg(feature = "workflows")]
-        {
-            match (&state.workflow_registry, &state.workflow_readiness) {
-                (Some(registry), Some(readiness)) if db_ok => {
-                    if let Err(e) = readiness.refresh_if_stale(registry, &state.db_pool).await {
-                        tracing::warn!(error = %e, "drain check refresh failed");
-                    }
-                    readiness.drain_pending()
-                }
-                (_, Some(readiness)) => readiness.drain_pending(),
-                _ => 0,
+            Ok(applied) => applied >= state.expected_system_migrations,
+            Err(err) => {
+                tracing::warn!(error = %err, "forge_system_migrations count failed; failing readiness probe");
+                false
             }
         }
-        #[cfg(not(feature = "workflows"))]
-        {
-            0usize
-        }
+    } else {
+        false
     };
 
-    let workflows_drain_clear = drain_pending == 0;
-    if !workflows_drain_clear {
-        tracing::warn!(
-            drain_pending,
-            "readiness probe failing: workflow runs blocked on missing (name, version) entries"
-        );
-    }
+    let cluster_registered = match state.node_id {
+        Some(node_id) if db_ok => match sqlx::query_scalar!(
+            r#"SELECT EXISTS(
+                   SELECT 1 FROM forge_nodes
+                   WHERE id = $1 AND status = 'active'
+               ) AS "found!""#,
+            node_id
+        )
+        .fetch_one(&state.db_pool)
+        .await
+        {
+            Ok(found) => Some(found),
+            Err(err) => {
+                tracing::warn!(error = %err, "forge_nodes lookup failed; failing readiness probe");
+                Some(false)
+            }
+        },
+        Some(_) => Some(false),
+        None => None,
+    };
 
-    let workflows_ready = workflows_ok && workflows_drain_clear;
-    let ready = db_ok && reactor_ok && workflows_ready;
+    let ready = db_ok
+        && reactor_ok
+        && notify_queue_ok
+        && migrations_ok
+        && cluster_registered.unwrap_or(true);
+
     let status_code = if ready {
         axum::http::StatusCode::OK
     } else {
@@ -740,7 +761,9 @@ async fn readiness_handler(
             ready,
             database: db_ok,
             reactor: reactor_ok,
-            workflows: workflows_ready,
+            notify_queue_ok,
+            migrations_ok,
+            cluster_registered,
             version: env!("CARGO_PKG_VERSION").to_string(),
         }),
     )

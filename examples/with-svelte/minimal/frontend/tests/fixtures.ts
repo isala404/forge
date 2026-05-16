@@ -32,9 +32,33 @@ export function trackConsoleErrors(page: Page): string[] {
 type ForgeFixtures = {
   rpc: (fn: string, args?: unknown) => Promise<unknown>;
   gotoReady: (path?: string) => Promise<void>;
+  // Capture a full-page screenshot at the end of every test. Saved to
+  // `${testInfo.outputDir}/<slug>.png` so each route's final UI state lands
+  // alongside Playwright's other artifacts (trace.zip, video.webm) when a
+  // failure happens. The artifact bundle is uploaded by CI without any extra
+  // wiring.
+  routeScreenshot: void;
 };
 
 export const test = base.extend<ForgeFixtures>({
+  routeScreenshot: [
+    async ({ page }, use, testInfo) => {
+      await use();
+      if (page.isClosed()) return;
+      const slug = testInfo.title.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+      try {
+        await page.screenshot({
+          path: testInfo.outputPath(`${slug || "route"}.png`),
+          fullPage: true,
+        });
+      } catch {
+        // Test already navigated away or context closed; the assertion-level
+        // failure (if any) is what we want surfaced, not the screenshot error.
+      }
+    },
+    { auto: true },
+  ],
+
   // eslint-disable-next-line no-empty-pattern
   rpc: async ({}, use) => {
     await use(async (fn: string, args: unknown = null) => {

@@ -369,7 +369,8 @@ impl CronRunner {
             input,
             forge_core::job::JobPriority::Normal,
             1,
-        );
+        )
+        .with_capability(forge_core::config::CRON_QUEUE);
 
         match self.job_queue.enqueue(job).await {
             Ok(job_id) => {

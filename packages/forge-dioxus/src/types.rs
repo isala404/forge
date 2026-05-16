@@ -204,23 +204,17 @@ impl<TOutput> Default for JobExecutionState<TOutput> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowStatus {
-    Created,
+    Pending,
     Running,
+    Sleeping,
     Waiting,
     Completed,
-    Compensating,
-    Compensated,
     Failed,
-    BlockedMissingVersion,
-    BlockedSignatureMismatch,
-    BlockedMissingHandler,
-    RetiredUnresumable,
-    CancelledByOperator,
 }
 
 impl Default for WorkflowStatus {
     fn default() -> Self {
-        Self::Created
+        Self::Pending
     }
 }
 
@@ -247,7 +241,7 @@ impl<TOutput> Default for WorkflowState<TOutput> {
     fn default() -> Self {
         Self {
             workflow_id: String::new(),
-            status: WorkflowStatus::Created,
+            status: WorkflowStatus::Pending,
             step: None,
             waiting_for: None,
             steps: Vec::new(),
@@ -467,12 +461,12 @@ mod tests {
     fn job_and_workflow_status_serialize_in_snake_case() {
         assert_eq!(serde_json::to_string(&JobStatus::CancelRequested).unwrap(), "\"cancel_requested\"");
         assert_eq!(
-            serde_json::to_string(&WorkflowStatus::BlockedMissingVersion).unwrap(),
-            "\"blocked_missing_version\""
+            serde_json::to_string(&WorkflowStatus::Sleeping).unwrap(),
+            "\"sleeping\""
         );
         assert_eq!(
-            serde_json::to_string(&WorkflowStatus::CancelledByOperator).unwrap(),
-            "\"cancelled_by_operator\""
+            serde_json::to_string(&WorkflowStatus::Pending).unwrap(),
+            "\"pending\""
         );
     }
 
@@ -503,7 +497,7 @@ mod tests {
 
         assert!(workflow.loading);
         assert_eq!(workflow.connection_state, ConnectionState::Disconnected);
-        assert_eq!(workflow.state.status, WorkflowStatus::Created);
+        assert_eq!(workflow.state.status, WorkflowStatus::Pending);
     }
 }
 

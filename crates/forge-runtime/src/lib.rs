@@ -97,6 +97,6 @@ pub use realtime::{
 pub use webhook::{WebhookEntry, WebhookRegistry, WebhookState, webhook_handler};
 #[cfg(feature = "workflows")]
 pub use workflow::{
-    DrainEntry, EventStore, WorkflowEntry, WorkflowExecutor, WorkflowReadiness, WorkflowRecord,
-    WorkflowRegistry, WorkflowScheduler, WorkflowSchedulerConfig, WorkflowStepRecord,
+    DrainEntry, EventStore, WorkflowEntry, WorkflowExecutor, WorkflowRecord, WorkflowRegistry,
+    WorkflowScheduler, WorkflowSchedulerConfig, WorkflowStepRecord,
 };

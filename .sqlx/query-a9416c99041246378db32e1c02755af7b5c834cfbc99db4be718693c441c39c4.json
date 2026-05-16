@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT current_setting('server_version_num')",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "current_setting",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "a9416c99041246378db32e1c02755af7b5c834cfbc99db4be718693c441c39c4"
+}

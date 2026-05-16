@@ -50,18 +50,12 @@ export interface JobState<TOutput = unknown> {
 }
 
 export type WorkflowStatus =
-  | "created"
+  | "pending"
   | "running"
+  | "sleeping"
   | "waiting"
   | "completed"
-  | "compensating"
-  | "compensated"
-  | "failed"
-  | "blocked_missing_version"
-  | "blocked_signature_mismatch"
-  | "blocked_missing_handler"
-  | "retired_unresumable"
-  | "cancelled_by_operator";
+  | "failed";
 
 export interface WorkflowStepState {
   name: string;

@@ -228,3 +228,24 @@ Forge::builder()
 - **System tables**: `forge_jobs`, `forge_workflow_runs`, `forge_signals_events`, etc. are framework-owned. Use `ctx.dispatch_job()`, `ctx.start_workflow()`, `ctx.record_signal()`. `forge check` fails the build on manual writes.
 - **DB primary failover**: the LISTEN/NOTIFY connection (`ChangeListener`) is not auto-reconnected after a primary failover. Restart the process. Pool connections reconnect automatically.
 - **`forge_*` namespace**: reserved for framework tables. Never create application tables with this prefix.
+
+### Admin endpoints and audit log
+
+The `/_api/admin/*` surface is operator-grade. Every state-changing call requires `AuthContext::has_role("admin")` and appends a row to `forge_admin_audit` (actor, roles, target type/id, reason, request_id, trace_id). Read-only list/inspect calls are dashboard hot paths and don't audit.
+
+- **Stop a runaway job**: `POST /_api/admin/jobs/{id}/cancel`. The worker checks `JobContext::is_cancelled()` between iterations. For unkillable jobs (no cancel check), `/force-abort` moves to `dead_letter`.
+- **Stop a runaway workflow**: `POST /_api/admin/workflows/{id}/cancel`. Sets `cancel_requested_at` and fires NOTIFY `forge_workflow_cancelled`. A run in `ctx.sleep("...", 24h)` wakes within 50 ms, runs its compensation chain, and lands in `cancelled_by_operator`. No process restart needed.
+- **Bleed off a hot queue**: `POST /_api/admin/queues/{name}/pause`. In-flight jobs finish, no new ones claim until `/resume`. The claim SQL uses `NOT EXISTS (SELECT 1 FROM forge_paused_queues ...)`.
+- **Recover a stranded workflow**: when `/_api/ready` shows blocked runs and a version mismatch is intended (you removed the old binary), use `/cancel` (with compensation) or `/force-abort` (no compensation, terminal `retired_unresumable`). Don't edit `forge_workflow_runs` directly — the admin path captures the reason.
+- **Diagnostics**: `/_api/admin/nodes` returns `forge_nodes` with heartbeat + load; `/_api/admin/leaders` shows which node holds each advisory lock. Use these instead of `pg_locks` inspection.
+
+Pass `{"reason": "..."}` on every state-changing call. The audit log is searched after incidents — empty reasons make post-mortems harder.
+
+### Readiness as a deploy gate
+
+`/_api/ready` is the load-balancer contract. Don't ship a binary that doesn't return 200 against the target DB.
+
+- `migrations_ok=false` → `forge migrate up` before the new binary takes traffic. The check compares the embedded system migration count to `forge_system_migrations`.
+- `notify_queue_ok=false` → some LISTEN consumer is stuck. Find with `SELECT pid, query FROM pg_stat_activity WHERE wait_event='AsyncWait'` and `pg_terminate_backend()`. Threshold is `pg_notification_queue_usage() < 0.75`.
+- `cluster_registered=false` at boot is a race — wait one heartbeat (~5 s). If it persists, the node's row in `forge_nodes` was marked dead; check logs.
+- PG < 18 is a startup hard-fail, not a readiness flag — the process exits non-zero with a clear error so orchestrators restart instead of accepting traffic.

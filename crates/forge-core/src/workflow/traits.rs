@@ -122,74 +122,42 @@ impl Default for WorkflowInfo {
 }
 
 /// Workflow execution status.
+///
+/// Six states: Pending, Running, Sleeping, Waiting, Completed, Failed.
+/// Cancel is a soft flag checked at step boundaries; cancelled runs end
+/// in Failed with `error = "cancelled"` after compensation runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum WorkflowStatus {
-    /// Workflow is created but not started.
-    Created,
+    /// Workflow created but not yet started.
+    Pending,
     /// Workflow is actively running.
     Running,
-    /// Workflow is waiting for an external event or timer.
+    /// Workflow is suspended on a durable sleep timer.
+    Sleeping,
+    /// Workflow is waiting for an external event.
     Waiting,
     /// Workflow completed successfully.
     Completed,
-    /// Workflow failed and is running compensation.
-    Compensating,
-    /// Workflow compensation completed.
-    Compensated,
-    /// Workflow failed (compensation also failed or not available).
+    /// Workflow failed (includes cancelled, blocked, and compensated runs).
     Failed,
-    /// Blocked: the workflow version is not present in the current binary.
-    BlockedMissingVersion,
-    /// Blocked: the workflow version exists but its signature does not match.
-    BlockedSignatureMismatch,
-    /// Blocked: no handler registered for this workflow name at all.
-    BlockedMissingHandler,
-    /// Explicitly retired by an operator. Terminal, preserves audit trail.
-    RetiredUnresumable,
-    /// Explicitly cancelled by an operator. Terminal, preserves audit trail.
-    CancelledByOperator,
 }
 
 impl WorkflowStatus {
     /// Convert to string for database storage.
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Created => "created",
+            Self::Pending => "pending",
             Self::Running => "running",
+            Self::Sleeping => "sleeping",
             Self::Waiting => "waiting",
             Self::Completed => "completed",
-            Self::Compensating => "compensating",
-            Self::Compensated => "compensated",
             Self::Failed => "failed",
-            Self::BlockedMissingVersion => "blocked_missing_version",
-            Self::BlockedSignatureMismatch => "blocked_signature_mismatch",
-            Self::BlockedMissingHandler => "blocked_missing_handler",
-            Self::RetiredUnresumable => "retired_unresumable",
-            Self::CancelledByOperator => "cancelled_by_operator",
         }
     }
 
     /// Check if the workflow is terminal (no longer running).
     pub fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            Self::Completed
-                | Self::Compensated
-                | Self::Failed
-                | Self::RetiredUnresumable
-                | Self::CancelledByOperator
-        )
-    }
-
-    /// Check if the workflow is blocked and cannot make progress.
-    pub fn is_blocked(&self) -> bool {
-        matches!(
-            self,
-            Self::BlockedMissingVersion
-                | Self::BlockedSignatureMismatch
-                | Self::BlockedMissingHandler
-        )
+        matches!(self, Self::Completed | Self::Failed)
     }
 }
 
@@ -209,18 +177,19 @@ impl FromStr for WorkflowStatus {
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
-            "created" => Ok(Self::Created),
+            "pending" | "created" => Ok(Self::Pending),
             "running" => Ok(Self::Running),
+            "sleeping" => Ok(Self::Sleeping),
             "waiting" => Ok(Self::Waiting),
             "completed" => Ok(Self::Completed),
-            "compensating" => Ok(Self::Compensating),
-            "compensated" => Ok(Self::Compensated),
-            "failed" => Ok(Self::Failed),
-            "blocked_missing_version" => Ok(Self::BlockedMissingVersion),
-            "blocked_signature_mismatch" => Ok(Self::BlockedSignatureMismatch),
-            "blocked_missing_handler" => Ok(Self::BlockedMissingHandler),
-            "retired_unresumable" => Ok(Self::RetiredUnresumable),
-            "cancelled_by_operator" => Ok(Self::CancelledByOperator),
+            "failed"
+            | "compensating"
+            | "compensated"
+            | "blocked_missing_version"
+            | "blocked_signature_mismatch"
+            | "blocked_missing_handler"
+            | "retired_unresumable"
+            | "cancelled_by_operator" => Ok(Self::Failed),
             _ => Err(ParseWorkflowStatusError(s.to_string())),
         }
     }
@@ -243,33 +212,52 @@ mod tests {
 
     #[test]
     fn test_workflow_status_conversion() {
+        assert_eq!(WorkflowStatus::Pending.as_str(), "pending");
         assert_eq!(WorkflowStatus::Running.as_str(), "running");
+        assert_eq!(WorkflowStatus::Sleeping.as_str(), "sleeping");
+        assert_eq!(WorkflowStatus::Waiting.as_str(), "waiting");
         assert_eq!(WorkflowStatus::Completed.as_str(), "completed");
-        assert_eq!(WorkflowStatus::Compensating.as_str(), "compensating");
-        assert_eq!(
-            WorkflowStatus::BlockedMissingVersion.as_str(),
-            "blocked_missing_version"
-        );
-        assert_eq!(
-            WorkflowStatus::CancelledByOperator.as_str(),
-            "cancelled_by_operator"
-        );
+        assert_eq!(WorkflowStatus::Failed.as_str(), "failed");
 
+        assert_eq!(
+            "pending".parse::<WorkflowStatus>(),
+            Ok(WorkflowStatus::Pending)
+        );
         assert_eq!(
             "running".parse::<WorkflowStatus>(),
             Ok(WorkflowStatus::Running)
         );
         assert_eq!(
-            "completed".parse::<WorkflowStatus>(),
-            Ok(WorkflowStatus::Completed)
+            "sleeping".parse::<WorkflowStatus>(),
+            Ok(WorkflowStatus::Sleeping)
+        );
+    }
+
+    #[test]
+    fn test_workflow_status_legacy_parsing() {
+        assert_eq!(
+            "created".parse::<WorkflowStatus>(),
+            Ok(WorkflowStatus::Pending)
+        );
+        assert_eq!(
+            "compensating".parse::<WorkflowStatus>(),
+            Ok(WorkflowStatus::Failed)
+        );
+        assert_eq!(
+            "compensated".parse::<WorkflowStatus>(),
+            Ok(WorkflowStatus::Failed)
         );
         assert_eq!(
             "blocked_missing_version".parse::<WorkflowStatus>(),
-            Ok(WorkflowStatus::BlockedMissingVersion)
+            Ok(WorkflowStatus::Failed)
         );
         assert_eq!(
             "cancelled_by_operator".parse::<WorkflowStatus>(),
-            Ok(WorkflowStatus::CancelledByOperator)
+            Ok(WorkflowStatus::Failed)
+        );
+        assert_eq!(
+            "retired_unresumable".parse::<WorkflowStatus>(),
+            Ok(WorkflowStatus::Failed)
         );
     }
 
@@ -277,18 +265,9 @@ mod tests {
     fn test_workflow_status_is_terminal() {
         assert!(!WorkflowStatus::Running.is_terminal());
         assert!(!WorkflowStatus::Waiting.is_terminal());
+        assert!(!WorkflowStatus::Sleeping.is_terminal());
+        assert!(!WorkflowStatus::Pending.is_terminal());
         assert!(WorkflowStatus::Completed.is_terminal());
         assert!(WorkflowStatus::Failed.is_terminal());
-        assert!(WorkflowStatus::Compensated.is_terminal());
-        assert!(WorkflowStatus::RetiredUnresumable.is_terminal());
-        assert!(WorkflowStatus::CancelledByOperator.is_terminal());
-    }
-
-    #[test]
-    fn test_workflow_status_is_blocked() {
-        assert!(!WorkflowStatus::Running.is_blocked());
-        assert!(WorkflowStatus::BlockedMissingVersion.is_blocked());
-        assert!(WorkflowStatus::BlockedSignatureMismatch.is_blocked());
-        assert!(WorkflowStatus::BlockedMissingHandler.is_blocked());
     }
 }

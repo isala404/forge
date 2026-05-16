@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE forge_jobs\n        SET status = 'pending',\n            attempts = 0,\n            last_error = NULL,\n            scheduled_at = NOW(),\n            cancelled_at = NULL,\n            cancel_requested_at = NULL,\n            cancel_reason = NULL,\n            completed_at = NULL,\n            failed_at = NULL,\n            worker_id = NULL,\n            claimed_at = NULL,\n            started_at = NULL\n        WHERE id = $1\n          AND status IN ('failed', 'dead_letter', 'cancelled')\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3aec38388fbf27db5f3ebf648f3445dbb1e0ceb7b8aa47f051139510840dc462"
+}

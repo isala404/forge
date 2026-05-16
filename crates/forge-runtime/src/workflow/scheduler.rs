@@ -66,11 +66,11 @@ impl WorkflowScheduler {
     /// Combines polling with NOTIFY-driven wakeup. When a workflow event is
     /// inserted, the `forge_workflow_event_notify` trigger fires a NOTIFY on
     /// the `forge_workflow_wakeup` channel, and we process immediately instead
-    /// of waiting for the next poll cycle. Polling remains as a fallback at a
-    /// longer interval (10x the base) to catch anything missed.
+    /// of waiting for the next poll cycle. Polling remains the wakeup path for
+    /// durable sleeps (no NOTIFY fires when `wake_at` expires), so the timer
+    /// runs at `poll_interval` directly.
     pub async fn run(&self, shutdown: CancellationToken) {
-        let fallback_interval = self.config.poll_interval * 10;
-        let mut interval = tokio::time::interval(fallback_interval);
+        let mut interval = tokio::time::interval(self.config.poll_interval);
         let mut cleanup_interval = tokio::time::interval(Duration::from_secs(3600));
 
         // Set up NOTIFY listener for immediate wakeup
@@ -88,7 +88,7 @@ impl WorkflowScheduler {
         };
 
         tracing::debug!(
-            poll_interval = ?fallback_interval,
+            poll_interval = ?self.config.poll_interval,
             batch_size = self.config.batch_size,
             notify_enabled = listener.is_some(),
             "Workflow scheduler started"
@@ -141,15 +141,21 @@ impl WorkflowScheduler {
 
     /// Process workflows that are ready to resume.
     async fn process_ready_workflows(&self) -> Result<()> {
+        // Cancellations take priority over timer/event wakeups: if an operator
+        // requested cancel, we run the cancel job first and skip any pending
+        // resume work for the same run.
+        self.process_cancel_requests().await?;
+
         // Query for workflows ready to wake (timer or event timeout)
         let workflows = sqlx::query!(
             r#"
             SELECT id, workflow_name, workflow_version, workflow_signature, waiting_for_event
             FROM forge_workflow_runs
-            WHERE status = 'waiting' AND (
-                (wake_at IS NOT NULL AND wake_at <= NOW())
-                OR (event_timeout_at IS NOT NULL AND event_timeout_at <= NOW())
-            )
+            WHERE cancel_requested_at IS NULL
+              AND (
+                (status = 'sleeping' AND wake_at IS NOT NULL AND wake_at <= NOW())
+                OR (status = 'waiting' AND event_timeout_at IS NOT NULL AND event_timeout_at <= NOW())
+              )
             ORDER BY COALESCE(wake_at, event_timeout_at) ASC
             LIMIT $1
             "#,
@@ -166,11 +172,10 @@ impl WorkflowScheduler {
 
         for workflow in workflows {
             if workflow.waiting_for_event.is_some() {
-                // Event timeout - resume with timeout error
-                self.resume_with_timeout(workflow.id).await;
+                self.claim_and_resume(workflow.id, false, "event_timeout")
+                    .await;
             } else {
-                // Timer expired - normal resume
-                self.resume_workflow(workflow.id).await;
+                self.claim_and_resume(workflow.id, true, "timer").await;
             }
         }
 
@@ -180,6 +185,74 @@ impl WorkflowScheduler {
         }
 
         Ok(())
+    }
+
+    /// Process workflows with a pending cancel request.
+    ///
+    /// These rows are surfaced by the `forge_workflow_runs_cancel_notify`
+    /// trigger on `forge_workflow_wakeup`, so this method is normally
+    /// driven by NOTIFY and completes within a single poll cycle.
+    async fn process_cancel_requests(&self) -> Result<()> {
+        let workflows = sqlx::query!(
+            r#"
+            SELECT id, cancel_reason
+            FROM forge_workflow_runs
+            WHERE cancel_requested_at IS NOT NULL
+              AND status IN ('pending', 'running', 'sleeping', 'waiting')
+            ORDER BY cancel_requested_at ASC
+            LIMIT $1
+            "#,
+            self.config.batch_size as i64
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(forge_core::ForgeError::Database)?;
+
+        for row in workflows {
+            if !self.try_claim_waiting(row.id).await {
+                continue;
+            }
+            let reason = row
+                .cancel_reason
+                .unwrap_or_else(|| "operator cancel".to_string());
+            self.enqueue_cancel(row.id, &reason).await;
+        }
+
+        Ok(())
+    }
+
+    /// Enqueue a `$workflow_resume` job carrying the cancel flag.
+    async fn enqueue_cancel(&self, workflow_run_id: Uuid, reason: &str) {
+        let input = serde_json::json!({
+            "run_id": workflow_run_id.to_string(),
+            "from_sleep": false,
+            "cancel": true,
+            "reason": reason,
+        });
+        let job = crate::jobs::JobRecord::new(
+            WORKFLOW_RESUME_JOB.to_string(),
+            input,
+            forge_core::job::JobPriority::High,
+            3,
+        )
+        .with_capability(forge_core::config::WORKFLOWS_QUEUE);
+        match self.job_queue.enqueue(job).await {
+            Ok(job_id) => {
+                tracing::debug!(
+                    workflow_run_id = %workflow_run_id,
+                    job_id = %job_id,
+                    trigger = "cancel",
+                    "Enqueued workflow cancel job"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    workflow_run_id = %workflow_run_id,
+                    error = %e,
+                    "Failed to enqueue workflow cancel job"
+                );
+            }
+        }
     }
 
     /// Process workflows that have pending events.
@@ -218,7 +291,7 @@ impl WorkflowScheduler {
                 .await
             {
                 Ok(Some(_event)) => {
-                    self.resume_with_event(workflow_id).await;
+                    self.claim_and_resume(workflow_id, false, "event").await;
                 }
                 Ok(None) => {
                     tracing::debug!(
@@ -240,41 +313,24 @@ impl WorkflowScheduler {
         Ok(())
     }
 
-    /// Resume a workflow after timer expiry by enqueuing a job.
-    async fn resume_workflow(&self, workflow_run_id: Uuid) {
+    /// Claim a workflow and enqueue a resume job.
+    async fn claim_and_resume(&self, workflow_run_id: Uuid, from_sleep: bool, trigger: &str) {
         if !self.try_claim_waiting(workflow_run_id).await {
             return;
         }
-        self.enqueue_resume(workflow_run_id, true, "timer").await;
-    }
-
-    /// Resume a workflow after event timeout by enqueuing a job.
-    async fn resume_with_timeout(&self, workflow_run_id: Uuid) {
-        if !self.try_claim_waiting(workflow_run_id).await {
-            return;
-        }
-        self.enqueue_resume(workflow_run_id, false, "event_timeout")
+        self.enqueue_resume(workflow_run_id, from_sleep, trigger)
             .await;
     }
 
-    /// Resume a workflow that received an event by enqueuing a job.
-    async fn resume_with_event(&self, workflow_run_id: Uuid) {
-        if !self.try_claim_waiting(workflow_run_id).await {
-            return;
-        }
-        self.enqueue_resume(workflow_run_id, false, "event").await;
-    }
-
-    /// Atomically transition a workflow from `waiting` to `running`.
-    /// Returns `false` if the row was already claimed by another scheduler
-    /// or is no longer in `waiting` status.
+    /// Atomically transition a workflow from `sleeping`/`waiting` to `running`.
+    /// Returns `false` if the row was already claimed by another scheduler.
     async fn try_claim_waiting(&self, workflow_run_id: Uuid) -> bool {
         match sqlx::query!(
             r#"
             UPDATE forge_workflow_runs
             SET wake_at = NULL, waiting_for_event = NULL, event_timeout_at = NULL,
                 suspended_at = NULL, status = 'running'
-            WHERE id = $1 AND status = 'waiting'
+            WHERE id = $1 AND status IN ('sleeping', 'waiting')
             "#,
             workflow_run_id,
         )
@@ -301,7 +357,8 @@ impl WorkflowScheduler {
             input,
             forge_core::job::JobPriority::High,
             3,
-        );
+        )
+        .with_capability(forge_core::config::WORKFLOWS_QUEUE);
         match self.job_queue.enqueue(job).await {
             Ok(job_id) => {
                 tracing::debug!(

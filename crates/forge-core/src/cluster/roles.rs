@@ -63,7 +63,7 @@ impl std::fmt::Display for NodeRole {
 }
 
 /// Leader role for coordinated operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum LeaderRole {
     /// Job assignment and cron triggering.
@@ -72,6 +72,8 @@ pub enum LeaderRole {
     MetricsAggregator,
     /// Log compaction.
     LogCompactor,
+    /// Leader-elected daemon instance.
+    Daemon(String),
 }
 
 impl LeaderRole {
@@ -83,15 +85,24 @@ impl LeaderRole {
             Self::Scheduler => 0x464F_5247_0001,
             Self::MetricsAggregator => 0x464F_5247_0002,
             Self::LogCompactor => 0x464F_5247_0003,
+            Self::Daemon(name) => {
+                // FNV-1a hash seeded in the FORGE daemon namespace
+                let mut h: i64 = 0x464F_5247_4000;
+                for b in name.bytes() {
+                    h = h.wrapping_mul(1099511628211).wrapping_add(b as i64);
+                }
+                h
+            }
         }
     }
 
     /// Convert to string for database storage.
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::Scheduler => "scheduler",
             Self::MetricsAggregator => "metrics_aggregator",
             Self::LogCompactor => "log_compactor",
+            Self::Daemon(name) => name.as_str(),
         }
     }
 }
@@ -115,7 +126,7 @@ impl FromStr for LeaderRole {
             "scheduler" => Ok(Self::Scheduler),
             "metrics_aggregator" => Ok(Self::MetricsAggregator),
             "log_compactor" => Ok(Self::LogCompactor),
-            _ => Err(ParseLeaderRoleError(s.to_string())),
+            other => Ok(Self::Daemon(other.to_string())),
         }
     }
 }
@@ -156,7 +167,26 @@ mod tests {
     #[test]
     fn test_leader_role_conversion() {
         assert_eq!("scheduler".parse::<LeaderRole>(), Ok(LeaderRole::Scheduler));
-        assert!("invalid".parse::<LeaderRole>().is_err());
+        assert_eq!(
+            "my_daemon".parse::<LeaderRole>(),
+            Ok(LeaderRole::Daemon("my_daemon".to_string()))
+        );
         assert_eq!(LeaderRole::Scheduler.as_str(), "scheduler");
+        assert_eq!(
+            LeaderRole::Daemon("my_daemon".to_string()).as_str(),
+            "my_daemon"
+        );
+    }
+
+    #[test]
+    fn test_daemon_lock_ids_are_unique_and_stable() {
+        let a = LeaderRole::Daemon("daemon_a".to_string()).lock_id();
+        let b = LeaderRole::Daemon("daemon_b".to_string()).lock_id();
+        assert_ne!(a, b);
+        assert_eq!(a, LeaderRole::Daemon("daemon_a".to_string()).lock_id());
+
+        assert_ne!(a, LeaderRole::Scheduler.lock_id());
+        assert_ne!(a, LeaderRole::MetricsAggregator.lock_id());
+        assert_ne!(a, LeaderRole::LogCompactor.lock_id());
     }
 }

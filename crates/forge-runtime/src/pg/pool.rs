@@ -143,6 +143,8 @@ impl Database {
         .await
         .map_err(|e| ForgeError::Internal(format!("Failed to connect to primary: {}", e)))?;
 
+        verify_postgres_version(&primary, "primary").await?;
+
         let mut replicas = Vec::new();
         for replica_url in &config.replica_urls {
             let pool = Self::create_pool(
@@ -153,6 +155,7 @@ impl Database {
             )
             .await
             .map_err(|e| ForgeError::Internal(format!("Failed to connect to replica: {}", e)))?;
+            verify_postgres_version(&pool, "replica").await?;
             replicas.push(ReplicaEntry {
                 pool: Arc::new(pool),
                 healthy: Arc::new(AtomicBool::new(true)),
@@ -343,6 +346,58 @@ impl Database {
             entry.pool.close().await;
         }
     }
+}
+
+/// Minimum supported PostgreSQL major version.
+///
+/// Forge v0.9+ uses features (skip-locked semantics with `NOWAIT`, partitioned
+/// table SET ACCESS METHOD, `pg_stat_statements.toplevel`, generated-column
+/// stored arrays of UUID, NOTIFY queue introspection via
+/// `pg_notification_queue_usage()`) that all require PostgreSQL 18 or newer.
+/// We hard-fail at startup so deployments don't discover an incompatibility
+/// at runtime under load.
+pub const MIN_POSTGRES_MAJOR: i32 = 18;
+
+/// Read the server's `server_version_num` and refuse to continue when the
+/// major version is below [`MIN_POSTGRES_MAJOR`]. The check uses a temporary
+/// connection from the supplied pool, so it works against both primary and
+/// replica before they're handed to the rest of the system.
+async fn verify_postgres_version(pool: &PgPool, role: &str) -> Result<()> {
+    let row = sqlx::query_scalar!("SELECT current_setting('server_version_num')")
+        .fetch_one(pool)
+        .await
+        .map_err(|e| {
+            ForgeError::Internal(format!(
+                "Failed to read PostgreSQL server_version_num from {}: {}",
+                role, e
+            ))
+        })?;
+
+    let version_num: i32 = row
+        .ok_or_else(|| {
+            ForgeError::Internal(format!(
+                "PostgreSQL {} returned NULL for server_version_num",
+                role
+            ))
+        })?
+        .parse()
+        .map_err(|e| {
+            ForgeError::Internal(format!(
+                "Could not parse PostgreSQL server_version_num from {}: {}",
+                role, e
+            ))
+        })?;
+
+    let major = version_num / 10_000;
+    if major < MIN_POSTGRES_MAJOR {
+        return Err(ForgeError::Internal(format!(
+            "PostgreSQL {} is at version {} but Forge requires {} or newer. \
+             See https://forge.dev/scale/hosting for supported versions.",
+            role, major, MIN_POSTGRES_MAJOR
+        )));
+    }
+    tracing::debug!(role, postgres_major = major, "PostgreSQL version verified");
+    Ok(())
 }
 
 /// Type alias for the pool type.

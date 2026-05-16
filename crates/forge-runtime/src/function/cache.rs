@@ -3,9 +3,11 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use forge_core::realtime::Change;
 use forge_core::{AuthContext, FunctionInfo};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tokio::sync::broadcast;
 
 use super::registry::FunctionRegistry;
 
@@ -310,6 +312,79 @@ impl QueryCacheCoordinator {
                 "Cache invalidated after mutation"
             );
         }
+    }
+
+    /// Invalidate cached queries affected by a `forge_changes` NOTIFY event.
+    ///
+    /// Used to propagate mutations across cluster nodes: every node listening
+    /// to `forge_changes` runs this for each peer-emitted change so its local
+    /// cache stays consistent. Without this, mutations on node A leave stale
+    /// cache entries on node B until TTL expires.
+    ///
+    /// Mirrors `invalidate_for_mutation`'s column-intersection logic but uses
+    /// the change's runtime `changed_columns` rather than the mutation's
+    /// compile-time set. An empty change column list means "could be any
+    /// column" (older trigger payloads, INSERT/DELETE) — fall back to full
+    /// invalidation for that table.
+    pub fn invalidate_by_change(&self, change: &Change) {
+        let Some(queries) = self.table_to_queries.get(&change.table) else {
+            return;
+        };
+        let change_cols_unknown = change.changed_columns.is_empty();
+        let change_cols: HashSet<&str> =
+            change.changed_columns.iter().map(String::as_str).collect();
+
+        let mut affected: Vec<&str> = Vec::new();
+        for dep in queries {
+            if change_cols_unknown
+                || dep.selected_columns.is_empty()
+                || dep
+                    .selected_columns
+                    .iter()
+                    .any(|c| change_cols.contains(c.as_str()))
+            {
+                affected.push(dep.name.as_str());
+            }
+        }
+        if !affected.is_empty() {
+            self.cache.invalidate_by_tables(&affected);
+            tracing::trace!(
+                table = %change.table,
+                invalidated_queries = ?affected,
+                "Cache invalidated by cluster change"
+            );
+        }
+    }
+
+    /// Spawn a background task that drains a `Change` broadcast and evicts
+    /// matching cache entries. Returns a handle the caller can abort on
+    /// shutdown. The receiver typically comes from
+    /// `Reactor::change_subscriber()`.
+    pub fn spawn_cluster_invalidator(
+        self: Arc<Self>,
+        mut rx: broadcast::Receiver<Change>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(change) => self.invalidate_by_change(&change),
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        // We dropped n change events; the local cache could
+                        // be holding values that should have been evicted.
+                        // Clear everything to recover correctness.
+                        tracing::warn!(
+                            dropped = n,
+                            "Cache invalidator lagged; clearing local cache"
+                        );
+                        self.cache.clear();
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        tracing::debug!("Change channel closed; cache invalidator stopping");
+                        break;
+                    }
+                }
+            }
+        })
     }
 
     /// Derive a stable cache scope from auth context. Anonymous callers share
@@ -730,6 +805,153 @@ mod tests {
                 .is_none(),
             "queries with unknown selected columns must always be invalidated"
         );
+    }
+
+    #[test]
+    fn invalidate_by_change_evicts_matching_query() {
+        use forge_core::realtime::{Change, ChangeOperation};
+
+        let coord = coordinator_with_deps(vec![("users", "list_user_names", &["id", "name"])]);
+        coord.set_by_scope(
+            "list_user_names",
+            &json!({}),
+            Some("anon"),
+            json!([]),
+            Duration::from_secs(60),
+        );
+
+        let change =
+            Change::new("users", ChangeOperation::Update).with_columns(vec!["name".to_string()]);
+        coord.invalidate_by_change(&change);
+
+        assert!(
+            coord
+                .get_by_scope("list_user_names", &json!({}), Some("anon"))
+                .is_none(),
+            "name change must invalidate name-reading query"
+        );
+    }
+
+    #[test]
+    fn invalidate_by_change_skips_disjoint_columns() {
+        use forge_core::realtime::{Change, ChangeOperation};
+
+        let coord = coordinator_with_deps(vec![("users", "list_user_emails", &["id", "email"])]);
+        coord.set_by_scope(
+            "list_user_emails",
+            &json!({}),
+            Some("anon"),
+            json!([]),
+            Duration::from_secs(60),
+        );
+
+        // Change touched only `name`; the email-only query should survive.
+        let change =
+            Change::new("users", ChangeOperation::Update).with_columns(vec!["name".to_string()]);
+        coord.invalidate_by_change(&change);
+
+        assert!(
+            coord
+                .get_by_scope("list_user_emails", &json!({}), Some("anon"))
+                .is_some(),
+            "disjoint column change must not invalidate"
+        );
+    }
+
+    #[test]
+    fn invalidate_by_change_falls_back_when_change_columns_unknown() {
+        use forge_core::realtime::{Change, ChangeOperation};
+
+        let coord = coordinator_with_deps(vec![("users", "list_user_emails", &["id", "email"])]);
+        coord.set_by_scope(
+            "list_user_emails",
+            &json!({}),
+            Some("anon"),
+            json!([]),
+            Duration::from_secs(60),
+        );
+
+        // Empty changed_columns (e.g. INSERT/DELETE) means "could be anything".
+        let change = Change::new("users", ChangeOperation::Insert);
+        coord.invalidate_by_change(&change);
+
+        assert!(
+            coord
+                .get_by_scope("list_user_emails", &json!({}), Some("anon"))
+                .is_none(),
+            "unknown change columns must fall back to full invalidation"
+        );
+    }
+
+    #[test]
+    fn invalidate_by_change_ignores_unrelated_table() {
+        use forge_core::realtime::{Change, ChangeOperation};
+
+        let coord = coordinator_with_deps(vec![("users", "list_users", &["id"])]);
+        coord.set_by_scope(
+            "list_users",
+            &json!({}),
+            Some("anon"),
+            json!([]),
+            Duration::from_secs(60),
+        );
+
+        let change = Change::new("orders", ChangeOperation::Update);
+        coord.invalidate_by_change(&change);
+
+        assert!(
+            coord
+                .get_by_scope("list_users", &json!({}), Some("anon"))
+                .is_some(),
+            "change to unrelated table must not invalidate"
+        );
+    }
+
+    #[tokio::test]
+    async fn cluster_invalidator_evicts_on_broadcast() {
+        use forge_core::realtime::{Change, ChangeOperation};
+
+        let coord = Arc::new(coordinator_with_deps(vec![(
+            "users",
+            "list_user_names",
+            &["id", "name"],
+        )]));
+        coord.set_by_scope(
+            "list_user_names",
+            &json!({}),
+            Some("anon"),
+            json!([]),
+            Duration::from_secs(60),
+        );
+
+        let (tx, rx) = broadcast::channel::<Change>(8);
+        let handle = Arc::clone(&coord).spawn_cluster_invalidator(rx);
+
+        tx.send(
+            Change::new("users", ChangeOperation::Update).with_columns(vec!["name".to_string()]),
+        )
+        .expect("send must succeed with active receiver");
+
+        // Allow the spawned task to drain the broadcast.
+        for _ in 0..50 {
+            if coord
+                .get_by_scope("list_user_names", &json!({}), Some("anon"))
+                .is_none()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        assert!(
+            coord
+                .get_by_scope("list_user_names", &json!({}), Some("anon"))
+                .is_none(),
+            "broadcast change must reach the invalidator and evict the entry"
+        );
+
+        drop(tx);
+        handle.await.expect("invalidator task must exit cleanly");
     }
 
     #[test]

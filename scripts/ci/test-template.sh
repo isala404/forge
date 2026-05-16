@@ -5,7 +5,7 @@ set -euo pipefail
 
 TEMPLATE="$1"
 FORGE="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
-WORKSPACE="$3"
+WORKSPACE="$(cd "$3" && pwd)"
 shift 3
 PLAYWRIGHT_ARGS=("$@")
 SLUG=$(echo "$TEMPLATE" | tr '/' '-')

@@ -15,6 +15,7 @@ use tracing::{Instrument, Span, field};
 use uuid::Uuid;
 
 use super::registry::DaemonRegistry;
+use crate::pg::{LeaderConfig, LeaderElection};
 
 /// Configuration for the daemon runner.
 #[derive(Debug, Clone)]
@@ -150,6 +151,17 @@ impl DaemonRunner {
                 let job_dispatch = self.job_dispatch.clone();
                 let workflow_dispatch = self.workflow_dispatch.clone();
 
+                let election = if leader_elected {
+                    Some(Arc::new(LeaderElection::new(
+                        pool.clone(),
+                        forge_core::cluster::NodeId::from_uuid(node_id),
+                        forge_core::cluster::LeaderRole::Daemon(name.to_string()),
+                        LeaderConfig::default(),
+                    )))
+                } else {
+                    None
+                };
+
                 tokio::spawn(async move {
                     run_daemon_loop(
                         daemon_name,
@@ -162,7 +174,7 @@ impl DaemonRunner {
                         restart_on_panic,
                         restart_delay,
                         max_restarts,
-                        leader_elected,
+                        election,
                         job_dispatch,
                         workflow_dispatch,
                     )
@@ -268,10 +280,11 @@ async fn run_daemon_loop(
     restart_on_panic: bool,
     restart_delay: Duration,
     max_restarts: Option<u32>,
-    leader_elected: bool,
+    election: Option<Arc<LeaderElection>>,
     job_dispatch: Option<Arc<dyn JobDispatch>>,
     workflow_dispatch: Option<Arc<dyn WorkflowDispatch>>,
 ) {
+    let leader_elected = election.is_some();
     let daemon_span = tracing::info_span!(
         "daemon.lifecycle",
         daemon.name = %name,
@@ -308,14 +321,16 @@ async fn run_daemon_loop(
                 break;
             }
 
-            // Try to acquire leadership if required
-            if leader_elected {
-                match try_acquire_leadership(&pool, &name, node_id).await {
+            // Acquire leadership via canonical LeaderElection (holds
+            // advisory lock on a dedicated connection for the daemon's
+            // lifetime, unlike the old pool-based acquire that released
+            // the lock when the connection returned to the pool).
+            if let Some(ref election) = election {
+                match election.try_become_leader().await {
                     Ok(true) => {
                         tracing::info!("Acquired leadership");
                     }
                     Ok(false) => {
-                        // Another node has leadership, wait and retry
                         tracing::debug!("Waiting for leadership");
                         tokio::select! {
                             _ = tokio::time::sleep(Duration::from_secs(5)) => {}
@@ -490,9 +505,8 @@ async fn run_daemon_loop(
         Span::current().record("daemon.uptime_ms", uptime);
         Span::current().record("daemon.restart_count", restarts);
 
-        // Release leadership if we held it
-        if leader_elected
-            && let Err(e) = release_leadership(&pool, &name, node_id).await
+        if let Some(ref election) = election
+            && let Err(e) = election.release_leadership().await
         {
             tracing::debug!(daemon = %name, error = %e, "Failed to release leadership");
         }
@@ -505,46 +519,6 @@ async fn run_daemon_loop(
     }
     .instrument(daemon_span)
     .await
-}
-
-async fn try_acquire_leadership(pool: &PgPool, daemon_name: &str, node_id: Uuid) -> Result<bool> {
-    // Use advisory lock for leader election
-    // Hash the daemon name to get a consistent lock ID
-    let lock_id = daemon_name
-        .bytes()
-        .fold(0i64, |acc, b| acc.wrapping_add(b as i64).wrapping_mul(31));
-
-    let result = sqlx::query_scalar!(r#"SELECT pg_try_advisory_lock($1) as "acquired!""#, lock_id)
-        .fetch_one(pool)
-        .await
-        .map_err(forge_core::ForgeError::Database)?;
-
-    if result {
-        // Update daemon record with our node_id
-        sqlx::query!(
-            "UPDATE forge_daemons SET node_id = $1 WHERE name = $2",
-            node_id,
-            daemon_name
-        )
-        .execute(pool)
-        .await
-        .map_err(forge_core::ForgeError::Database)?;
-    }
-
-    Ok(result)
-}
-
-async fn release_leadership(pool: &PgPool, daemon_name: &str, _node_id: Uuid) -> Result<()> {
-    let lock_id = daemon_name
-        .bytes()
-        .fold(0i64, |acc, b| acc.wrapping_add(b as i64).wrapping_mul(31));
-
-    sqlx::query_scalar!("SELECT pg_advisory_unlock($1)", lock_id)
-        .fetch_one(pool)
-        .await
-        .map_err(forge_core::ForgeError::Database)?;
-
-    Ok(())
 }
 
 async fn update_daemon_status(pool: &PgPool, name: &str, status: DaemonStatus) -> Result<()> {

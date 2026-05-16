@@ -140,9 +140,19 @@ CREATE TABLE IF NOT EXISTS forge_workflow_runs (
     compensation_state JSONB,
     -- User-defined key-value state that persists across suspension points
     saved_state JSONB DEFAULT '{}',
+    -- Operator cancel signal. The scheduler picks up rows where
+    -- cancel_requested_at IS NOT NULL via the forge_workflow_runs_cancel_notify
+    -- trigger and runs compensation immediately, bypassing any wake_at timer.
+    cancel_requested_at TIMESTAMPTZ,
+    cancel_reason TEXT,
     -- Forward-compat slot. Future-versioned fields land here without ALTER TABLE.
     metadata JSONB NOT NULL DEFAULT '{}'
 );
+
+CREATE INDEX IF NOT EXISTS idx_forge_workflow_runs_cancel_requested
+    ON forge_workflow_runs(cancel_requested_at)
+    WHERE cancel_requested_at IS NOT NULL
+      AND status IN ('pending', 'running', 'sleeping', 'waiting');
 
 CREATE INDEX IF NOT EXISTS idx_forge_workflow_runs_status
     ON forge_workflow_runs(status);
@@ -190,6 +200,40 @@ CREATE TABLE IF NOT EXISTS forge_workflow_steps (
     completed_at TIMESTAMPTZ,
     error TEXT,
     UNIQUE(workflow_run_id, step_name)
+);
+
+-- Admin audit log. One row per privileged action taken via /_api/admin/*.
+-- Append-only by convention; cleanup is the operator's responsibility.
+CREATE TABLE IF NOT EXISTS forge_admin_audit (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    actor_subject TEXT,
+    actor_roles TEXT[] NOT NULL DEFAULT '{}',
+    action VARCHAR(64) NOT NULL,
+    target_type VARCHAR(32) NOT NULL,
+    target_id TEXT,
+    reason TEXT,
+    request_id VARCHAR(64),
+    trace_id VARCHAR(64),
+    details JSONB NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_forge_admin_audit_occurred_at
+    ON forge_admin_audit(occurred_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_forge_admin_audit_actor_subject
+    ON forge_admin_audit(actor_subject)
+    WHERE actor_subject IS NOT NULL;
+
+-- Operator pause state for queues. A queue listed here is paused; workers
+-- targeting that capability skip the `claim` SQL when their capability shows
+-- up in this table. Kept tiny so operator pauses survive node restarts but
+-- can be removed without a config push.
+CREATE TABLE IF NOT EXISTS forge_paused_queues (
+    queue_name VARCHAR(255) PRIMARY KEY,
+    paused_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    paused_by TEXT,
+    reason TEXT
 );
 
 -- Rate Limiting: Token bucket storage (UNLOGGED: transient state rebuilt on startup)
@@ -434,6 +478,23 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER forge_workflow_event_notify_trigger
     AFTER INSERT ON forge_workflow_events
     FOR EACH ROW EXECUTE FUNCTION forge_workflow_event_notify();
+
+-- Workflow cancel wakeup via NOTIFY.
+-- When an operator sets cancel_requested_at on a suspended run, the scheduler
+-- listens on forge_workflow_wakeup and picks the row up within a single poll
+-- cycle (target: <50ms) instead of waiting for the wake_at timer to fire.
+CREATE OR REPLACE FUNCTION forge_workflow_runs_cancel_notify() RETURNS TRIGGER AS $$
+BEGIN
+    IF (OLD.cancel_requested_at IS NULL AND NEW.cancel_requested_at IS NOT NULL) THEN
+        PERFORM pg_notify('forge_workflow_wakeup', NEW.id::text);
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER forge_workflow_runs_cancel_notify_trigger
+    AFTER UPDATE OF cancel_requested_at ON forge_workflow_runs
+    FOR EACH ROW EXECUTE FUNCTION forge_workflow_runs_cancel_notify();
 
 -- Periodic cleanup function for expired webhook idempotency records
 -- This can be called from a cron job: SELECT forge_cleanup_webhook_events();

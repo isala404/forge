@@ -1,0 +1,160 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, workflow_name, workflow_version, workflow_signature,\n               owner_subject, input, output, status, blocking_reason,\n               resolution_reason, current_step, step_results, started_at,\n               completed_at, error, trace_id, suspended_at, wake_at,\n               waiting_for_event, event_timeout_at, tenant_id,\n               cancel_requested_at, cancel_reason, metadata\n        FROM forge_workflow_runs\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "workflow_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "workflow_version",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "workflow_signature",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "owner_subject",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "input",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 6,
+        "name": "output",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 7,
+        "name": "status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "blocking_reason",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "resolution_reason",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "current_step",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 11,
+        "name": "step_results",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 12,
+        "name": "started_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 13,
+        "name": "completed_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 14,
+        "name": "error",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 15,
+        "name": "trace_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 16,
+        "name": "suspended_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 17,
+        "name": "wake_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 18,
+        "name": "waiting_for_event",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 19,
+        "name": "event_timeout_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 20,
+        "name": "tenant_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 21,
+        "name": "cancel_requested_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 22,
+        "name": "cancel_reason",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 23,
+        "name": "metadata",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "3ae5e9fdf671a539fe44c7ff4c1a4353dfeeb549f13006b66916ca33118b3ee7"
+}

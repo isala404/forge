@@ -22,6 +22,8 @@ const V001_INITIAL: &str = include_str!("../../../migrations/system/v001_initial
 const V002_CHANGE_LOG: &str = include_str!("../../../migrations/system/v002_change_log.sql");
 const V003_JOB_WAKEUP: &str = include_str!("../../../migrations/system/v003_job_wakeup.sql");
 const V004_KV: &str = include_str!("../../../migrations/system/v004_kv.sql");
+const V005_WORKFLOW_STATUS: &str =
+    include_str!("../../../migrations/system/v005_workflow_status.sql");
 
 /// A system migration with a version number.
 #[derive(Debug, Clone)]
@@ -71,6 +73,11 @@ pub fn get_system_migrations() -> Vec<SystemMigration> {
             sql: V004_KV,
             description: "Key-value store tables",
         },
+        SystemMigration {
+            version: 5,
+            sql: V005_WORKFLOW_STATUS,
+            description: "Simplify workflow status to 6 variants",
+        },
     ]
 }
 
@@ -114,12 +121,13 @@ mod tests {
     #[test]
     fn test_get_system_migrations() {
         let migrations = get_system_migrations();
-        assert_eq!(migrations.len(), 4);
+        assert_eq!(migrations.len(), 5);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(migrations[0].name(), "__forge_v001");
         assert_eq!(migrations[1].name(), "__forge_v002");
         assert_eq!(migrations[2].name(), "__forge_v003");
         assert_eq!(migrations[3].name(), "__forge_v004");
+        assert_eq!(migrations[4].name(), "__forge_v005");
     }
 
     #[test]

@@ -42,8 +42,7 @@ pub async fn register(ctx: &MutationContext, input: RegisterInput) -> Result<Aut
         ));
     }
 
-    let password_hash =
-    {
+    let password_hash = {
         use argon2::PasswordHasher;
         use password_hash::SaltString;
         let salt = SaltString::generate(&mut password_hash::rand_core::OsRng);
@@ -115,8 +114,7 @@ pub async fn login(ctx: &MutationContext, input: LoginInput) -> Result<AuthRespo
         .as_deref()
         .ok_or_else(|| ForgeError::Validation("Invalid email or password".into()))?;
 
-    let valid =
-    {
+    let valid = {
         use argon2::PasswordVerifier;
         let parsed = password_hash::PasswordHash::new(hash)
             .map_err(|e| ForgeError::Internal(e.to_string()))?;

@@ -159,14 +159,13 @@ impl JobExecutor {
 
         match result {
             Ok(Ok(output)) => {
-                // Job completed successfully
-                if let Err(e) = self.queue.complete(job.id, output.clone(), ttl).await {
-                    tracing::debug!(job_id = %job.id, error = %e, "Failed to mark job as complete");
-                }
-                // Flush buffered sub-job and workflow dispatches
+                // Complete job and flush sub-dispatches atomically
                 let pending = ctx.take_pending_dispatches().await;
-                if let Err(e) = self.flush_pending_dispatches(&pending, &job.job_type).await {
-                    tracing::error!(job_id = %job.id, error = %e, "Failed to flush pending dispatches from job");
+                if let Err(e) = self
+                    .complete_with_dispatches(job, output.clone(), ttl, &pending)
+                    .await
+                {
+                    tracing::error!(job_id = %job.id, error = %e, "Failed to atomically complete job with dispatches");
                 }
                 crate::signals::emit_server_execution(
                     &job.job_type,
@@ -287,15 +286,41 @@ impl JobExecutor {
         (entry.compensation)(ctx, input.clone(), reason).await
     }
 
-    // Internal write to forge_workflow_runs uses runtime sqlx::query because the
-    // table is owned by the runtime crate and the macro path picks up the wrong
-    // .sqlx cache when this crate is built standalone.
+    /// Complete a job and flush its sub-dispatches in a single transaction.
     #[allow(clippy::disallowed_methods)]
-    async fn flush_pending_dispatches(
+    async fn complete_with_dispatches(
         &self,
+        job: &JobRecord,
+        output: serde_json::Value,
+        ttl: Option<std::time::Duration>,
         pending: &forge_core::function::OutboxBuffer,
-        parent_job_type: &str,
     ) -> forge_core::Result<()> {
+        let retention = ttl.unwrap_or(JobQueue::DEFAULT_RETENTION);
+        let expires_at = Some(
+            chrono::Utc::now()
+                + chrono::Duration::from_std(retention).unwrap_or(chrono::Duration::days(7)),
+        );
+
+        let mut tx = self
+            .db_pool
+            .begin()
+            .await
+            .map_err(forge_core::ForgeError::Database)?;
+
+        sqlx::query(
+            "UPDATE forge_jobs \
+             SET status = 'completed', output = $2, completed_at = NOW(), \
+                 cancel_requested_at = NULL, cancelled_at = NULL, cancel_reason = NULL, \
+                 expires_at = $3 \
+             WHERE id = $1 AND status = 'running'",
+        )
+        .bind(job.id)
+        .bind(&output)
+        .bind(expires_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(forge_core::ForgeError::Database)?;
+
         for pj in &pending.jobs {
             let mut record = JobRecord::new(
                 pj.job_type.clone(),
@@ -309,50 +334,38 @@ impl JobExecutor {
             if let Some(cap) = &pj.worker_capability {
                 record = record.with_capability(cap.as_str());
             }
-            if let Err(e) = self.queue.enqueue(record).await {
-                tracing::error!(
-                    parent_job_type = parent_job_type,
-                    child_job_type = %pj.job_type,
-                    error = %e,
-                    "Failed to flush sub-job dispatch"
-                );
-                return Err(forge_core::ForgeError::Job(format!(
-                    "Failed to dispatch sub-job '{}': {e}",
-                    pj.job_type
-                )));
-            }
+            self.queue
+                .enqueue_in_conn(&mut tx, record)
+                .await
+                .map_err(|e| {
+                    forge_core::ForgeError::Job(format!(
+                        "Failed to dispatch sub-job '{}': {e}",
+                        pj.job_type
+                    ))
+                })?;
         }
+
         for pw in &pending.workflows {
-            let run_id = pw.id;
-            // Runtime query: this path is rare (job-spawned workflows) and the
-            // table schema is internal, so skipping compile-time validation is acceptable.
-            let result = sqlx::query(
+            sqlx::query(
                 "INSERT INTO forge_workflow_runs \
                  (id, workflow_name, workflow_version, workflow_signature, \
                   input, status, owner_subject, created_at) \
                  VALUES ($1, $2, $3, $4, $5, 'created', $6, NOW())",
             )
-            .bind(run_id)
+            .bind(pw.id)
             .bind(&pw.workflow_name)
             .bind(&pw.workflow_version)
             .bind(&pw.workflow_signature)
             .bind(&pw.input)
             .bind(&pw.owner_subject)
-            .execute(&self.db_pool)
-            .await;
-            if let Err(e) = result {
-                tracing::error!(
-                    parent_job_type = parent_job_type,
-                    workflow_name = %pw.workflow_name,
-                    error = %e,
-                    "Failed to flush workflow dispatch from job"
-                );
-                return Err(forge_core::ForgeError::Job(format!(
-                    "Failed to start workflow '{}': {e}",
-                    pw.workflow_name
-                )));
-            }
+            .execute(&mut *tx)
+            .await
+            .map_err(forge_core::ForgeError::Database)?;
         }
+
+        tx.commit()
+            .await
+            .map_err(forge_core::ForgeError::Database)?;
         Ok(())
     }
 

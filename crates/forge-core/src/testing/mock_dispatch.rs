@@ -267,7 +267,7 @@ impl MockWorkflowDispatch {
             workflow_name: workflow_name.to_string(),
             input: input_json,
             started_at: Utc::now(),
-            status: WorkflowStatus::Created,
+            status: WorkflowStatus::Pending,
         };
 
         self.workflows

@@ -71,9 +71,12 @@ test("export job and verification workflow complete from the UI", async ({
   const exportSection = page.locator("section", {
     has: page.getByText("Export Job"),
   });
+  // Jobs run as background tasks with polling, so they need more time than simple CRUD
+  const JOB_TIMEOUT = 15_000;
+
   await exportSection.getByRole("button", { name: "Start Export" }).click();
   await expect(exportSection.getByText(/Export complete/i)).toBeVisible({
-    timeout: ACTION_TIMEOUT,
+    timeout: JOB_TIMEOUT,
   });
   await expect(exportSection.getByText(/100%/)).toBeVisible();
 
@@ -88,12 +91,12 @@ test("export job and verification workflow complete from the UI", async ({
   const confirmBtn = verificationSection.getByRole("button", {
     name: "Confirm Verification",
   });
-  await expect(confirmBtn).toBeVisible({ timeout: 15_000 });
+  await expect(confirmBtn).toBeVisible({ timeout: JOB_TIMEOUT });
   await confirmBtn.click();
 
   // After confirmation, remaining steps complete (includes wait_period durable sleep)
   await expect(verificationSection.locator(".step.completed")).toHaveCount(6, {
-    timeout: ACTION_TIMEOUT,
+    timeout: JOB_TIMEOUT,
   });
 });
 
@@ -129,10 +132,12 @@ test("webhook endpoint rejects bad signatures and surfaces accepted events", asy
   gotoReady,
   request,
 }) => {
+  const ts = () => Math.floor(Date.now() / 1000).toString();
   const badResponse = await request.post(`${API_URL}/_api/webhooks/demo`, {
     headers: {
       "Content-Type": "application/json",
       "X-Webhook-Signature": "invalid",
+      "X-Webhook-Timestamp": ts(),
       "X-Idempotency-Key": `bad-${Date.now()}`,
     },
     data: { action: "test" },
@@ -146,6 +151,7 @@ test("webhook endpoint rejects bad signatures and surfaces accepted events", asy
     headers: {
       "Content-Type": "application/json",
       "X-Webhook-Signature": signature,
+      "X-Webhook-Timestamp": ts(),
       "X-Idempotency-Key": key,
     },
     data: JSON.parse(body),

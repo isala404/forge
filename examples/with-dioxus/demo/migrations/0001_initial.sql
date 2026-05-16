@@ -63,7 +63,7 @@ VALUES (
     'demo@example.com',
     'Demo User',
     'member',
-    '$2b$10$wsSHkdSbkLT7f5nFtH5Wt.JJrrM8IoANoX0sd7SdGRRmL217/LxZm',
+    '$argon2id$v=19$m=19456,t=2,p=1$AjozmE60AjazLA3S4LXuvw$v+Jo+M5NZ+Q1K4ro1pDS4Hx0/cnHJ3uvmJC7RiNJkUg',
     NOW(),
     NOW()
 );

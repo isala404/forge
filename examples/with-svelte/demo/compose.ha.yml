@@ -1,0 +1,22 @@
+# HA override: 3 Forge replicas behind nginx load balancer.
+# Usage: docker compose -f docker-compose.yml -f compose.ha.yml up
+services:
+  backend:
+    deploy:
+      replicas: 3
+    ports: !override []
+
+  lb:
+    image: nginx:alpine
+    ports:
+      - "9081:9081"
+    volumes:
+      - ./nginx-ha.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9081/_api/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5

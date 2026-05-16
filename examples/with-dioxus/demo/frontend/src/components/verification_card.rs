@@ -53,7 +53,7 @@ fn VerificationRun(
     let show_confirm = is_waiting || is_confirming;
     let can_restart = matches!(
         wf.state.status,
-        WorkflowStatus::Completed | WorkflowStatus::Failed | WorkflowStatus::Compensated
+        WorkflowStatus::Completed | WorkflowStatus::Failed
     );
 
     let client = use_forge_client();

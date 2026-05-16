@@ -57,12 +57,10 @@ pub fn AuthCard() -> Element {
                 match result {
                     Ok(res) => {
                         signals.track_with_properties("auth_success", json!({"mode": is_register}));
-                        signals
-                            .identify(
-                                &res.user.id,
-                                json!({"name": &res.user.name, "email": &res.user.email}),
-                            )
-                            .await;
+                        signals.identify(
+                            &res.user.id,
+                            json!({"name": &res.user.name, "email": &res.user.email}),
+                        );
                         let claims = parse_jwt_claims(&res.access_token);
                         token_claims.set(Some(claims));
                         // Wire auth into ForgeAuthProvider so the client

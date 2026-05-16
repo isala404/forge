@@ -1,0 +1,44 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                workflow_name AS \"workflow_name!\",\n                workflow_version AS \"workflow_version!\",\n                COUNT(*) AS \"in_flight_count!\",\n                MIN(started_at) AS \"oldest_started_at!\",\n                (ARRAY_AGG(id ORDER BY started_at ASC))[:10] AS \"sample_run_ids!: Vec<Uuid>\"\n            FROM forge_workflow_runs\n            WHERE status NOT IN ('completed', 'failed')\n            GROUP BY workflow_name, workflow_version\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "workflow_name!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "workflow_version!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "in_flight_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "oldest_started_at!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 4,
+        "name": "sample_run_ids!: Vec<Uuid>",
+        "type_info": "UuidArray"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "4e42ff932159c134dd40d2a48277ceb0fb5115f4ef460e394afe75921b313c0a"
+}

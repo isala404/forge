@@ -95,23 +95,6 @@ impl EventStore {
         }))
     }
 
-    /// Check if an event exists for a workflow (without consuming).
-    pub async fn has_event(&self, event_name: &str, correlation_id: &str) -> Result<bool> {
-        let result = sqlx::query_scalar!(
-            r#"
-            SELECT COUNT(*) FROM forge_workflow_events
-            WHERE event_name = $1 AND correlation_id = $2 AND consumed_at IS NULL
-            "#,
-            event_name,
-            correlation_id
-        )
-        .fetch_one(&self.pool)
-        .await
-        .map_err(ForgeError::Database)?;
-
-        Ok(result.unwrap_or(0) > 0)
-    }
-
     /// List pending events for a workflow.
     #[allow(clippy::type_complexity)]
     pub async fn list_pending_events(&self, correlation_id: &str) -> Result<Vec<WorkflowEvent>> {

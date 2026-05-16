@@ -1,3 +1,4 @@
+mod admin;
 mod auth;
 pub mod jwks;
 mod mcp;
@@ -12,6 +13,7 @@ mod sse;
 mod tls;
 mod tracing;
 
+pub use admin::{AdminState, admin_router};
 pub use auth::{AuthConfig, AuthMiddleware, HmacTokenIssuer, build_auth_context_from_claims};
 pub use jwks::{JwksClient, JwksError};
 pub use mcp::{McpState, mcp_get_handler, mcp_post_handler};

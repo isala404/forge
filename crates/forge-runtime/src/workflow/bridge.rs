@@ -34,6 +34,27 @@ pub fn register_workflow_bridge(executor: Arc<WorkflowExecutor>, job_registry: &
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
 
+            let cancel: bool = args.get("cancel").and_then(Value::as_bool).unwrap_or(false);
+
+            if cancel {
+                let reason = args
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("operator cancel")
+                    .to_string();
+                return match executor.cancel(run_id, &reason).await {
+                    Ok(()) => Ok(Value::Null),
+                    Err(e) => {
+                        tracing::warn!(
+                            workflow_run_id = %run_id,
+                            error = %e,
+                            "Workflow cancel finalization failed"
+                        );
+                        Err(e)
+                    }
+                };
+            }
+
             let result = if from_sleep {
                 executor.resume_from_sleep(run_id).await
             } else {

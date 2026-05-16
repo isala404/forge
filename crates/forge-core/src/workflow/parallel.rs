@@ -120,7 +120,7 @@ impl<'a> ParallelBuilder<'a> {
 
         // Record step starts
         for step in &pending_steps {
-            self.ctx.record_step_start(&step.name);
+            self.ctx.record_step_start(&step.name).await;
         }
 
         // Execute steps in parallel
@@ -157,14 +157,14 @@ impl<'a> ParallelBuilder<'a> {
 
             match result {
                 Ok(value) => {
-                    self.ctx.record_step_complete(&name, value.clone());
+                    self.ctx.record_step_complete(&name, value.clone()).await;
                     results.insert(name.clone(), value);
                     if let Some(comp) = compensate {
                         compensation_handlers.push((name, comp));
                     }
                 }
                 Err(e) => {
-                    self.ctx.record_step_failure(&name, e.to_string());
+                    self.ctx.record_step_failure(&name, e.to_string()).await;
                     failed = true;
                     if first_error.is_none() {
                         first_error = Some(e);

@@ -206,7 +206,7 @@ impl TestContext {
             workflow_name: workflow_name.to_string(),
             input,
             started_at: Utc::now(),
-            status: WorkflowStatus::Created,
+            status: WorkflowStatus::Pending,
             completed_steps: Vec::new(),
         });
         run_id
@@ -379,7 +379,7 @@ mod tests {
             serde_json::json!({"email": "test@example.com"}),
         );
 
-        assert_eq!(ctx.workflow_status(run_id), Some(WorkflowStatus::Created));
+        assert_eq!(ctx.workflow_status(run_id), Some(WorkflowStatus::Pending));
 
         ctx.complete_workflow_step(run_id, "create_user");
         assert!(ctx.workflow_step_completed(run_id, "create_user"));

@@ -76,7 +76,7 @@ pub struct FunctionRouter {
     workflow_dispatcher: Option<Arc<dyn WorkflowDispatch>>,
     rate_limiter: Arc<dyn RateLimiterBackend>,
     role_resolver: SharedRoleResolver,
-    cache: QueryCacheCoordinator,
+    cache: Arc<QueryCacheCoordinator>,
     token_issuer: Option<Arc<dyn forge_core::TokenIssuer>>,
     token_ttl: forge_core::AuthTokenTtl,
     default_timeout: Duration,
@@ -102,7 +102,7 @@ impl FunctionRouter {
     ) -> Self {
         let rate_limiter: Arc<dyn RateLimiterBackend> =
             Arc::new(HybridRateLimiter::new(db.primary().clone()));
-        let cache = QueryCacheCoordinator::new(&registry);
+        let cache = Arc::new(QueryCacheCoordinator::new(&registry));
         Self {
             registry,
             db,
@@ -370,6 +370,11 @@ impl FunctionRouter {
             .functions()
             .map(|(_, entry)| entry.info().clone())
             .collect()
+    }
+
+    /// Shared handle to the query cache coordinator (used to wire cluster invalidation).
+    pub fn cache(&self) -> Arc<QueryCacheCoordinator> {
+        Arc::clone(&self.cache)
     }
 
     pub async fn route(

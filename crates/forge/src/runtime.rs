@@ -17,6 +17,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use uuid::Uuid;
+
 #[cfg(feature = "gateway")]
 use axum::Router;
 #[cfg(feature = "gateway")]
@@ -392,39 +394,6 @@ impl Forge {
             self.persist_workflow_definitions(&pool).await?;
         }
 
-        // Drain check: any non-terminal workflow run referencing a
-        // (name, version) we don't have a handler for is stranded. Boot still
-        // succeeds — we just refuse to report ready until the operator
-        // resolves them in PG (UPDATE forge_workflow_runs SET status = ...).
-        #[cfg(feature = "workflows")]
-        let workflow_readiness = forge_runtime::WorkflowReadiness::new();
-        #[cfg(feature = "workflows")]
-        let workflow_registry_arc = std::sync::Arc::new(self.workflow_registry.clone());
-        #[cfg(feature = "workflows")]
-        {
-            let stranded = workflow_readiness
-                .refresh(&workflow_registry_arc, &pool)
-                .await?;
-            for entry in &stranded {
-                tracing::warn!(
-                    workflow = %entry.workflow_name,
-                    version = %entry.workflow_version,
-                    in_flight_count = entry.in_flight_count,
-                    oldest_started_at = %entry.oldest_started_at,
-                    sample_run_ids = ?entry.sample_run_ids,
-                    "Stranded workflow runs detected; readiness probe will return 503 until resolved. \
-                     Run: UPDATE forge_workflow_runs SET status = 'cancelled_by_operator' \
-                     (or 'retired_unresumable') WHERE id IN (...);"
-                );
-            }
-            if !stranded.is_empty() {
-                tracing::warn!(
-                    drain_pending = workflow_readiness.drain_pending(),
-                    "Boot continuing with drain_pending > 0; /_api/ready will return 503"
-                );
-            }
-        }
-
         // Get local node info
         let hostname = get_hostname();
 
@@ -535,31 +504,77 @@ impl Forge {
 
         let job_queue = JobQueue::new(pool.clone());
 
-        // Start job worker if worker role
+        // Register the workflow bridge handler BEFORE spawning workers.
+        // `JobRegistry` is a plain map cloned by value when handed to each
+        // worker; any registration after worker startup is invisible to them
+        // and `$workflow_resume` jobs would fail with "unknown job type".
+        #[cfg(feature = "workflows")]
+        let workflow_bridge_executor = Arc::new(WorkflowExecutor::new(
+            Arc::new(self.workflow_registry.clone()),
+            pool.clone(),
+            job_queue.clone(),
+            http_client.clone(),
+        ));
+        #[cfg(feature = "workflows")]
+        {
+            forge_runtime::workflow::register_workflow_bridge(
+                workflow_bridge_executor.clone(),
+                &mut self.job_registry,
+            );
+        }
+
+        // Start one worker pool per configured queue if worker role.
+        //
+        // Each queue gets its own Worker instance with a single capability
+        // tag, so heavy traffic on `default` cannot starve `workflows` or
+        // `cron`. The `default` queue's worker is the only one that also
+        // claims jobs whose `worker_capability` is NULL (untagged user jobs).
+        // Custom queues are isolated to jobs explicitly tagged with their
+        // capability via `JobInfo::worker_capability` or the dispatcher.
         #[cfg(feature = "jobs")]
         if roles.contains(&NodeRole::Worker) {
-            let worker_config = WorkerConfig {
-                id: Some(node_id.as_uuid()),
-                capabilities: self.config.node.worker_capabilities.clone(),
-                max_concurrent: self.config.worker.max_concurrent_jobs,
-                poll_interval: *self.config.worker.poll_interval,
-                ..Default::default()
-            };
-
-            let mut worker = Worker::new(
-                worker_config,
-                job_queue.clone(),
-                self.job_registry.clone(),
-                pool.clone(),
-            );
-
-            handles.push(tokio::spawn(async move {
-                if let Err(e) = worker.run().await {
-                    tracing::error!("Worker error: {}", e);
+            let mut node_capabilities: Vec<String> = self.config.node.worker_capabilities.clone();
+            for queue_name in self.config.worker.queues.keys() {
+                if !node_capabilities.iter().any(|c| c == queue_name) {
+                    node_capabilities.push(queue_name.clone());
                 }
-            }));
+            }
 
-            tracing::debug!("Job worker started");
+            for (queue_name, queue_cfg) in &self.config.worker.queues {
+                if queue_cfg.workers == 0 {
+                    continue;
+                }
+                let worker_id = Uuid::new_v4();
+                let claim_untagged = queue_name == forge_core::config::DEFAULT_QUEUE;
+                let worker_config = WorkerConfig {
+                    id: Some(worker_id),
+                    capabilities: vec![queue_name.clone()],
+                    claim_untagged,
+                    max_concurrent: queue_cfg.workers,
+                    poll_interval: *self.config.worker.poll_interval,
+                    ..Default::default()
+                };
+
+                let mut worker = Worker::new(
+                    worker_config,
+                    job_queue.clone(),
+                    self.job_registry.clone(),
+                    pool.clone(),
+                );
+
+                let queue_label = queue_name.clone();
+                handles.push(tokio::spawn(async move {
+                    if let Err(e) = worker.run().await {
+                        tracing::error!(queue = %queue_label, "Worker error: {}", e);
+                    }
+                }));
+
+                tracing::debug!(
+                    queue = %queue_name,
+                    workers = queue_cfg.workers,
+                    "Job worker pool started",
+                );
+            }
         }
 
         // KV TTL cleanup runs on every node with a worker role.
@@ -608,22 +623,6 @@ impl Forge {
             }));
 
             tracing::debug!("Cron scheduler started");
-        }
-
-        // Register workflow bridge handler so workers can execute resume jobs.
-        #[cfg(feature = "workflows")]
-        let workflow_bridge_executor = Arc::new(WorkflowExecutor::new(
-            Arc::new(self.workflow_registry.clone()),
-            pool.clone(),
-            job_queue.clone(),
-            http_client.clone(),
-        ));
-        #[cfg(feature = "workflows")]
-        {
-            forge_runtime::workflow::register_workflow_bridge(
-                workflow_bridge_executor.clone(),
-                &mut self.job_registry,
-            );
         }
 
         // Start workflow scheduler if scheduler role
@@ -791,7 +790,8 @@ impl Forge {
                 gateway_config,
                 self.function_registry.clone(),
                 db_ref.clone(),
-            );
+            )
+            .with_node_id(self.node_id);
             #[cfg(feature = "jobs")]
             let gateway = gateway.with_job_dispatcher(job_dispatcher.clone());
             #[cfg(feature = "workflows")]
@@ -811,14 +811,6 @@ impl Forge {
             if let Some(resolver) = self.role_resolver.take() {
                 gateway = gateway.with_role_resolver(resolver);
             }
-            #[cfg(feature = "workflows")]
-            {
-                gateway = gateway.with_workflow_readiness(
-                    workflow_registry_arc.clone(),
-                    workflow_readiness.clone(),
-                );
-            }
-
             // Wire signals (product analytics + diagnostics)
             if self.config.signals.enabled {
                 let signals_pool = std::sync::Arc::new(db_ref.primary().clone());

@@ -78,6 +78,15 @@ const sidebars: SidebarsConfig = {
         'scale/worker-pools',
         'scale/reactivity',
         'scale/global-deploy',
+        'scale/overnight-success',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Agents',
+      collapsed: true,
+      items: [
+        'agents/dev-loop',
       ],
     },
     {

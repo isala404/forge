@@ -158,6 +158,12 @@ impl Reactor {
         self.shutdown_tx.subscribe()
     }
 
+    /// Subscribe to the cluster-wide change stream so other components (e.g.
+    /// the function-router cache) can react to peer-node mutations.
+    pub fn change_subscriber(&self) -> broadcast::Receiver<Change> {
+        self.change_listener.subscribe()
+    }
+
     /// Register a new session.
     ///
     /// `token_exp` is the JWT `exp` claim (Unix timestamp) from the session's

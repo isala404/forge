@@ -140,7 +140,17 @@ sqlx::query_as!(User, "...", id).fetch_one(&mut conn).await?
 - For values that genuinely need 64-bit precision — Snowflake / Twitter-style IDs, large monotonic counters, microsecond timestamps — declare the field as `String` in Rust and convert at the boundary, or use `serde_with::DisplayFromStr`. Anything that fits in `i32` (under ±2.1e9) is safe to keep as `i32`.
 - `Instant` / `DateTime<Utc>` already serialise as RFC 3339 strings, so timestamps never hit this trap unless you explicitly model them as `i64`.
 
-## 14. Svelte Reactive
+## 14. Operations and Deploy Gates
+
+- **PostgreSQL < 18 is a startup hard-fail**: Forge v2 reads `current_setting('server_version_num')` from a temp pool connection and refuses to continue if the major version is below 18. The runtime relies on `pg_notification_queue_usage()`, partitioned `SET ACCESS METHOD`, `pg_stat_statements.toplevel`, and `NOWAIT` skip-locked semantics. There is no v1-style fallback. Upgrade local Docker images and managed-DB engines before bumping the framework version.
+- **NOTIFY queue at 75 %**: `/_api/ready` returns 503 with `notify_queue_ok=false` once `pg_notification_queue_usage() >= 0.75`. Don't raise the threshold — fix the stuck consumer. Find it with `SELECT pid, application_name, query_start, query FROM pg_stat_activity WHERE wait_event='AsyncWait'` and `pg_terminate_backend()` the offender. The most common cause is a hung gateway node still holding `LISTEN` after a hang.
+- **`migrations_ok=false` after deploy**: code shipped before `forge migrate up`. The check compares embedded system-migration count to `forge_system_migrations`. Order the rollout: migrate, *then* swap traffic.
+- **`cluster_registered=false` for more than 10 s**: this node's row in `forge_nodes` was either never inserted (DB unreachable at boot) or marked dead by another node. Boot races clear within one heartbeat; persistent failures need a log dig.
+- **Never edit `forge_jobs` / `forge_workflow_runs` rows directly to recover from a bad deploy.** Use the admin endpoints — they audit, they fire NOTIFY, and they integrate with the cancel/compensation path. Raw `UPDATE` skips compensation and leaves you guessing which actor did what.
+- **Admin endpoints without `reason` are technically valid but useless** to the next operator reading the audit log. Always pass `{"reason": "<why>"}`.
+- **Per-queue worker pools are reserved, not shared**: `[worker.queues.workflows] workers = 4` means up to 4 simultaneous `$workflow_resume` jobs across this node. They don't burrow into `default`'s slot. Misconfiguring this starves a queue silently — the work just doesn't pick up.
+
+## 15. Svelte Reactive
 
 - Don't wrap `listTodos$()` runes helpers in a `toReactive` adapter. They already manage lifecycle via `$effect` roots — wrapping reintroduces the leaks the rune form eliminates. See [Svelte](./frontend/svelte.md#using-svelte-5-runes).
 - Never create a store inside a `$derived`. Opens a new SSE subscription every recomputation.

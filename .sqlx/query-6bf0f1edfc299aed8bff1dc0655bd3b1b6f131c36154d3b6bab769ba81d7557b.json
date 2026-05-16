@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE forge_workflow_runs\n            SET status = 'sleeping', suspended_at = NOW(), wake_at = $2\n            WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6bf0f1edfc299aed8bff1dc0655bd3b1b6f131c36154d3b6bab769ba81d7557b"
+}

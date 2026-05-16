@@ -35,7 +35,7 @@ pub use realtime_config::RealtimeConfig;
 pub use security::SecurityConfig;
 pub use signals::SignalsConfig;
 pub use types::{DurationStr, SizeStr};
-pub use worker::WorkerConfig;
+pub use worker::{CRON_QUEUE, DEFAULT_QUEUE, QueueWorkerConfig, WORKFLOWS_QUEUE, WorkerConfig};
 
 pub use loader::substitute_env_vars;
 

@@ -550,7 +550,7 @@
             <button class="confirm-btn" onclick={handleConfirmVerification} disabled={confirmSent}>
               {confirmSent ? "Confirmed" : "Confirm Verification"}
             </button>
-          {:else if ["completed", "failed", "compensated"].includes($workflowStore.status)}
+          {:else if ["completed", "failed"].includes($workflowStore.status)}
             <button onclick={startVerificationWorkflow}>Run Again</button>
           {/if}
         {:else}

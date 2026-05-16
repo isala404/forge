@@ -1,0 +1,176 @@
+---
+title: The agent dev loop
+sidebar_label: Dev loop
+---
+
+# The agent dev loop
+
+Forge was rebuilt with autonomous coding agents as a first-class consumer.
+This page documents the loop an agent should run when changing a Forge app
+so the change either compiles, passes tests, and boots — or fails loudly
+in a way the agent can react to.
+
+The loop is the same for humans; the framing here is just sharper.
+
+## Anatomy of a Forge change
+
+A typical change touches some combination of:
+
+- **Backend handlers** under `src/` — `#[forge::query]`, `#[forge::mutation]`,
+  `#[forge::job]`, `#[forge::workflow]`, `#[forge::cron]`, `#[forge::daemon]`,
+  `#[forge::webhook]`, `#[forge::mcp_tool]`.
+- **Schema migrations** in `migrations/` — forward-only `.sql` files, version
+  prefix is monotonic.
+- **Config** in `forge.toml` — TOML with `${ENV_VAR}` substitution.
+- **Frontend** under `frontend/` — SvelteKit or Dioxus, consumes the
+  generated client from `forge generate`.
+
+Every loop iteration runs the same sequence: regenerate bindings, compile,
+test, smoke. Pick the smallest step that disproves the change.
+
+## The inner loop
+
+```bash
+# 1. Edit Rust code or migrations.
+# 2. Regenerate bindings — this is what surfaces type drift between
+#    Rust and the frontend.
+forge generate
+
+# 3. Type/borrow-check everything cheaply.
+cargo check --workspace
+
+# 4. Run unit tests (no DB needed, .sqlx cache is checked in).
+SQLX_OFFLINE=true cargo test --workspace
+
+# 5. Lints (treat warnings as errors).
+cargo clippy --all-targets --all-features --workspace -- -D warnings
+cargo fmt --all --check
+```
+
+Each step takes seconds on a warm cache. Run them in order; an agent that
+runs `cargo test` before `cargo check` wastes the cache on a build the
+checker would have rejected faster.
+
+## The outer loop (DB-backed)
+
+When you change SQL — new migration, new query, modified table — the
+`.sqlx/` query cache goes stale and compile-time-checked queries fail
+offline.
+
+```bash
+# Start a clean PG 18, apply system + app migrations, regenerate.
+# See CLAUDE.md "Regenerating .sqlx cache" for the full script.
+docker run -d --name forge-sqlx-pg -e POSTGRES_PASSWORD=forge \
+  -e POSTGRES_DB=forge -p 5433:5432 postgres:18
+
+# Apply migrations, then:
+DATABASE_URL=postgres://postgres:forge@localhost:5433/forge \
+  cargo sqlx prepare --workspace -- --tests --all-features
+
+# Commit the .sqlx/ diff alongside the SQL change.
+```
+
+The `-- --tests --all-features` tail is required — `cargo sqlx prepare`
+only checks the default feature set otherwise, and integration-test
+queries gated behind `testcontainers` silently miss the cache.
+
+## The boot loop
+
+```bash
+forge check          # validates forge.toml, project layout, .sqlx
+forge migrate up     # forward-only, advisory-locked for cluster safety
+forge dev            # boots gateway + workers, watches code, rebuilds
+```
+
+`forge check` is the cheapest signal: it parses config, walks
+`migrations/`, scans handler attributes, and confirms `.sqlx/` matches
+current SQL. Run it before `cargo build` on a fresh clone — it catches
+"wrong directory" and "missing migration" instantly.
+
+The first request to `/_api/ready` after boot reveals five booleans:
+
+```json
+{
+  "database":         true,   // primary pool round-trips
+  "reactor":          true,   // NOTIFY listener attached
+  "notify_queue_ok":  true,   // pg_notification_queue_usage() < 75 %
+  "migrations_ok":    true,   // embedded count == forge_system_migrations count
+  "cluster_registered": true  // this node is in forge_nodes status=active
+}
+```
+
+Any `false` keeps the probe at HTTP 503. The body is your debugging
+target — don't trust a 200 from `/_api/health` (liveness only).
+
+## The cancel loop
+
+Long-running work doesn't deadlock the dev loop because workflows and
+jobs both react to cancellation in well under a second.
+
+- **Jobs**: `POST /_api/admin/jobs/{id}/cancel` flips status; the worker
+  loop checks `JobContext::is_cancelled()` every poll.
+- **Workflows**: `POST /_api/admin/workflows/{id}/cancel` sets
+  `cancel_requested_at` and fires `forge_workflow_cancelled` over NOTIFY.
+  A run sitting in `ctx.sleep("...", 24h)` wakes within 50 ms, runs its
+  compensation chain, and lands in `cancelled_by_operator`.
+
+You don't need to restart the dev server to clear a stuck workflow.
+
+## End-to-end before declaring done
+
+For UI-touching changes, run the example's Playwright suite. It boots a
+real backend, runs Chromium against the dev server, and dumps a
+full-page screenshot per test into `test-results/`:
+
+```bash
+target/debug/forge test       # cargo test → docker up → playwright
+```
+
+The screenshot fixture is autouse — every test in the suite captures
+its final state into `${testInfo.outputDir}/<slug>.png` alongside the
+trace.zip and video.webm that Playwright already produces. CI uploads
+the whole bundle on failure, so you don't have to wire anything special
+to see what broke.
+
+When the spec passes locally but you're not sure the UI is what you
+intended, open the screenshots before reading the trace. Visual drift
+is faster to confirm than DOM diffing.
+
+## Failure modes and what they mean
+
+| Symptom                                                     | Most likely cause                                                                                   |
+| ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `error: query is not in .sqlx/`                             | New or changed SQL; rerun `cargo sqlx prepare -- --tests --all-features`                            |
+| `forge check` flags missing handler                         | New `#[forge::*]` macro but the type isn't reachable from `lib.rs`; add a `pub use`                 |
+| Migration applies locally but fails on prod                 | Statement timeout (5 min) or lock timeout (5 s) — split into smaller migrations                     |
+| `/_api/ready` 503 with `notify_queue_ok=false`              | NOTIFY queue ≥ 75 %; a consumer is stuck — restart the affected gateway node                        |
+| `/_api/ready` 503 with `cluster_registered=false`           | Cluster heartbeat hasn't landed yet; wait ~5 s, then check `forge_nodes`                            |
+| `/_api/ready` 503 with `migrations_ok=false`                | Code is ahead of DB; `forge migrate up` before the new binary takes traffic                         |
+| Workflow stuck in `blocked_signature_mismatch`              | Schema drift across versions; pin the in-flight run with `cancel_by_operator` or `retire_unresumable` |
+| `cargo build` fine, `forge dev` panics with "PostgreSQL X"  | PG < 18; upgrade local Postgres                                                                     |
+| Frontend test passes locally, screenshot blank in CI        | Forgot `await gotoReady(path)` — the WASM/SvelteKit app hadn't subscribed yet                       |
+
+## When to stop and ask
+
+Stop and surface the failure (rather than retrying) when:
+
+- Two consecutive `cargo sqlx prepare` runs both fail with different
+  errors. The cache mismatch and the test schema have diverged; you need
+  human-eyes on which is canonical.
+- `/_api/ready` reports `migrations_ok=false` and `forge migrate up`
+  also fails. A migration is broken — fixing forward is destructive on a
+  shared database.
+- A workflow signature mismatch is detected after deploy. Pinned runs
+  block readiness for a reason; "force-resume" without understanding the
+  drift is how you corrupt durable state.
+
+In all three cases the right next move is reading, not re-running.
+
+## See also
+
+- [Configuration](../ship/configuration.mdx) — every config knob the loop
+  touches.
+- [Overnight success](../scale/overnight-success.mdx) — the same loop
+  applied to ship-level changes.
+- [Testing](../ship/testing.mdx) — fixtures, screenshots, and what the
+  CI templates do.

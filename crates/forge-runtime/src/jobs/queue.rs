@@ -124,7 +124,8 @@ pub struct JobQueue {
 
 impl JobQueue {
     /// Default retention for terminal jobs (completed, failed, cancelled).
-    const DEFAULT_RETENTION: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+    pub(crate) const DEFAULT_RETENTION: std::time::Duration =
+        std::time::Duration::from_secs(7 * 24 * 3600);
 
     /// Create a new job queue.
     pub fn new(pool: sqlx::PgPool) -> Self {
@@ -223,20 +224,34 @@ impl JobQueue {
     }
 
     /// Claim jobs using SKIP LOCKED pattern.
+    ///
+    /// `capabilities` is the set of queue/capability tags this worker serves.
+    /// If `claim_untagged` is true the worker also claims jobs whose
+    /// `worker_capability` is NULL — set on the `default` queue worker so it
+    /// drains untagged user jobs. Other queue workers must leave it false to
+    /// preserve queue isolation.
     pub async fn claim(
         &self,
         worker_id: Uuid,
         capabilities: &[String],
+        claim_untagged: bool,
         limit: i32,
     ) -> Result<Vec<JobRecord>, sqlx::Error> {
         let rows = sqlx::query!(
             r#"
             WITH claimable AS (
                 SELECT id
-                FROM forge_jobs
+                FROM forge_jobs j
                 WHERE status = 'pending'
                   AND scheduled_at <= NOW()
-                  AND (worker_capability = ANY($2) OR worker_capability IS NULL)
+                  AND (
+                      worker_capability = ANY($2)
+                      OR ($4 AND worker_capability IS NULL)
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM forge_paused_queues p
+                      WHERE p.queue_name = COALESCE(j.worker_capability, 'default')
+                  )
                 ORDER BY priority DESC, scheduled_at ASC
                 LIMIT $3
                 FOR UPDATE SKIP LOCKED
@@ -258,6 +273,7 @@ impl JobQueue {
             worker_id,
             capabilities,
             limit as i64,
+            claim_untagged,
         )
         .fetch_all(&self.pool)
         .await?;
@@ -843,7 +859,7 @@ mod integration_tests {
 
         // Claim it
         let claimed = queue
-            .claim(worker_id, &[], 10)
+            .claim(worker_id, &[], true, 10)
             .await
             .expect("Failed to claim");
         assert_eq!(claimed.len(), 1);
@@ -874,12 +890,12 @@ mod integration_tests {
 
         // Worker 1 claims 2
         let worker1 = Uuid::new_v4();
-        let batch1 = queue.claim(worker1, &[], 2).await.expect("claim1");
+        let batch1 = queue.claim(worker1, &[], true, 2).await.expect("claim1");
         assert_eq!(batch1.len(), 2);
 
         // Worker 2 claims remaining
         let worker2 = Uuid::new_v4();
-        let batch2 = queue.claim(worker2, &[], 2).await.expect("claim2");
+        let batch2 = queue.claim(worker2, &[], true, 2).await.expect("claim2");
         assert_eq!(batch2.len(), 1);
 
         // No overlap
@@ -909,7 +925,7 @@ mod integration_tests {
         queue.enqueue(high).await.expect("enqueue high");
 
         // Claim 1 - should get the high-priority job first
-        let claimed = queue.claim(worker_id, &[], 1).await.expect("claim");
+        let claimed = queue.claim(worker_id, &[], true, 1).await.expect("claim");
         assert_eq!(claimed.len(), 1);
         assert_eq!(claimed[0].job_type, "high_job");
 
@@ -926,7 +942,7 @@ mod integration_tests {
         let job_id = queue.enqueue(job).await.expect("enqueue");
 
         // Claim
-        queue.claim(worker_id, &[], 1).await.expect("claim");
+        queue.claim(worker_id, &[], true, 1).await.expect("claim");
 
         // Start
         queue.start(job_id, worker_id, 1).await.expect("start");
@@ -954,7 +970,7 @@ mod integration_tests {
         let job = JobRecord::new("flaky", serde_json::json!({}), JobPriority::Normal, 3);
         let job_id = queue.enqueue(job).await.expect("enqueue");
 
-        queue.claim(worker_id, &[], 1).await.expect("claim");
+        queue.claim(worker_id, &[], true, 1).await.expect("claim");
         queue.start(job_id, worker_id, 1).await.expect("start");
 
         // Fail with retry delay
@@ -985,7 +1001,7 @@ mod integration_tests {
         let job = JobRecord::new("fatal", serde_json::json!({}), JobPriority::Normal, 1);
         let job_id = queue.enqueue(job).await.expect("enqueue");
 
-        queue.claim(worker_id, &[], 1).await.expect("claim");
+        queue.claim(worker_id, &[], true, 1).await.expect("claim");
         queue.start(job_id, worker_id, 1).await.expect("start");
 
         // Fail without retry (None delay) -> dead letter
@@ -1089,7 +1105,7 @@ mod integration_tests {
         // Worker without capability can't claim
         let worker_no_cap = Uuid::new_v4();
         let claimed = queue
-            .claim(worker_no_cap, &["cpu".into()], 10)
+            .claim(worker_no_cap, &["cpu".into()], false, 10)
             .await
             .expect("claim");
         assert!(
@@ -1100,10 +1116,65 @@ mod integration_tests {
         // Worker with capability can claim
         let worker_with_cap = Uuid::new_v4();
         let claimed = queue
-            .claim(worker_with_cap, &["gpu".into()], 10)
+            .claim(worker_with_cap, &["gpu".into()], false, 10)
             .await
             .expect("claim");
         assert_eq!(claimed.len(), 1);
+
+        db.cleanup().await.expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn claim_untagged_isolation() {
+        let db = setup_db("claim_untagged_isolation").await;
+        let queue = JobQueue::new(db.pool().clone());
+
+        let untagged = JobRecord::new("any", serde_json::json!({}), JobPriority::Normal, 3);
+        queue.enqueue(untagged).await.expect("enqueue untagged");
+
+        let workflow_job = JobRecord::new("any", serde_json::json!({}), JobPriority::Normal, 3)
+            .with_capability("workflows");
+        queue.enqueue(workflow_job).await.expect("enqueue workflow");
+
+        let cron_job = JobRecord::new("any", serde_json::json!({}), JobPriority::Normal, 3)
+            .with_capability("cron");
+        queue.enqueue(cron_job).await.expect("enqueue cron");
+
+        // workflows-queue worker claim_untagged=false: only its own jobs.
+        let workflow_worker = Uuid::new_v4();
+        let claimed = queue
+            .claim(workflow_worker, &["workflows".into()], false, 10)
+            .await
+            .expect("claim workflows");
+        assert_eq!(
+            claimed.len(),
+            1,
+            "workflows worker must NOT pick up untagged jobs"
+        );
+        assert_eq!(claimed[0].worker_capability.as_deref(), Some("workflows"));
+
+        // cron-queue worker claim_untagged=false: only its own jobs.
+        let cron_worker = Uuid::new_v4();
+        let claimed = queue
+            .claim(cron_worker, &["cron".into()], false, 10)
+            .await
+            .expect("claim cron");
+        assert_eq!(
+            claimed.len(),
+            1,
+            "cron worker must NOT pick up untagged jobs"
+        );
+        assert_eq!(claimed[0].worker_capability.as_deref(), Some("cron"));
+
+        // default-queue worker claim_untagged=true picks up the untagged job
+        // even though "default" tag is not on it.
+        let default_worker = Uuid::new_v4();
+        let claimed = queue
+            .claim(default_worker, &["default".into()], true, 10)
+            .await
+            .expect("claim default");
+        assert_eq!(claimed.len(), 1, "default worker must claim untagged job");
+        assert!(claimed[0].worker_capability.is_none());
 
         db.cleanup().await.expect("cleanup");
     }
@@ -1116,7 +1187,7 @@ mod integration_tests {
 
         let job = JobRecord::new("long_task", serde_json::json!({}), JobPriority::Normal, 3);
         let job_id = queue.enqueue(job).await.expect("enqueue");
-        queue.claim(worker_id, &[], 1).await.expect("claim");
+        queue.claim(worker_id, &[], true, 1).await.expect("claim");
         queue.start(job_id, worker_id, 1).await.expect("start");
 
         // Heartbeat should not error
@@ -1133,7 +1204,7 @@ mod integration_tests {
 
         let job = JobRecord::new("export", serde_json::json!({}), JobPriority::Normal, 3);
         let job_id = queue.enqueue(job).await.expect("enqueue");
-        queue.claim(worker_id, &[], 1).await.expect("claim");
+        queue.claim(worker_id, &[], true, 1).await.expect("claim");
         queue.start(job_id, worker_id, 1).await.expect("start");
 
         queue
