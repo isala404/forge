@@ -28,9 +28,9 @@ impl DurationStr {
         self.0.as_secs()
     }
 
-    /// Get the duration as whole milliseconds.
+    /// Get the duration as whole milliseconds (saturates at `u64::MAX`).
     pub fn as_millis(&self) -> u64 {
-        self.0.as_millis() as u64
+        u64::try_from(self.0.as_millis()).unwrap_or(u64::MAX)
     }
 }
 
@@ -95,7 +95,7 @@ impl<'de> Deserialize<'de> for DurationStr {
 /// A byte-size value parsed from a human-readable string like `"20mb"`, `"1gb"`.
 ///
 /// Validates at deserialization time.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SizeStr(usize);
 
 impl SizeStr {

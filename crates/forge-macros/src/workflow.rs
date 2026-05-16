@@ -248,8 +248,7 @@ fn convert_workflow_attrs(darling: DarlingWorkflowAttrs) -> WorkflowAttrs {
 }
 
 /// Extract step and wait keys from the workflow function body for signature derivation.
-/// Looks for patterns like `ctx.step("key")`, `ctx.wait_for_event::<T>("event", ...)`,
-/// `ctx.sleep(...)`, and `ctx.parallel()...step("key")`.
+/// Looks for patterns like `ctx.step("key", ...)` and `ctx.wait_for_event::<T>("event", ...)`.
 struct ContractExtractor {
     step_keys: BTreeSet<String>,
     wait_keys: BTreeSet<String>,
@@ -303,8 +302,13 @@ impl<'ast> Visit<'ast> for ContractExtractor {
 }
 
 /// Derive a workflow signature from its persisted contract.
-/// The signature is a hex-encoded hash of: name, version, step keys, wait keys,
-/// timeout, and input/output type shapes.
+/// The signature is a 32-char hex-encoded blake3 hash (128 bits, truncated) of:
+/// name, version, step keys, wait keys, timeout, and input/output type names.
+///
+/// NOTE: Input/output types are hashed as their source-level type name strings,
+/// not full JSON schemas. This means renaming a type alias without changing its
+/// structure will produce a different signature. Full schemars-based structural
+/// hashing is deferred to a future pass.
 fn derive_signature(
     name: &str,
     version: &str,
@@ -314,35 +318,53 @@ fn derive_signature(
     input_type: &str,
     output_type: &str,
 ) -> String {
-    // Simple FNV-1a 64-bit hash (no external crate needed in proc macros)
-    let mut hash: u64 = 0xcbf29ce484222325;
-    let fnv_prime: u64 = 0x100000001b3;
+    let mut hasher = blake3::Hasher::new();
 
-    let mut feed = |bytes: &[u8]| {
-        for &b in bytes {
-            hash ^= u64::from(b);
-            hash = hash.wrapping_mul(fnv_prime);
-        }
-        // separator
-        hash ^= 0xff;
-        hash = hash.wrapping_mul(fnv_prime);
-    };
-
-    feed(name.as_bytes());
-    feed(version.as_bytes());
+    // Domain separator prevents collisions with other uses of blake3 in the project
+    hasher.update(b"forge_workflow_signature_v1\x00");
+    hasher.update(name.as_bytes());
+    hasher.update(b"\x00");
+    hasher.update(version.as_bytes());
+    hasher.update(b"\x00");
     for key in step_keys {
-        feed(b"step:");
-        feed(key.as_bytes());
+        hasher.update(b"step:");
+        hasher.update(key.as_bytes());
+        hasher.update(b"\x00");
     }
     for key in wait_keys {
-        feed(b"wait:");
-        feed(key.as_bytes());
+        hasher.update(b"wait:");
+        hasher.update(key.as_bytes());
+        hasher.update(b"\x00");
     }
-    feed(timeout_secs.to_le_bytes().as_slice());
-    feed(input_type.as_bytes());
-    feed(output_type.as_bytes());
+    hasher.update(&timeout_secs.to_le_bytes());
+    hasher.update(b"\x00");
+    hasher.update(input_type.as_bytes());
+    hasher.update(b"\x00");
+    hasher.update(output_type.as_bytes());
 
-    format!("{hash:016x}")
+    let hash = hasher.finalize();
+    let bytes = hash.as_bytes();
+    // Truncate to 128 bits (16 bytes) -> 32 hex chars. Collision-resistant
+    // enough for workflow signature matching (birthday bound ~2^64 runs).
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
+    )
 }
 
 pub fn workflow_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -553,6 +575,8 @@ mod tests {
         let sig1 = derive_signature("onboarding", "v1", &steps, &waits, 86400, "Input", "Output");
         let sig2 = derive_signature("onboarding", "v1", &steps, &waits, 86400, "Input", "Output");
         assert_eq!(sig1, sig2);
+        // blake3 truncated to 128 bits -> 32 hex chars
+        assert_eq!(sig1.len(), 32);
     }
 
     #[test]

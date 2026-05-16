@@ -9,7 +9,6 @@ use serde::de::DeserializeOwned;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use super::parallel::ParallelBuilder;
 use super::step::StepStatus;
 use super::suspend::{SuspendReason, WorkflowEvent};
 use crate::env::{EnvAccess, EnvProvider, RealEnvProvider};
@@ -549,6 +548,15 @@ impl WorkflowContext {
     }
 
     /// Register a compensation handler for a step.
+    ///
+    /// Limitation: compensation handlers are in-memory closures and cannot
+    /// survive a process restart. If the process crashes between step completion
+    /// and workflow termination, compensation handlers for completed steps are
+    /// lost. The `WorkflowExecutor::cancel` method detects this and fails the
+    /// workflow with a clear message indicating manual remediation is required.
+    /// This is an inherent constraint of closure-based compensation; a durable
+    /// alternative would require serializable compensation descriptors (e.g.,
+    /// naming a registered handler + captured args as JSON).
     pub fn register_compensation(&self, step_name: &str, handler: CompensationHandler) {
         let mut handlers = self
             .compensation_handlers
@@ -837,83 +845,6 @@ impl WorkflowContext {
         }
         // Return a special error that the executor catches
         Err(ForgeError::WorkflowSuspended)
-    }
-
-    /// Create a parallel builder for executing steps concurrently.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let results = ctx.parallel()
-    ///     .step("fetch_user", || async { get_user(id).await })
-    ///     .step("fetch_orders", || async { get_orders(id).await })
-    ///     .step_with_compensate("charge_card",
-    ///         || async { charge_card(amount).await },
-    ///         |charge| async move { refund(charge.id).await })
-    ///     .run().await?;
-    ///
-    /// let user: User = results.get("fetch_user")?;
-    /// let orders: Vec<Order> = results.get("fetch_orders")?;
-    /// ```
-    pub fn parallel(&self) -> ParallelBuilder<'_> {
-        ParallelBuilder::new(self)
-    }
-
-    /// Create a step runner for executing a workflow step.
-    ///
-    /// This provides a fluent API for defining steps with retry, compensation,
-    /// timeout, and optional behavior.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// use std::time::Duration;
-    ///
-    /// // Simple step
-    /// let data = ctx.step("fetch_data", || async {
-    ///     Ok(fetch_from_api().await?)
-    /// }).run().await?;
-    ///
-    /// // Step with retry (3 attempts, 2 second delay)
-    /// ctx.step("send_email", || async {
-    ///     send_verification_email(&user.email).await
-    /// })
-    /// .retry(3, Duration::from_secs(2))
-    /// .run()
-    /// .await?;
-    ///
-    /// // Step with compensation (rollback on later failure)
-    /// let charge = ctx.step("charge_card", || async {
-    ///     charge_credit_card(&card).await
-    /// })
-    /// .compensate(|charge_result| async move {
-    ///     refund_charge(&charge_result.charge_id).await
-    /// })
-    /// .run()
-    /// .await?;
-    ///
-    /// // Optional step (failure won't trigger compensation)
-    /// ctx.step("notify_slack", || async {
-    ///     post_to_slack("User signed up!").await
-    /// })
-    /// .optional()
-    /// .run()
-    /// .await?;
-    ///
-    /// // Step with timeout
-    /// ctx.step("slow_operation", || async {
-    ///     process_large_file().await
-    /// })
-    /// .timeout(Duration::from_secs(60))
-    /// .run()
-    /// .await?;
-    /// ```
-    pub fn step<T, F, Fut>(&self, name: impl Into<String>, f: F) -> super::StepRunner<'_, T>
-    where
-        T: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
-        F: Fn() -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = crate::Result<T>> + Send + 'static,
-    {
-        super::StepRunner::new(self, name, f)
     }
 }
 

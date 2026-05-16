@@ -155,3 +155,14 @@ sqlx::query_as!(User, "...", id).fetch_one(&mut conn).await?
 - Don't wrap `listTodos$()` runes helpers in a `toReactive` adapter. They already manage lifecycle via `$effect` roots — wrapping reintroduces the leaks the rune form eliminates. See [Svelte](./frontend/svelte.md#using-svelte-5-runes).
 - Never create a store inside a `$derived`. Opens a new SSE subscription every recomputation.
 - Set `export const ssr = false;` in `+layout.ts`. SSE / `EventSource` / `localStorage` aren't available server-side.
+
+## 16. Signals v1 → v2 Breaking Changes
+
+`trackVital()` and `identifyUser()` were removed in v2. Use the current API instead:
+
+| Removed (v1) | Replacement (v2) |
+| --- | --- |
+| `signals.trackVital(name, value)` | `signals.vital(name, value, extra?)` |
+| `signals.identifyUser(userId, traits)` | `signals.identify(userId, traits?)` |
+
+Both are available on the `ForgeSignals` instance returned by `getForgeSignals()` (Svelte) and `use_signals()` (Dioxus). Code using the old names will fail at runtime with a `TypeError: signals.trackVital is not a function` (Svelte) or a compile error (Dioxus — the method is removed from the struct).

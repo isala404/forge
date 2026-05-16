@@ -60,7 +60,7 @@ Your backend logic. Each file can contain any combination of:
 
 ```rust
 // Query - read data
-#[forge::query(tables = ["todos"])]
+#[forge::query(tables("todos"))]
 pub async fn list_todos(ctx: &QueryContext) -> Result<Vec<Todo>> { ... }
 
 // Mutation - write data

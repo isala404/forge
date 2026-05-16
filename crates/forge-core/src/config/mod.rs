@@ -115,8 +115,6 @@ impl ForgeConfig {
 
     /// Parse configuration from a TOML string.
     pub fn parse_toml(content: &str) -> Result<Self> {
-        loader::reject_secret_defaults(content)?;
-
         let content = loader::substitute_env_vars(content);
 
         let config: Self = toml::from_str(&content)

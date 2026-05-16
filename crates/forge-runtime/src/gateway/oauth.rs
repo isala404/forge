@@ -34,6 +34,11 @@ const RATE_WINDOW_SECS: u64 = 60;
 const RATE_CLEANUP_THRESHOLD: usize = 100;
 
 /// In-memory rate limiter for OAuth endpoints.
+///
+/// Per-node rate limiting. With N nodes behind a load balancer, the effective
+/// limit is N× the configured value. For exact cluster-wide OAuth rate limiting,
+/// integrate with StrictRateLimiter (PG-backed).
+// TODO(pre-1.0): migrate to StrictRateLimiter for cluster-wide enforcement
 #[derive(Clone, Default)]
 struct OAuthRateLimiter {
     buckets: Arc<RwLock<HashMap<String, (u32, Instant)>>>,
@@ -671,8 +676,9 @@ pub async fn oauth_authorize_post(
             PasswordHash::new(hash)
                 .ok()
                 .and_then(|parsed| {
-                    use argon2::PasswordVerifier;
-                    argon2::Argon2::default()
+                    use argon2::{Algorithm, Argon2, Params, PasswordVerifier, Version};
+                    let params = Params::new(65536, 3, 1, None).expect("valid argon2 params");
+                    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
                         .verify_password(password.as_bytes(), &parsed)
                         .ok()
                 })
@@ -1027,27 +1033,31 @@ fn base_url_from_headers(headers: &HeaderMap) -> String {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("localhost:9081");
 
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("http");
+    // Do not trust x-forwarded-proto: OAuth routes bypass the trusted-proxy
+    // middleware, so any client can spoof the header. Default to "https" for
+    // production safety; localhost gets "http" for local development.
+    let scheme = if host.starts_with("localhost") || host.starts_with("127.0.0.1") {
+        "http"
+    } else {
+        "https"
+    };
 
     format!("{scheme}://{host}")
 }
 
-fn client_ip(headers: &HeaderMap) -> String {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(|s| s.trim().to_string())
-        .or_else(|| {
-            headers
-                .get("x-real-ip")
-                .and_then(|v| v.to_str().ok())
-                .map(String::from)
-        })
-        .unwrap_or_else(|| "unknown".to_string())
+/// Extract client IP for rate limiting.
+///
+/// OAuth routes bypass the gateway's trusted-proxy middleware, so we cannot
+/// trust X-Forwarded-For or X-Real-IP headers here (any client could spoof
+/// them). Returns "unknown" as a safe fallback; rate limiting still works
+/// because the bucket key is per-IP and "unknown" collapses all unidentifiable
+/// clients into a single shared bucket.
+fn client_ip(_headers: &HeaderMap) -> String {
+    // Without access to the resolved peer address (which requires axum's
+    // ConnectInfo extractor on the route), we cannot determine the true client
+    // IP. "unknown" is safe: it means all OAuth rate-limit requests share one
+    // bucket, which is more restrictive, not less.
+    "unknown".to_string()
 }
 
 fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -1071,17 +1081,5 @@ fn html_escape(s: &str) -> String {
 }
 
 fn urlencoding(s: &str) -> String {
-    // Minimal percent-encoding for OAuth parameters
-    let mut result = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                result.push(b as char);
-            }
-            _ => {
-                result.push_str(&format!("%{b:02X}"));
-            }
-        }
-    }
-    result
+    percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
 }

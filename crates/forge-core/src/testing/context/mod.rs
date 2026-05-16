@@ -1,3 +1,5 @@
+// TODO(pre-1.0): Collapse to 4 generic contexts per 07-DELETION-LIST.md
+
 //! Test context builders for all FORGE function types.
 //!
 //! Each test context provides:

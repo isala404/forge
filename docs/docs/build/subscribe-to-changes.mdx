@@ -50,7 +50,7 @@ Debouncing prevents notification storms: 50ms after the last change, or 200ms ma
 
 | Attribute | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `tables` | `["t1", "t2"]` | auto | Override table dependencies (for dynamic SQL) |
+| `tables("t1", "t2")` | list | auto | Override table dependencies (for dynamic SQL) |
 | `public` | flag | `false` | Bypass authentication |
 | `cache` | `"duration"` | none | Cache TTL (e.g., `"30s"`) |
 | `timeout` | `u64` | none | Statement timeout in seconds |
@@ -84,7 +84,7 @@ Use `tables` only when SQL is constructed dynamically:
 
 ```rust
 // Dynamic SQL - must specify tables manually
-#[forge::query(tables = ["users", "orders"])]
+#[forge::query(tables("users", "orders"))]
 pub async fn search(ctx: &QueryContext, table: String, term: String) -> Result<Vec<Row>> {
     let sql = format!("SELECT * FROM {} WHERE name ILIKE $1", table);
     sqlx::query_as(&sql)

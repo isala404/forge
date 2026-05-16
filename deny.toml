@@ -1,3 +1,5 @@
+version = 2
+
 [graph]
 all-features = true
 

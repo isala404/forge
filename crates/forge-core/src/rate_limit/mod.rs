@@ -4,6 +4,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 
 use crate::ForgeError;
+use crate::util::parse_duration;
 
 mod backend;
 
@@ -125,23 +126,10 @@ impl RateLimitConfig {
         self.requests as f64 / self.per.as_secs_f64()
     }
 
-    /// Parse duration from string like "1m", "1h", "1d".
+    /// Parse duration from string like "1m", "1h", "1d", "100ms".
+    /// Delegates to [`crate::util::parse_duration`].
     pub fn parse_duration(s: &str) -> Option<Duration> {
-        let s = s.trim();
-        if s.is_empty() {
-            return None;
-        }
-
-        let (num_str, unit) = s.split_at(s.len() - 1);
-        let num: u64 = num_str.parse().ok()?;
-
-        match unit {
-            "s" => Some(Duration::from_secs(num)),
-            "m" => Some(Duration::from_secs(num * 60)),
-            "h" => Some(Duration::from_secs(num * 3600)),
-            "d" => Some(Duration::from_secs(num * 86400)),
-            _ => None,
-        }
+        parse_duration(s)
     }
 }
 

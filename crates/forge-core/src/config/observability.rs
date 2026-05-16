@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use super::default_true;
 use super::types::DurationStr;
 
 /// Observability configuration for OTLP telemetry.
@@ -71,10 +72,6 @@ impl ObservabilityConfig {
 
 fn default_otlp_endpoint() -> String {
     "http://localhost:4318".to_string()
-}
-
-fn default_true() -> bool {
-    true
 }
 
 /// Default trace sampling ratio. 100% so every span is visible out of the box.

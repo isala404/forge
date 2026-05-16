@@ -116,13 +116,25 @@ impl InvalidationEngine {
         }
 
         if pending.len() >= self.config.max_buffer_size {
-            drop(pending);
-            self.flush_all().await;
+            // Force all pending groups to be immediately ready on the next
+            // check_pending tick by backdating their timestamps past the
+            // max debounce window. This avoids discarding group IDs (which
+            // flush_all would return with no consumer).
+            let past = Instant::now() - Duration::from_millis(self.config.max_debounce_ms + 1);
+            for inv in pending.values_mut() {
+                inv.first_change = past;
+                inv.last_change = past;
+            }
         }
     }
 
     /// Check for groups that need to be invalidated (debounce expired).
     pub async fn check_pending(&self) -> Vec<QueryGroupId> {
+        // Cheap read-lock pre-check: avoid acquiring the write lock when idle.
+        if self.pending.read().await.is_empty() {
+            return Vec::new();
+        }
+
         let now = Instant::now();
         let debounce = Duration::from_millis(self.config.debounce_ms);
         let max_debounce = Duration::from_millis(self.config.max_debounce_ms);

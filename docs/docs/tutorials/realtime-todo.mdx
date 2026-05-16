@@ -86,7 +86,7 @@ use uuid::Uuid;
 
 use crate::schema::Todo;
 
-#[forge::query(public, tables = ["todos"])]
+#[forge::query(public, tables("todos"))]
 pub async fn list_todos(ctx: &QueryContext) -> Result<Vec<Todo>> {
     sqlx::query_as!(Todo, "SELECT * FROM todos ORDER BY created_at DESC")
         .fetch_all(ctx.db())
@@ -98,7 +98,7 @@ pub async fn list_todos(ctx: &QueryContext) -> Result<Vec<Todo>> {
 Key points:
 
 - **`public`** -- no authentication required. Remove this for authenticated endpoints.
-- **`tables = ["todos"]`** -- tells Forge which tables this query reads from. When a mutation modifies the `todos` table, Forge knows to re-run this query and push updates to all subscribers.
+- **`tables("todos")`** -- tells Forge which tables this query reads from. When a mutation modifies the `todos` table, Forge knows to re-run this query and push updates to all subscribers.
 - **`QueryContext`** -- provides access to the database pool via `ctx.db()`.
 
 ## Step 5: Create Mutations
@@ -436,7 +436,7 @@ The real-time pipeline:
 1. A client calls `createTodo()`, which sends a request to the Forge backend.
 2. The mutation inserts a row into the `todos` table.
 3. The PostgreSQL trigger (installed by `forge_enable_reactivity`) fires a `NOTIFY` event.
-4. Forge receives the notification via `LISTEN` and re-executes all queries that declared `tables = ["todos"]`.
+4. Forge receives the notification via `LISTEN` and re-executes all queries that declared `tables("todos")`.
 5. Forge hashes the new query result and compares it to the previous hash. If different, it pushes the updated data to all subscribed clients over SSE.
 6. The frontend binding (`listTodos$()` or `use_list_todos_live()`) receives the update and re-renders.
 

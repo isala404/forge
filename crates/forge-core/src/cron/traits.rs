@@ -7,6 +7,12 @@ use crate::Result;
 use crate::metadata::HandlerMetadata;
 
 /// Trait for cron job handlers.
+///
+/// Crons are dispatched as `$cron:{name}` jobs for execution but retain a
+/// separate trait for ergonomic configuration (schedule expression, timezone,
+/// catch-up). The execution model is unified through the job queue: the cron
+/// scheduler claims a run slot and enqueues a bridge job, which the worker
+/// pool executes with retry and timeout semantics inherited from `JobInfo`.
 pub trait ForgeCron: crate::__sealed::Sealed + Send + Sync + 'static {
     /// Reserved for future parameterized cron input.
     type Args: serde::de::DeserializeOwned + Send + Sync + 'static;

@@ -11,7 +11,10 @@ use crate::attrs::{
     RateLimitMeta, RequireRole, TablesList, parse_rate_limit_per, reject_reserved,
     validate_rate_limit,
 };
-use crate::sql_extractor::{SqlStringExtractor, extract_changed_columns_from_sql};
+use crate::sql_extractor::{
+    SqlStringExtractor, TableExtractionResult, extract_changed_columns_from_sql,
+    extract_tables_from_sql,
+};
 use crate::utils::{parse_duration_secs, parse_size_bytes, to_pascal_case};
 
 /// Attribute keys whose names are reserved for upcoming mutation-coalescing
@@ -386,9 +389,30 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         None => quote! { None },
     };
 
+    // Extract SQL strings once and reuse for both table deps and changed columns.
+    let mut extractor = SqlStringExtractor::new();
+    extractor.visit_block(fn_block);
+
     let table_deps_tokens = match &attrs.tables {
         Some(tables) => quote! { &[#(#tables),*] },
-        None => quote! { &[] },
+        None => {
+            // Auto-extract table dependencies from SQL (INSERT/UPDATE/DELETE targets).
+            match extract_tables_from_sql(&extractor.sql_strings) {
+                TableExtractionResult::Ok(tables) => {
+                    let mut sorted: Vec<String> = tables.into_iter().collect();
+                    sorted.sort();
+                    if sorted.is_empty() {
+                        quote! { &[] }
+                    } else {
+                        quote! { &[#(#sorted),*] }
+                    }
+                }
+                // If SQL can't be parsed, fall back to empty (conservative: invalidates
+                // nothing, but changed_columns will also be empty which triggers full
+                // invalidation of dependent queries via the coordinator).
+                TableExtractionResult::ParseFailed(_) => quote! { &[] },
+            }
+        }
     };
 
     // Extract written columns from INSERT/UPDATE statements in the body.
@@ -396,8 +420,6 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
     // the cache invalidator, which then falls back to invalidating every
     // dependent query rather than skipping ones it can't reason about.
     let changed_columns_tokens: TokenStream2 = {
-        let mut extractor = SqlStringExtractor::new();
-        extractor.visit_block(fn_block);
         let mut cols: Vec<String> = extract_changed_columns_from_sql(&extractor.sql_strings)
             .into_iter()
             .collect();

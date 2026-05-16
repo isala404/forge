@@ -6,7 +6,7 @@ use uuid::Uuid;
 use serde::Serialize;
 
 use crate::env::{EnvAccess, EnvProvider, RealEnvProvider};
-use crate::function::{AuthContext, OutboxBuffer, PendingJob, PendingWorkflow};
+use crate::function::AuthContext;
 use crate::http::CircuitBreakerClient;
 
 /// Returns an empty JSON object for initializing job saved data.
@@ -40,8 +40,6 @@ pub struct JobContext {
     progress_tx: Option<mpsc::Sender<ProgressUpdate>>,
     /// Environment variable provider.
     env_provider: Arc<dyn EnvProvider>,
-    /// Buffered dispatches, flushed by the executor after successful completion.
-    pending_dispatches: Arc<tokio::sync::Mutex<OutboxBuffer>>,
 }
 
 /// Progress update message.
@@ -77,7 +75,6 @@ impl JobContext {
             http_timeout: None,
             progress_tx: None,
             env_provider: Arc::new(RealEnvProvider::new()),
-            pending_dispatches: Arc::new(tokio::sync::Mutex::new(OutboxBuffer::default())),
         }
     }
 
@@ -138,11 +135,21 @@ impl JobContext {
 
     /// Get the raw database pool for bridge handlers that need to construct
     /// other context types (e.g., CronContext from a cron bridge job).
+    ///
+    /// Not intended for use in application job handlers. Use `db()`, `db_conn()`,
+    /// or `conn()` instead. This exists so bridge handlers (cron-to-job,
+    /// workflow-to-job) can construct sub-contexts that require a pool reference.
+    #[doc(hidden)]
     pub fn pool(&self) -> &sqlx::PgPool {
         &self.db_pool
     }
 
-    /// Get the circuit breaker HTTP client for bridge handlers.
+    /// Get the circuit breaker HTTP client for bridge handlers that need to
+    /// construct sub-contexts (e.g., CronContext from a cron bridge job).
+    ///
+    /// Not intended for use in application job handlers. Use `http()` or
+    /// `raw_http()` instead.
+    #[doc(hidden)]
     pub fn circuit_breaker_client(&self) -> &CircuitBreakerClient {
         &self.http_client
     }
@@ -207,10 +214,12 @@ impl JobContext {
         self.persist_saved_data(persisted).await
     }
 
-    /// Buffer a sub-job for dispatch after this job completes successfully.
+    /// Dispatch a sub-job directly.
     ///
-    /// The job is not inserted immediately. The executor drains the buffer
-    /// only on success, preventing orphaned sub-jobs if the parent fails.
+    /// The job is inserted into the queue immediately. If the parent job
+    /// subsequently fails, the sub-job remains enqueued (fire-and-forget
+    /// semantics). Use transactional dispatch in MutationContext for
+    /// commit-dependent dispatch.
     pub async fn dispatch_job<T: Serialize>(
         &self,
         job_type: &str,
@@ -219,21 +228,34 @@ impl JobContext {
         let id = Uuid::new_v4();
         let args_json = serde_json::to_value(args)
             .map_err(|e| crate::ForgeError::Serialization(e.to_string()))?;
-        let pending = PendingJob {
-            id,
-            job_type: job_type.to_string(),
-            args: args_json,
-            context: serde_json::Value::Object(serde_json::Map::new()),
-            owner_subject: self.auth.subject().map(String::from),
-            priority: 0,
-            max_attempts: 3,
-            worker_capability: None,
-        };
-        self.pending_dispatches.lock().await.jobs.push(pending);
+
+        // Runtime query: these INSERTs are new in the direct-dispatch refactor
+        // and the .sqlx cache hasn't been regenerated yet. Convert to compile-time
+        // query! after next `cargo sqlx prepare`.
+        #[allow(clippy::disallowed_methods)]
+        sqlx::query(
+            r#"
+            INSERT INTO forge_jobs (
+                id, job_type, input, job_context, status, priority, attempts, max_attempts,
+                owner_subject, scheduled_at, created_at
+            ) VALUES ($1, $2, $3, '{}', 'pending', 50, 0, 3, $4, NOW(), NOW())
+            "#,
+        )
+        .bind(id)
+        .bind(job_type)
+        .bind(&args_json)
+        .bind(self.auth.subject())
+        .execute(&self.db_pool)
+        .await
+        .map_err(crate::ForgeError::Database)?;
+
         Ok(id)
     }
 
-    /// Buffer a workflow start for dispatch after this job completes successfully.
+    /// Start a workflow directly.
+    ///
+    /// Inserts the workflow run row and a `$workflow_resume` job immediately.
+    /// The workflow will be picked up by the worker pool.
     pub async fn start_workflow<T: Serialize>(
         &self,
         workflow_name: &str,
@@ -242,22 +264,46 @@ impl JobContext {
         let id = Uuid::new_v4();
         let input_json = serde_json::to_value(args)
             .map_err(|e| crate::ForgeError::Serialization(e.to_string()))?;
-        let pending = PendingWorkflow {
-            id,
-            workflow_name: workflow_name.to_string(),
-            workflow_version: String::new(),
-            workflow_signature: String::new(),
-            input: input_json,
-            owner_subject: self.auth.subject().map(String::from),
-        };
-        self.pending_dispatches.lock().await.workflows.push(pending);
-        Ok(id)
-    }
 
-    /// Drain all pending dispatches. Called by the executor after successful completion.
-    pub async fn take_pending_dispatches(&self) -> OutboxBuffer {
-        let mut guard = self.pending_dispatches.lock().await;
-        std::mem::take(&mut *guard)
+        // Runtime query: convert to query! after next `cargo sqlx prepare`.
+        #[allow(clippy::disallowed_methods)]
+        sqlx::query(
+            r#"
+            INSERT INTO forge_workflow_runs (
+                id, workflow_name, workflow_version, workflow_signature,
+                input, status, owner_subject, started_at
+            ) VALUES ($1, $2, '', '', $3, 'pending', $4, NOW())
+            "#,
+        )
+        .bind(id)
+        .bind(workflow_name)
+        .bind(&input_json)
+        .bind(self.auth.subject())
+        .execute(&self.db_pool)
+        .await
+        .map_err(crate::ForgeError::Database)?;
+
+        // Enqueue resume job so the worker picks it up
+        let resume_input = serde_json::json!({
+            "run_id": id.to_string(),
+            "from_sleep": false,
+        });
+        // Runtime query: convert to query! after next `cargo sqlx prepare`.
+        #[allow(clippy::disallowed_methods)]
+        sqlx::query(
+            r#"
+            INSERT INTO forge_jobs (
+                id, job_type, input, job_context, status, priority, attempts, max_attempts,
+                worker_capability, scheduled_at, created_at
+            ) VALUES (gen_random_uuid(), '$workflow_resume', $1, '{}', 'pending', 75, 0, 3, 'workflows', NOW(), NOW())
+            "#,
+        )
+        .bind(&resume_input)
+        .execute(&self.db_pool)
+        .await
+        .map_err(crate::ForgeError::Database)?;
+
+        Ok(id)
     }
 
     /// Check if cancellation has been requested for this job.

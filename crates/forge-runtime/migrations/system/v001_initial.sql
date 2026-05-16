@@ -1,3 +1,4 @@
+-- TODO(pre-1.0): Split per subsystem (cluster, jobs, workflows, signals)
 -- FORGE Internal Schema v1
 -- This migration creates all system tables required by the FORGE runtime.
 -- It is applied automatically before any user migrations.
@@ -39,6 +40,8 @@ CREATE UNLOGGED TABLE IF NOT EXISTS forge_leaders (
 CREATE TABLE IF NOT EXISTS forge_jobs (
     id UUID PRIMARY KEY,
     job_type VARCHAR(255) NOT NULL,
+    queue VARCHAR(64) NOT NULL DEFAULT 'default',
+    kind VARCHAR(32) NOT NULL DEFAULT 'normal',
     input JSONB NOT NULL DEFAULT '{}',
     output JSONB,
     job_context JSONB NOT NULL DEFAULT '{}',
@@ -70,6 +73,10 @@ CREATE TABLE IF NOT EXISTS forge_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_forge_jobs_status_scheduled
     ON forge_jobs(status, scheduled_at)
+    WHERE status = 'pending';
+
+CREATE INDEX IF NOT EXISTS idx_forge_jobs_queue_status_scheduled
+    ON forge_jobs(queue, status, scheduled_at)
     WHERE status = 'pending';
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_forge_jobs_idempotency
@@ -125,7 +132,6 @@ CREATE TABLE IF NOT EXISTS forge_workflow_runs (
     blocking_reason TEXT,
     resolution_reason TEXT,
     current_step VARCHAR(255),
-    step_results JSONB DEFAULT '{}',
     started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     completed_at TIMESTAMPTZ,
     error TEXT,
@@ -175,7 +181,7 @@ CREATE INDEX IF NOT EXISTS idx_forge_workflow_runs_name_version
 
 -- Workflows: Event storage for durable workflows
 CREATE TABLE IF NOT EXISTS forge_workflow_events (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID PRIMARY KEY DEFAULT uuidv7(),
     event_name TEXT NOT NULL,
     correlation_id TEXT NOT NULL,
     payload JSONB,
@@ -205,7 +211,7 @@ CREATE TABLE IF NOT EXISTS forge_workflow_steps (
 -- Admin audit log. One row per privileged action taken via /_api/admin/*.
 -- Append-only by convention; cleanup is the operator's responsibility.
 CREATE TABLE IF NOT EXISTS forge_admin_audit (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID PRIMARY KEY DEFAULT uuidv7(),
     occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     actor_subject TEXT,
     actor_roles TEXT[] NOT NULL DEFAULT '{}',
@@ -238,7 +244,7 @@ CREATE TABLE IF NOT EXISTS forge_paused_queues (
 
 -- Rate Limiting: Token bucket storage (UNLOGGED: transient state rebuilt on startup)
 CREATE UNLOGGED TABLE IF NOT EXISTS forge_rate_limits (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID PRIMARY KEY DEFAULT uuidv7(),
     bucket_key TEXT NOT NULL,
     tokens DOUBLE PRECISION NOT NULL,
     last_refill TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -405,8 +411,6 @@ CREATE INDEX IF NOT EXISTS idx_forge_workflow_runs_input_gin
 CREATE INDEX IF NOT EXISTS idx_forge_workflow_runs_output_gin
     ON forge_workflow_runs USING GIN (output)
     WHERE output IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_forge_workflow_runs_step_results_gin
-    ON forge_workflow_runs USING GIN (step_results);
 
 -- Workflow events: Enable queries on event payload
 CREATE INDEX IF NOT EXISTS idx_forge_workflow_events_payload_gin
@@ -526,11 +530,11 @@ $$ LANGUAGE plpgsql;
 
 -- Auth: Refresh token storage for built-in token rotation
 CREATE TABLE IF NOT EXISTS forge_refresh_tokens (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id          UUID PRIMARY KEY DEFAULT uuidv7(),
     user_id     UUID NOT NULL,
     token_hash  TEXT NOT NULL UNIQUE,
     client_id   TEXT,
-    token_family UUID NOT NULL DEFAULT gen_random_uuid(),
+    token_family UUID NOT NULL DEFAULT uuidv7(),
     -- Roles snapshot at sign-in. Carried forward on rotation so refreshes
     -- never silently downgrade or escalate; new roles take effect at next
     -- sign-in, which matches the session-bounded security model.
@@ -559,7 +563,7 @@ $$;
 
 -- OAuth: Dynamic client registrations (MCP clients self-register via RFC 7591)
 CREATE TABLE IF NOT EXISTS forge_oauth_clients (
-    client_id                  TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
+    client_id                  TEXT PRIMARY KEY DEFAULT uuidv7()::TEXT,
     client_name                TEXT,
     redirect_uris              TEXT[] NOT NULL DEFAULT '{}',
     token_endpoint_auth_method TEXT NOT NULL DEFAULT 'none',
@@ -616,7 +620,7 @@ $$;
 
 -- Events table (partitioned by month for retention management)
 CREATE TABLE IF NOT EXISTS forge_signals_events (
-    id              UUID NOT NULL DEFAULT gen_random_uuid(),
+    id              UUID NOT NULL DEFAULT uuidv7(),
     event_type      VARCHAR(32) NOT NULL,
     event_name      VARCHAR(255),
     correlation_id  VARCHAR(64),

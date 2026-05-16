@@ -55,6 +55,13 @@ BEGIN
     END IF;
     payload := payload || '#' || log_seq::TEXT;
 
+    -- pg_notify has an 8000-byte payload limit. If the payload (with columns)
+    -- exceeds 7900 bytes, drop the column list. The listener handles missing
+    -- columns conservatively (invalidates all groups for the table).
+    IF length(payload) > 7900 THEN
+        payload := 'v1:' || TG_TABLE_NAME || ':' || TG_OP || ':' || row_id || '#' || log_seq::TEXT;
+    END IF;
+
     PERFORM pg_notify('forge_changes', payload);
 
     IF TG_OP = 'DELETE' THEN

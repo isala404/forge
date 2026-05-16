@@ -5,6 +5,7 @@ use std::time::Duration;
 use crate::error::{ForgeError, Result};
 use serde::{Deserialize, Serialize};
 
+use super::default_true;
 use super::types::DurationStr;
 
 /// MCP server configuration.
@@ -132,8 +133,4 @@ fn default_mcp_path() -> String {
 
 fn default_mcp_session_ttl() -> DurationStr {
     DurationStr::new(Duration::from_secs(3600))
-}
-
-fn default_true() -> bool {
-    true
 }

@@ -99,6 +99,13 @@ pub struct GatewayConfig {
     pub hsts: bool,
     /// Parsed trusted proxy CIDR ranges for IP extraction.
     pub trusted_proxies: Vec<ipnet::IpNet>,
+    /// Maximum number of background jobs a single mutation request may dispatch.
+    /// 0 disables the limit. Defaults to 10.
+    pub max_jobs_per_request: usize,
+    /// Maximum serialized response size in bytes. Defaults to 10 MiB.
+    pub max_result_size_bytes: usize,
+    /// Maximum JSON nesting depth for incoming request bodies. Defaults to 64.
+    pub max_json_depth: usize,
 }
 
 impl Default for GatewayConfig {
@@ -126,6 +133,9 @@ impl Default for GatewayConfig {
             security_headers: true,
             hsts: false,
             trusted_proxies: Vec::new(),
+            max_jobs_per_request: 10,
+            max_result_size_bytes: 10 * 1024 * 1024,
+            max_json_depth: 64,
         }
     }
 }
@@ -205,8 +215,7 @@ impl GatewayServer {
         let node_id = NodeId::new();
         let reactor = Arc::new(Reactor::new(
             node_id,
-            db.primary().clone(),
-            db.read_pool().clone(),
+            Arc::new(db.clone()),
             registry.clone(),
             config.reactor_config.clone(),
         ));
@@ -375,6 +384,8 @@ impl GatewayServer {
             token_issuer,
         );
         rpc.set_token_ttl(self.token_ttl.clone());
+        rpc.set_max_jobs_per_request(self.config.max_jobs_per_request);
+        rpc.set_max_result_size_bytes(self.config.max_result_size_bytes);
         if let Some(rate_limiter) = &self.rate_limiter {
             rpc.set_rate_limiter(rate_limiter.clone());
         }
@@ -454,6 +465,9 @@ impl GatewayServer {
                         axum::http::HeaderName::from_static("x-forge-platform"),
                     ])
                     .allow_credentials(true)
+                    // 24-hour preflight cache: browsers won't fire OPTIONS for
+                    // repeat cross-origin requests within this window.
+                    .max_age(Duration::from_secs(86400))
             }
         } else {
             CorsLayer::new()
@@ -487,6 +501,7 @@ impl GatewayServer {
         });
 
         // Build the main router with middleware
+        let max_json_depth = self.config.max_json_depth;
         let mut main_router = Router::new()
             // Health check endpoint (liveness)
             .route("/health", get(health_handler))
@@ -498,6 +513,12 @@ impl GatewayServer {
             .route("/rpc/{function}", post(rpc_function_handler))
             // Prevent oversized JSON payloads from exhausting memory.
             .layer(DefaultBodyLimit::max(DEFAULT_MAX_JSON_BODY_SIZE))
+            // Reject JSON bodies that exceed the nesting depth limit to prevent
+            // stack exhaustion during recursive deserialization.
+            .layer(middleware::from_fn_with_state(
+                max_json_depth,
+                json_depth_check_middleware,
+            ))
             // Add state
             .with_state(rpc_handler_state.clone());
 
@@ -989,6 +1010,101 @@ async fn tracing_middleware(
 
     set_tracing_headers(&mut response, &trace_id, &tracing_state.request_id);
     response
+}
+
+/// Count the maximum JSON nesting depth in a byte slice by scanning for `{`
+/// and `[` delimiters. String contents are skipped so quoted brackets don't
+/// inflate the count. This is a conservative O(n) pre-parse guard, not a full
+/// parser — its purpose is to catch stack-busting inputs before `serde_json`
+/// recurses into them.
+fn json_max_depth(bytes: &[u8]) -> usize {
+    let mut depth: usize = 0;
+    let mut max_depth: usize = 0;
+    let mut in_string = false;
+    let mut escape = false;
+    for &b in bytes {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if in_string {
+            if b == b'\\' {
+                escape = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                depth += 1;
+                if depth > max_depth {
+                    max_depth = depth;
+                }
+            }
+            b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+    max_depth
+}
+
+/// Middleware that rejects request bodies whose JSON nesting depth exceeds
+/// `max_depth`. Only inspects bodies for POST requests with a JSON
+/// `Content-Type`; all other requests pass through unchanged.
+///
+/// The body is buffered, inspected, and re-inserted into the request so that
+/// downstream handlers see the original bytes.
+async fn json_depth_check_middleware(
+    axum::extract::State(max_depth): axum::extract::State<usize>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::body::Body;
+
+    // Only check POST requests with a JSON content type.
+    let is_json_post = req.method() == axum::http::Method::POST
+        && req
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|ct| ct.contains("application/json"))
+            .unwrap_or(false);
+
+    if !is_json_post || max_depth == 0 {
+        return next.run(req).await;
+    }
+
+    let (parts, body) = req.into_parts();
+    let bytes = match axum::body::to_bytes(body, usize::MAX).await {
+        Ok(b) => b,
+        Err(_) => {
+            return super::response::RpcResponse::error(super::response::RpcError::new(
+                "BAD_REQUEST",
+                "Failed to read request body",
+            ))
+            .into_response();
+        }
+    };
+
+    let depth = json_max_depth(&bytes);
+    if depth > max_depth {
+        return super::response::RpcResponse::error(super::response::RpcError::new(
+            "BAD_REQUEST",
+            format!(
+                "JSON nesting depth {} exceeds the maximum of {}",
+                depth, max_depth
+            ),
+        ))
+        .into_response();
+    }
+
+    // Re-assemble the request with the buffered body.
+    let req = axum::extract::Request::from_parts(parts, Body::from(bytes));
+    next.run(req).await
 }
 
 #[cfg(test)]

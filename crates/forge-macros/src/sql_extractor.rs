@@ -6,8 +6,8 @@
 use std::collections::HashSet;
 
 use sqlparser::ast::{
-    Expr, JoinConstraint, JoinOperator, Query, Select, SelectItem, SetExpr, Statement, TableFactor,
-    TableWithJoins,
+    BinaryOperator, Expr, JoinConstraint, JoinOperator, Query, Select, SelectItem, SetExpr,
+    Statement, TableFactor, TableWithJoins,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
@@ -27,14 +27,40 @@ impl SqlStringExtractor {
         }
     }
 
-    /// Check if a string looks like SQL.
+    /// Check if a string looks like SQL by requiring: minimum length, starts
+    /// with a SQL keyword (after whitespace), and contains a matching pair.
     fn looks_like_sql(s: &str) -> bool {
-        let upper = s.to_uppercase();
-        upper.contains("SELECT")
-            || upper.contains("INSERT")
-            || upper.contains("UPDATE")
-            || upper.contains("DELETE")
-            || (upper.contains("FROM") && !upper.contains("import"))
+        if s.len() < 10 {
+            return false;
+        }
+
+        let trimmed = s.trim_start();
+        if trimmed.starts_with("http://")
+            || trimmed.starts_with("https://")
+            || trimmed.starts_with("import ")
+            || trimmed.starts_with("export ")
+        {
+            return false;
+        }
+
+        let upper = trimmed.to_uppercase();
+
+        // Must start with a SQL statement keyword
+        let starts_with_keyword = upper.starts_with("SELECT")
+            || upper.starts_with("INSERT")
+            || upper.starts_with("UPDATE")
+            || upper.starts_with("DELETE")
+            || upper.starts_with("WITH");
+        if !starts_with_keyword {
+            return false;
+        }
+
+        // Require keyword pairs that form valid SQL statement patterns
+        (upper.contains("SELECT") && upper.contains("FROM"))
+            || (upper.contains("INSERT") && upper.contains("INTO"))
+            || (upper.contains("UPDATE") && upper.contains("SET"))
+            || (upper.contains("DELETE") && upper.contains("FROM"))
+            || (upper.starts_with("WITH") && upper.contains("SELECT"))
     }
 
     /// Extract SQL strings from macro tokens.
@@ -86,11 +112,12 @@ impl SqlStringExtractor {
         else if lit.starts_with('"') && lit.ends_with('"') && lit.len() >= 2 {
             // Remove the surrounding quotes and unescape
             let content = &lit[1..lit.len() - 1];
-            // Basic unescaping (handles common cases)
             return Some(
                 content
                     .replace("\\n", "\n")
+                    .replace("\\r", "\r")
                     .replace("\\t", "\t")
+                    .replace("\\0", "")
                     .replace("\\\"", "\"")
                     .replace("\\\\", "\\"),
             );
@@ -622,13 +649,20 @@ pub enum ScopeCheckResult {
 /// indirectly (all FROM sources resolve to scoped CTEs or scoped subqueries).
 /// Scope propagates forward through CTE definitions so that later CTEs and
 /// the main query can inherit scope from earlier CTEs.
+///
+/// ALL statements across all SQL strings must be scoped for the function to be
+/// considered scoped. A single unscoped statement (e.g. one SELECT without a
+/// WHERE filter) makes the whole function unscoped.
 pub fn sql_references_identity_scope(sql_strings: &[String]) -> ScopeCheckResult {
+    let mut found_any_statement = false;
+
     for sql in sql_strings {
         match Parser::parse_sql(&PostgreSqlDialect {}, sql) {
             Ok(stmts) => {
                 for stmt in &stmts {
-                    if stmt_is_scoped(stmt) {
-                        return ScopeCheckResult::Scoped;
+                    found_any_statement = true;
+                    if !stmt_is_scoped(stmt) {
+                        return ScopeCheckResult::Unscoped;
                     }
                 }
             }
@@ -637,7 +671,12 @@ pub fn sql_references_identity_scope(sql_strings: &[String]) -> ScopeCheckResult
             }
         }
     }
-    ScopeCheckResult::Unscoped
+
+    if found_any_statement {
+        ScopeCheckResult::Scoped
+    } else {
+        ScopeCheckResult::Unscoped
+    }
 }
 
 /// Names of CTEs whose bodies have been determined to be scoped.
@@ -776,7 +815,22 @@ fn expr_has_scope(e: &Expr) -> bool {
     match e {
         Expr::Identifier(ident) => is_scope_col(&ident.value),
         Expr::CompoundIdentifier(parts) => parts.last().is_some_and(|p| is_scope_col(&p.value)),
-        Expr::BinaryOp { left, right, .. } => expr_has_scope(left) || expr_has_scope(right),
+        // Handle PostgreSQL JSON operators: claims->>'user_id' parses as
+        // BinaryOp { left, op: Arrow/LongArrow, right: Value('user_id') }.
+        // Check if the right-hand side of a JSON operator is a scope column name.
+        Expr::BinaryOp { left, op, right } => {
+            if matches!(
+                op,
+                BinaryOperator::Arrow
+                    | BinaryOperator::LongArrow
+                    | BinaryOperator::HashArrow
+                    | BinaryOperator::HashLongArrow
+            ) {
+                expr_has_scope(left) || value_is_scope_col(right)
+            } else {
+                expr_has_scope(left) || expr_has_scope(right)
+            }
+        }
         Expr::UnaryOp { expr, .. } | Expr::Nested(expr) => expr_has_scope(expr),
         Expr::Between {
             expr, low, high, ..
@@ -794,8 +848,32 @@ fn expr_has_scope(e: &Expr) -> bool {
         Expr::Subquery(q) | Expr::Exists { subquery: q, .. } => {
             query_is_scoped(q, &mut ScopeCtx::new())
         }
+        // Handle (claims->>'user_id')::uuid = $1 patterns:
+        // Cast wraps json access; walk into the inner expression.
+        Expr::Cast { expr, .. } => expr_has_scope(expr),
+        // Snowflake/Databricks-style JSON path access (obj:foo.bar).
+        // Check if any path element names a scope column.
+        Expr::JsonAccess { value, path } => expr_has_scope(value) || json_path_has_scope(path),
         _ => false,
     }
+}
+
+/// Check if an expression is a string literal naming a scope column.
+/// Used for the right-hand side of JSON arrow operators like `->>'user_id'`.
+fn value_is_scope_col(e: &Expr) -> bool {
+    match e {
+        Expr::Value(sqlparser::ast::Value::SingleQuotedString(s)) => is_scope_col(s),
+        Expr::Value(sqlparser::ast::Value::DoubleQuotedString(s)) => is_scope_col(s),
+        _ => false,
+    }
+}
+
+/// Check if a JsonPath (Snowflake-style) references a scope column name.
+fn json_path_has_scope(path: &sqlparser::ast::JsonPath) -> bool {
+    path.path.iter().any(|elem| match elem {
+        sqlparser::ast::JsonPathElem::Dot { key, .. } => is_scope_col(key),
+        sqlparser::ast::JsonPathElem::Bracket { key } => value_is_scope_col(key),
+    })
 }
 
 fn is_scope_col(name: &str) -> bool {
@@ -1054,11 +1132,23 @@ mod tests {
     }
 
     #[test]
-    fn test_scope_check_multiple_sql_one_scoped() {
+    fn test_scope_check_multiple_sql_one_unscoped_fails() {
+        // ALL statements must be scoped. One unscoped SELECT makes it unscoped.
         assert!(matches!(
             sql_references_identity_scope(&[
                 "SELECT count(*) FROM tasks".to_string(),
                 "SELECT * FROM tasks WHERE user_id = $1".to_string(),
+            ]),
+            ScopeCheckResult::Unscoped
+        ));
+    }
+
+    #[test]
+    fn test_scope_check_multiple_sql_all_scoped() {
+        assert!(matches!(
+            sql_references_identity_scope(&[
+                "SELECT * FROM tasks WHERE user_id = $1".to_string(),
+                "SELECT * FROM orders WHERE owner_id = $2".to_string(),
             ]),
             ScopeCheckResult::Scoped
         ));

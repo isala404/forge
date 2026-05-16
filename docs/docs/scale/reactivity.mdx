@@ -26,7 +26,7 @@ Each node runs a `ChangeListener` on a dedicated PostgreSQL connection. The list
 
 If the change log has been trimmed past the listener's last-seen position (retention expired during downtime), the listener signals the reactor to perform a full resync of all active subscriptions.
 
-The change log is automatically trimmed every 60 seconds by `forge_trim_change_log()`, keeping entries for 10 minutes by default.
+The change log is automatically trimmed every 60 seconds by `forge_trim_change_log()`, keeping entries for 1 hour by default.
 
 ## Debounce and Batching
 

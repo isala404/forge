@@ -34,6 +34,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use futures_core::future::BoxFuture;
@@ -413,59 +414,6 @@ impl<'c> sqlx::Executor<'c> for &'c mut ForgeConn<'_> {
     {
         let conn: &'e mut PgConnection = &mut *self;
         conn.describe(sql)
-    }
-}
-
-/// A job buffered for dispatch after transaction commit.
-///
-/// This is internal runtime plumbing exposed only so test contexts can
-/// inspect what was buffered. Construction is owned by the framework.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct PendingJob {
-    pub id: Uuid,
-    pub job_type: String,
-    pub args: serde_json::Value,
-    pub context: serde_json::Value,
-    pub owner_subject: Option<String>,
-    pub priority: i32,
-    pub max_attempts: i32,
-    pub worker_capability: Option<String>,
-}
-
-/// A workflow buffered for dispatch after transaction commit.
-///
-/// This is internal runtime plumbing exposed only so test contexts can
-/// inspect what was buffered. Construction is owned by the framework.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct PendingWorkflow {
-    pub id: Uuid,
-    pub workflow_name: String,
-    pub workflow_version: String,
-    pub workflow_signature: String,
-    pub input: serde_json::Value,
-    pub owner_subject: Option<String>,
-}
-
-/// Buffer for jobs and workflows dispatched during a transactional mutation.
-///
-/// Entries are flushed to the database atomically after the mutation transaction commits.
-/// If the transaction rolls back, buffered dispatches are discarded.
-///
-/// This is internal runtime plumbing. Use [`OutboxBuffer::new`] for construction
-/// when needed (e.g. inside the runtime crate).
-#[derive(Default)]
-#[non_exhaustive]
-pub struct OutboxBuffer {
-    pub jobs: Vec<PendingJob>,
-    pub workflows: Vec<PendingWorkflow>,
-}
-
-impl OutboxBuffer {
-    /// Construct a new buffer holding the given pending dispatches.
-    pub fn new(jobs: Vec<PendingJob>, workflows: Vec<PendingWorkflow>) -> Self {
-        Self { jobs, workflows }
     }
 }
 
@@ -923,6 +871,10 @@ pub struct MutationContext {
     token_issuer: Option<Arc<dyn TokenIssuer>>,
     /// Token TTL config from forge.toml.
     token_ttl: AuthTokenTtl,
+    /// Running count of background jobs dispatched by this mutation.
+    dispatched_job_count: Arc<AtomicUsize>,
+    /// Maximum number of jobs a single mutation may dispatch. 0 = unlimited.
+    max_jobs_per_request: usize,
 }
 
 impl MutationContext {
@@ -940,6 +892,8 @@ impl MutationContext {
             tx: None,
             token_issuer: None,
             token_ttl: AuthTokenTtl::default(),
+            dispatched_job_count: Arc::new(AtomicUsize::new(0)),
+            max_jobs_per_request: 0,
         }
     }
 
@@ -964,6 +918,8 @@ impl MutationContext {
             tx: None,
             token_issuer: None,
             token_ttl: AuthTokenTtl::default(),
+            dispatched_job_count: Arc::new(AtomicUsize::new(0)),
+            max_jobs_per_request: 0,
         }
     }
 
@@ -989,6 +945,8 @@ impl MutationContext {
             tx: None,
             token_issuer: None,
             token_ttl: AuthTokenTtl::default(),
+            dispatched_job_count: Arc::new(AtomicUsize::new(0)),
+            max_jobs_per_request: 0,
         }
     }
 
@@ -1026,6 +984,8 @@ impl MutationContext {
             tx: Some(tx_handle.clone()),
             token_issuer: None,
             token_ttl: AuthTokenTtl::default(),
+            dispatched_job_count: Arc::new(AtomicUsize::new(0)),
+            max_jobs_per_request: 0,
         };
 
         (ctx, tx_handle)
@@ -1135,6 +1095,12 @@ impl MutationContext {
     /// Set the token TTL configuration (from forge.toml `[auth]`).
     pub fn set_token_ttl(&mut self, ttl: AuthTokenTtl) {
         self.token_ttl = ttl;
+    }
+
+    /// Set the maximum number of background jobs this mutation may dispatch.
+    /// A value of 0 disables the limit.
+    pub fn set_max_jobs_per_request(&mut self, limit: usize) {
+        self.max_jobs_per_request = limit;
     }
 
     /// Issue a signed JWT from the given claims.
@@ -1249,11 +1215,27 @@ impl MutationContext {
     /// In transactional mutations the job row is inserted on the active
     /// transaction, so it only becomes visible to workers after commit.
     /// Outside a transaction the dispatcher writes through the pool directly.
+    ///
+    /// Returns `ForgeError::Validation` when the call would exceed the
+    /// per-request job dispatch cap configured via `max_jobs_per_request`.
     pub async fn dispatch_job<T: serde::Serialize>(
         &self,
         job_type: &str,
         args: T,
     ) -> crate::error::Result<Uuid> {
+        if self.max_jobs_per_request > 0 {
+            let count = self.dispatched_job_count.fetch_add(1, Ordering::Relaxed);
+            if count >= self.max_jobs_per_request {
+                // Undo the increment so repeated calls after the limit give a
+                // consistent count rather than growing without bound.
+                self.dispatched_job_count.fetch_sub(1, Ordering::Relaxed);
+                return Err(crate::error::ForgeError::Validation(format!(
+                    "max_jobs_per_request limit of {} exceeded",
+                    self.max_jobs_per_request
+                )));
+            }
+        }
+
         let args_json = serde_json::to_value(args)?;
         let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
             crate::error::ForgeError::Internal("Job dispatch not available".into())

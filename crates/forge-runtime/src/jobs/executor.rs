@@ -159,13 +159,9 @@ impl JobExecutor {
 
         match result {
             Ok(Ok(output)) => {
-                // Complete job and flush sub-dispatches atomically
-                let pending = ctx.take_pending_dispatches().await;
-                if let Err(e) = self
-                    .complete_with_dispatches(job, output.clone(), ttl, &pending)
-                    .await
-                {
-                    tracing::error!(job_id = %job.id, error = %e, "Failed to atomically complete job with dispatches");
+                // Complete the job (sub-dispatches are now direct, not buffered)
+                if let Err(e) = self.queue.complete(job.id, output.clone(), ttl).await {
+                    tracing::error!(job_id = %job.id, error = %e, "Failed to complete job");
                 }
                 crate::signals::emit_server_execution(
                     &job.job_type,
@@ -284,89 +280,6 @@ impl JobExecutor {
         reason: &str,
     ) -> forge_core::Result<()> {
         (entry.compensation)(ctx, input.clone(), reason).await
-    }
-
-    /// Complete a job and flush its sub-dispatches in a single transaction.
-    #[allow(clippy::disallowed_methods)]
-    async fn complete_with_dispatches(
-        &self,
-        job: &JobRecord,
-        output: serde_json::Value,
-        ttl: Option<std::time::Duration>,
-        pending: &forge_core::function::OutboxBuffer,
-    ) -> forge_core::Result<()> {
-        let retention = ttl.unwrap_or(JobQueue::DEFAULT_RETENTION);
-        let expires_at = Some(
-            chrono::Utc::now()
-                + chrono::Duration::from_std(retention).unwrap_or(chrono::Duration::days(7)),
-        );
-
-        let mut tx = self
-            .db_pool
-            .begin()
-            .await
-            .map_err(forge_core::ForgeError::Database)?;
-
-        sqlx::query(
-            "UPDATE forge_jobs \
-             SET status = 'completed', output = $2, completed_at = NOW(), \
-                 cancel_requested_at = NULL, cancelled_at = NULL, cancel_reason = NULL, \
-                 expires_at = $3 \
-             WHERE id = $1 AND status = 'running'",
-        )
-        .bind(job.id)
-        .bind(&output)
-        .bind(expires_at)
-        .execute(&mut *tx)
-        .await
-        .map_err(forge_core::ForgeError::Database)?;
-
-        for pj in &pending.jobs {
-            let mut record = JobRecord::new(
-                pj.job_type.clone(),
-                pj.args.clone(),
-                forge_core::job::JobPriority::from_i32(pj.priority),
-                pj.max_attempts,
-            )
-            .with_owner_subject(pj.owner_subject.clone());
-            record.id = pj.id;
-            record.job_context = pj.context.clone();
-            if let Some(cap) = &pj.worker_capability {
-                record = record.with_capability(cap.as_str());
-            }
-            self.queue
-                .enqueue_in_conn(&mut tx, record)
-                .await
-                .map_err(|e| {
-                    forge_core::ForgeError::Job(format!(
-                        "Failed to dispatch sub-job '{}': {e}",
-                        pj.job_type
-                    ))
-                })?;
-        }
-
-        for pw in &pending.workflows {
-            sqlx::query(
-                "INSERT INTO forge_workflow_runs \
-                 (id, workflow_name, workflow_version, workflow_signature, \
-                  input, status, owner_subject, created_at) \
-                 VALUES ($1, $2, $3, $4, $5, 'created', $6, NOW())",
-            )
-            .bind(pw.id)
-            .bind(&pw.workflow_name)
-            .bind(&pw.workflow_version)
-            .bind(&pw.workflow_signature)
-            .bind(&pw.input)
-            .bind(&pw.owner_subject)
-            .execute(&mut *tx)
-            .await
-            .map_err(forge_core::ForgeError::Database)?;
-        }
-
-        tx.commit()
-            .await
-            .map_err(forge_core::ForgeError::Database)?;
-        Ok(())
     }
 
     fn cancellation_reason(job: &JobRecord, fallback: &str) -> String {

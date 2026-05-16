@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, workflow_name, workflow_version, workflow_signature,\n               owner_subject, input, output, status, blocking_reason,\n               resolution_reason, current_step, step_results, started_at,\n               completed_at, error, trace_id, suspended_at, wake_at,\n               waiting_for_event, event_timeout_at, tenant_id,\n               cancel_requested_at, cancel_reason, metadata\n        FROM forge_workflow_runs\n        WHERE id = $1\n        ",
+  "query": "\n            SELECT id, workflow_name, workflow_version, workflow_signature,\n                   owner_subject, input, output, status, blocking_reason,\n                   resolution_reason, current_step, started_at,\n                   completed_at, error, trace_id,\n                   cancel_requested_at, cancel_reason\n            FROM forge_workflow_runs\n            WHERE id = $1\n            ",
   "describe": {
     "columns": [
       {
@@ -60,68 +60,33 @@
       },
       {
         "ordinal": 11,
-        "name": "step_results",
-        "type_info": "Jsonb"
-      },
-      {
-        "ordinal": 12,
         "name": "started_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 13,
+        "ordinal": 12,
         "name": "completed_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 14,
+        "ordinal": 13,
         "name": "error",
         "type_info": "Text"
       },
       {
-        "ordinal": 15,
+        "ordinal": 14,
         "name": "trace_id",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 16,
-        "name": "suspended_at",
-        "type_info": "Timestamptz"
-      },
-      {
-        "ordinal": 17,
-        "name": "wake_at",
-        "type_info": "Timestamptz"
-      },
-      {
-        "ordinal": 18,
-        "name": "waiting_for_event",
-        "type_info": "Text"
-      },
-      {
-        "ordinal": 19,
-        "name": "event_timeout_at",
-        "type_info": "Timestamptz"
-      },
-      {
-        "ordinal": 20,
-        "name": "tenant_id",
-        "type_info": "Uuid"
-      },
-      {
-        "ordinal": 21,
+        "ordinal": 15,
         "name": "cancel_requested_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 22,
+        "ordinal": 16,
         "name": "cancel_reason",
         "type_info": "Text"
-      },
-      {
-        "ordinal": 23,
-        "name": "metadata",
-        "type_info": "Jsonb"
       }
     ],
     "parameters": {
@@ -141,20 +106,13 @@
       true,
       true,
       true,
-      true,
       false,
       true,
       true,
       true,
       true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      false
+      true
     ]
   },
-  "hash": "3ae5e9fdf671a539fe44c7ff4c1a4353dfeeb549f13006b66916ca33118b3ee7"
+  "hash": "5ac63147769bc62d928c003ee74471512ff4d42de3ed736fd4d24837e6f476e2"
 }

@@ -1,3 +1,4 @@
+// TODO(pre-1.0): Split into smaller modules
 //! FORGE - The Rust Full-Stack Framework
 //!
 //! Single binary runtime that provides:
@@ -577,21 +578,33 @@ impl Forge {
             }
         }
 
-        // KV TTL cleanup runs on every node with a worker role.
+        // KV TTL + rate limit bucket cleanup runs leader-only every 5 minutes.
         #[cfg(feature = "jobs")]
         if roles.contains(&NodeRole::Worker) {
             let kv_pool = pool.clone();
             let mut kv_shutdown = self.shutdown_tx.subscribe();
+            let kv_leader = leader_election.clone();
             handles.push(tokio::spawn(async move {
-                let kv = forge_runtime::KvStore::new(kv_pool);
+                let kv = forge_runtime::KvStore::new(kv_pool.clone(), "app");
+                let rate_limiter = forge_runtime::StrictRateLimiter::new(kv_pool);
                 loop {
                     tokio::select! {
                         _ = kv_shutdown.recv() => break,
-                        _ = tokio::time::sleep(Duration::from_secs(60)) => {}
+                        _ = tokio::time::sleep(Duration::from_secs(300)) => {}
+                    }
+                    let is_leader = kv_leader.as_ref().map(|e| e.is_leader()).unwrap_or(true);
+                    if !is_leader {
+                        continue;
                     }
                     match kv.cleanup_expired().await {
                         Ok(n) if n > 0 => tracing::debug!(count = n, "KV TTL cleanup"),
                         Err(e) => tracing::warn!(error = %e, "KV TTL cleanup failed"),
+                        _ => {}
+                    }
+                    let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
+                    match rate_limiter.cleanup(cutoff).await {
+                        Ok(n) if n > 0 => tracing::debug!(count = n, "Rate limit bucket cleanup"),
+                        Err(e) => tracing::warn!(error = %e, "Rate limit cleanup failed"),
                         _ => {}
                     }
                 }
@@ -778,6 +791,9 @@ impl Forge {
                             .ok()
                     })
                     .collect(),
+                max_jobs_per_request: self.config.gateway.max_jobs_per_request,
+                max_result_size_bytes: self.config.gateway.max_result_size_bytes,
+                max_json_depth: self.config.gateway.max_json_depth,
             };
 
             // Build gateway server (pass Database wrapper for read replica routing)
@@ -803,9 +819,12 @@ impl Forge {
                     forge_core::config::RateLimitMode::Strict => std::sync::Arc::new(
                         forge_runtime::StrictRateLimiter::new(db_ref.primary().clone()),
                     ),
-                    forge_core::config::RateLimitMode::Hybrid => std::sync::Arc::new(
-                        forge_runtime::HybridRateLimiter::new(db_ref.primary().clone()),
-                    ),
+                    forge_core::config::RateLimitMode::Hybrid => {
+                        std::sync::Arc::new(forge_runtime::HybridRateLimiter::with_max_buckets(
+                            db_ref.primary().clone(),
+                            self.config.rate_limit.max_local_buckets,
+                        ))
+                    }
                 };
             gateway = gateway.with_rate_limiter(rate_limiter);
             if let Some(resolver) = self.role_resolver.take() {
@@ -839,9 +858,44 @@ impl Forge {
 
                 // Spawn session reaper
                 forge_runtime::signals::session::spawn_session_reaper(
-                    signals_pool,
+                    signals_pool.clone(),
                     (self.config.signals.session_timeout.as_secs() / 60) as u32,
                 );
+
+                // Ensure signal partitions exist at startup
+                forge_runtime::signals::partition::ensure_partitions(&signals_pool).await;
+
+                // Spawn daily partition maintenance (leader-only via leader_election)
+                {
+                    let partition_pool = signals_pool.clone();
+                    let retention_days = self.config.signals.retention_days;
+                    let partition_leader = leader_election.clone();
+                    let mut partition_shutdown = self.shutdown_tx.subscribe();
+                    handles.push(tokio::spawn(async move {
+                        loop {
+                            tokio::select! {
+                                _ = partition_shutdown.recv() => break,
+                                _ = tokio::time::sleep(Duration::from_secs(86_400)) => {}
+                            }
+                            // Only run on the leader node
+                            let is_leader = partition_leader
+                                .as_ref()
+                                .map(|e| e.is_leader())
+                                .unwrap_or(true);
+                            if is_leader {
+                                forge_runtime::signals::partition::ensure_partitions(
+                                    &partition_pool,
+                                )
+                                .await;
+                                forge_runtime::signals::partition::drop_old_partitions(
+                                    &partition_pool,
+                                    retention_days,
+                                )
+                                .await;
+                            }
+                        }
+                    }));
+                }
 
                 tracing::info!("Signals enabled (analytics + diagnostics)");
             }

@@ -21,6 +21,8 @@ pub enum CronStatus {
     Completed,
     /// Failed with error.
     Failed,
+    /// Cancelled before or during execution.
+    Cancelled,
 }
 
 impl CronStatus {
@@ -31,6 +33,7 @@ impl CronStatus {
             Self::Running => "running",
             Self::Completed => "completed",
             Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
         }
     }
 }
@@ -55,6 +58,7 @@ impl FromStr for CronStatus {
             "running" => Ok(Self::Running),
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
             _ => Err(ParseCronStatusError(s.to_string())),
         }
     }
@@ -268,11 +272,10 @@ impl CronRunner {
                 }
 
                 for scheduled in scheduled_times {
-                    // Try to claim this cron run; only claimed slots execute.
-                    if let Ok(Some(run_id)) =
-                        self.try_claim(info.name, scheduled, info.timezone).await
+                    // Atomically claim and enqueue in a single transaction.
+                    if let Ok(Some(_run_id)) =
+                        self.try_claim_and_enqueue(entry, scheduled, false).await
                     {
-                        self.execute_cron(entry, run_id, scheduled, false).await;
                         jobs_executed += 1;
                     }
                 }
@@ -296,21 +299,32 @@ impl CronRunner {
         .await
     }
 
-    /// Try to claim a cron run.
+    /// Atomically claim a cron run and enqueue its job in a single transaction.
     ///
     /// Returns the run ID if claimed (or stale-reclaimed), otherwise None.
     /// Leadership is already gated by `is_leader()` in `tick()`, and the
     /// `(cron_name, scheduled_time)` UNIQUE constraint provides the
     /// exactly-once guarantee against concurrent claimers.
-    async fn try_claim(
+    ///
+    /// The INSERT into `forge_cron_runs` and the INSERT into `forge_jobs` happen
+    /// within the same transaction so a crash between the two cannot leave an
+    /// orphaned cron_run row without a corresponding worker job.
+    async fn try_claim_and_enqueue(
         &self,
-        cron_name: &str,
+        entry: &super::registry::CronEntry,
         scheduled_time: DateTime<Utc>,
-        _timezone: &str,
+        is_catch_up: bool,
     ) -> forge_core::Result<Option<Uuid>> {
+        let info = &entry.info;
         let claim_id = Uuid::new_v4();
         let stale_threshold = chrono::Duration::from_std(self.config.run_stale_threshold)
             .unwrap_or(chrono::Duration::minutes(15));
+
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(forge_core::ForgeError::Database)?;
 
         // Insert new run, or reclaim stale running row if previous node crashed.
         let result = sqlx::query!(
@@ -329,88 +343,49 @@ impl CronRunner {
               AND forge_cron_runs.started_at < NOW() - make_interval(secs => $5)
             "#,
             claim_id,
-            cron_name,
+            info.name,
             scheduled_time,
             self.config.node_id,
             stale_threshold.num_seconds() as f64,
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(forge_core::ForgeError::Database)?;
 
-        if result.rows_affected() > 0 {
-            Ok(Some(claim_id))
-        } else {
-            Ok(None)
+        if result.rows_affected() == 0 {
+            // Already claimed by another node (or completed); implicit rollback
+            return Ok(None);
         }
-    }
 
-    /// Dispatch a cron run as a job on the shared worker pool.
-    async fn execute_cron(
-        &self,
-        entry: &super::registry::CronEntry,
-        run_id: Uuid,
-        scheduled_time: DateTime<Utc>,
-        is_catch_up: bool,
-    ) {
-        let info = &entry.info;
+        // Enqueue the cron job in the same transaction
         let job_type = format!("$cron:{}", info.name);
-
         let input = serde_json::json!({
-            "run_id": run_id,
+            "run_id": claim_id,
             "cron_name": info.name,
             "scheduled_time": scheduled_time.to_rfc3339(),
             "timezone": info.timezone,
             "is_catch_up": is_catch_up,
         });
+        let job =
+            crate::jobs::JobRecord::new(job_type, input, forge_core::job::JobPriority::Normal, 3)
+                .with_capability(forge_core::config::CRON_QUEUE);
+        self.job_queue
+            .enqueue_in_conn(&mut tx, job)
+            .await
+            .map_err(forge_core::ForgeError::Database)?;
 
-        let job = crate::jobs::JobRecord::new(
-            job_type.clone(),
-            input,
-            forge_core::job::JobPriority::Normal,
-            1,
-        )
-        .with_capability(forge_core::config::CRON_QUEUE);
+        tx.commit()
+            .await
+            .map_err(forge_core::ForgeError::Database)?;
 
-        match self.job_queue.enqueue(job).await {
-            Ok(job_id) => {
-                tracing::debug!(
-                    cron.name = info.name,
-                    cron.run_id = %run_id,
-                    job_id = %job_id,
-                    is_catch_up,
-                    "Cron dispatched as job"
-                );
-            }
-            Err(e) => {
-                tracing::error!(
-                    cron.name = info.name,
-                    cron.run_id = %run_id,
-                    error = %e,
-                    "Failed to enqueue cron job"
-                );
-                self.mark_failed(run_id, info.name, &e.to_string()).await;
-            }
-        }
-    }
+        tracing::debug!(
+            cron.name = info.name,
+            cron.run_id = %claim_id,
+            is_catch_up,
+            "Cron claimed and job enqueued"
+        );
 
-    /// Mark a cron run as failed.
-    async fn mark_failed(&self, run_id: Uuid, cron_name: &str, error: &str) {
-        if let Err(e) = sqlx::query!(
-            r#"
-            UPDATE forge_cron_runs
-            SET status = 'failed', completed_at = NOW(), error = $3
-            WHERE id = $1 AND node_id = $2
-            "#,
-            run_id,
-            self.config.node_id,
-            error,
-        )
-        .execute(&self.pool)
-        .await
-        {
-            tracing::error!(cron = cron_name, error = %e, "Failed to mark cron failed");
-        }
+        Ok(Some(claim_id))
     }
 
     /// Handle catch-up for missed runs.
@@ -465,9 +440,12 @@ impl CronRunner {
 
             let mut executed_count = 0u32;
             for scheduled in to_catch_up {
-                // Try to claim and execute
-                if let Some(run_id) = self.try_claim(info.name, scheduled, info.timezone).await? {
-                    self.execute_cron(entry, run_id, scheduled, true).await;
+                // Atomically claim and enqueue in a single transaction.
+                if self
+                    .try_claim_and_enqueue(entry, scheduled, true)
+                    .await?
+                    .is_some()
+                {
                     executed_count += 1;
                 }
             }
@@ -490,11 +468,13 @@ mod tests {
         assert_eq!(CronStatus::Running.as_str(), "running");
         assert_eq!(CronStatus::Completed.as_str(), "completed");
         assert_eq!(CronStatus::Failed.as_str(), "failed");
+        assert_eq!(CronStatus::Cancelled.as_str(), "cancelled");
 
         assert_eq!("pending".parse::<CronStatus>(), Ok(CronStatus::Pending));
         assert_eq!("running".parse::<CronStatus>(), Ok(CronStatus::Running));
         assert_eq!("completed".parse::<CronStatus>(), Ok(CronStatus::Completed));
         assert_eq!("failed".parse::<CronStatus>(), Ok(CronStatus::Failed));
+        assert_eq!("cancelled".parse::<CronStatus>(), Ok(CronStatus::Cancelled));
         assert!("invalid".parse::<CronStatus>().is_err());
     }
 

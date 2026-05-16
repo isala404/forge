@@ -59,6 +59,29 @@ impl FromMeta for RequireRole {
 pub struct TablesList(pub Vec<String>);
 
 impl FromMeta for TablesList {
+    fn from_meta(item: &syn::Meta) -> darling::Result<Self> {
+        // Detect the old `tables = [...]` array syntax and emit a migration hint.
+        if let syn::Meta::NameValue(nv) = item
+            && let syn::Expr::Array(_) = &nv.value
+        {
+            return Err(darling::Error::custom(
+                "the `tables = [...]` syntax was removed; use `tables(\"foo\", \"bar\")` instead",
+            ));
+        }
+        // Fall through to the standard list-form parser.
+        match item {
+            syn::Meta::List(_) => {
+                let nested =
+                    darling::ast::NestedMeta::parse_meta_list(item.require_list()?.tokens.clone())
+                        .map_err(darling::Error::from)?;
+                Self::from_list(&nested)
+            }
+            _ => Err(darling::Error::custom(
+                "tables expects a parenthesized list of string literals, e.g. tables(\"users\", \"orders\")",
+            )),
+        }
+    }
+
     fn from_list(items: &[darling::ast::NestedMeta]) -> darling::Result<Self> {
         let mut tables = Vec::new();
         for item in items {

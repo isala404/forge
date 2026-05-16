@@ -263,7 +263,7 @@ pub async fn webhook_handler(
         })
         .collect();
 
-    // Create context
+    // TODO(pre-1.0): Replace WebhookContext with MutationContext for dispatch atomicity
     let mut ctx = WebhookContext::new(
         info.name.to_string(),
         request_id.clone(),

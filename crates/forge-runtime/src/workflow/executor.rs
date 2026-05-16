@@ -62,7 +62,9 @@ impl WorkflowExecutor {
     }
 
     /// Start a new workflow on the active version.
-    /// Returns immediately with the run_id; workflow executes in the background.
+    /// Inserts the workflow row and enqueues a `$workflow_resume` job atomically
+    /// in a single transaction so a crash between the two cannot leave an
+    /// orphaned workflow row without a corresponding resume job.
     pub async fn start<I: serde::Serialize>(
         &self,
         workflow_name: &str,
@@ -83,7 +85,7 @@ impl WorkflowExecutor {
             workflow_name,
             entry.info.version,
             entry.info.signature,
-            input_value.clone(),
+            input_value,
             owner_subject,
         );
         if let Some(tid) = trace_id {
@@ -91,47 +93,35 @@ impl WorkflowExecutor {
         }
         let run_id = record.id;
 
-        // Clone entry data for background execution
-        let entry_info = entry.info.clone();
-        let entry_handler = entry.handler.clone();
-
-        let mut conn = self
+        let mut tx = self
             .pool
-            .acquire()
+            .begin()
             .await
             .map_err(forge_core::ForgeError::Database)?;
-        Self::insert_workflow_record(&mut conn, &record).await?;
 
-        // Execute workflow in background
-        let registry = self.registry.clone();
-        let pool = self.pool.clone();
-        let job_queue = self.job_queue.clone();
-        let http_client = self.http_client.clone();
-        let compensation_state = self.compensation_state.clone();
+        Self::insert_workflow_record(&mut tx, &record).await?;
 
-        tokio::spawn(async move {
-            let executor = WorkflowExecutor {
-                registry,
-                pool,
-                job_queue,
-                http_client,
-                compensation_state,
-            };
-            let entry = super::registry::WorkflowEntry {
-                info: entry_info,
-                handler: entry_handler,
-            };
-            if let Err(e) = executor
-                .execute_workflow(run_id, &entry, input_value, None)
-                .await
-            {
-                tracing::error!(
-                    workflow_run_id = %run_id,
-                    error = %e,
-                    "Workflow execution failed"
-                );
-            }
+        // Enqueue a resume job in the same transaction so the worker only sees
+        // it once the workflow row is committed.
+        let resume_input = serde_json::json!({
+            "run_id": run_id.to_string(),
+            "from_sleep": false,
         });
+        let job = JobRecord::new(
+            WORKFLOW_RESUME_JOB.to_string(),
+            resume_input,
+            JobPriority::High,
+            3,
+        )
+        .with_capability(forge_core::config::WORKFLOWS_QUEUE);
+        self.job_queue
+            .enqueue_in_conn(&mut tx, job)
+            .await
+            .map_err(forge_core::ForgeError::Database)?;
+
+        tx.commit()
+            .await
+            .map_err(forge_core::ForgeError::Database)?;
 
         Ok(run_id)
     }
@@ -328,19 +318,27 @@ impl WorkflowExecutor {
     ///
     /// Compensation follows the saga pattern: steps are undone in reverse order
     /// of their completion. The run ends in Failed with error = "cancelled".
+    ///
+    /// If compensation handlers are not in memory (e.g. after a process restart),
+    /// compensation cannot run. The workflow is failed with a clear reason so
+    /// operators know manual remediation is required. This is an honest limitation:
+    /// in-memory closures cannot survive restarts.
     pub async fn cancel(&self, run_id: Uuid, reason: &str) -> forge_core::Result<()> {
-        // Get compensation state from memory, falling back to persisted metadata
         if let Some(state) = self.compensation_state.write().await.remove(&run_id) {
             self.run_compensation(run_id, &state).await?;
+            let error = format!("cancelled: {reason}");
+            self.fail_workflow(run_id, &error).await?;
         } else {
-            tracing::warn!(
+            tracing::error!(
                 workflow_run_id = %run_id,
-                "Compensation handlers not in memory (post-restart cancel)"
+                "Compensation handlers lost (process restarted since workflow began); \
+                 manual remediation required for any side effects from completed steps"
             );
+            let error = format!(
+                "cancelled: {reason} (compensation skipped: handlers lost on restart, manual remediation required)"
+            );
+            self.fail_workflow(run_id, &error).await?;
         }
-
-        let error = format!("cancelled: {reason}");
-        self.fail_workflow(run_id, &error).await?;
 
         Ok(())
     }
@@ -540,8 +538,8 @@ impl WorkflowExecutor {
             INSERT INTO forge_workflow_runs (
                 id, workflow_name, workflow_version, workflow_signature,
                 owner_subject, input, status, current_step,
-                step_results, started_at, trace_id
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                started_at, trace_id
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
             record.id,
             &record.workflow_name,
@@ -551,7 +549,6 @@ impl WorkflowExecutor {
             record.input as _,
             record.status.as_str(),
             record.current_step as _,
-            record.step_results as _,
             record.started_at,
             record.trace_id.as_deref(),
         )
@@ -568,7 +565,7 @@ impl WorkflowExecutor {
             r#"
             SELECT id, workflow_name, workflow_version, workflow_signature,
                    owner_subject, input, output, status, blocking_reason,
-                   resolution_reason, current_step, step_results, started_at,
+                   resolution_reason, current_step, started_at,
                    completed_at, error, trace_id,
                    cancel_requested_at, cancel_reason
             FROM forge_workflow_runs
@@ -602,7 +599,6 @@ impl WorkflowExecutor {
             blocking_reason: row.blocking_reason,
             resolution_reason: row.resolution_reason,
             current_step: row.current_step,
-            step_results: row.step_results.unwrap_or_default(),
             started_at: row.started_at,
             completed_at: row.completed_at,
             error: row.error,

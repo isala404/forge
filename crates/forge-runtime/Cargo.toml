@@ -42,11 +42,13 @@ ipnet = { workspace = true, optional = true }
 tower = { workspace = true, optional = true }
 tower-http = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
-jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto", "use_pem"], optional = true }
+jsonwebtoken = { workspace = true, optional = true }
 argon2 = { workspace = true, optional = true }
 password-hash = { workspace = true, optional = true }
 ring = { version = "0.17", optional = true }
 serde_urlencoded = { version = "0.7", optional = true }
+percent-encoding = { version = "2", optional = true }
+aho-corasick = { version = "1", optional = true }
 hmac = { version = "0.12", optional = true }
 sha1 = { version = "0.10", optional = true }
 # Gateway TLS termination: rustls + tls-listener implement axum::serve::Listener.
@@ -91,6 +93,8 @@ gateway = [
     "dep:password-hash",
     "dep:ring",
     "dep:serde_urlencoded",
+    "dep:percent-encoding",
+    "dep:aho-corasick",
     "dep:hmac",
     "dep:sha1",
     "dep:tokio-rustls",

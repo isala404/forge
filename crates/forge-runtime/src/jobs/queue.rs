@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use forge_core::job::{JobPriority, JobStatus};
+use sqlx::Row;
 use uuid::Uuid;
 
 /// A job record in the database.
@@ -175,30 +176,35 @@ impl JobQueue {
             }
         }
 
-        sqlx::query!(
+        // Derive queue from worker_capability (or "default" if untagged)
+        let queue = job.worker_capability.as_deref().unwrap_or("default");
+
+        #[allow(clippy::disallowed_methods)]
+        sqlx::query(
             r#"
             INSERT INTO forge_jobs (
-                id, job_type, input, job_context, status, priority, attempts, max_attempts,
+                id, job_type, queue, input, job_context, status, priority, attempts, max_attempts,
                 worker_capability, idempotency_key, owner_subject, scheduled_at, created_at
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
             )
             ON CONFLICT DO NOTHING
             "#,
-            job.id,
-            &job.job_type,
-            job.input as _,
-            job.job_context as _,
-            job.status.as_str(),
-            job.priority,
-            job.attempts,
-            job.max_attempts,
-            job.worker_capability as _,
-            job.idempotency_key as _,
-            job.owner_subject as _,
-            job.scheduled_at,
-            job.created_at,
         )
+        .bind(job.id)
+        .bind(&job.job_type)
+        .bind(queue)
+        .bind(&job.input)
+        .bind(&job.job_context)
+        .bind(job.status.as_str())
+        .bind(job.priority)
+        .bind(job.attempts)
+        .bind(job.max_attempts)
+        .bind(&job.worker_capability)
+        .bind(&job.idempotency_key)
+        .bind(&job.owner_subject)
+        .bind(job.scheduled_at)
+        .bind(job.created_at)
         .execute(&mut *conn)
         .await?;
 
@@ -230,6 +236,12 @@ impl JobQueue {
     /// `worker_capability` is NULL — set on the `default` queue worker so it
     /// drains untagged user jobs. Other queue workers must leave it false to
     /// preserve queue isolation.
+    ///
+    /// Filters on both `worker_capability` (legacy routing) and `queue` column.
+    ///
+    /// Note: Daemon-type jobs (if introduced) would need a leader election
+    /// guard here. Currently daemons run outside the job queue via
+    /// `DaemonRunner` with their own advisory-lock-based leader election.
     pub async fn claim(
         &self,
         worker_id: Uuid,
@@ -237,7 +249,8 @@ impl JobQueue {
         claim_untagged: bool,
         limit: i32,
     ) -> Result<Vec<JobRecord>, sqlx::Error> {
-        let rows = sqlx::query!(
+        #[allow(clippy::disallowed_methods)]
+        let rows = sqlx::query(
             r#"
             WITH claimable AS (
                 SELECT id
@@ -248,6 +261,7 @@ impl JobQueue {
                       worker_capability = ANY($2)
                       OR ($4 AND worker_capability IS NULL)
                   )
+                  AND queue = ANY($2)
                   AND NOT EXISTS (
                       SELECT 1 FROM forge_paused_queues p
                       WHERE p.queue_name = COALESCE(j.worker_capability, 'default')
@@ -270,44 +284,44 @@ impl JobQueue {
                 claimed_at, started_at, completed_at, failed_at, last_heartbeat,
                 cancel_requested_at, cancelled_at, cancel_reason
             "#,
-            worker_id,
-            capabilities,
-            limit as i64,
-            claim_untagged,
         )
+        .bind(worker_id)
+        .bind(capabilities)
+        .bind(limit as i64)
+        .bind(claim_untagged)
         .fetch_all(&self.pool)
         .await?;
 
         let jobs = rows
             .into_iter()
             .map(|row| JobRecord {
-                id: row.id,
-                job_type: row.job_type,
-                input: row.input,
-                output: row.output,
-                job_context: row.job_context,
+                id: row.get("id"),
+                job_type: row.get("job_type"),
+                input: row.get("input"),
+                output: row.get("output"),
+                job_context: row.get("job_context"),
                 status: row
-                    .status
+                    .get::<String, _>("status")
                     .parse()
                     .unwrap_or(forge_core::job::JobStatus::Failed),
-                priority: row.priority,
-                attempts: row.attempts,
-                max_attempts: row.max_attempts,
-                last_error: row.last_error,
-                worker_capability: row.worker_capability,
-                worker_id: row.worker_id,
-                idempotency_key: row.idempotency_key,
-                owner_subject: row.owner_subject,
-                scheduled_at: row.scheduled_at,
-                created_at: row.created_at,
-                claimed_at: row.claimed_at,
-                started_at: row.started_at,
-                completed_at: row.completed_at,
-                failed_at: row.failed_at,
-                last_heartbeat: row.last_heartbeat,
-                cancel_requested_at: row.cancel_requested_at,
-                cancelled_at: row.cancelled_at,
-                cancel_reason: row.cancel_reason,
+                priority: row.get("priority"),
+                attempts: row.get("attempts"),
+                max_attempts: row.get("max_attempts"),
+                last_error: row.get("last_error"),
+                worker_capability: row.get("worker_capability"),
+                worker_id: row.get("worker_id"),
+                idempotency_key: row.get("idempotency_key"),
+                owner_subject: row.get("owner_subject"),
+                scheduled_at: row.get("scheduled_at"),
+                created_at: row.get("created_at"),
+                claimed_at: row.get("claimed_at"),
+                started_at: row.get("started_at"),
+                completed_at: row.get("completed_at"),
+                failed_at: row.get("failed_at"),
+                last_heartbeat: row.get("last_heartbeat"),
+                cancel_requested_at: row.get("cancel_requested_at"),
+                cancelled_at: row.get("cancelled_at"),
+                cancel_reason: row.get("cancel_reason"),
             })
             .collect();
 
@@ -581,19 +595,23 @@ impl JobQueue {
             return Ok(false);
         }
 
-        let updated = sqlx::query!(
+        let retention_secs = Self::DEFAULT_RETENTION.as_secs() as f64;
+        #[allow(clippy::disallowed_methods)]
+        let updated = sqlx::query(
             r#"
             UPDATE forge_jobs
             SET
                 status = 'cancelled',
                 cancelled_at = NOW(),
-                cancel_reason = COALESCE($2, cancel_reason)
+                cancel_reason = COALESCE($2, cancel_reason),
+                expires_at = NOW() + make_interval(secs => $3)
             WHERE id = $1
               AND status NOT IN ('completed', 'failed', 'dead_letter', 'cancelled')
             "#,
-            job_id,
-            reason,
         )
+        .bind(job_id)
+        .bind(reason)
+        .bind(retention_secs)
         .execute(&self.pool)
         .await?;
 
@@ -650,24 +668,29 @@ impl JobQueue {
     ) -> Result<u64, sqlx::Error> {
         let secs = stale_threshold.num_seconds() as f64;
 
-        let finalized = sqlx::query!(
+        let retention_secs = Self::DEFAULT_RETENTION.as_secs() as f64;
+        #[allow(clippy::disallowed_methods)]
+        let finalized = sqlx::query(
             r#"
             UPDATE forge_jobs
             SET
                 status = 'cancelled',
                 cancelled_at = NOW(),
-                cancel_reason = COALESCE(cancel_reason, 'worker died mid-cancel')
+                cancel_reason = COALESCE(cancel_reason, 'worker died mid-cancel'),
+                expires_at = NOW() + make_interval(secs => $2)
             WHERE
                 cancel_requested_at IS NOT NULL
                 AND status IN ('claimed', 'running', 'cancel_requested')
                 AND COALESCE(last_heartbeat, started_at, claimed_at) < NOW() - make_interval(secs => $1)
             "#,
-            secs,
         )
+        .bind(secs)
+        .bind(retention_secs)
         .execute(&self.pool)
         .await?;
 
-        let reset = sqlx::query!(
+        #[allow(clippy::disallowed_methods)]
+        let reset = sqlx::query(
             r#"
             UPDATE forge_jobs
             SET
@@ -675,7 +698,8 @@ impl JobQueue {
                 worker_id = NULL,
                 claimed_at = NULL,
                 started_at = NULL,
-                last_heartbeat = NULL
+                last_heartbeat = NULL,
+                attempts = attempts - 1
             WHERE
                 cancel_requested_at IS NULL
                 AND (
@@ -689,8 +713,8 @@ impl JobQueue {
                     )
                 )
             "#,
-            secs,
         )
+        .bind(secs)
         .execute(&self.pool)
         .await?;
 

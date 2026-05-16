@@ -62,8 +62,12 @@ pub fn register_cron_bridges(cron_registry: &Arc<CronRegistry>, job_registry: &m
             })
         });
 
+        // info.name is left empty because the HashMap key (job_name) is the
+        // source of truth for routing. Bridge jobs are never dispatched through
+        // the standard JobDispatch path which reads info.name. This avoids
+        // leaking a heap-allocated String into &'static str via Box::leak.
         let info = JobInfo {
-            name: Box::leak(job_name.clone().into_boxed_str()),
+            name: "",
             timeout,
             ..JobInfo::default()
         };

@@ -1,6 +1,6 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use dashmap::DashMap;
 
@@ -85,13 +85,18 @@ impl SessionManager {
         counts
     }
 
-    /// Clean up disconnected sessions older than the given duration.
+    /// Clean up sessions that have been inactive beyond `max_age`.
+    /// Removes disconnected, connecting, and reconnecting sessions past the cutoff.
+    /// Only actively connected sessions are retained unconditionally.
     pub fn cleanup_old_sessions(&self, max_age: std::time::Duration) {
         let cutoff = chrono::Utc::now()
-            - chrono::Duration::from_std(max_age).unwrap_or(chrono::TimeDelta::MAX);
+            - chrono::Duration::from_std(max_age).unwrap_or(chrono::Duration::days(30));
 
         self.sessions.retain(|_, session| {
-            session.status != SessionStatus::Disconnected || session.last_active_at > cutoff
+            if session.status == SessionStatus::Connected {
+                return true;
+            }
+            session.last_active_at > cutoff
         });
     }
 }
@@ -110,7 +115,7 @@ pub struct SessionCounts {
 ///
 /// Primary index: groups by QueryGroupId (DashMap, 64 shards).
 /// Secondary: lookup key -> QueryGroupId for dedup.
-/// Subscribers stored in a HashMap for O(1) insert/remove by key.
+/// Subscribers stored in a DashMap for concurrent O(1) insert/remove.
 /// Session -> subscribers mapping for cleanup.
 pub struct SubscriptionManager {
     /// Query groups indexed by ID. Sharded for concurrent access.
@@ -120,48 +125,20 @@ pub struct SubscriptionManager {
     /// Inverted index: table name -> set of group IDs that depend on that table.
     /// Maintained on subscribe/unsubscribe for O(1) affected-group lookups.
     table_index: DashMap<String, HashSet<QueryGroupId>>,
-    /// Subscribers indexed by auto-incrementing key.
-    subscribers: Arc<Mutex<SubscriberStore>>,
+    /// Subscribers indexed by auto-incrementing key. DashMap for lock-free access.
+    subscribers: DashMap<usize, Subscriber>,
+    /// Monotonic counter for subscriber keys.
+    next_subscriber_key: AtomicUsize,
     /// Session -> subscriber IDs for fast cleanup on disconnect.
     session_subscribers: DashMap<SessionId, Vec<SubscriberId>>,
     /// Monotonic counter for group IDs.
     next_group_id: AtomicU32,
     /// Maximum subscriptions per session.
     max_per_session: usize,
-}
-
-/// Simple indexed store replacing the `slab` crate.
-struct SubscriberStore {
-    entries: HashMap<usize, Subscriber>,
-    next_key: usize,
-}
-
-impl SubscriberStore {
-    fn new() -> Self {
-        Self {
-            entries: HashMap::new(),
-            next_key: 0,
-        }
-    }
-
-    fn insert(&mut self, value: Subscriber) -> usize {
-        let key = self.next_key;
-        self.next_key += 1;
-        self.entries.insert(key, value);
-        key
-    }
-
-    fn get(&self, key: usize) -> Option<&Subscriber> {
-        self.entries.get(&key)
-    }
-
-    fn remove(&mut self, key: usize) -> Option<Subscriber> {
-        self.entries.remove(&key)
-    }
-
-    fn iter(&self) -> impl Iterator<Item = (usize, &Subscriber)> {
-        self.entries.iter().map(|(&k, v)| (k, v))
-    }
+    /// Maximum serialized-result bytes to cache in `QueryGroup::last_result`.
+    /// Results larger than this are not cached; new group members will
+    /// re-execute the query instead of receiving a pre-cached value.
+    max_cached_result_bytes: usize,
 }
 
 impl SubscriptionManager {
@@ -172,14 +149,29 @@ impl SubscriptionManager {
 
     /// Create a new subscription manager with a custom shard count.
     pub fn with_shard_count(max_per_session: usize, shard_count: usize) -> Self {
+        Self::with_config(max_per_session, shard_count, 10_485_760)
+    }
+
+    /// Create a new subscription manager with full configuration.
+    ///
+    /// `max_cached_result_bytes` caps the serialized size of results stored in
+    /// `QueryGroup::last_result`. Results that exceed this limit are not cached;
+    /// new subscribers joining the group re-execute the query instead.
+    pub fn with_config(
+        max_per_session: usize,
+        shard_count: usize,
+        max_cached_result_bytes: usize,
+    ) -> Self {
         Self {
             groups: DashMap::with_shard_amount(shard_count),
             group_lookup: DashMap::with_shard_amount(shard_count),
             table_index: DashMap::with_shard_amount(shard_count),
-            subscribers: Arc::new(Mutex::new(SubscriberStore::new())),
+            subscribers: DashMap::with_shard_amount(shard_count),
+            next_subscriber_key: AtomicUsize::new(0),
             session_subscribers: DashMap::with_shard_amount(shard_count),
             next_group_id: AtomicU32::new(0),
             max_per_session,
+            max_cached_result_bytes,
         }
     }
 
@@ -240,6 +232,7 @@ impl SubscriptionManager {
                 selected_cols,
                 read_set: ReadSet::new(),
                 last_result_hash: None,
+                last_result: None,
                 subscribers: Vec::new(),
                 created_at: chrono::Utc::now(),
                 execution_count: 0,
@@ -260,22 +253,18 @@ impl SubscriptionManager {
 
         // Create subscriber in the store
         let subscription_id = SubscriptionId::new();
-        let subscriber_id = {
-            let mut store = self.subscribers.lock().unwrap_or_else(|e| {
-                tracing::error!("Subscriber store lock was poisoned, recovering");
-                e.into_inner()
-            });
-            let key = store.next_key;
-            let sid = SubscriberId(key as u32);
-            store.insert(Subscriber {
-                id: sid,
+        let key = self.next_subscriber_key.fetch_add(1, Ordering::Relaxed);
+        let subscriber_id = SubscriberId(key as u32);
+        self.subscribers.insert(
+            key,
+            Subscriber {
+                id: subscriber_id,
                 session_id,
                 client_sub_id,
                 group_id,
                 subscription_id,
-            });
-            sid
-        };
+            },
+        );
 
         // Add subscriber to group
         if let Some(mut group) = self.groups.get_mut(&group_id) {
@@ -293,23 +282,24 @@ impl SubscriptionManager {
 
     /// Remove a subscriber by its subscription ID.
     pub fn unsubscribe(&self, subscription_id: SubscriptionId) {
-        let mut store = self.subscribers.lock().unwrap_or_else(|e| {
-            tracing::error!("Subscriber store lock was poisoned, recovering");
-            e.into_inner()
-        });
-
         // Find the subscriber by subscription_id
-        let sub_key = store
+        let sub_key = self
+            .subscribers
             .iter()
-            .find(|(_, s)| s.subscription_id == subscription_id)
-            .map(|(key, s)| (key, s.group_id, s.session_id));
+            .find(|entry| entry.value().subscription_id == subscription_id)
+            .map(|entry| {
+                (
+                    *entry.key(),
+                    entry.value().group_id,
+                    entry.value().session_id,
+                )
+            });
 
         if let Some((key, group_id, session_id)) = sub_key {
             let subscriber_id = SubscriberId(key as u32);
-            store.remove(key);
+            self.subscribers.remove(&key);
 
             // Remove from group
-            drop(store); // Release lock before accessing DashMap
             if let Some(mut group) = self.groups.get_mut(&group_id) {
                 group.subscribers.retain(|s| *s != subscriber_id);
 
@@ -343,14 +333,10 @@ impl SubscriptionManager {
             .unwrap_or_default();
 
         let mut removed_sub_ids = Vec::new();
-        let mut store = self.subscribers.lock().unwrap_or_else(|e| {
-            tracing::error!("Subscriber store lock was poisoned, recovering");
-            e.into_inner()
-        });
 
         for sid in subscriber_ids {
             let key = sid.0 as usize;
-            if let Some(sub) = store.remove(key) {
+            if let Some((_, sub)) = self.subscribers.remove(&key) {
                 removed_sub_ids.push(sub.subscription_id);
 
                 // Remove from group
@@ -378,10 +364,15 @@ impl SubscriptionManager {
     /// Find all groups affected by a change via the inverted table index.
     /// O(groups_for_table) with column-level filtering, not O(all_groups).
     pub fn find_affected_groups(&self, change: &Change) -> Vec<QueryGroupId> {
-        let candidates = match self.table_index.get(&change.table) {
-            Some(set) => set.clone(),
-            None => return Vec::new(),
+        let Some(set) = self.table_index.get(&change.table) else {
+            return Vec::new();
         };
+
+        // Collect IDs into a Vec while holding the read guard — cheaper than
+        // cloning the entire HashSet since Vec is contiguous and we only need
+        // the IDs for downstream filtering.
+        let candidates: Vec<QueryGroupId> = set.iter().copied().collect();
+        drop(set);
 
         candidates
             .into_iter()
@@ -417,15 +408,11 @@ impl SubscriptionManager {
             .map(|g| g.subscribers.clone())
             .unwrap_or_default();
 
-        let store = self.subscribers.lock().unwrap_or_else(|e| {
-            tracing::error!("Subscriber store lock was poisoned, recovering");
-            e.into_inner()
-        });
         subscriber_ids
             .iter()
             .filter_map(|sid| {
-                store
-                    .get(sid.0 as usize)
+                self.subscribers
+                    .get(&(sid.0 as usize))
                     .map(|s| (s.session_id, s.client_sub_id.clone()))
             })
             .collect()
@@ -446,6 +433,53 @@ impl SubscriptionManager {
                 }
             }
             group.record_execution(read_set, result_hash);
+        }
+    }
+
+    /// Update a group after re-execution, caching the result data for new
+    /// subscribers that join the group before the next invalidation.
+    ///
+    /// If the serialized result exceeds `max_cached_result_bytes`, the data is
+    /// not stored in `last_result`. The hash is still recorded so delta
+    /// detection works correctly; new subscribers joining the group will
+    /// re-execute the query rather than receiving a cached value.
+    pub fn update_group_with_data(
+        &self,
+        group_id: QueryGroupId,
+        read_set: ReadSet,
+        result_hash: String,
+        data: std::sync::Arc<serde_json::Value>,
+    ) {
+        // Estimate the serialized size before taking the mutable guard.
+        // `serde_json::to_string` on a `Value` is infallible; `Ok` is the only
+        // reachable branch. Fall back to `usize::MAX` on any unexpected error
+        // so we conservatively skip caching rather than caching a huge value.
+        let serialized_len = serde_json::to_string(&*data)
+            .map(|s| s.len())
+            .unwrap_or(usize::MAX);
+
+        if let Some(mut group) = self.groups.get_mut(&group_id) {
+            for table in &read_set.tables {
+                let already_indexed = group.table_deps.iter().any(|t| *t == table);
+                if !already_indexed {
+                    self.table_index
+                        .entry(table.clone())
+                        .or_default()
+                        .insert(group_id);
+                }
+            }
+
+            if serialized_len > self.max_cached_result_bytes {
+                tracing::debug!(
+                    query = %group.query_name,
+                    result_bytes = serialized_len,
+                    limit_bytes = self.max_cached_result_bytes,
+                    "Result too large to cache; new subscribers will re-execute"
+                );
+                group.record_execution(read_set, result_hash);
+            } else {
+                group.record_execution_with_data(read_set, result_hash, data);
+            }
         }
     }
 

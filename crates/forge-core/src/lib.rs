@@ -65,8 +65,8 @@ pub use env::{EnvAccess, EnvProvider, MockEnvProvider, RealEnvProvider};
 pub use error::{ForgeError, Result};
 pub use function::{
     AuthContext, AuthTokenTtl, DbConn, ForgeConn, ForgeDb, ForgeMutation, ForgeQuery, FunctionInfo,
-    FunctionKind, JobDispatch, LogLevel, MutationContext, OutboxBuffer, PendingJob,
-    PendingWorkflow, QueryContext, RequestMetadata, TokenIssuer, WorkflowDispatch,
+    FunctionKind, JobDispatch, LogLevel, MutationContext, QueryContext, RequestMetadata,
+    TokenIssuer, WorkflowDispatch,
 };
 pub use http::{
     CircuitBreakerClient, CircuitBreakerConfig, CircuitBreakerError, CircuitBreakerOpen,
@@ -96,6 +96,6 @@ pub use webhook::{
     WebhookContext, WebhookInfo, WebhookResult, WebhookSignature,
 };
 pub use workflow::{
-    ForgeWorkflow, ParallelBuilder, ParallelResults, SuspendReason, WorkflowContext, WorkflowEvent,
-    WorkflowEventSender, WorkflowInfo, WorkflowStatus,
+    ForgeWorkflow, SuspendReason, WorkflowContext, WorkflowEvent, WorkflowEventSender,
+    WorkflowInfo, WorkflowStatus,
 };

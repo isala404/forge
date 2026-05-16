@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use super::types::DurationStr;
 
 /// JWT signing algorithm.
+///
+/// Supported values in forge.toml: `"HS256"` (default), `"RS256"`.
+/// Any other value produces a deserialization error at startup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "UPPERCASE")]
 #[non_exhaustive]

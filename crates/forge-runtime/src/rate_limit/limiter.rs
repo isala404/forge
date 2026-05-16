@@ -239,6 +239,10 @@ impl LocalBucket {
 /// correctness (e.g. billing quotas) use [`StrictRateLimiter`].
 ///
 /// `Global` keys always hit the database for cross-node consistency.
+///
+/// DESIGN: Per-node rate limiting. Cluster-wide consistency trades latency
+/// for accuracy. With N nodes, effective limit is N× per-key. Keep per-node
+/// budgets low.
 pub struct HybridRateLimiter {
     local: DashMap<String, LocalBucket>,
     db_limiter: StrictRateLimiter,
@@ -325,7 +329,9 @@ impl HybridRateLimiter {
 
     /// Clean up expired local buckets (call periodically).
     pub fn cleanup_local(&self, max_idle: Duration) {
-        let cutoff = std::time::Instant::now() - max_idle;
+        let cutoff = std::time::Instant::now()
+            .checked_sub(max_idle)
+            .unwrap_or(std::time::Instant::now());
         self.local.retain(|_, bucket| bucket.last_refill > cutoff);
     }
 }

@@ -109,10 +109,17 @@ impl ChangeListener {
             return None;
         }
 
-        let rows = crate::pg::drain_change_log(&self.pool, since)
+        let rows = match crate::pg::drain_change_log(&self.pool, since)
             .try_collect::<Vec<_>>()
             .await
-            .ok()?;
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!(error = %e, since_seq = since, "Failed to replay missed changes from log");
+                self.needs_resync.store(true, Ordering::Relaxed);
+                return Some(0);
+            }
+        };
 
         let count = rows.len();
         for row in &rows {
@@ -223,10 +230,14 @@ impl ChangeListener {
     fn parse_notification(&self, payload: &str) -> Option<(Change, i64)> {
         // Split off the optional #seq suffix
         let (body_with_version, seq) = match payload.rsplit_once('#') {
-            Some((prefix, seq_str)) => {
-                let seq = seq_str.parse::<i64>().unwrap_or(0);
-                (prefix, seq)
-            }
+            Some((prefix, seq_str)) => match seq_str.parse::<i64>() {
+                Ok(seq) => (prefix, seq),
+                Err(_) => {
+                    tracing::warn!(payload = %payload, "Malformed seq in notification, triggering resync");
+                    self.needs_resync.store(true, Ordering::Relaxed);
+                    return None;
+                }
+            },
             None => (payload, 0),
         };
 
@@ -252,8 +263,10 @@ impl ChangeListener {
         Some((change, seq))
     }
 
-    /// Manually emit a change (for testing or manual triggering).
-    pub fn emit_change(&self, change: Change) {
+    /// Manually emit a change (for testing).
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn emit_change(&self, change: Change) {
         let _ = self.change_tx.send(change);
     }
 }

@@ -36,6 +36,11 @@ impl Default for DaemonRunnerConfig {
 }
 
 /// Manages running all registered daemons.
+///
+/// Pre-1.0 architecture: Daemons run as separate long-lived tasks rather than
+/// jobs because they require different lifecycle semantics (no retry, no timeout,
+/// graceful shutdown signal). The per-job retry/timeout model doesn't map to
+/// continuously-running services.
 pub struct DaemonRunner {
     registry: Arc<DaemonRegistry>,
     pool: PgPool,

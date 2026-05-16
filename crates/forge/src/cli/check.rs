@@ -1,3 +1,4 @@
+// TODO(pre-1.0): Split into smaller modules
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use console::style;

@@ -96,6 +96,20 @@ impl RpcHandler {
         self.router.function_info(name)
     }
 
+    /// Set the maximum number of jobs a single mutation may dispatch.
+    pub fn set_max_jobs_per_request(&mut self, limit: usize) {
+        if let Some(router) = Arc::get_mut(&mut self.router) {
+            router.set_max_jobs_per_request(limit);
+        }
+    }
+
+    /// Set the maximum serialized response size in bytes.
+    pub fn set_max_result_size_bytes(&mut self, limit: usize) {
+        if let Some(router) = Arc::get_mut(&mut self.router) {
+            router.set_max_result_size_bytes(limit);
+        }
+    }
+
     /// Set the signals collector for auto-capturing RPC events.
     pub fn set_signals_collector(
         &mut self,

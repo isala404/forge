@@ -69,20 +69,52 @@ impl std::fmt::Display for SubscriberId {
 /// Authentication scope for query group identity.
 /// Two subscriptions with the same query+args but different auth scopes
 /// must be in different groups (different users see different data).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// Includes a hash of the sorted roles so users with different role sets
+/// don't share a group.
+#[derive(Debug, Clone)]
 pub struct AuthScope {
     pub principal_id: Option<String>,
     pub tenant_id: Option<String>,
+    /// Hash of the sorted roles for this auth context.
+    pub role_hash: u64,
+}
+
+impl PartialEq for AuthScope {
+    fn eq(&self, other: &Self) -> bool {
+        self.principal_id == other.principal_id
+            && self.tenant_id == other.tenant_id
+            && self.role_hash == other.role_hash
+    }
+}
+
+impl Eq for AuthScope {}
+
+impl std::hash::Hash for AuthScope {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.principal_id.hash(state);
+        self.tenant_id.hash(state);
+        self.role_hash.hash(state);
+    }
 }
 
 impl AuthScope {
     pub fn from_auth(auth: &crate::function::AuthContext) -> Self {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut roles: Vec<&str> = auth.roles().iter().map(|s| s.as_str()).collect();
+        roles.sort_unstable();
+        let mut hasher = DefaultHasher::new();
+        roles.hash(&mut hasher);
+        let role_hash = hasher.finish();
+
         Self {
             principal_id: auth.principal_id(),
             tenant_id: auth
                 .claim("tenant_id")
                 .and_then(|v| v.as_str())
                 .map(ToString::to_string),
+            role_hash,
         }
     }
 }
@@ -95,6 +127,9 @@ pub struct QueryGroup {
     pub query_name: String,
     pub args: Arc<serde_json::Value>,
     pub auth_scope: AuthScope,
+    /// Cached at subscribe time. Not refreshed during the group's lifetime.
+    /// Auth is bound to token lifetime: the reactor skips re-execution for
+    /// groups with expired tokens, and session cleanup evicts them.
     pub auth_context: crate::function::AuthContext,
     /// Compile-time table dependencies from FunctionInfo.
     pub table_deps: &'static [&'static str],
@@ -103,6 +138,8 @@ pub struct QueryGroup {
     pub read_set: ReadSet,
     /// Result hash for delta detection. Shared across all subscribers.
     pub last_result_hash: Option<String>,
+    /// Cached last result for sending to new subscribers joining an existing group.
+    pub last_result: Option<Arc<serde_json::Value>>,
     /// All subscribers in this group.
     pub subscribers: Vec<SubscriberId>,
     pub created_at: DateTime<Utc>,
@@ -170,6 +207,19 @@ impl QueryGroup {
     pub fn record_execution(&mut self, read_set: ReadSet, result_hash: String) {
         self.read_set = read_set;
         self.last_result_hash = Some(result_hash);
+        self.execution_count += 1;
+    }
+
+    /// Record execution with the result data cached for new subscribers.
+    pub fn record_execution_with_data(
+        &mut self,
+        read_set: ReadSet,
+        result_hash: String,
+        data: Arc<serde_json::Value>,
+    ) {
+        self.read_set = read_set;
+        self.last_result_hash = Some(result_hash);
+        self.last_result = Some(data);
         self.execution_count += 1;
     }
 
@@ -340,6 +390,7 @@ mod tests {
         let scope = AuthScope {
             principal_id: Some("user-1".to_string()),
             tenant_id: None,
+            role_hash: 0,
         };
         let key1 = QueryGroup::compute_lookup_key(
             "get_projects",
@@ -356,6 +407,7 @@ mod tests {
         let other_scope = AuthScope {
             principal_id: Some("user-2".to_string()),
             tenant_id: None,
+            role_hash: 0,
         };
         let key3 = QueryGroup::compute_lookup_key(
             "get_projects",
@@ -370,6 +422,7 @@ mod tests {
         let scope = AuthScope {
             principal_id: Some("u1".to_string()),
             tenant_id: None,
+            role_hash: 0,
         };
         let key =
             QueryGroup::compute_lookup_key("get_items", &serde_json::json!({"id": "42"}), &scope);
@@ -385,6 +438,7 @@ mod tests {
         let scope = AuthScope {
             principal_id: None,
             tenant_id: None,
+            role_hash: 0,
         };
         let key_ab =
             QueryGroup::compute_lookup_key("q", &serde_json::json!({"a": 1, "b": 2}), &scope);

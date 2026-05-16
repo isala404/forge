@@ -144,6 +144,7 @@ impl Database {
         .map_err(|e| ForgeError::Internal(format!("Failed to connect to primary: {}", e)))?;
 
         verify_postgres_version(&primary, "primary").await?;
+        detect_pgbouncer(&primary).await?;
 
         let mut replicas = Vec::new();
         for replica_url in &config.replica_urls {
@@ -397,6 +398,67 @@ async fn verify_postgres_version(pool: &PgPool, role: &str) -> Result<()> {
         )));
     }
     tracing::debug!(role, postgres_major = major, "PostgreSQL version verified");
+    Ok(())
+}
+
+/// Detect PgBouncer proxies and refuse to start when one is found.
+///
+/// PgBouncer in transaction-pooling mode breaks two Forge primitives:
+///   1. `pg_try_advisory_lock` — advisory locks are per-connection; with
+///      transaction pooling the connection changes between calls so the lock
+///      is silently lost after each transaction boundary.
+///   2. `LISTEN/NOTIFY` — persistent listeners require a stable connection;
+///      PgBouncer can reassign or close the underlying connection without
+///      Forge's listener task knowing, causing silent change-event loss.
+///
+/// Session-pooling mode does keep the connection, but Forge cannot distinguish
+/// it from transaction mode reliably at runtime. If you need connection pooling,
+/// use `pgcat` in query-router mode or rely on SQLx's built-in pool, which
+/// already amortises connection overhead without the above drawbacks.
+///
+/// Detection strategy:
+///   - `pg_backend_pid()` always returns a positive integer on real Postgres.
+///     PgBouncer returns 0 in transaction-pooling mode.
+///   - `version()` on PgBouncer returns a string containing "PgBouncer".
+///
+/// Both checks run so a future PgBouncer version that fixes `pg_backend_pid`
+/// can still be detected via the version string.
+async fn detect_pgbouncer(pool: &PgPool) -> Result<()> {
+    // Runtime query: this is a one-time startup introspection call, not a
+    // user-data query. Using sqlx::query() here is intentional and
+    // correct — we cannot use sqlx::query_scalar! because the .sqlx/ cache
+    // is built in SQLX_OFFLINE mode and this query should not appear in the
+    // cache (it is never called after startup).
+    #[allow(clippy::disallowed_methods)]
+    let (backend_pid, version_str): (i32, String) =
+        sqlx::query_as("SELECT pg_backend_pid(), version()")
+            .fetch_one(pool)
+            .await
+            .map_err(|e| {
+                ForgeError::Internal(format!(
+                    "PgBouncer detection query failed: {}. \
+                     Forge requires a direct PostgreSQL connection.",
+                    e
+                ))
+            })?;
+    let version_lower = version_str.to_lowercase();
+
+    if backend_pid == 0 || version_lower.contains("pgbouncer") {
+        return Err(ForgeError::Config(
+            "Forge detected a PgBouncer proxy in the connection path. \
+             Forge requires direct PostgreSQL connections because it relies on \
+             `pg_try_advisory_lock` (for leader election) and persistent `LISTEN/NOTIFY` \
+             listeners (for real-time reactivity). Both break under PgBouncer's transaction \
+             pooling mode. Connect directly to PostgreSQL, or use a session-level pooler \
+             that preserves connection identity (e.g. pgcat in query-router mode)."
+                .into(),
+        ));
+    }
+
+    tracing::debug!(
+        backend_pid,
+        "Direct PostgreSQL connection confirmed (no PgBouncer)"
+    );
     Ok(())
 }
 

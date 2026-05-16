@@ -103,19 +103,6 @@ pub enum RealtimeMessage {
     },
     /// Sent to slow clients before disconnecting them.
     Lagging,
-    /// Ephemeral pub-sub fan-out (forge_channels). The variant is reserved
-    /// for GA; the publish/subscribe pipeline lands in 1.0.x.
-    Channel {
-        channel: String,
-        payload: serde_json::Value,
-    },
-    /// Server detected a dropped or out-of-order delivery for a subscription
-    /// and asks the client to resync via `last-event-id`. Reserved for GA;
-    /// emission rules land in 1.0.x.
-    GapDetected {
-        client_sub_id: String,
-        last_event_id: Option<String>,
-    },
 }
 
 /// Per-session state with backpressure tracking.
@@ -358,7 +345,7 @@ impl SessionServer {
     /// Cleanup stale connections.
     pub fn cleanup_stale(&self, max_idle: Duration) {
         let cutoff_ts = (chrono::Utc::now()
-            - chrono::Duration::from_std(max_idle).unwrap_or(chrono::TimeDelta::MAX))
+            - chrono::Duration::from_std(max_idle).unwrap_or(chrono::Duration::days(30)))
         .timestamp();
 
         let stale: Vec<(SessionId, chrono::DateTime<chrono::Utc>)> = self

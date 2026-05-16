@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -21,10 +21,14 @@ impl Sha256Hasher {
         Self(Sha256::new())
     }
 
+    /// Consume the hasher and return a 64-bit cache key.
+    ///
+    /// Truncation to u64 is acceptable for cache key dedup — collision
+    /// probability is ~1/2^64 per birthday bound which is negligible for
+    /// cache sizes under billions of entries.
     fn finish_u64(self) -> u64 {
         let digest = self.0.finalize();
         let mut buf = [0u8; 8];
-        // SHA-256 always yields 32 bytes; `get` keeps clippy::indexing_slicing happy.
         if let Some(prefix) = digest.get(..8) {
             buf.copy_from_slice(prefix);
         }
@@ -38,12 +42,11 @@ impl Hasher for Sha256Hasher {
     }
 
     fn finish(&self) -> u64 {
-        // `Hasher::finish` requires a non-consuming signature, but SHA-256 is
-        // not free to clone. Cache callers use `finish_u64` after dropping the
-        // hasher; this fallback exists only to satisfy the trait.
+        // Required by the trait for `Hash::hash` to work. Clones internal
+        // state because `Hasher::finish` is non-consuming. All real callers
+        // use `finish_u64(self)` instead.
         let digest = self.0.clone().finalize();
         let mut buf = [0u8; 8];
-        // SHA-256 always yields 32 bytes, but `get` keeps clippy happy.
         if let Some(prefix) = digest.get(..8) {
             buf.copy_from_slice(prefix);
         }
@@ -53,13 +56,24 @@ impl Hasher for Sha256Hasher {
 
 /// A simple in-memory cache for query results.
 pub struct QueryCache {
-    entries: RwLock<HashMap<CacheKey, CacheEntry>>,
+    entries: RwLock<CacheState>,
     max_entries: usize,
 }
 
-#[derive(Clone, Eq, PartialEq, Hash)]
+struct CacheState {
+    map: HashMap<CacheKey, CacheEntry>,
+    /// Insertion-order queue for O(1) eviction of oldest entries.
+    insertion_order: VecDeque<CacheKey>,
+    /// Reverse index: function name -> set of cache keys for that function.
+    /// Avoids O(N) scan in `invalidate_by_tables` / `invalidate_function`.
+    name_to_keys: HashMap<Arc<str>, HashSet<CacheKey>>,
+}
+
+/// Cache key using hashed function name to avoid per-lookup String allocation.
+/// The `function_name_hash` is a stable SHA-256 truncation of the name.
+#[derive(Clone, Copy, Eq, PartialEq, Hash)]
 struct CacheKey {
-    function_name: String,
+    function_name_hash: u64,
     args_hash: u64,
     auth_scope_hash: u64,
 }
@@ -67,7 +81,8 @@ struct CacheKey {
 struct CacheEntry {
     value: Arc<Value>,
     expires_at: Instant,
-    created_at: Instant,
+    /// The original function name, retained for invalidation-by-name lookups.
+    function_name: Arc<str>,
 }
 
 impl QueryCache {
@@ -79,7 +94,11 @@ impl QueryCache {
     /// Create a new query cache with a maximum number of entries.
     pub fn with_max_entries(max_entries: usize) -> Self {
         Self {
-            entries: RwLock::new(HashMap::new()),
+            entries: RwLock::new(CacheState {
+                map: HashMap::new(),
+                insertion_order: VecDeque::new(),
+                name_to_keys: HashMap::new(),
+            }),
             max_entries,
         }
     }
@@ -91,10 +110,10 @@ impl QueryCache {
         args: &Value,
         auth_scope: Option<&str>,
     ) -> Option<Arc<Value>> {
-        let key = self.make_key(function_name, args, auth_scope);
+        let key = Self::make_key(function_name, args, auth_scope);
 
-        let entries = self.entries.read().ok()?;
-        let entry = entries.get(&key)?;
+        let state = self.entries.read().ok()?;
+        let entry = state.map.get(&key)?;
 
         if Instant::now() < entry.expires_at {
             Some(Arc::clone(&entry.value))
@@ -112,44 +131,76 @@ impl QueryCache {
         value: Value,
         ttl: Duration,
     ) {
-        let key = self.make_key(function_name, args, auth_scope);
+        let key = Self::make_key(function_name, args, auth_scope);
         let now = Instant::now();
 
         let entry = CacheEntry {
             value: Arc::new(value),
             expires_at: now + ttl,
-            created_at: now,
+            function_name: Arc::from(function_name),
         };
 
-        if let Ok(mut entries) = self.entries.write() {
+        if let Ok(mut state) = self.entries.write() {
             // Evict expired entries if we're at capacity
-            if entries.len() >= self.max_entries {
-                self.evict_expired(&mut entries);
+            if state.map.len() >= self.max_entries {
+                Self::evict_expired(&mut state);
             }
 
-            // If still at capacity, evict oldest entries
-            if entries.len() >= self.max_entries {
-                self.evict_oldest(&mut entries, (self.max_entries / 10).max(1));
+            // If still at capacity, evict oldest entries via insertion order
+            if state.map.len() >= self.max_entries {
+                Self::evict_oldest(&mut state, (self.max_entries / 10).max(1));
             }
 
-            entries.insert(key, entry);
+            if !state.map.contains_key(&key) {
+                state.insertion_order.push_back(key);
+            }
+            state
+                .name_to_keys
+                .entry(Arc::clone(&entry.function_name))
+                .or_default()
+                .insert(key);
+            state.map.insert(key, entry);
         }
     }
 
     /// Invalidate a specific cache entry.
     pub fn invalidate(&self, function_name: &str, args: &Value) {
-        let key = self.make_key(function_name, args, None);
-        if let Ok(mut entries) = self.entries.write() {
-            entries.retain(|k, _| {
-                !(k.function_name == key.function_name && k.args_hash == key.args_hash)
-            });
+        let name_hash = hash_str(function_name);
+        let args_hash = hash_value(args);
+        if let Ok(mut state) = self.entries.write() {
+            let matching: Vec<CacheKey> = state
+                .map
+                .keys()
+                .filter(|k| k.function_name_hash == name_hash && k.args_hash == args_hash)
+                .copied()
+                .collect();
+            for key in &matching {
+                if let Some(entry) = state.map.remove(key)
+                    && let Some(keys) = state.name_to_keys.get_mut(&entry.function_name)
+                {
+                    keys.remove(key);
+                    if keys.is_empty() {
+                        state.name_to_keys.remove(&entry.function_name);
+                    }
+                }
+            }
+            if !matching.is_empty() {
+                let removed: HashSet<&CacheKey> = matching.iter().collect();
+                state.insertion_order.retain(|k| !removed.contains(k));
+            }
         }
     }
 
     /// Invalidate all entries for a function.
     pub fn invalidate_function(&self, function_name: &str) {
-        if let Ok(mut entries) = self.entries.write() {
-            entries.retain(|k, _| k.function_name != function_name);
+        if let Ok(mut state) = self.entries.write() {
+            let name_arc: Arc<str> = Arc::from(function_name);
+            if let Some(keys) = state.name_to_keys.remove(&name_arc) {
+                for key in &keys {
+                    state.map.remove(key);
+                }
+                state.insertion_order.retain(|k| !keys.contains(k));
+            }
         }
     }
 
@@ -158,21 +209,37 @@ impl QueryCache {
         if query_names.is_empty() {
             return;
         }
-        if let Ok(mut entries) = self.entries.write() {
-            entries.retain(|k, _| !query_names.iter().any(|name| k.function_name == *name));
+        if let Ok(mut state) = self.entries.write() {
+            let mut all_removed_keys: HashSet<CacheKey> = HashSet::new();
+            for name in query_names {
+                let name_arc: Arc<str> = Arc::from(*name);
+                if let Some(keys) = state.name_to_keys.remove(&name_arc) {
+                    for key in &keys {
+                        state.map.remove(key);
+                    }
+                    all_removed_keys.extend(keys);
+                }
+            }
+            if !all_removed_keys.is_empty() {
+                state
+                    .insertion_order
+                    .retain(|k| !all_removed_keys.contains(k));
+            }
         }
     }
 
     /// Clear the entire cache.
     pub fn clear(&self) {
-        if let Ok(mut entries) = self.entries.write() {
-            entries.clear();
+        if let Ok(mut state) = self.entries.write() {
+            state.map.clear();
+            state.insertion_order.clear();
+            state.name_to_keys.clear();
         }
     }
 
     /// Get the number of cached entries.
     pub fn len(&self) -> usize {
-        self.entries.read().map(|e| e.len()).unwrap_or(0)
+        self.entries.read().map(|e| e.map.len()).unwrap_or(0)
     }
 
     /// Check if the cache is empty.
@@ -180,29 +247,54 @@ impl QueryCache {
         self.len() == 0
     }
 
-    fn make_key(&self, function_name: &str, args: &Value, auth_scope: Option<&str>) -> CacheKey {
+    fn make_key(function_name: &str, args: &Value, auth_scope: Option<&str>) -> CacheKey {
         CacheKey {
-            function_name: function_name.to_string(),
+            function_name_hash: hash_str(function_name),
             args_hash: hash_value(args),
             auth_scope_hash: hash_str(auth_scope.unwrap_or("")),
         }
     }
 
-    fn evict_expired(&self, entries: &mut HashMap<CacheKey, CacheEntry>) {
+    fn evict_expired(state: &mut CacheState) {
         let now = Instant::now();
-        entries.retain(|_, v| v.expires_at > now);
+        let expired_keys: Vec<CacheKey> = state
+            .map
+            .iter()
+            .filter(|(_, v)| v.expires_at <= now)
+            .map(|(k, _)| *k)
+            .collect();
+        for key in &expired_keys {
+            if let Some(entry) = state.map.remove(key)
+                && let Some(keys) = state.name_to_keys.get_mut(&entry.function_name)
+            {
+                keys.remove(key);
+                if keys.is_empty() {
+                    state.name_to_keys.remove(&entry.function_name);
+                }
+            }
+        }
+        if !expired_keys.is_empty() {
+            let removed: HashSet<&CacheKey> = expired_keys.iter().collect();
+            state.insertion_order.retain(|k| !removed.contains(k));
+        }
     }
 
-    fn evict_oldest(&self, entries: &mut HashMap<CacheKey, CacheEntry>, count: usize) {
-        let mut oldest: Vec<_> = entries
-            .iter()
-            .map(|(k, v)| (k.clone(), v.created_at))
-            .collect();
-
-        oldest.sort_by_key(|(_, t)| *t);
-
-        for (key, _) in oldest.into_iter().take(count) {
-            entries.remove(&key);
+    /// Evict the oldest entries by popping from the front of the insertion queue.
+    fn evict_oldest(state: &mut CacheState, count: usize) {
+        let mut evicted = 0;
+        while evicted < count {
+            let Some(key) = state.insertion_order.pop_front() else {
+                break;
+            };
+            if let Some(entry) = state.map.remove(&key) {
+                if let Some(keys) = state.name_to_keys.get_mut(&entry.function_name) {
+                    keys.remove(&key);
+                    if keys.is_empty() {
+                        state.name_to_keys.remove(&entry.function_name);
+                    }
+                }
+                evicted += 1;
+            }
         }
     }
 }
@@ -412,7 +504,15 @@ impl QueryCacheCoordinator {
             claims.insert(k.clone(), v.clone());
         }
 
-        let claims_json = serde_json::to_string(&claims).unwrap_or_default();
+        let claims_json = match serde_json::to_string(&claims) {
+            Ok(json) => json,
+            Err(_) => {
+                tracing::error!(
+                    "BTreeMap<String, Value> serialization failed — cache scope degraded"
+                );
+                String::new()
+            }
+        };
         let mut buf = String::with_capacity(64 + claims_json.len());
         for role in &roles {
             buf.push_str(role);
@@ -497,12 +597,13 @@ fn hash_value_recursive<H: Hasher>(value: &Value, hasher: &mut H) {
         Value::Object(obj) => {
             5u8.hash(hasher);
             obj.len().hash(hasher);
-            // Sort keys for consistent hashing
             let mut keys: Vec<_> = obj.keys().collect();
             keys.sort();
             for key in keys {
                 key.hash(hasher);
-                hash_value_recursive(&obj[key], hasher);
+                if let Some(v) = obj.get(key.as_str()) {
+                    hash_value_recursive(v, hasher);
+                }
             }
         }
     }

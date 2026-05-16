@@ -308,20 +308,6 @@ pub enum SsePayload {
         session_id: String,
         session_secret: String,
     },
-    /// Ephemeral pub-sub fan-out for `forge_channels`.
-    /// Wire format reserved for GA; behavior implementation lands in 1.0.x.
-    Channel {
-        channel: String,
-        payload: serde_json::Value,
-    },
-    /// Server detected a dropped or out-of-order delivery on `target` and is
-    /// signalling the client to resync via `last-event-id`.
-    /// Wire format reserved for GA; behavior implementation lands in 1.0.x.
-    Gap {
-        target: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        last_event_id: Option<String>,
-    },
 }
 
 /// Internal message type for SSE stream.
@@ -335,17 +321,6 @@ pub enum SseMessage {
         target: String,
         code: String,
         message: String,
-    },
-    /// Carries a Forge `forge_channels` pub-sub event to the SSE stream.
-    /// Implementation reserved; see [`SsePayload::Channel`].
-    Channel {
-        channel: String,
-        payload: serde_json::Value,
-    },
-    /// Tells the client a delivery gap was detected. See [`SsePayload::Gap`].
-    Gap {
-        target: String,
-        last_event_id: Option<String>,
     },
 }
 
@@ -522,8 +497,19 @@ pub async fn sse_handler(
     let auth_context = resolve_sse_auth_context(&request_auth, query_auth);
 
     let client_ip = resolved_ip.0;
+    // UUIDv4 provides 122 bits of randomness, sufficient for session secret entropy
     let session_secret = uuid::Uuid::new_v4().to_string();
-    let token_exp = auth_context.token_exp();
+    // Authenticated sessions without an explicit exp claim get a default
+    // expiry of 1 hour to prevent indefinite streaming on malformed tokens.
+    let token_exp = if auth_context.is_authenticated() {
+        Some(
+            auth_context
+                .token_exp()
+                .unwrap_or_else(|| chrono::Utc::now().timestamp() + 3600),
+        )
+    } else {
+        None
+    };
 
     // Atomic check-and-insert under a single write lock to prevent TOCTOU
     // races on per-user and per-IP session limits.
@@ -608,7 +594,9 @@ pub async fn sse_handler(
     let cleanup_guard = SessionCleanupGuard::new(session_id, reactor.clone(), sessions.clone());
     crate::observability::set_active_connections("sse", 1);
 
-    // Bridge reactor messages to SSE messages
+    // Bridge reactor messages to SSE messages.
+    // Token expiry is enforced by SessionServer::try_send_to_session (per-push)
+    // and cleanup_expired_tokens (periodic sweep). No inline check needed here.
     let bridge_cancel = cancel_token.clone();
     tokio::spawn(async move {
         loop {
@@ -616,17 +604,6 @@ pub async fn sse_handler(
                 msg = rt_rx.recv() => {
                     match msg {
                         Some(rt_msg) => {
-                            if let Some(exp) = token_exp
-                                && chrono::Utc::now().timestamp() > exp
-                            {
-                                let expired_msg = SseMessage::Error {
-                                    target: "session".to_string(),
-                                    code: "SESSION_EXPIRED".to_string(),
-                                    message: "Authentication token expired".to_string(),
-                                };
-                                let _ = tx.send(expired_msg).await;
-                                break;
-                            }
                             if let Some(sse_msg) = convert_realtime_to_sse(rt_msg)
                                 && tx.send(sse_msg).await.is_err() {
                                     break;
@@ -678,18 +655,6 @@ pub async fn sse_handler(
                                     let data = SsePayload::Error { target, code, message };
                                     serde_json::to_string(&data).ok().map(|json| {
                                         Event::default().event("error").data(json)
-                                    })
-                                }
-                                SseMessage::Channel { channel, payload } => {
-                                    let data = SsePayload::Channel { channel, payload };
-                                    serde_json::to_string(&data).ok().map(|json| {
-                                        Event::default().event("channel").data(json)
-                                    })
-                                }
-                                SseMessage::Gap { target, last_event_id } => {
-                                    let data = SsePayload::Gap { target, last_event_id };
-                                    serde_json::to_string(&data).ok().map(|json| {
-                                        Event::default().event("gap").data(json)
                                     })
                                 }
                             };
@@ -791,16 +756,6 @@ fn convert_realtime_to_sse(msg: RealtimeMessage) -> Option<SseMessage> {
             target: id,
             code,
             message,
-        }),
-        RealtimeMessage::Channel { channel, payload } => {
-            Some(SseMessage::Channel { channel, payload })
-        }
-        RealtimeMessage::GapDetected {
-            client_sub_id,
-            last_event_id,
-        } => Some(SseMessage::Gap {
-            target: format!("sub:{client_sub_id}"),
-            last_event_id,
         }),
         // Ignore control messages
         RealtimeMessage::Subscribe { .. }
@@ -1269,32 +1224,6 @@ mod tests {
         let resolved = resolve_sse_auth_context(&request_auth, Some(query_auth.clone()));
 
         assert_eq!(resolved.principal_id(), query_auth.principal_id());
-    }
-
-    #[test]
-    fn channel_payload_locks_to_channel_and_payload_fields() {
-        // Wire format reserved for GA. Future implementation must keep
-        // the same field names so 1.0 clients keep parsing.
-        let payload = SsePayload::Channel {
-            channel: "room:lobby".to_string(),
-            payload: serde_json::json!({"text": "hi"}),
-        };
-        let json = serde_json::to_string(&payload).unwrap();
-        assert!(json.contains("\"type\":\"channel\""), "{json}");
-        assert!(json.contains("\"channel\":\"room:lobby\""), "{json}");
-        assert!(json.contains("\"payload\""), "{json}");
-    }
-
-    #[test]
-    fn gap_payload_omits_last_event_id_when_unset() {
-        let payload = SsePayload::Gap {
-            target: "sub:abc".to_string(),
-            last_event_id: None,
-        };
-        let json = serde_json::to_string(&payload).unwrap();
-        assert!(json.contains("\"type\":\"gap\""), "{json}");
-        assert!(json.contains("\"target\":\"sub:abc\""), "{json}");
-        assert!(!json.contains("last_event_id"), "{json}");
     }
 
     #[test]

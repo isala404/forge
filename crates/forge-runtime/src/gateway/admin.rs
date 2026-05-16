@@ -637,7 +637,7 @@ async fn get_workflow(
         r#"
         SELECT id, workflow_name, workflow_version, workflow_signature,
                owner_subject, input, output, status, blocking_reason,
-               resolution_reason, current_step, step_results, started_at,
+               resolution_reason, current_step, started_at,
                completed_at, error, trace_id, suspended_at, wake_at,
                waiting_for_event, event_timeout_at, tenant_id,
                cancel_requested_at, cancel_reason, metadata
@@ -662,7 +662,6 @@ async fn get_workflow(
             "blocking_reason": r.blocking_reason,
             "resolution_reason": r.resolution_reason,
             "current_step": r.current_step,
-            "step_results": r.step_results,
             "started_at": r.started_at,
             "completed_at": r.completed_at,
             "error": r.error,

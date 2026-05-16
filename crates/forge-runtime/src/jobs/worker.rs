@@ -8,6 +8,7 @@ use uuid::Uuid;
 use super::executor::JobExecutor;
 use super::queue::JobQueue;
 use super::registry::JobRegistry;
+use crate::pg::LeaderElection;
 
 /// Worker configuration.
 #[derive(Debug, Clone)]
@@ -24,6 +25,10 @@ pub struct WorkerConfig {
     pub claim_untagged: bool,
     /// Maximum concurrent jobs.
     pub max_concurrent: usize,
+    /// Reserved capacity for system jobs ($workflow_resume, $cron:*).
+    /// These permits are only used by system jobs, preventing user job
+    /// floods from starving workflow/cron execution.
+    pub system_reserved: usize,
     /// Poll interval when queue is empty.
     pub poll_interval: Duration,
     /// Batch size for claiming jobs.
@@ -32,6 +37,8 @@ pub struct WorkerConfig {
     pub stale_cleanup_interval: Duration,
     /// Stale job threshold.
     pub stale_threshold: chrono::Duration,
+    /// Whether this worker is the leader (gates cleanup).
+    pub leader_election: Option<Arc<LeaderElection>>,
 }
 
 impl Default for WorkerConfig {
@@ -41,10 +48,12 @@ impl Default for WorkerConfig {
             capabilities: vec!["default".to_string()],
             claim_untagged: true,
             max_concurrent: 8,
+            system_reserved: 4,
             poll_interval: Duration::from_secs(5),
             batch_size: 10,
             stale_cleanup_interval: Duration::from_secs(60),
             stale_threshold: chrono::Duration::minutes(5),
+            leader_election: None,
         }
     }
 }
@@ -95,15 +104,18 @@ impl Worker {
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
         self.shutdown_tx = Some(shutdown_tx);
 
-        // Semaphore to limit concurrent jobs
+        // Semaphore for user jobs
         let semaphore = Arc::new(tokio::sync::Semaphore::new(self.config.max_concurrent));
+        // Separate semaphore for system jobs ($workflow_resume, $cron:*)
+        // so user job floods cannot starve workflow/cron execution.
+        let system_semaphore = Arc::new(tokio::sync::Semaphore::new(self.config.system_reserved));
 
-        // Spawn stale and expired cleanup task. Tied to a Notify shared with
-        // shutdown so it exits cleanly with the worker — orphan cleanup tasks
-        // in a multi-node cluster would compete with live workers' jobs.
+        // Spawn stale and expired cleanup task, gated behind leader election.
+        // Only the leader runs cleanup to avoid thundering herd on multi-node.
         let cleanup_queue = self.queue.clone();
         let cleanup_interval = self.config.stale_cleanup_interval;
         let stale_threshold = self.config.stale_threshold;
+        let cleanup_leader = self.config.leader_election.clone();
         let shutdown_notify = Arc::new(tokio::sync::Notify::new());
         let cleanup_shutdown = shutdown_notify.clone();
         let cleanup_handle = tokio::spawn(async move {
@@ -111,6 +123,15 @@ impl Worker {
                 tokio::select! {
                     _ = cleanup_shutdown.notified() => break,
                     _ = tokio::time::sleep(cleanup_interval) => {}
+                }
+
+                // Only run cleanup if we are the leader (or no election configured)
+                let is_leader = cleanup_leader
+                    .as_ref()
+                    .map(|e| e.is_leader())
+                    .unwrap_or(true);
+                if !is_leader {
+                    continue;
                 }
 
                 if let Err(e) = cleanup_queue.release_stale(stale_threshold).await {
@@ -202,11 +223,25 @@ impl Worker {
             };
 
             for job in jobs {
-                let permit = match semaphore.clone().acquire_owned().await {
-                    Ok(p) => p,
-                    Err(_) => {
-                        tracing::error!("Worker semaphore closed, stopping job processing");
-                        break;
+                // Use system semaphore for $workflow_resume and $cron:* jobs,
+                // user semaphore for everything else.
+                let is_system_job =
+                    job.job_type.starts_with("$workflow_") || job.job_type.starts_with("$cron:");
+                let permit = if is_system_job {
+                    match system_semaphore.clone().acquire_owned().await {
+                        Ok(p) => p,
+                        Err(_) => {
+                            tracing::error!("System semaphore closed, stopping job processing");
+                            break;
+                        }
+                    }
+                } else {
+                    match semaphore.clone().acquire_owned().await {
+                        Ok(p) => p,
+                        Err(_) => {
+                            tracing::error!("Worker semaphore closed, stopping job processing");
+                            break;
+                        }
                     }
                 };
                 let executor = self.executor.clone();
@@ -305,6 +340,7 @@ mod tests {
         assert_eq!(config.capabilities, vec!["default".to_string()]);
         assert!(config.claim_untagged);
         assert_eq!(config.max_concurrent, 8);
+        assert_eq!(config.system_reserved, 4);
         assert_eq!(config.batch_size, 10);
     }
 

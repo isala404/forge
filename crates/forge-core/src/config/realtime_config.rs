@@ -51,6 +51,11 @@ pub struct RealtimeConfig {
     pub shard_count: usize,
 
     /// Maximum concurrent SSE sessions per authenticated user.
+    ///
+    /// Interacts with `subscription_max_per_session` and `max_subscriptions_per_user`:
+    /// the effective per-user subscription cap is
+    /// `min(max_subscriptions_per_user, max_sessions_per_user * subscription_max_per_session)`.
+    /// With defaults (10 sessions, 100 per session, 500 global), the cap is 500.
     #[serde(default = "default_max_sessions_per_user")]
     pub max_sessions_per_user: usize,
 
@@ -59,6 +64,12 @@ pub struct RealtimeConfig {
     pub max_sessions_per_ip: usize,
 
     /// Cap on a user's total subscriptions across every active session.
+    ///
+    /// Global per-user cap across all sessions. With `max_sessions_per_user=10`
+    /// and `subscription_max_per_session=100`, the effective per-user cap is
+    /// `min(500, 10*100) = 500`. Lowering this below
+    /// `max_sessions_per_user * subscription_max_per_session` enforces a tighter
+    /// global ceiling regardless of how subscriptions are distributed.
     #[serde(default = "default_max_subscriptions_per_user")]
     pub max_subscriptions_per_user: usize,
 
@@ -93,7 +104,7 @@ fn default_shard_count() -> usize {
     64
 }
 fn default_max_sessions_per_user() -> usize {
-    8
+    10
 }
 fn default_max_sessions_per_ip() -> usize {
     32
@@ -102,7 +113,7 @@ fn default_max_subscriptions_per_user() -> usize {
     500
 }
 fn default_max_cached_result_bytes() -> usize {
-    1_048_576
+    10_485_760
 }
 
 impl Default for RealtimeConfig {

@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use super::default_true;
 use super::types::{DurationStr, SizeStr};
 
 /// Gateway configuration.
@@ -78,6 +79,24 @@ pub struct GatewayConfig {
     /// is always used and forwarding headers are ignored.
     #[serde(default)]
     pub trusted_proxies: Vec<String>,
+
+    /// Maximum number of background jobs a single mutation request may dispatch.
+    /// Prevents a single mutation from enqueuing an unbounded number of jobs and
+    /// exhausting the job table. Defaults to 10.
+    #[serde(default = "default_max_jobs_per_request")]
+    pub max_jobs_per_request: usize,
+
+    /// Maximum serialized response size in bytes. Responses exceeding this limit
+    /// are rejected before being written to the wire. Defaults to 10 MiB.
+    #[serde(default = "default_max_result_size_bytes")]
+    pub max_result_size_bytes: usize,
+
+    /// Maximum JSON nesting depth for incoming request bodies. Requests with
+    /// deeper nesting are rejected before deserialization to prevent stack
+    /// exhaustion. Defaults to 64.
+    #[serde(default = "default_max_json_depth")]
+    pub max_json_depth: usize,
+    // TODO(pre-1.0): per-route CSP overrides (item 40)
 }
 
 impl Default for GatewayConfig {
@@ -97,6 +116,9 @@ impl Default for GatewayConfig {
             security_headers: true,
             hsts: false,
             trusted_proxies: Vec::new(),
+            max_jobs_per_request: default_max_jobs_per_request(),
+            max_result_size_bytes: default_max_result_size_bytes(),
+            max_json_depth: default_max_json_depth(),
         }
     }
 }
@@ -201,6 +223,14 @@ fn default_max_multipart_fields() -> usize {
     20
 }
 
-fn default_true() -> bool {
-    true
+fn default_max_jobs_per_request() -> usize {
+    10
+}
+
+fn default_max_result_size_bytes() -> usize {
+    10 * 1024 * 1024
+}
+
+fn default_max_json_depth() -> usize {
+    64
 }

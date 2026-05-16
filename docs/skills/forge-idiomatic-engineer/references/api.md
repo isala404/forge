@@ -22,7 +22,7 @@ Defines a read-only operation. The macro generates a `{PascalCase}Query` struct 
 | `rate_limit(requests = N, per = "1m", key = "user")` | Configures rate limiting. `key` values: `"user"`, `"ip"`, `"global"`, `"custom:claim_name"`. |
 | `log = "info"` | Sets the log level for handler execution. |
 | `unscoped` | Skips mandatory scope enforcement checks at compile time. |
-| `tables = [...]` | Manually specifies table dependencies to trigger reactive cache invalidation. |
+| `tables("foo", "bar")` | Manually specifies table dependencies to trigger reactive cache invalidation. |
 
 ### `#[forge::mutation]`
 Defines a data-modifying operation. The macro generates a `{PascalCase}Mutation` struct and implements the `ForgeMutation` trait.

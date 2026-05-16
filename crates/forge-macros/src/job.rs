@@ -130,6 +130,19 @@ pub fn job_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let fn_name = &input.sig.ident;
     let fn_name_str = attrs.name.unwrap_or_else(|| fn_name.to_string());
+
+    // Reject job names starting with '$' — these are reserved for system jobs
+    // ($cron:*, $workflow_resume, etc.) registered via `register_system`.
+    if fn_name_str.starts_with('$') {
+        return TokenStream::from(
+            syn::Error::new(
+                fn_name.span(),
+                "job names starting with '$' are reserved for system jobs (e.g. $cron:*, $workflow_resume)",
+            )
+            .into_compile_error(),
+        );
+    }
+
     let module_name = format_ident!("__forge_handler_{}", fn_name);
     let struct_name = format_ident!("{}Job", to_pascal_case(&fn_name.to_string()));
 

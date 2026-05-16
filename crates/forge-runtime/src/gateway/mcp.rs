@@ -1,3 +1,4 @@
+// TODO(pre-1.0): Split into smaller modules
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -402,6 +403,11 @@ async fn handle_initialize(
     response
 }
 
+/// Handle `tools/list` — unauthenticated by MCP protocol design.
+///
+/// MCP clients call this to discover available tools before establishing an
+/// authenticated session. Tool *execution* (tools/call) requires auth; only
+/// discovery is open.
 fn handle_tools_list(state: &Arc<McpState>, id: Option<Value>, params: &Value) -> Response {
     let cursor = params.get("cursor").and_then(Value::as_str);
     let start = match cursor {
@@ -490,10 +496,11 @@ fn handle_tools_list(state: &Arc<McpState>, id: Option<Value>, params: &Value) -
         })
         .collect();
 
-    // Also expose all registered queries and mutations as MCP tools, unless
+    // Also expose public queries and mutations as MCP tools, unless
     // they are already covered by an explicit `#[mcp_tool]` declaration.
     if let Some(router) = &state.function_router {
         let mut fn_infos = router.function_infos();
+        fn_infos.retain(|info| info.is_public);
         fn_infos.sort_by(|a, b| a.name.cmp(b.name));
 
         for info in fn_infos {
@@ -623,7 +630,6 @@ async fn handle_tools_call(
             && router.has_function(tool_name)
         {
             return handle_proxied_function_call(
-                state,
                 router,
                 id,
                 tool_name,
@@ -790,7 +796,6 @@ async fn handle_tools_call(
 /// entirely by [`FunctionRouter::execute`], so we only need to map the result
 /// back to the MCP wire format.
 async fn handle_proxied_function_call(
-    _state: &Arc<McpState>,
     router: &Arc<FunctionRouter>,
     id: Option<Value>,
     tool_name: &str,

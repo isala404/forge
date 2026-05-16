@@ -46,14 +46,62 @@ pub mod webhook;
 pub mod workflow;
 
 // Signals: real implementation lives behind `gateway` (the only place signals
-// are actually ingested). When `gateway` is off, we expose a stub module so
-// always-on modules (rate_limit, jobs, daemon, function) can call
+// are actually ingested). When `gateway` is off, we expose inline no-op stubs
+// so always-on modules (rate_limit, jobs, daemon, function) can call
 // `crate::signals::emit_*` without cfg gates everywhere.
 #[cfg(feature = "gateway")]
 pub mod signals;
 #[cfg(not(feature = "gateway"))]
-#[path = "signals_stub.rs"]
-pub mod signals;
+pub mod signals {
+    //! No-op signals stubs when the `gateway` feature is disabled.
+    use forge_core::signals::SignalEvent;
+
+    #[inline]
+    pub fn emit_raw(_event: SignalEvent) {}
+
+    #[inline]
+    pub fn emit_server_execution(
+        _name: &str,
+        _kind: &str,
+        _duration_ms: i32,
+        _success: bool,
+        _error_message: Option<String>,
+    ) {
+    }
+
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    pub fn emit_diagnostic(
+        _event_name: &str,
+        _properties: serde_json::Value,
+        _client_ip: Option<String>,
+        _user_agent: Option<String>,
+        _visitor_id: Option<String>,
+        _user_id: Option<uuid::Uuid>,
+        _is_bot: bool,
+    ) {
+    }
+
+    #[inline]
+    pub fn install_global(_: Option<()>) {}
+
+    pub mod bot {
+        #[inline]
+        pub fn is_bot(_user_agent: Option<&str>) -> bool {
+            false
+        }
+    }
+
+    pub mod visitor {
+        pub fn generate_visitor_id(
+            _client_ip: Option<&str>,
+            _user_agent: Option<&str>,
+            _server_secret: &str,
+        ) -> String {
+            String::new()
+        }
+    }
+}
 
 // --- Re-exports follow the same gating ---
 

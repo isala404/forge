@@ -8,6 +8,7 @@ use uuid::Uuid;
 use super::bridge::WORKFLOW_RESUME_JOB;
 use super::event_store::EventStore;
 use crate::jobs::JobQueue;
+use crate::pg::LeaderElection;
 use forge_core::Result;
 
 /// Configuration for the workflow scheduler.
@@ -19,6 +20,8 @@ pub struct WorkflowSchedulerConfig {
     pub batch_size: i32,
     /// Whether to process event-based wakeups.
     pub process_events: bool,
+    /// Leader election handle for leader-gated operations (cleanup).
+    pub leader_election: Option<Arc<LeaderElection>>,
 }
 
 impl Default for WorkflowSchedulerConfig {
@@ -27,6 +30,7 @@ impl Default for WorkflowSchedulerConfig {
             poll_interval: Duration::from_secs(1),
             batch_size: 100,
             process_events: true,
+            leader_election: None,
         }
     }
 }
@@ -59,6 +63,15 @@ impl WorkflowScheduler {
             event_store,
             config,
         }
+    }
+
+    /// Returns true if this node is the leader (or no election is configured).
+    fn is_leader(&self) -> bool {
+        self.config
+            .leader_election
+            .as_ref()
+            .map(|e| e.is_leader())
+            .unwrap_or(true)
     }
 
     /// Run the scheduler until shutdown.
@@ -119,16 +132,18 @@ impl WorkflowScheduler {
                     }
                 }
                 _ = cleanup_interval.tick() => {
-                    // Periodically clean up consumed events older than 24 hours
-                    let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
-                    match self.event_store.cleanup_consumed_events(cutoff).await {
-                        Ok(count) if count > 0 => {
-                            tracing::debug!(count, "Cleaned up consumed workflow events");
+                    // Only the leader runs cleanup to avoid thundering herd on DELETE.
+                    if self.is_leader() {
+                        let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
+                        match self.event_store.cleanup_consumed_events(cutoff).await {
+                            Ok(count) if count > 0 => {
+                                tracing::debug!(count, "Cleaned up consumed workflow events");
+                            }
+                            Err(e) => {
+                                tracing::debug!(error = %e, "Failed to clean up consumed events");
+                            }
+                            _ => {}
                         }
-                        Err(e) => {
-                            tracing::debug!(error = %e, "Failed to clean up consumed events");
-                        }
-                        _ => {}
                     }
                 }
                 _ = shutdown.cancelled() => {
@@ -313,17 +328,72 @@ impl WorkflowScheduler {
         Ok(())
     }
 
-    /// Claim a workflow and enqueue a resume job.
+    /// Atomically claim a workflow and enqueue a resume job in a single transaction.
+    /// If the claim fails (row already claimed), the transaction is rolled back
+    /// and no resume job is enqueued.
     async fn claim_and_resume(&self, workflow_run_id: Uuid, from_sleep: bool, trigger: &str) {
-        if !self.try_claim_waiting(workflow_run_id).await {
-            return;
+        let result: std::result::Result<(), sqlx::Error> = async {
+            let mut tx = self.pool.begin().await?;
+
+            // Claim: transition from sleeping/waiting to running
+            // Runtime query: rewritten for single-transaction claim+resume.
+            // Convert to query!() after next `cargo sqlx prepare`.
+            #[allow(clippy::disallowed_methods)]
+            let claimed = sqlx::query(
+                r#"
+                UPDATE forge_workflow_runs
+                SET wake_at = NULL, waiting_for_event = NULL, event_timeout_at = NULL,
+                    suspended_at = NULL, status = 'running'
+                WHERE id = $1 AND status IN ('sleeping', 'waiting')
+                "#,
+            )
+            .bind(workflow_run_id)
+            .execute(&mut *tx)
+            .await?;
+
+            if claimed.rows_affected() == 0 {
+                // Already claimed by another scheduler; rollback is implicit on drop
+                return Ok(());
+            }
+
+            // Enqueue resume job in the same transaction
+            let input = serde_json::json!({
+                "run_id": workflow_run_id.to_string(),
+                "from_sleep": from_sleep,
+            });
+            let job = crate::jobs::JobRecord::new(
+                WORKFLOW_RESUME_JOB.to_string(),
+                input,
+                forge_core::job::JobPriority::High,
+                3,
+            )
+            .with_capability(forge_core::config::WORKFLOWS_QUEUE);
+            self.job_queue.enqueue_in_conn(&mut tx, job).await?;
+
+            tx.commit().await?;
+
+            tracing::debug!(
+                workflow_run_id = %workflow_run_id,
+                trigger,
+                "Claimed workflow and enqueued resume job"
+            );
+            Ok(())
         }
-        self.enqueue_resume(workflow_run_id, from_sleep, trigger)
-            .await;
+        .await;
+
+        if let Err(e) = result {
+            tracing::warn!(
+                workflow_run_id = %workflow_run_id,
+                error = %e,
+                trigger,
+                "Failed to claim and resume workflow"
+            );
+        }
     }
 
     /// Atomically transition a workflow from `sleeping`/`waiting` to `running`.
     /// Returns `false` if the row was already claimed by another scheduler.
+    /// Used by cancel path which has its own enqueue logic.
     async fn try_claim_waiting(&self, workflow_run_id: Uuid) -> bool {
         match sqlx::query!(
             r#"
@@ -342,39 +412,6 @@ impl WorkflowScheduler {
             Err(e) => {
                 tracing::warn!(workflow_run_id = %workflow_run_id, error = %e, "Failed to claim workflow for resume");
                 false
-            }
-        }
-    }
-
-    /// Enqueue a `$workflow_resume` job for the worker pool.
-    async fn enqueue_resume(&self, workflow_run_id: Uuid, from_sleep: bool, trigger: &str) {
-        let input = serde_json::json!({
-            "run_id": workflow_run_id.to_string(),
-            "from_sleep": from_sleep,
-        });
-        let job = crate::jobs::JobRecord::new(
-            WORKFLOW_RESUME_JOB.to_string(),
-            input,
-            forge_core::job::JobPriority::High,
-            3,
-        )
-        .with_capability(forge_core::config::WORKFLOWS_QUEUE);
-        match self.job_queue.enqueue(job).await {
-            Ok(job_id) => {
-                tracing::debug!(
-                    workflow_run_id = %workflow_run_id,
-                    job_id = %job_id,
-                    trigger,
-                    "Enqueued workflow resume job"
-                );
-            }
-            Err(e) => {
-                tracing::error!(
-                    workflow_run_id = %workflow_run_id,
-                    error = %e,
-                    trigger,
-                    "Failed to enqueue workflow resume job"
-                );
             }
         }
     }

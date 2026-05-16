@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
     "crates/forge",
     "crates/forge-core",
@@ -38,7 +38,7 @@ forge-runtime = { path = "crates/forge-runtime" }
 forge-codegen = { path = "crates/forge-codegen" }
 
 # Async runtime
-tokio = { version = "1.48", features = ["full"] }
+tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "process", "io-util", "fs"] }
 
 # Database
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "chrono", "json", "macros"] }
@@ -64,13 +64,14 @@ bytes = "1.10"
 futures-core = "0.3"
 cron = "0.15"
 thiserror = "2.0"
+# CLI-only; do not use in library crates
 anyhow = "1.0"
 subtle = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 tracing-opentelemetry = "0.28"
 
-# OpenTelemetry
+# TODO(pre-1.0): Replace with plain OTLP via reqwest
 opentelemetry = { version = "0.27", features = ["trace", "metrics", "logs"] }
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio", "trace", "metrics", "logs"] }
 opentelemetry-otlp = { version = "0.27", default-features = false, features = ["http-json", "reqwest-rustls", "trace", "metrics", "logs", "internal-logs"] }
@@ -78,11 +79,12 @@ opentelemetry-semantic-conventions = "0.27"
 opentelemetry-appender-tracing = "0.27"
 
 # Proc macros
-syn = { version = "2.0", features = ["full", "extra-traits", "visit"] }
+syn = { version = "2.0", features = ["full", "visit"] }
 darling = { version = "0.20" }
 quote = "1.0"
 inventory = "0.3"
 sha2 = "0.10"
+blake3 = "1"
 proc-macro2 = "1.0"
 
 # SQL parsing
@@ -103,7 +105,7 @@ testcontainers-modules = { version = "0.15", features = ["postgres"] }
 dotenvy = "0.15"
 argon2 = "0.5"
 password-hash = "0.5"
-jsonwebtoken = "9"
+jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto", "use_pem"] }
 rust-embed = "8"
 mime_guess = "2"
 which = "7"
@@ -115,6 +117,7 @@ dead_code = "deny"
 [workspace.lints.clippy]
 panic = "deny"
 unimplemented = "deny"
+todo = "deny"
 unwrap_used = "deny"
 indexing_slicing = "deny"
 disallowed_methods = "deny"

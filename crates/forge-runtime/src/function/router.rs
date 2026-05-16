@@ -80,6 +80,10 @@ pub struct FunctionRouter {
     token_issuer: Option<Arc<dyn forge_core::TokenIssuer>>,
     token_ttl: forge_core::AuthTokenTtl,
     default_timeout: Duration,
+    /// Maximum number of jobs a single mutation may dispatch (0 = unlimited).
+    max_jobs_per_request: usize,
+    /// Maximum serialized response size in bytes (0 = unlimited).
+    max_result_size_bytes: usize,
     #[cfg(feature = "gateway")]
     signals: Option<RpcSignalsEmitter>,
 }
@@ -115,6 +119,8 @@ impl FunctionRouter {
             token_issuer: None,
             token_ttl: forge_core::AuthTokenTtl::default(),
             default_timeout: Duration::from_secs(30),
+            max_jobs_per_request: 0,
+            max_result_size_bytes: 0,
             #[cfg(feature = "gateway")]
             signals: None,
         }
@@ -207,6 +213,18 @@ impl FunctionRouter {
     pub fn with_default_timeout(mut self, timeout: Duration) -> Self {
         self.default_timeout = timeout;
         self
+    }
+
+    /// Set the maximum number of jobs a single mutation may dispatch.
+    /// A value of 0 disables the limit.
+    pub fn set_max_jobs_per_request(&mut self, limit: usize) {
+        self.max_jobs_per_request = limit;
+    }
+
+    /// Set the maximum serialized response size in bytes.
+    /// A value of 0 disables the limit.
+    pub fn set_max_result_size_bytes(&mut self, limit: usize) {
+        self.max_result_size_bytes = limit;
     }
 
     /// Set the signals collector for auto-capturing RPC events.
@@ -377,6 +395,28 @@ impl FunctionRouter {
         Arc::clone(&self.cache)
     }
 
+    /// Reject a result value when its serialized size exceeds `max_result_size_bytes`.
+    ///
+    /// Uses `serde_json::to_string` to measure size, which is the same encoding
+    /// sent on the wire. A limit of 0 means unlimited.
+    fn check_result_size(&self, value: &Value) -> Result<()> {
+        if self.max_result_size_bytes == 0 {
+            return Ok(());
+        }
+        // Estimate by serializing. For very large values this is a second
+        // serialization, but it only fires when the limit is non-zero.
+        let serialized_len = serde_json::to_string(value)
+            .map(|s| s.len())
+            .unwrap_or(usize::MAX);
+        if serialized_len > self.max_result_size_bytes {
+            return Err(ForgeError::Internal(format!(
+                "Response size {} bytes exceeds max_result_size_bytes limit of {} bytes",
+                serialized_len, self.max_result_size_bytes
+            )));
+        }
+        Ok(())
+    }
+
     pub async fn route(
         &self,
         function_name: &str,
@@ -412,7 +452,9 @@ impl FunctionRouter {
                         self.db.read_pool().clone()
                     };
 
-                    if let Some(ttl) = info.cache_ttl {
+                    if !info.consistent
+                        && let Some(ttl) = info.cache_ttl
+                    {
                         // Derive scope once, before auth is moved into ctx, so
                         // get/set agree on the same cache key.
                         let scope = QueryCacheCoordinator::auth_scope(&auth);
@@ -432,6 +474,7 @@ impl FunctionRouter {
 
                         let ctx = QueryContext::new(pool, auth, request);
                         let result = handler(&ctx, args.clone()).await?;
+                        self.check_result_size(&result)?;
 
                         self.cache.set_by_scope(
                             function_name,
@@ -448,6 +491,7 @@ impl FunctionRouter {
                     } else {
                         let ctx = QueryContext::new(pool, auth, request);
                         let result = handler(&ctx, args).await?;
+                        self.check_result_size(&result)?;
                         Ok(RouteOutcome {
                             result: RouteResult::Query(result),
                             cache_hit: false,
@@ -472,9 +516,16 @@ impl FunctionRouter {
                         }
                         ctx.set_token_ttl(self.token_ttl.clone());
                         ctx.set_http_timeout(info.http_timeout);
+                        if self.max_jobs_per_request > 0 {
+                            ctx.set_max_jobs_per_request(self.max_jobs_per_request);
+                        }
                         let value = handler(&ctx, args).await?;
+                        self.check_result_size(&value)?;
                         Ok(RouteResult::Mutation(value))
                     };
+                    // Invalidation runs here, AFTER commit (execute_transactional
+                    // commits before returning). The cluster-wide NOTIFY also fires
+                    // post-commit, ensuring peer nodes invalidate too.
                     if result.is_ok() {
                         self.cache.invalidate_for_mutation(info);
                     }
@@ -621,6 +672,9 @@ impl FunctionRouter {
             }
             ctx.set_token_ttl(self.token_ttl.clone());
             ctx.set_http_timeout(info.http_timeout);
+            if self.max_jobs_per_request > 0 {
+                ctx.set_max_jobs_per_request(self.max_jobs_per_request);
+            }
 
             let result = handler(&ctx, args).await;
             drop(ctx);
@@ -637,6 +691,7 @@ impl FunctionRouter {
 
             match result {
                 Ok(value) => {
+                    self.check_result_size(&value)?;
                     tx.commit().await.map_err(ForgeError::Database)?;
                     Ok(RouteResult::Mutation(value))
                 }

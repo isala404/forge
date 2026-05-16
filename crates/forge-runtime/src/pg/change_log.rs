@@ -97,6 +97,19 @@ pub async fn min_seq(pool: &PgPool) -> Result<Option<i64>> {
     Ok(row.min)
 }
 
+/// Read the largest `seq` currently in the log, or `None` if it is empty.
+///
+/// Used at startup to initialize the listener's high-water mark so the first
+/// reconnect does not replay the entire log.
+#[allow(clippy::disallowed_methods)]
+pub async fn max_seq(pool: &PgPool) -> Result<Option<i64>> {
+    let row: (Option<i64>,) = sqlx::query_as("SELECT MAX(seq) FROM forge_change_log")
+        .fetch_one(pool)
+        .await
+        .map_err(ForgeError::Database)?;
+    Ok(row.0)
+}
+
 #[cfg(all(test, feature = "testcontainers"))]
 #[allow(
     clippy::unwrap_used,
