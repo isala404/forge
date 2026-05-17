@@ -734,6 +734,22 @@ impl Forge {
                 ));
             }
 
+            // CORS wildcard is a security risk in production: any origin can reach
+            // the gateway, and credentialed requests silently fail.
+            if self.config.gateway.cors_enabled
+                && self.config.gateway.cors_origins.iter().any(|o| o == "*")
+                && std::env::var("FORGE_ENV")
+                    .ok()
+                    .as_deref()
+                    .is_some_and(|v| v.eq_ignore_ascii_case("production"))
+            {
+                return Err(ForgeError::Config(
+                    "gateway.cors_origins = [\"*\"] is not allowed when FORGE_ENV=production. \
+                     Set explicit origins (e.g. cors_origins = [\"https://yourdomain.com\"])."
+                        .into(),
+                ));
+            }
+
             let gateway_config = RuntimeGatewayConfig {
                 port: self.config.gateway.port,
                 max_connections: self.config.gateway.max_connections,
@@ -813,6 +829,26 @@ impl Forge {
             #[cfg(feature = "workflows")]
             let gateway = gateway.with_workflow_dispatcher(workflow_executor.clone());
             let mut gateway = gateway.with_mcp_registry(self.mcp_registry.clone());
+
+            if matches!(
+                self.config.rate_limit.mode,
+                forge_core::config::RateLimitMode::Hybrid
+            ) {
+                let active_nodes: Option<i64> =
+                    sqlx::query_scalar("SELECT COUNT(*) FROM forge_nodes WHERE status = 'active'")
+                        .fetch_one(db_ref.primary())
+                        .await
+                        .ok();
+                if active_nodes.is_some_and(|n| n > 1) {
+                    let n = active_nodes.unwrap_or(0);
+                    tracing::warn!(
+                        active_nodes = n,
+                        "rate_limit.mode is 'hybrid' but {n} active nodes detected. \
+                         Per-user/per-IP limits are local-only and effectively multiply by the \
+                         node count. Set rate_limit.mode = \"strict\" for cluster deployments."
+                    );
+                }
+            }
 
             let rate_limiter: std::sync::Arc<dyn forge_core::rate_limit::RateLimiterBackend> =
                 match self.config.rate_limit.mode {
@@ -1530,6 +1566,8 @@ impl ForgeBuilder {
         let config = self
             .config
             .ok_or_else(|| ForgeError::Config("Configuration is required".to_string()))?;
+
+        config.auth.validate()?;
 
         let (shutdown_tx, _) = broadcast::channel(1);
 

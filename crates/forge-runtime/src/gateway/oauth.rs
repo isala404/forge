@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use axum::Extension;
 use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
@@ -211,6 +212,7 @@ pub struct RegisterResponse {
 
 pub async fn oauth_register(
     headers: HeaderMap,
+    Extension(resolved_ip): Extension<super::ResolvedClientIp>,
     State(state): State<Arc<OAuthState>>,
     Json(req): Json<RegisterRequest>,
 ) -> Response {
@@ -246,7 +248,7 @@ pub async fn oauth_register(
         }
     }
 
-    let ip = client_ip(&headers);
+    let ip = resolved_ip.0.as_deref().unwrap_or("unknown");
     let rate_key = format!("oauth_register:{ip}");
     if !state
         .rate_limiter
@@ -275,6 +277,49 @@ pub async fn oauth_register(
             Json(serde_json::json!({
                 "error": "too_many_clients",
                 "error_description": "Maximum number of registered clients reached"
+            })),
+        )
+            .into_response();
+    }
+
+    if req.client_name.as_ref().is_some_and(|n| n.len() > 256) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_client_metadata",
+                "error_description": "client_name must not exceed 256 characters"
+            })),
+        )
+            .into_response();
+    }
+    if req.redirect_uris.len() > 20 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_client_metadata",
+                "error_description": "redirect_uris must not exceed 20 entries"
+            })),
+        )
+            .into_response();
+    }
+    for uri in &req.redirect_uris {
+        if uri.len() > 2048 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid_client_metadata",
+                    "error_description": "each redirect_uri must not exceed 2048 characters"
+                })),
+            )
+                .into_response();
+        }
+    }
+    if req.grant_types.len() > 10 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_client_metadata",
+                "error_description": "grant_types must not exceed 10 entries"
             })),
         )
             .into_response();
@@ -526,6 +571,7 @@ pub struct AuthorizeForm {
 
 pub async fn oauth_authorize_post(
     headers: HeaderMap,
+    Extension(resolved_ip): Extension<super::ResolvedClientIp>,
     State(state): State<Arc<OAuthState>>,
     axum::Form(form): axum::Form<AuthorizeForm>,
 ) -> Response {
@@ -552,7 +598,7 @@ pub async fn oauth_authorize_post(
     }
 
     // Rate limit login failures (T7)
-    let ip = client_ip(&headers);
+    let ip = resolved_ip.0.as_deref().unwrap_or("unknown");
     let rate_key = format!("oauth_login:{ip}");
 
     // Validate client and redirect_uri again (form could be tampered)
@@ -1045,21 +1091,6 @@ fn base_url_from_headers(headers: &HeaderMap) -> String {
     format!("{scheme}://{host}")
 }
 
-/// Extract client IP for rate limiting.
-///
-/// OAuth routes bypass the gateway's trusted-proxy middleware, so we cannot
-/// trust X-Forwarded-For or X-Real-IP headers here (any client could spoof
-/// them). Returns "unknown" as a safe fallback; rate limiting still works
-/// because the bucket key is per-IP and "unknown" collapses all unidentifiable
-/// clients into a single shared bucket.
-fn client_ip(_headers: &HeaderMap) -> String {
-    // Without access to the resolved peer address (which requires axum's
-    // ConnectInfo extractor on the route), we cannot determine the true client
-    // IP. "unknown" is safe: it means all OAuth rate-limit requests share one
-    // bucket, which is more restrictive, not less.
-    "unknown".to_string()
-}
-
 fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
         .get(header::COOKIE)
@@ -1323,15 +1354,4 @@ mod tests {
         assert_eq!(default_s256(), "S256");
     }
 
-    // ── client_ip ───────────────────────────────────────────────────────
-
-    #[test]
-    fn client_ip_returns_unknown_to_collapse_unidentified_callers() {
-        // OAuth routes bypass trusted-proxy middleware, so we deliberately
-        // do not honor X-Forwarded-For / X-Real-IP here.
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", HeaderValue::from_static("1.2.3.4"));
-        headers.insert("x-real-ip", HeaderValue::from_static("5.6.7.8"));
-        assert_eq!(client_ip(&headers), "unknown");
-    }
 }

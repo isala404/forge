@@ -31,6 +31,28 @@ fn secret_kid(secret: &[u8]) -> String {
     out
 }
 
+/// Sanitize a client-provided string for safe logging. Strips ASCII control
+/// characters and truncates to 64 bytes to prevent log injection.
+fn sanitize_for_log(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_ascii_control())
+        .take(64)
+        .collect()
+}
+
+/// Environment snapshot for dev-mode guard. Each field represents a standard
+/// production-environment indicator; the presence of any blocks dev mode.
+#[derive(Default)]
+struct DevModeEnv {
+    forge_env: Option<String>,
+    node_env: Option<String>,
+    railway_environment: Option<String>,
+    k_service: Option<String>,
+    fly_app_name: Option<String>,
+    kubernetes_service_host: Option<String>,
+    aws_execution_env: Option<String>,
+}
+
 /// Operating mode for the auth middleware.
 ///
 /// `Production` is the only mode that runs JWT signature verification.
@@ -68,6 +90,8 @@ pub struct AuthConfig {
     pub legacy_secrets: Vec<forge_core::config::LegacySecret>,
     /// JWT spec claims that must be present. Derived from `required_claims` in forge.toml.
     pub required_claims: Vec<String>,
+    /// Reject RS256 tokens without a `kid` header. Default: true.
+    pub jwks_require_kid: bool,
     /// Auth mode. Only `Development` skips signature verification, and the only
     /// constructor that yields `Development` already refuses production env.
     pub(crate) mode: AuthMode,
@@ -85,6 +109,7 @@ impl Default for AuthConfig {
             session_cookie_ttl_secs: 3600,
             legacy_secrets: Vec::new(),
             required_claims: vec!["exp".into(), "sub".into()],
+            jwks_require_kid: true,
             mode: AuthMode::Production,
         }
     }
@@ -113,6 +138,7 @@ impl AuthConfig {
             session_cookie_ttl_secs: config.session_cookie_ttl_secs(),
             legacy_secrets: config.legacy_secrets.clone(),
             required_claims: config.required_claims.clone(),
+            jwks_require_kid: config.jwks_require_kid,
             mode: AuthMode::Production,
         })
     }
@@ -129,21 +155,62 @@ impl AuthConfig {
     /// WARNING: Only use this for development and testing.
     ///
     /// Fails closed in production: returns `ForgeError::Config` when
-    /// `FORGE_ENV=production`. The startup must abort, not auto-correct.
+    /// `FORGE_ENV=production` or any standard production environment indicator
+    /// is detected. The startup must abort, not auto-correct.
     pub fn dev_mode() -> forge_core::Result<Self> {
-        Self::dev_mode_with_env(std::env::var("FORGE_ENV").ok().as_deref())
+        Self::dev_mode_with_env(DevModeEnv {
+            forge_env: std::env::var("FORGE_ENV").ok(),
+            node_env: std::env::var("NODE_ENV").ok(),
+            railway_environment: std::env::var("RAILWAY_ENVIRONMENT").ok(),
+            k_service: std::env::var("K_SERVICE").ok(),
+            fly_app_name: std::env::var("FLY_APP_NAME").ok(),
+            kubernetes_service_host: std::env::var("KUBERNETES_SERVICE_HOST").ok(),
+            aws_execution_env: std::env::var("AWS_EXECUTION_ENV").ok(),
+        })
     }
 
-    /// Inner constructor that takes the resolved environment value. Split out
+    /// Inner constructor that takes a resolved environment snapshot. Split out
     /// from `dev_mode()` so tests can exercise the production guard without
     /// touching process-global env state.
-    fn dev_mode_with_env(forge_env: Option<&str>) -> forge_core::Result<Self> {
-        if forge_env.is_some_and(|v| v.eq_ignore_ascii_case("production")) {
+    fn dev_mode_with_env(env: DevModeEnv) -> forge_core::Result<Self> {
+        if env
+            .forge_env
+            .as_deref()
+            .is_some_and(|v| v.eq_ignore_ascii_case("production"))
+        {
             return Err(forge_core::ForgeError::Config(
                 "AuthConfig::dev_mode() refused: FORGE_ENV=production. \
                  Configure a real jwt_secret or jwks_url instead."
                     .into(),
             ));
+        }
+        if env
+            .node_env
+            .as_deref()
+            .is_some_and(|v| v.eq_ignore_ascii_case("production"))
+        {
+            return Err(forge_core::ForgeError::Config(
+                "AuthConfig::dev_mode() refused: NODE_ENV=production detected. \
+                 Configure a real jwt_secret or jwks_url instead."
+                    .into(),
+            ));
+        }
+        let indicators = [
+            ("RAILWAY_ENVIRONMENT", &env.railway_environment),
+            ("K_SERVICE", &env.k_service),
+            ("FLY_APP_NAME", &env.fly_app_name),
+            ("KUBERNETES_SERVICE_HOST", &env.kubernetes_service_host),
+            ("AWS_EXECUTION_ENV", &env.aws_execution_env),
+        ];
+        for (name, val) in &indicators {
+            if val.is_some() {
+                return Err(forge_core::ForgeError::Config(
+                    format!(
+                        "AuthConfig::dev_mode() refused: {name} is set, indicating a production \
+                         environment. Configure a real jwt_secret or jwks_url instead."
+                    ),
+                ));
+            }
         }
         Ok(Self {
             jwt_secret: None,
@@ -155,6 +222,7 @@ impl AuthConfig {
             session_cookie_ttl_secs: 3600,
             legacy_secrets: Vec::new(),
             required_claims: vec!["exp".into(), "sub".into()],
+            jwks_require_kid: true,
             mode: AuthMode::Development,
         })
     }
@@ -388,7 +456,7 @@ impl AuthMiddleware {
                     return self.decode_and_validate(token, key);
                 }
             }
-            debug!(kid = %tkid, "Token kid not recognised; falling back to full key scan");
+            debug!(kid = %sanitize_for_log(tkid), "Token kid not recognised; falling back to full key scan");
         }
 
         match self.decode_and_validate(token, primary) {
@@ -415,13 +483,18 @@ impl AuthMiddleware {
         let header = jsonwebtoken::decode_header(token)
             .map_err(|e| AuthError::InvalidToken(format!("Invalid token header: {}", e)))?;
 
-        debug!(kid = ?header.kid, alg = ?header.alg, "Validating RSA token");
+        let safe_kid = header.kid.as_deref().map(sanitize_for_log);
+        debug!(kid = ?safe_kid, alg = ?header.alg, "Validating RSA token");
 
         // Get key from JWKS
         let key = if let Some(kid) = header.kid {
             jwks.get_key(&kid).await.map_err(|e| {
                 AuthError::InvalidToken(format!("Failed to get key '{}': {}", kid, e))
             })?
+        } else if self.config.jwks_require_kid {
+            return Err(AuthError::InvalidToken(
+                "RS256 token missing kid header; set auth.jwks_require_kid = false to allow kidless tokens".to_string(),
+            ));
         } else {
             jwks.get_any_key()
                 .await
@@ -835,6 +908,15 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_for_log_strips_control_chars_and_truncates() {
+        assert_eq!(sanitize_for_log("normal-kid"), "normal-kid");
+        assert_eq!(sanitize_for_log("\x1b[2K\rok"), "[2Kok");
+        assert_eq!(sanitize_for_log("a\n\r\tb"), "ab");
+        let long = "x".repeat(100);
+        assert_eq!(sanitize_for_log(&long).len(), 64);
+    }
+
+    #[test]
     fn test_auth_config_default() {
         let config = AuthConfig::default();
         assert_eq!(config.algorithm, JwtAlgorithm::HS256);
@@ -857,22 +939,66 @@ mod tests {
 
     #[test]
     fn test_dev_mode_refuses_in_production() {
-        let result = AuthConfig::dev_mode_with_env(Some("production"));
+        let result = AuthConfig::dev_mode_with_env(DevModeEnv {
+            forge_env: Some("production".into()),
+            ..DevModeEnv::default()
+        });
         assert!(matches!(result, Err(forge_core::ForgeError::Config(_))));
     }
 
     #[test]
     fn test_dev_mode_refuses_case_insensitive() {
         for v in ["Production", "PRODUCTION", "production"] {
-            let result = AuthConfig::dev_mode_with_env(Some(v));
+            let result = AuthConfig::dev_mode_with_env(DevModeEnv {
+                forge_env: Some(v.into()),
+                ..DevModeEnv::default()
+            });
             assert!(matches!(result, Err(forge_core::ForgeError::Config(_))));
         }
     }
 
     #[test]
+    fn test_dev_mode_refuses_node_env_production() {
+        let result = AuthConfig::dev_mode_with_env(DevModeEnv {
+            node_env: Some("production".into()),
+            ..DevModeEnv::default()
+        });
+        assert!(matches!(result, Err(forge_core::ForgeError::Config(_))));
+    }
+
+    #[test]
+    fn test_dev_mode_refuses_cloud_platform_indicators() {
+        for (field, val) in [
+            ("RAILWAY_ENVIRONMENT", "production"),
+            ("K_SERVICE", "my-svc"),
+            ("FLY_APP_NAME", "my-app"),
+            ("KUBERNETES_SERVICE_HOST", "10.0.0.1"),
+            ("AWS_EXECUTION_ENV", "AWS_ECS_FARGATE"),
+        ] {
+            let mut env = DevModeEnv::default();
+            match field {
+                "RAILWAY_ENVIRONMENT" => env.railway_environment = Some(val.into()),
+                "K_SERVICE" => env.k_service = Some(val.into()),
+                "FLY_APP_NAME" => env.fly_app_name = Some(val.into()),
+                "KUBERNETES_SERVICE_HOST" => env.kubernetes_service_host = Some(val.into()),
+                "AWS_EXECUTION_ENV" => env.aws_execution_env = Some(val.into()),
+                _ => {}
+            }
+            let result = AuthConfig::dev_mode_with_env(env);
+            assert!(
+                matches!(result, Err(forge_core::ForgeError::Config(_))),
+                "{field} should block dev mode"
+            );
+        }
+    }
+
+    #[test]
     fn test_dev_mode_allows_other_env_values() {
-        for v in [None, Some("development"), Some("staging"), Some("")] {
-            let result = AuthConfig::dev_mode_with_env(v);
+        for forge_env in [None, Some("development"), Some("staging"), Some("")] {
+            let result = AuthConfig::dev_mode_with_env(DevModeEnv {
+                forge_env: forge_env.map(String::from),
+                ..DevModeEnv::default()
+            });
             assert!(result.is_ok());
         }
     }
@@ -1336,5 +1462,42 @@ mod tests {
             result.is_ok(),
             "unknown-kid token must still validate via fallback: {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn rsa_token_without_kid_rejected_when_jwks_require_kid_is_true() {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+
+        let config = AuthConfig {
+            algorithm: JwtAlgorithm::RS256,
+            jwks_client: Some(Arc::new(
+                JwksClient::new("http://example.invalid".into(), 3600).unwrap(),
+            )),
+            jwks_require_kid: true,
+            ..AuthConfig::default()
+        };
+        let middleware = AuthMiddleware::new(config);
+
+        // Build a minimal JWT with RS256 alg and no kid in the header.
+        // The kid check fires before signature verification, so the sig is irrelevant.
+        let header_json = r#"{"alg":"RS256","typ":"JWT"}"#;
+        let claims = create_test_claims(false);
+        let claims_json = serde_json::to_string(&claims).unwrap();
+        let header_b64 = URL_SAFE_NO_PAD.encode(header_json.as_bytes());
+        let claims_b64 = URL_SAFE_NO_PAD.encode(claims_json.as_bytes());
+        let token = format!("{header_b64}.{claims_b64}.fake-signature");
+
+        let result = middleware.validate_token_async(&token).await;
+        assert!(result.is_err(), "kidless RS256 token must be rejected");
+        let err = result.unwrap_err();
+        match &err {
+            AuthError::InvalidToken(msg) => {
+                assert!(
+                    msg.contains("missing kid"),
+                    "error should mention missing kid, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidToken, got: {other:?}"),
+        }
     }
 }

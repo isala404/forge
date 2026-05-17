@@ -104,6 +104,14 @@ pub struct AuthConfig {
     /// Used for OAuth consent flow cookies. Defaults to the access token TTL.
     pub session_cookie_ttl: Option<DurationStr>,
 
+    /// Reject RS256 tokens that arrive without a `kid` header.
+    /// Default: `true`. On shared issuers (Firebase, Clerk multi-app) a kidless
+    /// token would validate against an arbitrary cached key, accepting tokens
+    /// signed by any app the issuer exposes. Set to `false` only for providers
+    /// that genuinely omit `kid` in token headers (rare).
+    #[serde(default = "default_true")]
+    pub jwks_require_kid: bool,
+
     /// Old HMAC secrets still accepted for validation (never for signing).
     /// Each entry carries a mandatory `valid_until` timestamp; expired entries
     /// are silently dropped at middleware construction.
@@ -127,6 +135,7 @@ impl Default for AuthConfig {
             audience_required: default_audience_required(),
             required_claims: default_required_claims(),
             session_cookie_ttl: None,
+            jwks_require_kid: default_true(),
             legacy_secrets: Vec::new(),
         }
     }
@@ -250,6 +259,10 @@ fn default_audience_required() -> bool {
 
 fn default_required_claims() -> Vec<String> {
     vec!["exp".into(), "sub".into()]
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -498,5 +511,18 @@ mod tests {
         assert_eq!(rs, JwtAlgorithm::RS256);
         // Unknown values must fail loudly so a typo in forge.toml is caught at boot.
         assert!(serde_json::from_str::<JwtAlgorithm>(r#""ES256""#).is_err());
+    }
+
+    #[test]
+    fn jwks_require_kid_defaults_to_true() {
+        let cfg = AuthConfig::default();
+        assert!(cfg.jwks_require_kid);
+    }
+
+    #[test]
+    fn jwks_require_kid_deserializes_from_toml() {
+        let toml = r#"jwks_require_kid = false"#;
+        let cfg: AuthConfig = toml::from_str(toml).unwrap();
+        assert!(!cfg.jwks_require_kid);
     }
 }

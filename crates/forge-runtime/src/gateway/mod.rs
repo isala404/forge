@@ -84,24 +84,6 @@ pub(crate) fn resolve_client_ip(
     Some(peer.to_string())
 }
 
-/// Legacy header-based IP extraction (no proxy validation).
-/// Used only in contexts where peer address is unavailable.
-pub(crate) fn extract_client_ip(headers: &axum::http::HeaderMap) -> Option<String> {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            headers
-                .get("x-real-ip")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        })
-}
-
 pub(crate) fn extract_header(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
     headers
         .get(name)

@@ -19,6 +19,9 @@ pub struct Claims {
     /// Expiration time (Unix timestamp). Use [`Claims::exp`] /
     /// [`Claims::is_expired`].
     pub(crate) exp: i64,
+    /// Audience (`aud` claim). Use [`Claims::audience`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) aud: Option<String>,
     /// User roles. Use [`Claims::roles`] / [`Claims::has_role`].
     #[serde(default)]
     pub(crate) roles: Vec<String>,
@@ -42,6 +45,11 @@ impl Claims {
     /// Get the expiration Unix timestamp.
     pub fn exp(&self) -> i64 {
         self.exp
+    }
+
+    /// Get the audience (`aud` claim), if set.
+    pub fn audience(&self) -> Option<&str> {
+        self.aud.as_deref()
     }
 
     /// Get the user roles.
@@ -120,6 +128,7 @@ impl Claims {
 #[derive(Debug, Default)]
 pub struct ClaimsBuilder {
     sub: Option<String>,
+    aud: Option<String>,
     roles: Vec<String>,
     custom: HashMap<String, serde_json::Value>,
     duration_secs: i64,
@@ -130,6 +139,7 @@ impl ClaimsBuilder {
     pub fn new() -> Self {
         Self {
             sub: None,
+            aud: None,
             roles: Vec::new(),
             custom: HashMap::new(),
             duration_secs: 3600, // 1 hour default
@@ -187,12 +197,8 @@ impl ClaimsBuilder {
     }
 
     /// Set the token audience (`aud` claim).
-    ///
-    /// Bypasses the reserved-name check because `aud` has no structural field in `Claims`
-    /// but still needs to appear in the serialized JWT for external validators.
     pub fn audience(mut self, aud: impl Into<String>) -> Self {
-        self.custom
-            .insert("aud".to_string(), serde_json::json!(aud.into()));
+        self.aud = Some(aud.into());
         self
     }
 
@@ -218,6 +224,7 @@ impl ClaimsBuilder {
             sub,
             iat: now,
             exp: now + self.duration_secs,
+            aud: self.aud,
             roles: self.roles,
             custom: self.custom,
         })
@@ -274,16 +281,6 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn audience_sets_aud_without_error() {
-        let claims = Claims::builder()
-            .subject("user-1")
-            .audience("my-service")
-            .build()
-            .unwrap();
-        // aud ends up in the flattened custom map
-        assert!(claims.custom.contains_key("aud"));
-    }
 
     #[test]
     fn test_claims_expiration() {
@@ -291,6 +288,7 @@ mod tests {
             sub: "user-1".to_string(),
             iat: 0,
             exp: 1, // Expired timestamp
+            aud: None,
             roles: vec![],
             custom: HashMap::new(),
         };
@@ -344,6 +342,7 @@ mod tests {
             sub: "u".into(),
             iat: now,
             exp: now + 3600,
+            aud: None,
             roles: vec![],
             custom: HashMap::new(),
         };
@@ -405,6 +404,7 @@ mod tests {
             sub: "u".into(),
             iat: 0,
             exp: i64::MAX,
+            aud: None,
             roles: vec![],
             custom,
         };
@@ -430,6 +430,7 @@ mod tests {
             sub: "u".into(),
             iat: 0,
             exp: i64::MAX,
+            aud: None,
             roles: vec![],
             custom,
         };
@@ -465,6 +466,7 @@ mod tests {
             sub: "u".into(),
             iat: 0,
             exp: i64::MAX,
+            aud: None,
             roles: vec![],
             custom,
         };
@@ -477,6 +479,7 @@ mod tests {
             sub: "u".into(),
             iat: 0,
             exp: i64::MAX,
+            aud: None,
             roles: vec![],
             custom,
         };
@@ -484,16 +487,30 @@ mod tests {
     }
 
     #[test]
-    fn audience_bypasses_reserved_check() {
-        // aud is not in the builder's reserved list (it has no structural field),
-        // and the audience() helper writes through to the flattened map. This test
-        // documents that gap so a future tightening doesn't silently break tokens.
+    fn audience_round_trips_through_typed_field() {
         let claims = Claims::builder()
             .subject("u")
-            .audience("aud-1")
+            .audience("my-service")
             .build()
             .unwrap();
-        assert_eq!(claims.custom.get("aud"), Some(&serde_json::json!("aud-1")));
+        assert_eq!(claims.audience(), Some("my-service"));
+        // Serializes into the JWT as "aud"
+        let json = serde_json::to_value(&claims).unwrap();
+        assert_eq!(json.get("aud"), Some(&serde_json::json!("my-service")));
+        // Does not leak into the custom map
+        assert!(!claims.custom.contains_key("aud"));
+    }
+
+    #[test]
+    fn audience_deserializes_from_jwt() {
+        let claims = Claims::builder()
+            .subject("u")
+            .audience("svc-1")
+            .build()
+            .unwrap();
+        let json = serde_json::to_string(&claims).unwrap();
+        let restored: Claims = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.audience(), Some("svc-1"));
     }
 
     #[test]

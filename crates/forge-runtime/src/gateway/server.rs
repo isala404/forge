@@ -507,7 +507,10 @@ impl GatewayServer {
         });
 
         // Build the main router with middleware
-        let max_json_depth = self.config.max_json_depth;
+        let json_depth_config = JsonDepthConfig {
+            max_depth: self.config.max_json_depth,
+            max_body_bytes: DEFAULT_MAX_JSON_BODY_SIZE,
+        };
         let mut main_router = Router::new()
             // Health check endpoint (liveness)
             .route("/health", get(health_handler))
@@ -522,7 +525,7 @@ impl GatewayServer {
             // Reject JSON bodies that exceed the nesting depth limit to prevent
             // stack exhaustion during recursive deserialization.
             .layer(middleware::from_fn_with_state(
-                max_json_depth,
+                json_depth_config,
                 json_depth_check_middleware,
             ))
             // Add state
@@ -1047,34 +1050,33 @@ fn json_max_depth(bytes: &[u8]) -> usize {
     max_depth
 }
 
+/// JSON depth-check config passed as middleware state.
+#[derive(Debug, Clone, Copy)]
+struct JsonDepthConfig {
+    max_depth: usize,
+    max_body_bytes: usize,
+}
+
 /// Middleware that rejects request bodies whose JSON nesting depth exceeds
-/// `max_depth`. Only inspects bodies for POST requests with a JSON
-/// `Content-Type`; all other requests pass through unchanged.
+/// `max_depth`. Runs on all POST requests regardless of Content-Type, because
+/// serde_json will parse the body downstream even if the client lies about
+/// the content type.
 ///
 /// The body is buffered, inspected, and re-inserted into the request so that
 /// downstream handlers see the original bytes.
 async fn json_depth_check_middleware(
-    axum::extract::State(max_depth): axum::extract::State<usize>,
+    axum::extract::State(config): axum::extract::State<JsonDepthConfig>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     use axum::body::Body;
 
-    // Only check POST requests with a JSON content type.
-    let is_json_post = req.method() == axum::http::Method::POST
-        && req
-            .headers()
-            .get(axum::http::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .map(|ct| ct.contains("application/json"))
-            .unwrap_or(false);
-
-    if !is_json_post || max_depth == 0 {
+    if req.method() != axum::http::Method::POST || config.max_depth == 0 {
         return next.run(req).await;
     }
 
     let (parts, body) = req.into_parts();
-    let bytes = match axum::body::to_bytes(body, usize::MAX).await {
+    let bytes = match axum::body::to_bytes(body, config.max_body_bytes).await {
         Ok(b) => b,
         Err(_) => {
             return super::response::RpcResponse::error(super::response::RpcError::new(
@@ -1086,12 +1088,12 @@ async fn json_depth_check_middleware(
     };
 
     let depth = json_max_depth(&bytes);
-    if depth > max_depth {
+    if depth > config.max_depth {
         return super::response::RpcResponse::error(super::response::RpcError::new(
             "BAD_REQUEST",
             format!(
                 "JSON nesting depth {} exceeds the maximum of {}",
-                depth, max_depth
+                depth, config.max_depth
             ),
         ))
         .into_response();

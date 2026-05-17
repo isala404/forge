@@ -66,12 +66,9 @@ pub struct SignalsState {
 /// not run (tests, edge configurations).
 fn resolve_rate_limit_ip(
     resolved_ip: &Option<axum::Extension<crate::gateway::ResolvedClientIp>>,
-    headers: &HeaderMap,
+    _headers: &HeaderMap,
 ) -> Option<String> {
-    resolved_ip
-        .as_ref()
-        .and_then(|r| r.0.0.clone())
-        .or_else(|| extract_client_ip(headers))
+    resolved_ip.as_ref().and_then(|r| r.0.0.clone())
 }
 
 /// Build a 429 response when the per-IP signal quota is exhausted.
@@ -406,7 +403,7 @@ fn extract_request_ctx(
 ) -> RequestCtx {
     let user_agent = extract_header(headers, "user-agent");
     let platform_header = extract_header(headers, "x-forge-platform");
-    let raw_ip = resolved_ip.or_else(|| extract_client_ip(headers));
+    let raw_ip = resolved_ip;
     let ua_lower = user_agent
         .as_deref()
         .unwrap_or_default()
@@ -442,10 +439,6 @@ fn extract_header(headers: &HeaderMap, name: &str) -> Option<String> {
     crate::gateway::extract_header(headers, name)
 }
 
-fn extract_client_ip(headers: &HeaderMap) -> Option<String> {
-    crate::gateway::extract_client_ip(headers)
-}
-
 fn resolve_session_id(raw: Option<&str>) -> Option<Uuid> {
     raw.and_then(|s| Uuid::parse_str(s).ok())
 }
@@ -456,7 +449,7 @@ mod tests {
     use axum::http::{HeaderMap, HeaderValue};
     use uuid::Uuid;
 
-    use super::{extract_client_ip, extract_header, resolve_session_id};
+    use super::{extract_header, resolve_session_id};
 
     #[tokio::test]
     async fn extract_header_returns_value() {
@@ -476,36 +469,6 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-custom", HeaderValue::from_static(""));
         assert_eq!(extract_header(&headers, "x-custom"), None);
-    }
-
-    #[tokio::test]
-    async fn extract_client_ip_from_forwarded_for_single() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", HeaderValue::from_static("1.2.3.4"));
-        assert_eq!(extract_client_ip(&headers), Some("1.2.3.4".into()));
-    }
-
-    #[tokio::test]
-    async fn extract_client_ip_from_forwarded_for_multiple() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-forwarded-for",
-            HeaderValue::from_static("1.2.3.4, 5.6.7.8"),
-        );
-        assert_eq!(extract_client_ip(&headers), Some("1.2.3.4".into()));
-    }
-
-    #[tokio::test]
-    async fn extract_client_ip_falls_back_to_real_ip() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-real-ip", HeaderValue::from_static("9.8.7.6"));
-        assert_eq!(extract_client_ip(&headers), Some("9.8.7.6".into()));
-    }
-
-    #[tokio::test]
-    async fn extract_client_ip_returns_none_when_no_headers() {
-        let headers = HeaderMap::new();
-        assert_eq!(extract_client_ip(&headers), None);
     }
 
     #[tokio::test]
