@@ -162,6 +162,25 @@ impl RustType {
     pub fn is_nullable(&self) -> bool {
         matches!(self, RustType::Option(_))
     }
+
+    /// All leaf (non-recursive) variants for exhaustive testing.
+    pub fn leaf_variants() -> Vec<RustType> {
+        vec![
+            RustType::String,
+            RustType::Uuid,
+            RustType::I32,
+            RustType::I64,
+            RustType::F32,
+            RustType::F64,
+            RustType::Bool,
+            RustType::Instant,
+            RustType::LocalDate,
+            RustType::LocalTime,
+            RustType::Upload,
+            RustType::Json,
+            RustType::Bytes,
+        ]
+    }
 }
 
 #[cfg(test)]

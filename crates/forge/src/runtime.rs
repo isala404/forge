@@ -619,7 +619,7 @@ impl Forge {
             let cron_leader_election = leader_election.clone();
 
             let cron_config = CronRunnerConfig {
-                poll_interval: Duration::from_secs(1),
+                poll_interval: *self.config.cron.poll_interval,
                 node_id: node_id.as_uuid(),
                 is_leader: cron_leader_election.is_none(),
                 leader_election: cron_leader_election,
@@ -648,7 +648,10 @@ impl Forge {
                 pool.clone(),
                 job_queue.clone(),
                 event_store,
-                WorkflowSchedulerConfig::default(),
+                WorkflowSchedulerConfig {
+                    poll_interval: *self.config.workflow.poll_interval,
+                    ..WorkflowSchedulerConfig::default()
+                },
             );
 
             let shutdown_token = workflow_shutdown_token.clone();
@@ -686,7 +689,11 @@ impl Forge {
                 daemon_http,
                 node_id.as_uuid(),
                 daemon_shutdown_rx,
-            );
+            )
+            .with_config(forge_runtime::daemon::DaemonRunnerConfig {
+                health_check_interval: *self.config.daemon.health_check_interval,
+                heartbeat_interval: *self.config.daemon.heartbeat_interval,
+            });
             #[cfg(feature = "jobs")]
             let daemon_runner = daemon_runner.with_job_dispatch(job_dispatcher.clone());
             #[cfg(feature = "workflows")]

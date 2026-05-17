@@ -21,6 +21,10 @@ pub enum WorkflowResult {
     Completed(serde_json::Value),
     Suspended { reason: String },
     Failed { error: String },
+    Blocked {
+        status: forge_core::workflow::WorkflowStatus,
+        reason: String,
+    },
 }
 
 /// In-memory compensation state for a running workflow.
@@ -286,8 +290,11 @@ impl WorkflowExecutor {
             WorkflowStatus::Pending
             | WorkflowStatus::Running
             | WorkflowStatus::Sleeping
-            | WorkflowStatus::Waiting => {
-                // Can resume
+            | WorkflowStatus::Waiting
+            | WorkflowStatus::BlockedMissingVersion
+            | WorkflowStatus::BlockedSignatureMismatch
+            | WorkflowStatus::BlockedMissingHandler => {
+                // Can attempt resume (blocked runs will be re-validated)
             }
             status if status.is_terminal() => {
                 return Err(forge_core::ForgeError::Validation(format!(
@@ -319,16 +326,22 @@ impl WorkflowExecutor {
                 .await
             }
             Err(reason) => {
+                let blocked_status = reason.to_blocked_status();
                 let description = reason.description();
-                self.fail_workflow(run_id, &description).await?;
+                self.block_workflow(run_id, blocked_status, &description)
+                    .await?;
                 tracing::warn!(
                     workflow_run_id = %run_id,
                     workflow_name = %record.workflow_name,
                     workflow_version = %record.workflow_version,
+                    status = %blocked_status.as_str(),
                     reason = %description,
-                    "Workflow run failed (version/signature mismatch)"
+                    "Workflow run blocked (will retry on next deploy)"
                 );
-                Ok(WorkflowResult::Failed { error: description })
+                Ok(WorkflowResult::Blocked {
+                    status: blocked_status,
+                    reason: description,
+                })
             }
         }
     }
@@ -694,6 +707,29 @@ impl WorkflowExecutor {
                 run_id
             )));
         }
+
+        Ok(())
+    }
+
+    /// Mark a workflow as blocked (non-terminal). The run stays resumable
+    /// and will be retried when a matching handler is deployed.
+    async fn block_workflow(
+        &self,
+        run_id: Uuid,
+        status: forge_core::workflow::WorkflowStatus,
+        reason: &str,
+    ) -> forge_core::Result<()> {
+        // Uses runtime query because the status value is dynamic and the
+        // sqlx offline cache doesn't have an entry for this parameterized form.
+        sqlx::query(
+            "UPDATE forge_workflow_runs SET status = $1, error = $2 WHERE id = $3 AND status IN ('running', 'sleeping', 'waiting', 'pending')",
+        )
+        .bind(status.as_str())
+        .bind(reason)
+        .bind(run_id)
+        .execute(&self.pool)
+        .await
+        .map_err(forge_core::ForgeError::Database)?;
 
         Ok(())
     }

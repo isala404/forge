@@ -432,68 +432,69 @@ fn extract_result_type(ty: &syn::Type) -> RustType {
     type_to_rust_type(ty)
 }
 
-/// Convert a `syn::Type` to `RustType`.
+/// Convert a `syn::Type` to `RustType` via structural AST walk.
 fn type_to_rust_type(ty: &syn::Type) -> RustType {
-    let type_str = quote::quote!(#ty).to_string().replace(' ', "");
+    match ty {
+        syn::Type::Reference(r) => type_to_rust_type(&r.elem),
+        syn::Type::Path(tp) => path_to_rust_type(tp),
+        _ => RustType::Custom(quote::quote!(#ty).to_string()),
+    }
+}
 
-    match type_str.as_str() {
-        "String" | "&str" => RustType::String,
+/// Resolve a type path to `RustType` using the last path segment.
+fn path_to_rust_type(tp: &syn::TypePath) -> RustType {
+    let Some(last) = tp.path.segments.last() else {
+        return RustType::Custom(quote::quote!(#tp).to_string());
+    };
+    let ident = last.ident.to_string();
+
+    match ident.as_str() {
+        "String" | "str" => RustType::String,
         "i32" => RustType::I32,
         "i64" => RustType::I64,
         "f32" => RustType::F32,
         "f64" => RustType::F64,
         "bool" => RustType::Bool,
-        "Uuid" | "uuid::Uuid" => RustType::Uuid,
-        "DateTime<Utc>" | "chrono::DateTime<Utc>" | "chrono::DateTime<chrono::Utc>" => {
-            RustType::Instant
+        "Uuid" => RustType::Uuid,
+        "DateTime" => RustType::Instant,
+        "NaiveDate" => RustType::LocalDate,
+        "NaiveTime" => RustType::LocalTime,
+        "Value" => RustType::Json,
+        "Option" => {
+            let inner = first_generic_arg(last);
+            RustType::Option(Box::new(inner))
         }
-        "NaiveDate" | "chrono::NaiveDate" => RustType::LocalDate,
-        "NaiveTime" | "chrono::NaiveTime" => RustType::LocalTime,
-        "serde_json::Value" | "Value" => RustType::Json,
-        "Vec<u8>" => RustType::Bytes,
-        _ => parse_generic_or_custom(&type_str),
+        "Vec" => {
+            if is_vec_u8(last) {
+                return RustType::Bytes;
+            }
+            let inner = first_generic_arg(last);
+            RustType::Vec(Box::new(inner))
+        }
+        _ => RustType::Custom(ident),
     }
 }
 
-/// Handle generic types (`Option<T>`, `Vec<T>`) and custom types.
-fn parse_generic_or_custom(type_str: &str) -> RustType {
-    // Option<T>
-    if let Some(inner) = type_str
-        .strip_prefix("Option<")
-        .and_then(|s| s.strip_suffix('>'))
-    {
-        let inner_type = parse_inner_type(inner);
-        return RustType::Option(Box::new(inner_type));
-    }
-
-    // Vec<T>
-    if let Some(inner) = type_str
-        .strip_prefix("Vec<")
-        .and_then(|s| s.strip_suffix('>'))
-    {
-        if inner == "u8" {
-            return RustType::Bytes;
+/// Check if a `Vec` segment has `u8` as its type argument.
+fn is_vec_u8(seg: &syn::PathSegment) -> bool {
+    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+        if let Some(syn::GenericArgument::Type(syn::Type::Path(tp))) = args.args.first() {
+            if let Some(s) = tp.path.segments.last() {
+                return s.ident == "u8" && s.arguments.is_empty();
+            }
         }
-        let inner_type = parse_inner_type(inner);
-        return RustType::Vec(Box::new(inner_type));
     }
-
-    // Everything else is a custom type.
-    RustType::Custom(type_str.to_string())
+    false
 }
 
-/// Parse an inner type string, falling back to Custom on failure.
-fn parse_inner_type(inner: &str) -> RustType {
-    match syn::parse_str::<syn::Type>(inner) {
-        Ok(inner_ty) => type_to_rust_type(&inner_ty),
-        Err(_) => {
-            tracing::warn!(
-                "Could not parse inner type '{}', treating as custom type",
-                inner
-            );
-            RustType::Custom(inner.to_string())
+/// Extract the first generic type argument from a path segment.
+fn first_generic_arg(seg: &syn::PathSegment) -> RustType {
+    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+        if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
+            return type_to_rust_type(inner_ty);
         }
     }
+    RustType::Custom(seg.ident.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -1027,5 +1028,76 @@ mod tests {
             },
             other => panic!("Expected Vec, got: {other:?}"),
         }
+    }
+
+    fn parse_type(s: &str) -> RustType {
+        let ty: syn::Type = syn::parse_str(s).expect("valid type");
+        type_to_rust_type(&ty)
+    }
+
+    #[test]
+    fn type_to_rust_type_primitives() {
+        assert_eq!(parse_type("String"), RustType::String);
+        assert_eq!(parse_type("&str"), RustType::String);
+        assert_eq!(parse_type("i32"), RustType::I32);
+        assert_eq!(parse_type("i64"), RustType::I64);
+        assert_eq!(parse_type("f32"), RustType::F32);
+        assert_eq!(parse_type("f64"), RustType::F64);
+        assert_eq!(parse_type("bool"), RustType::Bool);
+    }
+
+    #[test]
+    fn type_to_rust_type_qualified_paths() {
+        assert_eq!(parse_type("Uuid"), RustType::Uuid);
+        assert_eq!(parse_type("uuid::Uuid"), RustType::Uuid);
+        assert_eq!(parse_type("DateTime<Utc>"), RustType::Instant);
+        assert_eq!(parse_type("chrono::DateTime<Utc>"), RustType::Instant);
+        assert_eq!(
+            parse_type("chrono::DateTime<chrono::Utc>"),
+            RustType::Instant
+        );
+        assert_eq!(parse_type("NaiveDate"), RustType::LocalDate);
+        assert_eq!(parse_type("chrono::NaiveDate"), RustType::LocalDate);
+        assert_eq!(parse_type("NaiveTime"), RustType::LocalTime);
+        assert_eq!(parse_type("chrono::NaiveTime"), RustType::LocalTime);
+        assert_eq!(parse_type("serde_json::Value"), RustType::Json);
+        assert_eq!(parse_type("Value"), RustType::Json);
+    }
+
+    #[test]
+    fn type_to_rust_type_containers() {
+        assert_eq!(parse_type("Vec<u8>"), RustType::Bytes);
+        assert_eq!(
+            parse_type("Vec<String>"),
+            RustType::Vec(Box::new(RustType::String))
+        );
+        assert_eq!(
+            parse_type("Option<i32>"),
+            RustType::Option(Box::new(RustType::I32))
+        );
+        assert_eq!(
+            parse_type("Option<Vec<String>>"),
+            RustType::Option(Box::new(RustType::Vec(Box::new(RustType::String))))
+        );
+    }
+
+    #[test]
+    fn type_to_rust_type_std_qualified_vec() {
+        assert_eq!(
+            parse_type("std::vec::Vec<i32>"),
+            RustType::Vec(Box::new(RustType::I32))
+        );
+        assert_eq!(
+            parse_type("std::option::Option<String>"),
+            RustType::Option(Box::new(RustType::String))
+        );
+    }
+
+    #[test]
+    fn type_to_rust_type_custom() {
+        assert_eq!(
+            parse_type("MyStruct"),
+            RustType::Custom("MyStruct".to_string())
+        );
     }
 }

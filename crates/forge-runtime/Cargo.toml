@@ -57,7 +57,6 @@ sha1 = { version = "0.10", optional = true }
 # `[gateway.tls] cert_path + key_path` in forge.toml.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"], optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
-rustls-pemfile = { version = "2", optional = true }
 tls-listener = { version = "0.11", default-features = false, features = ["rustls-ring", "axum", "tokio-net"], optional = true }
 jsonschema = { workspace = true, optional = true }
 
@@ -100,7 +99,6 @@ gateway = [
     "dep:sha1",
     "dep:tokio-rustls",
     "dep:rustls",
-    "dep:rustls-pemfile",
     "dep:tls-listener",
     "dep:jsonschema",
 ]

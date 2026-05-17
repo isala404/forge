@@ -123,9 +123,8 @@ impl Default for WorkflowInfo {
 
 /// Workflow execution status.
 ///
-/// Six states: Pending, Running, Sleeping, Waiting, Completed, Failed.
-/// Cancel is a soft flag checked at step boundaries; cancelled runs end
-/// in Failed with `error = "cancelled"` after compensation runs.
+/// Workflow lifecycle states. Blocked variants are non-terminal: a deploy
+/// with the matching handler/version/signature unblocks the run automatically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkflowStatus {
     /// Workflow created but not yet started.
@@ -138,8 +137,14 @@ pub enum WorkflowStatus {
     Waiting,
     /// Workflow completed successfully.
     Completed,
-    /// Workflow failed (includes cancelled, blocked, and compensated runs).
+    /// Workflow failed (includes cancelled and compensated runs).
     Failed,
+    /// No registered handler for the workflow's pinned version.
+    BlockedMissingVersion,
+    /// Handler exists but signature doesn't match the run's pinned signature.
+    BlockedSignatureMismatch,
+    /// Workflow name not found in the registry at all.
+    BlockedMissingHandler,
 }
 
 impl WorkflowStatus {
@@ -152,12 +157,25 @@ impl WorkflowStatus {
             Self::Waiting => "waiting",
             Self::Completed => "completed",
             Self::Failed => "failed",
+            Self::BlockedMissingVersion => "blocked_missing_version",
+            Self::BlockedSignatureMismatch => "blocked_signature_mismatch",
+            Self::BlockedMissingHandler => "blocked_missing_handler",
         }
     }
 
     /// Check if the workflow is terminal (no longer running).
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::Completed | Self::Failed)
+    }
+
+    /// Check if the workflow is blocked and waiting for a matching deploy.
+    pub fn is_blocked(&self) -> bool {
+        matches!(
+            self,
+            Self::BlockedMissingVersion
+                | Self::BlockedSignatureMismatch
+                | Self::BlockedMissingHandler
+        )
     }
 }
 
@@ -185,11 +203,11 @@ impl FromStr for WorkflowStatus {
             "failed"
             | "compensating"
             | "compensated"
-            | "blocked_missing_version"
-            | "blocked_signature_mismatch"
-            | "blocked_missing_handler"
             | "retired_unresumable"
             | "cancelled_by_operator" => Ok(Self::Failed),
+            "blocked_missing_version" => Ok(Self::BlockedMissingVersion),
+            "blocked_signature_mismatch" => Ok(Self::BlockedSignatureMismatch),
+            "blocked_missing_handler" => Ok(Self::BlockedMissingHandler),
             _ => Err(ParseWorkflowStatusError(s.to_string())),
         }
     }

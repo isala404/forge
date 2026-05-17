@@ -141,16 +141,9 @@ impl TestDatabase {
             uuid::Uuid::new_v4().simple()
         );
 
-        // Connect to default database to create the test database
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&base_url)
-            .await
-            .map_err(ForgeError::Database)?;
-
-        // Double-quoted identifier handles special characters in generated name
+        // Use the parent pool for DDL — avoids creating a throwaway admin pool per test.
         sqlx::query(&format!("CREATE DATABASE \"{}\"", db_name))
-            .execute(&pool)
+            .execute(&self.pool)
             .await
             .map_err(ForgeError::Database)?;
 

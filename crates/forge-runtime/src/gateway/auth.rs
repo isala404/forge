@@ -346,6 +346,9 @@ pub struct AuthMiddleware {
     /// each paired with the kid of the underlying secret. The kid lets the
     /// validator look up the right key directly when the token carries one.
     legacy_hmac_keys: Vec<(String, DecodingKey)>,
+    /// Positive token cache: maps token hash -> (Claims, expiry). Avoids
+    /// re-validating the same JWT on every request.
+    token_cache: Arc<dashmap::DashMap<u64, (Claims, std::time::Instant)>>,
 }
 
 impl std::fmt::Debug for AuthMiddleware {
@@ -409,6 +412,7 @@ impl AuthMiddleware {
             hmac_key,
             hmac_kid,
             legacy_hmac_keys,
+            token_cache: Arc::new(dashmap::DashMap::new()),
         }
     }
 
@@ -424,16 +428,71 @@ impl AuthMiddleware {
         &self.config
     }
 
-    /// Validate a JWT token and extract claims.
+    /// Validate a JWT token and extract claims. Results are cached by token
+    /// hash for up to 60 seconds (or until the token's `exp` claim, whichever
+    /// is sooner) to avoid re-validating the same JWT on every request.
     pub async fn validate_token_async(&self, token: &str) -> Result<Claims, AuthError> {
         if self.config.skips_verification() {
             return self.decode_without_verification(token);
         }
 
-        if self.config.is_hmac() {
-            self.validate_hmac(token)
+        let token_hash = Self::hash_token(token);
+
+        if let Some(entry) = self.token_cache.get(&token_hash) {
+            let (claims, expires_at) = entry.value();
+            if std::time::Instant::now() < *expires_at {
+                return Ok(claims.clone());
+            }
+            drop(entry);
+            self.token_cache.remove(&token_hash);
+        }
+
+        let claims = if self.config.is_hmac() {
+            self.validate_hmac(token)?
         } else {
-            self.validate_rsa(token).await
+            self.validate_rsa(token).await?
+        };
+
+        let cache_ttl = Self::cache_ttl(&claims);
+        if cache_ttl > std::time::Duration::ZERO {
+            self.token_cache.insert(
+                token_hash,
+                (claims.clone(), std::time::Instant::now() + cache_ttl),
+            );
+        }
+
+        self.evict_expired_cache_entries();
+
+        Ok(claims)
+    }
+
+    /// Hash a token to a u64 for cache key. Uses FxHash-style fast hashing.
+    fn hash_token(token: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        token.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Compute cache TTL as `min(exp - now, 60s)`.
+    fn cache_ttl(claims: &Claims) -> std::time::Duration {
+        const MAX_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+        let exp = claims.exp();
+        let now = chrono::Utc::now().timestamp();
+        let remaining = if exp > now {
+            std::time::Duration::from_secs((exp - now) as u64)
+        } else {
+            std::time::Duration::ZERO
+        };
+        remaining.min(MAX_CACHE_TTL)
+    }
+
+    /// Periodically evict expired entries to prevent unbounded growth.
+    fn evict_expired_cache_entries(&self) {
+        const MAX_CACHE_SIZE: usize = 10_000;
+        if self.token_cache.len() > MAX_CACHE_SIZE {
+            let now = std::time::Instant::now();
+            self.token_cache.retain(|_, (_, expires_at)| *expires_at > now);
         }
     }
 

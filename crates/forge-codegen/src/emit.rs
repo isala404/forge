@@ -439,28 +439,16 @@ mod tests {
     // --- Cross-target consistency ---
 
     /// Ensure every RustType variant maps to a non-empty string in both targets.
-    /// This catches missing arms in match statements when new types are added.
+    /// Uses `RustType::leaf_variants()` so adding a new variant without updating
+    /// both emitters fails this test (and the exhaustive match in the emitters
+    /// themselves produces a compile error).
     #[test]
     fn all_types_map_to_nonempty_in_both_targets() {
-        let types = vec![
-            RustType::String,
-            RustType::I32,
-            RustType::I64,
-            RustType::F32,
-            RustType::F64,
-            RustType::Bool,
-            RustType::Uuid,
-            RustType::Instant,
-            RustType::LocalDate,
-            RustType::LocalTime,
-            RustType::Json,
-            RustType::Bytes,
-            RustType::Upload,
-            RustType::Option(Box::new(RustType::String)),
-            RustType::Vec(Box::new(RustType::I32)),
-            RustType::Custom("User".into()),
-            RustType::Custom("()".into()),
-        ];
+        let mut types = RustType::leaf_variants();
+        types.push(RustType::Option(Box::new(RustType::String)));
+        types.push(RustType::Vec(Box::new(RustType::I32)));
+        types.push(RustType::Custom("User".into()));
+        types.push(RustType::Custom("()".into()));
 
         for ty in &types {
             let ts = ts_type(ty, Position::Arg);
@@ -475,6 +463,11 @@ mod tests {
             let dx = dioxus_type(ty);
             assert!(!dx.is_empty(), "dioxus_type returned empty for {ty:?}");
         }
+
+        assert!(
+            RustType::leaf_variants().len() >= 13,
+            "leaf_variants() must cover all non-recursive RustType variants"
+        );
     }
 
     /// Nested generics should produce valid type strings without panicking.

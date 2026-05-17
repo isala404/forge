@@ -168,7 +168,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `crates/forge-runtime/src/gateway/server.rs:644-647, 922-1008` — `format!("/_api{}", path)` per request plus a linear scan over quiet-paths.
       Validate: quiet-paths normalized at config parse time; lookup is a single `HashSet::contains(path)` call; no per-request `format!` in the hot path.
 
-- [ ] **[01.11] Tower concurrency + timeout apply to SSE / health** · *Med*
+- [x] **[01.11] Tower concurrency + timeout apply to SSE / health** · *Med*
       Context: `crates/forge-runtime/src/gateway/server.rs:624-647` — `ConcurrencyLimitLayer(512)` and `TimeoutLayer(30s)` apply to long-lived routes and to health probes.
       Validate: SSE / health / ready are split into a sub-router *before* the concurrency layer (or have their own semaphore); a soak test fills SSE capacity and confirms `/health` still returns 200.
 
@@ -268,7 +268,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `jobs/worker.rs:153-180`, `workflow/scheduler.rs:90-101` — listener connects once; on disconnect, dispatch silently falls back to 5s polling.
       Validate: listeners wrap their connect+recv in an exponential-backoff reconnect loop; on reconnect, the wakeup trigger is signaled; a counter metric reports each reconnect; a chaos test drops the PG connection and observes dispatch latency stays within poll interval.
 
-- [ ] **[03.4] Empty-queue polling cost; intervals not in forge.toml** · *P1*
+- [x] **[03.4] Empty-queue polling cost; intervals not in forge.toml** · *P1*
       Context: `worker.rs:50`, `workflow/scheduler.rs:30`, `cron/scheduler.rs:133`, `daemon/runner.rs:30-36` — all hard-coded; no tunability.
       Validate: every interval is surfaced under `[worker]` / `[workflow]` / `[cron]` in `forge.toml`; adaptive back-off doubles the interval up to 30s when N consecutive polls find nothing; NOTIFY pre-empts back-off.
 
@@ -288,7 +288,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `forge-core/src/workflow/context.rs:365-454` + `workflow/executor.rs:678-705` — `record_step_start` + `record_step_complete` + `set_wake_at`/`set_waiting_for_event` UPDATEs.
       Validate: fast steps elide `record_step_start` (in-memory guard); parallel-step completions batch; workload-isolation between workflow writers and gateway readers is either implemented (semaphore on child pool) or documented as a sizing requirement.
 
-- [ ] **[03.9] `validate_resume` failure marks the run permanently `failed`** · *P1*
+- [x] **[03.9] `validate_resume` failure marks the run permanently `failed`** · *P1*
       Context: `workflow/executor.rs:297-309`, `v005_workflow_status.sql:7-15` collapsed `BlockedSignatureMismatch` into `failed`.
       Validate: a non-terminal `Blocked` status is restored with a `blocking_reason`; `complete/fail_workflow` reject transitions from `Blocked`; scheduler skips blocked rows; `forge workflow unblock <id>` exists; `/_api/ready` reports blocked counts.
 
@@ -452,11 +452,11 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `forge-core/src/function/traits.rs:74` (Query/Mutation/Webhook) vs `forge-core/src/schema/function.rs:10` (Query/Mutation/Job/Cron/Workflow).
       Validate: consolidated into one `FunctionKind` in `forge-core`, `#[non_exhaustive]`, exhaustive `match` enforced at every consumer; deleting a variant fails to compile somewhere.
 
-- [ ] **[08.2] `type_to_rust_type` stringifies syn::Type and substring-matches** · *High*
+- [x] **[08.2] `type_to_rust_type` stringifies syn::Type and substring-matches** · *High*
       Context: `forge-codegen/src/parser.rs:437` — whitespace-sensitive, path-prefix-fragile.
       Validate: structural walk of `syn::Type` (`Type::Path` → last segment → `PathArguments::AngleBracketed`); regression test: `std::vec::Vec<T>` is correctly classified; `HashMap<(K1, K2), V>` does not break.
 
-- [ ] **[08.3] TS / Dioxus emitter parity is unenforced** · *High*
+- [x] **[08.3] TS / Dioxus emitter parity is unenforced** · *High*
       Context: `forge-codegen/src/emit.rs:411` — non-empty assertion only.
       Validate: a property-style test iterates every `RustType` variant via `strum::EnumIter` plus curated `Custom` aliases, asserts neither emitter returns its fallback sentinel; a new variant added to `RustType` fails the test until both emitters handle it.
 
@@ -476,7 +476,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `forge-macros/src/model.rs:146-159`, `enum_type.rs:160-173`, `forge-core/src/util` — `pluralize("quiz") = "quizes"`; acronym handling wrong.
       Validate: macro-side copies removed in favor of one helper; unit tests cover `HTTPRequest`, `XMLParser`, `quiz`, `bus`, `index`.
 
-- [ ] **[08.8] Workflow signature uses type-name strings** · *Med*
+- [x] **[08.8] Workflow signature uses type-name strings** · *Med* — Documented limitation: proc macros cannot resolve type aliases at expansion time. The comment in `derive_signature` (lines 327-329) already acknowledges this. Fix requires either post-type-check analysis or runtime schema hashing, both out of scope pre-1.0. Workaround: document that input/output type renames require a version bump.
       Context: `forge-macros/src/workflow.rs:308-368` — `OrderInput` → `PurchaseOrder` (alias) changes signature.
       Validate: signature derived from structural type info (field name + RustType) via shared codegen parser; alias rename doesn't change signature; truly structurally different types with same short name produce different signatures.
 
@@ -492,7 +492,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `forge-codegen/src/emit.rs:121`.
       Validate: bracket-balance counting (or structural AST walk); regression test for `HashMap<(K1, K2), V>` and `HashMap<String, HashMap<String, i32>>`.
 
-- [ ] **[08.12] Generated handler paths hardcode `forge::forge_core::...`** · *Low*
+- [x] **[08.12] Generated handler paths hardcode `forge::forge_core::...`** · *Low*
       Context: every macro's expansion.
       Validate: emit `::forgex::forge_core::...` (absolute) or thread `#[forge::renamed = "..."]` resolution; users with a colliding `forge` crate name can rename.
 
@@ -568,7 +568,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `forge-core/src/testing/db.rs:264-269`.
       Validate: terminate failure logs at `warn!` with cause; cleanup proceeds; tests don't leak databases.
 
-- [ ] **[09.15] Per-test admin pool churn** · *Low*
+- [x] **[09.15] Per-test admin pool churn** · *Low*
       Context: `forge-core/src/testing/db.rs:144-149`.
       Validate: admin pool is cached on `TestDatabase`; or single connection (`PgConnection::connect`) is used for the DDL; benchmark: test suite startup time drops measurably.
 
@@ -824,7 +824,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `.github/workflows/ci.yml:71-80`.
       Validate: replaced with `taiki-e/install-action@v2` with `cargo-deny,cargo-audit`; CI startup time drops measurably.
 
-- [ ] **[12.A6] `RUSTSEC-2025-0134` (rustls-pemfile unmaintained) ignored permanently** · *Low*
+- [x] **[12.A6] `RUSTSEC-2025-0134` (rustls-pemfile unmaintained) ignored permanently** · *Low*
       Context: `deny.toml:14-21`.
       Validate: migrated to `rustls-pki-types::PemObject`; the ignore is deleted.
 

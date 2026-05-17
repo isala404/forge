@@ -17,10 +17,6 @@ ignore = [
     # sidechannel is not exploitable in our stack. Drop when `rsa` ships a
     # constant-time fix.
     "RUSTSEC-2023-0071",
-    # RUSTSEC-2025-0134 — `rustls-pemfile` is unmaintained. Used directly for
-    # gateway TLS cert loading. Replacement is `rustls-pki-types::PemObject`.
-    # Tracked as cleanup; not exploitable on its own.
-    "RUSTSEC-2025-0134",
 ]
 
 [licenses]

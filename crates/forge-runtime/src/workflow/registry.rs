@@ -287,6 +287,17 @@ impl ResumeBlockReason {
             }
         }
     }
+
+    /// Map to the corresponding blocked workflow status.
+    pub fn to_blocked_status(&self) -> forge_core::workflow::WorkflowStatus {
+        match self {
+            Self::MissingHandler => forge_core::workflow::WorkflowStatus::BlockedMissingHandler,
+            Self::MissingVersion => forge_core::workflow::WorkflowStatus::BlockedMissingVersion,
+            Self::SignatureMismatch { .. } => {
+                forge_core::workflow::WorkflowStatus::BlockedSignatureMismatch
+            }
+        }
+    }
 }
 
 impl Clone for WorkflowRegistry {

@@ -6,6 +6,8 @@
 
 mod auth;
 pub mod cluster;
+mod cron_config;
+mod daemon_config;
 mod database;
 mod function;
 mod gateway;
@@ -20,9 +22,12 @@ mod security;
 pub mod signals;
 pub mod types;
 mod worker;
+mod workflow_config;
 
 pub use auth::{AuthConfig, JwtAlgorithm, LegacySecret};
 pub use cluster::ClusterConfig;
+pub use cron_config::CronConfig;
+pub use daemon_config::DaemonConfig;
 pub use database::DatabaseConfig;
 pub use function::FunctionConfig;
 pub use gateway::{GatewayConfig, TlsConfig};
@@ -36,6 +41,7 @@ pub use security::SecurityConfig;
 pub use signals::SignalsConfig;
 pub use types::{DurationStr, SizeStr};
 pub use worker::{CRON_QUEUE, DEFAULT_QUEUE, QueueWorkerConfig, WORKFLOWS_QUEUE, WorkerConfig};
+pub use workflow_config::WorkflowConfig;
 
 pub use loader::substitute_env_vars;
 
@@ -70,6 +76,18 @@ pub struct ForgeConfig {
     /// Worker configuration.
     #[serde(default)]
     pub worker: WorkerConfig,
+
+    /// Workflow scheduler configuration.
+    #[serde(default)]
+    pub workflow: WorkflowConfig,
+
+    /// Cron scheduler configuration.
+    #[serde(default)]
+    pub cron: CronConfig,
+
+    /// Daemon runner configuration.
+    #[serde(default)]
+    pub daemon: DaemonConfig,
 
     /// Cluster configuration.
     #[serde(default)]
@@ -239,6 +257,9 @@ impl ForgeConfig {
             gateway: GatewayConfig::default(),
             function: FunctionConfig::default(),
             worker: WorkerConfig::default(),
+            workflow: WorkflowConfig::default(),
+            cron: CronConfig::default(),
+            daemon: DaemonConfig::default(),
             cluster: ClusterConfig::default(),
             security: SecurityConfig::default(),
             auth: AuthConfig::default(),

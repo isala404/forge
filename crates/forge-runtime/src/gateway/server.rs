@@ -606,9 +606,9 @@ impl GatewayServer {
             db_pool: self.db.primary().clone(),
         });
 
+        // RPC-class routes get concurrency + timeout limits.
         main_router = main_router
             .merge(multipart_router)
-            .merge(sse_router)
             .merge(mcp_router)
             .merge(signals_router)
             .merge(admin_router);
@@ -616,6 +616,19 @@ impl GatewayServer {
         if let Some(custom) = &self.custom_routes {
             main_router = main_router.merge(custom.clone());
         }
+
+        let bounded_router = main_router.layer(
+            ServiceBuilder::new()
+                .layer(HandleErrorLayer::new(handle_middleware_error))
+                .layer(ConcurrencyLimitLayer::new(self.config.max_connections))
+                .layer(TimeoutLayer::new(Duration::from_secs(
+                    self.config.request_timeout_secs,
+                ))),
+        );
+
+        // SSE and health probes are excluded from concurrency/timeout limits:
+        // SSE connections are long-lived, health probes must never be blocked.
+        let full_router = bounded_router.merge(sse_router);
 
         // Security headers config
         let security_config = Arc::new(SecurityHeadersConfig {
@@ -626,13 +639,8 @@ impl GatewayServer {
         // Trusted proxies for client IP resolution
         let trusted_proxies = TrustedProxies(Arc::new(self.config.trusted_proxies.clone()));
 
-        // Build middleware stack
+        // Common middleware applied to all routes.
         let service_builder = ServiceBuilder::new()
-            .layer(HandleErrorLayer::new(handle_middleware_error))
-            .layer(ConcurrencyLimitLayer::new(self.config.max_connections))
-            .layer(TimeoutLayer::new(Duration::from_secs(
-                self.config.request_timeout_secs,
-            )))
             .layer(cors.clone())
             .layer(middleware::from_fn_with_state(
                 security_config,
@@ -652,8 +660,7 @@ impl GatewayServer {
                 tracing_middleware,
             ));
 
-        // Apply the remaining middleware layers
-        main_router.layer(service_builder)
+        full_router.layer(service_builder)
     }
 
     /// Get the socket address to bind to.

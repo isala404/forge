@@ -5,8 +5,6 @@
 //! [`axum::serve::Listener`], so the gateway's single
 //! `axum::serve(listener, service).await` hotpath handles both HTTP and HTTPS.
 
-use std::fs::File;
-use std::io::BufReader;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -15,7 +13,7 @@ use std::task::{Context, Poll};
 
 use forge_core::error::{ForgeError, Result};
 use rustls::ServerConfig;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
@@ -257,17 +255,16 @@ fn build_from_files(cert_path: &str, key_path: &str) -> Result<ServerConfig> {
 }
 
 fn read_pem_certs(path: &str) -> Result<Vec<CertificateDer<'static>>> {
-    let file = File::open(path).map_err(|e| {
-        ForgeError::Config(format!(
-            "failed to open gateway.tls.cert_path '{path}': {e}"
-        ))
-    })?;
-    let mut reader = BufReader::new(file);
-
-    let certs: std::result::Result<Vec<_>, _> = rustls_pemfile::certs(&mut reader).collect();
-    let certs = certs.map_err(|e| {
-        ForgeError::Config(format!("failed to parse PEM certificates in '{path}': {e}"))
-    })?;
+    let certs: Vec<_> = CertificateDer::pem_file_iter(path)
+        .map_err(|e| {
+            ForgeError::Config(format!(
+                "failed to read PEM certificates from '{path}': {e}"
+            ))
+        })?
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|e| {
+            ForgeError::Config(format!("failed to parse PEM certificates in '{path}': {e}"))
+        })?;
 
     if certs.is_empty() {
         return Err(ForgeError::Config(format!(
@@ -279,16 +276,11 @@ fn read_pem_certs(path: &str) -> Result<Vec<CertificateDer<'static>>> {
 }
 
 fn read_pem_key(path: &str) -> Result<PrivateKeyDer<'static>> {
-    let file = File::open(path).map_err(|e| {
-        ForgeError::Config(format!("failed to open gateway.tls.key_path '{path}': {e}"))
-    })?;
-    let mut reader = BufReader::new(file);
-
-    rustls_pemfile::private_key(&mut reader)
-        .map_err(|e| {
-            ForgeError::Config(format!("failed to parse PEM private key in '{path}': {e}"))
-        })?
-        .ok_or_else(|| ForgeError::Config(format!("no PEM private key found in '{path}'")))
+    PrivateKeyDer::from_pem_file(path).map_err(|e| {
+        ForgeError::Config(format!(
+            "failed to read PEM private key from '{path}': {e}"
+        ))
+    })
 }
 
 #[cfg(test)]
