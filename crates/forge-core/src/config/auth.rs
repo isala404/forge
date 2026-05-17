@@ -251,3 +251,252 @@ fn default_audience_required() -> bool {
 fn default_required_claims() -> Vec<String> {
     vec!["exp".into(), "sub".into()]
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    fn strong_secret() -> String {
+        "x".repeat(32)
+    }
+
+    #[test]
+    fn default_algorithm_is_hs256() {
+        assert_eq!(JwtAlgorithm::default(), JwtAlgorithm::HS256);
+    }
+
+    #[test]
+    fn default_required_claims_are_exp_and_sub() {
+        let claims = default_required_claims();
+        assert!(claims.contains(&"exp".to_string()));
+        assert!(claims.contains(&"sub".to_string()));
+    }
+
+    #[test]
+    fn default_audience_is_required() {
+        assert!(default_audience_required());
+    }
+
+    #[test]
+    fn is_configured_false_when_completely_empty() {
+        let cfg = AuthConfig::default();
+        assert!(!cfg.is_configured());
+    }
+
+    #[test]
+    fn is_configured_true_when_jwt_secret_set() {
+        let cfg = AuthConfig {
+            jwt_secret: Some("anything".into()),
+            ..AuthConfig::default()
+        };
+        assert!(cfg.is_configured());
+    }
+
+    #[test]
+    fn is_configured_true_when_only_jwt_issuer_set() {
+        // Issuer-only is enough to flip is_configured even without a secret.
+        let cfg = AuthConfig {
+            jwt_issuer: Some("https://issuer".into()),
+            ..AuthConfig::default()
+        };
+        assert!(cfg.is_configured());
+    }
+
+    #[test]
+    fn is_configured_true_when_only_jwks_url_set() {
+        let cfg = AuthConfig {
+            jwks_url: Some("https://jwks".into()),
+            ..AuthConfig::default()
+        };
+        assert!(cfg.is_configured());
+    }
+
+    #[test]
+    fn validate_passes_when_auth_disabled() {
+        // Empty config means auth is off; validation must not complain.
+        let cfg = AuthConfig::default();
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_hs256_rejects_missing_secret() {
+        // Issuer alone trips is_configured but HS256 still needs a secret.
+        let cfg = AuthConfig {
+            jwt_algorithm: JwtAlgorithm::HS256,
+            jwt_issuer: Some("https://issuer".into()),
+            jwt_audience: Some("api".into()),
+            ..AuthConfig::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        let ForgeError::Config(msg) = err else {
+            panic!("expected Config error");
+        };
+        assert!(msg.contains("jwt_secret"));
+    }
+
+    #[test]
+    fn validate_hs256_rejects_short_secret() {
+        let cfg = AuthConfig {
+            jwt_secret: Some("too-short".into()),
+            jwt_audience: Some("api".into()),
+            ..AuthConfig::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        let ForgeError::Config(msg) = err else {
+            panic!("expected Config error");
+        };
+        assert!(msg.contains("32 bytes"), "{msg}");
+    }
+
+    #[test]
+    fn validate_hs256_accepts_exactly_32_byte_secret() {
+        let cfg = AuthConfig {
+            jwt_secret: Some(strong_secret()),
+            jwt_audience: Some("api".into()),
+            ..AuthConfig::default()
+        };
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rs256_rejects_missing_jwks_url() {
+        let cfg = AuthConfig {
+            jwt_algorithm: JwtAlgorithm::RS256,
+            jwt_issuer: Some("https://issuer".into()),
+            jwt_audience: Some("api".into()),
+            ..AuthConfig::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        let ForgeError::Config(msg) = err else {
+            panic!("expected Config error");
+        };
+        assert!(msg.contains("jwks_url"));
+    }
+
+    #[test]
+    fn validate_rs256_does_not_require_jwt_secret() {
+        let cfg = AuthConfig {
+            jwt_algorithm: JwtAlgorithm::RS256,
+            jwks_url: Some("https://jwks".into()),
+            jwt_audience: Some("api".into()),
+            ..AuthConfig::default()
+        };
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_audience_required_rejects_missing_audience() {
+        let cfg = AuthConfig {
+            jwt_secret: Some(strong_secret()),
+            audience_required: true,
+            jwt_audience: None,
+            ..AuthConfig::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        let ForgeError::Config(msg) = err else {
+            panic!("expected Config error");
+        };
+        assert!(msg.contains("jwt_audience"));
+    }
+
+    #[test]
+    fn validate_audience_opt_out_passes_without_audience() {
+        let cfg = AuthConfig {
+            jwt_secret: Some(strong_secret()),
+            audience_required: false,
+            jwt_audience: None,
+            ..AuthConfig::default()
+        };
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn access_token_ttl_default_is_one_hour() {
+        let cfg = AuthConfig::default();
+        assert_eq!(cfg.access_token_ttl_secs(), 3600);
+    }
+
+    #[test]
+    fn access_token_ttl_clamps_to_at_least_one_second() {
+        // Zero-duration TTLs would mint already-expired tokens; the floor of 1
+        // keeps them at least nominally valid so client retry logic doesn't loop.
+        let cfg = AuthConfig {
+            access_token_ttl: Some(DurationStr::new(Duration::from_secs(0))),
+            ..AuthConfig::default()
+        };
+        assert_eq!(cfg.access_token_ttl_secs(), 1);
+    }
+
+    #[test]
+    fn refresh_token_ttl_default_is_30_days() {
+        let cfg = AuthConfig::default();
+        assert_eq!(cfg.refresh_token_ttl_days(), 30);
+    }
+
+    #[test]
+    fn refresh_token_ttl_sub_day_rounds_to_one() {
+        // Anything less than a day still grants one full day so tokens are usable.
+        let cfg = AuthConfig {
+            refresh_token_ttl: Some(DurationStr::new(Duration::from_secs(60))),
+            ..AuthConfig::default()
+        };
+        assert_eq!(cfg.refresh_token_ttl_days(), 1);
+    }
+
+    #[test]
+    fn refresh_token_ttl_seven_days_passes_through() {
+        let cfg = AuthConfig {
+            refresh_token_ttl: Some(DurationStr::new(Duration::from_secs(7 * 86400))),
+            ..AuthConfig::default()
+        };
+        assert_eq!(cfg.refresh_token_ttl_days(), 7);
+    }
+
+    #[test]
+    fn session_cookie_ttl_falls_back_to_access_token_ttl() {
+        let cfg = AuthConfig {
+            access_token_ttl: Some(DurationStr::new(Duration::from_secs(900))),
+            session_cookie_ttl: None,
+            ..AuthConfig::default()
+        };
+        assert_eq!(cfg.session_cookie_ttl_secs(), 900);
+    }
+
+    #[test]
+    fn session_cookie_ttl_overrides_access_token_ttl_when_set() {
+        let cfg = AuthConfig {
+            access_token_ttl: Some(DurationStr::new(Duration::from_secs(900))),
+            session_cookie_ttl: Some(DurationStr::new(Duration::from_secs(1200))),
+            ..AuthConfig::default()
+        };
+        assert_eq!(cfg.session_cookie_ttl_secs(), 1200);
+    }
+
+    #[test]
+    fn is_hmac_and_is_rsa_are_mutually_exclusive() {
+        let hs = AuthConfig {
+            jwt_algorithm: JwtAlgorithm::HS256,
+            ..AuthConfig::default()
+        };
+        assert!(hs.is_hmac());
+        assert!(!hs.is_rsa());
+
+        let rs = AuthConfig {
+            jwt_algorithm: JwtAlgorithm::RS256,
+            ..AuthConfig::default()
+        };
+        assert!(rs.is_rsa());
+        assert!(!rs.is_hmac());
+    }
+
+    #[test]
+    fn jwt_algorithm_deserializes_uppercase_strings() {
+        let hs: JwtAlgorithm = serde_json::from_str(r#""HS256""#).unwrap();
+        let rs: JwtAlgorithm = serde_json::from_str(r#""RS256""#).unwrap();
+        assert_eq!(hs, JwtAlgorithm::HS256);
+        assert_eq!(rs, JwtAlgorithm::RS256);
+        // Unknown values must fail loudly so a typo in forge.toml is caught at boot.
+        assert!(serde_json::from_str::<JwtAlgorithm>(r#""ES256""#).is_err());
+    }
+}

@@ -718,38 +718,83 @@ impl FunctionRouter {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    fn resolver() -> SharedRoleResolver {
+        default_role_resolver()
+    }
+
+    fn authed_as(roles: &[&str]) -> AuthContext {
+        AuthContext::authenticated(
+            uuid::Uuid::new_v4(),
+            roles.iter().map(|s| (*s).to_string()).collect(),
+            HashMap::new(),
+        )
+    }
+
     #[test]
-    fn test_check_auth_public() {
-        let info = FunctionInfo {
-            name: "test",
-            description: None,
-            kind: FunctionKind::Query,
-            required_role: None,
-            is_public: true,
-            cache_ttl: None,
-            timeout: None,
-            http_timeout: None,
-            rate_limit_requests: None,
-            rate_limit_per_secs: None,
-            rate_limit_key: None,
-            log_level: None,
-            table_dependencies: &[],
-            selected_columns: &[],
-            changed_columns: &[],
-            transactional: false,
-            consistent: false,
-            max_upload_size_bytes: None,
-        };
+    fn require_auth_allows_public_functions_for_anonymous_callers() {
+        let auth = AuthContext::unauthenticated();
+        assert!(require_auth(true, None, &auth, &resolver()).is_ok());
+    }
 
-        let _auth = AuthContext::unauthenticated();
+    #[test]
+    fn require_auth_allows_public_functions_even_with_required_role() {
+        // Public flag short-circuits: the role check never runs.
+        let auth = AuthContext::unauthenticated();
+        assert!(require_auth(true, Some("admin"), &auth, &resolver()).is_ok());
+    }
 
-        // Can't test check_auth directly without a router instance,
-        // but we can test the logic
-        assert!(info.is_public);
+    #[test]
+    fn require_auth_rejects_anonymous_callers_with_unauthorized() {
+        let auth = AuthContext::unauthenticated();
+        match require_auth(false, None, &auth, &resolver()) {
+            Err(ForgeError::Unauthorized(_)) => {}
+            other => panic!("expected Unauthorized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn require_auth_accepts_authenticated_caller_without_role_requirement() {
+        let auth = authed_as(&["user"]);
+        assert!(require_auth(false, None, &auth, &resolver()).is_ok());
+    }
+
+    #[test]
+    fn require_auth_accepts_caller_with_required_role() {
+        let auth = authed_as(&["user", "admin"]);
+        assert!(require_auth(false, Some("admin"), &auth, &resolver()).is_ok());
+    }
+
+    #[test]
+    fn require_auth_rejects_caller_missing_required_role_with_forbidden() {
+        let auth = authed_as(&["user"]);
+        match require_auth(false, Some("admin"), &auth, &resolver()) {
+            Err(ForgeError::Forbidden(msg)) => assert!(msg.contains("admin")),
+            other => panic!("expected Forbidden, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn require_auth_consults_custom_role_resolver() {
+        // Custom resolver expands "user" to also include "admin".
+        struct ExpandingResolver;
+        impl forge_core::RoleResolver for ExpandingResolver {
+            fn resolve(&self, auth: &AuthContext) -> Vec<String> {
+                let mut roles: Vec<String> = auth.roles().to_vec();
+                if roles.iter().any(|r| r == "user") {
+                    roles.push("admin".to_string());
+                }
+                roles
+            }
+        }
+        let auth = authed_as(&["user"]);
+        let resolver: SharedRoleResolver = Arc::new(ExpandingResolver);
+        // Without expansion this would Forbidden; with expansion it succeeds.
+        assert!(require_auth(false, Some("admin"), &auth, &resolver).is_ok());
     }
 
     #[test]

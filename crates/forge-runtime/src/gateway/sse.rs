@@ -1163,6 +1163,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    use crate::realtime::{JobData, WorkflowData};
     use uuid::Uuid;
 
     #[test]
@@ -1219,5 +1220,153 @@ mod tests {
         let json = serde_json::to_string(&err).unwrap();
         assert!(json.contains("\"code\":\"SSE_AT_CAPACITY\""), "{json}");
         assert!(json.contains("\"retry_after_secs\":5"), "{json}");
+    }
+
+    #[test]
+    fn try_parse_session_id_accepts_valid_uuid() {
+        let uuid = Uuid::new_v4();
+        let parsed = try_parse_session_id(&uuid.to_string()).unwrap();
+        assert_eq!(parsed.as_uuid(), uuid);
+    }
+
+    #[test]
+    fn try_parse_session_id_rejects_garbage() {
+        assert!(try_parse_session_id("not-a-uuid").is_none());
+        assert!(try_parse_session_id("").is_none());
+        assert!(try_parse_session_id("12345").is_none());
+    }
+
+    #[test]
+    fn same_principal_two_anonymous_match() {
+        let a = AuthContext::unauthenticated();
+        let b = AuthContext::unauthenticated();
+        assert!(same_principal(&a, &b));
+    }
+
+    #[test]
+    fn same_principal_anonymous_vs_authenticated_does_not_match() {
+        let anon = AuthContext::unauthenticated();
+        let auth = AuthContext::authenticated(Uuid::new_v4(), vec![], HashMap::new());
+        assert!(!same_principal(&anon, &auth));
+        assert!(!same_principal(&auth, &anon));
+    }
+
+    #[test]
+    fn same_principal_same_uuid_matches() {
+        let id = Uuid::new_v4();
+        let a = AuthContext::authenticated(id, vec!["user".into()], HashMap::new());
+        let b = AuthContext::authenticated(id, vec!["admin".into()], HashMap::new());
+        // Roles differ but principal is the same.
+        assert!(same_principal(&a, &b));
+    }
+
+    #[test]
+    fn same_principal_different_uuids_do_not_match() {
+        let a = AuthContext::authenticated(Uuid::new_v4(), vec![], HashMap::new());
+        let b = AuthContext::authenticated(Uuid::new_v4(), vec![], HashMap::new());
+        assert!(!same_principal(&a, &b));
+    }
+
+    #[test]
+    fn same_principal_authenticated_without_uuid_never_matches() {
+        // Authenticated-without-uuid (e.g. external IDP sub) cannot prove sameness
+        // through `principal_id`, so guard against false matches.
+        let a = AuthContext::authenticated_without_uuid(vec!["user".into()], HashMap::new());
+        let b = AuthContext::authenticated_without_uuid(vec!["user".into()], HashMap::new());
+        assert!(!same_principal(&a, &b));
+    }
+
+    #[test]
+    fn validate_client_sub_id_accepts_short_id() {
+        assert!(validate_client_sub_id("abc-123").is_ok());
+    }
+
+    #[test]
+    fn validate_client_sub_id_accepts_max_length() {
+        let id = "x".repeat(MAX_CLIENT_SUB_ID_LEN);
+        assert!(validate_client_sub_id(&id).is_ok());
+    }
+
+    #[test]
+    fn validate_client_sub_id_rejects_oversize() {
+        let id = "x".repeat(MAX_CLIENT_SUB_ID_LEN + 1);
+        let err = validate_client_sub_id(&id).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn convert_realtime_to_sse_lagging_is_swallowed() {
+        // Lagging is an internal eviction precursor; clients must not see it.
+        assert!(convert_realtime_to_sse(RealtimeMessage::Lagging).is_none());
+    }
+
+    #[test]
+    fn convert_realtime_to_sse_data_uses_sub_prefix() {
+        let msg = RealtimeMessage::Data {
+            subscription_id: "abc".into(),
+            data: serde_json::json!({"x": 1}),
+        };
+        let Some(SseMessage::Data { target, payload }) = convert_realtime_to_sse(msg) else {
+            panic!("expected Data");
+        };
+        assert_eq!(target, "sub:abc");
+        assert_eq!(payload, serde_json::json!({"x": 1}));
+    }
+
+    #[test]
+    fn convert_realtime_to_sse_job_uses_job_prefix() {
+        let msg = RealtimeMessage::JobUpdate {
+            client_sub_id: "j1".into(),
+            job: JobData {
+                job_id: "00000000-0000-0000-0000-000000000001".into(),
+                status: "running".into(),
+                progress_percent: Some(50),
+                progress_message: None,
+                output: None,
+                error: None,
+            },
+        };
+        let Some(SseMessage::Data { target, .. }) = convert_realtime_to_sse(msg) else {
+            panic!("expected Data");
+        };
+        assert_eq!(target, "job:j1");
+    }
+
+    #[test]
+    fn convert_realtime_to_sse_workflow_uses_wf_prefix() {
+        let msg = RealtimeMessage::WorkflowUpdate {
+            client_sub_id: "w1".into(),
+            workflow: WorkflowData {
+                workflow_id: "00000000-0000-0000-0000-000000000002".into(),
+                status: "running".into(),
+                current_step: None,
+                waiting_for: None,
+                steps: vec![],
+                output: None,
+                error: None,
+            },
+        };
+        let Some(SseMessage::Data { target, .. }) = convert_realtime_to_sse(msg) else {
+            panic!("expected Data");
+        };
+        assert_eq!(target, "wf:w1");
+    }
+
+    #[test]
+    fn convert_realtime_to_sse_auth_failed_targets_session() {
+        let msg = RealtimeMessage::AuthFailed {
+            reason: "token expired".into(),
+        };
+        let Some(SseMessage::Error {
+            target,
+            code,
+            message,
+        }) = convert_realtime_to_sse(msg)
+        else {
+            panic!("expected Error");
+        };
+        assert_eq!(target, "session");
+        assert_eq!(code, "SESSION_EXPIRED");
+        assert_eq!(message, "token expired");
     }
 }

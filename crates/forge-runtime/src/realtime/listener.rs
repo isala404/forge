@@ -372,4 +372,112 @@ mod tests {
 
         assert_eq!(listener.last_seq(), 99);
     }
+
+    // --- needs_resync semantics + parse edge cases ---
+
+    fn make_listener() -> ChangeListener {
+        let pool = sqlx::PgPool::connect_lazy("postgres://localhost/test").unwrap();
+        ChangeListener::new(pool, ListenerConfig::default())
+    }
+
+    #[tokio::test]
+    async fn parse_notification_with_malformed_seq_sets_needs_resync() {
+        // A `#suffix` that isn't a number is treated as gap-recovery failure:
+        // we drop the notification AND raise needs_resync so the reactor
+        // schedules a full resync. Silently parsing a bad seq would advance
+        // last_seq past real data and hide writes.
+        let listener = make_listener();
+        assert!(!listener.take_needs_resync());
+
+        let payload = "v1:projects:INSERT:550e8400-e29b-41d4-a716-446655440000#notanumber";
+        assert!(listener.parse_notification(payload).is_none());
+        assert!(listener.take_needs_resync(), "must request resync");
+    }
+
+    #[tokio::test]
+    async fn take_needs_resync_is_one_shot() {
+        // The flag is consumed by `take_needs_resync` — the reactor reads
+        // it once and resets, so a second read after a single trip must
+        // return false.
+        let listener = make_listener();
+        listener.needs_resync.store(true, Ordering::Relaxed);
+
+        assert!(listener.take_needs_resync());
+        assert!(!listener.take_needs_resync());
+    }
+
+    #[tokio::test]
+    async fn parse_notification_ignores_invalid_row_id_but_still_returns_change() {
+        // Bad UUID in the row_id slot doesn't void the whole notification —
+        // we still know what table changed, just not which row. Drop the row_id
+        // and keep the change so invalidation still fires.
+        let listener = make_listener();
+        let payload = "v1:projects:INSERT:not-a-uuid";
+        let (change, seq) = listener.parse_notification(payload).unwrap();
+        assert_eq!(change.table, "projects");
+        assert_eq!(change.operation, ChangeOperation::Insert);
+        assert!(change.row_id.is_none());
+        assert_eq!(seq, 0);
+    }
+
+    #[tokio::test]
+    async fn parse_notification_rejects_unknown_operation() {
+        let listener = make_listener();
+        let payload = "v1:projects:NUKE:550e8400-e29b-41d4-a716-446655440000";
+        assert!(listener.parse_notification(payload).is_none());
+    }
+
+    #[tokio::test]
+    async fn parse_notification_handles_empty_columns_list() {
+        // Trailing colon with no columns must not crash the parser. Empty
+        // changed_columns is meaningful — column-filter check falls back to
+        // "invalidate everything" downstream.
+        let listener = make_listener();
+        let payload = "v1:projects:UPDATE:550e8400-e29b-41d4-a716-446655440000:";
+        let (change, _) = listener.parse_notification(payload).unwrap();
+        // Empty after split → one empty-string element, not zero. This is the
+        // contract the trigger and parser agree on.
+        assert_eq!(change.changed_columns, vec![""]);
+    }
+
+    #[tokio::test]
+    async fn subscribe_broadcasts_emitted_changes_to_all_receivers() {
+        // emit_change feeds the same broadcast channel run() uses, so two
+        // independent subscribers must both see the change. This is the
+        // fan-out contract the listener relies on.
+        let listener = make_listener();
+        let mut rx1 = listener.subscribe();
+        let mut rx2 = listener.subscribe();
+
+        let change = Change::new("orders", ChangeOperation::Insert);
+        listener.emit_change(change.clone());
+
+        let got1 = rx1.try_recv().expect("rx1 receives");
+        let got2 = rx2.try_recv().expect("rx2 receives");
+        assert_eq!(got1.table, "orders");
+        assert_eq!(got2.table, "orders");
+    }
+
+    #[tokio::test]
+    async fn emit_change_without_subscribers_is_harmless() {
+        // broadcast::send with no receivers returns Err — emit_change must
+        // swallow it, not propagate. Otherwise reactor errors on startup
+        // before any session attaches.
+        let listener = make_listener();
+        listener.emit_change(Change::new("anything", ChangeOperation::Delete));
+        // No assertion required — the call returning is the test.
+    }
+
+    #[tokio::test]
+    async fn stop_flips_running_flag_immediately() {
+        // is_running() reflects in-flight loop state; stop() must mark it
+        // false even when the loop never ran (no PG to talk to in tests).
+        let listener = make_listener();
+        // Running starts false (loop never entered in tests).
+        assert!(!listener.is_running());
+        // Pretend the loop is in flight.
+        listener.running.store(true, Ordering::SeqCst);
+        listener.stop();
+        assert!(!listener.is_running());
+    }
 }

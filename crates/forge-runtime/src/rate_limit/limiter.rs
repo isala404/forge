@@ -381,34 +381,201 @@ impl RateLimiterBackend for HybridRateLimiter {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::disallowed_methods
+)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
-    #[tokio::test]
-    async fn test_rate_limiter_creation() {
-        let pool = sqlx::postgres::PgPoolOptions::new()
+    fn lazy_pool() -> PgPool {
+        // Pool is never actually queried in these tests — the local DashMap
+        // path short-circuits before any DB call for non-Global keys.
+        sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .connect_lazy("postgres://localhost/test")
-            .expect("Failed to create mock pool");
+            .expect("connect_lazy never fails for a syntactically valid URL")
+    }
 
-        let _limiter = StrictRateLimiter::new(pool);
+    fn cfg(requests: u32, window_ms: u64) -> RateLimitConfig {
+        RateLimitConfig::new(requests, Duration::from_millis(window_ms))
+    }
+
+    #[test]
+    fn local_bucket_consumes_then_denies() {
+        let mut bucket = LocalBucket::new(3.0, 1.0);
+        assert!(bucket.try_consume());
+        assert!(bucket.try_consume());
+        assert!(bucket.try_consume());
+        // 4th request must be denied — bucket is now <1 token.
+        assert!(!bucket.try_consume());
+        assert_eq!(bucket.remaining(), 0);
+    }
+
+    #[test]
+    fn local_bucket_refill_does_not_exceed_max() {
+        let mut bucket = LocalBucket::new(5.0, 1000.0);
+        // Drain to empty
+        for _ in 0..5 {
+            bucket.try_consume();
+        }
+        // Backdate last_refill to force a huge refill
+        bucket.last_refill = std::time::Instant::now() - Duration::from_secs(10);
+        // try_consume refills then consumes one token; should land at max - 1.
+        assert!(bucket.try_consume());
+        assert_eq!(bucket.remaining(), 4);
+    }
+
+    #[test]
+    fn local_bucket_time_until_token_is_zero_when_available() {
+        let bucket = LocalBucket::new(5.0, 1.0);
+        assert_eq!(bucket.time_until_token(), Duration::ZERO);
+    }
+
+    #[test]
+    fn local_bucket_time_until_token_reflects_refill_rate() {
+        // 0.5 tokens at 1.0/s → need 0.5s for next token.
+        let mut bucket = LocalBucket::new(1.0, 1.0);
+        bucket.tokens = 0.5;
+        let wait = bucket.time_until_token();
+        // Allow small float slack.
+        assert!(
+            wait.as_secs_f64() > 0.45 && wait.as_secs_f64() < 0.55,
+            "expected ~0.5s, got {wait:?}",
+        );
     }
 
     #[tokio::test]
-    async fn test_build_key() {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect_lazy("postgres://localhost/test")
-            .expect("Failed to create mock pool");
+    async fn hybrid_denies_after_quota_exhausted() {
+        let limiter = HybridRateLimiter::new(lazy_pool());
+        let config = cfg(3, 60_000);
 
-        let limiter = StrictRateLimiter::new(pool);
-        let auth = AuthContext::unauthenticated();
-        let request = RequestMetadata::default();
+        for i in 0..3 {
+            let r = limiter.check("user:alice:hit", &config).await.unwrap();
+            assert!(r.allowed, "request {i} should be allowed within quota");
+        }
 
-        let key = limiter.build_key(RateLimitKey::Global, "test_action", &auth, &request);
-        assert_eq!(key, "global:test_action");
+        let denied = limiter.check("user:alice:hit", &config).await.unwrap();
+        assert!(!denied.allowed, "4th request should be denied");
+        assert!(denied.retry_after.is_some());
+    }
 
-        let key = limiter.build_key(RateLimitKey::User, "test_action", &auth, &request);
-        assert!(key.starts_with("user:"));
+    #[tokio::test]
+    async fn hybrid_isolates_keys() {
+        let limiter = HybridRateLimiter::new(lazy_pool());
+        let config = cfg(2, 60_000);
+
+        // Drain alice
+        assert!(limiter.check("alice", &config).await.unwrap().allowed);
+        assert!(limiter.check("alice", &config).await.unwrap().allowed);
+        assert!(!limiter.check("alice", &config).await.unwrap().allowed);
+
+        // bob's bucket must be untouched
+        assert!(limiter.check("bob", &config).await.unwrap().allowed);
+    }
+
+    #[tokio::test]
+    async fn hybrid_concurrent_consumers_respect_quota() {
+        let limiter = Arc::new(HybridRateLimiter::new(lazy_pool()));
+        let config = Arc::new(cfg(10, 60_000));
+
+        let mut joins = Vec::new();
+        for _ in 0..50 {
+            let l = limiter.clone();
+            let c = config.clone();
+            joins.push(tokio::spawn(async move {
+                l.check("user:shared", &c).await.unwrap().allowed
+            }));
+        }
+
+        let mut allowed = 0;
+        for j in joins {
+            if j.await.unwrap() {
+                allowed += 1;
+            }
+        }
+        // With 10 tokens and 50 concurrent requests, allowed must be exactly 10
+        // (DashMap entry-or-insert serializes per-key under contention).
+        assert_eq!(
+            allowed, 10,
+            "exactly quota worth of requests should pass under contention"
+        );
+    }
+
+    #[tokio::test]
+    async fn hybrid_enforce_returns_typed_error() {
+        let limiter = HybridRateLimiter::new(lazy_pool());
+        let config = cfg(1, 60_000);
+        assert!(limiter.enforce("k", &config).await.is_ok());
+        match limiter.enforce("k", &config).await {
+            Err(ForgeError::RateLimitExceeded {
+                retry_after,
+                limit,
+                remaining: _,
+            }) => {
+                assert_eq!(limit, 1);
+                assert!(retry_after > Duration::ZERO);
+            }
+            other => panic!("expected RateLimitExceeded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn hybrid_cleanup_evicts_idle_buckets() {
+        let limiter = HybridRateLimiter::new(lazy_pool());
+        // Seed two buckets directly with different last_refill times.
+        let now = std::time::Instant::now();
+        limiter.local.insert(
+            "fresh".to_string(),
+            LocalBucket {
+                tokens: 1.0,
+                max_tokens: 1.0,
+                refill_rate: 1.0,
+                last_refill: now,
+            },
+        );
+        limiter.local.insert(
+            "stale".to_string(),
+            LocalBucket {
+                tokens: 1.0,
+                max_tokens: 1.0,
+                refill_rate: 1.0,
+                last_refill: now - Duration::from_secs(600),
+            },
+        );
+
+        limiter.cleanup_local(Duration::from_secs(300));
+
+        assert!(limiter.local.contains_key("fresh"));
+        assert!(!limiter.local.contains_key("stale"));
+    }
+
+    #[tokio::test]
+    async fn build_key_covers_all_variants() {
+        let limiter = StrictRateLimiter::new(lazy_pool());
+        let anon = AuthContext::unauthenticated();
+        let req = RequestMetadata::default();
+
+        assert_eq!(
+            limiter.build_key(RateLimitKey::Global, "act", &anon, &req),
+            "global:act"
+        );
+        let ip_key = limiter.build_key(RateLimitKey::Ip, "act", &anon, &req);
+        assert!(ip_key.starts_with("ip:"));
+        assert!(ip_key.ends_with(":act"));
+
+        // Unauthenticated user collapses to anon-<ip>; tenant lookup misses.
+        let user_key = limiter.build_key(RateLimitKey::User, "act", &anon, &req);
+        assert!(user_key.starts_with("user:anon-"));
+        assert_eq!(
+            limiter.build_key(RateLimitKey::Tenant, "act", &anon, &req),
+            "tenant:none:act"
+        );
+
+        let custom = limiter.build_key(RateLimitKey::Custom("org".to_string()), "act", &anon, &req);
+        assert_eq!(custom, "custom:org:unknown:act");
     }
 }

@@ -1155,3 +1155,129 @@ async fn list_leaders(
         ),
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use std::collections::HashMap;
+
+    fn anon() -> AuthContext {
+        AuthContext::unauthenticated()
+    }
+
+    fn user_with_roles(roles: &[&str]) -> AuthContext {
+        AuthContext::authenticated(
+            Uuid::new_v4(),
+            roles.iter().map(|r| (*r).to_string()).collect(),
+            HashMap::new(),
+        )
+    }
+
+    fn user_with_sub_claim(sub: &str, roles: &[&str]) -> AuthContext {
+        let mut claims = HashMap::new();
+        claims.insert("sub".to_string(), serde_json::json!(sub));
+        AuthContext::authenticated_without_uuid(
+            roles.iter().map(|r| (*r).to_string()).collect(),
+            claims,
+        )
+    }
+
+    // ── admin_err ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn admin_err_shapes_response_with_status_code_and_message() {
+        let resp = admin_err(StatusCode::FORBIDDEN, "forbidden", "no entry");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let body = to_bytes(resp.into_body(), 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "forbidden");
+        assert_eq!(json["message"], "no entry");
+    }
+
+    // ── require_admin ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn require_admin_rejects_unauthenticated_with_401() {
+        let err = require_admin(&anon()).unwrap_err();
+        assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+
+        let body = to_bytes(err.into_body(), 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "unauthenticated");
+    }
+
+    #[tokio::test]
+    async fn require_admin_rejects_authenticated_non_admin_with_403() {
+        let auth = user_with_roles(&["user", "viewer"]);
+        let err = require_admin(&auth).unwrap_err();
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+
+        let body = to_bytes(err.into_body(), 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "forbidden");
+        assert!(
+            json["message"].as_str().unwrap().contains(ADMIN_ROLE),
+            "message must name the missing role"
+        );
+    }
+
+    #[test]
+    fn require_admin_accepts_authenticated_admin() {
+        let auth = user_with_roles(&["admin"]);
+        assert!(require_admin(&auth).is_ok());
+    }
+
+    #[test]
+    fn require_admin_accepts_admin_alongside_other_roles() {
+        let auth = user_with_roles(&["user", "admin", "viewer"]);
+        assert!(require_admin(&auth).is_ok());
+    }
+
+    // ── actor_subject ───────────────────────────────────────────────────
+
+    #[test]
+    fn actor_subject_prefers_uuid_user_id() {
+        let id = Uuid::new_v4();
+        let auth = AuthContext::authenticated(id, vec!["admin".into()], HashMap::new());
+        assert_eq!(actor_subject(&auth), Some(id.to_string()));
+    }
+
+    #[test]
+    fn actor_subject_falls_back_to_sub_claim() {
+        // No UUID user_id, but a non-UUID JWT subject like "user@example.com"
+        let auth = user_with_sub_claim("user@example.com", &["admin"]);
+        assert_eq!(actor_subject(&auth), Some("user@example.com".into()));
+    }
+
+    #[test]
+    fn actor_subject_returns_none_for_anonymous() {
+        assert_eq!(actor_subject(&anon()), None);
+    }
+
+    #[test]
+    fn actor_subject_uses_uuid_even_when_sub_claim_also_present() {
+        let id = Uuid::new_v4();
+        let mut claims = HashMap::new();
+        claims.insert("sub".into(), serde_json::json!("decoy"));
+        let auth = AuthContext::authenticated(id, vec!["admin".into()], claims);
+        // The UUID branch wins per actor_subject's precedence.
+        assert_eq!(actor_subject(&auth), Some(id.to_string()));
+    }
+
+    // ── actor_roles ─────────────────────────────────────────────────────
+
+    #[test]
+    fn actor_roles_returns_full_role_list() {
+        let auth = user_with_roles(&["admin", "viewer"]);
+        let roles = actor_roles(&auth);
+        assert_eq!(roles, vec!["admin".to_string(), "viewer".to_string()]);
+    }
+
+    #[test]
+    fn actor_roles_empty_for_anonymous() {
+        assert!(actor_roles(&anon()).is_empty());
+    }
+}

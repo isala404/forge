@@ -1124,4 +1124,87 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("healthy"));
     }
+
+    #[test]
+    fn json_max_depth_flat_object_is_one() {
+        assert_eq!(json_max_depth(b"{\"a\":1}"), 1);
+    }
+
+    #[test]
+    fn json_max_depth_flat_array_is_one() {
+        assert_eq!(json_max_depth(b"[1,2,3]"), 1);
+    }
+
+    #[test]
+    fn json_max_depth_nested_object_counts_levels() {
+        assert_eq!(json_max_depth(b"{\"a\":{\"b\":{\"c\":1}}}"), 3);
+    }
+
+    #[test]
+    fn json_max_depth_nested_array_counts_levels() {
+        assert_eq!(json_max_depth(b"[[[[1]]]]"), 4);
+    }
+
+    #[test]
+    fn json_max_depth_mixed_nesting_tracks_peak() {
+        assert_eq!(json_max_depth(b"{\"a\":[{\"b\":[1]}]}"), 4);
+    }
+
+    #[test]
+    fn json_max_depth_ignores_braces_inside_strings() {
+        // Without string-awareness this would report 3.
+        assert_eq!(json_max_depth(b"{\"k\":\"{{{[[[\"}"), 1);
+    }
+
+    #[test]
+    fn json_max_depth_respects_escaped_quote_in_string() {
+        // The escaped quote does NOT close the string, so the trailing { inside the string is ignored.
+        assert_eq!(json_max_depth(b"{\"k\":\"a\\\"{b\"}"), 1);
+    }
+
+    #[test]
+    fn json_max_depth_empty_input_is_zero() {
+        assert_eq!(json_max_depth(b""), 0);
+    }
+
+    #[test]
+    fn json_max_depth_unbalanced_close_does_not_underflow() {
+        // Saturating sub guards against this; should not panic.
+        assert_eq!(json_max_depth(b"}}}}"), 0);
+        assert_eq!(json_max_depth(b"[1]]]]"), 1);
+    }
+
+    #[test]
+    fn signal_visitor_secret_uses_jwt_secret_when_present() {
+        let secret = Some("my-jwt-secret".to_string());
+        assert_eq!(signal_visitor_secret(&secret), "my-jwt-secret");
+    }
+
+    #[test]
+    fn signal_visitor_secret_falls_back_to_default_when_absent() {
+        assert_eq!(signal_visitor_secret(&None), DEFAULT_SIGNAL_SECRET);
+    }
+
+    #[test]
+    fn set_tracing_headers_inserts_both_headers() {
+        let mut response = axum::response::Response::new(axum::body::Body::empty());
+        set_tracing_headers(&mut response, "trace-abc", "req-xyz");
+        assert_eq!(
+            response.headers().get(TRACE_ID_HEADER).unwrap(),
+            "trace-abc"
+        );
+        assert_eq!(
+            response.headers().get(REQUEST_ID_HEADER).unwrap(),
+            "req-xyz"
+        );
+    }
+
+    #[test]
+    fn set_tracing_headers_skips_invalid_header_values() {
+        // Header values cannot contain control chars; should not panic, just skip.
+        let mut response = axum::response::Response::new(axum::body::Body::empty());
+        set_tracing_headers(&mut response, "bad\nvalue", "req-ok");
+        assert!(response.headers().get(TRACE_ID_HEADER).is_none());
+        assert_eq!(response.headers().get(REQUEST_ID_HEADER).unwrap(), "req-ok");
+    }
 }

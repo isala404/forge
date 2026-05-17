@@ -339,6 +339,7 @@ impl Default for TestContextBuilder {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -399,5 +400,98 @@ mod tests {
 
         assert_eq!(ctx.job_status(job1), Some(JobStatus::Completed));
         assert_eq!(ctx.job_status(job2), Some(JobStatus::Completed));
+    }
+
+    #[test]
+    fn cancel_job_marks_status() {
+        let mut ctx = TestContext::new_without_db();
+        let id = ctx.dispatch_job("send", serde_json::json!({}));
+        ctx.cancel_job(id);
+        assert_eq!(ctx.job_status(id), Some(JobStatus::Cancelled));
+    }
+
+    #[test]
+    fn cancel_job_is_noop_for_unknown_id() {
+        let mut ctx = TestContext::new_without_db();
+        ctx.dispatch_job("send", serde_json::json!({}));
+        ctx.cancel_job(Uuid::new_v4());
+        // No panic, no status change for the dispatched job.
+        assert_eq!(ctx.dispatched_jobs().len(), 1);
+    }
+
+    #[test]
+    fn run_jobs_does_not_revive_cancelled_jobs() {
+        let mut ctx = TestContext::new_without_db();
+        let live = ctx.dispatch_job("live", serde_json::json!({}));
+        let dead = ctx.dispatch_job("dead", serde_json::json!({}));
+        ctx.cancel_job(dead);
+
+        ctx.run_jobs();
+
+        assert_eq!(ctx.job_status(live), Some(JobStatus::Completed));
+        // Cancelled must not be flipped back to Completed.
+        assert_eq!(ctx.job_status(dead), Some(JobStatus::Cancelled));
+    }
+
+    #[test]
+    fn set_user_promotes_anonymous_to_authenticated() {
+        let mut ctx = TestContext::new_without_db();
+        assert!(!ctx.auth().is_authenticated());
+        assert!(ctx.user_id().is_none());
+
+        let uid = Uuid::new_v4();
+        ctx.set_user(uid);
+
+        assert!(ctx.auth().is_authenticated());
+        assert_eq!(ctx.user_id(), Some(uid));
+    }
+
+    #[test]
+    fn job_dispatched_matches_by_type_only() {
+        let mut ctx = TestContext::new_without_db();
+        ctx.dispatch_job("send_email", serde_json::json!({}));
+        assert!(ctx.job_dispatched("send_email"));
+        assert!(!ctx.job_dispatched("send_sms"));
+    }
+
+    #[test]
+    fn workflow_step_completed_returns_false_for_unknown_step() {
+        let mut ctx = TestContext::new_without_db();
+        let run = ctx.start_workflow("flow", serde_json::json!({}));
+        ctx.complete_workflow_step(run, "step_a");
+        assert!(ctx.workflow_step_completed(run, "step_a"));
+        assert!(!ctx.workflow_step_completed(run, "step_b"));
+    }
+
+    #[test]
+    fn workflow_step_completed_returns_false_for_unknown_run() {
+        let ctx = TestContext::new_without_db();
+        assert!(!ctx.workflow_step_completed(Uuid::new_v4(), "any"));
+    }
+
+    #[tokio::test]
+    async fn builder_build_propagates_roles_and_claims() {
+        let uid = Uuid::new_v4();
+        let mut claims = HashMap::new();
+        claims.insert("tenant".to_string(), serde_json::json!("acme"));
+
+        let ctx = TestContextBuilder::new()
+            .as_user(uid)
+            .with_roles(vec!["admin".to_string()])
+            .with_claims(claims)
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(ctx.user_id(), Some(uid));
+        assert!(ctx.auth().has_role("admin"));
+        assert_eq!(ctx.auth().claim("tenant"), Some(&serde_json::json!("acme")));
+    }
+
+    #[tokio::test]
+    async fn builder_build_without_user_leaves_anonymous() {
+        let ctx = TestContextBuilder::new().build().await.unwrap();
+        assert!(!ctx.auth().is_authenticated());
+        assert!(ctx.pool().is_none());
     }
 }

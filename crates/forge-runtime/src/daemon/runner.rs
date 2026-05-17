@@ -557,9 +557,200 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_config() {
+    fn default_config_matches_documented_intervals() {
         let config = DaemonRunnerConfig::default();
         assert_eq!(config.health_check_interval, Duration::from_secs(30));
         assert_eq!(config.heartbeat_interval, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn daemon_status_serializes_to_documented_strings() {
+        // The runner persists status via `as_str` so the SQL `status` column
+        // stays in sync with the enum. Lock every variant.
+        assert_eq!(DaemonStatus::Pending.as_str(), "pending");
+        assert_eq!(DaemonStatus::Acquiring.as_str(), "acquiring");
+        assert_eq!(DaemonStatus::Running.as_str(), "running");
+        assert_eq!(DaemonStatus::Stopped.as_str(), "stopped");
+        assert_eq!(DaemonStatus::Failed.as_str(), "failed");
+        assert_eq!(DaemonStatus::Restarting.as_str(), "restarting");
+    }
+}
+
+#[cfg(all(test, feature = "testcontainers"))]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::disallowed_methods
+)]
+mod integration_tests {
+    use super::*;
+    use forge_core::testing::{IsolatedTestDb, TestDatabase};
+
+    async fn setup_db(test_name: &str) -> IsolatedTestDb {
+        let base = TestDatabase::from_env()
+            .await
+            .expect("Failed to create test database");
+        let db = base
+            .isolated(test_name)
+            .await
+            .expect("Failed to create isolated db");
+        let system_sql = crate::pg::migration::get_all_system_sql();
+        db.run_sql(&system_sql)
+            .await
+            .expect("Failed to apply system schema");
+        db
+    }
+
+    fn runner(pool: PgPool) -> DaemonRunner {
+        let registry = Arc::new(DaemonRegistry::new());
+        let http_client = CircuitBreakerClient::with_defaults(reqwest::Client::new());
+        let (_tx, rx) = broadcast::channel::<()>(1);
+        DaemonRunner::new(registry, pool, http_client, Uuid::new_v4(), rx)
+    }
+
+    fn handle(name: &str, status: DaemonStatus, restarts: u32) -> DaemonHandle {
+        let (shutdown_tx, _) = watch::channel(false);
+        DaemonHandle {
+            name: name.to_string(),
+            instance_id: Uuid::new_v4(),
+            shutdown_tx,
+            restarts,
+            status,
+        }
+    }
+
+    #[tokio::test]
+    async fn record_daemon_start_inserts_new_row() {
+        let db = setup_db("daemon_start_insert").await;
+        let r = runner(db.pool().clone());
+        let h = handle("ingester", DaemonStatus::Running, 0);
+
+        r.record_daemon_start(&h).await.unwrap();
+
+        let (status, restarts): (String, i32) =
+            sqlx::query_as("SELECT status, restarts FROM forge_daemons WHERE name = $1")
+                .bind("ingester")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(status, "running");
+        assert_eq!(restarts, 0);
+    }
+
+    #[tokio::test]
+    async fn record_daemon_start_upserts_existing_row_and_clears_last_error() {
+        let db = setup_db("daemon_start_upsert").await;
+        let r = runner(db.pool().clone());
+
+        // First run: failure path leaves last_error populated.
+        let h1 = handle("ingester", DaemonStatus::Running, 0);
+        r.record_daemon_start(&h1).await.unwrap();
+        record_daemon_error(db.pool(), "ingester", "boom")
+            .await
+            .unwrap();
+
+        // Restart: same name, higher restarts. last_error must be cleared.
+        let h2 = handle("ingester", DaemonStatus::Running, 3);
+        r.record_daemon_start(&h2).await.unwrap();
+
+        let (status, restarts, last_error): (String, i32, Option<String>) = sqlx::query_as(
+            "SELECT status, restarts, last_error FROM forge_daemons WHERE name = $1",
+        )
+        .bind("ingester")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(status, "running");
+        assert_eq!(restarts, 3);
+        assert_eq!(
+            last_error, None,
+            "restart must clear last_error so operators see only the current failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn record_daemon_stop_only_touches_matching_instance() {
+        let db = setup_db("daemon_stop_instance").await;
+        let r = runner(db.pool().clone());
+        let h = handle("ingester", DaemonStatus::Running, 0);
+        r.record_daemon_start(&h).await.unwrap();
+
+        // Wrong instance id — must not flip status to stopped.
+        let wrong = DaemonHandle {
+            name: h.name.clone(),
+            instance_id: Uuid::new_v4(),
+            shutdown_tx: watch::channel(false).0,
+            restarts: 0,
+            status: DaemonStatus::Stopped,
+        };
+        r.record_daemon_stop(&wrong).await.unwrap();
+        let status: String = sqlx::query_scalar("SELECT status FROM forge_daemons WHERE name = $1")
+            .bind("ingester")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            status, "running",
+            "stop for a different instance must not racily stop the live one"
+        );
+
+        // Correct instance id — flips to stopped.
+        r.record_daemon_stop(&h).await.unwrap();
+        let status: String = sqlx::query_scalar("SELECT status FROM forge_daemons WHERE name = $1")
+            .bind("ingester")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(status, "stopped");
+    }
+
+    #[tokio::test]
+    async fn update_daemon_status_writes_all_documented_states() {
+        let db = setup_db("daemon_status_states").await;
+        let r = runner(db.pool().clone());
+        r.record_daemon_start(&handle("d", DaemonStatus::Running, 0))
+            .await
+            .unwrap();
+
+        for s in [
+            DaemonStatus::Pending,
+            DaemonStatus::Acquiring,
+            DaemonStatus::Running,
+            DaemonStatus::Stopped,
+            DaemonStatus::Failed,
+            DaemonStatus::Restarting,
+        ] {
+            update_daemon_status(db.pool(), "d", s).await.unwrap();
+            let got: String =
+                sqlx::query_scalar("SELECT status FROM forge_daemons WHERE name = $1")
+                    .bind("d")
+                    .fetch_one(db.pool())
+                    .await
+                    .unwrap();
+            assert_eq!(got, s.as_str());
+        }
+    }
+
+    #[tokio::test]
+    async fn record_daemon_error_sets_failed_with_message() {
+        let db = setup_db("daemon_error_failed").await;
+        let r = runner(db.pool().clone());
+        r.record_daemon_start(&handle("d", DaemonStatus::Running, 0))
+            .await
+            .unwrap();
+
+        record_daemon_error(db.pool(), "d", "panic: index out of bounds")
+            .await
+            .unwrap();
+
+        let (status, msg): (String, Option<String>) =
+            sqlx::query_as("SELECT status, last_error FROM forge_daemons WHERE name = $1")
+                .bind("d")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(status, "failed");
+        assert_eq!(msg.as_deref(), Some("panic: index out of bounds"));
     }
 }

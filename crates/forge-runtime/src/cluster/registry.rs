@@ -111,5 +111,4 @@ impl NodeRegistry {
 
         Ok(result.rows_affected())
     }
-
 }

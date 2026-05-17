@@ -553,4 +553,264 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(server.connection_count(), 1);
     }
+
+    #[test]
+    fn try_send_to_missing_session_returns_not_found() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+        let result = server.try_send_to_session(SessionId::new(), RealtimeMessage::Lagging);
+        assert!(matches!(result, Err(SendError::SessionNotFound)));
+    }
+
+    #[test]
+    fn try_send_to_closed_sender_returns_closed_and_evicts() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+        let session_id = SessionId::new();
+        let (tx, rx) = mpsc::channel(1);
+
+        server.register_connection(session_id, tx, None);
+        drop(rx);
+
+        let result = server.try_send_to_session(session_id, RealtimeMessage::Lagging);
+        assert!(matches!(result, Err(SendError::Closed)));
+        assert_eq!(server.connection_count(), 0);
+    }
+
+    #[test]
+    fn backpressure_evicts_after_max_consecutive_drops() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+        let session_id = SessionId::new();
+        // Buffer of 1: one send succeeds, all subsequent attempts return Full.
+        let (tx, _rx) = mpsc::channel(1);
+        server.register_connection(session_id, tx, None);
+
+        // Fill the buffer.
+        assert!(
+            server
+                .try_send_to_session(session_id, RealtimeMessage::Lagging)
+                .is_ok()
+        );
+
+        // First MAX_CONSECUTIVE_DROPS Full results don't evict.
+        for _ in 0..MAX_CONSECUTIVE_DROPS {
+            let r = server.try_send_to_session(session_id, RealtimeMessage::Lagging);
+            assert!(matches!(r, Err(SendError::Full)));
+        }
+        assert_eq!(server.connection_count(), 1);
+
+        // The next Full crosses the threshold and evicts.
+        let r = server.try_send_to_session(session_id, RealtimeMessage::Lagging);
+        assert!(matches!(r, Err(SendError::Evicted)));
+        assert_eq!(server.connection_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn drop_counter_resets_on_successful_send() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+        let session_id = SessionId::new();
+        let (tx, mut rx) = mpsc::channel(1);
+        server.register_connection(session_id, tx, None);
+
+        // Fill, then accumulate Full errors short of the threshold.
+        assert!(
+            server
+                .try_send_to_session(session_id, RealtimeMessage::Lagging)
+                .is_ok()
+        );
+        for _ in 0..(MAX_CONSECUTIVE_DROPS - 1) {
+            assert!(matches!(
+                server.try_send_to_session(session_id, RealtimeMessage::Lagging),
+                Err(SendError::Full)
+            ));
+        }
+
+        // Drain so the next send succeeds and resets the counter.
+        let _ = rx.recv().await;
+        assert!(
+            server
+                .try_send_to_session(session_id, RealtimeMessage::Lagging)
+                .is_ok()
+        );
+
+        // The counter reset, so we can now absorb a fresh batch of Full errors
+        // without being evicted.
+        for _ in 0..MAX_CONSECUTIVE_DROPS {
+            assert!(matches!(
+                server.try_send_to_session(session_id, RealtimeMessage::Lagging),
+                Err(SendError::Full)
+            ));
+        }
+        assert_eq!(server.connection_count(), 1);
+    }
+
+    #[test]
+    fn remove_connection_purges_subscription_mappings() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+        let session_id = SessionId::new();
+        let sub_a = SubscriptionId::new();
+        let sub_b = SubscriptionId::new();
+        let (tx, _rx) = mpsc::channel(8);
+
+        server.register_connection(session_id, tx, None);
+        server.add_subscription(session_id, sub_a).unwrap();
+        server.add_subscription(session_id, sub_b).unwrap();
+        assert_eq!(server.subscription_count(), 2);
+
+        let removed = server.remove_connection(session_id).unwrap();
+        assert_eq!(removed.len(), 2);
+        assert_eq!(server.subscription_count(), 0);
+        // The reverse map is fully cleared.
+        assert!(server.remove_connection(session_id).is_none());
+    }
+
+    #[test]
+    fn add_subscription_to_unknown_session_errors() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+        let result = server.add_subscription(SessionId::new(), SubscriptionId::new());
+        assert!(result.is_err());
+        assert_eq!(server.subscription_count(), 0);
+    }
+
+    #[test]
+    fn remove_unknown_subscription_is_noop() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+        // No panic, no state change.
+        server.remove_subscription(SubscriptionId::new());
+        assert_eq!(server.subscription_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn broadcast_delta_routes_to_subscribed_session() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+        let session_id = SessionId::new();
+        let sub_id = SubscriptionId::new();
+        let (tx, mut rx) = mpsc::channel(8);
+
+        server.register_connection(session_id, tx, None);
+        server.add_subscription(session_id, sub_id).unwrap();
+
+        let mut delta = Delta::empty();
+        delta.added.push(serde_json::json!({"hello": "world"}));
+        server.broadcast_delta(sub_id, delta).await.unwrap();
+
+        match rx.recv().await {
+            Some(RealtimeMessage::DeltaUpdate {
+                subscription_id, ..
+            }) => {
+                assert_eq!(subscription_id, sub_id.to_string());
+            }
+            other => panic!("expected DeltaUpdate, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn broadcast_delta_without_subscription_is_noop() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+        // No matching subscription -> Ok(()) and no panic.
+        let result = server
+            .broadcast_delta(SubscriptionId::new(), Delta::empty())
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn send_to_session_delivers_message() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+        let session_id = SessionId::new();
+        let (tx, mut rx) = mpsc::channel(8);
+        server.register_connection(session_id, tx, None);
+
+        server
+            .send_to_session(
+                session_id,
+                RealtimeMessage::AuthFailed {
+                    reason: "test".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        match rx.recv().await {
+            Some(RealtimeMessage::AuthFailed { reason }) => assert_eq!(reason, "test"),
+            other => panic!("expected AuthFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_to_unknown_session_errors() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+        let result = server
+            .send_to_session(SessionId::new(), RealtimeMessage::Lagging)
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cleanup_stale_evicts_only_idle_sessions() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+
+        let idle = SessionId::new();
+        let active = SessionId::new();
+        let (tx1, _rx1) = mpsc::channel(8);
+        let (tx2, _rx2) = mpsc::channel(8);
+
+        // Both registered "now"; we'll then backdate `idle.last_active` so it
+        // crosses the cleanup cutoff.
+        server.register_connection(idle, tx1, None);
+        server.register_connection(active, tx2, None);
+
+        // Reach into the entry and rewrite last_active to two hours ago.
+        let two_hours_ago = chrono::Utc::now().timestamp() - 7200;
+        {
+            let entry = server.connections.get(&idle).unwrap();
+            entry.last_active.store(two_hours_ago, Ordering::Relaxed);
+        }
+
+        // Cutoff = now - 1 hour. `idle` (-2h) is stale; `active` (now) is fresh.
+        server.cleanup_stale(Duration::from_secs(3600));
+
+        assert_eq!(server.connection_count(), 1);
+        assert!(server.connections.contains_key(&active));
+        assert!(!server.connections.contains_key(&idle));
+    }
+
+    #[test]
+    fn cleanup_expired_tokens_evicts_and_notifies() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+
+        let expired = SessionId::new();
+        let valid = SessionId::new();
+        let (tx_expired, mut rx_expired) = mpsc::channel(8);
+        let (tx_valid, _rx_valid) = mpsc::channel(8);
+
+        // Token expired one second after the Unix epoch (clearly in the past).
+        server.register_connection(expired, tx_expired, Some(1));
+        // Token good for another hour.
+        server.register_connection(valid, tx_valid, Some(chrono::Utc::now().timestamp() + 3600));
+
+        server.cleanup_expired_tokens();
+
+        // Only the expired session was evicted.
+        assert_eq!(server.connection_count(), 1);
+        assert!(server.connections.contains_key(&valid));
+
+        // The expired client received an AuthFailed notification before eviction.
+        match rx_expired.try_recv() {
+            Ok(RealtimeMessage::AuthFailed { reason }) => {
+                assert!(reason.contains("expired"), "unexpected reason: {reason}");
+            }
+            other => panic!("expected AuthFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cleanup_expired_tokens_skips_unauthenticated_sessions() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+        let session_id = SessionId::new();
+        let (tx, _rx) = mpsc::channel(8);
+        server.register_connection(session_id, tx, None);
+
+        server.cleanup_expired_tokens();
+
+        assert_eq!(server.connection_count(), 1);
+    }
 }

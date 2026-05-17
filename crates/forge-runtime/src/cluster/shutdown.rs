@@ -185,13 +185,96 @@ impl Drop for InFlightGuard {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
     use super::*;
+    use forge_core::cluster::{NodeInfo, NodeRole};
+    use sqlx::postgres::PgPoolOptions;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn make_shutdown() -> Arc<GracefulShutdown> {
+        // `connect_lazy` never opens the socket, so we can build a NodeRegistry
+        // without a live Postgres. None of the methods exercised below touch
+        // the pool — they only read/write atomics and the broadcast channel.
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://localhost:1/never")
+            .unwrap();
+        let node = NodeInfo::new_local(
+            "test-host".to_string(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            9081,
+            9082,
+            vec![NodeRole::Gateway],
+            vec!["default".to_string()],
+            "test".to_string(),
+        );
+        let registry = Arc::new(NodeRegistry::new(pool, node));
+        Arc::new(GracefulShutdown::new(
+            registry,
+            None,
+            ShutdownConfig::default(),
+        ))
+    }
 
     #[test]
     fn test_shutdown_config_default() {
         let config = ShutdownConfig::default();
         assert_eq!(config.drain_timeout, Duration::from_secs(30));
         assert_eq!(config.poll_interval, Duration::from_millis(100));
+    }
+
+    #[tokio::test]
+    async fn fresh_shutdown_accepts_work_and_has_zero_in_flight() {
+        let sd = make_shutdown();
+        assert!(!sd.is_shutdown_requested());
+        assert!(sd.should_accept_work());
+        assert_eq!(sd.in_flight_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn in_flight_counter_increments_and_decrements() {
+        let sd = make_shutdown();
+        sd.increment_in_flight();
+        sd.increment_in_flight();
+        assert_eq!(sd.in_flight_count(), 2);
+        sd.decrement_in_flight();
+        assert_eq!(sd.in_flight_count(), 1);
+        sd.decrement_in_flight();
+        assert_eq!(sd.in_flight_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn in_flight_guard_tracks_counter_via_raii() {
+        let sd = make_shutdown();
+        {
+            let _g1 = InFlightGuard::try_new(sd.clone()).expect("should admit work");
+            let _g2 = InFlightGuard::try_new(sd.clone()).expect("should admit work");
+            assert_eq!(sd.in_flight_count(), 2);
+        }
+        // Both guards dropped — counter back to zero.
+        assert_eq!(sd.in_flight_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn in_flight_guard_refuses_work_after_shutdown_flag_set() {
+        let sd = make_shutdown();
+        // Flip the flag directly — emulates state after `shutdown()` ran past
+        // step 1 without needing the registry/DB calls.
+        sd.shutdown_requested.store(true, Ordering::SeqCst);
+        assert!(!sd.should_accept_work());
+        assert!(InFlightGuard::try_new(sd.clone()).is_none());
+        // Counter must not have been incremented by the refused attempt.
+        assert_eq!(sd.in_flight_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn subscribe_returns_independent_receivers() {
+        let sd = make_shutdown();
+        let mut r1 = sd.subscribe();
+        let mut r2 = sd.subscribe();
+        // Both should receive the same broadcast.
+        sd.shutdown_tx.send(()).unwrap();
+        assert!(r1.recv().await.is_ok());
+        assert!(r2.recv().await.is_ok());
     }
 }

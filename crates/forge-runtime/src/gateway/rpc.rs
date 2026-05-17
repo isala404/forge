@@ -274,4 +274,134 @@ mod tests {
         assert!(response.error.is_some());
         assert_eq!(response.error.as_ref().unwrap().code, "NOT_FOUND");
     }
+
+    // ── is_valid_function_name ──────────────────────────────────────────
+
+    #[test]
+    fn function_name_accepts_typical_identifiers() {
+        assert!(is_valid_function_name("get_user"));
+        assert!(is_valid_function_name("module.fn"));
+        assert!(is_valid_function_name("ns:tool"));
+        assert!(is_valid_function_name("with-dashes"));
+        assert!(is_valid_function_name("alpha123"));
+    }
+
+    #[test]
+    fn function_name_rejects_empty() {
+        assert!(!is_valid_function_name(""));
+    }
+
+    #[test]
+    fn function_name_rejects_over_256_chars() {
+        let exactly_256 = "a".repeat(256);
+        let over_256 = "a".repeat(257);
+        assert!(is_valid_function_name(&exactly_256));
+        assert!(!is_valid_function_name(&over_256));
+    }
+
+    #[test]
+    fn function_name_rejects_special_chars() {
+        // The validator is the first line of defense against log injection and
+        // routing-table corruption; anything outside [alnum_.:-] must be
+        // refused.
+        assert!(!is_valid_function_name("with space"));
+        assert!(!is_valid_function_name("path/traversal"));
+        assert!(!is_valid_function_name("html<tag>"));
+        assert!(!is_valid_function_name("semi;colon"));
+        assert!(!is_valid_function_name("newline\nin"));
+        assert!(!is_valid_function_name("question?"));
+    }
+
+    // ── extract_user_agent ──────────────────────────────────────────────
+
+    #[test]
+    fn user_agent_returns_value_when_header_present() {
+        let mut headers = HeaderMap::new();
+        headers.insert(USER_AGENT, "Mozilla/5.0".parse().unwrap());
+        assert_eq!(extract_user_agent(&headers), Some("Mozilla/5.0".into()));
+    }
+
+    #[test]
+    fn user_agent_returns_none_when_header_absent() {
+        let headers = HeaderMap::new();
+        assert_eq!(extract_user_agent(&headers), None);
+    }
+
+    // ── extract_correlation_id ──────────────────────────────────────────
+
+    #[test]
+    fn correlation_id_round_trips_typical_value() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-correlation-id", "abc-123".parse().unwrap());
+        assert_eq!(extract_correlation_id(&headers), Some("abc-123".into()));
+    }
+
+    #[test]
+    fn correlation_id_rejects_empty_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-correlation-id", "".parse().unwrap());
+        // Empty header is treated the same as absent so we never thread an
+        // empty correlation ID into the request metadata.
+        assert_eq!(extract_correlation_id(&headers), None);
+    }
+
+    #[test]
+    fn correlation_id_rejects_value_over_64_chars() {
+        // Length cap protects log lines from being padded by untrusted clients.
+        let exactly_64 = "a".repeat(64);
+        let over_64 = "a".repeat(65);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-correlation-id", exactly_64.parse().unwrap());
+        assert_eq!(extract_correlation_id(&headers), Some(exactly_64));
+
+        headers.insert("x-correlation-id", over_64.parse().unwrap());
+        assert_eq!(extract_correlation_id(&headers), None);
+    }
+
+    #[test]
+    fn correlation_id_absent_returns_none() {
+        let headers = HeaderMap::new();
+        assert_eq!(extract_correlation_id(&headers), None);
+    }
+
+    // ── build_metadata ──────────────────────────────────────────────────
+
+    #[test]
+    fn build_metadata_preserves_uuid_request_id_when_parseable() {
+        let id = uuid::Uuid::new_v4();
+        let mut tracing_state = TracingState::with_trace_id("trace-123".to_string());
+        tracing_state.request_id = id.to_string();
+        let headers = HeaderMap::new();
+        let meta = build_metadata(tracing_state, Some("10.0.0.1".into()), &headers);
+        assert_eq!(meta.request_id(), id);
+        assert_eq!(meta.trace_id(), "trace-123");
+        assert_eq!(meta.client_ip(), Some("10.0.0.1"));
+    }
+
+    #[test]
+    fn build_metadata_falls_back_to_new_uuid_when_request_id_unparseable() {
+        // Defensive: a malformed request_id (not a UUID) gets replaced with a
+        // fresh UUID rather than crashing the request.
+        let mut tracing_state = TracingState::with_trace_id("trace".to_string());
+        tracing_state.request_id = "not-a-uuid".to_string();
+        let meta = build_metadata(tracing_state, None, &HeaderMap::new());
+        // Generated UUIDs are v4; assert it isn't the nil UUID at minimum.
+        assert_ne!(meta.request_id(), uuid::Uuid::nil());
+    }
+
+    #[test]
+    fn build_metadata_propagates_headers_into_request_metadata() {
+        let mut tracing_state = TracingState::with_trace_id("trace".to_string());
+        tracing_state.request_id = uuid::Uuid::new_v4().to_string();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(USER_AGENT, "curl/8.0".parse().unwrap());
+        headers.insert("x-correlation-id", "corr-42".parse().unwrap());
+
+        let meta = build_metadata(tracing_state, None, &headers);
+        assert_eq!(meta.user_agent(), Some("curl/8.0"));
+        assert_eq!(meta.correlation_id(), Some("corr-42"));
+        assert_eq!(meta.client_ip(), None);
+    }
 }

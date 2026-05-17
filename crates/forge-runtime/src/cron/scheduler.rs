@@ -494,3 +494,349 @@ mod tests {
         assert!(config.is_leader);
     }
 }
+
+#[cfg(all(test, feature = "testcontainers"))]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::disallowed_methods
+)]
+mod integration_tests {
+    use super::*;
+    use crate::cron::registry::CronEntry;
+    use forge_core::cron::{CronInfo, CronSchedule};
+    use forge_core::testing::{IsolatedTestDb, TestDatabase};
+
+    async fn setup_db(test_name: &str) -> IsolatedTestDb {
+        let base = TestDatabase::from_env()
+            .await
+            .expect("Failed to create test database");
+        let db = base
+            .isolated(test_name)
+            .await
+            .expect("Failed to create isolated db");
+        let system_sql = crate::pg::migration::get_all_system_sql();
+        db.run_sql(&system_sql)
+            .await
+            .expect("Failed to apply system schema");
+        db
+    }
+
+    fn make_entry(name: &'static str, expr: &str) -> CronEntry {
+        CronEntry {
+            info: CronInfo {
+                name,
+                schedule: CronSchedule::new(expr).expect("valid expression"),
+                ..Default::default()
+            },
+            // Never invoked by the scheduler under test — the job is dispatched
+            // through the worker pool by name. A no-op handler is sufficient.
+            handler: Arc::new(|_ctx| Box::pin(async { Ok(()) })),
+        }
+    }
+
+    fn make_runner(pool: sqlx::PgPool) -> CronRunner {
+        let registry = Arc::new(CronRegistry::new());
+        let job_queue = crate::jobs::JobQueue::new(pool.clone());
+        CronRunner::new(registry, pool, job_queue, CronRunnerConfig::default())
+    }
+
+    async fn count_rows(pool: &sqlx::PgPool, sql: &str) -> i64 {
+        sqlx::query_scalar::<_, i64>(sql)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn try_claim_and_enqueue_inserts_run_and_job_atomically() {
+        let db = setup_db("cron_claim_enqueue").await;
+        let pool = db.pool().clone();
+        let runner = make_runner(pool.clone());
+        let entry = make_entry("nightly_cleanup", "0 0 * * * *");
+        let scheduled = Utc::now() - chrono::Duration::seconds(30);
+
+        let run_id = runner
+            .try_claim_and_enqueue(&entry, scheduled, false)
+            .await
+            .expect("claim ok")
+            .expect("claimed some id");
+
+        let runs = count_rows(
+            &pool,
+            "SELECT COUNT(*) FROM forge_cron_runs WHERE cron_name = 'nightly_cleanup' AND status = 'running'",
+        )
+        .await;
+        assert_eq!(runs, 1, "should have one running cron_run");
+
+        let jobs = count_rows(
+            &pool,
+            "SELECT COUNT(*) FROM forge_jobs WHERE job_type = '$cron:nightly_cleanup'",
+        )
+        .await;
+        assert_eq!(jobs, 1, "should have one queued $cron: job");
+
+        // The job's input encodes the run_id so the worker reconciles status.
+        let input_run_id: String = sqlx::query_scalar(
+            "SELECT input->>'run_id' FROM forge_jobs WHERE job_type = '$cron:nightly_cleanup'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(input_run_id, run_id.to_string());
+    }
+
+    #[tokio::test]
+    async fn try_claim_and_enqueue_is_exactly_once_for_same_slot() {
+        // The (cron_name, scheduled_time) UNIQUE constraint plus the conditional
+        // ON CONFLICT ... WHERE clause is the entire correctness story for
+        // distributed cron: same slot claimed twice must yield exactly one job.
+        let db = setup_db("cron_exactly_once").await;
+        let pool = db.pool().clone();
+        let runner = make_runner(pool.clone());
+        let entry = make_entry("hourly", "0 0 * * * *");
+        let scheduled = Utc::now();
+
+        let first = runner
+            .try_claim_and_enqueue(&entry, scheduled, false)
+            .await
+            .unwrap();
+        let second = runner
+            .try_claim_and_enqueue(&entry, scheduled, false)
+            .await
+            .unwrap();
+
+        assert!(first.is_some(), "first claim must succeed");
+        assert!(second.is_none(), "second claim must be rejected");
+
+        assert_eq!(
+            count_rows(&pool, "SELECT COUNT(*) FROM forge_cron_runs").await,
+            1
+        );
+        assert_eq!(
+            count_rows(&pool, "SELECT COUNT(*) FROM forge_jobs").await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn try_claim_and_enqueue_reclaims_stale_running_row() {
+        // If a previous node crashed mid-execution and left a 'running' row,
+        // the next leader after `run_stale_threshold` must adopt the slot,
+        // re-issue a job, and overwrite started_at so progress tracking restarts.
+        let db = setup_db("cron_stale_reclaim").await;
+        let pool = db.pool().clone();
+        let mut runner = make_runner(pool.clone());
+        // Short threshold so we don't need to backdate by 15 minutes.
+        runner.config.run_stale_threshold = Duration::from_secs(1);
+        let entry = make_entry("hourly", "0 0 * * * *");
+        let scheduled = Utc::now();
+
+        let original_id = Uuid::new_v4();
+        let original_node = Uuid::new_v4();
+        // Backdated 'running' row that's older than the stale threshold.
+        sqlx::query(
+            "INSERT INTO forge_cron_runs (id, cron_name, scheduled_time, status, node_id, started_at)
+             VALUES ($1, $2, $3, 'running', $4, NOW() - INTERVAL '5 seconds')",
+        )
+        .bind(original_id)
+        .bind(entry.info.name)
+        .bind(scheduled)
+        .bind(original_node)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let new_run_id = runner
+            .try_claim_and_enqueue(&entry, scheduled, false)
+            .await
+            .unwrap()
+            .expect("stale row should be reclaimed");
+
+        assert_ne!(new_run_id, original_id, "id must be rotated");
+
+        let row: (String, Option<Uuid>) = sqlx::query_as(
+            "SELECT status, node_id FROM forge_cron_runs
+             WHERE cron_name = $1 AND scheduled_time = $2",
+        )
+        .bind(entry.info.name)
+        .bind(scheduled)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, "running");
+        assert_eq!(row.1, Some(runner.config.node_id));
+
+        // The reclaim must also enqueue a fresh job — orphaned cron_run rows
+        // without a matching $cron: job would silently miss the run.
+        assert_eq!(
+            count_rows(&pool, "SELECT COUNT(*) FROM forge_jobs").await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn try_claim_and_enqueue_skips_fresh_running_row() {
+        // Inverse of the stale case: a fresh 'running' row is another leader's
+        // live execution. Reclaiming it would duplicate work.
+        let db = setup_db("cron_fresh_skip").await;
+        let pool = db.pool().clone();
+        let mut runner = make_runner(pool.clone());
+        // Long threshold so the fresh row stays fresh for the duration of the
+        // test, regardless of host clock skew.
+        runner.config.run_stale_threshold = Duration::from_secs(3600);
+        let entry = make_entry("hourly", "0 0 * * * *");
+        let scheduled = Utc::now();
+
+        let original_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO forge_cron_runs (id, cron_name, scheduled_time, status, node_id, started_at)
+             VALUES ($1, $2, $3, 'running', $4, NOW())",
+        )
+        .bind(original_id)
+        .bind(entry.info.name)
+        .bind(scheduled)
+        .bind(Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let attempt = runner
+            .try_claim_and_enqueue(&entry, scheduled, false)
+            .await
+            .unwrap();
+
+        assert!(attempt.is_none(), "fresh row must not be reclaimed");
+        // Existing id must not be rotated.
+        let id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM forge_cron_runs WHERE cron_name = $1 AND scheduled_time = $2",
+        )
+        .bind(entry.info.name)
+        .bind(scheduled)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(id, original_id);
+        // And no job was enqueued (the inner INSERT runs only on successful claim).
+        assert_eq!(
+            count_rows(&pool, "SELECT COUNT(*) FROM forge_jobs").await,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn try_claim_and_enqueue_skips_completed_slot() {
+        // Once a slot is 'completed', it must never be re-run by this scheduler —
+        // the ON CONFLICT WHERE clause only matches status='running'.
+        let db = setup_db("cron_completed_skip").await;
+        let pool = db.pool().clone();
+        let runner = make_runner(pool.clone());
+        let entry = make_entry("hourly", "0 0 * * * *");
+        let scheduled = Utc::now();
+
+        sqlx::query(
+            "INSERT INTO forge_cron_runs (id, cron_name, scheduled_time, status, completed_at)
+             VALUES ($1, $2, $3, 'completed', NOW())",
+        )
+        .bind(Uuid::new_v4())
+        .bind(entry.info.name)
+        .bind(scheduled)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let attempt = runner
+            .try_claim_and_enqueue(&entry, scheduled, false)
+            .await
+            .unwrap();
+        assert!(attempt.is_none(), "completed slot must not be re-claimed");
+        assert_eq!(
+            count_rows(&pool, "SELECT COUNT(*) FROM forge_jobs").await,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_catch_up_caps_at_catch_up_limit() {
+        // The catch_up_limit is the safety valve for a node that's been offline
+        // for a long time: a daily cron offline for a week shouldn't fire 7
+        // simultaneous runs. The cap protects against that thundering herd.
+        let db = setup_db("cron_catch_up_limit").await;
+        let pool = db.pool().clone();
+        let runner = make_runner(pool.clone());
+        // Every second so the catch-up window of ~5 minutes yields many
+        // candidate times, deterministically exceeding the limit we set.
+        let mut entry = make_entry("every_sec", "* * * * * *");
+        entry.info.catch_up = true;
+        entry.info.catch_up_limit = 3;
+
+        // Seed a 'completed' run 10 seconds ago so handle_catch_up has a
+        // non-default start time and finds plenty of missed slots between
+        // then and now.
+        sqlx::query(
+            "INSERT INTO forge_cron_runs (id, cron_name, scheduled_time, status, completed_at)
+             VALUES ($1, $2, NOW() - INTERVAL '10 seconds', 'completed', NOW() - INTERVAL '10 seconds')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(entry.info.name)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        runner.handle_catch_up(&entry).await.unwrap();
+
+        // Total runs = 1 seed completed + at most catch_up_limit new claims.
+        let running_count = count_rows(
+            &pool,
+            "SELECT COUNT(*) FROM forge_cron_runs WHERE status = 'running'",
+        )
+        .await;
+        assert!(
+            running_count <= 3,
+            "catch_up_limit should cap new claims, got {running_count}"
+        );
+        assert!(
+            running_count > 0,
+            "should have claimed at least one missed run"
+        );
+        assert_eq!(
+            count_rows(&pool, "SELECT COUNT(*) FROM forge_jobs").await,
+            running_count,
+            "one $cron: job per claimed slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn is_leader_falls_back_to_static_when_no_election_handle() {
+        // The scheduler can run in single-node mode (no advisory-lock election).
+        // is_leader must respect the static flag in that case.
+        let registry = Arc::new(CronRegistry::new());
+        let pool = setup_db("cron_static_leader").await.pool().clone();
+        let job_queue = crate::jobs::JobQueue::new(pool.clone());
+
+        let leader = CronRunner::new(
+            registry.clone(),
+            pool.clone(),
+            job_queue.clone(),
+            CronRunnerConfig {
+                is_leader: true,
+                leader_election: None,
+                ..Default::default()
+            },
+        );
+        let follower = CronRunner::new(
+            registry,
+            pool,
+            job_queue,
+            CronRunnerConfig {
+                is_leader: false,
+                leader_election: None,
+                ..Default::default()
+            },
+        );
+
+        assert!(leader.is_leader());
+        assert!(!follower.is_leader());
+    }
+}

@@ -395,4 +395,109 @@ mod tests {
         assert!(config.enable_metrics);
         assert!(config.enable_logs);
     }
+
+    #[test]
+    fn sampling_ratio_clamps_negative_to_zero() {
+        let config = TelemetryConfig::default().with_sampling_ratio(-0.5);
+        assert_eq!(config.sampling_ratio, 0.0);
+    }
+
+    #[test]
+    fn sampling_ratio_clamps_above_one_to_one() {
+        let config = TelemetryConfig::default().with_sampling_ratio(2.5);
+        assert_eq!(config.sampling_ratio, 1.0);
+    }
+
+    #[test]
+    fn sampling_ratio_preserves_value_in_range() {
+        let config = TelemetryConfig::default().with_sampling_ratio(0.25);
+        assert_eq!(config.sampling_ratio, 0.25);
+    }
+
+    #[test]
+    fn from_observability_config_kill_switch_disables_all_signals() {
+        // When obs.enabled = false, every enable_* flag in the resolved
+        // TelemetryConfig must be false even if the per-signal flags say true.
+        // This is the global off switch.
+        let mut obs = forge_core::config::ObservabilityConfig::default();
+        obs.enabled = false;
+        obs.enable_traces = true;
+        obs.enable_metrics = true;
+        obs.enable_logs = true;
+
+        let config = TelemetryConfig::from_observability_config(&obs, "proj", "1.0.0");
+        assert!(!config.enable_traces);
+        assert!(!config.enable_metrics);
+        assert!(!config.enable_logs);
+    }
+
+    #[test]
+    fn from_observability_config_respects_per_signal_disable_when_enabled() {
+        let mut obs = forge_core::config::ObservabilityConfig::default();
+        obs.enabled = true;
+        obs.enable_traces = true;
+        obs.enable_metrics = false;
+        obs.enable_logs = true;
+
+        let config = TelemetryConfig::from_observability_config(&obs, "proj", "1.0.0");
+        assert!(config.enable_traces);
+        assert!(!config.enable_metrics);
+        assert!(config.enable_logs);
+    }
+
+    #[test]
+    fn from_observability_config_falls_back_to_project_name() {
+        let obs = forge_core::config::ObservabilityConfig::default();
+        // service_name is None on the default; resolved config should use
+        // the project name instead.
+        assert!(obs.service_name.is_none());
+        let config = TelemetryConfig::from_observability_config(&obs, "my-app", "2.0.0");
+        assert_eq!(config.service_name, "my-app");
+        assert_eq!(config.service_version, "2.0.0");
+    }
+
+    #[test]
+    fn from_observability_config_uses_explicit_service_name_when_set() {
+        let mut obs = forge_core::config::ObservabilityConfig::default();
+        obs.service_name = Some("override-name".to_string());
+        let config = TelemetryConfig::from_observability_config(&obs, "ignored", "1.0.0");
+        assert_eq!(config.service_name, "override-name");
+    }
+
+    #[test]
+    fn telemetry_error_display_messages_are_descriptive() {
+        // These error strings end up in operator logs at startup; keep their
+        // shape stable so log alerting rules don't break silently.
+        assert_eq!(
+            TelemetryError::TracerInit("connection refused".into()).to_string(),
+            "failed to initialize tracer: connection refused"
+        );
+        assert_eq!(
+            TelemetryError::MeterInit("dns".into()).to_string(),
+            "failed to initialize meter: dns"
+        );
+        assert_eq!(
+            TelemetryError::LoggerInit("tls".into()).to_string(),
+            "failed to initialize logger: tls"
+        );
+        assert_eq!(
+            TelemetryError::AlreadyInitialized.to_string(),
+            "telemetry already initialized"
+        );
+        assert_eq!(
+            TelemetryError::SubscriberInit("global set".into()).to_string(),
+            "tracing subscriber init failed: global set"
+        );
+    }
+
+    #[test]
+    fn build_env_filter_returns_valid_filter_for_dashed_project() {
+        // The filter logic replaces `-` with `_` so a Cargo crate name like
+        // "my-app" becomes the runtime crate identifier "my_app" in the
+        // tracing directive. This test exercises construction without
+        // panicking; the directive's effect on filtering is tracing's own
+        // contract.
+        let _filter = build_env_filter("my-app", "debug");
+        let _filter = build_env_filter("plain", "info");
+    }
 }

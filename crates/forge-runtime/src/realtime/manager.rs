@@ -432,6 +432,7 @@ pub struct SubscriptionCounts {
 mod tests {
     use super::*;
     use forge_core::function::AuthContext;
+    use uuid::Uuid;
 
     #[test]
     fn test_subscription_manager_create() {
@@ -654,5 +655,461 @@ mod tests {
 
         let change = Change::new("projects", forge_core::realtime::ChangeOperation::Insert);
         assert!(manager.find_affected_groups(&change).is_empty());
+    }
+
+    // --- Additional coverage: tenant isolation, args isolation, ref-counted
+    // group eviction, update_group runtime-table indexing, cache size limit,
+    // get_group_subscribers fan-out, all_group_ids snapshot, column-filtered
+    // invalidation, and session-removal return value.
+
+    fn authed(user_id: Uuid, roles: Vec<&str>) -> AuthContext {
+        AuthContext::authenticated(
+            user_id,
+            roles.into_iter().map(String::from).collect(),
+            std::collections::HashMap::new(),
+        )
+    }
+
+    #[test]
+    fn subscribe_does_not_coalesce_across_different_users() {
+        // Same query + args, different principal → different groups. This is
+        // the row-level security invariant: alice and bob must not share a
+        // cached result, even when they ran the same query.
+        let manager = SubscriptionManager::new(50);
+        let alice = authed(Uuid::new_v4(), vec![]);
+        let bob = authed(Uuid::new_v4(), vec![]);
+        let s1 = SessionId::new();
+        let s2 = SessionId::new();
+
+        let (g_alice, _, is_new_alice) = manager
+            .subscribe(
+                s1,
+                "a".into(),
+                "list_orders",
+                &serde_json::json!({}),
+                &alice,
+                &[],
+                &[],
+            )
+            .unwrap();
+        let (g_bob, _, is_new_bob) = manager
+            .subscribe(
+                s2,
+                "b".into(),
+                "list_orders",
+                &serde_json::json!({}),
+                &bob,
+                &[],
+                &[],
+            )
+            .unwrap();
+
+        assert!(is_new_alice);
+        assert!(is_new_bob);
+        assert_ne!(g_alice, g_bob);
+    }
+
+    #[test]
+    fn subscribe_does_not_coalesce_when_roles_differ() {
+        // Same principal, different role set → different group. Roles can
+        // affect what rows the query returns, so they're part of the dedup key.
+        let manager = SubscriptionManager::new(50);
+        let uid = Uuid::new_v4();
+        let viewer = authed(uid, vec!["viewer"]);
+        let admin = authed(uid, vec!["admin", "viewer"]);
+        let s1 = SessionId::new();
+        let s2 = SessionId::new();
+
+        let (g_viewer, _, _) = manager
+            .subscribe(
+                s1,
+                "a".into(),
+                "list_orders",
+                &serde_json::json!({}),
+                &viewer,
+                &[],
+                &[],
+            )
+            .unwrap();
+        let (g_admin, _, _) = manager
+            .subscribe(
+                s2,
+                "b".into(),
+                "list_orders",
+                &serde_json::json!({}),
+                &admin,
+                &[],
+                &[],
+            )
+            .unwrap();
+        assert_ne!(g_viewer, g_admin);
+    }
+
+    #[test]
+    fn subscribe_does_not_coalesce_with_different_args() {
+        // Args are part of the dedup key — `{"status": "open"}` and
+        // `{"status": "closed"}` are two distinct subscriptions.
+        let manager = SubscriptionManager::new(50);
+        let auth = AuthContext::unauthenticated();
+        let (g_open, _, _) = manager
+            .subscribe(
+                SessionId::new(),
+                "a".into(),
+                "list_orders",
+                &serde_json::json!({"status": "open"}),
+                &auth,
+                &[],
+                &[],
+            )
+            .unwrap();
+        let (g_closed, _, _) = manager
+            .subscribe(
+                SessionId::new(),
+                "b".into(),
+                "list_orders",
+                &serde_json::json!({"status": "closed"}),
+                &auth,
+                &[],
+                &[],
+            )
+            .unwrap();
+        assert_ne!(g_open, g_closed);
+    }
+
+    #[test]
+    fn unsubscribe_keeps_group_alive_while_other_subscribers_remain() {
+        // Group eviction is ref-counted by subscriber count, not by name —
+        // two subscribers, removing one must not delete the group or its
+        // table index entry.
+        let manager = SubscriptionManager::new(50);
+        let auth = AuthContext::unauthenticated();
+        static T: &[&str] = &["t"];
+
+        let (g1, sub1, _) = manager
+            .subscribe(
+                SessionId::new(),
+                "a".into(),
+                "q",
+                &serde_json::json!({}),
+                &auth,
+                T,
+                &[],
+            )
+            .unwrap();
+        let (g2, _sub2, _) = manager
+            .subscribe(
+                SessionId::new(),
+                "b".into(),
+                "q",
+                &serde_json::json!({}),
+                &auth,
+                T,
+                &[],
+            )
+            .unwrap();
+        assert_eq!(g1, g2);
+
+        manager.unsubscribe(sub1);
+
+        // Group must still be present; table_index too.
+        assert!(manager.get_group(g1).is_some());
+        assert_eq!(manager.counts().indexed_tables, 1);
+        assert_eq!(manager.get_group_subscribers(g1).len(), 1);
+    }
+
+    #[test]
+    fn unsubscribe_is_noop_for_unknown_subscription_id() {
+        // Calling unsubscribe on a SubscriptionId we never inserted must not
+        // panic or corrupt state.
+        let manager = SubscriptionManager::new(50);
+        let phantom = forge_core::realtime::SubscriptionId::new();
+        manager.unsubscribe(phantom);
+        assert_eq!(manager.counts().total, 0);
+    }
+
+    #[test]
+    fn get_group_subscribers_returns_session_and_client_sub_id_tuples() {
+        // Used by the fan-out path. The mapping must round-trip exactly the
+        // `(SessionId, client_sub_id)` pair we subscribed with.
+        let manager = SubscriptionManager::new(50);
+        let auth = AuthContext::unauthenticated();
+        let session = SessionId::new();
+        let (group_id, _, _) = manager
+            .subscribe(
+                session,
+                "my-client-sub".into(),
+                "q",
+                &serde_json::json!({}),
+                &auth,
+                &[],
+                &[],
+            )
+            .unwrap();
+
+        let subs = manager.get_group_subscribers(group_id);
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].0, session);
+        assert_eq!(subs[0].1, "my-client-sub");
+    }
+
+    #[test]
+    fn all_group_ids_returns_every_active_group() {
+        let manager = SubscriptionManager::new(50);
+        let auth = AuthContext::unauthenticated();
+        let (g1, _, _) = manager
+            .subscribe(
+                SessionId::new(),
+                "a".into(),
+                "q1",
+                &serde_json::json!({}),
+                &auth,
+                &[],
+                &[],
+            )
+            .unwrap();
+        let (g2, _, _) = manager
+            .subscribe(
+                SessionId::new(),
+                "b".into(),
+                "q2",
+                &serde_json::json!({}),
+                &auth,
+                &[],
+                &[],
+            )
+            .unwrap();
+
+        let mut ids = manager.all_group_ids();
+        ids.sort_by_key(|g| g.0);
+        let mut want = vec![g1, g2];
+        want.sort_by_key(|g| g.0);
+        assert_eq!(ids, want);
+    }
+
+    #[test]
+    fn update_group_extends_table_index_with_runtime_discovered_tables() {
+        // The compile-time `table_deps` list might miss tables reached via
+        // dynamic SQL or sub-functions. `update_group` is the bridge: after
+        // the first execution the runtime read_set has to merge into the
+        // table index so subsequent changes to those tables also invalidate.
+        let manager = SubscriptionManager::new(50);
+        let auth = AuthContext::unauthenticated();
+        static PROJECTS: &[&str] = &["projects"];
+
+        let (group_id, _, _) = manager
+            .subscribe(
+                SessionId::new(),
+                "a".into(),
+                "q",
+                &serde_json::json!({}),
+                &auth,
+                PROJECTS,
+                &[],
+            )
+            .unwrap();
+
+        // Runtime discovers that the query also touched `tasks`.
+        let mut rs = ReadSet::new();
+        rs.tables.push("tasks".to_string());
+        manager.update_group(group_id, rs, "hash1".to_string());
+
+        let change = Change::new("tasks", forge_core::realtime::ChangeOperation::Update);
+        assert_eq!(manager.find_affected_groups(&change), vec![group_id]);
+    }
+
+    #[test]
+    fn update_group_with_data_skips_cache_when_result_exceeds_limit() {
+        // With a 64-byte cache cap, a large payload must record the hash
+        // for delta detection but leave `last_result` empty so new joiners
+        // re-execute instead of receiving stale data from the cache.
+        let manager = SubscriptionManager::with_config(50, 64, 64);
+        let auth = AuthContext::unauthenticated();
+        let (group_id, _, _) = manager
+            .subscribe(
+                SessionId::new(),
+                "a".into(),
+                "q",
+                &serde_json::json!({}),
+                &auth,
+                &[],
+                &[],
+            )
+            .unwrap();
+
+        // Payload comfortably > 64 bytes when serialised.
+        let big = std::sync::Arc::new(serde_json::json!({
+            "items": vec!["row-with-padding-to-blow-past-the-cache-limit"; 8]
+        }));
+        manager.update_group_with_data(
+            group_id,
+            ReadSet::new(),
+            "hash-big".to_string(),
+            big.clone(),
+        );
+
+        let group = manager.get_group(group_id).expect("group");
+        assert_eq!(group.last_result_hash.as_deref(), Some("hash-big"));
+        assert!(
+            group.last_result.is_none(),
+            "oversize results must not be cached"
+        );
+    }
+
+    #[test]
+    fn update_group_with_data_caches_when_result_fits_under_limit() {
+        let manager = SubscriptionManager::with_config(50, 64, 10_485_760);
+        let auth = AuthContext::unauthenticated();
+        let (group_id, _, _) = manager
+            .subscribe(
+                SessionId::new(),
+                "a".into(),
+                "q",
+                &serde_json::json!({}),
+                &auth,
+                &[],
+                &[],
+            )
+            .unwrap();
+
+        let small = std::sync::Arc::new(serde_json::json!({"ok": true}));
+        manager.update_group_with_data(
+            group_id,
+            ReadSet::new(),
+            "hash-small".to_string(),
+            small.clone(),
+        );
+
+        let group = manager.get_group(group_id).expect("group");
+        assert_eq!(group.last_result_hash.as_deref(), Some("hash-small"));
+        assert!(group.last_result.is_some());
+    }
+
+    #[test]
+    fn find_affected_groups_filters_by_selected_columns_for_updates() {
+        // `selected_cols = ["name"]` means an UPDATE that only touched
+        // `email` shouldn't invalidate the group. INSERTs always do, since
+        // they change row presence regardless of columns.
+        let manager = SubscriptionManager::new(50);
+        let auth = AuthContext::unauthenticated();
+        static USERS: &[&str] = &["users"];
+        static COLS: &[&str] = &["name"];
+
+        let (group_id, _, _) = manager
+            .subscribe(
+                SessionId::new(),
+                "a".into(),
+                "q",
+                &serde_json::json!({}),
+                &auth,
+                USERS,
+                COLS,
+            )
+            .unwrap();
+
+        let unrelated = Change::new("users", forge_core::realtime::ChangeOperation::Update)
+            .with_columns(vec!["email".to_string()]);
+        assert!(manager.find_affected_groups(&unrelated).is_empty());
+
+        let relevant = Change::new("users", forge_core::realtime::ChangeOperation::Update)
+            .with_columns(vec!["name".to_string()]);
+        assert_eq!(manager.find_affected_groups(&relevant), vec![group_id]);
+
+        // Inserts always invalidate (row presence changes).
+        let insert = Change::new("users", forge_core::realtime::ChangeOperation::Insert)
+            .with_columns(vec!["email".to_string()]);
+        assert_eq!(manager.find_affected_groups(&insert), vec![group_id]);
+    }
+
+    #[test]
+    fn remove_session_subscriptions_returns_subscription_ids_for_cleanup() {
+        // The session server uses the returned IDs to tell other components
+        // (channels, presence, etc.) which subscriptions just went away.
+        let manager = SubscriptionManager::new(50);
+        let auth = AuthContext::unauthenticated();
+        let session = SessionId::new();
+        let (_, sub1, _) = manager
+            .subscribe(
+                session,
+                "a".into(),
+                "q1",
+                &serde_json::json!({}),
+                &auth,
+                &[],
+                &[],
+            )
+            .unwrap();
+        let (_, sub2, _) = manager
+            .subscribe(
+                session,
+                "b".into(),
+                "q2",
+                &serde_json::json!({}),
+                &auth,
+                &[],
+                &[],
+            )
+            .unwrap();
+
+        let mut removed = manager.remove_session_subscriptions(session);
+        removed.sort_by_key(|s| s.0);
+        let mut want = vec![sub1, sub2];
+        want.sort_by_key(|s| s.0);
+        assert_eq!(removed, want);
+
+        // And a follow-up call returns nothing — the session is gone.
+        assert!(manager.remove_session_subscriptions(session).is_empty());
+    }
+
+    #[test]
+    fn counts_reflects_groups_sessions_subscribers_and_tables() {
+        let manager = SubscriptionManager::new(50);
+        let auth = AuthContext::unauthenticated();
+        static USERS: &[&str] = &["users"];
+        static ORDERS: &[&str] = &["orders"];
+
+        let session_a = SessionId::new();
+        let session_b = SessionId::new();
+        // Two subscribers in session_a sharing one group (coalesced)
+        manager
+            .subscribe(
+                session_a,
+                "1".into(),
+                "list_users",
+                &serde_json::json!({}),
+                &auth,
+                USERS,
+                &[],
+            )
+            .unwrap();
+        manager
+            .subscribe(
+                session_a,
+                "2".into(),
+                "list_orders",
+                &serde_json::json!({}),
+                &auth,
+                ORDERS,
+                &[],
+            )
+            .unwrap();
+        // session_b shares the list_users group with session_a → same group, +1 subscriber
+        manager
+            .subscribe(
+                session_b,
+                "3".into(),
+                "list_users",
+                &serde_json::json!({}),
+                &auth,
+                USERS,
+                &[],
+            )
+            .unwrap();
+
+        let counts = manager.counts();
+        assert_eq!(counts.total, 3);
+        assert_eq!(counts.unique_queries, 2);
+        assert_eq!(counts.sessions, 2);
+        assert_eq!(counts.indexed_tables, 2);
+        assert!(counts.memory_bytes > 0);
     }
 }

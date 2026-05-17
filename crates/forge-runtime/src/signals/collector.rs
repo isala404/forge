@@ -286,3 +286,299 @@ async fn flush_batch(pool: &PgPool, buffer: &mut Vec<SignalEvent>) {
         Err(e) => error!(count, error = %e, "failed to flush signal events"),
     }
 }
+
+#[cfg(all(test, feature = "testcontainers"))]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::disallowed_methods
+)]
+mod integration_tests {
+    use super::*;
+    use forge_core::signals::SignalEvent;
+    use forge_core::testing::{IsolatedTestDb, TestDatabase};
+
+    async fn setup_db(test_name: &str) -> IsolatedTestDb {
+        let base = TestDatabase::from_env()
+            .await
+            .expect("Failed to create test database");
+        let db = base
+            .isolated(test_name)
+            .await
+            .expect("Failed to create isolated db");
+        let system_sql = crate::pg::migration::get_all_system_sql();
+        db.run_sql(&system_sql)
+            .await
+            .expect("Failed to apply system schema");
+        db
+    }
+
+    async fn row_count(pool: &PgPool) -> i64 {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM forge_signals_events")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    fn sample_event(name: &str) -> SignalEvent {
+        SignalEvent::server_execution(name, "job", 12, true, None)
+    }
+
+    #[tokio::test]
+    async fn shutdown_flushes_pending_events_below_batch_size() {
+        // Tiny batch_size=10 + long flush_interval forces the test to prove
+        // that shutdown — not the timer — is what drains the buffer.
+        let db = setup_db("signals_shutdown_flush").await;
+        let pool = Arc::new(db.pool().clone());
+        let collector = SignalsCollector::spawn(pool.clone(), 10, Duration::from_secs(60), 100);
+
+        for i in 0..3 {
+            collector.try_send(sample_event(&format!("evt_{i}")));
+        }
+        collector.shutdown().await;
+
+        assert_eq!(row_count(&pool).await, 3);
+    }
+
+    #[tokio::test]
+    async fn batch_size_threshold_triggers_immediate_flush() {
+        // Send exactly batch_size events with a long timer; if the size-trigger
+        // path is broken, the flush won't happen before our assertion fires.
+        let db = setup_db("signals_batch_flush").await;
+        let pool = Arc::new(db.pool().clone());
+        let collector = SignalsCollector::spawn(pool.clone(), 5, Duration::from_secs(60), 100);
+
+        for i in 0..5 {
+            collector.try_send(sample_event(&format!("evt_{i}")));
+        }
+
+        // Poll briefly for the async flush to complete; size-trigger should
+        // fire within a few ms once the buffer hits 5.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let n = row_count(&pool).await;
+            if n == 5 {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("batch flush did not occur, count={n}");
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        collector.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn interval_tick_flushes_partial_batches() {
+        // Below batch_size events with a short flush interval: only the timer
+        // can move them to the DB.
+        let db = setup_db("signals_interval_flush").await;
+        let pool = Arc::new(db.pool().clone());
+        let collector = SignalsCollector::spawn(pool.clone(), 100, Duration::from_millis(100), 100);
+
+        collector.try_send(sample_event("a"));
+        collector.try_send(sample_event("b"));
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let n = row_count(&pool).await;
+            if n == 2 {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("interval flush did not occur, count={n}");
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        collector.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_is_idempotent() {
+        // Second shutdown must be a no-op — calling it twice during graceful
+        // exit is a real pattern (signal handler + Drop, etc.).
+        let db = setup_db("signals_shutdown_idempotent").await;
+        let pool = Arc::new(db.pool().clone());
+        let collector = SignalsCollector::spawn(pool.clone(), 10, Duration::from_secs(60), 100);
+
+        collector.try_send(sample_event("once"));
+        collector.shutdown().await;
+        // Should return immediately, not hang waiting on a closed channel.
+        collector.shutdown().await;
+
+        assert_eq!(row_count(&pool).await, 1);
+    }
+
+    #[tokio::test]
+    async fn try_send_drops_events_after_shutdown() {
+        // Post-shutdown sends must not panic or block — the channel is closed
+        // by then and try_send sees TrySendError::Closed.
+        let db = setup_db("signals_send_after_close").await;
+        let pool = Arc::new(db.pool().clone());
+        let collector = SignalsCollector::spawn(pool.clone(), 10, Duration::from_secs(60), 100);
+
+        collector.try_send(sample_event("before"));
+        collector.shutdown().await;
+        // No panic, no hang — this is the contract.
+        collector.try_send(sample_event("after"));
+
+        // Only the "before" event made it through.
+        assert_eq!(row_count(&pool).await, 1);
+    }
+
+    #[tokio::test]
+    async fn batch_persists_full_event_field_set() {
+        // The UNNEST insert binds 31 parallel arrays — a single column-order
+        // bug would silently corrupt every event. Round-trip every field
+        // that comes from the wire and assert it lands on the right column.
+        let db = setup_db("signals_field_roundtrip").await;
+        let pool = Arc::new(db.pool().clone());
+        let collector = SignalsCollector::spawn(pool.clone(), 10, Duration::from_secs(60), 100);
+
+        let user_id = uuid::Uuid::new_v4();
+        let tenant_id = uuid::Uuid::new_v4();
+        let session_id = uuid::Uuid::new_v4();
+        let event = SignalEvent {
+            event_type: forge_core::signals::SignalEventType::RpcCall,
+            event_name: Some("get_user".to_string()),
+            correlation_id: Some("corr-123".to_string()),
+            session_id: Some(session_id),
+            visitor_id: Some("visit-abc".to_string()),
+            user_id: Some(user_id),
+            tenant_id: Some(tenant_id),
+            properties: serde_json::json!({"k": "v"}),
+            page_url: Some("https://x.test/a".to_string()),
+            referrer: Some("https://ref.test".to_string()),
+            function_name: Some("get_user".to_string()),
+            function_kind: Some("query".to_string()),
+            duration_ms: Some(42),
+            status: Some("success".to_string()),
+            error_message: None,
+            error_stack: None,
+            error_context: None,
+            client_ip: Some("10.0.0.1".to_string()),
+            country: Some("US".to_string()),
+            city: Some("NYC".to_string()),
+            user_agent: Some("test/1.0".to_string()),
+            device_type: Some("desktop".to_string()),
+            browser: Some("firefox".to_string()),
+            os: Some("linux".to_string()),
+            utm: Some(forge_core::signals::UtmParams {
+                source: Some("twitter".to_string()),
+                medium: Some("social".to_string()),
+                campaign: Some("launch".to_string()),
+                term: Some("rust".to_string()),
+                content: Some("post".to_string()),
+            }),
+            is_bot: false,
+            timestamp: chrono::Utc::now(),
+        };
+        collector.try_send(event);
+        collector.shutdown().await;
+
+        use sqlx::Row;
+        let row = sqlx::query(
+            "SELECT event_type, event_name, correlation_id, session_id, visitor_id,
+                user_id, tenant_id, function_name, function_kind, status,
+                duration_ms, client_ip, country, city, user_agent,
+                browser, os, utm_source, utm_medium, utm_campaign, utm_term, is_bot
+             FROM forge_signals_events LIMIT 1",
+        )
+        .fetch_one(&*pool)
+        .await
+        .unwrap();
+
+        assert_eq!(row.get::<String, _>("event_type"), "rpc_call");
+        assert_eq!(
+            row.get::<Option<String>, _>("event_name").as_deref(),
+            Some("get_user")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("correlation_id").as_deref(),
+            Some("corr-123")
+        );
+        assert_eq!(
+            row.get::<Option<uuid::Uuid>, _>("session_id"),
+            Some(session_id)
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("visitor_id").as_deref(),
+            Some("visit-abc")
+        );
+        assert_eq!(row.get::<Option<uuid::Uuid>, _>("user_id"), Some(user_id));
+        assert_eq!(
+            row.get::<Option<uuid::Uuid>, _>("tenant_id"),
+            Some(tenant_id)
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("function_name").as_deref(),
+            Some("get_user")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("function_kind").as_deref(),
+            Some("query")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("status").as_deref(),
+            Some("success")
+        );
+        assert_eq!(row.get::<Option<i32>, _>("duration_ms"), Some(42));
+        assert_eq!(
+            row.get::<Option<String>, _>("client_ip").as_deref(),
+            Some("10.0.0.1")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("country").as_deref(),
+            Some("US")
+        );
+        assert_eq!(row.get::<Option<String>, _>("city").as_deref(), Some("NYC"));
+        assert_eq!(
+            row.get::<Option<String>, _>("user_agent").as_deref(),
+            Some("test/1.0")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("browser").as_deref(),
+            Some("firefox")
+        );
+        assert_eq!(row.get::<Option<String>, _>("os").as_deref(), Some("linux"));
+        assert_eq!(
+            row.get::<Option<String>, _>("utm_source").as_deref(),
+            Some("twitter")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("utm_medium").as_deref(),
+            Some("social")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("utm_campaign").as_deref(),
+            Some("launch")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("utm_term").as_deref(),
+            Some("rust")
+        );
+        assert!(!row.get::<bool, _>("is_bot"));
+    }
+
+    #[tokio::test]
+    async fn full_channel_drops_excess_events_without_panicking() {
+        // channel_capacity=2 with a long flush interval and a slow consumer
+        // means try_send sees Full on the third call. The contract is "drop
+        // and warn" — must not panic, must not block.
+        let db = setup_db("signals_channel_full").await;
+        let pool = Arc::new(db.pool().clone());
+        // Tiny capacity, large batch_size so the flush loop doesn't drain
+        // before we overflow.
+        let collector = SignalsCollector::spawn(pool.clone(), 1000, Duration::from_secs(60), 1);
+
+        // First send fills capacity; second is the buffered receiver slot;
+        // beyond that we either land in buffer or hit Full. Burst enough that
+        // at least one Full must occur.
+        for i in 0..50 {
+            collector.try_send(sample_event(&format!("burst_{i}")));
+        }
+        // No panic = pass. Drain via shutdown so the test cleans up.
+        collector.shutdown().await;
+    }
+}

@@ -1083,3 +1083,255 @@ fn html_escape(s: &str) -> String {
 fn urlencoding(s: &str) -> String {
     percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    // ── html_escape ─────────────────────────────────────────────────────
+
+    #[test]
+    fn html_escape_neutralizes_script_tags() {
+        let xss = "<script>alert('xss')</script>";
+        let escaped = html_escape(xss);
+        assert_eq!(
+            escaped,
+            "&lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;"
+        );
+        assert!(!escaped.contains('<'));
+        assert!(!escaped.contains('>'));
+    }
+
+    #[test]
+    fn html_escape_handles_quotes_and_ampersands() {
+        assert_eq!(html_escape("a & b"), "a &amp; b");
+        assert_eq!(html_escape(r#"say "hi""#), "say &quot;hi&quot;");
+        assert_eq!(html_escape("it's"), "it&#x27;s");
+    }
+
+    #[test]
+    fn html_escape_orders_ampersand_first_to_avoid_double_escape() {
+        // If we replaced `<` first as `&lt;`, then replaced `&` -> `&amp;`,
+        // the literal `<` would render as `&amp;lt;` and break the page.
+        // The current implementation escapes `&` first, so a raw `<` becomes
+        // exactly `&lt;`.
+        assert_eq!(html_escape("<"), "&lt;");
+    }
+
+    // ── urlencoding ─────────────────────────────────────────────────────
+
+    #[test]
+    fn urlencoding_percent_encodes_non_alphanumeric() {
+        // NON_ALPHANUMERIC encodes everything except [A-Za-z0-9].
+        assert_eq!(urlencoding("hello world"), "hello%20world");
+        assert_eq!(urlencoding("a/b?c=d&e"), "a%2Fb%3Fc%3Dd%26e");
+    }
+
+    #[test]
+    fn urlencoding_preserves_alphanumerics() {
+        assert_eq!(urlencoding("AbCdEf123"), "AbCdEf123");
+    }
+
+    // ── base_url_from_headers ───────────────────────────────────────────
+
+    #[test]
+    fn base_url_defaults_to_https_for_remote_host() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("api.example.com"));
+        assert_eq!(base_url_from_headers(&headers), "https://api.example.com");
+    }
+
+    #[test]
+    fn base_url_uses_http_for_localhost() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("localhost:9081"));
+        assert_eq!(base_url_from_headers(&headers), "http://localhost:9081");
+
+        headers.insert("host", HeaderValue::from_static("127.0.0.1:9081"));
+        assert_eq!(base_url_from_headers(&headers), "http://127.0.0.1:9081");
+    }
+
+    #[test]
+    fn base_url_ignores_x_forwarded_proto() {
+        // Anyone can spoof X-Forwarded-Proto on OAuth routes (no trusted-proxy
+        // middleware). Verify we ignore it and use the safe default.
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("api.example.com"));
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("http"));
+        assert_eq!(base_url_from_headers(&headers), "https://api.example.com");
+    }
+
+    #[test]
+    fn base_url_falls_back_when_host_missing() {
+        let headers = HeaderMap::new();
+        assert_eq!(base_url_from_headers(&headers), "http://localhost:9081");
+    }
+
+    // ── extract_cookie ──────────────────────────────────────────────────
+
+    #[test]
+    fn extract_cookie_finds_named_value() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("session=abc123; theme=dark"),
+        );
+        assert_eq!(extract_cookie(&headers, "session"), Some("abc123".into()));
+        assert_eq!(extract_cookie(&headers, "theme"), Some("dark".into()));
+        assert_eq!(extract_cookie(&headers, "missing"), None);
+    }
+
+    #[test]
+    fn extract_cookie_handles_whitespace_between_pairs() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::COOKIE, HeaderValue::from_static("a=1;   b=2;\tc=3"));
+        assert_eq!(extract_cookie(&headers, "b"), Some("2".into()));
+        assert_eq!(extract_cookie(&headers, "c"), Some("3".into()));
+    }
+
+    #[test]
+    fn extract_cookie_returns_none_when_header_absent() {
+        let headers = HeaderMap::new();
+        assert_eq!(extract_cookie(&headers, "anything"), None);
+    }
+
+    #[test]
+    fn extract_cookie_skips_malformed_pairs() {
+        // A cookie segment with no `=` is simply skipped, not treated as a
+        // match for any name.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("malformed; real=value"),
+        );
+        assert_eq!(extract_cookie(&headers, "malformed"), None);
+        assert_eq!(extract_cookie(&headers, "real"), Some("value".into()));
+    }
+
+    // ── OAuthRateLimiter ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn rate_limiter_allows_up_to_limit_then_rejects() {
+        let limiter = OAuthRateLimiter::default();
+        for _ in 0..3 {
+            assert!(limiter.check("ip-a", 3).await);
+        }
+        // 4th attempt for the same key is rejected.
+        assert!(!limiter.check("ip-a", 3).await);
+    }
+
+    #[tokio::test]
+    async fn rate_limiter_buckets_are_per_key() {
+        let limiter = OAuthRateLimiter::default();
+        // Exhaust ip-a.
+        for _ in 0..2 {
+            assert!(limiter.check("ip-a", 2).await);
+        }
+        assert!(!limiter.check("ip-a", 2).await);
+        // ip-b has its own bucket.
+        assert!(limiter.check("ip-b", 2).await);
+        assert!(limiter.check("ip-b", 2).await);
+        assert!(!limiter.check("ip-b", 2).await);
+    }
+
+    #[tokio::test]
+    async fn rate_limiter_window_reset_via_backdated_entry() {
+        let limiter = OAuthRateLimiter::default();
+        // Burn the budget for "ip-c".
+        assert!(limiter.check("ip-c", 1).await);
+        assert!(!limiter.check("ip-c", 1).await);
+
+        // Force the timestamp to look older than the window so the next call
+        // takes the "rollover" branch.
+        {
+            let mut buckets = limiter.buckets.write().await;
+            let entry = buckets.get_mut("ip-c").unwrap();
+            entry.1 = Instant::now() - Duration::from_secs(RATE_WINDOW_SECS + 1);
+        }
+        assert!(limiter.check("ip-c", 1).await);
+    }
+
+    // ── token_error ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn token_error_returns_400_with_oauth_error_shape() {
+        let resp = token_error("invalid_grant", "bad code");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let body = to_bytes(resp.into_body(), 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "invalid_grant");
+        assert_eq!(json["error_description"], "bad code");
+    }
+
+    // ── authorize_error_redirect ────────────────────────────────────────
+
+    #[test]
+    fn authorize_error_redirect_encodes_query_params_and_state() {
+        let resp = authorize_error_redirect(
+            "https://client.example.com/cb",
+            Some("xyz state"),
+            "access_denied",
+            "user said no",
+        );
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(location.starts_with("https://client.example.com/cb?"));
+        // Parameter names are hard-coded literals; only the values are passed
+        // through urlencoding. NON_ALPHANUMERIC encodes both `_` (%5F) and ` `
+        // (%20), so error VALUES carrying underscores get encoded too.
+        assert!(location.contains("error=access%5Fdenied"), "got {location}");
+        assert!(
+            location.contains("error_description=user%20said%20no"),
+            "got {location}"
+        );
+        assert!(location.contains("state=xyz%20state"), "got {location}");
+    }
+
+    #[test]
+    fn authorize_error_redirect_omits_state_when_absent() {
+        let resp = authorize_error_redirect(
+            "https://client.example.com/cb",
+            None,
+            "invalid_request",
+            "missing param",
+        );
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(!location.contains("state="));
+        assert!(
+            location.contains("error=invalid%5Frequest"),
+            "got {location}"
+        );
+    }
+
+    // ── default_s256 ────────────────────────────────────────────────────
+
+    #[test]
+    fn default_s256_returns_canonical_pkce_method() {
+        assert_eq!(default_s256(), "S256");
+    }
+
+    // ── client_ip ───────────────────────────────────────────────────────
+
+    #[test]
+    fn client_ip_returns_unknown_to_collapse_unidentified_callers() {
+        // OAuth routes bypass trusted-proxy middleware, so we deliberately
+        // do not honor X-Forwarded-For / X-Real-IP here.
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("1.2.3.4"));
+        headers.insert("x-real-ip", HeaderValue::from_static("5.6.7.8"));
+        assert_eq!(client_ip(&headers), "unknown");
+    }
+}

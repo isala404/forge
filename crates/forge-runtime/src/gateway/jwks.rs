@@ -377,4 +377,130 @@ mod tests {
         assert!(result.is_ok());
         assert!(result.unwrap().is_none()); // Should return None when missing components
     }
+
+    #[test]
+    fn jwks_client_exposes_configured_url() {
+        let client =
+            JwksClient::new("https://issuer.example.com/.well-known/jwks".into(), 60).unwrap();
+        assert_eq!(client.url(), "https://issuer.example.com/.well-known/jwks");
+    }
+
+    #[test]
+    fn parse_jwk_returns_none_for_non_rsa_kty() {
+        // "oct" (symmetric) keys can't be used for asymmetric verification; we
+        // skip them silently rather than erroring, so the caller can keep
+        // processing the rest of the JWKS.
+        let client = JwksClient::new("http://example.com".into(), 60).unwrap();
+        let jwk = JsonWebKey {
+            kid: Some("sym".into()),
+            kty: "oct".into(),
+            alg: None,
+            key_use: Some("sig".into()),
+            n: None,
+            e: None,
+            x5c: None,
+        };
+        assert!(client.parse_jwk(&jwk).unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_jwk_returns_none_when_only_modulus_present() {
+        // RSA with `n` but no `e` is malformed; we drop it rather than crashing.
+        let client = JwksClient::new("http://example.com".into(), 60).unwrap();
+        let jwk = JsonWebKey {
+            kid: Some("partial".into()),
+            kty: "RSA".into(),
+            alg: Some("RS256".into()),
+            key_use: Some("sig".into()),
+            n: Some("AQAB".into()),
+            e: None,
+            x5c: None,
+        };
+        assert!(client.parse_jwk(&jwk).unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_jwk_x5c_takes_precedence_over_n_e_and_fails_loudly_on_bad_cert() {
+        // When x5c is present, the implementation uses it first. A garbage
+        // cert string therefore surfaces as KeyParseFailed, not silent
+        // fallthrough to the n/e branch (which would otherwise succeed).
+        let client = JwksClient::new("http://example.com".into(), 60).unwrap();
+        let jwk = JsonWebKey {
+            kid: Some("bad-x5c".into()),
+            kty: "RSA".into(),
+            alg: Some("RS256".into()),
+            key_use: Some("sig".into()),
+            n: Some(
+                "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw"
+                    .into(),
+            ),
+            e: Some("AQAB".into()),
+            x5c: Some(vec!["not-a-real-cert".into()]),
+        };
+        let err = client.parse_jwk(&jwk).unwrap_err();
+        assert!(matches!(err, JwksError::KeyParseFailed(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn jwks_error_display_messages_are_descriptive() {
+        // The error messages flow into operator logs; keep their shape stable.
+        assert_eq!(
+            JwksError::FetchFailed("HTTP 500".into()).to_string(),
+            "Failed to fetch JWKS: HTTP 500"
+        );
+        assert_eq!(
+            JwksError::ParseFailed("eof".into()).to_string(),
+            "Failed to parse JWKS: eof"
+        );
+        assert_eq!(
+            JwksError::KeyParseFailed("bad PEM".into()).to_string(),
+            "Failed to parse key: bad PEM"
+        );
+        assert_eq!(
+            JwksError::KeyNotFound("abc".into()).to_string(),
+            "Key not found: abc"
+        );
+        assert_eq!(
+            JwksError::NoKeysAvailable.to_string(),
+            "No keys available in JWKS"
+        );
+        assert_eq!(
+            JwksError::HttpClientError("tls".into()).to_string(),
+            "Failed to create HTTP client: tls"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_key_returns_cached_match_without_network() {
+        // Pre-populate the cache so the read path is exercised without
+        // touching the JWKS endpoint. Verifies the cached-key fast path.
+        let client = JwksClient::new("http://example.invalid".into(), 3600).unwrap();
+        let key = DecodingKey::from_secret(b"placeholder");
+        let mut keys = HashMap::new();
+        keys.insert("kid-1".to_string(), key);
+        *client.cache.write().await = Some(CachedJwks {
+            keys,
+            fetched_at: Instant::now(),
+        });
+
+        // Hit
+        let got = client.get_key("kid-1").await;
+        assert!(got.is_ok());
+    }
+
+    #[tokio::test]
+    async fn get_any_key_returns_first_cached_when_kid_absent() {
+        // Some providers issue tokens without a `kid` header; the fallback
+        // must return whichever key is cached.
+        let client = JwksClient::new("http://example.invalid".into(), 3600).unwrap();
+        let mut keys = HashMap::new();
+        keys.insert("only".into(), DecodingKey::from_secret(b"placeholder"));
+        *client.cache.write().await = Some(CachedJwks {
+            keys,
+            fetched_at: Instant::now(),
+        });
+
+        let got = client.get_any_key().await;
+        assert!(got.is_ok());
+    }
 }
