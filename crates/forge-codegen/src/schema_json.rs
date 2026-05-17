@@ -291,4 +291,153 @@ mod tests {
         let second = emit_string(&registry).unwrap();
         assert_eq!(first, second, "Schema output must be deterministic");
     }
+
+    #[test]
+    fn emit_rust_type_covers_every_numeric_and_temporal_variant() {
+        // Each branch in emit_rust_type is part of the public wire contract;
+        // a missing variant would emit `null` silently and break consumers.
+        assert_eq!(
+            emit_rust_type(&RustType::I64),
+            json!({"base": "number", "format": "i64"})
+        );
+        assert_eq!(
+            emit_rust_type(&RustType::F32),
+            json!({"base": "number", "format": "f32"})
+        );
+        assert_eq!(
+            emit_rust_type(&RustType::F64),
+            json!({"base": "number", "format": "f64"})
+        );
+        assert_eq!(
+            emit_rust_type(&RustType::Instant),
+            json!({"base": "string", "format": "datetime"})
+        );
+        assert_eq!(
+            emit_rust_type(&RustType::LocalDate),
+            json!({"base": "string", "format": "date"})
+        );
+        assert_eq!(
+            emit_rust_type(&RustType::LocalTime),
+            json!({"base": "string", "format": "time"})
+        );
+        assert_eq!(emit_rust_type(&RustType::Upload), json!("upload"));
+        assert_eq!(emit_rust_type(&RustType::Json), json!("any"));
+        assert_eq!(emit_rust_type(&RustType::Bytes), json!("bytes"));
+    }
+
+    #[test]
+    fn emit_rust_type_nests_option_and_vec_recursively() {
+        // Option<Vec<Custom>> exercises three combined transforms.
+        let ty = RustType::Option(Box::new(RustType::Vec(Box::new(RustType::Custom(
+            "Role".into(),
+        )))));
+        assert_eq!(
+            emit_rust_type(&ty),
+            json!({"nullable": {"array": {"$ref": "Role"}}})
+        );
+    }
+
+    #[test]
+    fn field_emits_nullable_flag_for_option_types() {
+        // FieldDef::new sets `nullable: true` whenever the rust_type is Option.
+        let field = FieldDef::new("nickname", RustType::Option(Box::new(RustType::String)));
+        let json = emit_field(&field);
+        assert_eq!(json["name"], "nickname");
+        assert_eq!(json["nullable"], true);
+        assert_eq!(json["type"], json!({"nullable": "string"}));
+    }
+
+    #[test]
+    fn field_emits_doc_only_when_present() {
+        let mut documented = FieldDef::new("email", RustType::String);
+        documented.doc = Some("Primary contact address".into());
+        let with_doc = emit_field(&documented);
+        assert_eq!(with_doc["doc"], "Primary contact address");
+
+        let plain = emit_field(&FieldDef::new("id", RustType::Uuid));
+        assert!(
+            plain.as_object().unwrap().get("doc").is_none(),
+            "absent doc must not emit the key"
+        );
+    }
+
+    #[test]
+    fn enum_emits_int_value_and_variant_doc_when_set() {
+        let mut enum_def = EnumDef::new("Status");
+        let mut active = EnumVariant::new("Active");
+        active.int_value = Some(1);
+        active.doc = Some("Currently in use".into());
+        enum_def.variants.push(active);
+        enum_def.variants.push(EnumVariant::new("Archived"));
+
+        let json = emit_enum(&enum_def);
+        assert_eq!(json["variants"][0]["int_value"], 1);
+        assert_eq!(json["variants"][0]["doc"], "Currently in use");
+
+        // The bare variant must NOT emit int_value or doc keys.
+        let second = json["variants"][1].as_object().unwrap();
+        assert!(second.get("int_value").is_none());
+        assert!(second.get("doc").is_none());
+    }
+
+    #[test]
+    fn enum_emits_top_level_doc_when_set() {
+        let mut enum_def = EnumDef::new("Role");
+        enum_def.doc = Some("User permission tier".into());
+        enum_def.variants.push(EnumVariant::new("Admin"));
+
+        let json = emit_enum(&enum_def);
+        assert_eq!(json["doc"], "User permission tier");
+    }
+
+    #[test]
+    fn table_emits_top_level_doc_when_set() {
+        let mut table = TableDef::new("users", "User");
+        table.doc = Some("Account records".into());
+        table.fields.push(FieldDef::new("id", RustType::Uuid));
+
+        let json = emit_table(&table);
+        assert_eq!(json["doc"], "Account records");
+        assert_eq!(json["kind"], "model");
+    }
+
+    #[test]
+    fn function_with_no_args_emits_empty_array() {
+        let func = FunctionDef::query("ping", RustType::Bool);
+        let json = emit_function(&func);
+        assert_eq!(json["kind"], "query");
+        assert_eq!(json["args"], json!([]));
+        assert_eq!(json["returns"], json!("boolean"));
+    }
+
+    #[test]
+    fn types_and_functions_sort_alphabetically_in_string_output() {
+        let registry = SchemaRegistry::new();
+        registry.register_function(FunctionDef::query("z_last", RustType::String));
+        registry.register_function(FunctionDef::query("a_first", RustType::String));
+
+        let mut zebra = TableDef::new("zebras", "Zebra");
+        zebra.fields.push(FieldDef::new("id", RustType::Uuid));
+        registry.register_table(zebra);
+
+        let mut apple = TableDef::new("apples", "Apple");
+        apple.fields.push(FieldDef::new("id", RustType::Uuid));
+        registry.register_table(apple);
+
+        let output = emit_string(&registry).unwrap();
+
+        let a_pos = output.find("\"a_first\"").expect("a_first present");
+        let z_pos = output.find("\"z_last\"").expect("z_last present");
+        assert!(
+            a_pos < z_pos,
+            "functions must be sorted: a_first at {a_pos}, z_last at {z_pos}"
+        );
+
+        let apple_pos = output.find("\"Apple\"").expect("Apple present");
+        let zebra_pos = output.find("\"Zebra\"").expect("Zebra present");
+        assert!(
+            apple_pos < zebra_pos,
+            "types must be sorted: Apple at {apple_pos}, Zebra at {zebra_pos}"
+        );
+    }
 }

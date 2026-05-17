@@ -488,6 +488,7 @@ fn newest_mtime_under(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
@@ -509,6 +510,44 @@ mod tests {
     }
 
     #[test]
+    fn parse_pg_host_port_handles_no_userinfo_and_no_db() {
+        // No userinfo segment, default port.
+        assert_eq!(
+            parse_pg_host_port("postgres://host"),
+            Some(("host".into(), 5432))
+        );
+        // No userinfo, explicit port, no db.
+        assert_eq!(
+            parse_pg_host_port("postgres://host:6432"),
+            Some(("host".into(), 6432))
+        );
+    }
+
+    #[test]
+    fn parse_pg_host_port_unparseable_port_falls_back_to_default() {
+        // `xyz` is not a valid port, so the parser falls back to 5432.
+        assert_eq!(
+            parse_pg_host_port("postgres://h:xyz/db"),
+            Some(("h".into(), 5432))
+        );
+    }
+
+    #[test]
+    fn parse_pg_host_port_rejects_empty_host() {
+        // Empty host after the `://` separator is meaningless — reject it.
+        assert_eq!(parse_pg_host_port("postgres:///db"), None);
+        assert_eq!(parse_pg_host_port("postgres://@:5432/db"), None);
+    }
+
+    #[test]
+    fn parse_pg_host_port_strips_query_string() {
+        assert_eq!(
+            parse_pg_host_port("postgres://h:5433?sslmode=require"),
+            Some(("h".into(), 5433))
+        );
+    }
+
+    #[test]
     fn version_meets_basic() {
         assert!(version_meets("1.92.0", "1.92"));
         assert!(version_meets("1.93.0", "1.92"));
@@ -516,5 +555,117 @@ mod tests {
         assert!(!version_meets("1.91.0", "1.92"));
         assert!(!version_meets("1.0", "1.92"));
         assert!(version_meets("1.92", "1.92"));
+    }
+
+    #[test]
+    fn version_meets_handles_trailing_garbage_after_full_match() {
+        // Dotted segments that don't parse are dropped, so any trailing tag
+        // attached to a later segment gets truncated. As long as enough
+        // numeric components match before the bad one, the comparison passes.
+        assert!(version_meets("1.92.0-nightly", "1.92"));
+        // But if the bad token replaces a required component, the missing
+        // component is treated as 0 and the comparison fails.
+        assert!(!version_meets("1.93-beta", "1.92"));
+    }
+
+    #[test]
+    fn version_meets_treats_empty_found_as_zero() {
+        // No digits at all -> treated as 0.0.0, which is less than 1.92.
+        assert!(!version_meets("", "1.92"));
+    }
+
+    #[test]
+    fn report_counters_increment_correctly() {
+        let mut r = Report::new();
+        assert_eq!(r.failures, 0);
+        assert_eq!(r.warnings, 0);
+
+        r.record(CheckStatus::Ok, "a", "ok detail", None);
+        r.record(CheckStatus::Warn, "b", "warn detail", Some("do x"));
+        r.record(CheckStatus::Skip, "c", "skip detail", None);
+        r.record(CheckStatus::Fail, "d", "fail detail", Some("do y"));
+        r.record(CheckStatus::Fail, "e", "another fail", None);
+
+        // Only Warn and Fail bump counters.
+        assert_eq!(r.warnings, 1);
+        assert_eq!(r.failures, 2);
+    }
+
+    #[test]
+    fn required_rust_version_reads_workspace_then_package_then_fallback() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        // 1. workspace.package.rust-version wins.
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            r#"[workspace.package]
+rust-version = "1.99"
+"#,
+        )
+        .unwrap();
+        assert_eq!(required_rust_version(Some(dir.path())), "1.99");
+
+        // 2. Falls back to package.rust-version when no workspace section.
+        let dir2 = tempdir().unwrap();
+        fs::write(
+            dir2.path().join("Cargo.toml"),
+            r#"[package]
+name = "thing"
+rust-version = "1.80"
+"#,
+        )
+        .unwrap();
+        assert_eq!(required_rust_version(Some(dir2.path())), "1.80");
+
+        // 3. Defaults to 1.92 when nothing is declared.
+        let dir3 = tempdir().unwrap();
+        fs::write(
+            dir3.path().join("Cargo.toml"),
+            r#"[package]
+name = "thing"
+"#,
+        )
+        .unwrap();
+        assert_eq!(required_rust_version(Some(dir3.path())), "1.92");
+    }
+
+    #[test]
+    fn newest_mtime_under_finds_filtered_files_recursively() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let sub = dir.path().join("inner");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(dir.path().join("keep.rs"), "fn a(){}").unwrap();
+        fs::write(sub.join("also.rs"), "fn b(){}").unwrap();
+        // Non-matching extension must be ignored.
+        fs::write(sub.join("README.md"), "ignored").unwrap();
+
+        let mtime = newest_mtime_under(dir.path(), |p| {
+            p.extension().and_then(|s| s.to_str()) == Some("rs")
+        });
+        assert!(mtime.is_some(), "should find at least one .rs file");
+    }
+
+    #[test]
+    fn newest_mtime_under_returns_none_when_nothing_matches() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("only.txt"), "x").unwrap();
+        let mtime = newest_mtime_under(dir.path(), |p| {
+            p.extension().and_then(|s| s.to_str()) == Some("rs")
+        });
+        assert!(mtime.is_none());
+    }
+
+    #[test]
+    fn newest_mtime_under_handles_missing_path() {
+        let mtime = newest_mtime_under(Path::new("/definitely/not/a/real/path"), |_| true);
+        assert!(mtime.is_none());
     }
 }

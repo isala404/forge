@@ -916,4 +916,157 @@ mod tests {
         assert_eq!(state.status, StepStatus::Completed);
         assert!(state.completed_at.is_some());
     }
+
+    fn lazy_ctx() -> WorkflowContext {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://localhost/nonexistent")
+            .expect("Failed to create mock pool");
+        WorkflowContext::new(
+            Uuid::new_v4(),
+            "test".to_string(),
+            pool,
+            CircuitBreakerClient::with_defaults(reqwest::Client::new()),
+        )
+    }
+
+    #[test]
+    fn step_state_fail_records_error_and_completion() {
+        let mut state = StepState::new("step");
+        state.start();
+        state.fail("boom");
+        assert_eq!(state.status, StepStatus::Failed);
+        assert_eq!(state.error.as_deref(), Some("boom"));
+        assert!(state.completed_at.is_some());
+    }
+
+    #[test]
+    fn step_state_compensate_only_flips_status() {
+        let mut state = StepState::new("step");
+        state.complete(serde_json::json!({"ok": true}));
+        let completed_at = state.completed_at;
+        state.compensate();
+        assert_eq!(state.status, StepStatus::Compensated);
+        // compensate() must not erase or overwrite the completion timestamp.
+        assert_eq!(state.completed_at, completed_at);
+    }
+
+    #[tokio::test]
+    async fn save_state_and_load_state_round_trip() {
+        let ctx = lazy_ctx();
+        ctx.save_state("count", 42_u32).unwrap();
+        let v: Option<u32> = ctx.load_state("count").unwrap();
+        assert_eq!(v, Some(42));
+    }
+
+    #[tokio::test]
+    async fn load_state_returns_none_for_unknown_key() {
+        let ctx = lazy_ctx();
+        let v: Option<String> = ctx.load_state("missing").unwrap();
+        assert!(v.is_none());
+    }
+
+    #[tokio::test]
+    async fn load_state_returns_deserialization_error_on_type_mismatch() {
+        let ctx = lazy_ctx();
+        ctx.save_state("k", "a string").unwrap();
+        let err = ctx.load_state::<u32>("k").unwrap_err();
+        assert!(matches!(err, ForgeError::Deserialization(_)));
+    }
+
+    #[tokio::test]
+    async fn take_saved_state_returns_snapshot_of_all_entries() {
+        let ctx = lazy_ctx();
+        ctx.save_state("a", 1_u32).unwrap();
+        ctx.save_state("b", "two").unwrap();
+        let snap = ctx.take_saved_state();
+        assert_eq!(snap.len(), 2);
+        assert_eq!(snap.get("a"), Some(&serde_json::json!(1)));
+        assert_eq!(snap.get("b"), Some(&serde_json::json!("two")));
+    }
+
+    #[tokio::test]
+    async fn tenant_id_defaults_to_none_and_with_tenant_sets_it() {
+        let ctx = lazy_ctx();
+        assert!(ctx.tenant_id().is_none());
+        let tenant = Uuid::new_v4();
+        let ctx = ctx.with_tenant(tenant);
+        assert_eq!(ctx.tenant_id(), Some(tenant));
+    }
+
+    #[tokio::test]
+    async fn is_resumed_defaults_to_false() {
+        let ctx = lazy_ctx();
+        assert!(!ctx.is_resumed());
+    }
+
+    #[tokio::test]
+    async fn is_step_completed_and_started_return_false_for_unknown_steps() {
+        let ctx = lazy_ctx();
+        assert!(!ctx.is_step_completed("nope"));
+        assert!(!ctx.is_step_started("nope"));
+    }
+
+    #[tokio::test]
+    async fn get_step_result_returns_none_for_unknown_step() {
+        let ctx = lazy_ctx();
+        let v: Option<serde_json::Value> = ctx.get_step_result("nope");
+        assert!(v.is_none());
+    }
+
+    #[tokio::test]
+    async fn with_step_states_rebuilds_completed_steps_from_status() {
+        let ctx = lazy_ctx();
+        let mut s = HashMap::new();
+        let mut completed = StepState::new("done");
+        completed.complete(serde_json::json!({"v": 1}));
+        s.insert("done".to_string(), completed);
+        let pending = StepState::new("pending");
+        s.insert("pending".to_string(), pending);
+
+        let ctx = ctx.with_step_states(s);
+        assert!(ctx.is_step_completed("done"));
+        assert!(!ctx.is_step_completed("pending"));
+
+        let reversed = ctx.completed_steps_reversed();
+        assert_eq!(reversed, vec!["done".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn completed_steps_reversed_is_empty_initially() {
+        let ctx = lazy_ctx();
+        assert!(ctx.completed_steps_reversed().is_empty());
+    }
+
+    #[tokio::test]
+    async fn elapsed_is_non_negative() {
+        let ctx = lazy_ctx();
+        let e = ctx.elapsed();
+        // started_at was set at construction, so elapsed must be >= 0.
+        assert!(e.num_milliseconds() >= 0);
+    }
+
+    #[tokio::test]
+    async fn register_and_has_compensation_round_trip() {
+        let ctx = lazy_ctx();
+        assert!(!ctx.has_compensation("step1"));
+        let handler: CompensationHandler =
+            Arc::new(|_v| Box::pin(async { Ok::<(), ForgeError>(()) }));
+        ctx.register_compensation("step1", handler);
+        assert!(ctx.has_compensation("step1"));
+        assert!(ctx.get_compensation_handler("step1").is_some());
+        assert!(ctx.get_compensation_handler("step2").is_none());
+    }
+
+    #[tokio::test]
+    async fn all_step_states_returns_independent_clone() {
+        let ctx = lazy_ctx();
+        let mut s = HashMap::new();
+        s.insert("a".to_string(), StepState::new("a"));
+        let ctx = ctx.with_step_states(s);
+
+        let snap = ctx.all_step_states();
+        assert_eq!(snap.len(), 1);
+        assert!(snap.contains_key("a"));
+    }
 }

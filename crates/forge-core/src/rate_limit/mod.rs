@@ -217,7 +217,7 @@ impl RateLimitHeaders {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -286,5 +286,150 @@ mod tests {
         assert!(!result.allowed);
         assert!(result.retry_after.is_some());
         assert!(result.to_error(100).is_some());
+    }
+
+    #[test]
+    fn rate_limit_key_default_is_user() {
+        // Defaulting to User means handlers without an explicit key are scoped
+        // per-principal — flipping this to Global would silently make limits
+        // shared across all callers.
+        assert_eq!(RateLimitKey::default(), RateLimitKey::User);
+    }
+
+    #[test]
+    fn rate_limit_key_as_str_covers_all_standard_variants() {
+        assert_eq!(RateLimitKey::Tenant.as_str(), "tenant");
+        assert_eq!(RateLimitKey::UserAction.as_str(), "user_action");
+    }
+
+    #[test]
+    fn rate_limit_key_custom_name_is_none_for_standard_variants() {
+        for variant in [
+            RateLimitKey::User,
+            RateLimitKey::Ip,
+            RateLimitKey::Tenant,
+            RateLimitKey::UserAction,
+            RateLimitKey::Global,
+        ] {
+            assert_eq!(variant.custom_name(), None);
+        }
+    }
+
+    #[test]
+    fn rate_limit_key_parse_covers_all_named_variants() {
+        assert_eq!(
+            "tenant".parse::<RateLimitKey>().unwrap(),
+            RateLimitKey::Tenant
+        );
+        assert_eq!(
+            "user_action".parse::<RateLimitKey>().unwrap(),
+            RateLimitKey::UserAction
+        );
+        assert_eq!(
+            "global".parse::<RateLimitKey>().unwrap(),
+            RateLimitKey::Global
+        );
+    }
+
+    #[test]
+    fn rate_limit_key_parse_custom_extracts_inner_name() {
+        let parsed = "custom:org_id".parse::<RateLimitKey>().unwrap();
+        assert_eq!(parsed, RateLimitKey::Custom("org_id".to_string()));
+        assert_eq!(parsed.custom_name(), Some("org_id"));
+
+        // Empty inner name is still accepted at parse time; the backend decides
+        // what to do with it.
+        let empty = "custom:".parse::<RateLimitKey>().unwrap();
+        assert_eq!(empty, RateLimitKey::Custom(String::new()));
+    }
+
+    #[test]
+    fn rate_limit_key_parse_unknown_returns_descriptive_error() {
+        let err = "bogus".parse::<RateLimitKey>().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("bogus"), "error should echo input: {msg}");
+        assert!(
+            msg.contains("user, ip, tenant, user_action, global, custom:<name>"),
+            "error should list valid keys: {msg}"
+        );
+    }
+
+    #[test]
+    fn rate_limit_config_default_matches_documented_values() {
+        let cfg = RateLimitConfig::default();
+        assert_eq!(cfg.requests, 100);
+        assert_eq!(cfg.per, Duration::from_secs(60));
+        assert_eq!(cfg.key, RateLimitKey::User);
+    }
+
+    #[test]
+    fn rate_limit_config_with_key_overrides_default() {
+        let cfg = RateLimitConfig::new(10, Duration::from_secs(1)).with_key(RateLimitKey::Ip);
+        assert_eq!(cfg.key, RateLimitKey::Ip);
+        assert_eq!(cfg.requests, 10);
+        assert_eq!(cfg.per, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn rate_limit_config_refill_rate_handles_burst_window() {
+        // 60 requests/30s = 2 tokens/sec
+        let cfg = RateLimitConfig::new(60, Duration::from_secs(30));
+        assert!((cfg.refill_rate() - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn to_error_carries_retry_after_and_limit_metadata() {
+        let result = RateLimitResult::denied(3, Utc::now(), Duration::from_secs(42));
+        let err = result.to_error(100).expect("denied result yields error");
+        match err {
+            ForgeError::RateLimitExceeded {
+                retry_after,
+                limit,
+                remaining,
+            } => {
+                assert_eq!(retry_after, Duration::from_secs(42));
+                assert_eq!(limit, 100);
+                assert_eq!(remaining, 3);
+            }
+            other => panic!("expected RateLimitExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_error_falls_back_to_1s_when_retry_after_missing() {
+        // Construct a denied-shaped result with no retry_after to confirm the
+        // documented 1-second fallback in to_error.
+        let result = RateLimitResult {
+            allowed: false,
+            remaining: 0,
+            reset_at: Utc::now(),
+            retry_after: None,
+        };
+        match result.to_error(5).expect("denied yields error") {
+            ForgeError::RateLimitExceeded { retry_after, .. } => {
+                assert_eq!(retry_after, Duration::from_secs(1));
+            }
+            other => panic!("expected RateLimitExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limit_headers_from_allowed_result_omits_retry_after() {
+        let reset = Utc::now();
+        let result = RateLimitResult::allowed(7, reset);
+        let headers = RateLimitHeaders::from_result(&result, 10);
+        assert_eq!(headers.limit, 10);
+        assert_eq!(headers.remaining, 7);
+        assert_eq!(headers.reset, reset.timestamp());
+        assert_eq!(headers.retry_after, None);
+    }
+
+    #[test]
+    fn rate_limit_headers_from_denied_result_carries_retry_after_seconds() {
+        let reset = Utc::now();
+        let result = RateLimitResult::denied(0, reset, Duration::from_secs(15));
+        let headers = RateLimitHeaders::from_result(&result, 10);
+        assert_eq!(headers.retry_after, Some(15));
+        assert_eq!(headers.remaining, 0);
     }
 }

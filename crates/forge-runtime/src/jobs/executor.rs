@@ -366,4 +366,33 @@ mod tests {
         assert!(!result.is_success());
         assert!(!result.should_retry());
     }
+
+    #[test]
+    fn timed_out_not_retryable_does_not_request_retry() {
+        // The TimedOut branch in should_retry returns its own `retryable` flag —
+        // make sure the false case isn't lost when the worker passes through.
+        let result = ExecutionResult::TimedOut { retryable: false };
+        assert!(!result.should_retry());
+        assert!(!result.is_success());
+    }
+
+    #[test]
+    fn heartbeat_interval_is_30_seconds() {
+        // The stale-reclaim window in JobQueue assumes heartbeats land well
+        // under it; if this jumps, the cleanup deadline in queue.rs must move
+        // in lockstep.
+        assert_eq!(JobExecutor::HEARTBEAT_INTERVAL, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn execution_result_debug_includes_error_payload() {
+        // Workers log ExecutionResult via Debug on the unhappy path; the error
+        // message must be present so triage doesn't need to re-derive it.
+        let result = ExecutionResult::Failed {
+            error: "connection refused".to_string(),
+            retryable: false,
+        };
+        let rendered = format!("{result:?}");
+        assert!(rendered.contains("connection refused"), "got: {rendered}");
+    }
 }

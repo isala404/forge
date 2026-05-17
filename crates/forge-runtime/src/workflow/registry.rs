@@ -311,7 +311,7 @@ impl Clone for WorkflowRegistry {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
     use super::*;
     use forge_core::workflow::WorkflowDefStatus;

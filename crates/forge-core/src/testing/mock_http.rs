@@ -475,4 +475,178 @@ mod tests {
 
         assert_eq!(mock.mocks.read().unwrap().len(), 2);
     }
+
+    fn req(method: &str, url: &str, path: &str) -> MockRequest {
+        MockRequest {
+            method: method.to_string(),
+            path: path.to_string(),
+            url: url.to_string(),
+            headers: HashMap::new(),
+            body: serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn response_status_helpers_use_documented_codes() {
+        assert_eq!(MockResponse::internal_error("boom").status, 500);
+        assert_eq!(MockResponse::not_found("nope").status, 404);
+        assert_eq!(MockResponse::unauthorized("nope").status, 401);
+        assert_eq!(MockResponse::ok().status, 200);
+
+        // ok() returns an empty JSON object — handlers that key off body shape
+        // (e.g., serde to () or empty struct) rely on this.
+        assert_eq!(MockResponse::ok().body, serde_json::json!({}));
+    }
+
+    #[test]
+    fn response_json_sets_content_type_header() {
+        let r = MockResponse::json(serde_json::json!({"ok": true}));
+        assert_eq!(
+            r.headers.get("content-type"),
+            Some(&"application/json".to_string())
+        );
+    }
+
+    #[test]
+    fn pattern_matcher_handles_leading_and_double_wildcards() {
+        let m = MockHttp::new();
+        // Leading wildcard (pattern_parts[0] is empty).
+        assert!(m.matches_pattern("https://api.example.com/v1/users", "*/users"));
+        assert!(!m.matches_pattern("https://api.example.com/v1/posts", "*/users"));
+
+        // Bare `*` matches anything (both pattern parts are empty strings).
+        assert!(m.matches_pattern("anything", "*"));
+        assert!(m.matches_pattern("", "*"));
+    }
+
+    #[test]
+    fn pattern_matcher_rejects_exact_pattern_with_extra_suffix() {
+        let m = MockHttp::new();
+        assert!(!m.matches_pattern(
+            "https://api.example.com/users/extra",
+            "https://api.example.com/users"
+        ));
+    }
+
+    #[tokio::test]
+    async fn execute_falls_back_to_500_when_no_mock_matches() {
+        let mock = MockHttp::new();
+        let r = mock.execute(req("GET", "https://nowhere/", "/")).await;
+        assert_eq!(r.status, 500);
+        assert!(
+            r.body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("No mock found"),
+            "fallback should explain the failure, got {:?}",
+            r.body
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_records_request_even_when_no_mock_matches() {
+        // The recording happens before the lookup so failed-match calls still
+        // show up in requests() — important for diagnosing "why didn't my mock fire".
+        let mock = MockHttp::new();
+        let _ = mock
+            .execute(req("DELETE", "https://nowhere/x", "/x"))
+            .await;
+        let recorded = mock.requests();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].method, "DELETE");
+        assert_eq!(recorded[0].url, "https://nowhere/x");
+    }
+
+    #[tokio::test]
+    async fn execute_matches_against_path_when_url_misses() {
+        // Pattern only matches the path, not the full URL.
+        let mock = MockHttp::new();
+        mock.add_mock_sync("/health", |_| MockResponse::ok());
+        let r = mock
+            .execute(req("GET", "https://internal.svc:8080/health", "/health"))
+            .await;
+        assert_eq!(r.status, 200);
+    }
+
+    #[tokio::test]
+    async fn execute_uses_first_registered_mock_on_overlapping_patterns() {
+        let mock = MockHttp::new();
+        mock.add_mock_sync("https://api.example.com/*", |_| {
+            MockResponse::json(serde_json::json!({"hit": "first"}))
+        });
+        mock.add_mock_sync("https://api.example.com/users", |_| {
+            MockResponse::json(serde_json::json!({"hit": "second"}))
+        });
+
+        let r = mock
+            .execute(req(
+                "GET",
+                "https://api.example.com/users",
+                "/users",
+            ))
+            .await;
+        assert_eq!(r.body["hit"], "first");
+    }
+
+    #[tokio::test]
+    async fn requests_to_filters_by_pattern() {
+        let mock = MockHttp::new();
+        mock.add_mock_sync("*", |_| MockResponse::ok());
+
+        let _ = mock
+            .execute(req("GET", "https://api.example.com/a", "/a"))
+            .await;
+        let _ = mock
+            .execute(req("GET", "https://other.com/b", "/b"))
+            .await;
+        let _ = mock
+            .execute(req("GET", "https://api.example.com/c", "/c"))
+            .await;
+
+        let api_calls = mock.requests_to("https://api.example.com/*");
+        assert_eq!(api_calls.len(), 2);
+        assert!(api_calls.iter().all(|r| r.url.contains("api.example.com")));
+    }
+
+    #[tokio::test]
+    async fn clear_requests_and_clear_mocks_independently_reset_state() {
+        let mock = MockHttp::new();
+        mock.add_mock_sync("*", |_| MockResponse::ok());
+        let _ = mock.execute(req("GET", "https://x/", "/")).await;
+        assert_eq!(mock.requests().len(), 1);
+
+        mock.clear_requests();
+        assert!(mock.requests().is_empty());
+        // Mocks survive a requests-only clear; the next call should still match.
+        let r = mock.execute(req("GET", "https://x/", "/")).await;
+        assert_eq!(r.status, 200);
+
+        mock.clear_mocks();
+        let r = mock.execute(req("GET", "https://x/", "/")).await;
+        assert_eq!(r.status, 500, "after clear_mocks, fallback should hit");
+    }
+
+    #[tokio::test]
+    async fn assert_called_with_body_runs_predicate_against_recorded_body() {
+        let mock = MockHttp::new();
+        mock.add_mock_sync("*", |_| MockResponse::ok());
+
+        let mut request = req("POST", "https://api/upload", "/upload");
+        request.body = serde_json::json!({"size": 42});
+        let _ = mock.execute(request).await;
+
+        // Predicate matches — should not panic.
+        mock.assert_called_with_body("https://api/*", |body| body["size"] == 42);
+    }
+
+    #[test]
+    fn defaults_match_new() {
+        // Default impls are wrappers around new(); just exercise them so the
+        // Default path doesn't silently rot.
+        let m1 = MockHttp::default();
+        assert!(m1.requests().is_empty());
+        let b1 = MockHttpBuilder::default();
+        let m2 = b1.build();
+        assert!(m2.requests().is_empty());
+    }
 }

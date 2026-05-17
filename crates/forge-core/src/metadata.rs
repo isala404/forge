@@ -433,4 +433,160 @@ mod tests {
         assert_eq!(meta.kind, HandlerKind::Daemon);
         assert_eq!(meta.leader_elected, Some(false));
     }
+
+    #[test]
+    fn from_cron_info_carries_schedule_and_timezone() {
+        let schedule = crate::cron::CronSchedule::new("0 0 * * *").expect("valid cron");
+        let info = crate::cron::CronInfo {
+            name: "nightly_cleanup",
+            schedule,
+            timezone: "America/Los_Angeles",
+            ..crate::cron::CronInfo::default()
+        };
+        let meta = HandlerMetadata::from(&info);
+        assert_eq!(meta.kind, HandlerKind::Cron);
+        assert_eq!(meta.name, "nightly_cleanup");
+        assert_eq!(meta.cron_timezone.as_deref(), Some("America/Los_Angeles"));
+        assert!(
+            meta.cron_schedule
+                .as_deref()
+                .is_some_and(|s| s.contains("0 0 * * *"))
+        );
+        // Default cron timeout is 1h.
+        assert_eq!(meta.timeout, Some(Duration::from_secs(3600)));
+        // Cron is internal-only — never public, no rate limits.
+        assert!(!meta.is_public);
+        assert!(meta.rate_limit_requests.is_none());
+        // Cron carries no DB/HTTP table info.
+        assert!(meta.table_dependencies.is_empty());
+        assert!(meta.changed_columns.is_empty());
+    }
+
+    #[test]
+    fn from_workflow_info_carries_version_and_signature() {
+        let info = crate::workflow::WorkflowInfo {
+            name: "user_onboarding",
+            version: "2026-05",
+            signature: "abc123",
+            is_public: true,
+            required_role: Some("admin"),
+            ..crate::workflow::WorkflowInfo::default()
+        };
+        let meta = HandlerMetadata::from(&info);
+        assert_eq!(meta.kind, HandlerKind::Workflow);
+        assert_eq!(meta.name, "user_onboarding");
+        assert_eq!(meta.workflow_version.as_deref(), Some("2026-05"));
+        assert_eq!(meta.workflow_signature.as_deref(), Some("abc123"));
+        assert!(meta.is_public);
+        assert_eq!(meta.required_role.as_deref(), Some("admin"));
+        // Default workflow timeout is 24h.
+        assert_eq!(meta.timeout, Some(Duration::from_secs(86400)));
+    }
+
+    #[test]
+    fn from_webhook_info_always_public_and_carries_path() {
+        let info = crate::webhook::WebhookInfo {
+            name: "stripe",
+            description: Some("Stripe webhooks"),
+            path: "/webhooks/stripe",
+            ..crate::webhook::WebhookInfo::default()
+        };
+        let meta = HandlerMetadata::from(&info);
+        assert_eq!(meta.kind, HandlerKind::Webhook);
+        assert_eq!(meta.name, "stripe");
+        assert_eq!(meta.webhook_path.as_deref(), Some("/webhooks/stripe"));
+        // Webhooks always bypass auth by design.
+        assert!(meta.is_public);
+        assert!(meta.required_role.is_none());
+        assert_eq!(meta.description.as_deref(), Some("Stripe webhooks"));
+        // Default webhook timeout is 30s.
+        assert_eq!(meta.timeout, Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn from_mcp_tool_info_carries_rate_limit_and_role() {
+        let info = crate::mcp::McpToolInfo {
+            name: "lookup_user",
+            title: Some("Lookup User"),
+            description: Some("Look up a user by id"),
+            required_role: Some("staff"),
+            is_public: false,
+            timeout: Some(Duration::from_secs(45)),
+            rate_limit_requests: Some(60),
+            rate_limit_per_secs: Some(60),
+            rate_limit_key: Some("user"),
+            annotations: crate::mcp::McpToolAnnotations::default(),
+            icons: &[],
+        };
+        let meta = HandlerMetadata::from(&info);
+        assert_eq!(meta.kind, HandlerKind::McpTool);
+        assert_eq!(meta.name, "lookup_user");
+        assert_eq!(meta.description.as_deref(), Some("Look up a user by id"));
+        assert_eq!(meta.required_role.as_deref(), Some("staff"));
+        assert!(!meta.is_public);
+        assert_eq!(meta.timeout, Some(Duration::from_secs(45)));
+        assert_eq!(meta.rate_limit_requests, Some(60));
+        assert_eq!(meta.rate_limit_per_secs, Some(60));
+        assert_eq!(meta.rate_limit_key.as_deref(), Some("user"));
+        // MCP tools don't participate in DB schema introspection.
+        assert!(meta.table_dependencies.is_empty());
+        assert!(meta.selected_columns.is_empty());
+    }
+
+    #[test]
+    fn handler_kind_is_distinct_per_variant() {
+        // Verify enum equality/inequality so a stray future rename doesn't silently
+        // alias variants.
+        let kinds = [
+            HandlerKind::Query,
+            HandlerKind::Mutation,
+            HandlerKind::Job,
+            HandlerKind::Cron,
+            HandlerKind::Workflow,
+            HandlerKind::Daemon,
+            HandlerKind::Webhook,
+            HandlerKind::McpTool,
+        ];
+        for (i, a) in kinds.iter().enumerate() {
+            for (j, b) in kinds.iter().enumerate() {
+                if i == j {
+                    assert_eq!(a, b);
+                } else {
+                    assert_ne!(a, b);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn from_function_info_webhook_kind_maps_to_webhook() {
+        // FunctionKind::Webhook is mapped through FunctionInfo::From → HandlerKind::Webhook
+        // (HandlerMetadata's separate `From<&WebhookInfo>` covers the macro-emitted path).
+        let info = FunctionInfo {
+            name: "incoming",
+            description: None,
+            kind: FunctionKind::Webhook,
+            required_role: None,
+            is_public: true,
+            cache_ttl: None,
+            timeout: None,
+            http_timeout: None,
+            rate_limit_requests: None,
+            rate_limit_per_secs: None,
+            rate_limit_key: None,
+            log_level: None,
+            table_dependencies: &[],
+            selected_columns: &[],
+            changed_columns: &[],
+            transactional: false,
+            consistent: false,
+            max_upload_size_bytes: None,
+        };
+        let meta = HandlerMetadata::from(&info);
+        assert_eq!(meta.kind, HandlerKind::Webhook);
+        // Note: webhook_path is None here because we converted via FunctionInfo,
+        // not WebhookInfo. That's the contract: only the WebhookInfo From-impl
+        // populates webhook_path.
+        assert!(meta.webhook_path.is_none());
+    }
 }

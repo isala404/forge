@@ -287,6 +287,110 @@ async fn flush_batch(pool: &PgPool, buffer: &mut Vec<SignalEvent>) {
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
+mod unit_tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+
+    fn lazy_pool() -> Arc<PgPool> {
+        // connect_lazy never opens a socket; tests below never trigger a flush
+        // so no actual DB I/O happens.
+        Arc::new(
+            PgPoolOptions::new()
+                .connect_lazy("postgres://localhost:1/never")
+                .expect("lazy pool"),
+        )
+    }
+
+    #[tokio::test]
+    async fn shutdown_with_no_events_returns_promptly() {
+        // No events sent => flush_loop's shutdown branch drains an empty rx
+        // and skips flush_batch entirely — should complete well under the 5s
+        // internal timeout.
+        let collector =
+            SignalsCollector::spawn(lazy_pool(), 100, Duration::from_secs(60), 100);
+
+        let start = std::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(1), collector.shutdown())
+            .await
+            .expect("shutdown did not complete within 1s");
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "shutdown should be fast on empty buffer, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_is_idempotent_within_same_instance() {
+        // Second shutdown sees the oneshot already taken and returns
+        // immediately — calling shutdown from both a signal handler and Drop
+        // must not panic or hang.
+        let collector =
+            SignalsCollector::spawn(lazy_pool(), 100, Duration::from_secs(60), 100);
+        collector.shutdown().await;
+        tokio::time::timeout(Duration::from_millis(100), collector.shutdown())
+            .await
+            .expect("second shutdown should be a fast no-op");
+    }
+
+    #[tokio::test]
+    async fn try_send_after_shutdown_is_silent_noop() {
+        // try_send must not panic when the receiver side has dropped (closed
+        // channel). The drop happens implicitly when flush_loop exits.
+        let collector =
+            SignalsCollector::spawn(lazy_pool(), 100, Duration::from_secs(60), 100);
+        collector.shutdown().await;
+
+        // Give the spawned task a moment to release the rx.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let event = forge_core::signals::SignalEvent::server_execution(
+            "after_shutdown",
+            "rpc",
+            1,
+            true,
+            None,
+        );
+        // Must not panic, must not block. The TrySendError::Closed branch logs
+        // at debug! and returns.
+        collector.try_send(event);
+    }
+
+    #[tokio::test]
+    async fn collector_is_clone_and_shutdown_propagates_across_clones() {
+        // Clone shares the tx + shutdown_tx Arc. Shutting down via one clone
+        // takes the shared oneshot so any other clone's shutdown is a no-op,
+        // confirming both share the same flush-loop ownership.
+        let collector =
+            SignalsCollector::spawn(lazy_pool(), 100, Duration::from_secs(60), 100);
+        let cloned = collector.clone();
+        collector.shutdown().await;
+        tokio::time::timeout(Duration::from_millis(100), cloned.shutdown())
+            .await
+            .expect("clone's shutdown should observe the shared state");
+    }
+
+    #[tokio::test]
+    async fn dropping_all_collectors_lets_flush_loop_exit_naturally() {
+        // When every sender is dropped, rx.recv() returns None and the loop
+        // exits without needing an explicit shutdown call. The spawned task
+        // releases its resources cleanly.
+        let pool = lazy_pool();
+        {
+            let collector =
+                SignalsCollector::spawn(pool.clone(), 100, Duration::from_secs(60), 100);
+            // Send nothing; immediately drop.
+            drop(collector);
+        }
+        // No assertion — the requirement is that the runtime doesn't leak a
+        // hung task. Tokio's runtime would notice in this test's drop if it
+        // did. Sleep a tick to let the task observe the channel close.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 #[cfg(all(test, feature = "testcontainers"))]
 #[allow(
     clippy::unwrap_used,

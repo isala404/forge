@@ -248,4 +248,105 @@ mod tests {
         assert_eq!(ctx.header("content-type"), Some("application/json"));
         assert_eq!(ctx.header("CONTENT-TYPE"), Some("application/json"));
     }
+
+    #[test]
+    fn default_builder_auto_generates_request_id_and_no_idempotency_key() {
+        let ctx = TestWebhookContext::builder("anon").build();
+        // request_id must be a parseable UUID when not overridden.
+        assert!(Uuid::parse_str(&ctx.request_id).is_ok());
+        assert!(ctx.idempotency_key.is_none());
+        assert!(ctx.headers().is_empty());
+        assert!(ctx.db().is_none());
+    }
+
+    #[test]
+    fn with_request_id_overrides_generated_value() {
+        let ctx = TestWebhookContext::builder("a")
+            .with_request_id("req-42")
+            .build();
+        assert_eq!(ctx.request_id, "req-42");
+    }
+
+    #[test]
+    fn with_headers_bulk_lowercases_all_keys() {
+        let mut input = HashMap::new();
+        input.insert("X-One".to_string(), "1".to_string());
+        input.insert("X-TWO".to_string(), "2".to_string());
+        let ctx = TestWebhookContext::builder("a").with_headers(input).build();
+        assert_eq!(ctx.header("x-one"), Some("1"));
+        assert_eq!(ctx.header("x-two"), Some("2"));
+        // Stored map should only contain lowercased keys.
+        for k in ctx.headers().keys() {
+            assert_eq!(k, &k.to_lowercase(), "header key not lowercased: {k}");
+        }
+    }
+
+    #[test]
+    fn header_returns_none_for_missing() {
+        let ctx = TestWebhookContext::builder("a").build();
+        assert!(ctx.header("absent").is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatch_job_records_each_call_in_order() {
+        let ctx = TestWebhookContext::builder("h").build();
+        ctx.dispatch_job("a", serde_json::json!({"n": 1}))
+            .await
+            .unwrap();
+        ctx.dispatch_job("a", serde_json::json!({"n": 2}))
+            .await
+            .unwrap();
+        ctx.dispatch_job("b", serde_json::json!({})).await.unwrap();
+        ctx.job_dispatch().assert_dispatch_count("a", 2);
+        ctx.job_dispatch().assert_dispatch_count("b", 1);
+        ctx.job_dispatch().assert_not_dispatched("never");
+    }
+
+    #[tokio::test]
+    async fn with_job_dispatch_shares_state_across_clones() {
+        let shared = Arc::new(MockJobDispatch::new());
+        let ctx = TestWebhookContext::builder("h")
+            .with_job_dispatch(shared.clone())
+            .build();
+        ctx.dispatch_job("shared", serde_json::json!({}))
+            .await
+            .unwrap();
+        // Caller's handle sees the dispatch even though the call went through ctx.
+        shared.assert_dispatched("shared");
+    }
+
+    #[test]
+    fn with_env_and_with_envs_compose() {
+        let mut bulk = HashMap::new();
+        bulk.insert("B1".to_string(), "vb1".to_string());
+        let ctx = TestWebhookContext::builder("h")
+            .with_env("A", "va")
+            .with_envs(bulk)
+            .build();
+        // EnvAccess wires the MockEnvProvider correctly.
+        assert_eq!(ctx.env("A"), Some("va".to_string()));
+        assert_eq!(ctx.env("B1"), Some("vb1".to_string()));
+        assert!(ctx.env("UNSET").is_none());
+        // The mock records accesses, so we can verify reads landed on the same provider.
+        assert!(ctx.env_mock().was_accessed("A"));
+    }
+
+    #[tokio::test]
+    async fn mock_http_json_returns_serialized_body_when_executed() {
+        let ctx = TestWebhookContext::builder("h")
+            .mock_http_json("https://example.test/echo", serde_json::json!({"ok": true}))
+            .build();
+
+        let req = MockRequest {
+            method: "GET".to_string(),
+            path: "/echo".to_string(),
+            url: "https://example.test/echo".to_string(),
+            headers: HashMap::new(),
+            body: serde_json::Value::Null,
+        };
+        let resp = ctx.http().execute(req).await;
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, serde_json::json!({"ok": true}));
+        ctx.http().assert_called("https://example.test/echo");
+    }
 }

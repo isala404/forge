@@ -277,4 +277,72 @@ mod tests {
         assert!(r1.recv().await.is_ok());
         assert!(r2.recv().await.is_ok());
     }
+
+    #[test]
+    fn shutdown_config_clone_preserves_custom_values() {
+        let original = ShutdownConfig {
+            drain_timeout: Duration::from_millis(250),
+            poll_interval: Duration::from_millis(5),
+        };
+        let cloned = original.clone();
+        assert_eq!(cloned.drain_timeout, Duration::from_millis(250));
+        assert_eq!(cloned.poll_interval, Duration::from_millis(5));
+    }
+
+    #[tokio::test]
+    async fn late_subscribers_miss_messages_sent_before_subscription() {
+        // Broadcast channel only delivers messages sent AFTER a receiver
+        // subscribes — handlers that subscribe inside a request handler may
+        // miss the shutdown signal if they raced the shutdown call.
+        let sd = make_shutdown();
+        // Hold an early receiver so send() has a subscriber and succeeds; the
+        // late receiver still must not see this historical broadcast.
+        let _early = sd.subscribe();
+        sd.shutdown_tx.send(()).unwrap();
+
+        let mut late = sd.subscribe();
+        let recv_result =
+            tokio::time::timeout(Duration::from_millis(20), late.recv()).await;
+        assert!(
+            recv_result.is_err(),
+            "late subscriber should not receive historical broadcast: {recv_result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn guard_admitted_before_shutdown_still_decrements_after_flag_set() {
+        // Models a request that began serving before shutdown was requested;
+        // when it finishes, the counter must come back to zero so the drain
+        // loop can exit.
+        let sd = make_shutdown();
+        let guard = InFlightGuard::try_new(sd.clone()).expect("admit");
+        assert_eq!(sd.in_flight_count(), 1);
+
+        sd.shutdown_requested.store(true, Ordering::SeqCst);
+        assert!(!sd.should_accept_work(), "no new work after flag set");
+
+        drop(guard);
+        assert_eq!(sd.in_flight_count(), 0, "RAII drop must decrement even mid-shutdown");
+    }
+
+    #[tokio::test]
+    async fn concurrent_increments_and_decrements_keep_counter_consistent() {
+        // Hammer the atomic from multiple tasks; the final balance should be
+        // zero. Tests the SeqCst orderings on the counter under contention.
+        let sd = make_shutdown();
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let s = sd.clone();
+            handles.push(tokio::spawn(async move {
+                for _ in 0..50 {
+                    s.increment_in_flight();
+                    s.decrement_in_flight();
+                }
+            }));
+        }
+        for h in handles {
+            h.await.expect("task did not panic");
+        }
+        assert_eq!(sd.in_flight_count(), 0);
+    }
 }

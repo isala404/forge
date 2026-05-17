@@ -257,7 +257,12 @@ pub trait EnvAccess {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing, unsafe_code)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    unsafe_code
+)]
 mod tests {
     use super::*;
 
@@ -374,5 +379,128 @@ mod tests {
         // env_contains()
         assert!(ctx.env_contains("PORT"));
         assert!(!ctx.env_contains("MISSING"));
+    }
+
+    #[test]
+    fn mock_remove_drops_var_but_does_not_clear_access_history() {
+        let mut provider = MockEnvProvider::new();
+        provider.set("TOKEN", "abc");
+        let _ = provider.get("TOKEN");
+        provider.remove("TOKEN");
+
+        // Subsequent reads see the var as absent.
+        assert!(provider.get("TOKEN").is_none());
+        // Access history is independent of value state — removing the var does
+        // not retroactively un-track the earlier read.
+        assert!(provider.was_accessed("TOKEN"));
+    }
+
+    #[test]
+    fn mock_all_returns_currently_configured_vars() {
+        let mut provider = MockEnvProvider::new();
+        provider.set("A", "1");
+        provider.set("B", "2");
+        provider.remove("B");
+
+        let all = provider.all();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all.get("A"), Some(&"1".to_string()));
+        assert!(!all.contains_key("B"));
+    }
+
+    #[test]
+    fn mock_access_log_preserves_duplicate_reads_in_order() {
+        let mut provider = MockEnvProvider::new();
+        provider.set("X", "1");
+        let _ = provider.get("X");
+        let _ = provider.get("Y"); // missing
+        let _ = provider.get("X");
+
+        // The log is append-only, not deduped — useful for spotting repeated reads
+        // that should be cached.
+        assert_eq!(
+            provider.accessed_keys(),
+            vec!["X".to_string(), "Y".to_string(), "X".to_string()]
+        );
+    }
+
+    #[test]
+    fn mock_assert_not_accessed_passes_when_untouched() {
+        let provider = MockEnvProvider::new();
+        // Must not panic — this is the happy path of assert_not_accessed.
+        provider.assert_not_accessed("NEVER_READ");
+    }
+
+    #[test]
+    fn env_require_error_is_config_variant_with_key_name() {
+        let provider = MockEnvProvider::new();
+        let ctx = TestEnvContext { provider };
+
+        let err = ctx.env_require("STRIPE_API_KEY").unwrap_err();
+        match err {
+            ForgeError::Config(msg) => {
+                assert!(msg.contains("STRIPE_API_KEY"), "msg should name the key: {msg}");
+                assert!(msg.contains("not set"), "msg should describe failure: {msg}");
+            }
+            other => panic!("expected ForgeError::Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn env_parse_error_quotes_key_and_value_in_message() {
+        let mut provider = MockEnvProvider::new();
+        provider.set("PORT", "not_a_port");
+        let ctx = TestEnvContext { provider };
+
+        let err: ForgeError = ctx.env_parse::<u16>("PORT").unwrap_err();
+        match err {
+            ForgeError::Config(msg) => {
+                assert!(msg.contains("PORT"), "msg should name the key: {msg}");
+                assert!(msg.contains("not_a_port"), "msg should show the bad value: {msg}");
+            }
+            other => panic!("expected ForgeError::Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn env_parse_or_returns_default_when_unset() {
+        let provider = MockEnvProvider::new();
+        let ctx = TestEnvContext { provider };
+
+        let port: u16 = ctx.env_parse_or("MISSING_PORT", 8080).unwrap();
+        assert_eq!(port, 8080);
+    }
+
+    #[test]
+    fn env_parse_or_propagates_parse_error_when_var_is_set() {
+        // env_parse_or only uses the default when the var is *absent*; a set
+        // but unparseable value must surface as an error rather than be hidden.
+        let mut provider = MockEnvProvider::new();
+        provider.set("RETRIES", "lots");
+        let ctx = TestEnvContext { provider };
+
+        let err = ctx.env_parse_or::<u32>("RETRIES", 5).unwrap_err();
+        match err {
+            ForgeError::Config(msg) => {
+                assert!(msg.contains("RETRIES"));
+                assert!(msg.contains("lots"));
+            }
+            other => panic!("expected ForgeError::Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn real_provider_contains_delegates_to_get() {
+        // contains() has a default trait impl that just checks get().is_some();
+        // confirm the wrapping by exercising both paths on the real provider.
+        unsafe {
+            std::env::set_var("FORGE_CONTAINS_PROBE", "x");
+        }
+        let p = RealEnvProvider::new();
+        assert!(p.contains("FORGE_CONTAINS_PROBE"));
+        assert!(!p.contains("FORGE_DEFINITELY_NOT_SET_XYZ_42"));
+        unsafe {
+            std::env::remove_var("FORGE_CONTAINS_PROBE");
+        }
     }
 }

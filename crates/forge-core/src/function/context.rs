@@ -1375,4 +1375,216 @@ mod tests {
         let meta2 = RequestMetadata::with_trace_id("trace-123".to_string());
         assert_eq!(meta2.trace_id, "trace-123");
     }
+
+    #[test]
+    fn auth_context_without_uuid_carries_claims_but_no_user_id() {
+        let mut claims = HashMap::new();
+        claims.insert("sub".to_string(), serde_json::json!("user@example.com"));
+        let ctx = AuthContext::authenticated_without_uuid(vec!["user".to_string()], claims);
+
+        assert!(ctx.is_authenticated());
+        assert!(ctx.user_id().is_none());
+        assert!(ctx.require_user_id().is_err());
+        assert_eq!(ctx.subject(), Some("user@example.com"));
+        assert!(ctx.has_role("user"));
+    }
+
+    #[test]
+    fn require_subject_errors_when_unauthenticated() {
+        let ctx = AuthContext::unauthenticated();
+        let err = ctx.require_subject().unwrap_err();
+        assert!(matches!(err, crate::error::ForgeError::Unauthorized(_)));
+    }
+
+    #[test]
+    fn require_subject_errors_when_authenticated_without_sub_claim() {
+        // Authenticated context (e.g., UUID-based) with no `sub` claim should
+        // still error from `require_subject`, since the raw subject is what
+        // non-UUID providers care about.
+        let ctx = AuthContext::authenticated(Uuid::new_v4(), vec![], HashMap::new());
+        let err = ctx.require_subject().unwrap_err();
+        assert!(matches!(err, crate::error::ForgeError::Unauthorized(_)));
+    }
+
+    #[test]
+    fn require_subject_returns_sub_claim_when_present() {
+        let mut claims = HashMap::new();
+        claims.insert("sub".to_string(), serde_json::json!("abc"));
+        let ctx = AuthContext::authenticated(Uuid::new_v4(), vec![], claims);
+        assert_eq!(ctx.require_subject().unwrap(), "abc");
+    }
+
+    #[test]
+    fn principal_id_prefers_sub_claim_over_uuid() {
+        let user_id = Uuid::new_v4();
+        let mut claims = HashMap::new();
+        claims.insert("sub".to_string(), serde_json::json!("string-sub"));
+        let ctx = AuthContext::authenticated(user_id, vec![], claims);
+        // sub takes precedence over uuid.
+        assert_eq!(ctx.principal_id(), Some("string-sub".to_string()));
+    }
+
+    #[test]
+    fn principal_id_falls_back_to_uuid_when_no_sub_claim() {
+        let user_id = Uuid::new_v4();
+        let ctx = AuthContext::authenticated(user_id, vec![], HashMap::new());
+        assert_eq!(ctx.principal_id(), Some(user_id.to_string()));
+    }
+
+    #[test]
+    fn principal_id_is_none_for_unauthenticated_with_no_sub() {
+        let ctx = AuthContext::unauthenticated();
+        assert_eq!(ctx.principal_id(), None);
+    }
+
+    #[test]
+    fn is_admin_only_true_when_admin_role_present() {
+        let plain = AuthContext::authenticated(Uuid::new_v4(), vec!["user".into()], HashMap::new());
+        assert!(!plain.is_admin());
+        let admin =
+            AuthContext::authenticated(Uuid::new_v4(), vec!["admin".into()], HashMap::new());
+        assert!(admin.is_admin());
+        // Unauthenticated never admin.
+        assert!(!AuthContext::unauthenticated().is_admin());
+    }
+
+    #[test]
+    fn tenant_id_parses_valid_uuid_claim() {
+        let tenant = Uuid::new_v4();
+        let mut claims = HashMap::new();
+        claims.insert(
+            "tenant_id".to_string(),
+            serde_json::json!(tenant.to_string()),
+        );
+        let ctx = AuthContext::authenticated(Uuid::new_v4(), vec![], claims);
+        assert_eq!(ctx.tenant_id(), Some(tenant));
+    }
+
+    #[test]
+    fn tenant_id_returns_none_for_missing_or_invalid_claim() {
+        // Missing.
+        let ctx = AuthContext::authenticated(Uuid::new_v4(), vec![], HashMap::new());
+        assert!(ctx.tenant_id().is_none());
+
+        // Non-string.
+        let mut claims = HashMap::new();
+        claims.insert("tenant_id".to_string(), serde_json::json!(123));
+        let ctx = AuthContext::authenticated(Uuid::new_v4(), vec![], claims);
+        assert!(ctx.tenant_id().is_none());
+
+        // Garbage string.
+        let mut claims = HashMap::new();
+        claims.insert("tenant_id".to_string(), serde_json::json!("not-a-uuid"));
+        let ctx = AuthContext::authenticated(Uuid::new_v4(), vec![], claims);
+        assert!(ctx.tenant_id().is_none());
+    }
+
+    #[test]
+    fn token_exp_round_trips_and_drives_expiry_check() {
+        let ctx = AuthContext::authenticated(Uuid::new_v4(), vec![], HashMap::new());
+        // No token exp by default ⇒ never expired.
+        assert!(!ctx.token_is_expired());
+        assert!(ctx.token_exp().is_none());
+
+        // Past timestamp ⇒ expired.
+        let expired = ctx.clone().with_token_exp(1);
+        assert_eq!(expired.token_exp(), Some(1));
+        assert!(expired.token_is_expired());
+
+        // Far-future timestamp ⇒ not expired.
+        let live = ctx.with_token_exp(chrono::Utc::now().timestamp() + 3600);
+        assert!(!live.token_is_expired());
+    }
+
+    #[test]
+    fn token_is_expired_false_for_unauthenticated_without_exp() {
+        let ctx = AuthContext::unauthenticated();
+        assert!(!ctx.token_is_expired());
+    }
+
+    #[test]
+    fn claims_and_roles_accessors_return_stored_values() {
+        let mut claims = HashMap::new();
+        claims.insert("k".to_string(), serde_json::json!("v"));
+        let ctx = AuthContext::authenticated(
+            Uuid::new_v4(),
+            vec!["a".into(), "b".into()],
+            claims.clone(),
+        );
+
+        assert_eq!(ctx.claims(), &claims);
+        assert_eq!(ctx.roles(), &["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn request_metadata_setters_mutate_fields() {
+        let mut meta = RequestMetadata::new();
+        meta.set_client_ip(Some("1.2.3.4".to_string()));
+        meta.set_user_agent(Some("ua/1".to_string()));
+        meta.set_correlation_id(Some("corr-1".to_string()));
+
+        assert_eq!(meta.client_ip(), Some("1.2.3.4"));
+        assert_eq!(meta.user_agent(), Some("ua/1"));
+        assert_eq!(meta.correlation_id(), Some("corr-1"));
+
+        meta.set_client_ip(None);
+        assert!(meta.client_ip().is_none());
+    }
+
+    #[test]
+    fn request_metadata_internal_constructor_carries_fields() {
+        let rid = Uuid::new_v4();
+        let meta = RequestMetadata::__build_internal(
+            rid,
+            "t-1".into(),
+            Some("ip".into()),
+            Some("ua".into()),
+            Some("corr".into()),
+        );
+        assert_eq!(meta.request_id(), rid);
+        assert_eq!(meta.trace_id(), "t-1");
+        assert_eq!(meta.client_ip(), Some("ip"));
+        assert_eq!(meta.user_agent(), Some("ua"));
+        assert_eq!(meta.correlation_id(), Some("corr"));
+    }
+
+    #[test]
+    fn request_metadata_default_matches_new() {
+        let a = RequestMetadata::default();
+        let b = RequestMetadata::new();
+        // Trace IDs differ (random), but field shape should match.
+        assert!(a.client_ip().is_none());
+        assert!(b.user_agent().is_none());
+    }
+
+    #[test]
+    fn auth_token_ttl_default_is_one_hour_and_thirty_days() {
+        let ttl = AuthTokenTtl::default();
+        assert_eq!(ttl.access_token_secs, 3600);
+        assert_eq!(ttl.refresh_token_days, 30);
+
+        let custom = AuthTokenTtl::new(60, 7);
+        assert_eq!(custom.access_token_secs, 60);
+        assert_eq!(custom.refresh_token_days, 7);
+    }
+
+    #[test]
+    fn sql_operation_classifies_common_prefixes() {
+        assert_eq!(sql_operation("SELECT 1"), "SELECT");
+        assert_eq!(sql_operation("  select * from users"), "SELECT");
+        assert_eq!(sql_operation("Insert into x values (1)"), "INSERT");
+        assert_eq!(sql_operation("UPDATE x SET v = 1"), "UPDATE");
+        assert_eq!(sql_operation("delete from x"), "DELETE");
+    }
+
+    #[test]
+    fn sql_operation_falls_back_to_other_for_unknown_or_short() {
+        assert_eq!(
+            sql_operation("WITH cte AS (SELECT 1) SELECT * FROM cte"),
+            "OTHER"
+        );
+        assert_eq!(sql_operation("BEGIN"), "OTHER");
+        assert_eq!(sql_operation(""), "OTHER");
+        assert_eq!(sql_operation("hi"), "OTHER");
+    }
 }

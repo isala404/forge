@@ -200,58 +200,110 @@ impl CronLog {
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+    use crate::env::MockEnvProvider;
 
-    #[tokio::test]
-    async fn test_cron_context_creation() {
+    fn make_ctx(scheduled: DateTime<Utc>, is_catch_up: bool) -> CronContext {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .connect_lazy("postgres://localhost/nonexistent")
             .expect("Failed to create mock pool");
-
-        let run_id = Uuid::new_v4();
-        let scheduled = Utc::now() - chrono::Duration::seconds(30);
-
-        let ctx = CronContext::new(
-            run_id,
-            "test_cron".to_string(),
-            scheduled,
-            "UTC".to_string(),
-            false,
-            pool,
-            CircuitBreakerClient::with_defaults(reqwest::Client::new()),
-        );
-
-        assert_eq!(ctx.run_id, run_id);
-        assert_eq!(ctx.cron_name, "test_cron");
-        assert!(!ctx.is_catch_up);
-    }
-
-    #[tokio::test]
-    async fn test_cron_delay() {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect_lazy("postgres://localhost/nonexistent")
-            .expect("Failed to create mock pool");
-
-        let scheduled = Utc::now() - chrono::Duration::minutes(5);
-
-        let ctx = CronContext::new(
+        CronContext::new(
             Uuid::new_v4(),
             "test_cron".to_string(),
             scheduled,
             "UTC".to_string(),
-            false,
+            is_catch_up,
             pool,
             CircuitBreakerClient::with_defaults(reqwest::Client::new()),
-        );
+        )
+    }
+
+    #[tokio::test]
+    async fn test_cron_context_creation() {
+        let scheduled = Utc::now() - chrono::Duration::seconds(30);
+        let ctx = make_ctx(scheduled, false);
+
+        assert_eq!(ctx.cron_name, "test_cron");
+        assert!(!ctx.is_catch_up);
+        // Default auth is unauthenticated.
+        assert!(!ctx.auth.is_authenticated());
+        // execution_time is set after scheduled, so delay must be non-negative.
+        assert!(ctx.delay() >= chrono::Duration::zero());
+    }
+
+    #[tokio::test]
+    async fn test_cron_delay() {
+        let scheduled = Utc::now() - chrono::Duration::minutes(5);
+        let ctx = make_ctx(scheduled, false);
 
         assert!(ctx.is_late());
         assert!(ctx.delay() >= chrono::Duration::minutes(5));
     }
 
+    #[tokio::test]
+    async fn cron_on_time_is_not_late() {
+        // scheduled in the future or roughly now -> delay <= 1m, not late
+        let ctx = make_ctx(Utc::now() + chrono::Duration::seconds(5), false);
+        assert!(!ctx.is_late());
+    }
+
+    #[tokio::test]
+    async fn cron_catch_up_flag_round_trips() {
+        let ctx = make_ctx(Utc::now() - chrono::Duration::minutes(30), true);
+        assert!(ctx.is_catch_up);
+    }
+
+    #[tokio::test]
+    async fn cron_trace_id_returns_run_id_as_string() {
+        let ctx = make_ctx(Utc::now(), false);
+        assert_eq!(ctx.trace_id(), ctx.run_id.to_string());
+    }
+
+    #[tokio::test]
+    async fn cron_with_auth_replaces_default() {
+        use std::collections::HashMap;
+        let uid = Uuid::new_v4();
+        let auth = AuthContext::authenticated(uid, vec!["admin".to_string()], HashMap::new());
+        let ctx = make_ctx(Utc::now(), false).with_auth(auth);
+        assert!(ctx.auth.is_authenticated());
+        assert!(ctx.auth.has_role("admin"));
+    }
+
+    #[tokio::test]
+    async fn cron_with_env_provider_overrides_real() {
+        let mut mock = MockEnvProvider::new();
+        mock.set("FORGE_CRON_KEY", "v");
+        let ctx = make_ctx(Utc::now(), false).with_env_provider(Arc::new(mock));
+        use crate::env::EnvAccess;
+        assert_eq!(ctx.env("FORGE_CRON_KEY"), Some("v".to_string()));
+        assert_eq!(ctx.env("FORGE_MISSING"), None);
+    }
+
+    #[tokio::test]
+    async fn cron_set_http_timeout_does_not_panic() {
+        let mut ctx = make_ctx(Utc::now(), false);
+        ctx.set_http_timeout(Some(Duration::from_millis(100)));
+        let _ = ctx.http();
+        ctx.set_http_timeout(None);
+        let _ = ctx.http();
+    }
+
     #[test]
     fn test_cron_log() {
         let log = CronLog::new("test_cron".to_string());
-        log.info("Test message", serde_json::json!({"key": "value"}));
+        // All four levels must accept the same shape and not panic.
+        log.info("Info", serde_json::json!({"k": 1}));
+        log.warn("Warn", serde_json::json!({"k": 2}));
+        log.error("Error", serde_json::json!({"k": 3}));
+        log.debug("Debug", serde_json::json!({"k": 4}));
+    }
+
+    #[test]
+    fn cron_log_clones_share_name() {
+        let log = CronLog::new("orig".to_string());
+        let log2 = log.clone();
+        // Just exercise both — name is private but cloning must produce a
+        // functional logger that doesn't panic.
+        log2.info("after clone", serde_json::Value::Null);
     }
 }

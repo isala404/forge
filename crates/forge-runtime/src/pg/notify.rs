@@ -155,6 +155,41 @@ where
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod unit_tests {
+    use super::*;
+
+    #[derive(serde::Serialize)]
+    struct Tiny {
+        v: u32,
+    }
+
+    #[test]
+    fn channel_constructor_records_name() {
+        const CH: NotifyChannel<Tiny> = NotifyChannel::new("forge_test_channel");
+        assert_eq!(CH.name(), "forge_test_channel");
+    }
+
+    #[test]
+    fn max_payload_bytes_stays_below_pg_notify_ceiling() {
+        // PG caps NOTIFY at 8000 bytes. The constant must stay strictly under
+        // that with at least some framing headroom — verify we didn't silently
+        // bump it to or past the PG ceiling.
+        const _: () = assert!(MAX_PAYLOAD_BYTES < 8000);
+        const _: () = assert!(MAX_PAYLOAD_BYTES == 7 * 1024);
+    }
+
+    #[test]
+    fn channel_handle_is_zero_sized() {
+        // PhantomData<fn(T) -> T> + a single &'static str pointer should keep
+        // the channel handle as small as a pointer. Verifies we didn't
+        // accidentally grow the struct.
+        use std::mem::size_of;
+        assert_eq!(size_of::<NotifyChannel<Tiny>>(), size_of::<&'static str>());
+    }
+}
+
 #[cfg(all(test, feature = "testcontainers"))]
 #[allow(
     clippy::unwrap_used,

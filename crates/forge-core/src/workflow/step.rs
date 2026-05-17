@@ -259,4 +259,82 @@ mod tests {
         assert!(!config.optional);
         assert_eq!(config.retry_count, 0);
     }
+
+    #[test]
+    fn step_status_as_str_covers_all_variants() {
+        assert_eq!(StepStatus::Pending.as_str(), "pending");
+        assert_eq!(StepStatus::Running.as_str(), "running");
+        assert_eq!(StepStatus::Completed.as_str(), "completed");
+        assert_eq!(StepStatus::Failed.as_str(), "failed");
+        assert_eq!(StepStatus::Compensated.as_str(), "compensated");
+        assert_eq!(StepStatus::Skipped.as_str(), "skipped");
+        assert_eq!(StepStatus::Waiting.as_str(), "waiting");
+    }
+
+    #[test]
+    fn step_status_parse_roundtrips_every_variant() {
+        for status in [
+            StepStatus::Pending,
+            StepStatus::Running,
+            StepStatus::Completed,
+            StepStatus::Failed,
+            StepStatus::Compensated,
+            StepStatus::Skipped,
+            StepStatus::Waiting,
+        ] {
+            let s = status.as_str();
+            let parsed: StepStatus = s.parse().unwrap();
+            assert_eq!(parsed, status, "{s} did not round-trip");
+        }
+    }
+
+    #[test]
+    fn step_status_parse_rejects_unknown() {
+        let err = "garbage".parse::<StepStatus>().unwrap_err();
+        assert_eq!(err.0, "garbage");
+        // Display must echo the bad value so logs pinpoint the typo.
+        assert!(err.to_string().contains("garbage"));
+    }
+
+    #[test]
+    fn step_constructor_records_name() {
+        let s: Step<String> = Step::new("send_email");
+        assert_eq!(s.name, "send_email");
+    }
+
+    type NoFut = Pin<Box<dyn Future<Output = Result<u32>> + Send + 'static>>;
+    type NoComp = Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>;
+
+    fn fresh_builder<'a>() -> StepBuilder<'a, u32, NoFut, NoComp> {
+        StepBuilder::new("noop")
+    }
+
+    #[test]
+    fn step_builder_defaults() {
+        let b = fresh_builder();
+        assert_eq!(b.name(), "noop");
+        assert!(!b.is_optional());
+        assert_eq!(b.retry_count(), 0);
+        assert_eq!(b.retry_delay(), Duration::from_secs(1));
+        assert!(b.get_timeout().is_none());
+    }
+
+    #[test]
+    fn step_builder_optional_flag_flips() {
+        let b = fresh_builder().optional();
+        assert!(b.is_optional());
+    }
+
+    #[test]
+    fn step_builder_retry_sets_count_and_delay() {
+        let b = fresh_builder().retry(3, Duration::from_millis(250));
+        assert_eq!(b.retry_count(), 3);
+        assert_eq!(b.retry_delay(), Duration::from_millis(250));
+    }
+
+    #[test]
+    fn step_builder_timeout_setter() {
+        let b = fresh_builder().timeout(Duration::from_secs(5));
+        assert_eq!(b.get_timeout(), Some(Duration::from_secs(5)));
+    }
 }

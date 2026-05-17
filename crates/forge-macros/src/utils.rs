@@ -229,4 +229,150 @@ mod tests {
         assert_eq!(parse_size_bytes("1048576"), Some(1048576));
         assert_eq!(parse_size_bytes("invalid"), None);
     }
+
+    #[test]
+    fn pascal_case_handles_empty_and_edge_segments() {
+        // Empty string -> empty Pascal-case output (no segments to capitalize).
+        assert_eq!(to_pascal_case(""), "");
+        // Single character is uppercased.
+        assert_eq!(to_pascal_case("a"), "A");
+        // Already-PascalCase identifier passes through unchanged (no underscores).
+        assert_eq!(to_pascal_case("Already"), "Already");
+        // Leading/trailing/consecutive underscores produce empty segments,
+        // which map to empty strings — must not panic and must not insert
+        // sentinel chars.
+        assert_eq!(to_pascal_case("_foo"), "Foo");
+        assert_eq!(to_pascal_case("foo_"), "Foo");
+        assert_eq!(to_pascal_case("foo__bar"), "FooBar");
+    }
+
+    #[test]
+    fn parse_duration_secs_accepts_ms_and_day_suffixes() {
+        // Sub-second durations truncate to zero seconds (parse_duration_secs
+        // discards the millisecond fraction). Callers that care about ms must
+        // use parse_duration_tokens or parse_duration directly.
+        assert_eq!(parse_duration_secs("500ms"), Some(0));
+        assert_eq!(parse_duration_secs("1d"), Some(86400));
+    }
+
+    #[test]
+    fn parse_duration_tokens_covers_all_unit_branches() {
+        // Each unit branch must produce a non-empty TokenStream that does NOT
+        // contain compile_error. The bare-integer case is already covered.
+        for input in ["100ms", "30s", "5m", "1h", "1d"] {
+            let ts = parse_duration_tokens(input, 0);
+            let out = ts.to_string();
+            assert!(!out.is_empty(), "empty token stream for {input}");
+            assert!(
+                !out.contains("compile_error"),
+                "expected valid duration for {input}, got: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_duration_tokens_emits_compile_error_for_invalid_numeric() {
+        // Numeric portion that doesn't parse as u64 should fall through to the
+        // invalid() branch in EACH suffix arm — exercise them to make sure no
+        // arm swallows the error silently.
+        for input in ["xms", "abcs", "?m", " h", "  d"] {
+            let out = parse_duration_tokens(input, 0).to_string();
+            assert!(
+                out.contains("compile_error"),
+                "{input} should emit compile_error, got: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_size_bytes_is_case_insensitive_across_units() {
+        // strip_suffix is matched against the lowercased input, so the unit
+        // tag may be in any case — confirm the matrix.
+        assert_eq!(parse_size_bytes("1KB"), Some(1024));
+        assert_eq!(parse_size_bytes("1Kb"), Some(1024));
+        assert_eq!(parse_size_bytes("1Gb"), Some(1024 * 1024 * 1024));
+        assert_eq!(parse_size_bytes("4B"), Some(4));
+    }
+
+    #[test]
+    fn parse_size_bytes_tolerates_whitespace_and_zero() {
+        // Inner whitespace between number and unit is allowed (num.trim() in
+        // each arm). Outer whitespace is stripped by the initial s.trim().
+        assert_eq!(parse_size_bytes("  16 kb  "), Some(16 * 1024));
+        assert_eq!(parse_size_bytes("0gb"), Some(0));
+        // Trailing garbage that isn't a recognized unit falls through to the
+        // bare-integer branch and fails.
+        assert_eq!(parse_size_bytes("10xy"), None);
+    }
+
+    fn parse_ty(src: &str) -> syn::Type {
+        syn::parse_str(src).expect("type parses")
+    }
+
+    #[test]
+    fn primitive_arg_type_recognizes_every_scalar() {
+        // Walk the full matrix of names the matches!() arm in
+        // is_primitive_arg_type accepts — keeps the list and the test in
+        // lockstep if either drifts.
+        let scalars = [
+            "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128",
+            "usize", "f32", "f64", "bool", "char", "String", "Uuid",
+        ];
+        for s in scalars {
+            assert!(
+                is_primitive_arg_type(&parse_ty(s)),
+                "{s} should be treated as primitive"
+            );
+        }
+    }
+
+    #[test]
+    fn primitive_arg_type_unwraps_references() {
+        // &str -> Reference(Type::Path("str")) -> primitive. &String likewise.
+        assert!(is_primitive_arg_type(&parse_ty("&str")));
+        assert!(is_primitive_arg_type(&parse_ty("&String")));
+        assert!(is_primitive_arg_type(&parse_ty("&i32")));
+        // Nested reference still recurses through.
+        assert!(is_primitive_arg_type(&parse_ty("&&u64")));
+    }
+
+    #[test]
+    fn primitive_arg_type_matches_on_leaf_segment() {
+        // Path qualification doesn't matter — only the last segment is
+        // inspected — so fully-qualified scalars and collections still count.
+        assert!(is_primitive_arg_type(&parse_ty("std::string::String")));
+        assert!(is_primitive_arg_type(&parse_ty("std::vec::Vec<u8>")));
+        assert!(is_primitive_arg_type(&parse_ty(
+            "std::collections::HashMap<String, i32>"
+        )));
+        assert!(is_primitive_arg_type(&parse_ty("uuid::Uuid")));
+    }
+
+    #[test]
+    fn primitive_arg_type_treats_collection_wrappers_as_primitive() {
+        // Vec/Option/HashMap/etc. are not custom args structs — callers wrap
+        // them in a generated args struct rather than passing through.
+        assert!(is_primitive_arg_type(&parse_ty("Vec<u8>")));
+        assert!(is_primitive_arg_type(&parse_ty("Option<String>")));
+        assert!(is_primitive_arg_type(&parse_ty("HashMap<String, i32>")));
+        assert!(is_primitive_arg_type(&parse_ty("BTreeMap<u64, bool>")));
+        assert!(is_primitive_arg_type(&parse_ty("HashSet<u32>")));
+        assert!(is_primitive_arg_type(&parse_ty("BTreeSet<i64>")));
+    }
+
+    #[test]
+    fn primitive_arg_type_rejects_custom_structs_and_tuples() {
+        // User-defined types must be passed through directly — the macros
+        // detect that by getting `false` back from this helper.
+        assert!(!is_primitive_arg_type(&parse_ty("MyArgs")));
+        assert!(!is_primitive_arg_type(&parse_ty("crate::types::Input")));
+        // Tuples are Type::Tuple, not Type::Path, so they fall through to
+        // the early `return false` branch.
+        assert!(!is_primitive_arg_type(&parse_ty("(u32, String)")));
+        // Unit type is also Type::Tuple in syn.
+        assert!(!is_primitive_arg_type(&parse_ty("()")));
+        // Empty/non-path types (slice, array) are rejected too.
+        assert!(!is_primitive_arg_type(&parse_ty("[u8; 4]")));
+        assert!(!is_primitive_arg_type(&parse_ty("[u8]")));
+    }
 }

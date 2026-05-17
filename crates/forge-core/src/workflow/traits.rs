@@ -270,4 +270,111 @@ mod tests {
         assert!(WorkflowStatus::Completed.is_terminal());
         assert!(WorkflowStatus::Failed.is_terminal());
     }
+
+    #[test]
+    fn workflow_def_status_default_is_active() {
+        // Default must be Active so a freshly-constructed WorkflowInfo accepts
+        // new runs without an explicit status set.
+        assert_eq!(WorkflowDefStatus::default(), WorkflowDefStatus::Active);
+    }
+
+    #[test]
+    fn workflow_def_status_as_str_round_trips_all_variants() {
+        assert_eq!(WorkflowDefStatus::Active.as_str(), "active");
+        assert_eq!(WorkflowDefStatus::Deprecated.as_str(), "deprecated");
+        assert_eq!(WorkflowDefStatus::Staging.as_str(), "staging");
+    }
+
+    #[test]
+    fn workflow_def_status_active_predicate_only_matches_active() {
+        assert!(WorkflowDefStatus::Active.is_active());
+        assert!(!WorkflowDefStatus::Deprecated.is_active());
+        assert!(!WorkflowDefStatus::Staging.is_active());
+    }
+
+    #[test]
+    fn workflow_def_status_deprecated_predicate_only_matches_deprecated() {
+        assert!(!WorkflowDefStatus::Active.is_deprecated());
+        assert!(WorkflowDefStatus::Deprecated.is_deprecated());
+        assert!(!WorkflowDefStatus::Staging.is_deprecated());
+    }
+
+    #[test]
+    fn workflow_info_active_and_deprecated_track_status() {
+        let deprecated = WorkflowInfo {
+            status: WorkflowDefStatus::Deprecated,
+            ..WorkflowInfo::default()
+        };
+        assert!(!deprecated.is_active());
+        assert!(deprecated.is_deprecated());
+
+        let staging = WorkflowInfo {
+            status: WorkflowDefStatus::Staging,
+            ..WorkflowInfo::default()
+        };
+        assert!(!staging.is_active());
+        assert!(!staging.is_deprecated());
+
+        let active = WorkflowInfo {
+            status: WorkflowDefStatus::Active,
+            ..WorkflowInfo::default()
+        };
+        assert!(active.is_active());
+        assert!(!active.is_deprecated());
+    }
+
+    #[test]
+    fn workflow_info_default_timeout_is_one_day() {
+        let info = WorkflowInfo::default();
+        assert_eq!(info.timeout, Duration::from_secs(86_400));
+        assert!(info.http_timeout.is_none());
+        assert!(!info.is_public);
+        assert!(info.required_role.is_none());
+        assert!(info.signature.is_empty());
+    }
+
+    #[test]
+    fn workflow_status_parse_rejects_unknown() {
+        let err = "garbage".parse::<WorkflowStatus>().unwrap_err();
+        assert_eq!(err.0, "garbage");
+        // Display must echo the bad value so logs pinpoint the typo.
+        let msg = err.to_string();
+        assert!(msg.contains("garbage"), "display dropped value: {msg}");
+        assert!(msg.contains("invalid workflow status"));
+    }
+
+    #[test]
+    fn parse_workflow_status_error_eq_uses_inner_string() {
+        // PartialEq is derived, so equality is by inner String only.
+        assert_eq!(
+            ParseWorkflowStatusError("x".to_string()),
+            ParseWorkflowStatusError("x".to_string())
+        );
+        assert_ne!(
+            ParseWorkflowStatusError("x".to_string()),
+            ParseWorkflowStatusError("y".to_string())
+        );
+    }
+
+    #[test]
+    fn workflow_status_all_legacy_aliases_collapse_to_failed() {
+        // The DB schema kept a wider set of historical statuses; the parser
+        // must collapse every "post-running, non-success" variant to Failed.
+        for legacy in [
+            "compensating",
+            "compensated",
+            "blocked_missing_version",
+            "blocked_signature_mismatch",
+            "blocked_missing_handler",
+            "retired_unresumable",
+            "cancelled_by_operator",
+        ] {
+            let parsed: WorkflowStatus = legacy.parse().unwrap();
+            assert_eq!(
+                parsed,
+                WorkflowStatus::Failed,
+                "{legacy} did not map to Failed"
+            );
+        }
+    }
 }

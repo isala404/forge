@@ -331,4 +331,159 @@ mod tests {
         };
         assert_eq!(config.calculate_backoff(10), Duration::from_secs(10));
     }
+
+    #[test]
+    fn priority_from_i32_covers_all_buckets() {
+        // Boundaries derived from the impl: 0..=12 Background, 13..=37 Low,
+        // 38..=62 Normal, 63..=87 High, _ Critical (incl. negatives).
+        assert_eq!(JobPriority::from_i32(0), JobPriority::Background);
+        assert_eq!(JobPriority::from_i32(12), JobPriority::Background);
+        assert_eq!(JobPriority::from_i32(13), JobPriority::Low);
+        assert_eq!(JobPriority::from_i32(25), JobPriority::Low);
+        assert_eq!(JobPriority::from_i32(37), JobPriority::Low);
+        assert_eq!(JobPriority::from_i32(38), JobPriority::Normal);
+        assert_eq!(JobPriority::from_i32(62), JobPriority::Normal);
+        assert_eq!(JobPriority::from_i32(63), JobPriority::High);
+        assert_eq!(JobPriority::from_i32(87), JobPriority::High);
+        assert_eq!(JobPriority::from_i32(88), JobPriority::Critical);
+        assert_eq!(JobPriority::from_i32(1_000_000), JobPriority::Critical);
+        // Negatives fall through to Critical via the wildcard arm.
+        assert_eq!(JobPriority::from_i32(-1), JobPriority::Critical);
+    }
+
+    #[test]
+    fn priority_default_is_normal() {
+        assert_eq!(JobPriority::default(), JobPriority::Normal);
+    }
+
+    #[test]
+    fn priority_round_trips_through_i32_buckets() {
+        // The constructed values are at bucket centers, so the round trip is
+        // lossless for the canonical numeric encodings.
+        for variant in [
+            JobPriority::Background,
+            JobPriority::Low,
+            JobPriority::Normal,
+            JobPriority::High,
+            JobPriority::Critical,
+        ] {
+            assert_eq!(JobPriority::from_i32(variant.as_i32()), variant);
+        }
+    }
+
+    #[test]
+    fn priority_from_str_is_case_insensitive_for_all_variants() {
+        assert_eq!(
+            "background".parse::<JobPriority>(),
+            Ok(JobPriority::Background)
+        );
+        assert_eq!("Low".parse::<JobPriority>(), Ok(JobPriority::Low));
+        assert_eq!("NORMAL".parse::<JobPriority>(), Ok(JobPriority::Normal));
+        assert_eq!("HiGh".parse::<JobPriority>(), Ok(JobPriority::High));
+        assert_eq!("critical".parse::<JobPriority>(), Ok(JobPriority::Critical));
+    }
+
+    #[test]
+    fn priority_from_str_reports_unknown_input_verbatim() {
+        let err = "urgent".parse::<JobPriority>().unwrap_err();
+        assert_eq!(err.0, "urgent");
+        // Display surfaces the bad input.
+        assert!(err.to_string().contains("urgent"));
+    }
+
+    #[test]
+    fn status_from_str_rejects_unknown_input() {
+        let err = "pending_review".parse::<JobStatus>().unwrap_err();
+        assert_eq!(err.0, "pending_review");
+        assert!(err.to_string().contains("pending_review"));
+    }
+
+    #[test]
+    fn status_round_trips_for_every_variant() {
+        for status in [
+            JobStatus::Pending,
+            JobStatus::Claimed,
+            JobStatus::Running,
+            JobStatus::Completed,
+            JobStatus::Retry,
+            JobStatus::Failed,
+            JobStatus::DeadLetter,
+            JobStatus::CancelRequested,
+            JobStatus::Cancelled,
+        ] {
+            let s = status.as_str();
+            assert_eq!(s.parse::<JobStatus>().unwrap(), status);
+        }
+    }
+
+    #[test]
+    fn parse_errors_are_error_trait_impls() {
+        // Cheap guard against accidental removal of the Error impl, which
+        // would break `?` propagation in user code that uses these parsers.
+        fn assert_error<E: std::error::Error>() {}
+        assert_error::<ParseJobPriorityError>();
+        assert_error::<ParseJobStatusError>();
+    }
+
+    #[test]
+    fn job_info_default_values_match_doctrine() {
+        let info = JobInfo::default();
+        assert_eq!(info.name, "");
+        assert_eq!(info.timeout, Duration::from_secs(3600));
+        assert_eq!(info.priority, JobPriority::Normal);
+        assert!(!info.is_public);
+        assert!(info.required_role.is_none());
+        assert!(!info.idempotent);
+        assert!(info.ttl.is_none());
+    }
+
+    #[test]
+    fn retry_config_default_retries_on_all_errors() {
+        let cfg = RetryConfig::default();
+        assert_eq!(cfg.max_attempts, 3);
+        assert_eq!(cfg.backoff, BackoffStrategy::Exponential);
+        assert_eq!(cfg.max_backoff, Duration::from_secs(300));
+        assert!(cfg.retry_on.is_empty(), "empty list ⇒ retry on every error");
+    }
+
+    #[test]
+    fn backoff_fixed_returns_base_for_any_attempt() {
+        let cfg = RetryConfig {
+            backoff: BackoffStrategy::Fixed,
+            ..Default::default()
+        };
+        for attempt in [1u32, 2, 5, 100] {
+            assert_eq!(cfg.calculate_backoff(attempt), Duration::from_secs(1));
+        }
+    }
+
+    #[test]
+    fn backoff_linear_multiplies_base_by_attempt() {
+        let cfg = RetryConfig {
+            backoff: BackoffStrategy::Linear,
+            ..Default::default()
+        };
+        assert_eq!(cfg.calculate_backoff(1), Duration::from_secs(1));
+        assert_eq!(cfg.calculate_backoff(5), Duration::from_secs(5));
+        assert_eq!(cfg.calculate_backoff(50), Duration::from_secs(50));
+    }
+
+    #[test]
+    fn backoff_exponential_handles_attempt_zero_without_underflow() {
+        // attempt = 0 ⇒ saturating_sub keeps exponent at 0 ⇒ 2^0 = 1 ⇒ base.
+        let cfg = RetryConfig::default();
+        assert_eq!(cfg.calculate_backoff(0), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn backoff_exponential_caps_at_max_backoff_for_large_attempt() {
+        // attempt = 20 ⇒ 2^19 seconds = ~6 days, must cap to default 5 min.
+        let cfg = RetryConfig::default();
+        assert_eq!(cfg.calculate_backoff(20), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn backoff_strategy_default_is_exponential() {
+        assert_eq!(BackoffStrategy::default(), BackoffStrategy::Exponential);
+    }
 }

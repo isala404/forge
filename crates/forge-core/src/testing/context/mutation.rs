@@ -240,6 +240,7 @@ impl TestMutationContextBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ForgeError;
 
     #[tokio::test]
     async fn test_dispatch_job() {
@@ -292,5 +293,127 @@ mod tests {
         let ctx = TestMutationContext::authenticated(Uuid::new_v4());
 
         ctx.job_dispatch().assert_not_dispatched("send_email");
+    }
+
+    #[tokio::test]
+    async fn minimal_is_unauthenticated_and_user_id_errors() {
+        let ctx = TestMutationContext::minimal();
+        assert!(!ctx.auth.is_authenticated());
+        let err = ctx.user_id().unwrap_err();
+        assert!(
+            matches!(err, ForgeError::Unauthorized(_)),
+            "expected Unauthorized, got {err:?}"
+        );
+        assert!(ctx.db().is_none());
+    }
+
+    #[tokio::test]
+    async fn authenticated_helper_exposes_user_id() {
+        let uid = Uuid::new_v4();
+        let ctx = TestMutationContext::authenticated(uid);
+        assert_eq!(ctx.user_id().unwrap(), uid);
+        assert!(ctx.auth.is_authenticated());
+    }
+
+    #[tokio::test]
+    async fn as_subject_authenticates_without_uuid() {
+        let ctx = TestMutationContext::builder()
+            .as_subject("firebase|abc123")
+            .build();
+        // Subject-only auth: authenticated but no UUID.
+        assert!(ctx.auth.is_authenticated());
+        assert!(ctx.user_id().is_err(), "no UUID -> require_user_id fails");
+        assert_eq!(
+            ctx.auth.claim("sub"),
+            Some(&serde_json::json!("firebase|abc123"))
+        );
+    }
+
+    #[tokio::test]
+    async fn builder_with_role_and_with_roles_compose() {
+        let ctx = TestMutationContext::builder()
+            .as_user(Uuid::new_v4())
+            .with_role("editor")
+            .with_roles(vec!["admin".to_string(), "billing".to_string()])
+            .build();
+        assert!(ctx.auth.has_role("editor"));
+        assert!(ctx.auth.has_role("admin"));
+        assert!(ctx.auth.has_role("billing"));
+        assert!(!ctx.auth.has_role("ghost"));
+    }
+
+    #[tokio::test]
+    async fn with_claim_round_trips_through_auth_context() {
+        let ctx = TestMutationContext::builder()
+            .as_user(Uuid::new_v4())
+            .with_claim("tenant", serde_json::json!("acme"))
+            .build();
+        assert_eq!(ctx.auth.claim("tenant"), Some(&serde_json::json!("acme")));
+    }
+
+    #[tokio::test]
+    async fn with_envs_bulk_loads_provider() {
+        let mut vars = HashMap::new();
+        vars.insert("K1".to_string(), "v1".to_string());
+        vars.insert("K2".to_string(), "v2".to_string());
+        let ctx = TestMutationContext::builder().with_envs(vars).build();
+        assert_eq!(ctx.env("K1"), Some("v1".to_string()));
+        assert_eq!(ctx.env("K2"), Some("v2".to_string()));
+        assert!(ctx.env_mock().was_accessed("K1"));
+    }
+
+    #[tokio::test]
+    async fn with_env_single_and_with_envs_compose() {
+        let mut bulk = HashMap::new();
+        bulk.insert("BULK".to_string(), "b".to_string());
+        let ctx = TestMutationContext::builder()
+            .with_env("ONE", "1")
+            .with_envs(bulk)
+            .build();
+        assert_eq!(ctx.env("ONE"), Some("1".to_string()));
+        assert_eq!(ctx.env("BULK"), Some("b".to_string()));
+    }
+
+    #[tokio::test]
+    async fn with_job_dispatch_shares_state() {
+        let shared = Arc::new(MockJobDispatch::new());
+        let ctx = TestMutationContext::builder()
+            .with_job_dispatch(shared.clone())
+            .build();
+        ctx.dispatch_job("ext", serde_json::json!({}))
+            .await
+            .unwrap();
+        // Outside handle sees the dispatch.
+        shared.assert_dispatched("ext");
+    }
+
+    #[tokio::test]
+    async fn with_workflow_dispatch_shares_state() {
+        let shared = Arc::new(MockWorkflowDispatch::new());
+        let ctx = TestMutationContext::builder()
+            .with_workflow_dispatch(shared.clone())
+            .build();
+        ctx.start_workflow("ext_wf", serde_json::json!({}))
+            .await
+            .unwrap();
+        shared.assert_started("ext_wf");
+    }
+
+    #[tokio::test]
+    async fn mock_http_json_executes_via_pattern() {
+        let ctx = TestMutationContext::builder()
+            .mock_http_json("https://api.test/echo", serde_json::json!({"ok": true}))
+            .build();
+        let req = MockRequest {
+            method: "GET".to_string(),
+            path: "/echo".to_string(),
+            url: "https://api.test/echo".to_string(),
+            headers: HashMap::new(),
+            body: serde_json::Value::Null,
+        };
+        let resp = ctx.http().execute(req).await;
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, serde_json::json!({"ok": true}));
+        ctx.http().assert_called("https://api.test/echo");
     }
 }

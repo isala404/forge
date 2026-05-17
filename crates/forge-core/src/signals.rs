@@ -603,6 +603,154 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn server_execution_marks_status_and_clears_client_context() {
+        // Server-initiated runs have no visitor/UA/IP/session — confirm the
+        // constructor leaves those slots empty so the events table doesn't
+        // accidentally attribute background work to a request.
+        let event = SignalEvent::server_execution("send_email", "job", 1500, true, None);
+
+        assert_eq!(event.event_type, SignalEventType::ServerExecution);
+        assert_eq!(event.event_name.as_deref(), Some("send_email"));
+        assert_eq!(event.function_name.as_deref(), Some("send_email"));
+        assert_eq!(event.function_kind.as_deref(), Some("job"));
+        assert_eq!(event.duration_ms, Some(1500));
+        assert_eq!(event.status.as_deref(), Some("success"));
+        assert!(event.error_message.is_none());
+
+        // Must NOT carry any client/session attribution.
+        assert!(event.client_ip.is_none());
+        assert!(event.user_agent.is_none());
+        assert!(event.visitor_id.is_none());
+        assert!(event.session_id.is_none());
+        assert!(event.user_id.is_none());
+        assert!(event.tenant_id.is_none());
+        assert!(event.correlation_id.is_none());
+        assert!(!event.is_bot, "background runs are never flagged as bots");
+        assert_eq!(
+            event.properties,
+            serde_json::Value::Object(serde_json::Map::new())
+        );
+    }
+
+    #[tokio::test]
+    async fn server_execution_records_error_message_and_failure_status() {
+        let event = SignalEvent::server_execution(
+            "process_payment",
+            "workflow",
+            8000,
+            false,
+            Some("connection refused".to_string()),
+        );
+
+        assert_eq!(event.status.as_deref(), Some("error"));
+        assert_eq!(event.error_message.as_deref(), Some("connection refused"));
+        // error_stack/context are reserved for frontend reports — server
+        // executions only get a message.
+        assert!(event.error_stack.is_none());
+        assert!(event.error_context.is_none());
+    }
+
+    #[tokio::test]
+    async fn diagnostic_event_uses_track_type_and_threads_request_context() {
+        // Diagnostics (auth failure, rate limit hit, etc.) ride the Track
+        // event_type so the analytics table doesn't gain another partition;
+        // they MUST carry the request attribution the caller provides.
+        let user_id = Uuid::new_v4();
+        let props = serde_json::json!({"reason": "invalid_token"});
+
+        let event = SignalEvent::diagnostic(
+            "auth_failure",
+            props.clone(),
+            Some("10.0.0.5".to_string()),
+            Some("curl/8".to_string()),
+            Some("visitor-xyz".to_string()),
+            Some(user_id),
+            true,
+        );
+
+        assert_eq!(event.event_type, SignalEventType::Track);
+        assert_eq!(event.event_name.as_deref(), Some("auth_failure"));
+        assert_eq!(event.properties, props);
+        assert_eq!(event.client_ip.as_deref(), Some("10.0.0.5"));
+        assert_eq!(event.user_agent.as_deref(), Some("curl/8"));
+        assert_eq!(event.visitor_id.as_deref(), Some("visitor-xyz"));
+        assert_eq!(event.user_id, Some(user_id));
+        assert!(event.is_bot, "bot flag must round-trip");
+
+        // Diagnostics aren't RPC calls — function fields stay empty.
+        assert!(event.function_name.is_none());
+        assert!(event.function_kind.is_none());
+        assert!(event.duration_ms.is_none());
+        assert!(event.status.is_none());
+    }
+
+    #[tokio::test]
+    async fn diagnostic_event_tolerates_all_optional_context_missing() {
+        // Anonymous diagnostic (no IP/UA/visitor/user) must still produce a
+        // valid event — the worker paths that emit these often run in
+        // contexts with no request at all.
+        let event = SignalEvent::diagnostic(
+            "rate_limit_exceeded",
+            serde_json::Value::Null,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+
+        assert_eq!(event.event_type, SignalEventType::Track);
+        assert_eq!(event.event_name.as_deref(), Some("rate_limit_exceeded"));
+        assert_eq!(event.properties, serde_json::Value::Null);
+        assert!(event.client_ip.is_none());
+        assert!(event.user_agent.is_none());
+        assert!(!event.is_bot);
+    }
+
+    #[tokio::test]
+    async fn breadcrumb_data_defaults_to_null_when_absent() {
+        // Frontend trackers commonly omit `data` for trivial breadcrumbs;
+        // the #[serde(default)] must turn that into Value::Null rather than
+        // failing deserialization.
+        let json = r#"{"message": "form submitted"}"#;
+        let bc: Breadcrumb = serde_json::from_str(json).unwrap();
+        assert_eq!(bc.message, "form submitted");
+        assert_eq!(bc.data, serde_json::Value::Null);
+        assert!(bc.timestamp.is_none());
+    }
+
+    #[tokio::test]
+    async fn utm_params_default_is_all_none() {
+        // The Default impl is load-bearing — RPC handlers construct
+        // UtmParams::default() when the URL has no utm_* keys.
+        let u = UtmParams::default();
+        assert!(u.source.is_none());
+        assert!(u.medium.is_none());
+        assert!(u.campaign.is_none());
+        assert!(u.term.is_none());
+        assert!(u.content.is_none());
+    }
+
+    #[tokio::test]
+    async fn signal_payload_unknown_type_fails_deserialization() {
+        // Pin the discriminator behavior: an unknown `type` MUST be rejected
+        // so the ingestion handler doesn't silently drop misrouted payloads.
+        let json = r#"{"type": "bogus", "payload": {}}"#;
+        let err = serde_json::from_str::<SignalPayload>(json).unwrap_err();
+        // serde_json's wording around unknown variants includes the bad tag.
+        assert!(err.to_string().contains("bogus"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn signal_event_type_serializes_to_snake_case_json_string() {
+        // Display covers the human format; this pins the wire format.
+        let j = serde_json::to_string(&SignalEventType::ServerExecution).unwrap();
+        assert_eq!(j, "\"server_execution\"");
+        let j = serde_json::to_string(&SignalEventType::PageView).unwrap();
+        assert_eq!(j, "\"page_view\"");
+    }
+
+    #[tokio::test]
     async fn signal_payload_round_trips_all_variants() {
         let event_payload = SignalPayload::Event(SignalEventBatch {
             events: vec![ClientEvent {

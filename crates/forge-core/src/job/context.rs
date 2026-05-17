@@ -407,7 +407,7 @@ impl EnvAccess for JobContext {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -531,5 +531,129 @@ mod tests {
         let saved = ctx.saved().await;
         assert_eq!(saved["charge_id"], "ch_123");
         assert_eq!(saved["amount"], 100);
+    }
+
+    fn mock_pool() -> sqlx::PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://localhost/nonexistent")
+            .expect("Failed to create mock pool")
+    }
+
+    fn nil_ctx() -> JobContext {
+        JobContext::new(
+            Uuid::nil(),
+            "test_job".to_string(),
+            1,
+            3,
+            mock_pool(),
+            CircuitBreakerClient::with_defaults(reqwest::Client::new()),
+        )
+    }
+
+    #[test]
+    fn empty_saved_data_is_an_empty_object() {
+        let data = empty_saved_data();
+        let obj = data.as_object().expect("empty_saved_data is an object");
+        assert!(obj.is_empty());
+    }
+
+    #[tokio::test]
+    async fn progress_without_channel_is_a_noop() {
+        let ctx = nil_ctx();
+        // No `.with_progress(...)` was attached — progress should succeed silently.
+        ctx.progress(42, "boot").expect("noop progress should not error");
+    }
+
+    #[tokio::test]
+    async fn progress_clamps_percentage_to_100() {
+        let (tx, rx) = mpsc::channel();
+        let ctx = nil_ctx().with_progress(tx);
+        ctx.progress(250, "over").expect("send should succeed");
+        let update = rx.recv().expect("update available");
+        assert_eq!(update.percentage, 100);
+        assert_eq!(update.message, "over");
+        assert_eq!(update.job_id, ctx.job_id);
+    }
+
+    #[tokio::test]
+    async fn progress_returns_job_error_when_receiver_dropped() {
+        let (tx, rx) = mpsc::channel::<ProgressUpdate>();
+        drop(rx);
+        let ctx = nil_ctx().with_progress(tx);
+        let err = ctx
+            .progress(10, "lost")
+            .expect_err("dropped receiver should fail send");
+        match err {
+            crate::ForgeError::Job(msg) => {
+                assert!(msg.contains("Failed to send progress"), "got: {msg}");
+            }
+            other => panic!("expected ForgeError::Job, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn with_auth_threads_authenticated_principal() {
+        let user = Uuid::new_v4();
+        let ctx = nil_ctx().with_auth(AuthContext::authenticated(
+            user,
+            vec!["admin".to_string()],
+            Default::default(),
+        ));
+        assert_eq!(ctx.auth.user_id(), Some(user));
+        assert!(ctx.auth.has_role("admin"));
+    }
+
+    #[tokio::test]
+    async fn with_env_provider_reaches_through_env_access_trait() {
+        use crate::env::MockEnvProvider;
+        let mut mock = MockEnvProvider::new();
+        mock.set("API_KEY", "sk_test");
+        let ctx = nil_ctx().with_env_provider(Arc::new(mock));
+
+        assert_eq!(ctx.env("API_KEY"), Some("sk_test".to_string()));
+        assert!(ctx.env("MISSING").is_none());
+    }
+
+    #[tokio::test]
+    async fn set_saved_replaces_data_when_job_id_is_nil_without_db_write() {
+        // With job_id == nil the implementation short-circuits before the DB
+        // update, so the in-memory replacement still works against a bogus pool.
+        let ctx = nil_ctx().with_saved(serde_json::json!({"keep": "me"}));
+        ctx.set_saved(serde_json::json!({"only": "this"}))
+            .await
+            .expect("nil-job set_saved should not touch DB");
+
+        let saved = ctx.saved().await;
+        assert!(saved.get("keep").is_none());
+        assert_eq!(saved["only"], "this");
+    }
+
+    #[tokio::test]
+    async fn save_promotes_non_object_value_into_object() {
+        // If saved data is somehow not an object (e.g., legacy nullable column),
+        // save() must replace it with an object containing the new key rather
+        // than silently dropping the write.
+        let ctx = nil_ctx().with_saved(serde_json::Value::Null);
+        ctx.save("charge", serde_json::json!("ch_1"))
+            .await
+            .expect("save coerces non-object data");
+
+        let saved = ctx.saved().await;
+        assert!(saved.is_object(), "saved should be an object after save()");
+        assert_eq!(saved["charge"], "ch_1");
+    }
+
+    #[test]
+    fn progress_update_carries_job_id_percentage_and_message() {
+        let id = Uuid::new_v4();
+        let update = ProgressUpdate {
+            job_id: id,
+            percentage: 75,
+            message: "almost there".to_string(),
+        };
+        assert_eq!(update.job_id, id);
+        assert_eq!(update.percentage, 75);
+        assert_eq!(update.message, "almost there");
     }
 }
