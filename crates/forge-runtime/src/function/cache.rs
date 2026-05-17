@@ -131,22 +131,32 @@ impl QueryCache {
         value: Value,
         ttl: Duration,
     ) {
+        self.set_arc(function_name, args, auth_scope, Arc::new(value), ttl);
+    }
+
+    /// Store a pre-wrapped `Arc<Value>` in the cache.
+    pub fn set_arc(
+        &self,
+        function_name: &str,
+        args: &Value,
+        auth_scope: Option<&str>,
+        value: Arc<Value>,
+        ttl: Duration,
+    ) {
         let key = Self::make_key(function_name, args, auth_scope);
         let now = Instant::now();
 
         let entry = CacheEntry {
-            value: Arc::new(value),
+            value,
             expires_at: now + ttl,
             function_name: Arc::from(function_name),
         };
 
         if let Ok(mut state) = self.entries.write() {
-            // Evict expired entries if we're at capacity
             if state.map.len() >= self.max_entries {
                 Self::evict_expired(&mut state);
             }
 
-            // If still at capacity, evict oldest entries via insertion order
             if state.map.len() >= self.max_entries {
                 Self::evict_oldest(&mut state, (self.max_entries / 10).max(1));
             }
@@ -361,6 +371,18 @@ impl QueryCacheCoordinator {
         ttl: Duration,
     ) {
         self.cache.set(function_name, args, scope, value, ttl);
+    }
+
+    /// Store a pre-wrapped `Arc<Value>` with an already-derived scope.
+    pub fn set_arc_by_scope(
+        &self,
+        function_name: &str,
+        args: &Value,
+        scope: Option<&str>,
+        value: Arc<Value>,
+        ttl: Duration,
+    ) {
+        self.cache.set_arc(function_name, args, scope, value, ttl);
     }
 
     /// Invalidate cached queries whose table dependencies overlap with the

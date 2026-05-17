@@ -56,6 +56,20 @@ jobs:
       - name: test
         run: cargo test --workspace
 
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.92
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: msrv
+          cache-on-failure: true
+      - run: scripts/ci/create-env-stubs.sh
+      - run: cargo check --workspace --all-features
+
   guardrails:
     name: Guardrails
     runs-on: ubuntu-latest
@@ -68,16 +82,15 @@ jobs:
           shared-key: ci
           save-if: "false"
 
-      - name: Install cargo-deny
-        run: cargo install cargo-deny --locked
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-audit
 
       - name: cargo deny
         run: cargo deny check
 
       - name: cargo audit
-        run: |
-          cargo install cargo-audit --locked
-          cargo audit --deny warnings
+        run: cargo audit --deny warnings
 
   workspace-integration:
     name: Workspace integration
@@ -109,6 +122,7 @@ jobs:
           save-if: "false"
       - run: cargo test -p forge-svelte-demo-template --features testcontainers
       - run: cargo test -p todo --features testcontainers
+      - run: cargo test -p todo-dioxus --features testcontainers
 
   pr-smoke:
     name: PR Smoke
@@ -118,8 +132,12 @@ jobs:
       fail-fast: false
       matrix:
         template:
+          - with-svelte/minimal
           - with-svelte/demo
+          - with-svelte/realtime-todo-list
+          - with-dioxus/minimal
           - with-dioxus/demo
+          - with-dioxus/realtime-todo-list
     uses: ./.github/workflows/template-smoke.yml
     with:
       template: ${{ matrix.template }}

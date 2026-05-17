@@ -16,5 +16,5 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-quote = "1.0"
-syn = { version = "2.0", features = ["full", "parsing"] }
+quote = { workspace = true }
+syn = { workspace = true, features = ["parsing"] }

@@ -111,13 +111,20 @@ impl LogLevel {
     }
 }
 
+impl FunctionKind {
+    /// Return the kind as a static string, avoiding per-call allocation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Query => "query",
+            Self::Mutation => "mutation",
+            Self::Webhook => "webhook",
+        }
+    }
+}
+
 impl std::fmt::Display for FunctionKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            FunctionKind::Query => write!(f, "query"),
-            FunctionKind::Mutation => write!(f, "mutation"),
-            FunctionKind::Webhook => write!(f, "webhook"),
-        }
+        f.write_str(self.as_str())
     }
 }
 

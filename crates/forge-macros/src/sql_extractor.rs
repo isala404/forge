@@ -627,6 +627,11 @@ fn normalize_table_name(name: &str) -> String {
 }
 
 /// Scope columns that identify a row's owning principal.
+///
+/// Matching is name-based only: any column literally named one of these passes
+/// the scope check regardless of whether it's actually a foreign key to the
+/// users table. Until RLS enforcement lands, this is a compile-time lint, not
+/// a security boundary.
 const SCOPE_COLS: &[&str] = &["user_id", "owner_id", "tenant_id"];
 
 /// Check whether the SQL scope depends on `tenant_id` (as opposed to

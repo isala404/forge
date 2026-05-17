@@ -16,6 +16,8 @@ use crate::function::AuthContext;
 use crate::http::CircuitBreakerClient;
 use crate::{ForgeError, Result};
 
+const LOCK_POISONED: &str = "workflow lock poisoned";
+
 /// Type alias for compensation handler function.
 pub type CompensationHandler = Arc<
     dyn Fn(serde_json::Value) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync,
@@ -248,7 +250,7 @@ impl WorkflowContext {
 
     /// Restore saved state from persisted data (used on resume).
     pub fn with_saved_state(self, state: HashMap<String, serde_json::Value>) -> Self {
-        *self.saved_state.write().expect("workflow lock poisoned") = state;
+        *self.saved_state.write().expect(LOCK_POISONED) = state;
         self
     }
 
@@ -258,7 +260,7 @@ impl WorkflowContext {
             .map_err(|e| crate::ForgeError::Serialization(e.to_string()))?;
         self.saved_state
             .write()
-            .expect("workflow lock poisoned")
+            .expect(LOCK_POISONED)
             .insert(key.to_string(), json);
         Ok(())
     }
@@ -268,7 +270,7 @@ impl WorkflowContext {
         &self,
         key: &str,
     ) -> crate::Result<Option<T>> {
-        let guard = self.saved_state.read().expect("workflow lock poisoned");
+        let guard = self.saved_state.read().expect(LOCK_POISONED);
         match guard.get(key) {
             Some(value) => {
                 let result = serde_json::from_value(value.clone())
@@ -283,7 +285,7 @@ impl WorkflowContext {
     pub fn take_saved_state(&self) -> HashMap<String, serde_json::Value> {
         self.saved_state
             .read()
-            .expect("workflow lock poisoned")
+            .expect(LOCK_POISONED)
             .clone()
     }
 
@@ -295,18 +297,18 @@ impl WorkflowContext {
             .map(|(name, _)| name.clone())
             .collect();
 
-        *self.step_states.write().expect("workflow lock poisoned") = states;
+        *self.step_states.write().expect(LOCK_POISONED) = states;
         *self
             .completed_steps
             .write()
-            .expect("workflow lock poisoned") = completed;
+            .expect(LOCK_POISONED) = completed;
         self
     }
 
     pub fn get_step_state(&self, name: &str) -> Option<StepState> {
         self.step_states
             .read()
-            .expect("workflow lock poisoned")
+            .expect(LOCK_POISONED)
             .get(name)
             .cloned()
     }
@@ -314,7 +316,7 @@ impl WorkflowContext {
     pub fn is_step_completed(&self, name: &str) -> bool {
         self.step_states
             .read()
-            .expect("workflow lock poisoned")
+            .expect(LOCK_POISONED)
             .get(name)
             .map(|s| s.status == StepStatus::Completed)
             .unwrap_or(false)
@@ -327,7 +329,7 @@ impl WorkflowContext {
     pub fn is_step_started(&self, name: &str) -> bool {
         self.step_states
             .read()
-            .expect("workflow lock poisoned")
+            .expect(LOCK_POISONED)
             .get(name)
             .map(|s| s.status != StepStatus::Pending)
             .unwrap_or(false)
@@ -336,7 +338,7 @@ impl WorkflowContext {
     pub fn get_step_result<T: serde::de::DeserializeOwned>(&self, name: &str) -> Option<T> {
         self.step_states
             .read()
-            .expect("workflow lock poisoned")
+            .expect(LOCK_POISONED)
             .get(name)
             .and_then(|s| s.result.as_ref())
             .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -347,7 +349,7 @@ impl WorkflowContext {
     /// If the step is already running or beyond (completed/failed), this is a no-op.
     pub async fn record_step_start(&self, name: &str) {
         let state_clone = {
-            let mut states = self.step_states.write().expect("workflow lock poisoned");
+            let mut states = self.step_states.write().expect(LOCK_POISONED);
             let state = states
                 .entry(name.to_string())
                 .or_insert_with(|| StepState::new(name));
@@ -401,7 +403,7 @@ impl WorkflowContext {
         name: &str,
         result: serde_json::Value,
     ) -> Option<StepState> {
-        let mut states = self.step_states.write().expect("workflow lock poisoned");
+        let mut states = self.step_states.write().expect(LOCK_POISONED);
         if let Some(state) = states.get_mut(name) {
             state.complete(result.clone());
         }
@@ -411,7 +413,7 @@ impl WorkflowContext {
         let mut completed = self
             .completed_steps
             .write()
-            .expect("workflow lock poisoned");
+            .expect(LOCK_POISONED);
         if !completed.contains(&name.to_string()) {
             completed.push(name.to_string());
         }
@@ -458,7 +460,7 @@ impl WorkflowContext {
     pub async fn record_step_failure(&self, name: &str, error: impl Into<String>) {
         let error_str = error.into();
         let state_clone = {
-            let mut states = self.step_states.write().expect("workflow lock poisoned");
+            let mut states = self.step_states.write().expect(LOCK_POISONED);
             if let Some(state) = states.get_mut(name) {
                 state.fail(error_str.clone());
             }
@@ -494,7 +496,7 @@ impl WorkflowContext {
 
     /// Record step compensation.
     pub fn record_step_compensated(&self, name: &str) {
-        let mut states = self.step_states.write().expect("workflow lock poisoned");
+        let mut states = self.step_states.write().expect(LOCK_POISONED);
         if let Some(state) = states.get_mut(name) {
             state.compensate();
         }
@@ -532,14 +534,14 @@ impl WorkflowContext {
     }
 
     pub fn completed_steps_reversed(&self) -> Vec<String> {
-        let completed = self.completed_steps.read().expect("workflow lock poisoned");
+        let completed = self.completed_steps.read().expect(LOCK_POISONED);
         completed.iter().rev().cloned().collect()
     }
 
     pub fn all_step_states(&self) -> HashMap<String, StepState> {
         self.step_states
             .read()
-            .expect("workflow lock poisoned")
+            .expect(LOCK_POISONED)
             .clone()
     }
 
@@ -561,14 +563,14 @@ impl WorkflowContext {
         let mut handlers = self
             .compensation_handlers
             .write()
-            .expect("workflow lock poisoned");
+            .expect(LOCK_POISONED);
         handlers.insert(step_name.to_string(), handler);
     }
 
     pub fn get_compensation_handler(&self, step_name: &str) -> Option<CompensationHandler> {
         self.compensation_handlers
             .read()
-            .expect("workflow lock poisoned")
+            .expect(LOCK_POISONED)
             .get(step_name)
             .cloned()
     }
@@ -576,7 +578,7 @@ impl WorkflowContext {
     pub fn has_compensation(&self, step_name: &str) -> bool {
         self.compensation_handlers
             .read()
-            .expect("workflow lock poisoned")
+            .expect(LOCK_POISONED)
             .contains_key(step_name)
     }
 
@@ -617,7 +619,7 @@ impl WorkflowContext {
     pub fn compensation_handlers(&self) -> HashMap<String, CompensationHandler> {
         self.compensation_handlers
             .read()
-            .expect("workflow lock poisoned")
+            .expect(LOCK_POISONED)
             .clone()
     }
 

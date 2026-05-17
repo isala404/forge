@@ -697,7 +697,8 @@ fn convert_realtime_to_sse(msg: RealtimeMessage) -> Option<SseMessage> {
             data,
         } => Some(SseMessage::Data {
             target: format!("sub:{}", subscription_id),
-            payload: data,
+            payload: std::sync::Arc::try_unwrap(data)
+                .unwrap_or_else(|arc| serde_json::Value::clone(&arc)),
         }),
         RealtimeMessage::DeltaUpdate {
             subscription_id,
@@ -1304,7 +1305,7 @@ mod tests {
     fn convert_realtime_to_sse_data_uses_sub_prefix() {
         let msg = RealtimeMessage::Data {
             subscription_id: "abc".into(),
-            data: serde_json::json!({"x": 1}),
+            data: std::sync::Arc::new(serde_json::json!({"x": 1})),
         };
         let Some(SseMessage::Data { target, payload }) = convert_realtime_to_sse(msg) else {
             panic!("expected Data");

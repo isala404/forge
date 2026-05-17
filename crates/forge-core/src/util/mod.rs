@@ -75,10 +75,13 @@ pub fn to_pascal_case(s: &str) -> String {
 
 /// Convert a PascalCase or camelCase string to snake_case.
 pub fn to_snake_case(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
     let mut result = String::new();
-    for (i, c) in s.chars().enumerate() {
+    for (i, &c) in chars.iter().enumerate() {
         if c.is_uppercase() {
-            if i > 0 {
+            let prev_lower = i > 0 && chars.get(i - 1).is_some_and(|p| p.is_lowercase());
+            let next_lower = chars.get(i + 1).is_some_and(|n| n.is_lowercase());
+            if i > 0 && (prev_lower || next_lower) {
                 result.push('_');
             }
             result.extend(c.to_lowercase());
@@ -206,6 +209,11 @@ mod tests {
         assert_eq!(to_snake_case("ListAllProjects"), "list_all_projects");
         assert_eq!(to_snake_case("Simple"), "simple");
         assert_eq!(to_snake_case("ProjectStatus"), "project_status");
+        assert_eq!(to_snake_case("HTTPServer"), "http_server");
+        assert_eq!(to_snake_case("XMLParser"), "xml_parser");
+        assert_eq!(to_snake_case("listInvoices"), "list_invoices");
+        assert_eq!(to_snake_case("foo2Bar"), "foo2_bar");
+        assert_eq!(to_snake_case("already_snake"), "already_snake");
     }
 
     #[test]

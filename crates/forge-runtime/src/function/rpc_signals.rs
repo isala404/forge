@@ -53,7 +53,7 @@ impl RpcSignalsEmitter {
         function_kind: &str,
         duration: Duration,
         success: bool,
-        ctx: &RpcSignalContext,
+        ctx: RpcSignalContext,
     ) {
         let bot = is_bot(ctx.user_agent.as_deref());
         let visitor_id = ctx.client_ip.as_ref().map(|_| {
@@ -71,9 +71,9 @@ impl RpcSignalsEmitter {
             success,
             ctx.user_id,
             ctx.tenant_id,
-            ctx.correlation_id.clone(),
-            ctx.client_ip.clone(),
-            ctx.user_agent.clone(),
+            ctx.correlation_id,
+            ctx.client_ip,
+            ctx.user_agent,
             visitor_id,
             bot,
         );

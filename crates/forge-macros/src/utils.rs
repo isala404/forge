@@ -176,6 +176,49 @@ pub fn is_primitive_arg_type(ty: &syn::Type) -> bool {
     )
 }
 
+/// Convert a PascalCase identifier to snake_case.
+pub(crate) fn to_snake_case(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut result = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_uppercase() {
+            let prev_lower = i > 0 && chars.get(i - 1).is_some_and(|p| p.is_lowercase());
+            let next_lower = chars.get(i + 1).is_some_and(|n| n.is_lowercase());
+            if i > 0 && (prev_lower || next_lower) {
+                result.push('_');
+            }
+            result.extend(c.to_lowercase());
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// Simple English pluralization.
+pub(crate) fn pluralize(s: &str) -> String {
+    if s.ends_with("ss")
+        || s.ends_with("sh")
+        || s.ends_with("ch")
+        || s.ends_with('x')
+        || s.ends_with("zz")
+    {
+        format!("{}es", s)
+    } else if s.ends_with('z') {
+        format!("{}zes", s)
+    } else if s.ends_with('s') {
+        format!("{}es", s)
+    } else if let Some(stem) = s.strip_suffix('y') {
+        if !s.ends_with("ay") && !s.ends_with("ey") && !s.ends_with("oy") && !s.ends_with("uy") {
+            format!("{}ies", stem)
+        } else {
+            format!("{}s", s)
+        }
+    } else {
+        format!("{}s", s)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,5 +417,24 @@ mod tests {
         // Empty/non-path types (slice, array) are rejected too.
         assert!(!is_primitive_arg_type(&parse_ty("[u8; 4]")));
         assert!(!is_primitive_arg_type(&parse_ty("[u8]")));
+    }
+
+    #[test]
+    fn snake_case_converts_pascal_case() {
+        assert_eq!(to_snake_case("UserProfile"), "user_profile");
+        assert_eq!(to_snake_case("HTTPRequest"), "http_request");
+        assert_eq!(to_snake_case("simple"), "simple");
+        assert_eq!(to_snake_case("A"), "a");
+    }
+
+    #[test]
+    fn pluralize_handles_sibilants_and_z_doubling() {
+        assert_eq!(pluralize("user"), "users");
+        assert_eq!(pluralize("address"), "addresses");
+        assert_eq!(pluralize("box"), "boxes");
+        assert_eq!(pluralize("quiz"), "quizzes");
+        assert_eq!(pluralize("buzz"), "buzzes");
+        assert_eq!(pluralize("category"), "categories");
+        assert_eq!(pluralize("key"), "keys");
     }
 }

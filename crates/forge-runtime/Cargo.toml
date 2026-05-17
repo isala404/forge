@@ -25,10 +25,10 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 dashmap = { workspace = true }
-futures-util = "0.3"
-tokio-util = "0.7"
-base64 = "0.22"
-sha2 = "0.10"
+futures-util = { workspace = true }
+tokio-util = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }
 subtle = { workspace = true }
 
 # --- Optional deps (gated by feature) ---
@@ -155,7 +155,7 @@ testcontainers = ["forge-core/testcontainers"]
 
 [dev-dependencies]
 tokio-test = { workspace = true }
-tempfile = "3.14"
+tempfile = { workspace = true }
 # In-memory self-signed cert for the TLS handshake e2e test in gateway/tls.rs.
 # `reqwest` (with rustls-tls) is already a regular dep, so the test reuses it.
 rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }

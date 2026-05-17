@@ -33,8 +33,7 @@ echo "=== Scaffold ==="
 
 # Patch Dioxus frontend to use local forge-dioxus source
 if [ -f "$DIR/frontend/Cargo.toml" ] && grep -q 'forge-dioxus' "$DIR/frontend/Cargo.toml"; then
-  sed -i.bak "s|forge-dioxus = .*|forge-dioxus = { path = \"$WORKSPACE/packages/forge-dioxus\" }|" "$DIR/frontend/Cargo.toml"
-  rm -f "$DIR/frontend/Cargo.toml.bak"
+  perl -pi -e "s|forge-dioxus = .*|forge-dioxus = { path = \"$WORKSPACE/packages/forge-dioxus\" }|" "$DIR/frontend/Cargo.toml"
 fi
 
 # Patch npm packages to local source
@@ -50,10 +49,10 @@ fi
 cd "$DIR"
 
 echo "=== Auto-format generated code ==="
-cargo fmt 2>/dev/null || true
-find "$DIR/frontend" -name '*.rs' -exec rustfmt --edition 2024 {} + 2>/dev/null || true
+cargo fmt || true
+find "$DIR/frontend" -name '*.rs' -exec rustfmt --edition 2024 {} + || true
 if [ -d "$DIR/frontend" ] && [ -f "$DIR/frontend/package.json" ]; then
-  cd "$DIR/frontend" && bun install --no-save 2>/dev/null && bunx prettier --write . 2>/dev/null || true && cd "$DIR"
+  cd "$DIR/frontend" && bun install --no-save && bunx prettier --write . || true && cd "$DIR"
 fi
 
 echo "=== Forge check ==="

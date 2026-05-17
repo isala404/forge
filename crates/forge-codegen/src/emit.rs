@@ -118,19 +118,34 @@ fn ts_hashmap(name: &str) -> String {
         return "Record<string, unknown>".into();
     };
 
-    let mut parts = inner.splitn(2, ',').map(|s| s.trim());
-    let _key_type = parts.next();
-    if let Some(value) = parts.next() {
-        let value_type = match value {
-            "String" | "&str" | "str" => "string",
-            "i32" | "i64" | "u32" | "u64" | "f32" | "f64" => "number",
-            "bool" => "boolean",
-            other => other,
-        };
-        format!("Record<string, {}>", value_type)
-    } else {
-        "Record<string, unknown>".into()
+    let Some((_key, value)) = split_top_level_comma(inner) else {
+        return "Record<string, unknown>".into();
+    };
+
+    let value_type = match value {
+        "String" | "&str" | "str" => "string",
+        "i32" | "i64" | "u32" | "u64" | "f32" | "f64" => "number",
+        "bool" => "boolean",
+        other => other,
+    };
+    format!("Record<string, {}>", value_type)
+}
+
+/// Split a generic parameter list at the first top-level comma,
+/// respecting nested `<>`, `()`, and `[]` brackets.
+fn split_top_level_comma(s: &str) -> Option<(&str, &str)> {
+    let mut depth = 0usize;
+    for (i, c) in s.char_indices() {
+        match c {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                return Some((s.get(..i)?.trim(), s.get(i + 1..)?.trim()));
+            }
+            _ => {}
+        }
     }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -309,6 +324,24 @@ mod tests {
                 Position::Arg
             ),
             "Record<string, User>"
+        );
+    }
+
+    #[test]
+    fn ts_hashmap_nested_generics() {
+        assert_eq!(
+            ts_type(
+                &RustType::Custom("HashMap<String, HashMap<String, i32>>".into()),
+                Position::Arg
+            ),
+            "Record<string, HashMap<String, i32>>"
+        );
+        assert_eq!(
+            ts_type(
+                &RustType::Custom("HashMap<(K1, K2), V>".into()),
+                Position::Arg
+            ),
+            "Record<string, V>"
         );
     }
 

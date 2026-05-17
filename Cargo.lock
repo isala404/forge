@@ -1228,7 +1228,7 @@ version = "0.9.0"
 dependencies = [
  "chrono",
  "forgex",
- "jsonwebtoken 9.3.1",
+ "jsonwebtoken",
  "reqwest",
  "serde",
  "serde_json",
@@ -1348,7 +1348,7 @@ dependencies = [
  "hmac",
  "ipnet",
  "jsonschema",
- "jsonwebtoken 10.3.0",
+ "jsonwebtoken",
  "maxminddb",
  "opentelemetry",
  "opentelemetry-appender-tracing",
@@ -2165,21 +2165,6 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid-simd",
-]
-
-[[package]]
-name = "jsonwebtoken"
-version = "9.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a87cc7a48537badeae96744432de36f4be2b4a34a05a5ef32e9dd8a1c169dde"
-dependencies = [
- "base64 0.22.1",
- "js-sys",
- "pem",
- "ring",
- "serde",
- "serde_json",
- "simple_asn1",
 ]
 
 [[package]]

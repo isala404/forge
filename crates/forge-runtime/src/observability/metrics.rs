@@ -163,10 +163,10 @@ impl JobMetrics {
         }
     }
 
-    pub fn record(&self, job_type: &str, status: &str, duration_secs: f64) {
+    pub fn record(&self, job_type: &str, status: &'static str, duration_secs: f64) {
         let attributes = [
             KeyValue::new("job_type", job_type.to_string()),
-            KeyValue::new("status", status.to_string()),
+            KeyValue::new("status", status),
         ];
 
         self.executions_total.add(1, &attributes);
@@ -191,19 +191,19 @@ impl ActiveConnectionsGauge {
         Self { gauge }
     }
 
-    pub fn increment(&self, connection_type: &str) {
+    pub fn increment(&self, connection_type: &'static str) {
         self.gauge
-            .add(1, &[KeyValue::new("type", connection_type.to_string())]);
+            .add(1, &[KeyValue::new("type", connection_type)]);
     }
 
-    pub fn decrement(&self, connection_type: &str) {
+    pub fn decrement(&self, connection_type: &'static str) {
         self.gauge
-            .add(-1, &[KeyValue::new("type", connection_type.to_string())]);
+            .add(-1, &[KeyValue::new("type", connection_type)]);
     }
 
-    pub fn set(&self, connection_type: &str, delta: i64) {
+    pub fn set(&self, connection_type: &'static str, delta: i64) {
         self.gauge
-            .add(delta, &[KeyValue::new("type", connection_type.to_string())]);
+            .add(delta, &[KeyValue::new("type", connection_type)]);
     }
 }
 
@@ -245,11 +245,11 @@ pub fn record_fn_cache(function: &str, hit: bool) {
     fn_cache_metrics().record(function, hit);
 }
 
-pub fn record_job_execution(job_type: &str, status: &str, duration_secs: f64) {
+pub fn record_job_execution(job_type: &str, status: &'static str, duration_secs: f64) {
     job_metrics().record(job_type, status, duration_secs);
 }
 
-pub fn set_active_connections(connection_type: &str, delta: i64) {
+pub fn set_active_connections(connection_type: &'static str, delta: i64) {
     connections_gauge().set(connection_type, delta);
 }
 

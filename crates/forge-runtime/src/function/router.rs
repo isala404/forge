@@ -49,8 +49,8 @@ fn require_auth(
 
 /// Result of routing a function call.
 pub enum RouteResult {
-    /// Query execution result.
-    Query(Value),
+    /// Query execution result (Arc to avoid cloning cached values).
+    Query(Arc<Value>),
     /// Mutation execution result.
     Mutation(Value),
     /// Job dispatch result (returns job_id).
@@ -246,13 +246,11 @@ impl FunctionRouter {
         let fn_timeout = info.and_then(|i| i.timeout).unwrap_or(self.default_timeout);
         let log_level = log_level_for(info);
 
-        let kind = info
-            .map(|i| i.kind.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+        let kind = info.map(|i| i.kind.as_str()).unwrap_or("unknown");
 
         // Capture signal metadata before auth/request are consumed.
         #[cfg(feature = "gateway")]
-        let signal_ctx = self
+        let mut signal_ctx = self
             .signals
             .as_ref()
             .map(|_| RpcSignalContext::capture(&auth, &request));
@@ -289,14 +287,14 @@ impl FunctionRouter {
                 );
                 crate::observability::record_fn_execution(
                     function_name,
-                    &kind,
+                    kind,
                     false,
                     false,
                     duration.as_secs_f64(),
                 );
                 #[cfg(feature = "gateway")]
-                if let (Some(emitter), Some(ctx)) = (&self.signals, &signal_ctx) {
-                    emitter.emit(function_name, &kind, duration, false, ctx);
+                if let (Some(emitter), Some(ctx)) = (&self.signals, signal_ctx.take()) {
+                    emitter.emit(function_name, kind, duration, false, ctx);
                 }
                 return Err(ForgeError::Timeout(format!(
                     "Function '{}' timed out after {:?}",
@@ -311,7 +309,10 @@ impl FunctionRouter {
             Ok(outcome) => {
                 let RouteOutcome { result, cache_hit } = outcome;
                 let (result_kind, value) = match result {
-                    RouteResult::Query(v) => ("query", v),
+                    RouteResult::Query(arc) => {
+                        let v = Arc::try_unwrap(arc).unwrap_or_else(|a| Value::clone(&a));
+                        ("query", v)
+                    }
                     RouteResult::Mutation(v) => ("mutation", v),
                     RouteResult::Job(v) => ("job", v),
                     RouteResult::Workflow(v) => ("workflow", v),
@@ -334,7 +335,7 @@ impl FunctionRouter {
                     duration.as_secs_f64(),
                 );
                 #[cfg(feature = "gateway")]
-                if let (Some(emitter), Some(ctx)) = (&self.signals, &signal_ctx) {
+                if let (Some(emitter), Some(ctx)) = (&self.signals, signal_ctx.take()) {
                     emitter.emit(function_name, result_kind, duration, true, ctx);
                 }
 
@@ -344,7 +345,7 @@ impl FunctionRouter {
                 log_completion(
                     log_level,
                     function_name,
-                    &kind,
+                    kind,
                     &args,
                     duration,
                     false,
@@ -352,14 +353,14 @@ impl FunctionRouter {
                 );
                 crate::observability::record_fn_execution(
                     function_name,
-                    &kind,
+                    kind,
                     false,
                     false,
                     duration.as_secs_f64(),
                 );
                 #[cfg(feature = "gateway")]
-                if let (Some(emitter), Some(ctx)) = (&self.signals, &signal_ctx) {
-                    emitter.emit(function_name, &kind, duration, false, ctx);
+                if let (Some(emitter), Some(ctx)) = (&self.signals, signal_ctx.take()) {
+                    emitter.emit(function_name, kind, duration, false, ctx);
                 }
 
                 Err(e)
@@ -397,17 +398,12 @@ impl FunctionRouter {
 
     /// Reject a result value when its serialized size exceeds `max_result_size_bytes`.
     ///
-    /// Uses `serde_json::to_string` to measure size, which is the same encoding
-    /// sent on the wire. A limit of 0 means unlimited.
+    /// A limit of 0 means unlimited.
     fn check_result_size(&self, value: &Value) -> Result<()> {
         if self.max_result_size_bytes == 0 {
             return Ok(());
         }
-        // Estimate by serializing. For very large values this is a second
-        // serialization, but it only fires when the limit is non-zero.
-        let serialized_len = serde_json::to_string(value)
-            .map(|s| s.len())
-            .unwrap_or(usize::MAX);
+        let serialized_len = json_byte_length(value);
         if serialized_len > self.max_result_size_bytes {
             return Err(ForgeError::Internal(format!(
                 "Response size {} bytes exceeds max_result_size_bytes limit of {} bytes",
@@ -472,7 +468,7 @@ impl FunctionRouter {
                             tracing::Span::current().record("cache.hit", true);
                             crate::observability::record_fn_cache(function_name, true);
                             return Ok(RouteOutcome {
-                                result: RouteResult::Query(Value::clone(&cached)),
+                                result: RouteResult::Query(cached),
                                 cache_hit: true,
                             });
                         }
@@ -483,16 +479,17 @@ impl FunctionRouter {
                         let result = handler(&ctx, args.clone()).await?;
                         self.check_result_size(&result)?;
 
-                        self.cache.set_by_scope(
+                        let arc = Arc::new(result);
+                        self.cache.set_arc_by_scope(
                             function_name,
                             &args,
                             scope.as_deref(),
-                            result.clone(),
+                            Arc::clone(&arc),
                             Duration::from_secs(ttl),
                         );
 
                         Ok(RouteOutcome {
-                            result: RouteResult::Query(result),
+                            result: RouteResult::Query(arc),
                             cache_hit: false,
                         })
                     } else {
@@ -500,7 +497,7 @@ impl FunctionRouter {
                         let result = handler(&ctx, args).await?;
                         self.check_result_size(&result)?;
                         Ok(RouteOutcome {
-                            result: RouteResult::Query(result),
+                            result: RouteResult::Query(Arc::new(result)),
                             cache_hit: false,
                         })
                     }
@@ -580,7 +577,7 @@ impl FunctionRouter {
             match workflow_dispatcher
                 .start_by_name(
                     function_name,
-                    args.clone(),
+                    args,
                     auth.principal_id(),
                     Some(request.trace_id().to_string()),
                 )
@@ -721,6 +718,28 @@ impl FunctionRouter {
         }
         .instrument(span)
         .await
+    }
+}
+
+/// Measure the JSON-serialized byte length of a `serde_json::Value` without
+/// allocating a `String`. Uses a counting `io::Write` implementation fed to
+/// `serde_json::to_writer`.
+fn json_byte_length(value: &Value) -> usize {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 += buf.len();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    if serde_json::to_writer(&mut counter, value).is_ok() {
+        counter.0
+    } else {
+        usize::MAX
     }
 }
 

@@ -23,6 +23,7 @@ use tracing::{debug, error, warn};
 pub struct SignalsCollector {
     tx: mpsc::Sender<SignalEvent>,
     shutdown_tx: Arc<Mutex<Option<oneshot::Sender<oneshot::Sender<()>>>>>,
+    dropped_count: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl SignalsCollector {
@@ -48,6 +49,7 @@ impl SignalsCollector {
         Self {
             tx,
             shutdown_tx: Arc::new(Mutex::new(Some(shutdown_tx))),
+            dropped_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -56,12 +58,20 @@ impl SignalsCollector {
         match self.tx.try_send(event) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_)) => {
-                warn!("signals collector channel full, dropping event");
+                let prev = self.dropped_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if prev.is_multiple_of(1000) {
+                    warn!(dropped = prev + 1, "signals collector channel full, dropping events");
+                }
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 debug!("signals collector closed, dropping event");
             }
         }
+    }
+
+    /// Returns the total number of dropped events since this collector was created.
+    pub fn dropped_count(&self) -> u64 {
+        self.dropped_count.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Flush buffered events and wait for the background task to drain.

@@ -659,16 +659,20 @@ impl Reactor {
 
                     if last_hash.as_ref() != Some(&new_hash) {
                         // Update group state with cached result
-                        let data_arc = std::sync::Arc::new(new_data.clone());
-                        subscription_manager
-                            .update_group_with_data(group_id, read_set, new_hash, data_arc);
+                        let data_arc = std::sync::Arc::new(new_data);
+                        subscription_manager.update_group_with_data(
+                            group_id,
+                            read_set,
+                            new_hash,
+                            std::sync::Arc::clone(&data_arc),
+                        );
 
                         // Fan out to all subscribers in this group
                         let subscribers = subscription_manager.get_group_subscribers(group_id);
                         for (session_id, client_sub_id) in subscribers {
                             let message = RealtimeMessage::Data {
                                 subscription_id: client_sub_id.clone(),
-                                data: new_data.clone(),
+                                data: std::sync::Arc::clone(&data_arc),
                             };
 
                             if let Err(e) = session_server.try_send_to_session(session_id, message)

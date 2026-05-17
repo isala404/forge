@@ -17,6 +17,8 @@ use std::sync::RwLock;
 use super::function::FunctionDef;
 use super::model::TableDef;
 
+const LOCK_POISONED: &str = "schema registry lock poisoned";
+
 /// Global registry of all schema definitions.
 /// This is populated at compile time by the proc macros.
 /// Uses BTreeMap for deterministic iteration order.
@@ -43,13 +45,13 @@ impl SchemaRegistry {
 
     /// Register a table definition.
     pub fn register_table(&self, table: TableDef) {
-        let mut tables = self.tables.write().expect("schema registry lock poisoned");
+        let mut tables = self.tables.write().expect(LOCK_POISONED);
         tables.insert(table.name.clone(), table);
     }
 
     /// Register an enum definition.
     pub fn register_enum(&self, enum_def: EnumDef) {
-        let mut enums = self.enums.write().expect("schema registry lock poisoned");
+        let mut enums = self.enums.write().expect(LOCK_POISONED);
         enums.insert(enum_def.name.clone(), enum_def);
     }
 
@@ -58,19 +60,19 @@ impl SchemaRegistry {
         let mut functions = self
             .functions
             .write()
-            .expect("schema registry lock poisoned");
+            .expect(LOCK_POISONED);
         functions.insert(func.name.clone(), func);
     }
 
     /// Get a table by name.
     pub fn get_table(&self, name: &str) -> Option<TableDef> {
-        let tables = self.tables.read().expect("schema registry lock poisoned");
+        let tables = self.tables.read().expect(LOCK_POISONED);
         tables.get(name).cloned()
     }
 
     /// Get an enum by name.
     pub fn get_enum(&self, name: &str) -> Option<EnumDef> {
-        let enums = self.enums.read().expect("schema registry lock poisoned");
+        let enums = self.enums.read().expect(LOCK_POISONED);
         enums.get(name).cloned()
     }
 
@@ -79,19 +81,19 @@ impl SchemaRegistry {
         let functions = self
             .functions
             .read()
-            .expect("schema registry lock poisoned");
+            .expect(LOCK_POISONED);
         functions.get(name).cloned()
     }
 
     /// Get all registered tables.
     pub fn all_tables(&self) -> Vec<TableDef> {
-        let tables = self.tables.read().expect("schema registry lock poisoned");
+        let tables = self.tables.read().expect(LOCK_POISONED);
         tables.values().cloned().collect()
     }
 
     /// Get all registered enums.
     pub fn all_enums(&self) -> Vec<EnumDef> {
-        let enums = self.enums.read().expect("schema registry lock poisoned");
+        let enums = self.enums.read().expect(LOCK_POISONED);
         enums.values().cloned().collect()
     }
 
@@ -100,7 +102,7 @@ impl SchemaRegistry {
         let functions = self
             .functions
             .read()
-            .expect("schema registry lock poisoned");
+            .expect(LOCK_POISONED);
         functions.values().cloned().collect()
     }
 
@@ -108,15 +110,15 @@ impl SchemaRegistry {
     pub fn clear(&self) {
         self.tables
             .write()
-            .expect("schema registry lock poisoned")
+            .expect(LOCK_POISONED)
             .clear();
         self.enums
             .write()
-            .expect("schema registry lock poisoned")
+            .expect(LOCK_POISONED)
             .clear();
         self.functions
             .write()
-            .expect("schema registry lock poisoned")
+            .expect(LOCK_POISONED)
             .clear();
     }
 }

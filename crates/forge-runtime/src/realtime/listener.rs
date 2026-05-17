@@ -276,7 +276,6 @@ impl ChangeListener {
 
     /// Manually emit a change (for testing).
     #[cfg(test)]
-    #[allow(dead_code)]
     pub(crate) fn emit_change(&self, change: Change) {
         let _ = self.change_tx.send(change);
     }

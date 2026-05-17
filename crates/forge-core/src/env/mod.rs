@@ -73,6 +73,12 @@ impl RealEnvProvider {
     pub fn new() -> Self {
         Self
     }
+
+    /// Return a shared `Arc` to the singleton instance.
+    pub fn shared() -> Arc<dyn EnvProvider> {
+        static INSTANCE: std::sync::OnceLock<Arc<dyn EnvProvider>> = std::sync::OnceLock::new();
+        Arc::clone(INSTANCE.get_or_init(|| Arc::new(Self)))
+    }
 }
 
 impl EnvProvider for RealEnvProvider {

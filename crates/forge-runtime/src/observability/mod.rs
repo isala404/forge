@@ -118,10 +118,10 @@ mod stub {
     pub fn record_http_request(_method: &str, _path: &str, _status: u16, _duration_secs: f64) {}
 
     #[inline]
-    pub fn record_job_execution(_job_type: &str, _status: &str, _duration_secs: f64) {}
+    pub fn record_job_execution(_job_type: &str, _status: &'static str, _duration_secs: f64) {}
 
     #[inline]
-    pub fn set_active_connections(_connection_type: &str, _delta: i64) {}
+    pub fn set_active_connections(_connection_type: &'static str, _delta: i64) {}
 
     pub fn extract_table_name(_sql: &str) -> Option<&str> {
         None

@@ -22,10 +22,7 @@ pub struct ClusterMetrics {
     nodes_dead: Gauge<i64>,
     leader_election_attempts: Counter<u64>,
     is_leader: Gauge<i64>,
-    // Reactor metrics — only consumed when gateway/realtime is on.
-    #[allow(dead_code)]
     notifications_processed: Counter<u64>,
-    #[allow(dead_code)]
     notification_latency: Histogram<f64>,
 }
 
@@ -118,17 +115,14 @@ pub fn set_is_leader(role: &str, is_leader: bool) {
     );
 }
 
-// Reactor metrics — only called from `realtime` (gateway-side).
-#[cfg(feature = "otel")]
-#[allow(dead_code)]
+#[cfg(all(feature = "otel", feature = "gateway"))]
 pub fn record_notification_processed(table: &str) {
     metrics()
         .notifications_processed
         .add(1, &[KeyValue::new("table", table.to_string())]);
 }
 
-#[cfg(feature = "otel")]
-#[allow(dead_code)]
+#[cfg(all(feature = "otel", feature = "gateway"))]
 pub fn record_notification_latency(latency_secs: f64) {
     metrics().notification_latency.record(latency_secs, &[]);
 }
@@ -151,12 +145,11 @@ pub fn record_leader_election_attempt(_role: &str, _acquired: bool) {}
 #[inline]
 pub fn set_is_leader(_role: &str, _is_leader: bool) {}
 
-#[cfg(not(feature = "otel"))]
+#[cfg(all(not(feature = "otel"), feature = "gateway"))]
 #[inline]
-#[allow(dead_code)]
 pub fn record_notification_processed(_table: &str) {}
 
-#[cfg(not(feature = "otel"))]
+#[cfg(all(not(feature = "otel"), feature = "gateway"))]
 #[inline]
-#[allow(dead_code)]
 pub fn record_notification_latency(_latency_secs: f64) {}
+

@@ -407,7 +407,16 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
                 sorted.sort();
                 sorted
             }
-            TableExtractionResult::ParseFailed(_) => Vec::new(),
+            TableExtractionResult::ParseFailed(sql) => {
+                let preview: String = sql.chars().take(80).collect();
+                return Err(syn::Error::new_spanned(
+                    &input.sig.ident,
+                    format!(
+                        "SQL in `{fn_name_str}` could not be parsed: \"{preview}...\"\n\
+                         Add #[mutation(tables(\"your_table\"))] to specify table dependencies explicitly."
+                    ),
+                ));
+            }
         }
     };
 

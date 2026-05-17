@@ -834,6 +834,8 @@ impl Forge {
                 self.config.rate_limit.mode,
                 forge_core::config::RateLimitMode::Hybrid
             ) {
+                // System table query runs at startup, not in offline-checked code path.
+                #[allow(clippy::disallowed_methods)]
                 let active_nodes: Option<i64> =
                     sqlx::query_scalar("SELECT COUNT(*) FROM forge_nodes WHERE status = 'active'")
                         .fetch_one(db_ref.primary())

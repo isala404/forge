@@ -24,7 +24,6 @@ impl Default for CronSchedule {
 impl CronSchedule {
     /// Create a new cron schedule from an expression.
     pub fn new(expression: &str) -> Result<Self, CronParseError> {
-        // Normalize expression (add seconds if missing)
         let normalized = normalize_cron_expression(expression);
 
         let schedule = Schedule::from_str(&normalized)
@@ -34,6 +33,20 @@ impl CronSchedule {
             expression: normalized,
             schedule: Some(schedule),
         })
+    }
+
+    /// Create a cron schedule from an expression that was already validated at compile time.
+    ///
+    /// Falls back to a non-firing schedule if parsing somehow fails, which cannot happen
+    /// when the macro has already validated the expression.
+    pub fn new_validated(expression: &str) -> Self {
+        let normalized = normalize_cron_expression(expression);
+        let schedule = Schedule::from_str(&normalized).ok();
+
+        Self {
+            expression: normalized,
+            schedule,
+        }
     }
 
     /// Get the cron expression string.

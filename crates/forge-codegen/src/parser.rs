@@ -643,7 +643,7 @@ mod tests {
     #[test]
     fn test_to_snake_case() {
         assert_eq!(to_snake_case("UserProfile"), "user_profile");
-        assert_eq!(to_snake_case("ID"), "i_d");
+        assert_eq!(to_snake_case("ID"), "id");
         assert_eq!(to_snake_case("createdAt"), "created_at");
     }
 

@@ -252,6 +252,7 @@ fn convert_workflow_attrs(darling: DarlingWorkflowAttrs) -> WorkflowAttrs {
 struct ContractExtractor {
     step_keys: BTreeSet<String>,
     wait_keys: BTreeSet<String>,
+    errors: Vec<syn::Error>,
 }
 
 impl ContractExtractor {
@@ -259,6 +260,7 @@ impl ContractExtractor {
         Self {
             step_keys: BTreeSet::new(),
             wait_keys: BTreeSet::new(),
+            errors: Vec::new(),
         }
     }
 
@@ -279,18 +281,28 @@ impl<'ast> Visit<'ast> for ContractExtractor {
         match method_name.as_str() {
             // ctx.step("key", ...) or builder.step("key", ...)
             "step" => {
-                if let Some(first_arg) = node.args.first()
-                    && let Some(key) = Self::extract_string_lit(first_arg)
-                {
-                    self.step_keys.insert(key);
+                if let Some(first_arg) = node.args.first() {
+                    if let Some(key) = Self::extract_string_lit(first_arg) {
+                        self.step_keys.insert(key);
+                    } else {
+                        self.errors.push(syn::Error::new_spanned(
+                            first_arg,
+                            "workflow step name must be a string literal",
+                        ));
+                    }
                 }
             }
             // ctx.wait_for_event::<T>("event_name", ...)
             "wait_for_event" => {
-                if let Some(first_arg) = node.args.first()
-                    && let Some(key) = Self::extract_string_lit(first_arg)
-                {
-                    self.wait_keys.insert(key);
+                if let Some(first_arg) = node.args.first() {
+                    if let Some(key) = Self::extract_string_lit(first_arg) {
+                        self.wait_keys.insert(key);
+                    } else {
+                        self.errors.push(syn::Error::new_spanned(
+                            first_arg,
+                            "workflow wait_for_event name must be a string literal",
+                        ));
+                    }
                 }
             }
             _ => {}
@@ -408,6 +420,13 @@ pub fn workflow_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Extract step/wait keys from function body for signature derivation
     let mut contract_extractor = ContractExtractor::new();
     contract_extractor.visit_block(block);
+
+    if let Some(first_err) = contract_extractor.errors.into_iter().reduce(|mut acc, e| {
+        acc.combine(e);
+        acc
+    }) {
+        return TokenStream::from(first_err.to_compile_error());
+    }
 
     // Parse input type from function signature
     let mut input_type = quote! { () };

@@ -128,17 +128,14 @@ impl RpcHandler {
         auth: AuthContext,
         metadata: RequestMetadata,
     ) -> RpcResponse {
-        // Don't check has_function early - let router try jobs/workflows too
+        let request_id = metadata.request_id().to_string();
         match self
             .router
-            .execute(&request.function, request.args, auth, metadata.clone())
+            .execute(&request.function, request.args, auth, metadata)
             .await
         {
-            Ok(value) => {
-                RpcResponse::success(value).with_request_id(metadata.request_id().to_string())
-            }
-            Err(e) => RpcResponse::error(RpcError::from(e))
-                .with_request_id(metadata.request_id().to_string()),
+            Ok(value) => RpcResponse::success(value).with_request_id(request_id),
+            Err(e) => RpcResponse::error(RpcError::from(e)).with_request_id(request_id),
         }
     }
 }

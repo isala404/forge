@@ -740,7 +740,7 @@ impl QueryContext {
             auth,
             request,
             db_pool,
-            env_provider: Arc::new(RealEnvProvider::new()),
+            env_provider: RealEnvProvider::shared(),
         }
     }
 
@@ -888,7 +888,7 @@ impl MutationContext {
             http_timeout: None,
             job_dispatch: None,
             workflow_dispatch: None,
-            env_provider: Arc::new(RealEnvProvider::new()),
+            env_provider: RealEnvProvider::shared(),
             tx: None,
             token_issuer: None,
             token_ttl: AuthTokenTtl::default(),
@@ -914,7 +914,7 @@ impl MutationContext {
             http_timeout: None,
             job_dispatch,
             workflow_dispatch,
-            env_provider: Arc::new(RealEnvProvider::new()),
+            env_provider: RealEnvProvider::shared(),
             tx: None,
             token_issuer: None,
             token_ttl: AuthTokenTtl::default(),
@@ -980,7 +980,7 @@ impl MutationContext {
             http_timeout: None,
             job_dispatch,
             workflow_dispatch,
-            env_provider: Arc::new(RealEnvProvider::new()),
+            env_provider: RealEnvProvider::shared(),
             tx: Some(tx_handle.clone()),
             token_issuer: None,
             token_ttl: AuthTokenTtl::default(),

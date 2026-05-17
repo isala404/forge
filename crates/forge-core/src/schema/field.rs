@@ -67,6 +67,6 @@ mod tests {
     fn test_to_snake_case() {
         assert_eq!(to_snake_case("createdAt"), "created_at");
         assert_eq!(to_snake_case("userId"), "user_id");
-        assert_eq!(to_snake_case("HTTPServer"), "h_t_t_p_server");
+        assert_eq!(to_snake_case("HTTPServer"), "http_server");
     }
 }

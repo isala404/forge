@@ -141,8 +141,7 @@ pub fn cron_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 fn info() -> forge::forge_core::cron::CronInfo {
                     forge::forge_core::cron::CronInfo {
                         name: #rpc_name,
-                        schedule: forge::forge_core::cron::CronSchedule::new(#schedule)
-                            .expect("Invalid cron schedule"),
+                        schedule: forge::forge_core::cron::CronSchedule::new_validated(#schedule),
                         timezone: #timezone,
                         group: #group,
                         catch_up: #catch_up,

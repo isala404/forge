@@ -157,20 +157,7 @@ struct VariantInfo {
     sql_value: String,
 }
 
-fn to_snake_case(s: &str) -> String {
-    let mut result = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if c.is_uppercase() {
-            if i > 0 {
-                result.push('_');
-            }
-            result.push(c.to_lowercase().next().unwrap());
-        } else {
-            result.push(c);
-        }
-    }
-    result
-}
+use crate::utils::to_snake_case;
 
 #[cfg(test)]
 mod tests {

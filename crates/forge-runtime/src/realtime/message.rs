@@ -64,7 +64,7 @@ pub struct WorkflowStepData {
 pub enum RealtimeMessage {
     Data {
         subscription_id: String,
-        data: serde_json::Value,
+        data: std::sync::Arc<serde_json::Value>,
     },
     DeltaUpdate {
         subscription_id: String,

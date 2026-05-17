@@ -259,19 +259,26 @@ pub fn init_telemetry(
 
     // Build optional trace layer (includes sqlx debug for DB-level spans)
     let otel_trace_layer = if config.enable_traces {
-        let tracer_provider = init_tracer(config)?;
-        let tracer = tracer_provider.tracer(config.service_name.clone());
+        match init_tracer(config) {
+            Ok(tracer_provider) => {
+                let tracer = tracer_provider.tracer(config.service_name.clone());
 
-        TRACER_PROVIDER
-            .set(tracer_provider.clone())
-            .map_err(|_| TelemetryError::AlreadyInitialized)?;
+                TRACER_PROVIDER
+                    .set(tracer_provider.clone())
+                    .map_err(|_| TelemetryError::AlreadyInitialized)?;
 
-        global::set_tracer_provider(tracer_provider);
+                global::set_tracer_provider(tracer_provider);
 
-        Some(
-            OpenTelemetryLayer::new(tracer)
-                .with_filter(build_console_filter(project_name, log_level)),
-        )
+                Some(
+                    OpenTelemetryLayer::new(tracer)
+                        .with_filter(build_console_filter(project_name, log_level)),
+                )
+            }
+            Err(e) => {
+                eprintln!("WARNING: OTLP trace exporter init failed, traces disabled: {e}");
+                None
+            }
+        }
     } else {
         None
     };
@@ -281,26 +288,32 @@ pub fn init_telemetry(
     // that blocks events from the OTLP transport stack (hyper, reqwest, h2,
     // etc.) to prevent infinite feedback through the HTTP exporter.
     let otel_log_layer = if config.enable_logs {
-        let logger_provider = init_logger(config)?;
+        match init_logger(config) {
+            Ok(logger_provider) => {
+                let env_filter = build_console_filter(project_name, log_level);
+                let log_layer = OpenTelemetryTracingBridge::new(&logger_provider).with_filter(
+                    env_filter.and(FilterFn::new(|metadata| {
+                        let target = metadata.target();
+                        !target.starts_with("hyper")
+                            && !target.starts_with("reqwest")
+                            && !target.starts_with("h2")
+                            && !target.starts_with("tonic")
+                            && !target.starts_with("tower")
+                            && !target.starts_with("opentelemetry")
+                    })),
+                );
 
-        let env_filter = build_console_filter(project_name, log_level);
-        let log_layer = OpenTelemetryTracingBridge::new(&logger_provider).with_filter(
-            env_filter.and(FilterFn::new(|metadata| {
-                let target = metadata.target();
-                !target.starts_with("hyper")
-                    && !target.starts_with("reqwest")
-                    && !target.starts_with("h2")
-                    && !target.starts_with("tonic")
-                    && !target.starts_with("tower")
-                    && !target.starts_with("opentelemetry")
-            })),
-        );
+                LOGGER_PROVIDER
+                    .set(logger_provider)
+                    .map_err(|_| TelemetryError::AlreadyInitialized)?;
 
-        LOGGER_PROVIDER
-            .set(logger_provider)
-            .map_err(|_| TelemetryError::AlreadyInitialized)?;
-
-        Some(log_layer)
+                Some(log_layer)
+            }
+            Err(e) => {
+                eprintln!("WARNING: OTLP log exporter init failed, log bridge disabled: {e}");
+                None
+            }
+        }
     } else {
         None
     };
@@ -317,13 +330,18 @@ pub fn init_telemetry(
     }
 
     if config.enable_metrics {
-        let meter_provider = init_meter(config)?;
+        match init_meter(config) {
+            Ok(meter_provider) => {
+                METER_PROVIDER
+                    .set(meter_provider.clone())
+                    .map_err(|_| TelemetryError::AlreadyInitialized)?;
 
-        METER_PROVIDER
-            .set(meter_provider.clone())
-            .map_err(|_| TelemetryError::AlreadyInitialized)?;
-
-        global::set_meter_provider(meter_provider);
+                global::set_meter_provider(meter_provider);
+            }
+            Err(e) => {
+                eprintln!("WARNING: OTLP metric exporter init failed, metrics disabled: {e}");
+            }
+        }
     }
 
     tracing::info!(

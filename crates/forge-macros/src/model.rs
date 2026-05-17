@@ -143,40 +143,7 @@ fn extract_string_value(s: &str) -> Option<String> {
     None
 }
 
-fn to_snake_case(s: &str) -> String {
-    let mut result = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if c.is_uppercase() {
-            if i > 0 {
-                result.push('_');
-            }
-            result.push(c.to_lowercase().next().unwrap());
-        } else {
-            result.push(c);
-        }
-    }
-    result
-}
-
-fn pluralize(s: &str) -> String {
-    // Simple English pluralization rules
-    if s.ends_with('s')
-        || s.ends_with("sh")
-        || s.ends_with("ch")
-        || s.ends_with('x')
-        || s.ends_with('z')
-    {
-        format!("{}es", s)
-    } else if let Some(stem) = s.strip_suffix('y') {
-        if !s.ends_with("ay") && !s.ends_with("ey") && !s.ends_with("oy") && !s.ends_with("uy") {
-            format!("{}ies", stem)
-        } else {
-            format!("{}s", s)
-        }
-    } else {
-        format!("{}s", s)
-    }
-}
+use crate::utils::{pluralize, to_snake_case};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
@@ -189,7 +156,7 @@ mod tests {
     fn snake_case_simple() {
         assert_eq!(to_snake_case("User"), "user");
         assert_eq!(to_snake_case("UserProfile"), "user_profile");
-        assert_eq!(to_snake_case("HTTPRequest"), "h_t_t_p_request");
+        assert_eq!(to_snake_case("HTTPRequest"), "http_request");
     }
 
     #[test]
@@ -216,7 +183,7 @@ mod tests {
         assert_eq!(pluralize("crash"), "crashes");
         assert_eq!(pluralize("match"), "matches");
         assert_eq!(pluralize("box"), "boxes");
-        assert_eq!(pluralize("quiz"), "quizes");
+        assert_eq!(pluralize("quiz"), "quizzes");
     }
 
     #[test]

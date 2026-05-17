@@ -407,11 +407,9 @@ impl std::fmt::Display for CircuitBreakerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CircuitBreakerError::CircuitOpen(e) => write!(f, "{}", e),
-            CircuitBreakerError::PrivateHostBlocked(host) => write!(
+            CircuitBreakerError::PrivateHostBlocked(_host) => write!(
                 f,
-                "Outbound request blocked: '{}' resolves to a private IP. \
-                 Set `[http] allow_private = true` to enable.",
-                host
+                "Outbound request blocked: target resolves to a private IP"
             ),
             CircuitBreakerError::Request(e) => write!(f, "HTTP request failed: {}", e),
         }
@@ -1055,13 +1053,11 @@ mod tests {
     }
 
     #[test]
-    fn private_host_blocked_display_suggests_config_escape_hatch() {
-        // The error must tell operators exactly which knob to flip — it's
-        // the only signal they get when an outbound call dies in dev.
+    fn private_host_blocked_display_redacts_host() {
         let err = CircuitBreakerError::PrivateHostBlocked("127.0.0.1".to_string());
         let s = err.to_string();
-        assert!(s.contains("127.0.0.1"));
-        assert!(s.contains("allow_private"));
+        assert!(!s.contains("127.0.0.1"), "host must not leak through Display");
+        assert!(s.contains("private IP"));
     }
 
     #[test]

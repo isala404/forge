@@ -645,7 +645,7 @@ impl GatewayServer {
                 auth_middleware,
             ))
             .layer(middleware::from_fn_with_state(
-                Arc::new(self.config.quiet_paths.clone()),
+                Arc::new(normalize_quiet_paths(&self.config.quiet_paths)),
                 tracing_middleware,
             ));
 
@@ -923,7 +923,7 @@ async fn api_version_middleware(
 /// Quiet routes skip spans, logs, and metrics to avoid noise from
 /// probes or high-frequency internal endpoints.
 async fn tracing_middleware(
-    axum::extract::State(quiet_paths): axum::extract::State<Arc<Vec<String>>>,
+    axum::extract::State(quiet_paths): axum::extract::State<Arc<std::collections::HashSet<String>>>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
@@ -948,6 +948,11 @@ async fn tracing_middleware(
 
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
+    let route_pattern = req
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|m| m.as_str().to_string())
+        .unwrap_or_else(|| normalize_metric_path(&path));
 
     let mut tracing_state = TracingState::with_trace_id(trace_id.clone());
     if let Some(span_id) = parent_span_id {
@@ -966,10 +971,7 @@ async fn tracing_middleware(
             .insert(forge_core::function::AuthContext::unauthenticated());
     }
 
-    // Config uses full paths (/_api/health) but axum strips the prefix
-    // for nested routers, so the middleware sees /health not /_api/health.
-    let full_path = format!("/_api{}", path);
-    let is_quiet = quiet_paths.iter().any(|r| *r == full_path || *r == path);
+    let is_quiet = quiet_paths.contains(path.as_str());
 
     if is_quiet {
         let mut response = next.run(req).await;
@@ -1004,7 +1006,7 @@ async fn tracing_middleware(
         200..=299 => tracing::info!(parent: &span, duration_ms, "Request completed"),
         _ => tracing::trace!(parent: &span, duration_ms, "Request completed"),
     }
-    crate::observability::record_http_request(&method, &path, status, elapsed.as_secs_f64());
+    crate::observability::record_http_request(&method, &route_pattern, status, elapsed.as_secs_f64());
 
     set_tracing_headers(&mut response, &trace_id, &tracing_state.request_id);
     response
@@ -1015,6 +1017,46 @@ async fn tracing_middleware(
 /// inflate the count. This is a conservative O(n) pre-parse guard, not a full
 /// parser — its purpose is to catch stack-busting inputs before `serde_json`
 /// recurses into them.
+/// Normalize a raw URI path into a bounded route template for metric labels.
+/// Replaces dynamic segments (UUIDs, numeric IDs) with placeholders to prevent
+/// unbounded cardinality in OTLP backends.
+fn normalize_metric_path(path: &str) -> String {
+    let segments: Vec<&str> = path.split('/').collect();
+    let mut out = String::with_capacity(path.len());
+    for (i, seg) in segments.iter().enumerate() {
+        if i > 0 {
+            out.push('/');
+        }
+        if seg.is_empty() {
+            continue;
+        }
+        if uuid::Uuid::try_parse(seg).is_ok() || seg.chars().all(|c| c.is_ascii_digit()) {
+            out.push_str("{id}");
+        } else {
+            out.push_str(seg);
+        }
+    }
+    if out.is_empty() {
+        "/".to_string()
+    } else {
+        out
+    }
+}
+
+/// Pre-compute the quiet-paths set at startup. Config entries may use the full
+/// `/_api/health` form while axum strips the prefix for nested routers, so the
+/// middleware sees `/health`. We store the stripped form to avoid a per-request
+/// `format!`.
+fn normalize_quiet_paths(paths: &[String]) -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::with_capacity(paths.len() * 2);
+    for p in paths {
+        let stripped = p.strip_prefix("/_api").unwrap_or(p);
+        set.insert(stripped.to_string());
+        set.insert(p.clone());
+    }
+    set
+}
+
 fn json_max_depth(bytes: &[u8]) -> usize {
     let mut depth: usize = 0;
     let mut max_depth: usize = 0;

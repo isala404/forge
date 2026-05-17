@@ -47,6 +47,7 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.9"
+# Pinned: schemars 1.x is a breaking rewrite; stay on 0.8.x until we can migrate JsonSchema derives.
 schemars = { version = "=0.8.22", features = ["chrono", "uuid1"] }
 jsonschema = "0.28"
 
@@ -71,7 +72,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 tracing-opentelemetry = "0.28"
 
-# TODO(pre-1.0): Replace with plain OTLP via reqwest
+# Pinned: OTel 0.27 is the latest stable release as of Rust edition 2024.
 opentelemetry = { version = "0.27", features = ["trace", "metrics", "logs"] }
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio", "trace", "metrics", "logs"] }
 opentelemetry-otlp = { version = "0.27", default-features = false, features = ["http-json", "reqwest-rustls", "trace", "metrics", "logs", "internal-logs"] }
@@ -86,6 +87,10 @@ inventory = "0.3"
 sha2 = "0.10"
 blake3 = "1"
 proc-macro2 = "1.0"
+base64 = "0.22"
+futures-util = "0.3"
+tokio-util = "0.7"
+tempfile = "3"
 
 # SQL parsing
 sqlparser = "0.54"
@@ -143,7 +148,7 @@ codegen-units = 256
 [profile.release]
 lto = true
 codegen-units = 1
-strip = true
+strip = "debuginfo"
 
 # Ad-hoc release builds (smoke tests, local benchmarks) don't need full LTO.
 # Use with `cargo build --profile release-fast` to skip the LTO link stall.
