@@ -8,7 +8,7 @@ use darling::FromMeta;
 use darling::ast::NestedMeta;
 
 use crate::attrs::{
-    RateLimitMeta, RequireRole, TablesList, parse_rate_limit_per, reject_reserved,
+    RateLimitMeta, RequireRole, TablesList, default_true, parse_rate_limit_per, reject_reserved,
     validate_rate_limit,
 };
 use crate::sql_extractor::{
@@ -49,6 +49,9 @@ struct DarlingQueryAttrs {
     unscoped: bool,
     #[darling(default)]
     consistent: bool,
+    /// Set `register = false` to skip `inventory::submit!` auto-registration.
+    #[darling(default = "default_true")]
+    register: bool,
     #[darling(default)]
     timeout: Option<String>,
     #[darling(default)]
@@ -107,6 +110,7 @@ struct QueryAttrs {
     log_level: Option<String>,
     /// Explicitly specified table dependencies (override for dynamic SQL).
     tables: Option<Vec<String>>,
+    register: bool,
 }
 
 /// Expand the #[forge::query] attribute.
@@ -183,6 +187,7 @@ fn convert_query_attrs(darling: DarlingQueryAttrs) -> Result<QueryAttrs, syn::Er
         rate_limit_key,
         log_level: darling.log,
         tables: darling.tables.map(|t| t.0),
+        register: darling.register,
     })
 }
 
@@ -346,6 +351,15 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
 
     // Get remaining params for args struct
     let arg_params: Vec<_> = params.iter().skip(1).cloned().collect();
+
+    // Reject argument types that codegen cannot emit bindings for.
+    for p in &arg_params {
+        if let FnArg::Typed(pat_type) = p {
+            if let Some((reason, span)) = crate::utils::check_arg_wire_type(&pat_type.ty) {
+                return Err(syn::Error::new(span, reason));
+            }
+        }
+    }
 
     // Build args struct fields
     let args_fields: Vec<TokenStream2> = arg_params
@@ -568,6 +582,16 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
         }
     };
 
+    let registration = if attrs.register {
+        quote! {
+            forge::inventory::submit!(forge::AutoHandler(|registries| {
+                registries.functions.register_query::<#struct_name>();
+            }));
+        }
+    } else {
+        quote! {}
+    };
+
     Ok(quote! {
         #inner_fn
 
@@ -618,9 +642,7 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
                 }
             }
 
-            forge::inventory::submit!(forge::AutoHandler(|registries| {
-                registries.functions.register_query::<#struct_name>();
-            }));
+            #registration
         }
     })
 }

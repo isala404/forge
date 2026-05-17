@@ -68,6 +68,7 @@ thiserror = "2.0"
 # CLI-only; do not use in library crates
 anyhow = "1.0"
 subtle = "2"
+ahash = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 tracing-opentelemetry = "0.28"

@@ -6,6 +6,11 @@
 
 use darling::FromMeta;
 
+/// Default value function for darling `#[darling(default = "default_true")]`.
+pub fn default_true() -> bool {
+    true
+}
+
 /// Rate limit configuration shared between query, mutation, and mcp_tool macros.
 ///
 /// Parses `rate_limit(requests = 100, per = "1m", key = "user")`.
@@ -41,15 +46,20 @@ impl FromMeta for RequireRole {
 
     fn from_list(items: &[darling::ast::NestedMeta]) -> darling::Result<Self> {
         if items.len() != 1 {
-            return Err(darling::Error::custom(
+            let err = darling::Error::custom(
                 "require_role expects exactly one string argument, e.g. require_role(\"admin\")",
-            ));
+            );
+            return Err(match items.first() {
+                Some(item) => err.with_span(item),
+                None => err,
+            });
         }
         match &items[0] {
             darling::ast::NestedMeta::Lit(syn::Lit::Str(s)) => Ok(RequireRole(s.value())),
-            _ => Err(darling::Error::custom(
+            other => Err(darling::Error::custom(
                 "require_role expects a string literal, e.g. require_role(\"admin\")",
-            )),
+            )
+            .with_span(other)),
         }
     }
 }
@@ -66,7 +76,8 @@ impl FromMeta for TablesList {
         {
             return Err(darling::Error::custom(
                 "the `tables = [...]` syntax was removed; use `tables(\"foo\", \"bar\")` instead",
-            ));
+            )
+            .with_span(item));
         }
         // Fall through to the standard list-form parser.
         match item {
@@ -78,7 +89,8 @@ impl FromMeta for TablesList {
             }
             _ => Err(darling::Error::custom(
                 "tables expects a parenthesized list of string literals, e.g. tables(\"users\", \"orders\")",
-            )),
+            )
+            .with_span(item)),
         }
     }
 
@@ -89,10 +101,11 @@ impl FromMeta for TablesList {
                 darling::ast::NestedMeta::Lit(syn::Lit::Str(s)) => {
                     tables.push(s.value());
                 }
-                _ => {
+                other => {
                     return Err(darling::Error::custom(
                         "tables expects string literals, e.g. tables(\"users\", \"orders\")",
-                    ));
+                    )
+                    .with_span(other));
                 }
             }
         }

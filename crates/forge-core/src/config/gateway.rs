@@ -44,9 +44,13 @@ pub struct GatewayConfig {
     #[serde(default = "default_quiet_paths")]
     pub quiet_paths: Vec<String>,
 
-    /// Maximum request body size (e.g. "100mb", "1gb"). Defaults to "20mb".
+    /// Maximum request body size for multipart uploads (e.g. "100mb", "1gb"). Defaults to "20mb".
     #[serde(default = "default_max_body_size")]
     pub max_body_size: SizeStr,
+
+    /// Maximum JSON request body size for RPC endpoints (e.g. "1mb", "5mb"). Defaults to "1mb".
+    #[serde(default = "default_max_json_body_size")]
+    pub max_json_body_size: SizeStr,
 
     /// Default per-file cap for multipart uploads (e.g. "10mb", "200mb").
     /// Applies when a mutation does not declare its own `max_size`. Set to
@@ -110,6 +114,7 @@ impl Default for GatewayConfig {
             cors_origins: default_cors_origins(),
             quiet_paths: default_quiet_paths(),
             max_body_size: default_max_body_size(),
+            max_json_body_size: default_max_json_body_size(),
             max_file_size: default_max_file_size(),
             tls: TlsConfig::default(),
             max_multipart_fields: default_max_multipart_fields(),
@@ -229,6 +234,10 @@ fn default_max_jobs_per_request() -> usize {
 
 fn default_max_result_size_bytes() -> usize {
     10 * 1024 * 1024
+}
+
+fn default_max_json_body_size() -> SizeStr {
+    SizeStr::new(1024 * 1024)
 }
 
 fn default_max_json_depth() -> usize {

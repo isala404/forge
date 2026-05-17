@@ -7,6 +7,7 @@ use syn::{ItemFn, parse_macro_input};
 use darling::FromMeta;
 use darling::ast::NestedMeta;
 
+use crate::attrs::default_true;
 use crate::utils::{parse_duration_tokens, to_pascal_case};
 
 /// Darling-parsed cron attributes (excludes the positional schedule string).
@@ -25,6 +26,9 @@ struct DarlingCronAttrs {
     catch_up_limit: Option<u32>,
     #[darling(default)]
     timeout: Option<String>,
+    /// Set `register = false` to skip `inventory::submit!` auto-registration.
+    #[darling(default = "default_true")]
+    register: bool,
 }
 
 #[derive(Debug, Default)]
@@ -37,6 +41,7 @@ struct CronAttrs {
     catch_up: bool,
     catch_up_limit: Option<u32>,
     timeout: Option<String>,
+    register: bool,
 }
 
 pub fn cron_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -74,6 +79,7 @@ pub fn cron_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         catch_up: darling_attrs.catch_up,
         catch_up_limit: darling_attrs.catch_up_limit,
         timeout: darling_attrs.timeout,
+        register: darling_attrs.register,
     };
 
     let fn_name = &input.sig.ident;
@@ -124,6 +130,16 @@ pub fn cron_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let other_attrs = &input.attrs;
 
+    let registration = if attrs.register {
+        quote! {
+            forge::inventory::submit!(forge::AutoHandler(|registries| {
+                registries.crons.register::<#struct_name>();
+            }));
+        }
+    } else {
+        quote! {}
+    };
+
     let expanded = quote! {
         #[doc(hidden)]
         #[allow(non_snake_case)]
@@ -158,9 +174,7 @@ pub fn cron_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
             }
 
-            forge::inventory::submit!(forge::AutoHandler(|registries| {
-                registries.crons.register::<#struct_name>();
-            }));
+            #registration
         }
     };
 

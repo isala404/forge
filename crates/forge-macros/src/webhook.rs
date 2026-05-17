@@ -5,6 +5,7 @@ use syn::{ItemFn, parse_macro_input};
 use darling::FromMeta;
 use darling::ast::NestedMeta;
 
+use crate::attrs::default_true;
 use crate::utils::{parse_duration_tokens, to_pascal_case};
 
 /// Darling-parsed webhook attributes.
@@ -31,6 +32,9 @@ struct DarlingWebhookAttrs {
     /// Set to `0` to disable replay enforcement (not recommended).
     #[darling(default)]
     replay_window_secs: Option<u64>,
+    /// Set `register = false` to skip `inventory::submit!` auto-registration.
+    #[darling(default = "default_true")]
+    register: bool,
     // `signature` is handled manually - darling will see it as unknown, so we
     // parse the raw token stream for it before handing to darling.
 }
@@ -48,6 +52,7 @@ struct WebhookAttrs {
     idempotency: Option<String>,
     timeout: Option<String>,
     replay_window_secs: Option<u64>,
+    register: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -205,6 +210,7 @@ pub fn webhook_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         idempotency: darling_attrs.idempotency,
         timeout: darling_attrs.timeout,
         replay_window_secs: darling_attrs.replay_window_secs,
+        register: darling_attrs.register,
     };
 
     // Validate path
@@ -334,6 +340,19 @@ pub fn webhook_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let other_attrs = &input.attrs;
 
+    let registration = if attrs.register {
+        quote! {
+            forge::inventory::submit!(forge::AutoHandler(|registries| {
+                registries.webhooks.register::<#struct_name>();
+                registries.functions.register_webhook_info(
+                    forge::forge_core::FunctionInfo::from(&#struct_name::info())
+                );
+            }));
+        }
+    } else {
+        quote! {}
+    };
+
     let expanded = quote! {
         #[doc(hidden)]
         #[allow(non_snake_case)]
@@ -369,12 +388,7 @@ pub fn webhook_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
             }
 
-            forge::inventory::submit!(forge::AutoHandler(|registries| {
-                registries.webhooks.register::<#struct_name>();
-                registries.functions.register_webhook_info(
-                    forge::forge_core::FunctionInfo::from(&#struct_name::info())
-                );
-            }));
+            #registration
         }
     };
 

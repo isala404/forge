@@ -42,7 +42,7 @@ impl WebhookState {
         Self {
             registry,
             pool,
-            http_client: CircuitBreakerClient::with_defaults(reqwest::Client::new()),
+            http_client: CircuitBreakerClient::with_ssrf_protection(),
             job_dispatcher: None,
         }
     }

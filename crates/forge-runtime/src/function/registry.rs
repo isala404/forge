@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use ahash::AHashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -78,7 +78,7 @@ impl FunctionEntry {
 /// Registry of all FORGE functions.
 #[derive(Clone)]
 pub struct FunctionRegistry {
-    functions: HashMap<String, FunctionEntry>,
+    functions: AHashMap<String, FunctionEntry>,
 }
 
 impl Clone for FunctionEntry {
@@ -101,7 +101,7 @@ impl FunctionRegistry {
     /// Create a new empty registry.
     pub fn new() -> Self {
         Self {
-            functions: HashMap::new(),
+            functions: AHashMap::new(),
         }
     }
 

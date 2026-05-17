@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use darling::FromMeta;
 use darling::ast::NestedMeta;
 
-use crate::attrs::RequireRole;
+use crate::attrs::{RequireRole, default_true};
 use crate::utils::{parse_duration_tokens, to_pascal_case};
 
 /// Minimum sleep duration (in seconds) that triggers the tokio::sleep warning.
@@ -162,6 +162,9 @@ struct DarlingWorkflowAttrs {
     status: Option<String>,
     #[darling(default)]
     require_role: Option<RequireRole>,
+    /// Set `register = false` to skip `inventory::submit!` auto-registration.
+    #[darling(default = "default_true")]
+    register: bool,
 }
 
 impl DarlingWorkflowAttrs {
@@ -202,6 +205,7 @@ struct WorkflowAttrs {
     is_public: bool,
     status: WorkflowStatus,
     required_role: Option<String>,
+    register: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,6 +224,7 @@ impl Default for WorkflowAttrs {
             is_public: false,
             status: WorkflowStatus::Active,
             required_role: None,
+            register: true,
         }
     }
 }
@@ -244,6 +249,7 @@ fn convert_workflow_attrs(darling: DarlingWorkflowAttrs) -> WorkflowAttrs {
         is_public: darling.public,
         status,
         required_role: darling.require_role.map(|r| r.0),
+        register: darling.register,
     }
 }
 
@@ -533,6 +539,16 @@ pub fn workflow_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let fn_attrs = &input.attrs;
 
+    let registration = if attrs.register {
+        quote! {
+            forge::inventory::submit!(forge::AutoHandler(|registries| {
+                registries.workflows.register::<#struct_name>();
+            }));
+        }
+    } else {
+        quote! {}
+    };
+
     let expanded = quote! {
         #[doc(hidden)]
         #[allow(non_snake_case)]
@@ -569,9 +585,7 @@ pub fn workflow_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
             }
 
-            forge::inventory::submit!(forge::AutoHandler(|registries| {
-                registries.workflows.register::<#struct_name>();
-            }));
+            #registration
         }
     };
 

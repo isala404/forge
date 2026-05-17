@@ -5,6 +5,7 @@ use syn::{ItemFn, parse_macro_input};
 use darling::FromMeta;
 use darling::ast::NestedMeta;
 
+use crate::attrs::default_true;
 use crate::utils::{parse_duration_tokens, to_pascal_case};
 
 /// Darling-parsed daemon attributes.
@@ -25,6 +26,9 @@ struct DarlingDaemonAttrs {
     startup_delay: Option<String>,
     #[darling(default)]
     max_restarts: Option<u32>,
+    /// Set `register = false` to skip `inventory::submit!` auto-registration.
+    #[darling(default = "default_true")]
+    register: bool,
 }
 
 #[derive(Debug, Default)]
@@ -37,6 +41,7 @@ struct DaemonAttrs {
     restart_delay: Option<String>,
     startup_delay: Option<String>,
     max_restarts: Option<u32>,
+    register: bool,
 }
 
 pub fn daemon_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -60,6 +65,7 @@ pub fn daemon_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         restart_delay: darling_attrs.restart_delay,
         startup_delay: darling_attrs.startup_delay,
         max_restarts: darling_attrs.max_restarts,
+        register: darling_attrs.register,
     };
 
     let fn_name = &input.sig.ident;
@@ -100,6 +106,16 @@ pub fn daemon_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let other_attrs = &input.attrs;
 
+    let registration = if attrs.register {
+        quote! {
+            forge::inventory::submit!(forge::AutoHandler(|registries| {
+                registries.daemons.register::<#struct_name>();
+            }));
+        }
+    } else {
+        quote! {}
+    };
+
     let expanded = quote! {
         #[doc(hidden)]
         #[allow(non_snake_case)]
@@ -131,9 +147,7 @@ pub fn daemon_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
             }
 
-            forge::inventory::submit!(forge::AutoHandler(|registries| {
-                registries.daemons.register::<#struct_name>();
-            }));
+            #registration
         }
     };
 

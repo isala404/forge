@@ -5,7 +5,7 @@ use syn::{ItemFn, parse_macro_input};
 use darling::FromMeta;
 use darling::ast::NestedMeta;
 
-use crate::attrs::{IdempotentMeta, RequireRole, RetryMeta, reject_reserved};
+use crate::attrs::{IdempotentMeta, RequireRole, RetryMeta, default_true, reject_reserved};
 use crate::utils::{parse_duration_tokens, to_pascal_case};
 
 /// Attribute keys whose names are reserved for upcoming job-deduplication and
@@ -48,6 +48,9 @@ struct DarlingJobAttrs {
     ttl: Option<String>,
     #[darling(default)]
     retry: Option<RetryMeta>,
+    /// Set `register = false` to skip `inventory::submit!` auto-registration.
+    #[darling(default = "default_true")]
+    register: bool,
     // Reserved keys
     #[darling(default)]
     unique_key: Option<String>,
@@ -111,6 +114,7 @@ struct JobAttrs {
     is_public: bool,
     required_role: Option<String>,
     ttl: Option<String>,
+    register: bool,
 }
 
 pub fn job_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -285,6 +289,16 @@ pub fn job_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let other_attrs = &input.attrs;
 
+    let registration = if attrs.register {
+        quote! {
+            forge::inventory::submit!(forge::AutoHandler(|registries| {
+                registries.jobs.register::<#struct_name>();
+            }));
+        }
+    } else {
+        quote! {}
+    };
+
     let expanded = quote! {
         #[doc(hidden)]
         #[allow(non_snake_case)]
@@ -332,9 +346,7 @@ pub fn job_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 #compensate
             }
 
-            forge::inventory::submit!(forge::AutoHandler(|registries| {
-                registries.jobs.register::<#struct_name>();
-            }));
+            #registration
         }
     };
 
@@ -380,6 +392,7 @@ fn convert_job_attrs(darling: DarlingJobAttrs) -> JobAttrs {
         is_public: darling.public,
         required_role: darling.require_role.map(|r| r.0),
         ttl: darling.ttl,
+        register: darling.register,
     }
 }
 

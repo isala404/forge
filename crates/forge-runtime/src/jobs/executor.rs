@@ -25,7 +25,7 @@ impl JobExecutor {
             queue,
             registry: Arc::new(registry),
             db_pool,
-            http_client: CircuitBreakerClient::with_defaults(reqwest::Client::new()),
+            http_client: CircuitBreakerClient::with_ssrf_protection(),
         }
     }
 

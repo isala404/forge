@@ -7,7 +7,8 @@ use darling::FromMeta;
 use darling::ast::NestedMeta;
 
 use crate::attrs::{
-    RateLimitMeta, RequireRole, parse_rate_limit_per, validate_rate_limit, validate_rate_limit_key,
+    RateLimitMeta, RequireRole, default_true, parse_rate_limit_per, validate_rate_limit,
+    validate_rate_limit_key,
 };
 use crate::utils::{parse_duration_secs, to_pascal_case};
 
@@ -36,6 +37,9 @@ struct DarlingMcpToolAttrs {
     timeout: Option<String>,
     #[darling(default)]
     rate_limit: Option<RateLimitMeta>,
+    /// Set `register = false` to skip `inventory::submit!` auto-registration.
+    #[darling(default = "default_true")]
+    register: bool,
 }
 
 /// Expand the #[forge::mcp_tool] attribute.
@@ -77,6 +81,7 @@ struct McpToolAttrs {
     destructive_hint: Option<bool>,
     idempotent_hint: Option<bool>,
     open_world_hint: Option<bool>,
+    register: bool,
 }
 
 fn convert_mcp_tool_attrs(darling: DarlingMcpToolAttrs) -> Result<McpToolAttrs, syn::Error> {
@@ -116,6 +121,7 @@ fn convert_mcp_tool_attrs(darling: DarlingMcpToolAttrs) -> Result<McpToolAttrs, 
         },
         idempotent_hint: if darling.idempotent { Some(true) } else { None },
         open_world_hint: if darling.open_world { Some(true) } else { None },
+        register: darling.register,
     })
 }
 
@@ -211,6 +217,15 @@ fn expand_mcp_tool_impl(input: ItemFn, attrs: McpToolAttrs) -> syn::Result<Token
     let is_ref = type_str.starts_with('&');
 
     let arg_params: Vec<_> = params.iter().skip(1).cloned().collect();
+
+    // Reject argument types that codegen cannot emit bindings for.
+    for p in &arg_params {
+        if let FnArg::Typed(pat_type) = p {
+            if let Some((reason, span)) = crate::utils::check_arg_wire_type(&pat_type.ty) {
+                return Err(syn::Error::new(span, reason));
+            }
+        }
+    }
 
     let args_fields: Vec<TokenStream2> = arg_params
         .iter()
@@ -400,6 +415,16 @@ fn expand_mcp_tool_impl(input: ItemFn, attrs: McpToolAttrs) -> syn::Result<Token
         }
     };
 
+    let registration = if attrs.register {
+        quote! {
+            forge::inventory::submit!(forge::AutoHandler(|registries| {
+                registries.mcp_tools.register::<#struct_name>();
+            }));
+        }
+    } else {
+        quote! {}
+    };
+
     Ok(quote! {
         #inner_fn
 
@@ -448,9 +473,7 @@ fn expand_mcp_tool_impl(input: ItemFn, attrs: McpToolAttrs) -> syn::Result<Token
                 }
             }
 
-            forge::inventory::submit!(forge::AutoHandler(|registries| {
-                registries.mcp_tools.register::<#struct_name>();
-            }));
+            #registration
         }
     })
 }

@@ -25,6 +25,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 dashmap = { workspace = true }
+ahash = { workspace = true }
 futures-util = { workspace = true }
 tokio-util = { workspace = true }
 base64 = { workspace = true }

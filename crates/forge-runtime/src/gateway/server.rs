@@ -90,6 +90,8 @@ pub struct GatewayConfig {
     pub project_name: String,
     /// Maximum body size in bytes for uploads. Defaults to 20 MB.
     pub max_body_size_bytes: usize,
+    /// Maximum JSON body size in bytes for RPC endpoints. Defaults to 1 MB.
+    pub max_json_body_bytes: usize,
     /// Default per-file cap in bytes for multipart uploads. Applies when
     /// a mutation does not declare its own `max_size`. Defaults to 10 MB.
     pub max_file_size_bytes: usize,
@@ -135,6 +137,7 @@ impl Default for GatewayConfig {
             token_ttl: forge_core::AuthTokenTtl::default(),
             project_name: "forge-app".to_string(),
             max_body_size_bytes: DEFAULT_MAX_MULTIPART_BODY_SIZE,
+            max_json_body_bytes: DEFAULT_MAX_JSON_BODY_SIZE,
             max_file_size_bytes: DEFAULT_MAX_FILE_SIZE,
             tls: None,
             max_multipart_fields: 20,
@@ -509,7 +512,7 @@ impl GatewayServer {
         // Build the main router with middleware
         let json_depth_config = JsonDepthConfig {
             max_depth: self.config.max_json_depth,
-            max_body_bytes: DEFAULT_MAX_JSON_BODY_SIZE,
+            max_body_bytes: self.config.max_json_body_bytes,
         };
         let mut main_router = Router::new()
             // Health check endpoint (liveness)
@@ -521,7 +524,7 @@ impl GatewayServer {
             // REST-style function endpoint (JSON)
             .route("/rpc/{function}", post(rpc_function_handler))
             // Prevent oversized JSON payloads from exhausting memory.
-            .layer(DefaultBodyLimit::max(DEFAULT_MAX_JSON_BODY_SIZE))
+            .layer(DefaultBodyLimit::max(self.config.max_json_body_bytes))
             // Reject JSON bodies that exceed the nesting depth limit to prevent
             // stack exhaustion during recursive deserialization.
             .layer(middleware::from_fn_with_state(

@@ -431,6 +431,7 @@ fn default_s256() -> String {
 
 pub async fn oauth_authorize_get(
     headers: HeaderMap,
+    Extension(resolved_ip): Extension<super::ResolvedClientIp>,
     Query(params): Query<AuthorizeQuery>,
     State(state): State<Arc<OAuthState>>,
 ) -> Response {
@@ -490,8 +491,18 @@ pub async fn oauth_authorize_get(
     }
 
     // Check for existing session cookie (set by auth middleware on API calls)
-    let session_subject = extract_cookie(&headers, "forge_session")
-        .and_then(|v| super::auth::verify_session_cookie(&v, &state.jwt_secret));
+    let verify_ua = headers
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    let session_subject = extract_cookie(&headers, "forge_session").and_then(|v| {
+        super::auth::verify_session_cookie(
+            &v,
+            &state.jwt_secret,
+            resolved_ip.0.as_deref(),
+            verify_ua.as_deref(),
+        )
+    });
     let has_session = session_subject.is_some();
 
     // Generate CSRF token (T5)
@@ -635,8 +646,18 @@ pub async fn oauth_authorize_post(
     // Authenticate user: try session cookie first, then token, then email/password
     let user_id: Uuid;
 
-    let session_subject = extract_cookie(&headers, "forge_session")
-        .and_then(|v| super::auth::verify_session_cookie(&v, &state.jwt_secret));
+    let post_verify_ua = headers
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    let session_subject = extract_cookie(&headers, "forge_session").and_then(|v| {
+        super::auth::verify_session_cookie(
+            &v,
+            &state.jwt_secret,
+            resolved_ip.0.as_deref(),
+            post_verify_ua.as_deref(),
+        )
+    });
 
     if let Some(subject) = session_subject {
         // Session cookie flow: user identified by signed cookie from previous API calls.
@@ -810,8 +831,16 @@ pub async fn oauth_authorize_post(
     // instead of the login form. This is same-origin (backend serves both
     // the authorize page and this POST), so the cookie sticks.
     let cookie_ttl = state.session_cookie_ttl_secs;
-    let cookie_value =
-        super::auth::sign_session_cookie(&user_id.to_string(), &state.jwt_secret, cookie_ttl);
+    let sign_ua = headers
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok());
+    let cookie_value = super::auth::sign_session_cookie(
+        &user_id.to_string(),
+        &state.jwt_secret,
+        cookie_ttl,
+        resolved_ip.0.as_deref(),
+        sign_ua,
+    );
     let secure_flag = "; Secure";
     let session_cookie = format!(
         "forge_session={cookie_value}; Path=/_api/oauth/; HttpOnly; SameSite=Lax; Max-Age={cookie_ttl}{secure_flag}"

@@ -473,7 +473,7 @@ impl Forge {
         // Create HTTP client with circuit breaker for actions and crons.
         // Used by cron, daemons, and workflow executor for outbound HTTP.
         #[cfg(any(feature = "cron", feature = "daemons", feature = "workflows"))]
-        let http_client = CircuitBreakerClient::with_defaults(reqwest::Client::new());
+        let http_client = CircuitBreakerClient::with_ssrf_protection();
 
         // Start background tasks based on roles
         let mut handles = Vec::new();
@@ -762,6 +762,7 @@ impl Forge {
                 mcp: self.config.mcp.clone(),
                 quiet_paths: self.config.gateway.quiet_paths.clone(),
                 max_body_size_bytes: self.config.gateway.max_body_size.as_bytes(),
+                max_json_body_bytes: self.config.gateway.max_json_body_size.as_bytes(),
                 max_file_size_bytes: self.config.gateway.max_file_size.as_bytes(),
                 token_ttl: forge_core::AuthTokenTtl::new(
                     self.config.auth.access_token_ttl_secs(),

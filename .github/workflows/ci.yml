@@ -92,6 +92,65 @@ jobs:
       - name: cargo audit
         run: cargo audit --deny warnings
 
+  sqlx-cache:
+    name: SQLx cache integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: forge
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          save-if: "false"
+      - name: Install sqlx-cli
+        run: cargo install sqlx-cli --no-default-features --features rustls,postgres
+      - name: Apply system migrations
+        run: |
+          for f in crates/forge-runtime/migrations/system/v*.sql; do
+            psql -U postgres -h localhost -p 5433 -d forge -f "$f"
+          done
+        env:
+          PGPASSWORD: postgres
+      - name: Apply example migrations
+        run: |
+          psql -U postgres -h localhost -p 5433 -d forge \
+            -f examples/with-svelte/demo/migrations/0001_initial.sql
+          psql -U postgres -h localhost -p 5433 -d forge \
+            -f examples/with-svelte/realtime-todo-list/migrations/0001_todos.sql
+          psql -U postgres -h localhost -p 5433 -d forge -c "
+            CREATE TABLE IF NOT EXISTS counters (
+              id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+              name VARCHAR(255) NOT NULL UNIQUE,
+              value BIGINT NOT NULL DEFAULT 0,
+              updated_by UUID REFERENCES users(id),
+              updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );"
+        env:
+          PGPASSWORD: postgres
+      - run: scripts/ci/create-env-stubs.sh
+      - name: Regenerate .sqlx cache
+        run: cargo sqlx prepare --workspace
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5433/forge
+          SQLX_OFFLINE: "false"
+      - name: Verify cache is up to date
+        run: git diff --exit-code .sqlx/
+
   workspace-integration:
     name: Workspace integration
     needs: [validate, guardrails]

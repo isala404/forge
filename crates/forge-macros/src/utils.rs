@@ -176,6 +176,52 @@ pub fn is_primitive_arg_type(ty: &syn::Type) -> bool {
     )
 }
 
+/// Returns an error message if the type is not portable across the wire
+/// (i.e. codegen cannot emit bindings for it). Must match
+/// `forge-codegen/src/parser.rs:unsupported_type_reason`.
+pub fn unsupported_wire_type(name: &str) -> Option<&'static str> {
+    match name {
+        "usize" | "isize" => Some(
+            "platform-dependent size type is not portable across the wire; use i32 or i64 instead",
+        ),
+        "u8" | "u16" | "u32" | "u64" | "u128" | "i8" | "i16" | "i128" => Some(
+            "unsigned and narrow integer types are not supported in handler signatures; use i32 or i64 for portability",
+        ),
+        _ => None,
+    }
+}
+
+/// Check a handler argument type for wire-incompatible leaf types.
+/// Returns `Some(error_message)` when the outermost non-wrapper type is
+/// unsupported. Does not recurse into generic parameters — codegen's own
+/// `validate_registry` handles nested types and special-cases like `Vec<u8>`.
+pub fn check_arg_wire_type(ty: &syn::Type) -> Option<(String, proc_macro2::Span)> {
+    let ident = leaf_type_ident(ty)?;
+    let name = ident.to_string();
+    unsupported_wire_type(&name).map(|reason| (reason.to_string(), ident.span()))
+}
+
+/// Walk through references and single-type-parameter wrappers (Option, Vec)
+/// to find the innermost named type segment.
+fn leaf_type_ident(ty: &syn::Type) -> Option<&syn::Ident> {
+    match ty {
+        syn::Type::Reference(r) => leaf_type_ident(&r.elem),
+        syn::Type::Path(p) => {
+            let seg = p.path.segments.last()?;
+            let name = seg.ident.to_string();
+            if matches!(name.as_str(), "Option" | "Vec") {
+                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                    if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                        return leaf_type_ident(inner);
+                    }
+                }
+            }
+            Some(&seg.ident)
+        }
+        _ => None,
+    }
+}
+
 /// Convert a PascalCase identifier to snake_case.
 pub(crate) fn to_snake_case(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
@@ -425,6 +471,64 @@ mod tests {
         assert_eq!(to_snake_case("HTTPRequest"), "http_request");
         assert_eq!(to_snake_case("simple"), "simple");
         assert_eq!(to_snake_case("A"), "a");
+    }
+
+    #[test]
+    fn unsupported_wire_type_rejects_platform_dependent_and_unsigned() {
+        assert!(unsupported_wire_type("usize").is_some());
+        assert!(unsupported_wire_type("isize").is_some());
+        assert!(unsupported_wire_type("u8").is_some());
+        assert!(unsupported_wire_type("u16").is_some());
+        assert!(unsupported_wire_type("u32").is_some());
+        assert!(unsupported_wire_type("u64").is_some());
+        assert!(unsupported_wire_type("u128").is_some());
+        assert!(unsupported_wire_type("i8").is_some());
+        assert!(unsupported_wire_type("i16").is_some());
+        assert!(unsupported_wire_type("i128").is_some());
+    }
+
+    #[test]
+    fn unsupported_wire_type_accepts_portable_types() {
+        assert!(unsupported_wire_type("i32").is_none());
+        assert!(unsupported_wire_type("i64").is_none());
+        assert!(unsupported_wire_type("f32").is_none());
+        assert!(unsupported_wire_type("f64").is_none());
+        assert!(unsupported_wire_type("bool").is_none());
+        assert!(unsupported_wire_type("String").is_none());
+        assert!(unsupported_wire_type("Uuid").is_none());
+        assert!(unsupported_wire_type("MyStruct").is_none());
+    }
+
+    #[test]
+    fn check_arg_wire_type_rejects_bare_unsigned() {
+        assert!(check_arg_wire_type(&parse_ty("u32")).is_some());
+        assert!(check_arg_wire_type(&parse_ty("usize")).is_some());
+        assert!(check_arg_wire_type(&parse_ty("i128")).is_some());
+    }
+
+    #[test]
+    fn check_arg_wire_type_recurses_through_option_and_vec() {
+        assert!(check_arg_wire_type(&parse_ty("Option<u32>")).is_some());
+        assert!(check_arg_wire_type(&parse_ty("Vec<usize>")).is_some());
+        assert!(check_arg_wire_type(&parse_ty("Option<Vec<i128>>")).is_some());
+    }
+
+    #[test]
+    fn check_arg_wire_type_accepts_portable_types() {
+        assert!(check_arg_wire_type(&parse_ty("i32")).is_none());
+        assert!(check_arg_wire_type(&parse_ty("i64")).is_none());
+        assert!(check_arg_wire_type(&parse_ty("f64")).is_none());
+        assert!(check_arg_wire_type(&parse_ty("String")).is_none());
+        assert!(check_arg_wire_type(&parse_ty("Option<i32>")).is_none());
+        assert!(check_arg_wire_type(&parse_ty("Vec<String>")).is_none());
+        assert!(check_arg_wire_type(&parse_ty("MyStruct")).is_none());
+    }
+
+    #[test]
+    fn check_arg_wire_type_skips_non_wrapper_generics() {
+        // HashMap<String, u32> — leaf is HashMap, not u32, so it passes.
+        // Deep inner types are validated by codegen's validate_registry.
+        assert!(check_arg_wire_type(&parse_ty("HashMap<String, u32>")).is_none());
     }
 
     #[test]

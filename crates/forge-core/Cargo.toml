@@ -24,7 +24,7 @@ tracing = { workspace = true }
 futures-core = { workspace = true }
 sqlx = { workspace = true }
 reqwest = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync"] }
+tokio = { workspace = true, features = ["rt", "sync", "net"] }
 base64 = { workspace = true }
 ipnet = { workspace = true }
 sha2 = { workspace = true }

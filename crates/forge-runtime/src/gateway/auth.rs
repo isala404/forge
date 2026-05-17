@@ -777,6 +777,12 @@ pub async fn auth_middleware(
 
     let should_set_cookie = should_set_cookie && !has_session_cookie;
 
+    let cookie_ip = req
+        .extensions()
+        .get::<crate::gateway::ResolvedClientIp>()
+        .and_then(|r| r.0.clone());
+    let cookie_ua = crate::gateway::extract_header(req.headers(), "user-agent");
+
     let mut req = req;
     req.extensions_mut().insert(auth_context.clone());
 
@@ -787,7 +793,13 @@ pub async fn auth_middleware(
         && let Some(secret) = &middleware.config.jwt_secret
     {
         let cookie_ttl = middleware.config.session_cookie_ttl_secs;
-        let cookie_value = sign_session_cookie(subject, secret, cookie_ttl);
+        let cookie_value = sign_session_cookie(
+            subject,
+            secret,
+            cookie_ttl,
+            cookie_ip.as_deref(),
+            cookie_ua.as_deref(),
+        );
         // Always emit `Secure`. We previously inferred TLS from
         // `x-forwarded-proto`, but that header is trivially spoofable when the
         // gateway is exposed without a trusted reverse proxy in front, so a
@@ -807,59 +819,125 @@ pub async fn auth_middleware(
     response
 }
 
-/// OAuth session cookie format: `subject.expiry_unix.hmac_signature`
+/// Coarsen an IP address to /24 (IPv4) or /48 (IPv6) for cookie binding.
+/// Returns a stable prefix that survives minor NAT/proxy changes.
+fn coarsen_ip(ip: &str) -> String {
+    if let Ok(addr) = ip.parse::<std::net::IpAddr>() {
+        match addr {
+            std::net::IpAddr::V4(v4) => {
+                let o = v4.octets();
+                format!(
+                    "{}.{}.{}",
+                    o.first().copied().unwrap_or(0),
+                    o.get(1).copied().unwrap_or(0),
+                    o.get(2).copied().unwrap_or(0),
+                )
+            }
+            std::net::IpAddr::V6(v6) => {
+                let s = v6.segments();
+                format!(
+                    "{:x}:{:x}:{:x}",
+                    s.first().copied().unwrap_or(0),
+                    s.get(1).copied().unwrap_or(0),
+                    s.get(2).copied().unwrap_or(0),
+                )
+            }
+        }
+    } else {
+        String::new()
+    }
+}
+
+/// Hash a user-agent string for cookie binding (truncated hex).
+fn hash_ua(ua: &str) -> String {
+    let hash = Sha256::digest(ua.as_bytes());
+    let bytes = hash.as_slice();
+    let (a, b, c, d) = (
+        bytes.first().copied().unwrap_or(0),
+        bytes.get(1).copied().unwrap_or(0),
+        bytes.get(2).copied().unwrap_or(0),
+        bytes.get(3).copied().unwrap_or(0),
+    );
+    format!("{a:x}{b:x}{c:x}{d:x}")
+}
+
+/// OAuth session cookie format: `base64(subject):expiry_unix.hmac_signature`
 /// The cookie identifies a user for the OAuth consent page without requiring
 /// localStorage (which doesn't work cross-origin in dev).
-pub fn sign_session_cookie(subject: &str, secret: &str, ttl_secs: i64) -> String {
+///
+/// Subject is base64-encoded to avoid delimiter collisions with subjects
+/// containing `.` or `:` (e.g. external provider IDs from Firebase/Clerk).
+///
+/// The HMAC covers the client's coarsened IP (/24 or /48) and a UA hash so a
+/// stolen cookie cannot be replayed from a different network or browser.
+pub fn sign_session_cookie(
+    subject: &str,
+    secret: &str,
+    ttl_secs: i64,
+    client_ip: Option<&str>,
+    user_agent: Option<&str>,
+) -> String {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
     let expiry = chrono::Utc::now().timestamp() + ttl_secs;
-    let payload = format!("{subject}.{expiry}");
+    let ip_prefix = client_ip.map(coarsen_ip).unwrap_or_default();
+    let ua_hash = user_agent.map(hash_ua).unwrap_or_default();
+    let encoded_subject = URL_SAFE_NO_PAD.encode(subject.as_bytes());
+    let payload = format!("{encoded_subject}:{expiry}");
+    let binding = format!("{payload}.{ip_prefix}.{ua_hash}");
 
-    let mut mac =
-        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
-    mac.update(payload.as_bytes());
+    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret.as_bytes()) else {
+        return String::new();
+    };
+    mac.update(binding.as_bytes());
     let sig = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
 
     format!("{payload}.{sig}")
 }
 
 /// Verify and extract the subject from a session cookie.
-/// Returns None if expired, tampered, or malformed.
+/// Returns None if expired, tampered, binding mismatch, or malformed.
 ///
 /// Only used by the OAuth flow; gated behind `mcp-oauth`.
 #[cfg(feature = "mcp-oauth")]
-pub fn verify_session_cookie(cookie_value: &str, secret: &str) -> Option<String> {
+pub fn verify_session_cookie(
+    cookie_value: &str,
+    secret: &str,
+    client_ip: Option<&str>,
+    user_agent: Option<&str>,
+) -> Option<String> {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
-    let parts: Vec<&str> = cookie_value.rsplitn(2, '.').collect();
-    if parts.len() != 2 {
-        return None;
-    }
-    let sig_encoded = parts.first()?;
-    let payload = parts.get(1)?; // "subject.expiry"
+    // Format: "base64(subject):expiry.signature"
+    let (payload, sig_encoded) = cookie_value.rsplit_once('.')?;
+
+    // Recompute binding with the current client's IP and UA
+    let ip_prefix = client_ip.map(coarsen_ip).unwrap_or_default();
+    let ua_hash = user_agent.map(hash_ua).unwrap_or_default();
+    let binding = format!("{payload}.{ip_prefix}.{ua_hash}");
 
     // Verify signature (HMAC verify_slice is constant-time)
     let sig_bytes = URL_SAFE_NO_PAD.decode(sig_encoded).ok()?;
     let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).ok()?;
-    mac.update(payload.as_bytes());
+    mac.update(binding.as_bytes());
     mac.verify_slice(&sig_bytes).ok()?;
 
-    // Extract subject and expiry
-    let dot_pos = payload.rfind('.')?;
-    let subject = &payload[..dot_pos];
-    let expiry_str = &payload[dot_pos + 1..];
+    // Extract subject and expiry from "base64(subject):expiry"
+    let (encoded_subject, expiry_str) = payload.rsplit_once(':')?;
     let expiry: i64 = expiry_str.parse().ok()?;
 
     if chrono::Utc::now().timestamp() > expiry {
         return None;
     }
 
-    Some(subject.to_string())
+    let subject_bytes = URL_SAFE_NO_PAD.decode(encoded_subject).ok()?;
+    let subject = String::from_utf8(subject_bytes).ok()?;
+
+    Some(subject)
 }
 
 #[cfg(test)]
@@ -899,12 +977,37 @@ mod tests {
 
     #[cfg(feature = "mcp-oauth")]
     fn session_cookie_with_expiry(subject: &str, secret: &str, expiry: i64) -> String {
-        let payload = format!("{subject}.{expiry}");
+        let encoded_subject = URL_SAFE_NO_PAD.encode(subject.as_bytes());
+        let payload = format!("{encoded_subject}:{expiry}");
+        let ip_prefix = coarsen_ip("192.168.1.42");
+        let ua_hash = hash_ua("TestAgent/1.0");
+        let binding = format!("{payload}.{ip_prefix}.{ua_hash}");
         let mut mac =
             Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key");
-        mac.update(payload.as_bytes());
+        mac.update(binding.as_bytes());
         let sig = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
         format!("{payload}.{sig}")
+    }
+
+    #[cfg(feature = "mcp-oauth")]
+    #[test]
+    fn test_coarsen_ip_masks_correctly() {
+        assert_eq!(coarsen_ip("192.168.1.42"), "192.168.1");
+        assert_eq!(coarsen_ip("10.0.0.1"), "10.0.0");
+        assert_eq!(
+            coarsen_ip("2001:db8:85a3::8a2e:370:7334"),
+            "2001:db8:85a3"
+        );
+        assert_eq!(coarsen_ip("not-an-ip"), "");
+    }
+
+    #[cfg(feature = "mcp-oauth")]
+    #[test]
+    fn test_hash_ua_deterministic() {
+        let h1 = hash_ua("Mozilla/5.0");
+        let h2 = hash_ua("Mozilla/5.0");
+        assert_eq!(h1, h2);
+        assert_ne!(hash_ua("Mozilla/5.0"), hash_ua("Chrome/100"));
     }
 
     #[test]
@@ -1169,10 +1272,12 @@ mod tests {
     #[cfg(feature = "mcp-oauth")]
     #[test]
     fn test_verify_session_cookie_round_trip_and_tamper_detection() {
-        let cookie = sign_session_cookie("user-123", "session-secret", 86400);
+        let ip = Some("192.168.1.42");
+        let ua = Some("TestAgent/1.0");
+        let cookie = sign_session_cookie("user-123", "session-secret", 86400, ip, ua);
 
         assert_eq!(
-            verify_session_cookie(&cookie, "session-secret"),
+            verify_session_cookie(&cookie, "session-secret", ip, ua),
             Some("user-123".to_string())
         );
 
@@ -1181,8 +1286,14 @@ mod tests {
             tampered.push(if last_char == 'a' { 'b' } else { 'a' });
         }
 
-        assert_eq!(verify_session_cookie(&tampered, "session-secret"), None);
-        assert_eq!(verify_session_cookie(&cookie, "wrong-secret"), None);
+        assert_eq!(
+            verify_session_cookie(&tampered, "session-secret", ip, ua),
+            None
+        );
+        assert_eq!(
+            verify_session_cookie(&cookie, "wrong-secret", ip, ua),
+            None
+        );
     }
 
     #[cfg(feature = "mcp-oauth")]
@@ -1195,8 +1306,53 @@ mod tests {
         );
 
         assert_eq!(
-            verify_session_cookie(&expired_cookie, "session-secret"),
+            verify_session_cookie(
+                &expired_cookie,
+                "session-secret",
+                Some("192.168.1.42"),
+                Some("TestAgent/1.0"),
+            ),
             None
+        );
+    }
+
+    #[cfg(feature = "mcp-oauth")]
+    #[test]
+    fn test_verify_session_cookie_rejects_binding_mismatch() {
+        let ip = Some("192.168.1.42");
+        let ua = Some("TestAgent/1.0");
+        let cookie = sign_session_cookie("user-123", "session-secret", 86400, ip, ua);
+
+        // Different IP
+        assert_eq!(
+            verify_session_cookie(&cookie, "session-secret", Some("10.0.0.1"), ua),
+            None
+        );
+
+        // Different UA
+        assert_eq!(
+            verify_session_cookie(&cookie, "session-secret", ip, Some("OtherBrowser/2.0")),
+            None
+        );
+
+        // No binding at all
+        assert_eq!(
+            verify_session_cookie(&cookie, "session-secret", None, None),
+            None
+        );
+    }
+
+    #[cfg(feature = "mcp-oauth")]
+    #[test]
+    fn test_session_cookie_round_trips_subject_with_dots() {
+        let ip = Some("192.168.1.42");
+        let ua = Some("TestAgent/1.0");
+        let subject = "clerk.user.abc.123";
+        let cookie = sign_session_cookie(subject, "session-secret", 86400, ip, ua);
+
+        assert_eq!(
+            verify_session_cookie(&cookie, "session-secret", ip, ua),
+            Some(subject.to_string())
         );
     }
 

@@ -8,6 +8,7 @@ use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 use reqwest::{IntoUrl, Method, Request, RequestBuilder, Response};
+use std::net::{IpAddr, SocketAddr};
 
 /// Circuit breaker state for a single host.
 #[derive(Debug, Clone)]
@@ -64,12 +65,12 @@ pub struct CircuitBreakerConfig {
     pub backoff_multiplier: f64,
     /// Whether the circuit breaker is enabled.
     pub enabled: bool,
-    /// Allow requests to private/loopback/link-local IP literals.
-    /// Defaults to `false` to block obvious SSRF targets like `127.0.0.1`
+    /// Allow requests to private/loopback/link-local IPs.
+    /// Defaults to `false` to block SSRF targets like `127.0.0.1`
     /// and the AWS/GCE metadata endpoint `169.254.169.254`. Flip to `true`
     /// in development or when calling internal services on private CIDRs.
-    /// Note: this only inspects URL host literals; DNS-resolved hostnames
-    /// pointing at private IPs are not blocked.
+    /// Clients built via `build_ssrf_safe_client` also block hostnames
+    /// that resolve to private IPs at the DNS layer.
     pub allow_private: bool,
 }
 
@@ -108,6 +109,80 @@ impl std::fmt::Display for CircuitBreakerOpen {
 
 impl std::error::Error for CircuitBreakerOpen {}
 
+/// Returns true when the given IP is in a loopback, private (RFC 1918 / ULA),
+/// link-local, broadcast, unspecified, or documentation range.
+/// Also handles IPv4-mapped IPv6 addresses (`::ffff:x.x.x.x`).
+pub fn is_private_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_private_v4(v4),
+        IpAddr::V6(v6) => {
+            // IPv4-mapped addresses (::ffff:0:0/96) — check the inner v4
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_private_v4(v4);
+            }
+            let seg0 = v6.segments().first().copied().unwrap_or(0);
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (seg0 & 0xffc0) == 0xfe80 // link-local fe80::/10
+                || (seg0 & 0xfe00) == 0xfc00 // ULA fc00::/7
+        }
+    }
+}
+
+fn is_private_v4(v4: std::net::Ipv4Addr) -> bool {
+    v4.is_loopback()
+        || v4.is_private()
+        || v4.is_link_local()
+        || v4.is_broadcast()
+        || v4.is_unspecified()
+        || v4.is_documentation()
+}
+
+/// DNS resolver that filters out private/loopback/link-local addresses from
+/// resolution results. Prevents SSRF via DNS rebinding or hostnames that
+/// resolve to internal IPs (e.g. `metadata.internal` -> `169.254.169.254`).
+struct SsrfSafeResolver;
+
+impl reqwest::dns::Resolve for SsrfSafeResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        Box::pin(async move {
+            let host = name.as_str().to_string();
+            let addrs: Vec<SocketAddr> =
+                tokio::net::lookup_host(format!("{host}:0")).await?.collect();
+            let safe: Vec<SocketAddr> = addrs
+                .into_iter()
+                .filter(|addr| !is_private_ip(addr.ip()))
+                .collect();
+            if safe.is_empty() {
+                return Err(
+                    format!("DNS resolution for {host} returned only private IPs").into(),
+                );
+            }
+            let addrs: reqwest::dns::Addrs = Box::new(safe.into_iter());
+            Ok(addrs)
+        })
+    }
+}
+
+/// Build a reqwest client with SSRF-safe DNS resolution. Hostnames that
+/// resolve to private/loopback/link-local IPs are rejected at the DNS layer.
+///
+/// # Panics
+///
+/// Panics if the TLS backend is unavailable, which is a fatal startup error.
+pub fn build_ssrf_safe_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .dns_resolver(std::sync::Arc::new(SsrfSafeResolver))
+        .build()
+        .unwrap_or_else(|e| {
+            tracing::error!("Failed to build SSRF-safe HTTP client: {e}");
+            // This only fails when the TLS backend is missing. Proceeding with
+            // an unprotected client would silently remove DNS-level SSRF guards,
+            // so we propagate the failure as a panic at startup.
+            unreachable!("TLS backend required for HTTP client")
+        })
+}
+
 /// HTTP client with circuit breaker pattern.
 ///
 /// Tracks failure rates per host and fails fast when a host is unhealthy.
@@ -133,6 +208,12 @@ impl CircuitBreakerClient {
         Self::new(client, CircuitBreakerConfig::default())
     }
 
+    /// Create with default configuration and SSRF-safe DNS resolution.
+    /// Hostnames resolving to private/loopback/link-local IPs are blocked.
+    pub fn with_ssrf_protection() -> Self {
+        Self::new(build_ssrf_safe_client(), CircuitBreakerConfig::default())
+    }
+
     /// Get the underlying reqwest client for building requests.
     pub fn inner(&self) -> &reqwest::Client {
         &self.inner
@@ -153,34 +234,18 @@ impl CircuitBreakerClient {
         )
     }
 
-    /// Returns true when the URL's host is a literal IP in a loopback,
-    /// private (RFC 1918 / ULA), link-local, or unspecified range. Only
-    /// inspects literal IP hosts: domain names that may resolve to private
-    /// ranges via DNS slip past this check.
+    /// Returns true when the URL's host is a literal IP in a private range.
+    /// Hostnames are not resolved here — DNS-level SSRF protection is handled
+    /// by `SsrfSafeResolver` when the client is built via `build_ssrf_safe_client`.
     fn url_targets_private_ip(url: &reqwest::Url) -> bool {
         let Some(host) = url.host_str() else {
             return false;
         };
         let trimmed = host.trim_start_matches('[').trim_end_matches(']');
-        let Ok(ip) = trimmed.parse::<std::net::IpAddr>() else {
+        let Ok(ip) = trimmed.parse::<IpAddr>() else {
             return false;
         };
-        match ip {
-            std::net::IpAddr::V4(v4) => {
-                v4.is_loopback()
-                    || v4.is_private()
-                    || v4.is_link_local()
-                    || v4.is_broadcast()
-                    || v4.is_unspecified()
-                    || v4.is_documentation()
-            }
-            std::net::IpAddr::V6(v6) => {
-                v6.is_loopback()
-                    || v6.is_unspecified()
-                    || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
-                    || (v6.segments()[0] & 0xfe00) == 0xfc00 // ULA fc00::/7
-            }
-        }
+        is_private_ip(ip)
     }
 
     /// Check if a request to the given host should be allowed.
@@ -772,11 +837,10 @@ mod tests {
             "http://1.1.1.1/",
             "http://8.8.8.8/",
             "http://[2001:4860:4860::8888]/", // Google public DNS v6
-            // DNS-resolved hostnames are intentionally NOT inspected by this
-            // helper (documented). They must pass through here even if the
-            // name happens to spell a private host.
+            // Hostnames pass the URL-literal check; DNS-level blocking is
+            // handled by SsrfSafeResolver at connect time.
             "http://api.example.com/",
-            "http://localhost/", // string "localhost" is not an IP literal
+            "http://localhost/",
         ];
         for u in allowed {
             assert!(
@@ -800,6 +864,55 @@ mod tests {
                 assert_eq!(host, "127.0.0.1");
             }
             other => panic!("expected PrivateHostBlocked, got {other:?}"),
+        }
+    }
+
+    // ---- is_private_ip ----
+
+    #[test]
+    fn is_private_ip_blocks_all_private_ranges() {
+        let blocked: Vec<IpAddr> = vec![
+            "127.0.0.1".parse().unwrap(),
+            "10.0.0.1".parse().unwrap(),
+            "172.16.0.1".parse().unwrap(),
+            "192.168.1.1".parse().unwrap(),
+            "169.254.169.254".parse().unwrap(),
+            "0.0.0.0".parse().unwrap(),
+            "255.255.255.255".parse().unwrap(),
+            "::1".parse().unwrap(),
+            "::".parse().unwrap(),
+            "fe80::1".parse().unwrap(),
+            "fc00::1".parse().unwrap(),
+            "fd00::1".parse().unwrap(),
+        ];
+        for ip in blocked {
+            assert!(is_private_ip(ip), "should block {ip}");
+        }
+    }
+
+    #[test]
+    fn is_private_ip_blocks_ipv4_mapped_ipv6() {
+        let mapped: Vec<IpAddr> = vec![
+            "::ffff:127.0.0.1".parse().unwrap(),
+            "::ffff:10.0.0.1".parse().unwrap(),
+            "::ffff:169.254.169.254".parse().unwrap(),
+            "::ffff:192.168.1.1".parse().unwrap(),
+        ];
+        for ip in mapped {
+            assert!(is_private_ip(ip), "should block IPv4-mapped {ip}");
+        }
+    }
+
+    #[test]
+    fn is_private_ip_allows_public_addresses() {
+        let allowed: Vec<IpAddr> = vec![
+            "1.1.1.1".parse().unwrap(),
+            "8.8.8.8".parse().unwrap(),
+            "93.184.216.34".parse().unwrap(),
+            "2001:4860:4860::8888".parse().unwrap(),
+        ];
+        for ip in allowed {
+            assert!(!is_private_ip(ip), "should allow {ip}");
         }
     }
 

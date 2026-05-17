@@ -67,21 +67,26 @@ pub struct RouteOutcome {
     pub cache_hit: bool,
 }
 
+/// Shared mutation dependencies cloned once per request instead of per-field.
+#[derive(Clone)]
+struct MutationDeps {
+    http_client: CircuitBreakerClient,
+    job_dispatcher: Option<Arc<dyn JobDispatch>>,
+    workflow_dispatcher: Option<Arc<dyn WorkflowDispatch>>,
+    token_issuer: Option<Arc<dyn forge_core::TokenIssuer>>,
+    token_ttl: forge_core::AuthTokenTtl,
+    max_jobs_per_request: usize,
+}
+
 /// Routes and executes function calls with timeout, rate limiting, and observability.
 pub struct FunctionRouter {
     registry: Arc<FunctionRegistry>,
     db: Database,
-    http_client: CircuitBreakerClient,
-    job_dispatcher: Option<Arc<dyn JobDispatch>>,
-    workflow_dispatcher: Option<Arc<dyn WorkflowDispatch>>,
+    mutation_deps: Arc<MutationDeps>,
     rate_limiter: Arc<dyn RateLimiterBackend>,
     role_resolver: SharedRoleResolver,
     cache: Arc<QueryCacheCoordinator>,
-    token_issuer: Option<Arc<dyn forge_core::TokenIssuer>>,
-    token_ttl: forge_core::AuthTokenTtl,
     default_timeout: Duration,
-    /// Maximum number of jobs a single mutation may dispatch (0 = unlimited).
-    max_jobs_per_request: usize,
     /// Maximum serialized response size in bytes (0 = unlimited).
     max_result_size_bytes: usize,
     #[cfg(feature = "gateway")]
@@ -94,7 +99,7 @@ impl FunctionRouter {
         Self::with_http_client(
             registry,
             db,
-            CircuitBreakerClient::with_defaults(reqwest::Client::new()),
+            CircuitBreakerClient::with_ssrf_protection(),
         )
     }
 
@@ -110,16 +115,18 @@ impl FunctionRouter {
         Self {
             registry,
             db,
-            http_client,
-            job_dispatcher: None,
-            workflow_dispatcher: None,
+            mutation_deps: Arc::new(MutationDeps {
+                http_client,
+                job_dispatcher: None,
+                workflow_dispatcher: None,
+                token_issuer: None,
+                token_ttl: forge_core::AuthTokenTtl::default(),
+                max_jobs_per_request: 0,
+            }),
             rate_limiter,
             role_resolver: default_role_resolver(),
             cache,
-            token_issuer: None,
-            token_ttl: forge_core::AuthTokenTtl::default(),
             default_timeout: Duration::from_secs(30),
-            max_jobs_per_request: 0,
             max_result_size_bytes: 0,
             #[cfg(feature = "gateway")]
             signals: None,
@@ -180,32 +187,37 @@ impl FunctionRouter {
         self.rate_limiter = rate_limiter;
     }
 
+    /// Get a mutable reference to the inner mutation deps for builder methods.
+    fn deps_mut(&mut self) -> &mut MutationDeps {
+        Arc::make_mut(&mut self.mutation_deps)
+    }
+
     /// Set the token issuer for this router (enables `ctx.issue_token()` in mutations).
     pub fn with_token_issuer(mut self, issuer: Arc<dyn forge_core::TokenIssuer>) -> Self {
-        self.token_issuer = Some(issuer);
+        self.deps_mut().token_issuer = Some(issuer);
         self
     }
 
     /// Set the token TTL config for this router (configures `ctx.issue_token_pair()` durations).
     pub fn with_token_ttl(mut self, ttl: forge_core::AuthTokenTtl) -> Self {
-        self.token_ttl = ttl;
+        self.deps_mut().token_ttl = ttl;
         self
     }
 
     /// Set the token TTL config (mutable reference version).
     pub fn set_token_ttl(&mut self, ttl: forge_core::AuthTokenTtl) {
-        self.token_ttl = ttl;
+        self.deps_mut().token_ttl = ttl;
     }
 
     /// Set the job dispatcher for this router.
     pub fn with_job_dispatcher(mut self, dispatcher: Arc<dyn JobDispatch>) -> Self {
-        self.job_dispatcher = Some(dispatcher);
+        self.deps_mut().job_dispatcher = Some(dispatcher);
         self
     }
 
     /// Set the workflow dispatcher for this router.
     pub fn with_workflow_dispatcher(mut self, dispatcher: Arc<dyn WorkflowDispatch>) -> Self {
-        self.workflow_dispatcher = Some(dispatcher);
+        self.deps_mut().workflow_dispatcher = Some(dispatcher);
         self
     }
 
@@ -218,7 +230,7 @@ impl FunctionRouter {
     /// Set the maximum number of jobs a single mutation may dispatch.
     /// A value of 0 disables the limit.
     pub fn set_max_jobs_per_request(&mut self, limit: usize) {
-        self.max_jobs_per_request = limit;
+        self.deps_mut().max_jobs_per_request = limit;
     }
 
     /// Set the maximum serialized response size in bytes.
@@ -507,21 +519,22 @@ impl FunctionRouter {
                         self.execute_transactional(info, handler, args, auth, request)
                             .await
                     } else {
+                        let deps = Arc::clone(&self.mutation_deps);
                         let mut ctx = MutationContext::with_dispatch(
                             self.db.primary().clone(),
                             auth,
                             request,
-                            self.http_client.clone(),
-                            self.job_dispatcher.clone(),
-                            self.workflow_dispatcher.clone(),
+                            deps.http_client.clone(),
+                            deps.job_dispatcher.clone(),
+                            deps.workflow_dispatcher.clone(),
                         );
-                        if let Some(ref issuer) = self.token_issuer {
+                        if let Some(ref issuer) = deps.token_issuer {
                             ctx.set_token_issuer(issuer.clone());
                         }
-                        ctx.set_token_ttl(self.token_ttl.clone());
+                        ctx.set_token_ttl(deps.token_ttl.clone());
                         ctx.set_http_timeout(info.http_timeout);
-                        if self.max_jobs_per_request > 0 {
-                            ctx.set_max_jobs_per_request(self.max_jobs_per_request);
+                        if deps.max_jobs_per_request > 0 {
+                            ctx.set_max_jobs_per_request(deps.max_jobs_per_request);
                         }
                         let value = handler(&ctx, args).await?;
                         self.check_result_size(&value)?;
@@ -541,7 +554,7 @@ impl FunctionRouter {
             };
         }
 
-        if let Some(ref job_dispatcher) = self.job_dispatcher
+        if let Some(ref job_dispatcher) = self.mutation_deps.job_dispatcher
             && let Some(job_info) = job_dispatcher.get_info(function_name)
         {
             require_auth(
@@ -565,7 +578,7 @@ impl FunctionRouter {
             }
         }
 
-        if let Some(ref workflow_dispatcher) = self.workflow_dispatcher
+        if let Some(ref workflow_dispatcher) = self.mutation_deps.workflow_dispatcher
             && let Some(workflow_info) = workflow_dispatcher.get_info(function_name)
         {
             require_auth(
@@ -662,22 +675,23 @@ impl FunctionRouter {
                 .await
                 .map_err(ForgeError::Database)?;
 
+            let deps = Arc::clone(&self.mutation_deps);
             let (mut ctx, tx_handle) = MutationContext::with_transaction(
                 primary.clone(),
                 tx,
                 auth,
                 request,
-                self.http_client.clone(),
-                self.job_dispatcher.clone(),
-                self.workflow_dispatcher.clone(),
+                deps.http_client.clone(),
+                deps.job_dispatcher.clone(),
+                deps.workflow_dispatcher.clone(),
             );
-            if let Some(ref issuer) = self.token_issuer {
+            if let Some(ref issuer) = deps.token_issuer {
                 ctx.set_token_issuer(issuer.clone());
             }
-            ctx.set_token_ttl(self.token_ttl.clone());
+            ctx.set_token_ttl(deps.token_ttl.clone());
             ctx.set_http_timeout(info.http_timeout);
-            if self.max_jobs_per_request > 0 {
-                ctx.set_max_jobs_per_request(self.max_jobs_per_request);
+            if deps.max_jobs_per_request > 0 {
+                ctx.set_max_jobs_per_request(deps.max_jobs_per_request);
             }
 
             let result = handler(&ctx, args).await;

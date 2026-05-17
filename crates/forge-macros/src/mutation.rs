@@ -8,7 +8,7 @@ use darling::FromMeta;
 use darling::ast::NestedMeta;
 
 use crate::attrs::{
-    RateLimitMeta, RequireRole, TablesList, parse_rate_limit_per, reject_reserved,
+    RateLimitMeta, RequireRole, TablesList, default_true, parse_rate_limit_per, reject_reserved,
     validate_rate_limit,
 };
 use crate::sql_extractor::{
@@ -51,6 +51,9 @@ struct DarlingMutationAttrs {
     max_size: Option<String>,
     #[darling(default)]
     tables: Option<TablesList>,
+    /// Set `register = false` to skip `inventory::submit!` auto-registration.
+    #[darling(default = "default_true")]
+    register: bool,
     // Reserved keys
     #[darling(default)]
     coalesce_window: Option<String>,
@@ -91,6 +94,7 @@ struct MutationAttrs {
     max_upload_size_bytes: Option<usize>,
     /// Override auto-detected table dependencies from SQL extraction.
     tables: Option<Vec<String>>,
+    register: bool,
 }
 
 impl Default for MutationAttrs {
@@ -109,6 +113,7 @@ impl Default for MutationAttrs {
             transactional: true,
             max_upload_size_bytes: None,
             tables: None,
+            register: true,
         }
     }
 }
@@ -178,6 +183,7 @@ fn convert_mutation_attrs(darling: DarlingMutationAttrs) -> Result<MutationAttrs
         transactional: darling.transactional.unwrap_or(true),
         max_upload_size_bytes: darling.max_size.and_then(|s| parse_size_bytes(&s)),
         tables: darling.tables.map(|t| t.0),
+        register: darling.register,
     })
 }
 
@@ -273,6 +279,15 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
 
     // Get remaining params for args struct
     let arg_params: Vec<_> = params.iter().skip(1).cloned().collect();
+
+    // Reject argument types that codegen cannot emit bindings for.
+    for p in &arg_params {
+        if let FnArg::Typed(pat_type) = p {
+            if let Some((reason, span)) = crate::utils::check_arg_wire_type(&pat_type.ty) {
+                return Err(syn::Error::new(span, reason));
+            }
+        }
+    }
 
     // Build args struct fields
     let args_fields: Vec<TokenStream2> = arg_params
@@ -579,6 +594,16 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         }
     };
 
+    let registration = if attrs.register {
+        quote! {
+            forge::inventory::submit!(forge::AutoHandler(|registries| {
+                registries.functions.register_mutation::<#struct_name>();
+            }));
+        }
+    } else {
+        quote! {}
+    };
+
     Ok(quote! {
         #inner_fn
 
@@ -629,9 +654,7 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
                 }
             }
 
-            forge::inventory::submit!(forge::AutoHandler(|registries| {
-                registries.functions.register_mutation::<#struct_name>();
-            }));
+            #registration
         }
     })
 }
