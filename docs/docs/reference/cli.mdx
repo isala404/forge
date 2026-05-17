@@ -397,6 +397,46 @@ Each result is one line, prefixed with `[OK]`, `[!]`, `[X]`, or `[i]`. The comma
 
 ---
 
+## Cargo Features
+
+`forgex` defaults to `full`, which enables everything. Use `default-features = false` plus one of the presets (or individual subsystem flags) to produce a smaller binary.
+
+```toml
+# Cargo.toml — slim worker binary, no HTTP stack
+forgex = { version = "...", default-features = false, features = ["worker"] }
+```
+
+### Preset bundles
+
+| Feature | Includes | Description |
+| ------- | -------- | ----------- |
+| `full` | all subsystems | Default. Equivalent to today's behavior; existing apps need no changes. |
+| `worker` | `jobs`, `workflows`, `cron`, `daemons`, `otel` | Background workers without an HTTP surface. Use for binaries that consume jobs/workflows but serve no traffic. |
+| `api` | `gateway`, `otel` | HTTP gateway with observability, no background workers. Use for read-heavy API nodes. |
+| `minimal` | `gateway` | Smallest possible HTTP binary. Structured logs go to stderr only; no OTel exporters. |
+
+### Subsystem features
+
+| Feature | Default | Description |
+| ------- | ------- | ----------- |
+| `gateway` | yes | Axum HTTP server: RPC, SSE realtime, OAuth, MCP, webhooks, signals, TLS termination. Pulls the full axum/tower stack. Disable for worker-only binaries. |
+| `jobs` | yes | PostgreSQL-backed job queue with `SKIP LOCKED` worker. |
+| `workflows` | yes | Versioned durable workflow executor with signature guards and compensation. |
+| `cron` | yes | Cron scheduler with leader-only execution and exactly-once guarantees. |
+| `daemons` | yes | Long-running daemon runner (leader-elected or per-node). |
+| `mcp-oauth` | yes | OAuth 2.1 + PKCE authentication for MCP tools. Requires `gateway`. Without it, MCP uses JWT bearer auth only. |
+| `geoip` | yes | Bundles a ~10 MB IP-to-country database for signals enrichment. Requires a network fetch at compile time. Omit for offline builds or when you don't use signals. Requires `gateway`. |
+| `otel` | yes | OpenTelemetry trace, metric, and log exporters via OTLP HTTP. Pulls ~5 OTel crates plus protobuf stubs. Disable to skip those deps entirely. |
+
+### Other features
+
+| Feature | Default | Description |
+| ------- | ------- | ----------- |
+| `testcontainers` | no | Enables `TestQueryContext`, `TestMutationContext`, and friends that spin up a real PostgreSQL container. Enable in dev/CI integration test binaries only — not in production. |
+| `embedded-frontend` | no | Embeds the compiled frontend bundle into the binary at build time (`rust-embed`). Used by `forge test` to produce a self-contained test binary. Enable explicitly when you want a single-binary deployment. |
+
+---
+
 ## Exit Codes
 
 | Code | Description                                           |

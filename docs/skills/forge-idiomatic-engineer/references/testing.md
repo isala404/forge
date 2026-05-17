@@ -30,7 +30,7 @@ let ctx = TestMutationContext::builder()
     .build();
 
 // Job — progress, cancellation, heartbeat
-let ctx = TestJobContext::builder().with_pool(db.pool()).build();
+let ctx = TestJobContext::builder("job_name").with_pool(db.pool()).build();
 ```
 
 `TestCronContext`, `TestWorkflowContext`, `TestDaemonContext`, `TestWebhookContext`, and `TestMcpToolContext` follow the same shape.
@@ -70,7 +70,7 @@ mod tests {
 | `assert_err_variant!(result, ForgeError::NotFound(_))` | specific variant |
 | `assert_job_dispatched!(ctx, "job_name")` | job queued during the mutation |
 | `assert_workflow_started!(ctx, "workflow_name")` | workflow started during the mutation |
-| `assert_http_called!(ctx, "POST", "https://...")` | HTTP call was made via `ctx.http()` |
+| `assert_http_called!(ctx, "https://api.example.com/*")` | HTTP call was made via `ctx.http()` |
 
 ## Failure Scenarios to Always Cover
 

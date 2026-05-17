@@ -112,7 +112,10 @@ otel = [
 
 # --- Bundle presets ---
 
-# Everything. Mirrors today's behavior; no opt-out needed for existing apps.
+# Everything except geoip. `geoip` requires a build-time network fetch for the
+# bundled IP-to-country DB and is excluded from the default preset so that
+# `cargo build` succeeds in offline/CI environments. Enable it explicitly with
+# `--features forgex/geoip` when needed.
 full = [
     "gateway",
     "mcp-oauth",
@@ -120,7 +123,6 @@ full = [
     "workflows",
     "cron",
     "daemons",
-    "geoip",
     "otel",
 ]
 

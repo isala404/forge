@@ -86,10 +86,14 @@ impl LeaderRole {
             Self::MetricsAggregator => 0x464F_5247_0002,
             Self::LogCompactor => 0x464F_5247_0003,
             Self::Daemon(name) => {
-                // FNV-1a hash seeded in the FORGE daemon namespace
-                let mut h: i64 = 0x464F_5247_4000;
+                // FNV-1a 64-bit hash in the FORGE daemon namespace.
+                // Standard FNV-1a: XOR byte, then multiply by the FNV prime.
+                const FNV_OFFSET: i64 = 0x464F_5247_4000;
+                const FNV_PRIME: i64 = 0x0100_0000_01b3; // 1099511628211
+                let mut h: i64 = FNV_OFFSET;
                 for b in name.bytes() {
-                    h = h.wrapping_mul(1099511628211).wrapping_add(b as i64);
+                    h ^= b as i64;
+                    h = h.wrapping_mul(FNV_PRIME);
                 }
                 h
             }

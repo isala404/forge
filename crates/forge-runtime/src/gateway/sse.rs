@@ -568,7 +568,6 @@ pub async fn sse_handler(
     let session_id = SessionId::new();
     let buffer_size = state.config.channel_buffer_size;
     let keepalive_secs = state.config.keepalive_interval_secs;
-    let (tx, mut rx) = mpsc::channel::<SseMessage>(buffer_size);
     let cancel_token = CancellationToken::new();
 
     let query_auth = if let Some(token) = &query.token {
@@ -678,35 +677,9 @@ pub async fn sse_handler(
         SessionCleanupGuard::new(session_id, reactor.clone(), state_for_cleanup.clone());
     crate::observability::set_active_connections("sse", 1);
 
-    // Bridge reactor messages to SSE messages.
+    // Single task: bridge reactor messages directly to SSE events.
     // Token expiry is enforced by SessionServer::try_send_to_session (per-push)
     // and cleanup_expired_tokens (periodic sweep). No inline check needed here.
-    let bridge_cancel = cancel_token.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                msg = rt_rx.recv() => {
-                    match msg {
-                        Some(rt_msg) => {
-                            if let Some(sse_msg) = convert_realtime_to_sse(rt_msg) {
-                                match tokio::time::timeout(
-                                    Duration::from_secs(5),
-                                    tx.send(sse_msg),
-                                ).await {
-                                    Ok(Err(_)) | Err(_) => break,
-                                    Ok(Ok(())) => {}
-                                }
-                            }
-                        }
-                        None => break,
-                    }
-                }
-                _ = bridge_cancel.cancelled() => break,
-            }
-        }
-    });
-
-    // Spawn a task that feeds SSE events into a channel
     let (event_tx, event_rx) = mpsc::channel::<Result<Event, Infallible>>(buffer_size);
 
     tokio::spawn(async move {
@@ -730,23 +703,25 @@ pub async fn sse_handler(
 
         loop {
             tokio::select! {
-                msg = rx.recv() => {
+                msg = rt_rx.recv() => {
                     match msg {
-                        Some(sse_msg) => {
-                            let event = match sse_msg {
-                                SseMessage::Data { target, payload } => {
-                                    let data = SsePayload::Update { target, payload };
-                                    serde_json::to_string(&data).ok().map(|json| {
-                                        Event::default().event("update").data(json)
-                                    })
+                        Some(rt_msg) => {
+                            let event = convert_realtime_to_sse(rt_msg).and_then(|sse_msg| {
+                                match sse_msg {
+                                    SseMessage::Data { target, payload } => {
+                                        let data = SsePayload::Update { target, payload };
+                                        serde_json::to_string(&data).ok().map(|json| {
+                                            Event::default().event("update").data(json)
+                                        })
+                                    }
+                                    SseMessage::Error { target, code, message } => {
+                                        let data = SsePayload::Error { target, code, message };
+                                        serde_json::to_string(&data).ok().map(|json| {
+                                            Event::default().event("error").data(json)
+                                        })
+                                    }
                                 }
-                                SseMessage::Error { target, code, message } => {
-                                    let data = SsePayload::Error { target, code, message };
-                                    serde_json::to_string(&data).ok().map(|json| {
-                                        Event::default().event("error").data(json)
-                                    })
-                                }
-                            };
+                            });
                             if let Some(evt) = event {
                                 match tokio::time::timeout(
                                     Duration::from_secs(5),

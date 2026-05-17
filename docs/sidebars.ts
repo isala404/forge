@@ -61,10 +61,13 @@ const sidebars: SidebarsConfig = {
       collapsed: true,
       items: [
         'ship/configuration',
+        'ship/production-architecture',
         'ship/signals',
         'ship/mcp-security',
         'ship/testing',
+        'ship/security',
         'ship/deploy',
+        'ship/migrations',
       ],
     },
     {
@@ -98,6 +101,7 @@ const sidebars: SidebarsConfig = {
         'reference/contexts',
         'reference/attributes',
         'reference/errors',
+        'reference/pitfalls',
         'reference/wire-protocol',
         'reference/observability-catalog',
       ],

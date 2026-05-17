@@ -414,6 +414,324 @@ forge generate [OPTIONS]
 | `--src, -s`    | Source directory to scan (default: `src`)                         |
 | `-y, --yes`    | Auto-accept prompts (for CI)                                      |
 
+## Client API Reference
+
+The generated bindings are thin wrappers over the `@forge-rs/svelte` runtime. This section documents the runtime API directly so you know what you're working with.
+
+### ForgeProvider
+
+`ForgeProvider` is a Svelte component that creates the `ForgeClient`, opens the SSE connection, and puts both into Svelte context. Every page that uses generated bindings must be inside it.
+
+```svelte
+<!-- frontend/src/routes/+layout.svelte -->
+<script lang="ts">
+  import { ForgeProvider } from '@forge-rs/svelte';
+  import { auth } from '$lib/forge/auth.svelte';
+  import { type Snippet } from 'svelte';
+
+  let { children }: { children: Snippet } = $props();
+</script>
+
+<ForgeProvider
+  url="http://localhost:3000"
+  getToken={() => auth.token}
+  onAuthError={(err) => auth.clearAuth()}
+  onMutationError={(err) => console.error('Mutation failed', err)}
+  onConnectionChange={(state) => console.log('SSE', state)}
+>
+  {@render children()}
+</ForgeProvider>
+```
+
+```typescript
+// frontend/src/routes/+layout.ts
+export const ssr = false; // Required: EventSource and localStorage are browser-only
+```
+
+| Prop                | Type                                              | Required | Description                                                                                     |
+| ------------------- | ------------------------------------------------- | -------- | ----------------------------------------------------------------------------------------------- |
+| `url`               | `string`                                          | Yes      | Base URL of your Forge backend (no trailing slash)                                              |
+| `getToken`          | `() => string \| null \| Promise<string \| null>` | No       | Returns the current access token. Called before every RPC and SSE connect.                      |
+| `onAuthError`       | `(err: ForgeError) => void`                       | No       | Fired on HTTP 401/403 from RPC or SSE. Use it to redirect to login or clear auth state.        |
+| `onMutationError`   | `(err: ForgeClientError) => void`                 | No       | Global fallback for mutation errors not handled locally. Good for toast notifications.          |
+| `onConnectionChange`| `(state: ConnectionState) => void`                | No       | Fired whenever the SSE state changes (`'disconnected'`, `'connecting'`, `'connected'`).         |
+| `signals`           | `SignalsConfig \| false`                          | No       | Analytics configuration. Pass `false` to disable entirely. See [Signals](#signals) below.      |
+
+### ForgeClientConfig
+
+If you need to create a client manually (e.g., for testing), use `createForgeClient`:
+
+```typescript
+import { createForgeClient } from '@forge-rs/svelte';
+
+const client = createForgeClient({
+  url: 'http://localhost:3000',
+  getToken: () => localStorage.getItem('token'),
+  refreshToken: async () => {
+    const res = await fetch('/auth/refresh', { method: 'POST', credentials: 'include' });
+    if (!res.ok) return null;
+    const { access_token } = await res.json();
+    return access_token;
+  },
+  onAuthError: (err) => router.goto('/login'),
+  onMutationError: (err) => showToast(err.message),
+  timeout: 30000,
+});
+```
+
+| Option            | Type                                              | Default    | Description                                                                                               |
+| ----------------- | ------------------------------------------------- | ---------- | --------------------------------------------------------------------------------------------------------- |
+| `url`             | `string`                                          | —          | Backend base URL.                                                                                         |
+| `getToken`        | `() => string \| null \| Promise<string \| null>` | `undefined`| Token provider. Called before every request.                                                              |
+| `refreshToken`    | `() => Promise<string \| null>`                   | `undefined`| Called automatically on 401. Should return a fresh access token or `null`. The failed call is retried once. Concurrent 401s coalesce on a single refresh attempt. |
+| `onAuthError`     | `(err: ForgeError) => void`                       | `undefined`| Fired when auth fails and cannot be recovered via `refreshToken`.                                         |
+| `onMutationError` | `(err: ForgeClientError) => void`                 | `undefined`| Global mutation error sink.                                                                               |
+| `timeout`         | `number` (ms)                                     | `30000`    | SSE connection timeout.                                                                                   |
+
+### ForgeClientError
+
+All RPC and subscription failures throw `ForgeClientError`, which extends `Error`:
+
+```typescript
+import { ForgeClientError } from '@forge-rs/svelte';
+
+try {
+  await createUser({ email: 'alice@example.com' });
+} catch (err) {
+  if (err instanceof ForgeClientError) {
+    if (err.isRateLimited()) {
+      console.warn(`Slow down, retry in ${err.retryAfterSecs}s`);
+    } else if (err.isValidation()) {
+      console.error('Bad input:', err.details);
+    } else if (err.isUnauthorized()) {
+      router.goto('/login');
+    } else {
+      console.error(`[${err.code}] ${err.message}`);
+    }
+  }
+}
+```
+
+| Property         | Type                             | Description                                                           |
+| ---------------- | -------------------------------- | --------------------------------------------------------------------- |
+| `code`           | `string`                         | Machine-readable error code (e.g., `RATE_LIMITED`, `VALIDATION_ERROR`, `UNAUTHORIZED`, `NOT_FOUND`, `INTERNAL`). |
+| `message`        | `string`                         | Human-readable description.                                           |
+| `retryAfterSecs` | `number \| undefined`            | Present on `RATE_LIMITED` errors. Seconds to wait before retrying.   |
+| `details`        | `Record<string, unknown> \| undefined` | Extra context from the server (e.g., field-level validation errors). |
+| `isRateLimited()`| `() => boolean`                  | `code === 'RATE_LIMITED'`                                             |
+| `isUnauthorized()`| `() => boolean`                 | `code === 'UNAUTHORIZED'`                                             |
+| `isValidation()` | `() => boolean`                  | `code === 'VALIDATION_ERROR'`                                         |
+
+### Store Primitives
+
+The generated subscription functions are built from three primitives exported by `@forge-rs/svelte`. You can use them directly for advanced cases.
+
+#### createQueryStore
+
+One-shot fetch with no live updates. Fetches once on creation and exposes `refetch()` to re-run.
+
+```typescript
+import { createQueryStore } from '@forge-rs/svelte';
+
+const store = createQueryStore<{ id: string }, User>('get_user', { id: userId });
+```
+
+Returns a `QueryStore<T>` with:
+
+| Member     | Type                                       | Description                      |
+| ---------- | ------------------------------------------ | -------------------------------- |
+| `subscribe`| `(run: (v: QueryResult<T>) => void) => ()=> void` | Svelte store protocol. |
+| `refetch`  | `() => Promise<void>`                      | Re-runs the RPC call.            |
+| `reset`    | `() => void`                               | Resets to `{ loading: true, data: null, error: null }`. |
+
+#### createSubscriptionStore
+
+Live subscription that re-runs whenever the server detects a relevant DB change:
+
+```typescript
+import { createSubscriptionStore } from '@forge-rs/svelte';
+
+const store = createSubscriptionStore<{ id: string }, User>('get_user', { id: userId });
+```
+
+Returns a `SubscriptionStore<T>` with the same members as `QueryStore<T>` plus:
+
+| Member        | Type           | Description                                       |
+| ------------- | -------------- | ------------------------------------------------- |
+| `unsubscribe` | `() => void`   | Detaches from SSE and cleans up. Call when you manage lifecycle manually. |
+
+The store auto-unsubscribes when its last Svelte subscriber leaves (last `$`-ref removed from the DOM). Manual cleanup is only needed when using the store outside a component.
+
+#### createConnectionStore
+
+Tracks the SSE connection state:
+
+```typescript
+import { createConnectionStore } from '@forge-rs/svelte';
+
+const conn = createConnectionStore();
+// $conn === 'disconnected' | 'connecting' | 'connected'
+```
+
+#### createJobStore
+
+Dispatches a job and streams its progress over SSE:
+
+```typescript
+import { createJobStore } from '@forge-rs/svelte';
+
+const job = createJobStore<ExportArgs, ExportResult>('export_users', { format: 'csv' });
+```
+
+The store value is `JobState<TOutput> & { loading: boolean }`:
+
+| Field      | Type                                                                             | Description                                |
+| ---------- | -------------------------------------------------------------------------------- | ------------------------------------------ |
+| `jobId`    | `string`                                                                         | UUID assigned by the server.               |
+| `status`   | `'pending' \| 'claimed' \| 'running' \| 'completed' \| 'failed' \| 'cancelled'` | Current job status.                        |
+| `progress` | `number \| null`                                                                 | 0–100 progress percentage, if reported.    |
+| `message`  | `string \| null`                                                                 | Latest progress message from the job.      |
+| `output`   | `TOutput \| null`                                                                | Final output once status is `completed`.   |
+| `error`    | `string \| null`                                                                 | Error message when status is `failed`.     |
+| `loading`  | `boolean`                                                                        | `true` until the job ID is received.       |
+
+#### createWorkflowStore
+
+Starts a durable workflow and streams step-level state over SSE:
+
+```typescript
+import { createWorkflowStore } from '@forge-rs/svelte';
+
+const wf = createWorkflowStore<OnboardArgs, OnboardResult>('onboard_user', { userId });
+```
+
+The store value is `WorkflowState<TOutput> & { loading: boolean }`:
+
+| Field        | Type                                                                              | Description                                              |
+| ------------ | --------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| `workflowId` | `string`                                                                          | UUID assigned by the server.                             |
+| `status`     | `'pending' \| 'running' \| 'sleeping' \| 'waiting' \| 'completed' \| 'failed'`   | Overall workflow status.                                 |
+| `step`       | `string \| null`                                                                  | Name of the currently executing step.                    |
+| `waitingFor` | `string \| null`                                                                  | Name of the external event the workflow is waiting on.   |
+| `steps`      | `WorkflowStepState[]`                                                             | All step records with individual `status` and `error`.   |
+| `output`     | `TOutput \| null`                                                                 | Final output once status is `completed`.                 |
+| `error`      | `string \| null`                                                                  | Error message when status is `failed`.                   |
+
+### fireMutation
+
+Fire-and-forget wrapper that routes errors to the global `onMutationError` handler:
+
+```typescript
+import { fireMutation } from '@forge-rs/svelte';
+import { deleteTodo } from '$lib/forge';
+
+// Errors go to onMutationError; no await needed
+fireMutation(deleteTodo, { id: todoId });
+
+// Per-call override
+fireMutation(deleteTodo, { id: todoId }, (err) => showToast(err.message));
+```
+
+Use `fireMutation` for fire-and-forget interactions (delete, toggle, increment) where the UI doesn't need to track pending state. Use `await mutationFn(args)` or the runes `$()` form when you need local pending/error state.
+
+### createOptimisticMutation
+
+Applies a local patch immediately and reverts automatically on error or after a TTL:
+
+```typescript
+import { createOptimisticMutation, createSubscriptionStore } from '@forge-rs/svelte';
+import { reorderTask } from '$lib/forge';
+
+const todos = createSubscriptionStore('list_todos', null);
+
+const reorder = createOptimisticMutation(
+  reorderTask,
+  todos,
+  (data, args) => data.map(t => t.id === args.id ? { ...t, position: args.position } : t),
+  { ttlMs: 3000 }, // auto-revert after 3s if no SSE confirmation
+);
+
+// Read from reorder.data, not todos directly
+reorder.fire({ id: todoId, position: 2 });
+```
+
+The `data` member is a `Readable<TData | null>` that layers the optimistic patch over the live subscription. Once the server confirms the change via SSE, the patch is dropped and the server data takes over.
+
+### Auth Token Management
+
+The `auth.svelte.ts` file generated alongside the bindings exports a global `auth` object:
+
+```typescript
+import { auth } from '$lib/forge/auth.svelte';
+
+// After successful login
+const result = await signIn({ email, password });
+auth.setAuth(result.access_token, result.refresh_token, result.user);
+
+// After logout
+await signOut();
+auth.clearAuth();
+
+// Start background token rotation (call once, on mount)
+auth.startRefreshLoop('http://localhost:3000/auth/refresh');
+```
+
+`setAuth` and `clearAuth` both update localStorage and trigger an SSE reconnect, so active subscriptions re-register under the new identity. Writing to `localStorage` directly bypasses the reconnect and leaves subscriptions authenticated as the previous user.
+
+| Method                          | Description                                                                       |
+| ------------------------------- | --------------------------------------------------------------------------------- |
+| `auth.setAuth(access, refresh, user)` | Persists tokens, updates `auth.token` and `auth.user`, triggers reconnect. |
+| `auth.clearAuth()`              | Clears stored tokens, resets state, triggers anonymous reconnect.                 |
+| `auth.startRefreshLoop(url)`    | Polls the refresh endpoint before token expiry. Concurrent 401s coalesce.         |
+| `auth.token`                    | Current access token, or `null`.                                                  |
+| `auth.user`                     | Typed viewer object (pass generic: `auth.user as MyUser`), or `null`.             |
+| `auth.loading`                  | `true` until the first token resolution completes.                                |
+
+### Signals
+
+`ForgeSignals` handles product analytics and diagnostics. It is created inside `ForgeProvider` and is mostly automatic.
+
+```svelte
+<ForgeProvider
+  url="http://localhost:3000"
+  signals={{
+    enabled: true,
+    autoPageViews: true,
+    autoCaptureErrors: true,
+    autoWebVitals: true,
+    autoNetworkEvents: true,
+    flushInterval: 5000,
+    maxBatchSize: 20,
+    respectDnt: true,
+    persistQueue: true,
+  }}
+>
+```
+
+To track custom events, get the signals instance from context:
+
+```typescript
+import { getForgeSignals } from '@forge-rs/svelte';
+
+const signals = getForgeSignals();
+signals.track('plan_upgraded', { plan: 'pro', seats: 10 });
+signals.identify(user.id, { email: user.email });
+```
+
+| Config Option       | Default  | Description                                                                 |
+| ------------------- | -------- | --------------------------------------------------------------------------- |
+| `enabled`           | `true`   | Master switch. Set `false` or pass `signals={false}` to disable entirely.   |
+| `autoPageViews`     | `true`   | Tracks navigation via `history.pushState` / `popstate`.                     |
+| `autoCaptureErrors` | `true`   | Captures unhandled `window.onerror` and `unhandledrejection` events.        |
+| `autoWebVitals`     | `true`   | Captures LCP, CLS, INP, FCP, TTFB, and navigation timing.                  |
+| `autoNetworkEvents` | `true`   | Tracks online/offline transitions.                                          |
+| `flushInterval`     | `5000`   | How often (ms) buffered events are flushed to the server.                   |
+| `maxBatchSize`      | `20`     | Maximum events per flush batch.                                             |
+| `respectDnt`        | `true`   | Disables collection if the browser sends `DNT: 1` or `Sec-GPC: 1`.         |
+| `persistQueue`      | `true`   | Saves the outbound queue to `localStorage` so events survive page reloads.  |
+
+Correlation IDs are automatically injected into RPC request headers, linking frontend events to backend traces.
+
 ## Usage in SvelteKit Components
 
 ```svelte

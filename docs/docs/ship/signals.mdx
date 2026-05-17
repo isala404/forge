@@ -187,26 +187,113 @@ When the user navigates away or closes the tab, pending events are flushed via t
 
 ## Endpoints
 
-The server exposes a single ingestion endpoint. It is added to `quiet_paths` internally so it doesn't generate its own telemetry noise.
+The server exposes a single ingestion endpoint at `POST /_api/signal`. It is added to `quiet_paths` internally so it doesn't generate its own telemetry noise. The endpoint is unauthenticated by design — see [Limitations](#limitations).
 
-| Endpoint | Method | Purpose |
-| --- | --- | --- |
-| `/_api/signal` | POST | Discriminated by top-level `type` field: `event` (batch custom events, identify, web vitals, breadcrumbs — max 50 per request), `view` (page view with referrer and UTM params), `report` (frontend error reports with breadcrumbs) |
+All requests share the same shape: a `type` discriminator field and a `payload` object whose structure depends on the type.
 
-The endpoint returns:
+```
+POST /_api/signal
+Content-Type: application/json
 
-```json
-{ "ok": true, "session_id": "uuid" }
+{ "type": "<discriminator>", "payload": { ... } }
 ```
 
-Request headers the server looks at:
+### Discriminators
+
+| `type` | Purpose | DNT/Sec-GPC honoured |
+| --- | --- | --- |
+| `event` | Batch of custom/tracked events (max 50 per request). Covers `track()`, `identify()`, web vitals, breadcrumbs. | Yes — short-circuits silently |
+| `view` | Single page view with URL, referrer, title, and UTM parameters. | Yes — short-circuits silently |
+| `report` | Frontend error report. Bypasses DNT/Sec-GPC so crashes from opted-out browsers remain visible. | No |
+
+#### `type: "event"`
+
+```json
+{
+  "type": "event",
+  "payload": {
+    "events": [
+      {
+        "event": "button_clicked",
+        "properties": { "button_id": "signup" },
+        "correlation_id": "req-abc123",
+        "timestamp": "2026-05-18T12:00:00Z"
+      }
+    ],
+    "context": {
+      "page_url": "https://example.com/signup",
+      "referrer": "https://google.com",
+      "session_id": "550e8400-e29b-41d4-a716-446655440000"
+    }
+  }
+}
+```
+
+`events` is required; `context` and per-event `correlation_id`/`timestamp` are optional.
+
+#### `type: "view"`
+
+```json
+{
+  "type": "view",
+  "payload": {
+    "url": "https://example.com/dashboard",
+    "referrer": "https://example.com/",
+    "title": "Dashboard",
+    "utm_source": "newsletter",
+    "utm_medium": "email",
+    "utm_campaign": "may-launch",
+    "utm_term": null,
+    "utm_content": null,
+    "correlation_id": "req-abc123"
+  }
+}
+```
+
+Only `url` is required. All UTM fields, `referrer`, `title`, and `correlation_id` are optional.
+
+#### `type: "report"`
+
+```json
+{
+  "type": "report",
+  "payload": {
+    "errors": [
+      {
+        "message": "Payment failed",
+        "stack": "Error: Payment failed\n    at checkout.ts:42",
+        "context": { "order_id": "123" },
+        "correlation_id": "req-abc123",
+        "page_url": "https://example.com/checkout",
+        "breadcrumbs": [
+          { "message": "Opened checkout modal", "data": {}, "timestamp": "2026-05-18T11:59:55Z" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+`errors` is required. Per-error `stack`, `context`, `correlation_id`, `page_url`, and `breadcrumbs` are optional. Max 50 errors per request.
+
+### Response
+
+All three discriminators return the same shape:
+
+```json
+{ "ok": true, "session_id": "550e8400-e29b-41d4-a716-446655440000" }
+```
+
+`session_id` is assigned on the first request and must be echoed back in the `x-session-id` header on subsequent requests to maintain session continuity. On DNT short-circuit, `session_id` is `null`.
+
+### Request headers
 
 | Header | Purpose |
 | --- | --- |
-| `x-session-id` | Session continuity (value from previous response) |
+| `x-session-id` | Session continuity (UUID from previous response) |
 | `x-forge-platform` | Device classification (`web`, `desktop-macos`, `desktop-windows`, `desktop-linux`, `ios`, `android`) |
 | `x-correlation-id` | Links frontend events to backend RPC execution |
-| `Authorization` | Optional, associates events with authenticated user |
+| `Authorization` | Optional — associates events with an authenticated user |
 
 ## Storage
 

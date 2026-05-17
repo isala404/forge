@@ -9,6 +9,42 @@ use thiserror::Error;
 /// Marked `#[non_exhaustive]` so new variants can be added in minor releases without
 /// breaking exhaustive `match` arms in user code. Always include a `_ =>` catch-all
 /// when matching on this enum.
+///
+/// # Examples
+///
+/// Returning typed errors from a handler:
+///
+/// ```
+/// use forge_core::ForgeError;
+///
+/// fn find_user(id: u64) -> Result<String, ForgeError> {
+///     if id == 0 {
+///         return Err(ForgeError::not_found("user not found"));
+///     }
+///     Ok("alice".to_string())
+/// }
+///
+/// assert_eq!(find_user(0).unwrap_err().http_status(), 404);
+/// assert_eq!(find_user(1).unwrap(), "alice");
+/// ```
+///
+/// Matching on variants with a catch-all (required because the enum is `#[non_exhaustive]`):
+///
+/// ```
+/// use forge_core::ForgeError;
+///
+/// fn classify(err: &ForgeError) -> &'static str {
+///     match err {
+///         ForgeError::NotFound(_)    => "not_found",
+///         ForgeError::Unauthorized(_) => "unauthorized",
+///         ForgeError::Validation(_)  => "validation",
+///         _ => "other",
+///     }
+/// }
+///
+/// assert_eq!(classify(&ForgeError::not_found("x")), "not_found");
+/// assert_eq!(classify(&ForgeError::internal("oops")), "other");
+/// ```
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum ForgeError {

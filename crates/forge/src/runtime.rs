@@ -921,7 +921,7 @@ impl Forge {
                         loop {
                             tokio::select! {
                                 _ = partition_shutdown.recv() => break,
-                                _ = tokio::time::sleep(Duration::from_secs(86_400)) => {}
+                                _ = tokio::time::sleep(Duration::from_secs(21_600)) => {}
                             }
                             // Only run on the leader node
                             let is_leader = partition_leader
@@ -1142,7 +1142,7 @@ impl Forge {
                     }
                 };
                 let serve = axum::serve(listener, router).with_graceful_shutdown(async move {
-                    let _ = gateway_shutdown_rx.recv().await;
+                    let _ = gateway_shutdown_rx.wait_for(|v| *v).await;
                     tracing::debug!("Gateway draining in-flight requests");
                 });
                 if let Err(e) = serve.await {

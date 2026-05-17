@@ -112,6 +112,7 @@ Read-only database access for query handlers.
 | `env_parse` | `fn env_parse<T: FromStr>(&self, key: &str) -> Result<T>` | Parse env var to type |
 | `env_parse_or` | `fn env_parse_or<T: FromStr>(&self, key: &str, default: T) -> Result<T>` | Parse env var with default |
 | `env_contains` | `fn env_contains(&self, key: &str) -> bool` | Check if env var is set |
+| `claim` | `fn claim(&self, key: &str) -> Option<&Value>` | Shortcut for `self.auth.claim(key)` — reserved JWT fields are filtered |
 
 ---
 
@@ -152,6 +153,7 @@ Transactional database access with HTTP client and job/workflow dispatch.
 | `env_parse` | `fn env_parse<T: FromStr>(&self, key: &str) -> Result<T>` | Parse env var to type |
 | `env_parse_or` | `fn env_parse_or<T: FromStr>(&self, key: &str, default: T) -> Result<T>` | Parse env var with default |
 | `env_contains` | `fn env_contains(&self, key: &str) -> bool` | Check if env var is set |
+| `claim` | `fn claim(&self, key: &str) -> Option<&Value>` | Shortcut for `self.auth.claim(key)` — reserved JWT fields are filtered |
 
 ---
 
@@ -183,6 +185,8 @@ Background job execution context with progress reporting and heartbeats.
 | `save` | `async fn save(&self, key: &str, value: Value) -> Result<()>` | Save data for retries/compensation |
 | `saved` | `async fn saved(&self) -> Value` | Get all saved job data |
 | `set_saved` | `async fn set_saved(&self, data: Value) -> Result<()>` | Replace all saved data |
+| `dispatch_job` | `async fn dispatch_job<T: Serialize>(&self, job_type: &str, args: &T) -> Result<Uuid>` | Dispatch a sub-job (fire-and-forget; not commit-gated) |
+| `start_workflow` | `async fn start_workflow<T: Serialize>(&self, workflow_name: &str, args: &T) -> Result<Uuid>` | Start a workflow directly from a job |
 | `is_cancel_requested` | `async fn is_cancel_requested(&self) -> Result<bool>` | Check if cancellation was requested |
 | `check_cancelled` | `async fn check_cancelled(&self) -> Result<()>` | Return error if cancellation requested |
 | `is_retry` | `fn is_retry(&self) -> bool` | Check if this is a retry attempt |
@@ -242,6 +246,8 @@ Scheduled task execution context with timing information.
 | `raw_http` | `fn raw_http(&self) -> &Client` | Raw reqwest client (bypasses circuit breaker) |
 | `delay` | `fn delay(&self) -> chrono::Duration` | Time between scheduled and actual execution |
 | `is_late` | `fn is_late(&self) -> bool` | Check if delay exceeds 1 minute |
+| `trace_id` | `fn trace_id(&self) -> String` | Correlation ID for this run (OTel trace ID when configured, otherwise `run_id`) |
+| `span` | `fn span(&self) -> &Span` | Parent tracing span; use to attach child spans within the handler |
 | `env` | `fn env(&self, key: &str) -> Option<String>` | Get environment variable |
 | `env_or` | `fn env_or(&self, key: &str, default: &str) -> String` | Get env var with default |
 | `env_require` | `fn env_require(&self, key: &str) -> Result<String>` | Get required env var |
@@ -389,6 +395,8 @@ Long-running service context with shutdown signaling and heartbeats.
 | `is_shutdown_requested` | `fn is_shutdown_requested(&self) -> bool` | Check if shutdown was requested |
 | `shutdown_signal` | `async fn shutdown_signal(&self)` | Wait for shutdown signal |
 | `heartbeat` | `async fn heartbeat(&self) -> Result<()>` | Send heartbeat to indicate daemon is alive |
+| `trace_id` | `fn trace_id(&self) -> String` | Correlation ID for this instance (`instance_id` as string) |
+| `span` | `fn span(&self) -> &Span` | Parent tracing span; use to attach child spans within the handler |
 | `env` | `fn env(&self, key: &str) -> Option<String>` | Get environment variable |
 | `env_or` | `fn env_or(&self, key: &str, default: &str) -> String` | Get env var with default |
 | `env_require` | `fn env_require(&self, key: &str) -> Result<String>` | Get required env var |
@@ -461,7 +469,7 @@ MCP tool execution context with database, auth, dispatch, and environment access
 | `db` | `fn db(&self) -> &PgPool` | Database connection pool |
 | `conn` | `async fn conn(&self) -> sqlx::Result<ForgeConn<'static>>` | Connection for `query_as!` macros |
 | `db_conn` | `fn db_conn(&self) -> DbConn<'_>` | Database connection as `DbConn` for shared helpers |
-| `user_id` | `fn user_id(&self) -> Result<Uuid>` | Get authenticated user's UUID |
+| `user_id` | `fn user_id(&self) -> Result<Uuid>` | Get authenticated user's UUID (returns 401 if unauthenticated) |
 | `tenant_id` | `fn tenant_id(&self) -> Option<Uuid>` | Get tenant ID from JWT claims |
 | `dispatch_job` | `async fn dispatch_job<T: Serialize>(&self, job_type: &str, args: T) -> Result<Uuid>` | Dispatch a background job |
 | `start_workflow` | `async fn start_workflow<T: Serialize>(&self, workflow_name: &str, input: T) -> Result<Uuid>` | Start a workflow |

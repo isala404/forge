@@ -67,6 +67,32 @@ When `mcp.oauth = true`, Forge adds OAuth 2.1 Authorization Code + PKCE:
 
 This separation helps MCP clients and models recover from tool input errors while still treating protocol faults as transport-level failures.
 
+## Endpoints
+
+### MCP transport
+
+| Method | Path | Notes |
+|--------|------|-------|
+| `POST` | `/_api/mcp` (default) | JSON-RPC request/notification payload. Returns `200` with result or `202` for notification-only payloads. |
+| `GET`  | `/_api/mcp` | Not used for stream transport in v1 — returns `405`. |
+
+The path is controlled by `mcp.path` in `forge.toml` (default: `/mcp`, mounted under `/_api`).
+
+### OAuth 2.1 (requires `mcp.oauth = true`)
+
+All OAuth endpoints are mounted under `/_api` and bypass the Forge auth middleware.
+
+| Method | Path | Notes |
+|--------|------|-------|
+| `GET`  | `/.well-known/oauth-authorization-server` | Authorization server metadata (RFC 8414). Advertises all OAuth endpoints. |
+| `GET`  | `/.well-known/oauth-protected-resource` | Protected resource metadata (RFC 9728). Points back to this server as the authorization server. |
+| `POST` | `/_api/oauth/register` | Dynamic client registration (RFC 7591). Rate-limited to 10 req/min per IP; 1 000 client cap. |
+| `GET`  | `/_api/oauth/authorize` | Authorization endpoint. Renders consent page; reads `forge_session` cookie for single-click re-auth. |
+| `POST` | `/_api/oauth/authorize` | Authorization form submit. Validates CSRF token, credentials, PKCE challenge; issues authorization code (60 s TTL, single-use); redirects to `redirect_uri`. |
+| `POST` | `/_api/oauth/token` | Token endpoint. Exchanges authorization code + PKCE verifier for access + refresh tokens, or refreshes using a refresh token. Response includes `aud: "forge:mcp"`. |
+
+When OAuth is disabled, `/.well-known/oauth-authorization-server` and `/.well-known/oauth-protected-resource` return `404` with `{"error":"oauth_not_supported"}` so MCP clients can detect the configuration and fall back to unauthenticated or bring-your-own JWT flows.
+
 ## Transport Notes
 
 Forge MCP v1 is Streamable HTTP only.

@@ -272,9 +272,68 @@ Signal types: `event`, `view`, `report`.
 
 ## Health Checks
 
-`GET /_api/health` returns 200 when the process is alive.
+### `GET /_api/health` — liveness probe
 
-`GET /_api/ready` returns 200 when the server can serve requests (database connected, migrations applied, no blocked workflows). Returns 503 if not ready.
+Returns `200 OK` as long as the process is running. No database call is made. Use this as a Kubernetes `livenessProbe` or Docker `HEALTHCHECK` — if it fails, the container is dead and should be replaced.
+
+```json
+{
+  "status": "healthy",
+  "version": "0.5.0"
+}
+```
+
+### `GET /_api/ready` — readiness probe
+
+Returns `200 OK` when the server is ready to accept traffic, or `503 Service Unavailable` when it is not. No authentication is required.
+
+```json
+{
+  "ready": true,
+  "database": true,
+  "reactor": true,
+  "notify_queue_ok": true,
+  "migrations_ok": true,
+  "cluster_registered": true,
+  "version": "0.5.0"
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ready` | `boolean` | `true` only when every other field is passing |
+| `database` | `boolean` | Primary pool can serve `SELECT 1` |
+| `reactor` | `boolean` | Change listener (LISTEN/NOTIFY) is connected |
+| `notify_queue_ok` | `boolean` | PostgreSQL notification queue usage is below 75% |
+| `migrations_ok` | `boolean` | All embedded system migrations have been applied |
+| `cluster_registered` | `boolean \| null` | This node has an `active` row in `forge_nodes`; `null` when cluster registration is disabled |
+
+The probe returns `503` if any of the checks fails. `ready: false` on a `503` response still includes the individual flags so you can tell which check failed.
+
+**Why `notify_queue_ok` matters.** PostgreSQL's shared notification queue is finite. Once it reaches 75% capacity, LISTEN/NOTIFY messages start dropping, which means live-data updates stop reaching clients. The probe fails at this threshold so the load balancer can drain the node before the queue saturates.
+
+**Why `migrations_ok` matters.** The binary embeds the expected number of system migrations. If the count in `forge_system_migrations` is lower, the database schema is behind the binary and the node is not safe to serve traffic.
+
+**Using the probes for container orchestration.** A typical Kubernetes configuration:
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /_api/health
+    port: 3000
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+readinessProbe:
+  httpGet:
+    path: /_api/ready
+    port: 3000
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  failureThreshold: 3
+```
+
+Keep `/_api/health` as the liveness probe and `/_api/ready` as the readiness probe. Do not swap them — removing a pod that temporarily can't reach the database is almost always wrong.
 
 ## File Uploads
 

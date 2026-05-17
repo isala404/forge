@@ -54,6 +54,53 @@ Forge persists workflow state to PostgreSQL after each step. When the process re
 
 The macro validates your code at compile time. Using `tokio::sleep()` with durations over 100 seconds produces a compile error, guiding you toward `ctx.sleep()`.
 
+## Run Status Lifecycle
+
+Every workflow run moves through a set of statuses stored in `forge_workflow_runs.status`. Understanding them helps when querying run history or debugging stuck workflows.
+
+| Status | Terminal | Description |
+|--------|----------|-------------|
+| `Pending` | No | Created but not yet picked up by the executor. |
+| `Running` | No | Actively executing a step. |
+| `Sleeping` | No | Suspended on a durable `ctx.sleep()` timer. Resumes automatically when the timer fires. |
+| `Waiting` | No | Parked on `ctx.wait_for_event()`. Resumes when the named event is inserted into `forge_workflow_events`. |
+| `Completed` | Yes | Finished successfully. |
+| `Failed` | Yes | Ended with an unhandled error, operator cancellation, saga compensation, or operator retirement. |
+| `BlockedMissingVersion` | No | No handler registered for the run's pinned `(name, version)`. Deploy the matching handler to unblock. |
+| `BlockedSignatureMismatch` | No | A handler for the version exists, but its signature differs from the one recorded at start time (step keys, types, or timeout changed). Deploy a compatible version to unblock. |
+| `BlockedMissingHandler` | No | The workflow name is not in the registry at all. |
+
+**Blocked variants are non-terminal.** A deploy that provides a matching handler with the correct signature automatically unblocks the run — no data loss, no manual intervention. The `/_api/ready` endpoint returns `503` while any blocked runs exist.
+
+### Typical transitions
+
+```
+Pending → Running → Completed
+                  → Failed
+
+Running → Sleeping → Running   (durable sleep)
+Running → Waiting  → Running   (wait_for_event)
+
+Running → BlockedMissingVersion    ┐
+Running → BlockedSignatureMismatch ├─ deploy fix → Running
+Running → BlockedMissingHandler    ┘
+```
+
+### Querying run status
+
+```sql
+-- In-flight runs for a workflow
+SELECT id, status, created_at
+FROM forge_workflow_runs
+WHERE workflow_name = 'onboard_user'
+  AND status NOT IN ('completed', 'failed');
+
+-- All blocked runs (any cause)
+SELECT id, workflow_name, workflow_version, status
+FROM forge_workflow_runs
+WHERE status LIKE 'blocked_%';
+```
+
 ## Attributes
 
 | Attribute | Type | Default | Description |

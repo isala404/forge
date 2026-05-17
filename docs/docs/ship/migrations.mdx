@@ -1,0 +1,83 @@
+# Migrations
+
+Forge migrations are forward-only SQL files. There is no rollback by design — write a corrective migration instead. The advisory lock means only one node runs migrations at a time, so running `forge migrate up` against a live cluster is safe.
+
+## Commands
+
+```bash
+forge migrate up      # run all pending migrations
+forge migrate status  # show what has been applied and what is pending
+forge migrate prepare # run pending migrations, then regenerate .sqlx/ offline cache
+```
+
+All three subcommands accept `--config` (default: `forge.toml`) and `--migrations-dir` (default: `migrations`).
+
+## forge migrate up
+
+Reads every `.sql` file in `migrations/` in lexicographic order, checks which have already been applied (tracked in `forge_migrations`), and runs the rest in a single session. Applied migrations are recorded with a SHA-256 checksum so drift is detectable.
+
+```
+  ● Running pending migrations...
+  ✓ Migrations complete
+```
+
+On startup, the runtime does the same thing automatically under an advisory lock, so you rarely need to run this manually. The explicit command is useful when you want to apply migrations before starting a new binary in a zero-downtime deploy.
+
+## forge migrate status
+
+Shows what has been applied and what is still pending, with timestamps. It also surfaces two anomalies:
+
+| Marker | Meaning | Action |
+|--------|---------|--------|
+| `[DRIFT now=abc123]` | File on disk no longer matches the checksum recorded when it was applied | Stop editing applied migrations — write a new one |
+| `[SOURCE FILE MISSING]` | Migration recorded in DB but `.sql` file is gone | Restore the file or accept the orphan |
+
+```
+  ✓ Applied:
+    0001_initial at 2026-04-10 09:12:03
+    0002_add_roles at 2026-04-18 14:55:21
+    0003_add_trades at 2026-05-01 11:30:00
+
+  ⚠ Pending:
+    → 0004_add_indexes
+
+  ℹ 3 applied, 1 pending
+```
+
+## forge migrate prepare
+
+Runs any pending migrations and then calls `cargo sqlx prepare --workspace` to regenerate the `.sqlx/` offline cache. Use this before committing query changes so CI can compile without a live database.
+
+Requires `cargo-sqlx`:
+
+```bash
+cargo install sqlx-cli --no-default-features --features postgres
+```
+
+## Advisory lock
+
+Only one node acquires the migration lock at a time. The lock ID is derived from "FORGE" (`0x464F524745`). If a node crashes mid-migration, PostgreSQL releases the lock automatically when the connection drops — no manual cleanup needed.
+
+## Writing migrations
+
+Files live in `migrations/` and must be prefixed with a zero-padded version number so they sort correctly:
+
+```
+migrations/
+  0001_initial.sql
+  0002_add_roles.sql
+  0003_add_trades.sql
+```
+
+Never edit a file after it has been applied. Add a new migration file instead.
+
+```sql
+-- 0004_add_indexes.sql
+CREATE INDEX CONCURRENTLY trades_user_id_idx ON trades (user_id);
+```
+
+`CONCURRENTLY` avoids locking the table during the index build. Note that SQLx runs each file in an implicit transaction — `CREATE INDEX CONCURRENTLY` cannot run inside a transaction, so place it in its own migration file if needed.
+
+## No rollback
+
+Rollback support is not planned. If a migration has a bug, write a corrective migration. This matches how production databases actually work — an applied migration has potentially modified data, and reversing it safely requires understanding the data, not just the schema.

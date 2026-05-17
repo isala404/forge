@@ -10,9 +10,13 @@
 use sqlx::PgPool;
 use tracing::{debug, error, info};
 
-/// Ensure partitions exist for the current month and next month.
+/// Ensure partitions exist for the current month and the next three months.
+///
+/// Pre-creating three months ahead prevents gaps when the maintenance loop
+/// (which sleeps a fixed interval from startup, not aligned to midnight)
+/// fires late on a month boundary.
 pub async fn ensure_partitions(pool: &PgPool) {
-    let (current, next) = tokio::join!(
+    let results = tokio::join!(
         sqlx::query(
             "SELECT forge_signals_ensure_partition(date_trunc('month', CURRENT_DATE)::date)",
         )
@@ -21,16 +25,26 @@ pub async fn ensure_partitions(pool: &PgPool) {
             "SELECT forge_signals_ensure_partition((date_trunc('month', CURRENT_DATE) + interval '1 month')::date)",
         )
         .execute(pool),
+        sqlx::query(
+            "SELECT forge_signals_ensure_partition((date_trunc('month', CURRENT_DATE) + interval '2 months')::date)",
+        )
+        .execute(pool),
+        sqlx::query(
+            "SELECT forge_signals_ensure_partition((date_trunc('month', CURRENT_DATE) + interval '3 months')::date)",
+        )
+        .execute(pool),
     );
 
-    if let Err(e) = current {
-        error!(error = %e, "failed to ensure current month partition");
+    let labels = ["current", "+1 month", "+2 months", "+3 months"];
+    for (result, label) in [results.0, results.1, results.2, results.3]
+        .into_iter()
+        .zip(labels)
+    {
+        if let Err(e) = result {
+            error!(error = %e, month = label, "failed to ensure signal partition");
+        }
     }
-    if let Err(e) = next {
-        error!(error = %e, "failed to ensure next month partition");
-    } else {
-        debug!("signal partitions verified");
-    }
+    debug!("signal partitions verified (current + 3 months ahead)");
 }
 
 /// Drop partitions older than the retention period.

@@ -2,6 +2,32 @@
 
 How Forge keeps subscriptions up to date after mutations, and the operational knobs you can tune.
 
+## Mental Model
+
+A reactive query is a regular query that re-executes automatically whenever its underlying data changes. From the application's perspective, there is no polling, no manual cache invalidation, and no event plumbing — you mark a query `#[forge::query]`, subscribe to it from the frontend, and the client store stays current.
+
+Under the hood, the guarantee is built on a deterministic pipeline:
+
+```
+DB write
+  → trigger fires → forge_change_log row inserted → NOTIFY forge_changes
+  → ChangeListener receives NOTIFY on its dedicated PG connection
+  → InvalidationEngine debounces (50ms quiet window, 200ms max)
+  → coalesced batch delivered to Reactor
+  → Reactor looks up subscriptions affected by changed tables
+  → re-executes each affected query (bounded at 64 concurrent)
+  → hashes result, compares to last-sent hash
+  → pushes SSE update only when data actually changed
+  → client store receives update, Svelte re-renders
+```
+
+The key properties that fall out of this design:
+
+- **No false positives in re-renders.** Hash comparison means clients only re-render when data genuinely changed, even if many mutations hit the same rows within a debounce window.
+- **No polling.** The LISTEN/NOTIFY connection delivers changes within milliseconds of commit; the 50ms debounce is a batching optimization, not a polling interval.
+- **Shared re-execution.** Fifty clients subscribed to the same query with the same args share one re-execution. The reactor fans the result out to all of them.
+- **Automatic scope.** Auth identity is baked into the subscription key. User A and User B subscribing to `get_my_notifications` are separate groups; a change that affects only user B's rows triggers only user B's re-execution.
+
 ## Architecture
 
 When a client subscribes to a query via SSE, the server remembers the query, its arguments, and which tables it touches. When any of those tables change, the server re-executes the query and pushes the new result if it differs from the last one sent.
@@ -14,6 +40,29 @@ The pipeline has four stages:
 4. **Fan-out** (SSE push)
 
 Each stage runs per-node. There is no global coordinator for reactivity.
+
+## Enabling Reactivity on Your Tables
+
+Forge's system tables (`forge_jobs`, `forge_workflow_runs`, `forge_workflow_steps`) have reactivity enabled automatically. For your own application tables, call `forge_enable_reactivity()` in a migration:
+
+```sql
+SELECT forge_enable_reactivity('orders');
+SELECT forge_enable_reactivity('messages');
+```
+
+This installs a trigger named `forge_notify_orders` (the pattern is `forge_notify_{table_name}`) that fires `AFTER INSERT OR UPDATE OR DELETE` on every row and notifies the runtime of the change. Once the trigger is in place, any `#[forge::query]` that reads from that table will re-execute automatically when the table changes — no other configuration needed.
+
+To stop tracking changes on a table:
+
+```sql
+SELECT forge_disable_reactivity('orders');
+```
+
+This drops the trigger. Existing subscriptions that depend on the table continue to work but will stop receiving updates until the trigger is re-added.
+
+**Naming constraint.** Table names must be 50 characters or fewer (the `forge_notify_` prefix adds 13 characters; PostgreSQL caps identifiers at 63). The function validates this and raises an error at migration time if the name is too long.
+
+**When to call it.** Add `SELECT forge_enable_reactivity('your_table')` at the bottom of the migration that creates the table. That way the trigger exists from the first insert.
 
 ## Change Detection
 

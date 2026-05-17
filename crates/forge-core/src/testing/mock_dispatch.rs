@@ -23,6 +23,10 @@ pub struct DispatchedJob {
     pub job_type: String,
     /// Job arguments (serialized).
     pub args: serde_json::Value,
+    /// Owner subject from the dispatching context.
+    pub owner_subject: Option<String>,
+    /// Whether this was dispatched inside a transaction via `dispatch_in_conn`.
+    pub in_connection: bool,
     /// When the job was dispatched.
     pub dispatched_at: DateTime<Utc>,
     /// Current status (for test simulation).
@@ -75,6 +79,17 @@ impl MockJobDispatch {
 
     /// Dispatch a job (records for later verification).
     pub async fn dispatch<T: serde::Serialize>(&self, job_type: &str, args: T) -> Result<Uuid> {
+        self.dispatch_inner(job_type, args, None, false).await
+    }
+
+    /// Internal dispatch that captures all metadata.
+    async fn dispatch_inner<T: serde::Serialize>(
+        &self,
+        job_type: &str,
+        args: T,
+        owner_subject: Option<String>,
+        in_connection: bool,
+    ) -> Result<Uuid> {
         let id = Uuid::new_v4();
         let args_json =
             serde_json::to_value(args).map_err(|e| ForgeError::Serialization(e.to_string()))?;
@@ -83,6 +98,8 @@ impl MockJobDispatch {
             id,
             job_type: job_type.to_string(),
             args: args_json,
+            owner_subject,
+            in_connection,
             dispatched_at: Utc::now(),
             status: JobStatus::Pending,
             cancel_reason: None,
@@ -204,10 +221,13 @@ impl crate::function::JobDispatch for MockJobDispatch {
         &self,
         job_type: &str,
         args: serde_json::Value,
-        _owner_subject: Option<String>,
+        owner_subject: Option<String>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Uuid>> + Send + '_>> {
         let job_type = job_type.to_string();
-        Box::pin(async move { self.dispatch(&job_type, args).await })
+        Box::pin(async move {
+            self.dispatch_inner(&job_type, args, owner_subject, false)
+                .await
+        })
     }
 
     fn dispatch_in_conn<'a>(
@@ -215,9 +235,12 @@ impl crate::function::JobDispatch for MockJobDispatch {
         _conn: &'a mut sqlx::PgConnection,
         job_type: &'a str,
         args: serde_json::Value,
-        _owner_subject: Option<String>,
+        owner_subject: Option<String>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Uuid>> + Send + 'a>> {
-        Box::pin(async move { self.dispatch(job_type, args).await })
+        Box::pin(async move {
+            self.dispatch_inner(job_type, args, owner_subject, true)
+                .await
+        })
     }
 
     fn cancel(

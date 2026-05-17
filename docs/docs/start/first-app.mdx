@@ -2,6 +2,24 @@
 
 Create a real-time todo list using Forge queries, mutations, and PostgreSQL-backed subscriptions.
 
+## Quick Start
+
+Zero to running app in five commands:
+
+```bash
+cargo install forgex
+forge new my-app --template with-svelte/minimal
+cd my-app
+forge migrate up
+forge test
+```
+
+Requires Rust, Docker (with Compose v2), and Bun. `forge migrate up` starts a local Postgres container and applies migrations. `forge test` runs your backend unit tests and the Playwright suite against a live stack.
+
+The rest of this page walks through building the app from scratch.
+
+---
+
 ## Install Forge
 
 ```bash
@@ -27,6 +45,14 @@ eval (forge env)
 ```
 
 `forge env` auto-detects your shell. Pass `--shell bash|zsh|fish` to override.
+
+Run `forge doctor` at any time to verify your environment is set up correctly:
+
+```bash
+forge doctor
+```
+
+It checks Rust toolchain version, `cargo-sqlx`, Docker, `bun`/`dx`, `DATABASE_URL` reachability, and `.sqlx/` cache freshness — printing `[OK]`, `[!]`, or `[X]` for each item with a remediation hint on failure.
 
 ## Create and Run
 
@@ -97,13 +123,7 @@ pub mod todos;
 pub use todos::*;
 ```
 
-Register it in `src/main.rs`:
-
-```rust
-Forge::builder()
-    .register_query::<functions::ListTodosQuery>()
-    // ... other registrations
-```
+The `#[forge::query]` macro generates an `inventory::submit!` call automatically, so no manual registration is needed.
 
 ## Add the Table
 
@@ -148,15 +168,21 @@ pub async fn create_todo(ctx: &MutationContext, input: CreateTodoInput) -> Resul
 }
 ```
 
-Register it in `src/main.rs`:
-
-Add to the builder chain in `src/main.rs`:
+Your `src/main.rs` uses `auto_register()`, which picks up all annotated handlers automatically:
 
 ```rust
-Forge::builder()
-    .register_query::<functions::ListTodosQuery>()
-    .register_mutation::<functions::CreateTodoMutation>()
-    // ...
+use forge::prelude::*;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let config = ForgeConfig::from_file("forge.toml")?;
+    Forge::builder()
+        .config(config)
+        .auto_register()
+        .build()?
+        .run()
+        .await
+}
 ```
 
 Test it:

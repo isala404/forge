@@ -51,6 +51,35 @@ use std::path::Path;
 use crate::error::{ForgeError, Result};
 
 /// Root configuration for FORGE.
+///
+/// Configuration is loaded from a TOML file (typically `forge.toml`) and supports
+/// `${ENV_VAR}` and `${VAR-default}` substitution throughout. Only `database.url`
+/// is required; every other section has a sensible default.
+///
+/// # Examples
+///
+/// Parse a minimal TOML snippet:
+///
+/// ```
+/// use forge_core::config::ForgeConfig;
+///
+/// let config = ForgeConfig::parse_toml(r#"
+///     [database]
+///     url = "postgres://localhost/myapp"
+/// "#).unwrap();
+///
+/// assert_eq!(config.database.url(), "postgres://localhost/myapp");
+/// assert_eq!(config.gateway.port, 9081); // default port
+/// ```
+///
+/// Construct programmatically (useful in tests):
+///
+/// ```
+/// use forge_core::config::ForgeConfig;
+///
+/// let config = ForgeConfig::default_with_database_url("postgres://localhost/test");
+/// assert_eq!(config.database.url(), "postgres://localhost/test");
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ForgeConfig {

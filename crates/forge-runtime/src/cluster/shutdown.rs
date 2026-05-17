@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use forge_core::cluster::NodeStatus;
-use tokio::sync::broadcast;
+use tokio::sync::watch;
 
 use super::registry::NodeRegistry;
 use crate::pg::LeaderElection;
@@ -33,7 +33,7 @@ pub struct GracefulShutdown {
     config: ShutdownConfig,
     shutdown_requested: Arc<AtomicBool>,
     in_flight_count: Arc<AtomicU32>,
-    shutdown_tx: broadcast::Sender<()>,
+    shutdown_tx: watch::Sender<bool>,
 }
 
 impl GracefulShutdown {
@@ -43,7 +43,7 @@ impl GracefulShutdown {
         leader_election: Option<Arc<LeaderElection>>,
         config: ShutdownConfig,
     ) -> Self {
-        let (shutdown_tx, _) = broadcast::channel(1);
+        let (shutdown_tx, _) = watch::channel(false);
         Self {
             registry,
             leader_election,
@@ -75,7 +75,9 @@ impl GracefulShutdown {
     }
 
     /// Subscribe to shutdown notifications.
-    pub fn subscribe(&self) -> broadcast::Receiver<()> {
+    ///
+    /// Late subscribers immediately see `true` if shutdown was already requested.
+    pub fn subscribe(&self) -> watch::Receiver<bool> {
         self.shutdown_tx.subscribe()
     }
 
@@ -89,8 +91,8 @@ impl GracefulShutdown {
         // Mark shutdown as requested
         self.shutdown_requested.store(true, Ordering::SeqCst);
 
-        // Notify all listeners
-        let _ = self.shutdown_tx.send(());
+        // Notify all listeners (watch replays current value to new subscribers)
+        self.shutdown_tx.send_replace(true);
 
         tracing::info!("Starting graceful shutdown");
 
@@ -272,10 +274,12 @@ mod tests {
         let sd = make_shutdown();
         let mut r1 = sd.subscribe();
         let mut r2 = sd.subscribe();
-        // Both should receive the same broadcast.
-        sd.shutdown_tx.send(()).unwrap();
-        assert!(r1.recv().await.is_ok());
-        assert!(r2.recv().await.is_ok());
+        // Both should see the state change.
+        sd.shutdown_tx.send_replace(true);
+        assert!(r1.changed().await.is_ok());
+        assert!(*r1.borrow());
+        assert!(r2.changed().await.is_ok());
+        assert!(*r2.borrow());
     }
 
     #[test]
@@ -290,22 +294,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn late_subscribers_miss_messages_sent_before_subscription() {
-        // Broadcast channel only delivers messages sent AFTER a receiver
-        // subscribes — handlers that subscribe inside a request handler may
-        // miss the shutdown signal if they raced the shutdown call.
+    async fn late_subscribers_see_shutdown_state() {
+        // watch channel replays current value to new subscribers, so late
+        // subscribers immediately observe that shutdown was requested.
         let sd = make_shutdown();
-        // Hold an early receiver so send() has a subscriber and succeeds; the
-        // late receiver still must not see this historical broadcast.
-        let _early = sd.subscribe();
-        sd.shutdown_tx.send(()).unwrap();
+        sd.shutdown_tx.send_replace(true);
 
-        let mut late = sd.subscribe();
-        let recv_result =
-            tokio::time::timeout(Duration::from_millis(20), late.recv()).await;
+        let late = sd.subscribe();
         assert!(
-            recv_result.is_err(),
-            "late subscriber should not receive historical broadcast: {recv_result:?}"
+            *late.borrow(),
+            "late subscriber must see shutdown=true from watch channel"
         );
     }
 

@@ -37,6 +37,21 @@ my-app/
 
 `forge new` uses explicit template ids. Choose `with-svelte/*` for SvelteKit frontends and `with-dioxus/*` for Dioxus frontends.
 
+## Terminology
+
+These terms appear throughout the docs and the framework source:
+
+- **handler** — the Rust async function you write, annotated with a macro like `#[forge::query]` or `#[forge::mutation]`.
+- **function** — a handler once it is registered with the runtime. Forge uses "function" as the generic term for anything in the registry (queries, mutations, jobs, etc.).
+- **RPC** — the wire protocol. Queries and mutations are called over HTTP POST to `/_api/rpc/{function_name}`. The frontend bindings hide this detail.
+- **query** — a read-only handler (`#[forge::query]`). Participates in the reactivity pipeline; results are pushed to subscribers when the underlying data changes.
+- **mutation** — a write handler (`#[forge::mutation]`). Runs inside a database transaction; job and workflow dispatches are flushed after commit.
+- **job** — a background task (`#[forge::job]`). Dispatched from mutations, persisted in PostgreSQL, executed by the worker with retries.
+- **cron** — a scheduled handler (`#[forge::cron]`). Runs on a cron expression; leader-elected so it executes exactly once across the cluster.
+- **workflow** — a durable, resumable multi-step process (`#[forge::workflow]`). Steps survive restarts; signature-guarded to prevent incompatible resume.
+- **daemon** — a long-running service (`#[forge::daemon]`). Runs continuously; can be leader-elected or replicated across nodes.
+- **webhook** — an incoming HTTP callback handler (`#[forge::webhook]`). Validates signatures and runs inside the Forge runtime.
+
 ## Key Files
 
 ### forge.toml

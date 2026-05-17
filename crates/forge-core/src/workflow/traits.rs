@@ -267,7 +267,15 @@ mod tests {
         );
         assert_eq!(
             "blocked_missing_version".parse::<WorkflowStatus>(),
-            Ok(WorkflowStatus::Failed)
+            Ok(WorkflowStatus::BlockedMissingVersion)
+        );
+        assert_eq!(
+            "blocked_signature_mismatch".parse::<WorkflowStatus>(),
+            Ok(WorkflowStatus::BlockedSignatureMismatch)
+        );
+        assert_eq!(
+            "blocked_missing_handler".parse::<WorkflowStatus>(),
+            Ok(WorkflowStatus::BlockedMissingHandler)
         );
         assert_eq!(
             "cancelled_by_operator".parse::<WorkflowStatus>(),
@@ -285,6 +293,9 @@ mod tests {
         assert!(!WorkflowStatus::Waiting.is_terminal());
         assert!(!WorkflowStatus::Sleeping.is_terminal());
         assert!(!WorkflowStatus::Pending.is_terminal());
+        assert!(!WorkflowStatus::BlockedMissingVersion.is_terminal());
+        assert!(!WorkflowStatus::BlockedSignatureMismatch.is_terminal());
+        assert!(!WorkflowStatus::BlockedMissingHandler.is_terminal());
         assert!(WorkflowStatus::Completed.is_terminal());
         assert!(WorkflowStatus::Failed.is_terminal());
     }
@@ -375,15 +386,10 @@ mod tests {
     }
 
     #[test]
-    fn workflow_status_all_legacy_aliases_collapse_to_failed() {
-        // The DB schema kept a wider set of historical statuses; the parser
-        // must collapse every "post-running, non-success" variant to Failed.
+    fn workflow_status_legacy_aliases_collapse_to_failed() {
         for legacy in [
             "compensating",
             "compensated",
-            "blocked_missing_version",
-            "blocked_signature_mismatch",
-            "blocked_missing_handler",
             "retired_unresumable",
             "cancelled_by_operator",
         ] {
@@ -393,6 +399,30 @@ mod tests {
                 WorkflowStatus::Failed,
                 "{legacy} did not map to Failed"
             );
+        }
+    }
+
+    #[test]
+    fn workflow_status_blocked_variants_parse_distinctly() {
+        assert_eq!(
+            "blocked_missing_version".parse::<WorkflowStatus>(),
+            Ok(WorkflowStatus::BlockedMissingVersion)
+        );
+        assert_eq!(
+            "blocked_signature_mismatch".parse::<WorkflowStatus>(),
+            Ok(WorkflowStatus::BlockedSignatureMismatch)
+        );
+        assert_eq!(
+            "blocked_missing_handler".parse::<WorkflowStatus>(),
+            Ok(WorkflowStatus::BlockedMissingHandler)
+        );
+        for blocked in [
+            WorkflowStatus::BlockedMissingVersion,
+            WorkflowStatus::BlockedSignatureMismatch,
+            WorkflowStatus::BlockedMissingHandler,
+        ] {
+            assert!(blocked.is_blocked());
+            assert!(!blocked.is_terminal());
         }
     }
 }

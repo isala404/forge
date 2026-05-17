@@ -17,5 +17,15 @@ services:
       timeout: 5s
       retries: 5
 
+  otel-lgtm:
+    image: grafana/otel-lgtm:latest
+    profiles:
+      - observability
+    ports:
+      - "127.0.0.1:3000:3000"   # Grafana UI
+      - "127.0.0.1:4317:4317"   # OTLP gRPC
+      - "127.0.0.1:4318:4318"   # OTLP HTTP
+    restart: unless-stopped
+
 volumes:
   postgres_data:

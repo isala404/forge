@@ -142,6 +142,10 @@ cargo build --release
 The release binary embeds the Forge runtime and can optionally bundle the frontend build
 using the `embedded-frontend` feature.
 
+## Stability
+
+Forge is pre-1.0 and actively evolving. Breaking changes may occur between minor versions without a migration path when they produce a cleaner API or simpler internals. Semver patch releases (`0.x.y`) are safe to upgrade. If you are running Forge in production, pin to an exact minor version (`forgex = "=0.x.y"`) and review the changelog before upgrading.
+
 ## Requirements
 
 Forge requires PostgreSQL 15+ and is released under the MIT License.

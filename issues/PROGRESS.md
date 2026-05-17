@@ -148,7 +148,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `crates/forge-runtime/src/function/router.rs:251, 298-302` and `function/rpc_signals.rs:50-80` — `info.kind.to_string()` + `client_ip.clone()` + `user_agent.clone()` + `correlation_id.clone()` per RPC even when the channel is full and the event is dropped.
       Validate: `FunctionKind::as_str()` returns `&'static str`; the signal context is built once as `Arc<RpcSignalContext>`; SHA-256 visitor-ID derivation runs inside the collector worker, not at emit time; a bench shows per-call signal alloc count drops to ~0 on a no-signals build and ≤1 on the full build.
 
-- [ ] **[01.6] JWT validated on every request with no positive cache** · *High*
+- [x] **[01.6] JWT validated on every request with no positive cache** · *High*
       Context: `crates/forge-runtime/src/gateway/auth.rs:360-482` — every authenticated request runs full HMAC/RSA verify; legacy-key scan fires on kid miss.
       Validate: an LRU keyed on `(blake3(token), config_epoch)` returns cached `Claims` with TTL = `min(exp, now+60s)`; legacy scan is skipped when kid matches primary; a load test at 50k RPS with a single token shows ≥90% reduction in CPU on the auth path.
 
@@ -160,7 +160,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `crates/forge-runtime/src/function/router.rs:550, 576` — function-not-found probes job then workflow dispatcher, cloning args each time.
       Validate: a unified name→(Function|Job|Workflow) lookup built at startup means dispatch is one hashmap probe; benchmark confirms not-found path performs zero extra clones.
 
-- [ ] **[01.9] SSE bridge spawns 2 tasks per session** · *Med*
+- [x] **[01.9] SSE bridge spawns 2 tasks per session** · *Med*
       Context: `crates/forge-runtime/src/gateway/sse.rs:601-679` — bridge + stream-feeder, four channels, two tasks per connection.
       Validate: the two are merged into one (or the conversion happens inline in a `Stream` impl); benchmark: at 10k SSE sessions, task count and memory footprint drop measurably.
 
@@ -368,7 +368,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `v001_initial.sql:819-928`, `signals/views.rs:11-13` — concurrent refresh holds snapshots forever and prevents vacuum.
       Validate: `forge_signals_daily_stats` replaced with incremental hourly rollups; refresh is tiered (function_stats 5m, daily 1h, retention 6h); benchmark at 100M events shows refresh completes within the tier window.
 
-- [ ] **[06.13] Partition coverage is current + next only** · *Med*
+- [x] **[06.13] Partition coverage is current + next only** · *Med*
       Context: `signals/partition.rs:14-34`, `v001_initial.sql:679-703`.
       Validate: pre-create current + next 3 partitions; healthcheck that `forge_signals_events_default` is empty; partition coverage exposed via admin endpoint.
 
@@ -412,7 +412,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `cron/scheduler.rs:330-358` — original `forge_jobs` row stays claimable.
       Validate: on reclaim, the previous job row is cancelled or a `superseded_at` column is set; worker checks the flag at handler entry; a regression test simulates leader transition mid-cron and asserts the handler fires exactly once.
 
-- [ ] **[07.8] Daemon FNV `lock_id` folded into i64 with collision risk** · *Med*
+- [x] **[07.8] Daemon FNV `lock_id` folded into i64 with collision risk** · *Med*
       Context: `forge-core/src/cluster/roles.rs:88-95`.
       Validate: collision detection at startup aborts boot if two `LeaderRole`s map to the same `lock_id`; OR a `forge_daemon_locks` table assigns serial IDs persistently.
 
@@ -428,7 +428,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `cluster/shutdown.rs:88-131` — only RPC handlers tracked.
       Validate: leader-elected subsystems signal "cleanly stopped" before `release_leadership`; OR the in-flight counter includes daemon/cron/workflow work; a regression test under SIGTERM shows no overlap between old-leader work and new-leader work.
 
-- [ ] **[07.12] Late shutdown subscribers miss the broadcast** · *Med*
+- [x] **[07.12] Late shutdown subscribers miss the broadcast** · *Med*
       Context: `cluster/shutdown.rs:293-310`.
       Validate: shutdown signal is delivered via `tokio::sync::watch::channel(false)` (replays current value) or the broadcast is paired with an `AtomicBool`; a late subscriber observes shutdown.
 
@@ -536,11 +536,11 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: only `MockHttp` and dispatch-only mocks exist.
       Validate: `MockJobRunner` and `MockWorkflowExecutor` execute registered handlers; `IsolatedTestDb` pattern is documented prominently; docs name the no-in-memory-DB tradeoff explicitly.
 
-- [ ] **[09.7] `MockJobDispatch::dispatch_in_conn` silently ignores the connection** · *Med*
+- [x] **[09.7] `MockJobDispatch::dispatch_in_conn` silently ignores the connection** · *Med*
       Context: `forge-core/src/testing/mock_dispatch.rs:213-221`.
       Validate: the mock either participates in the transaction or its non-transactional nature is documented loudly; an `assert_job_committed!` requires explicit confirmation; a regression test rolls back a tx and asserts the mock records no dispatch.
 
-- [ ] **[09.8] `MockHttp` pattern semantics are subtle** · *Low*
+- [x] **[09.8] `MockHttp` pattern semantics are subtle** · *Low*
       Context: `forge-core/src/testing/mock_http.rs:184-220`.
       Validate: precedence rule documented; `mock_exact()` vs `mock_glob()` is the API; first-registered-wins is explicit.
 
@@ -560,7 +560,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `forge-runtime/src/signals/collector.rs:33-52, 59` — per-drop warn-log, no counter.
       Validate: rate-limited warn (accumulator + 1s flush); `forge_signals_dropped_total` Prometheus counter exists; dashboards expose drop rate; default capacity raised if benchmarks support it.
 
-- [ ] **[09.13] Signal partition auto-creation has a month-end edge case** · *High*
+- [x] **[09.13] Signal partition auto-creation has a month-end edge case** · *High*
       Context: `forge-runtime/src/signals/partition.rs:14-34`; `forge/src/runtime.rs:875-898` 24h sleep loop.
       Validate: leader-elected schedule-driven (advisory-lock) job ensures `current + 2 future` partitions; inserts to `forge_signals_events_default` raise a `/ready` warning.
 
@@ -576,123 +576,123 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
 
 ## J. Documentation — User docs + skill refs
 
-- [ ] **[10.F1] `start/first-app.mdx` teaches a registration model the framework no longer uses** · *Crit*
+- [x] **[10.F1] `start/first-app.mdx` teaches a registration model the framework no longer uses** · *Crit*
       Context: doc walks through `.register_query::<...>()`; all shipped templates use `.auto_register()`.
       Validate: page rewritten around `.auto_register()`; manual `register_*` mentioned only as an escape hatch; a brand-new user can follow the doc and get a running app.
 
-- [ ] **[10.F2] `ctx.http_with_circuit_breaker()` documented but does not exist** · *Crit*
+- [x] **[10.F2] `ctx.http_with_circuit_breaker()` documented but does not exist** · *Crit*
       Context: `docs/docs/build/write-data.mdx:216,258` references a non-existent method.
       Validate: doc updated to match `ctx.http()` (which is already circuit-breaker-backed); skill `api.md` is the source-of-truth; references removed.
 
-- [ ] **[10.F3] `reference/errors.mdx` stale against `ForgeError::http_status()`** · *High*
+- [x] **[10.F3] `reference/errors.mdx` stale against `ForgeError::http_status()`** · *High*
       Context: missing `Conflict`, `UnprocessableEntity`, `ServiceUnavailable`; `Deserialization` listed as 500 (actual 400).
       Validate: doc regenerated from the source doc-comment table; a CI check diffs the doc comment against `errors.mdx`.
 
-- [ ] **[10.F4] No documentation page for `/admin/*` operator endpoints** · *Crit (ops)*
+- [x] **[10.F4] No documentation page for `/admin/*` operator endpoints** · *Crit (ops)*
       Context: `crates/forge-runtime/src/gateway/admin.rs` documented only in the skill ref.
       Validate: new `reference/admin-api.mdx` with audit log, reason convention, `admin` role requirement, incident-response examples; sidebar updated.
 
-- [ ] **[10.F5] `/_api/ready` semantics undocumented** · *High*
+- [x] **[10.F5] `/_api/ready` semantics undocumented** · *High*
       Context: response shape and 5 flags only in skill ref.
       Validate: `ship/deploy.mdx` "Health probes" section documents the flag table; mirrored in skill `patterns.md`.
 
-- [ ] **[10.F6] OAuth 2.1 / MCP endpoints have no user-facing reference** · *High*
+- [x] **[10.F6] OAuth 2.1 / MCP endpoints have no user-facing reference** · *High*
       Context: endpoints, payloads, CSRF cookie, sticky-session caveat live in source only.
       Validate: new `reference/oauth.mdx`; cross-linked from MCP security page.
 
-- [ ] **[10.F7] `custom_routes` documented in skill ref only** · *High*
+- [x] **[10.F7] `custom_routes` documented in skill ref only** · *High*
       Context: factory API not in `build/custom-handlers.mdx`.
       Validate: `build/custom-handlers.mdx` (or new `build/custom-routes.mdx`) covers `ForgeBuilder::custom_routes(...)`, reserved path list, middleware behavior.
 
-- [ ] **[10.F8] `RoleResolver` undocumented in user docs** · *Med*
+- [x] **[10.F8] `RoleResolver` undocumented in user docs** · *Med*
       Context: custom RBAC via `RoleResolver` is in skill `api.md` only.
       Validate: `build/protect-routes.mdx` has a "Custom role resolution" section with builder example.
 
-- [ ] **[10.F9] Worker queue model under-documented** · *High*
+- [x] **[10.F9] Worker queue model under-documented** · *High*
       Context: reserved queue names, `worker_capability`, queue-pool starvation isolation scattered.
       Validate: `scale/worker-pools.mdx` rewritten from first principles with diagram of claim SQL, reserved queues, capability matching, pause/resume.
 
-- [ ] **[10.F10] No reactivity mental-model page** · *High*
+- [x] **[10.F10] No reactivity mental-model page** · *High*
       Context: `scale/reactivity.mdx` describes pipeline; missing when/why/cost.
       Validate: new `start/reactivity-model.mdx` (or a "How it works" in `build/subscribe-to-changes.mdx`) covers reactivity cost, adaptive row-vs-table tracking, auth scope dedup, when not to use it.
 
-- [ ] **[10.F11] No first-class security model page** · *Crit (GA)*
+- [x] **[10.F11] No first-class security model page** · *Crit (GA)*
       Context: security notes scattered.
       Validate: new `ship/security.mdx` covers AuthN, AuthZ, tenant isolation, SSRF, rate-limit modes, admin audit, TLS posture, signals DNT/Sec-GPC; linked from each handler page.
 
-- [ ] **[10.F12] `TenantIsolationMode` is implemented but undocumented** · *High*
+- [x] **[10.F12] `TenantIsolationMode` is implemented but undocumented** · *High*
       Context: `forge-core/src/tenant/mod.rs` defines None/Strict/ReadShared.
       Validate: covered in the new security model page OR a dedicated `build/multi-tenancy.mdx` with the row-level enforcement story.
 
-- [ ] **[10.F13] Signals: server endpoint discriminator missing from user docs** · *Med*
+- [x] **[10.F13] Signals: server endpoint discriminator missing from user docs** · *Med*
       Context: `POST /_api/signal` discriminator table only in skill ref.
       Validate: `ship/signals.mdx` has a "Wire format" section with the type discriminator table.
 
-- [ ] **[10.F14] `forge env` / `forge doctor` not in onboarding** · *Med*
+- [x] **[10.F14] `forge env` / `forge doctor` not in onboarding** · *Med*
       Context: present in CLI reference; missing from `start/first-app.mdx` troubleshooting.
       Validate: `forge doctor` is in the troubleshooting section of `start/first-app.mdx` and `tutorials/shipping-to-production.mdx`.
 
-- [ ] **[10.F15] No error catalog: code → cause → remediation** · *High*
+- [x] **[10.F15] No error catalog: code → cause → remediation** · *High*
       Context: production-observable conditions (`BlockedMissingVersion`, `notify_queue_ok=false`, `circuit open`, retry-after) unsorted.
       Validate: `reference/errors.mdx` has a "Runtime conditions" section covering every `WorkflowStatus` variant and readiness-flag failure modes with remediation hints.
 
-- [ ] **[10.F16] `WorkflowStatus` variants under-documented** · *High*
+- [x] **[10.F16] `WorkflowStatus` variants under-documented** · *High*
       Context: `BlockedMissingVersion`, `BlockedSignatureMismatch`, `RetiredUnresumable`, `CancelledByOperator`, `Compensating`, `Compensated` not in user docs.
       Validate: state-transition table in `build/long-processes.mdx`; "Recover a blocked workflow" runbook in `reference/admin-api.mdx`.
 
-- [ ] **[10.F17] Tutorials don't show advanced macro attributes** · *Med*
+- [x] **[10.F17] Tutorials don't show advanced macro attributes** · *Med*
       Context: `cache="30s"`, `consistent`, `rate_limit(...)`, `idempotent(key=...)`, `compensate`, `worker_capability`, `replay_window_secs` etc. not taught.
       Validate: new "Advanced macro attributes" page under `build/` with copy-paste snippets.
 
-- [ ] **[10.F18] No "5-minute" onboarding path** · *High*
+- [x] **[10.F18] No "5-minute" onboarding path** · *High*
       Context: `start/first-app.mdx` is 274 lines.
       Validate: `start/first-app.mdx` trimmed to a `forge new ... && docker compose up && open localhost:9080` flow; the heavy walkthrough moves to `tutorials/your-first-feature.mdx`.
 
-- [ ] **[10.F19] No production-architecture / deployment-topology page** · *Crit (ops)*
+- [x] **[10.F19] No production-architecture / deployment-topology page** · *Crit (ops)*
       Context: deploy specifics scattered between `ship/deploy.mdx` and `scale/multiple-nodes.mdx`.
       Validate: new `ship/production-architecture.mdx`: single-binary vs split worker/api, LB topology, sticky sessions, DATABASE_URL sizing, PG 18 requirement, rolling-deploy workflow-signature caveats, migration order.
 
-- [ ] **[10.F20] Migration operational details missing** · *High*
+- [x] **[10.F20] Migration operational details missing** · *High*
       Context: forward-only rationale, advisory-lock during rolling deploy, `forge_system_migrations` ledger, schema-change reactivity lifecycle missing.
       Validate: new `ship/migrations.mdx` covers the playbook end-to-end.
 
-- [ ] **[10.F21] Cluster setup / node roles is fragmentary** · *High*
+- [x] **[10.F21] Cluster setup / node roles is fragmentary** · *High*
       Context: `roles = ["gateway", "worker", "scheduler"]`, `worker_capabilities`, `cluster_registered` readiness flag scattered.
       Validate: rename `scale/multiple-nodes.mdx` → `scale/cluster-architecture.mdx`; full enumeration of roles + leader election keys.
 
-- [ ] **[10.F22] Cargo features not in user docs** · *Med*
+- [x] **[10.F22] Cargo features not in user docs** · *Med*
       Context: `gateway`, `worker`, `api`, `minimal`, `geoip`, `otel` only in skill ref.
       Validate: "Build presets" section in `ship/deploy.mdx`; feature-gate errors cross-link to it.
 
-- [ ] **[10.F23] Frontend client API reference is non-existent** · *High*
+- [x] **[10.F23] Frontend client API reference is non-existent** · *High*
       Context: `getForgeClient`, `ForgeProvider`, `useForgeAuth`, `setForgeAccessToken`, live store contract have no human-readable reference.
       Validate: new `reference/client-svelte.mdx` and `reference/client-dioxus.mdx` generated from JSDoc/rustdoc; published as part of the docs site.
 
-- [ ] **[10.F24] `forge_enable_reactivity()` and PG helpers undocumented as API** · *Med*
+- [x] **[10.F24] `forge_enable_reactivity()` and PG helpers undocumented as API** · *Med*
       Context: SQL surface that's part of the framework contract missing.
       Validate: new `reference/postgres-helpers.mdx` covers `forge_enable_reactivity`, `forge_change_log`, `forge_*` reserved prefix.
 
-- [ ] **[10.F25] Testing framework partial in user docs** · *Med*
+- [x] **[10.F25] Testing framework partial in user docs** · *Med*
       Context: backend covered; assertion macros catalogue, Playwright fixtures (`rpc`, `gotoReady`, `uniqueId`, `ACTION_TIMEOUT`) missing.
       Validate: `ship/testing.mdx` "Frontend tests" section uses the fixtures from the realtime-todo example.
 
-- [ ] **[10.F26] Inconsistent terminology** · *Med*
+- [x] **[10.F26] Inconsistent terminology** · *Med*
       Context: function vs handler, pool vs queue, subscription vs reactive query vs live store, outbox vs buffered jobs.
       Validate: new `reference/glossary.mdx` defines canonical terms; offending pages updated to use the canonical term.
 
-- [ ] **[10.F27] No doctests / no executable examples** · *Med*
+- [x] **[10.F27] No doctests / no executable examples** · *Med*
       Context: every Rust snippet in docs is a non-compiled markdown block.
       Validate: a CI job compiles every fenced ```rust block in `docs/docs/` against the workspace; OR canonical snippets are sourced from `examples/with-svelte/demo` via Docusaurus partials.
 
-- [ ] **[10.F28] Reference page completeness gaps** · *High*
+- [x] **[10.F28] Reference page completeness gaps** · *High*
       Context: `McpToolContext`, `WebhookContext`, `DaemonContext` light in `reference/contexts.mdx`; Context Capability Matrix only in skill ref.
       Validate: Context Capability Matrix copied into the top of `reference/contexts.mdx`; each context section audited against source methods.
 
-- [ ] **[10.F29] Skill references have content not surfaced for humans** · *Med*
+- [x] **[10.F29] Skill references have content not surfaced for humans** · *Med*
       Context: `resilience.md`, `recipes.md`, `patterns.md`, `pitfalls.md` are AI-only.
       Validate: `pitfalls.md` content promoted into a `Common pitfalls` user page OR a Docusaurus plugin/sidebar surfaces skill refs to humans; CI enforces the "both surfaces in same changeset" policy.
 
-- [ ] **[10.F30] Pre-1.0 stability posture not in user docs** · *Med*
+- [x] **[10.F30] Pre-1.0 stability posture not in user docs** · *Med*
       Context: breaking-change-encouraged stance lives only in `CLAUDE.md`.
       Validate: a "Stability and versioning" section in `docs/docs/index.mdx` (or new `start/stability.mdx`); links from the changelog.
 
@@ -868,7 +868,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: every example pulls in `full`.
       Validate: at least one example or smoke test exercises `worker` or `api`; CI matrix includes a slim-build job.
 
-- [ ] **[12.C3] `geoip` requires build-time network fetch with no offline path** · *Med*
+- [x] **[12.C3] `geoip` requires build-time network fetch with no offline path** · *Med*
       Context: `crates/forge-runtime/Cargo.toml:67`.
       Validate: `geoip` moved out of `full` default, OR the lite DB is vendored; `cargo build -p forgex` succeeds offline.
 
@@ -912,14 +912,14 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: same `shared-key: ci` for validate, guardrails, workspace-integration.
       Validate: cache keys segmented per feature profile, or `save-if` discipline is consistent; CI cache hit rate improves.
 
-- [ ] **[12.D10] Release publishes crates with hardcoded 30s sleeps** · *Low*
+- [x] **[12.D10] Release publishes crates with hardcoded 30s sleeps** · *Low*
       Context: `.github/workflows/release.yml:222`.
       Validate: replaced with polling the crates.io API for the published version, or with `cargo-release` which handles the propagation natively.
 
 - [x] **[12.E1] docker-compose Postgres version matches CI** · *None* — Verified both at PG 18; no action needed.
       Validate: no action; verified both at PG 18.
 
-- [ ] **[12.E2] No Grafana/Loki/Tempo profile in docker-compose despite signals dashboard reference** · *Low*
+- [x] **[12.E2] No Grafana/Loki/Tempo profile in docker-compose despite signals dashboard reference** · *Low*
       Context: signals docs reference a Grafana dashboard; local dev has none.
       Validate: an `observability` profile in `docker-compose.yml` starts otel-lgtm + Grafana with the signals dashboard pre-provisioned.
 

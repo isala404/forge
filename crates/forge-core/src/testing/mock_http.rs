@@ -13,16 +13,26 @@ use serde::Serialize;
 
 /// Mock HTTP client for testing.
 ///
+/// Mocks are matched **first-registered-wins**: the first handler whose
+/// pattern matches the request URL (or path) is used. Register specific
+/// patterns before broad wildcards.
+///
+/// Patterns are matched against both the full URL and the path component,
+/// so `"/health"` matches a request to `https://internal:8080/health`.
+///
 /// # Example
 ///
 /// ```ignore
-/// let mut mock = MockHttp::new();
-/// mock.add_mock_sync("https://api.example.com/*", |req| {
+/// let mock = MockHttp::new();
+/// mock.mock_exact("https://api.example.com/users", |_| {
+///     MockResponse::json(json!({"users": []}))
+/// });
+/// mock.mock_glob("https://api.example.com/*", |_| {
 ///     MockResponse::json(json!({"status": "ok"}))
 /// });
 ///
 /// let response = mock.execute(request).await;
-/// mock.assert_called("https://api.example.com/*");
+/// mock.assert_called("https://api.example.com/users");
 /// ```
 #[derive(Clone)]
 pub struct MockHttp {
@@ -133,6 +143,9 @@ impl MockHttp {
     }
 
     /// Add a mock handler (sync version for use in builders).
+    ///
+    /// The pattern supports `*` as a glob wildcard. Mocks are matched
+    /// first-registered-wins against both the full URL and the path.
     pub fn add_mock_sync<F>(&self, pattern: &str, handler: F)
     where
         F: Fn(&MockRequest) -> MockResponse + Send + Sync + 'static,
@@ -142,6 +155,24 @@ impl MockHttp {
             pattern: pattern.to_string(),
             handler: Arc::new(handler),
         });
+    }
+
+    /// Add a mock handler for an exact URL or path (no wildcards).
+    pub fn mock_exact<F>(&self, url: &str, handler: F)
+    where
+        F: Fn(&MockRequest) -> MockResponse + Send + Sync + 'static,
+    {
+        self.add_mock_sync(url, handler);
+    }
+
+    /// Add a mock handler with glob pattern (`*` matches any substring).
+    ///
+    /// Register specific patterns before broad ones — first match wins.
+    pub fn mock_glob<F>(&self, pattern: &str, handler: F)
+    where
+        F: Fn(&MockRequest) -> MockResponse + Send + Sync + 'static,
+    {
+        self.add_mock_sync(pattern, handler);
     }
 
     /// Add a mock handler from a boxed closure.

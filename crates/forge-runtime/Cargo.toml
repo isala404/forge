@@ -137,7 +137,11 @@ otel = [
 
 # --- Bundle features (composition shortcuts) ---
 
-# Everything except testcontainers. What `forgex` activates by default.
+# Everything except testcontainers and geoip. What `forgex` activates by default.
+# `geoip` is intentionally excluded: it requires a build-time network fetch to
+# download the bundled IP-to-country DB. Enable it explicitly with
+# `--features forge-runtime/geoip` when you need IP enrichment and have network
+# access at build time.
 full = [
     "gateway",
     "mcp-oauth",
@@ -145,7 +149,6 @@ full = [
     "workflows",
     "cron",
     "daemons",
-    "geoip",
     "otel",
 ]
 

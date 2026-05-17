@@ -41,6 +41,10 @@ Defines a data-modifying operation. The macro generates a `{PascalCase}Mutation`
 ### `#[forge::job]`
 Defines an asynchronous background task. These tasks are durable and automatically retried upon failure.
 
+**Queue model**: PG-backed (`forge_jobs` table). Workers claim with `FOR UPDATE SKIP LOCKED`, ordered `priority DESC, scheduled_at ASC`. Concurrency bounded by a semaphore (`max_concurrent`, default 8). System jobs (workflow resumes, cron) hold 4 reserved permits so user job floods cannot starve them. Stale `claimed`/`running` jobs without a heartbeat for 5 minutes are released back to `pending` automatically.
+
+**Status lifecycle**: `Pending` → `Claimed` (locked, not yet executing) → `Running` → `Completed` / `Failed` (retries remaining returns to `Pending`) / `DeadLetter` (max_attempts exhausted) / `CancelRequested` → `Cancelled`.
+
 | Attribute | Description and Rationale |
 |---|---|
 | `name = "x"` | Overrides the default job name. |
@@ -212,6 +216,11 @@ mode = "hybrid"               # "hybrid" (default, per-node DashMap for user/ip)
 
 [realtime]
 # All fields are optional; production-safe defaults shown.
+# PG helper functions (call in migrations to wire up reactivity):
+#   SELECT forge_enable_reactivity('table_name');   -- installs forge_notify_{table} trigger (INSERT/UPDATE/DELETE)
+#   SELECT forge_disable_reactivity('table_name');  -- drops the trigger
+# System tables (forge_jobs, forge_workflow_runs, forge_workflow_steps) are enabled automatically.
+# Table name limit: 50 chars (trigger prefix adds 13; PG caps identifiers at 63).
 debounce_quiet_window = "50ms"       # coalesce window for change notifications
 debounce_max_wait = "200ms"          # max wait before forcing a flush
 max_concurrent_reexecutions = 64     # parallel query re-runs during invalidation
@@ -260,9 +269,9 @@ A single `POST /_api/signal` endpoint accepts a discriminated payload via the to
 
 | `type` | Payload | Purpose |
 |---|---|---|
-| `event` | `{ events: [...] }` (max 50) | Batch of custom events, including `track`, `identify`, `web_vital`, `error`, `breadcrumb`, `page_view` |
-| `view` | `{ url, referrer?, utm?, ... }` | Page view with referrer and UTM params |
-| `report` | `{ error, breadcrumbs?, context? }` | Frontend error report (bypasses DNT) |
+| `event` | `{ events: [{event, properties?, correlation_id?, timestamp?}], context?: {page_url?, referrer?, session_id?} }` (max 50 events) | Batch of custom events, including `track`, `identify`, `web_vital`, `error`, `breadcrumb`, `page_view` |
+| `view` | `{ url, referrer?, title?, utm_source?, utm_medium?, utm_campaign?, utm_term?, utm_content?, correlation_id? }` | Page view with referrer and UTM params |
+| `report` | `{ errors: [{message, stack?, context?, correlation_id?, page_url?, breadcrumbs?}] }` (max 50 errors) | Frontend error report (bypasses DNT) |
 
 ### Auto-captured Event Types
 
@@ -280,6 +289,28 @@ A single `POST /_api/signal` endpoint accepts a discriminated payload via the to
 ### Single Pool
 
 Forge runs one primary connection pool. Queries, mutations, jobs, cron, daemons, workflows, observability, and signals all share it. Workload separation belongs at the worker level (concurrency limits, dedicated worker nodes), not at the connection layer. Size `database.pool_size` for the union of expected concurrency and use `database.statement_timeout` to bound runaway queries.
+
+## MCP and OAuth Endpoints
+
+### MCP transport (`mcp.enabled = true`)
+
+| Method | Path | Notes |
+|--------|------|-------|
+| `POST` | `/_api/mcp` (default) | JSON-RPC request/notification. Returns 200 with result or 202 for notification-only. Path controlled by `mcp.path`. |
+| `GET`  | `/_api/mcp` | Not used for stream transport in v1 — returns 405. |
+
+### OAuth 2.1 (`mcp.oauth = true`, requires `mcp-oauth` feature)
+
+Endpoints bypass Forge auth middleware. When OAuth is disabled both `/.well-known` routes return `404 {"error":"oauth_not_supported"}`.
+
+| Method | Path | Notes |
+|--------|------|-------|
+| `GET`  | `/.well-known/oauth-authorization-server` | RFC 8414 AS metadata. Advertises authorize/token/register URLs. |
+| `GET`  | `/.well-known/oauth-protected-resource` | RFC 9728 resource metadata. Points at this server as AS. |
+| `POST` | `/_api/oauth/register` | Dynamic client registration (RFC 7591). Rate-limited 10/min per IP; 1 000 client cap. |
+| `GET`  | `/_api/oauth/authorize` | Consent page. Reads `forge_session` cookie for single-click re-auth. |
+| `POST` | `/_api/oauth/authorize` | Form submit. Validates CSRF + credentials + PKCE; issues auth code (60 s TTL, single-use); redirects to `redirect_uri`. |
+| `POST` | `/_api/oauth/token` | Exchange code+PKCE verifier for access+refresh tokens, or refresh. Tokens carry `aud:"forge:mcp"`. |
 
 ## Admin Endpoints
 
@@ -305,9 +336,29 @@ All `/_api/admin/*` routes require the `admin` role on `AuthContext`. Every stat
 
 State-changing routes accept an optional `reason` string; pass it — the audit log is searched after incidents.
 
-## Readiness Probe
+## Production Topology
 
-`GET /_api/ready` returns 200 only when every flag is `true`; otherwise 503 with the body identifying failures. The probe body is intentionally shallow — no version strings, row counts, or stuck workflow names leak to unauthenticated callers.
+One binary runs all subsystems: gateway (Axum HTTP), function executor, job worker, cron scheduler (leader-elected), reactor (SSE/NOTIFY), daemon runner, and workflow executor. Deploy more copies for redundancy and scale — no separate worker process or sidecar.
+
+**Node roles** (`[node] roles = [...]`): `gateway` (HTTP server), `function` (query/mutation execution), `worker` (job processing), `scheduler` (cron, leader-only). Default is all four. Omit `worker` on API nodes, omit `gateway` on dedicated worker nodes.
+
+**Cluster config** (`[cluster]`): `discovery = "postgres"` (only supported backend), `heartbeat_interval` (default `"5s"`), `dead_threshold` (default `"15s"`). No extra infrastructure beyond PostgreSQL.
+
+**Minimum production**: 2 nodes (all roles) + PostgreSQL + load balancer routing on `/_api/ready`. One node wins the scheduler advisory lock; the other stands by. If the leader crashes, the lock releases when its PG connection closes and the standby acquires within the next heartbeat interval (default 5 s).
+
+**Daemon leader election**: daemons marked leader-elected get an advisory lock derived from the daemon's name via FNV-1a hash (`0x464F52474000` namespace). Stable across restarts; collisions between different daemon names are not possible in practice.
+
+**Required infrastructure**: PostgreSQL 18 only. No Redis, no message bus, no separate scheduler process. Optional: read replicas (`[database.replicas]`), OTLP collector (`[observability]`), PgBouncer/RDS Proxy if approaching `max_connections`.
+
+**MCP OAuth sticky sessions**: `/_api/oauth/*` stores CSRF state in-memory on the initiating node. Configure sticky sessions for that path prefix on the load balancer, or dedicate a single gateway node for MCP traffic.
+
+Docs: `ship/production-architecture`, `scale/multiple-nodes`.
+
+## Health and Readiness Probes
+
+`GET /_api/health` — liveness probe. Returns 200 as long as the process is running. No DB call. Body: `{"status":"healthy","version":"0.x.x"}`. Use as Kubernetes `livenessProbe`.
+
+`GET /_api/ready` — readiness probe. Returns 200 only when every flag is `true`; otherwise 503 with the body identifying failures. No authentication required. Body also includes `ready` (aggregate) and `version`.
 
 ```json
 {
@@ -378,6 +429,28 @@ Forge::builder()
 
 The resolver is called once per `require_role` check. Cache expensive lookups internally. Without a custom resolver, the default returns `auth.roles()` as-is.
 
+## Tenant Isolation
+
+`TenantIsolationMode` controls how tenant scoping is applied inside a handler. Three variants:
+
+| Mode | `as_str()` | Meaning |
+|------|-----------|---------|
+| `None` | `"none"` | No isolation; global access. Default. |
+| `Strict` | `"strict"` | Reads and writes scoped to own tenant only. |
+| `ReadShared` | `"read_shared"` | Reads include global rows; writes are tenant-scoped. |
+
+`TenantContext` holds the resolved tenant and mode:
+- `TenantContext::none()` — no tenant set.
+- `TenantContext::strict(tenant_id)` — strict mode shorthand.
+- `TenantContext::new(tenant_id, mode)` — arbitrary mode.
+- `.requires_filtering()` — true when tenant is set and mode != `None`.
+- `.sql_filter("column", param_index)` — returns `Some(("\"column\" = $N", uuid))` for safe parameterized injection; returns `None` if column name is invalid or no tenant is set.
+- `.require_tenant()` — returns `Err(ForgeError::Unauthorized)` if no tenant.
+
+`tenant_id` flows from JWT claim → `ctx.auth.tenant_id()` → handler SQL. When a private query's SQL contains `tenant_id` in a WHERE clause, the macro marks `requires_tenant_scope = true`. The runtime enforces the claim's presence and returns 403 if absent — before the handler runs.
+
+Testing: use `.with_tenant(uuid)` on any test context builder.
+
 ## Duration Formats
 Time durations can be expressed as `500ms`, `30s`, `5m`, `2h`, `7d`, or a bare number representing seconds. Note that `query`, `mutation`, and `mcp_tool` timeout attributes specifically require a bare `u64` integer representing seconds.
 
@@ -428,7 +501,9 @@ The canonical status mapping lives on `ForgeError::http_status() -> u16`. Downst
 | `forge new <name>` | Scaffolds a new project from a template. |
 | `forge generate` | Synchronizes backend changes with frontend bindings and types. |
 | `forge check` | Runs linting, formatting, and validates SQL and bindings. |
-| `forge migrate <up|status|prepare>`| Manages database migrations. Forward-only; no `down`. |
+| `forge migrate up` | Run all pending migrations under advisory lock. Safe against a live cluster. |
+| `forge migrate status` | Show applied/pending migrations. Flags `[DRIFT]` (checksum mismatch) and `[SOURCE FILE MISSING]` anomalies. |
+| `forge migrate prepare` | Run pending migrations, then regenerate `.sqlx/` offline cache via `cargo sqlx prepare --workspace`. Requires `cargo-sqlx`. |
 | `forge test` | Executes full-stack E2E tests using Playwright. |
 
 ## Project File Standards
@@ -440,23 +515,26 @@ The canonical status mapping lives on `ForgeError::http_status() -> u16`. Downst
 
 Subsystems are feature-gated; default is `full`. Opt out with `default-features = false` and pick a preset.
 
-| Feature | Bundles | Pulls (extra crates) |
-|---|---|---|
-| `gateway` | HTTP RPC + SSE + OAuth + MCP + webhooks + signals | axum, tower, tower-http, jsonwebtoken, bcrypt, ed25519 |
-| `jobs` | PG-backed queue + worker | — |
-| `workflows` | Durable workflow executor | — |
-| `cron` | Cron scheduler | — |
-| `daemons` | Long-running daemon runner | — |
-| `geoip` | IP→country + MaxMind reader (req. `gateway`) | db_ip (build-time download — breaks air-gapped CI), maxminddb |
-| `otel` | OpenTelemetry trace/metric/log exporters | opentelemetry ×6, reqwest-otlp |
+**Presets**: `full` = all (default) · `worker` = jobs+workflows+cron+daemons+otel (no HTTP) · `api` = gateway+otel (no workers) · `minimal` = gateway only.
 
-Presets: `full` = all (default) · `worker` = jobs+workflows+cron+daemons+otel (no HTTP) · `api` = gateway+otel (no workers) · `minimal` = gateway only.
+| Feature | Default | Bundles | Extra crates |
+|---|---|---|---|
+| `gateway` | yes | HTTP RPC + SSE + OAuth + MCP + webhooks + signals + TLS | axum, tower, tower-http, jsonwebtoken, argon2, ring, rustls |
+| `jobs` | yes | PG-backed queue + SKIP LOCKED worker | — |
+| `workflows` | yes | Versioned durable workflow executor | — |
+| `cron` | yes | Leader-only cron scheduler | — |
+| `daemons` | yes | Long-running daemon runner | — |
+| `mcp-oauth` | yes | OAuth 2.1 + PKCE for MCP (req. `gateway`) | — |
+| `geoip` | yes | IP→country enrichment for signals (req. `gateway`) | db_ip (build-time download), maxminddb |
+| `otel` | yes | OTel trace/metric/log exporters | opentelemetry ×5, protobuf stubs |
+| `testcontainers` | no | Test context helpers that spin up a real PG container | testcontainers |
+| `embedded-frontend` | no | Embeds compiled frontend into binary at build time | rust-embed |
 
 ```toml
-forge = { version = "0.9", default-features = false, features = ["worker"] }
+forgex = { version = "0.9", default-features = false, features = ["worker"] }
 ```
 
-`#[forge::job/cron/workflow/daemon/webhook/mcp_tool]` without the matching feature errors at the generated `forge::Auto{Job,Cron,Workflow,Daemon,Webhook,McpTool}` reference. Without `otel`, observability call sites (`record_*`) become no-op stubs and `tracing-subscriber` still logs to stderr.
+`#[forge::job/cron/workflow/daemon/webhook/mcp_tool]` without the matching feature errors at the generated `forge::Auto{Job,Cron,Workflow,Daemon,Webhook,McpTool}` reference. Without `otel`, `tracing-subscriber` still logs to stderr. `geoip` fetches a ~10 MB DB at compile time — disable for air-gapped builds or when not using signals.
 
 ## Build Profiles
 
