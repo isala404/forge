@@ -12,8 +12,9 @@ use crate::attrs::{
     validate_rate_limit,
 };
 use crate::sql_extractor::{
-    SqlStringExtractor, TableExtractionResult, extract_changed_columns_from_sql,
-    extract_tables_from_sql,
+    DbDelegationDetector, ScopeCheckResult, SqlStringExtractor, TableExtractionResult,
+    extract_changed_columns_from_sql, extract_tables_from_sql, sql_references_identity_scope,
+    sql_scope_requires_tenant,
 };
 use crate::utils::{parse_duration_secs, parse_size_bytes, to_pascal_case};
 
@@ -78,6 +79,7 @@ struct MutationAttrs {
     description: Option<String>,
     required_role: Option<String>,
     is_public: bool,
+    is_unscoped: bool,
     timeout: Option<u64>,
     rate_limit_requests: Option<u32>,
     rate_limit_per_secs: Option<u64>,
@@ -98,6 +100,7 @@ impl Default for MutationAttrs {
             description: None,
             required_role: None,
             is_public: false,
+            is_unscoped: false,
             timeout: None,
             rate_limit_requests: None,
             rate_limit_per_secs: None,
@@ -166,6 +169,7 @@ fn convert_mutation_attrs(darling: DarlingMutationAttrs) -> Result<MutationAttrs
         description: darling.description,
         required_role: darling.require_role.map(|r| r.0),
         is_public: darling.public,
+        is_unscoped: darling.unscoped,
         timeout,
         rate_limit_requests,
         rate_limit_per_secs,
@@ -389,36 +393,32 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         None => quote! { None },
     };
 
-    // Extract SQL strings once and reuse for both table deps and changed columns.
+    // Extract SQL strings once and reuse for table deps, changed columns, and scope.
     let mut extractor = SqlStringExtractor::new();
     extractor.visit_block(fn_block);
 
-    let table_deps_tokens = match &attrs.tables {
-        Some(tables) => quote! { &[#(#tables),*] },
-        None => {
-            // Auto-extract table dependencies from SQL (INSERT/UPDATE/DELETE targets).
-            match extract_tables_from_sql(&extractor.sql_strings) {
-                TableExtractionResult::Ok(tables) => {
-                    let mut sorted: Vec<String> = tables.into_iter().collect();
-                    sorted.sort();
-                    if sorted.is_empty() {
-                        quote! { &[] }
-                    } else {
-                        quote! { &[#(#sorted),*] }
-                    }
-                }
-                // If SQL can't be parsed, fall back to empty (conservative: invalidates
-                // nothing, but changed_columns will also be empty which triggers full
-                // invalidation of dependent queries via the coordinator).
-                TableExtractionResult::ParseFailed(_) => quote! { &[] },
+    let has_explicit_tables = attrs.tables.is_some();
+    let table_dependencies: Vec<String> = if let Some(ref tables) = attrs.tables {
+        tables.clone()
+    } else {
+        match extract_tables_from_sql(&extractor.sql_strings) {
+            TableExtractionResult::Ok(tables) => {
+                let mut sorted: Vec<String> = tables.into_iter().collect();
+                sorted.sort();
+                sorted
             }
+            TableExtractionResult::ParseFailed(_) => Vec::new(),
         }
     };
 
+    let table_deps_tokens = if table_dependencies.is_empty() {
+        quote! { &[] }
+    } else {
+        let deps = &table_dependencies;
+        quote! { &[#(#deps),*] }
+    };
+
     // Extract written columns from INSERT/UPDATE statements in the body.
-    // Empty result is intentional — it signals "could touch any column" to
-    // the cache invalidator, which then falls back to invalidating every
-    // dependent query rather than skipping ones it can't reason about.
     let changed_columns_tokens: TokenStream2 = {
         let mut cols: Vec<String> = extract_changed_columns_from_sql(&extractor.sql_strings)
             .into_iter()
@@ -429,6 +429,69 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         } else {
             quote! { &[#(#cols),*] }
         }
+    };
+
+    // Detect DB delegation in mutations with no inline SQL.
+    if !attrs.is_public
+        && !attrs.is_unscoped
+        && table_dependencies.is_empty()
+        && !has_explicit_tables
+    {
+        let mut delegation = DbDelegationDetector::new();
+        delegation.visit_block(fn_block);
+        if delegation.found {
+            return Err(syn::Error::new_spanned(
+                &input.sig.ident,
+                format!(
+                    "Private mutation `{fn_name_str}` calls .pool() but contains no inline SQL, \
+                     so table dependencies and scope cannot be verified. Inline the SQL in the \
+                     handler body, or add #[mutation(tables(\"...\"))] to declare dependencies \
+                     explicitly."
+                ),
+            ));
+        }
+    }
+
+    // Scope check: private mutations that touch tables must filter by user identity.
+    if !attrs.is_public && !attrs.is_unscoped && !table_dependencies.is_empty() {
+        let mut scope_extractor = SqlStringExtractor::new();
+        scope_extractor.visit_block(fn_block);
+        match sql_references_identity_scope(&scope_extractor.sql_strings) {
+            ScopeCheckResult::Scoped => {}
+            ScopeCheckResult::Unscoped => {
+                let tables_str = table_dependencies.join(", ");
+                return Err(syn::Error::new_spanned(
+                    &input.sig.ident,
+                    format!(
+                        "Private mutation `{fn_name_str}` references table(s) [{tables_str}] but \
+                         SQL does not filter by user_id or owner_id. Add a WHERE clause scoped to \
+                         the authenticated user, or use #[mutation(unscoped)] if this is \
+                         intentional."
+                    ),
+                ));
+            }
+            ScopeCheckResult::ParseFailed => {
+                let tables_str = table_dependencies.join(", ");
+                return Err(syn::Error::new_spanned(
+                    &input.sig.ident,
+                    format!(
+                        "Private mutation `{fn_name_str}` references table(s) [{tables_str}] but \
+                         SQL could not be parsed to verify scope. Add #[mutation(unscoped)] to \
+                         opt out of scope checking, or add #[mutation(tables(\"...\"))] to skip \
+                         automatic extraction."
+                    ),
+                ));
+            }
+        }
+    }
+
+    // Detect tenant_id scope for runtime enforcement.
+    let requires_tenant_scope = if !attrs.is_public && !attrs.is_unscoped {
+        let mut tenant_extractor = SqlStringExtractor::new();
+        tenant_extractor.visit_block(fn_block);
+        sql_scope_requires_tenant(&tenant_extractor.sql_strings)
+    } else {
+        false
     };
 
     let transactional = attrs.transactional;
@@ -543,6 +606,7 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
                         transactional: #transactional,
                         consistent: false,
                         max_upload_size_bytes: #max_upload_size_bytes,
+                        requires_tenant_scope: #requires_tenant_scope,
                     }
                 }
 
@@ -816,6 +880,7 @@ mod tests {
 
         let attrs = MutationAttrs {
             tables: Some(vec!["users".into(), "orders".into()]),
+            is_unscoped: true,
             ..Default::default()
         };
         let output = expand_mutation_impl(input, attrs).expect("should expand");

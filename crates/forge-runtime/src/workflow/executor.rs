@@ -133,6 +133,7 @@ impl WorkflowExecutor {
         entry: &super::registry::WorkflowEntry,
         input: serde_json::Value,
         resume: Option<ResumeState>,
+        owner_subject: Option<String>,
     ) -> forge_core::Result<WorkflowResult> {
         self.claim_for_execution(run_id).await?;
 
@@ -181,6 +182,23 @@ impl WorkflowExecutor {
                 self.http_client.clone(),
             ),
         };
+        if let Some(ref subject) = owner_subject {
+            let auth = if let Ok(uuid) = uuid::Uuid::parse_str(subject) {
+                forge_core::AuthContext::authenticated(
+                    uuid,
+                    Vec::new(),
+                    std::collections::HashMap::new(),
+                )
+            } else {
+                let mut claims = std::collections::HashMap::new();
+                claims.insert(
+                    "sub".to_string(),
+                    serde_json::Value::String(subject.clone()),
+                );
+                forge_core::AuthContext::authenticated_without_uuid(Vec::new(), claims)
+            };
+            ctx = ctx.with_auth(auth);
+        }
         ctx.set_http_timeout(entry.info.http_timeout);
 
         let handler = entry.handler.clone();
@@ -291,8 +309,14 @@ impl WorkflowExecutor {
                     started_at: record.started_at,
                     from_sleep,
                 };
-                self.execute_workflow(run_id, entry, record.input, Some(resume))
-                    .await
+                self.execute_workflow(
+                    run_id,
+                    entry,
+                    record.input,
+                    Some(resume),
+                    record.owner_subject,
+                )
+                .await
             }
             Err(reason) => {
                 let description = reason.description();

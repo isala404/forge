@@ -36,7 +36,7 @@ pub async fn create_counter(ctx: &MutationContext, input: CreateCounterInput) ->
 }
 
 /// Atomic increment. This is the hot write path.
-#[forge::mutation]
+#[forge::mutation(unscoped)]
 pub async fn increment(ctx: &MutationContext, input: IncrementInput) -> Result<Counter> {
     let mut conn = ctx.conn().await?;
 

@@ -432,6 +432,13 @@ impl FunctionRouter {
                 &auth,
                 &self.role_resolver,
             )?;
+            if info.requires_tenant_scope && auth.tenant_id().is_none() {
+                return Err(ForgeError::Forbidden(
+                    "this function requires a tenant scope but the auth context has no tenant_id \
+                     claim"
+                        .to_string(),
+                ));
+            }
             self.check_rate_limit(info, function_name, &auth, &request)
                 .await?;
 

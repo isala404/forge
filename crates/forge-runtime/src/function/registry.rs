@@ -254,6 +254,7 @@ mod tests {
             transactional: false,
             consistent: false,
             max_upload_size_bytes: None,
+            requires_tenant_scope: false,
         }
     }
 

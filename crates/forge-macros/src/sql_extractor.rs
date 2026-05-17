@@ -6,13 +6,34 @@
 use std::collections::HashSet;
 
 use sqlparser::ast::{
-    BinaryOperator, Expr, JoinConstraint, JoinOperator, Query, Select, SelectItem, SetExpr,
+    BinaryOperator, Expr, Query, Select, SelectItem, SetExpr,
     Statement, TableFactor, TableWithJoins,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 use syn::visit::Visit;
-use syn::{Expr as SynExpr, ExprCall, ExprLit, ExprMacro, ExprMethodCall, Lit};
+use syn::{Expr as SynExpr, ExprCall, ExprLit, ExprMacro, ExprMethodCall};
+
+/// Detects `.pool()` calls in a handler body, signalling DB work delegated
+/// to a helper function whose SQL is invisible to `SqlStringExtractor`.
+pub struct DbDelegationDetector {
+    pub found: bool,
+}
+
+impl DbDelegationDetector {
+    pub fn new() -> Self {
+        Self { found: false }
+    }
+}
+
+impl<'ast> Visit<'ast> for DbDelegationDetector {
+    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        if node.method == "pool" {
+            self.found = true;
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+}
 
 /// Visitor that extracts SQL string literals from function bodies.
 pub struct SqlStringExtractor {
@@ -102,10 +123,15 @@ impl<'ast> Visit<'ast> for SqlStringExtractor {
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
         let method_name = node.method.to_string();
 
-        // Check for sqlx query patterns: .query(), .query_as(), etc.
         if matches!(
             method_name.as_str(),
-            "query" | "query_as" | "query_scalar" | "query_as_unchecked"
+            "query"
+                | "query_as"
+                | "query_scalar"
+                | "query_as_unchecked"
+                | "query_scalar_unchecked"
+                | "query_with"
+                | "raw_sql"
         ) {
             // The first argument is typically the SQL string
             if let Some(first_arg) = node.args.first() {
@@ -128,7 +154,9 @@ impl<'ast> Visit<'ast> for SqlStringExtractor {
                 .collect::<Vec<_>>()
                 .join("::");
 
-            if (path_str.contains("query") || path_str.ends_with("query_as"))
+            if (path_str.contains("query")
+                || path_str.ends_with("query_as")
+                || path_str.ends_with("raw_sql"))
                 && let Some(first_arg) = node.args.first()
             {
                 self.visit_expr(first_arg);
@@ -138,17 +166,12 @@ impl<'ast> Visit<'ast> for SqlStringExtractor {
         syn::visit::visit_expr_call(self, node);
     }
 
-    fn visit_expr_lit(&mut self, node: &'ast ExprLit) {
-        // Extract string literals that look like SQL
-        if let Lit::Str(lit_str) = &node.lit {
-            let value = lit_str.value();
-
-            if Self::looks_like_sql(&value) {
-                self.sql_strings.push(value);
-            }
-        }
-
-        syn::visit::visit_expr_lit(self, node);
+    fn visit_expr_lit(&mut self, _node: &'ast ExprLit) {
+        // Intentionally a no-op. SQL extraction is anchored to known call-site
+        // contexts (sqlx method calls, sqlx macros, sqlx function calls) rather
+        // than scanning all string literals with a heuristic. This prevents
+        // false positives from log messages, doc comments, and other non-SQL
+        // strings that happen to look like SQL.
     }
 
     fn visit_expr_macro(&mut self, node: &'ast ExprMacro) {
@@ -163,7 +186,11 @@ impl<'ast> Visit<'ast> for SqlStringExtractor {
 
         if matches!(
             macro_name.as_str(),
-            "query" | "query_as" | "query_scalar" | "query_as_unchecked"
+            "query"
+                | "query_as"
+                | "query_scalar"
+                | "query_as_unchecked"
+                | "query_scalar_unchecked"
         ) {
             // Extract string literals from the macro tokens
             self.extract_sql_from_tokens(&node.mac.tokens);
@@ -602,6 +629,79 @@ fn normalize_table_name(name: &str) -> String {
 /// Scope columns that identify a row's owning principal.
 const SCOPE_COLS: &[&str] = &["user_id", "owner_id", "tenant_id"];
 
+/// Check whether the SQL scope depends on `tenant_id` (as opposed to
+/// `user_id`/`owner_id`). When true, the runtime must verify the auth
+/// context has a tenant claim before dispatching the query.
+pub fn sql_scope_requires_tenant(sql_strings: &[String]) -> bool {
+    for sql in sql_strings {
+        if let Ok(stmts) = Parser::parse_sql(&PostgreSqlDialect {}, sql) {
+            for stmt in &stmts {
+                if stmt_mentions_tenant(stmt) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn stmt_mentions_tenant(stmt: &Statement) -> bool {
+    match stmt {
+        Statement::Query(q) => query_mentions_tenant(q),
+        Statement::Update { selection, .. } => {
+            selection.as_ref().is_some_and(expr_mentions_tenant)
+        }
+        Statement::Delete(d) => d.selection.as_ref().is_some_and(expr_mentions_tenant),
+        _ => false,
+    }
+}
+
+fn query_mentions_tenant(q: &Query) -> bool {
+    if let Some(with) = &q.with {
+        for cte in &with.cte_tables {
+            if query_mentions_tenant(&cte.query) {
+                return true;
+            }
+        }
+    }
+    set_expr_mentions_tenant(&q.body)
+}
+
+fn set_expr_mentions_tenant(e: &SetExpr) -> bool {
+    match e {
+        SetExpr::Select(s) => s.selection.as_ref().is_some_and(expr_mentions_tenant),
+        SetExpr::Query(q) => query_mentions_tenant(q),
+        SetExpr::SetOperation { left, right, .. } => {
+            set_expr_mentions_tenant(left) || set_expr_mentions_tenant(right)
+        }
+        _ => false,
+    }
+}
+
+fn expr_mentions_tenant(e: &Expr) -> bool {
+    match e {
+        Expr::Identifier(ident) => ident.value.eq_ignore_ascii_case("tenant_id"),
+        Expr::CompoundIdentifier(parts) => parts
+            .last()
+            .is_some_and(|p| p.value.eq_ignore_ascii_case("tenant_id")),
+        Expr::BinaryOp { left, right, .. } => {
+            expr_mentions_tenant(left) || expr_mentions_tenant(right)
+        }
+        Expr::UnaryOp { expr, .. } | Expr::Nested(expr) | Expr::Cast { expr, .. } => {
+            expr_mentions_tenant(expr)
+        }
+        Expr::InList { expr, list, .. } => {
+            expr_mentions_tenant(expr) || list.iter().any(expr_mentions_tenant)
+        }
+        Expr::InSubquery { expr, .. } => expr_mentions_tenant(expr),
+        Expr::Between {
+            expr, low, high, ..
+        } => expr_mentions_tenant(expr) || expr_mentions_tenant(low) || expr_mentions_tenant(high),
+        Expr::IsNull(e) | Expr::IsNotNull(e) => expr_mentions_tenant(e),
+        _ => false,
+    }
+}
+
 /// Result of scope checking.
 pub enum ScopeCheckResult {
     /// SQL parsed and scope was found.
@@ -650,16 +750,19 @@ pub fn sql_references_identity_scope(sql_strings: &[String]) -> ScopeCheckResult
     }
 }
 
-/// Names of CTEs whose bodies have been determined to be scoped.
-/// Built up in definition order so later CTEs can reference earlier ones.
+/// Tracks CTE scoping state during scope analysis.
 struct ScopeCtx {
+    /// Names of CTEs whose bodies have been determined to be scoped.
     scoped_ctes: HashSet<String>,
+    /// All CTE names defined in the current query, scoped or not.
+    all_ctes: HashSet<String>,
 }
 
 impl ScopeCtx {
     fn new() -> Self {
         Self {
             scoped_ctes: HashSet::new(),
+            all_ctes: HashSet::new(),
         }
     }
 }
@@ -675,16 +778,15 @@ fn stmt_is_scoped(stmt: &Statement) -> bool {
 }
 
 fn query_is_scoped(q: &Query, ctx: &mut ScopeCtx) -> bool {
-    // Evaluate CTEs in definition order. Each scoped CTE is recorded so
-    // later CTEs and the main body can treat it as a scoped source.
     if let Some(with) = &q.with {
         for cte in &with.cte_tables {
             let cte_name = cte.alias.name.value.to_lowercase();
-            // Evaluate CTE body with current ctx (can see earlier CTEs).
+            ctx.all_ctes.insert(cte_name.clone());
             if query_is_scoped(
                 &cte.query,
                 &mut ScopeCtx {
                     scoped_ctes: ctx.scoped_ctes.clone(),
+                    all_ctes: ctx.all_ctes.clone(),
                 },
             ) {
                 ctx.scoped_ctes.insert(cte_name);
@@ -701,6 +803,7 @@ fn set_expr_is_scoped(e: &SetExpr, ctx: &ScopeCtx) -> bool {
             q,
             &mut ScopeCtx {
                 scoped_ctes: ctx.scoped_ctes.clone(),
+                all_ctes: ctx.all_ctes.clone(),
             },
         ),
         SetExpr::SetOperation { left, right, .. } => {
@@ -712,41 +815,48 @@ fn set_expr_is_scoped(e: &SetExpr, ctx: &ScopeCtx) -> bool {
     }
 }
 
-/// A SELECT is scoped if it has a direct scope predicate (WHERE or JOIN ON),
+/// A SELECT is scoped if its WHERE clause contains a scope predicate,
 /// OR if every FROM source is itself scoped (CTE reference to a scoped CTE,
-/// derived subquery that is scoped, or a table involved in a scoped join).
+/// or derived subquery that is scoped).
+///
+/// WHERE scope only applies when FROM sources are plain tables or already-
+/// scoped references. An unscoped CTE that reads a real table materializes
+/// all rows — the outer WHERE filters the output but the CTE body had
+/// unscoped access, so we require the CTE itself to be scoped.
 fn select_is_scoped(s: &Select, ctx: &ScopeCtx) -> bool {
-    // Fast path: direct scope in WHERE
-    if s.selection.as_ref().is_some_and(expr_has_scope) {
+    let has_where_scope = s.selection.as_ref().is_some_and(expr_has_scope);
+    if has_where_scope && !any_source_is_unscoped_cte(s, ctx) {
         return true;
     }
-    // Fast path: any JOIN ON references a scope column
-    if s.from.iter().any(joins_have_scope) {
-        return true;
-    }
-    // Slow path: check if all FROM sources are inherently scoped
-    // (every source is a scoped CTE or a scoped subquery)
     if s.from.is_empty() {
         return false;
     }
     s.from.iter().all(|twj| all_sources_in_twj_scoped(twj, ctx))
 }
 
-/// Check if any JOIN ON condition in this table-with-joins has a scope column.
-fn joins_have_scope(twj: &TableWithJoins) -> bool {
-    twj.joins.iter().any(|join| match &join.join_operator {
-        JoinOperator::Inner(c)
-        | JoinOperator::LeftOuter(c)
-        | JoinOperator::RightOuter(c)
-        | JoinOperator::FullOuter(c) => {
-            if let JoinConstraint::On(expr) = c {
-                expr_has_scope(expr)
-            } else {
-                false
-            }
-        }
-        _ => false,
+/// Check if any FROM source references a CTE that was NOT determined to be
+/// scoped. Plain table names that happen to match are also caught here,
+/// but that's safe: if a plain table name collides with a CTE, the CTE
+/// takes precedence in SQL semantics.
+fn any_source_is_unscoped_cte(s: &Select, ctx: &ScopeCtx) -> bool {
+    s.from.iter().any(|twj| {
+        source_is_unscoped_cte(&twj.relation, ctx)
+            || twj
+                .joins
+                .iter()
+                .any(|j| source_is_unscoped_cte(&j.relation, ctx))
     })
+}
+
+/// A source is an unscoped CTE reference if it's a table name that appears
+/// in `all_ctes` (a known CTE) but NOT in `scoped_ctes`.
+fn source_is_unscoped_cte(factor: &TableFactor, ctx: &ScopeCtx) -> bool {
+    if let TableFactor::Table { name, .. } = factor {
+        let table_name = normalize_table_name(&name.to_string()).to_lowercase();
+        ctx.all_ctes.contains(&table_name) && !ctx.scoped_ctes.contains(&table_name)
+    } else {
+        false
+    }
 }
 
 /// Check if every source in a TableWithJoins is scoped through CTE or subquery.
@@ -772,6 +882,7 @@ fn source_is_scoped(factor: &TableFactor, ctx: &ScopeCtx) -> bool {
             subquery,
             &mut ScopeCtx {
                 scoped_ctes: ctx.scoped_ctes.clone(),
+                all_ctes: ctx.all_ctes.clone(),
             },
         ),
         TableFactor::NestedJoin {
@@ -798,6 +909,13 @@ fn expr_has_scope(e: &Expr) -> bool {
                     | BinaryOperator::HashLongArrow
             ) {
                 expr_has_scope(left) || value_is_scope_col(right)
+            } else if matches!(
+                op,
+                BinaryOperator::Eq | BinaryOperator::NotEq
+            ) && (is_direct_scope_ref(left) && is_literal_value(right)
+                || is_direct_scope_ref(right) && is_literal_value(left))
+            {
+                false
             } else {
                 expr_has_scope(left) || expr_has_scope(right)
             }
@@ -814,7 +932,12 @@ fn expr_has_scope(e: &Expr) -> bool {
         | Expr::IsNotFalse(e) => expr_has_scope(e),
         Expr::InList { expr, list, .. } => expr_has_scope(expr) || list.iter().any(expr_has_scope),
         Expr::InSubquery { expr, subquery, .. } => {
-            expr_has_scope(expr) || query_is_scoped(subquery, &mut ScopeCtx::new())
+            let sub_scoped = query_is_scoped(subquery, &mut ScopeCtx::new());
+            if is_direct_scope_ref(expr) {
+                sub_scoped
+            } else {
+                expr_has_scope(expr) || sub_scoped
+            }
         }
         Expr::Subquery(q) | Expr::Exists { subquery: q, .. } => {
             query_is_scoped(q, &mut ScopeCtx::new())
@@ -825,6 +948,38 @@ fn expr_has_scope(e: &Expr) -> bool {
         // Snowflake/Databricks-style JSON path access (obj:foo.bar).
         // Check if any path element names a scope column.
         Expr::JsonAccess { value, path } => expr_has_scope(value) || json_path_has_scope(path),
+        _ => false,
+    }
+}
+
+/// Check if an expression directly resolves to a scope column reference
+/// (not just contains one somewhere in the tree). Walks through casts and
+/// JSON arrow operators.
+fn is_direct_scope_ref(e: &Expr) -> bool {
+    match e {
+        Expr::Identifier(ident) => is_scope_col(&ident.value),
+        Expr::CompoundIdentifier(parts) => parts.last().is_some_and(|p| is_scope_col(&p.value)),
+        Expr::Cast { expr, .. } | Expr::Nested(expr) => is_direct_scope_ref(expr),
+        Expr::BinaryOp { left, op, right } => {
+            matches!(
+                op,
+                BinaryOperator::Arrow
+                    | BinaryOperator::LongArrow
+                    | BinaryOperator::HashArrow
+                    | BinaryOperator::HashLongArrow
+            ) && (is_direct_scope_ref(left) || value_is_scope_col(right))
+        }
+        _ => false,
+    }
+}
+
+/// Check if an expression is a non-placeholder literal (string, number, etc.).
+/// Placeholders ($1, $2) are dynamic bindings and are acceptable as scope
+/// column counterparts.
+fn is_literal_value(e: &Expr) -> bool {
+    match e {
+        Expr::Value(v) => !matches!(v, sqlparser::ast::Value::Placeholder(_)),
+        Expr::Cast { expr, .. } | Expr::Nested(expr) => is_literal_value(expr),
         _ => false,
     }
 }
@@ -1069,12 +1224,12 @@ mod tests {
     }
 
     #[test]
-    fn test_scope_check_join_on() {
+    fn test_scope_check_join_on_without_where_is_unscoped() {
         assert!(matches!(
             sql_references_identity_scope(&[
                 "SELECT t.* FROM tasks t JOIN users u ON t.user_id = u.id".to_string()
             ]),
-            ScopeCheckResult::Scoped
+            ScopeCheckResult::Unscoped
         ));
     }
 
@@ -1156,11 +1311,22 @@ mod tests {
     }
 
     #[test]
-    fn scope_check_cte_body_unscoped_outer_scoped_passes() {
-        // Outer WHERE scopes the CTE output — this should pass.
+    fn scope_check_cte_body_unscoped_outer_where_rejected() {
         assert!(matches!(
             sql_references_identity_scope(&[
                 "WITH all_t AS (SELECT * FROM tasks) SELECT * FROM all_t WHERE user_id = $1"
+                    .to_string()
+            ]),
+            ScopeCheckResult::Unscoped
+        ));
+    }
+
+    #[test]
+    fn scope_check_cte_body_scoped_outer_where_passes() {
+        assert!(matches!(
+            sql_references_identity_scope(&[
+                "WITH scoped_t AS (SELECT * FROM tasks WHERE user_id = $1) \
+                 SELECT * FROM scoped_t WHERE status = 'active'"
                     .to_string()
             ]),
             ScopeCheckResult::Scoped
@@ -1245,6 +1411,28 @@ mod tests {
     }
 
     #[test]
+    fn scope_check_in_unscoped_subquery_rejected() {
+        assert!(matches!(
+            sql_references_identity_scope(&[
+                "SELECT * FROM tasks WHERE user_id IN (SELECT user_id FROM other_users)"
+                    .to_string()
+            ]),
+            ScopeCheckResult::Unscoped
+        ));
+    }
+
+    #[test]
+    fn scope_check_in_scoped_subquery_non_scope_lhs_passes() {
+        assert!(matches!(
+            sql_references_identity_scope(&[
+                "SELECT * FROM tasks WHERE id IN (SELECT task_id FROM assignments WHERE user_id = $1)"
+                    .to_string()
+            ]),
+            ScopeCheckResult::Scoped
+        ));
+    }
+
+    #[test]
     fn scope_check_exists_subquery_scoped() {
         assert!(matches!(
             sql_references_identity_scope(&[
@@ -1279,14 +1467,34 @@ mod tests {
     }
 
     #[test]
-    fn scope_check_join_on_scope_col() {
-        // JOIN ON with a scope column scopes the SELECT.
+    fn scope_check_join_on_scope_col_without_where_is_unscoped() {
         assert!(matches!(
             sql_references_identity_scope(&[
                 "SELECT t.*, p.name FROM tasks t INNER JOIN projects p ON t.user_id = p.owner_id"
                     .to_string()
             ]),
+            ScopeCheckResult::Unscoped
+        ));
+    }
+
+    #[test]
+    fn scope_check_join_with_where_scope_passes() {
+        assert!(matches!(
+            sql_references_identity_scope(&[
+                "SELECT t.*, p.name FROM tasks t JOIN projects p ON t.project_id = p.id WHERE t.user_id = $1"
+                    .to_string()
+            ]),
             ScopeCheckResult::Scoped
+        ));
+    }
+
+    #[test]
+    fn scope_check_join_on_scope_leaks_other_table() {
+        assert!(matches!(
+            sql_references_identity_scope(&[
+                "SELECT s.* FROM secrets s JOIN users u ON u.user_id = $1".to_string()
+            ]),
+            ScopeCheckResult::Unscoped
         ));
     }
 
@@ -1308,6 +1516,58 @@ mod tests {
                 "SELECT * FROM (SELECT * FROM (SELECT * FROM tasks) a) b".to_string()
             ]),
             ScopeCheckResult::Unscoped
+        ));
+    }
+
+    #[test]
+    fn scope_check_rejects_literal_uuid_binding() {
+        assert!(matches!(
+            sql_references_identity_scope(&[
+                "SELECT * FROM tasks WHERE owner_id = '00000000-0000-0000-0000-000000000000'"
+                    .to_string()
+            ]),
+            ScopeCheckResult::Unscoped
+        ));
+    }
+
+    #[test]
+    fn scope_check_rejects_literal_integer_binding() {
+        assert!(matches!(
+            sql_references_identity_scope(&[
+                "SELECT * FROM tasks WHERE user_id = 1".to_string()
+            ]),
+            ScopeCheckResult::Unscoped
+        ));
+    }
+
+    #[test]
+    fn scope_check_rejects_literal_with_cast() {
+        assert!(matches!(
+            sql_references_identity_scope(&[
+                "SELECT * FROM tasks WHERE user_id = '00000000-0000-0000-0000-000000000000'::uuid"
+                    .to_string()
+            ]),
+            ScopeCheckResult::Unscoped
+        ));
+    }
+
+    #[test]
+    fn scope_check_accepts_placeholder_binding() {
+        assert!(matches!(
+            sql_references_identity_scope(&[
+                "SELECT * FROM tasks WHERE user_id = $1".to_string()
+            ]),
+            ScopeCheckResult::Scoped
+        ));
+    }
+
+    #[test]
+    fn scope_check_accepts_cast_placeholder_binding() {
+        assert!(matches!(
+            sql_references_identity_scope(&[
+                "SELECT * FROM tasks WHERE user_id = $1::uuid".to_string()
+            ]),
+            ScopeCheckResult::Scoped
         ));
     }
 

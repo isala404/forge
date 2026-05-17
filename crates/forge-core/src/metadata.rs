@@ -364,6 +364,7 @@ mod tests {
             transactional: false,
             consistent: false,
             max_upload_size_bytes: None,
+            requires_tenant_scope: false,
         };
 
         let meta = HandlerMetadata::from(&info);
@@ -396,6 +397,7 @@ mod tests {
             transactional: true,
             consistent: false,
             max_upload_size_bytes: None,
+            requires_tenant_scope: false,
         };
 
         let meta = HandlerMetadata::from(&info);
@@ -581,6 +583,7 @@ mod tests {
             transactional: false,
             consistent: false,
             max_upload_size_bytes: None,
+            requires_tenant_scope: false,
         };
         let meta = HandlerMetadata::from(&info);
         assert_eq!(meta.kind, HandlerKind::Webhook);

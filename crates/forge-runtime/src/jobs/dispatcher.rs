@@ -24,12 +24,16 @@ impl JobDispatcher {
     }
 
     /// Dispatch a job immediately.
-    pub async fn dispatch<J: ForgeJob>(&self, args: J::Args) -> Result<Uuid, forge_core::ForgeError>
+    pub async fn dispatch<J: ForgeJob>(
+        &self,
+        args: J::Args,
+        owner_subject: Option<String>,
+    ) -> Result<Uuid, forge_core::ForgeError>
     where
         J::Args: serde::Serialize,
     {
         let info = J::info();
-        self.dispatch_with_info(&info, serde_json::to_value(args)?, None)
+        self.dispatch_with_info(&info, serde_json::to_value(args)?, owner_subject)
             .await
     }
 
@@ -38,6 +42,7 @@ impl JobDispatcher {
         &self,
         delay: Duration,
         args: J::Args,
+        owner_subject: Option<String>,
     ) -> Result<Uuid, forge_core::ForgeError>
     where
         J::Args: serde::Serialize,
@@ -46,7 +51,7 @@ impl JobDispatcher {
         let scheduled_at = Utc::now()
             + chrono::Duration::from_std(delay)
                 .map_err(|_| forge_core::ForgeError::InvalidArgument("delay too large".into()))?;
-        self.dispatch_at_with_info(&info, serde_json::to_value(args)?, scheduled_at)
+        self.dispatch_at_with_info(&info, serde_json::to_value(args)?, scheduled_at, owner_subject)
             .await
     }
 
@@ -55,12 +60,13 @@ impl JobDispatcher {
         &self,
         at: DateTime<Utc>,
         args: J::Args,
+        owner_subject: Option<String>,
     ) -> Result<Uuid, forge_core::ForgeError>
     where
         J::Args: serde::Serialize,
     {
         let info = J::info();
-        self.dispatch_at_with_info(&info, serde_json::to_value(args)?, at)
+        self.dispatch_at_with_info(&info, serde_json::to_value(args)?, at, owner_subject)
             .await
     }
 
@@ -126,6 +132,7 @@ impl JobDispatcher {
         info: &JobInfo,
         args: serde_json::Value,
         scheduled_at: DateTime<Utc>,
+        owner_subject: Option<String>,
     ) -> Result<Uuid, forge_core::ForgeError> {
         let mut job = JobRecord::new(
             info.name,
@@ -133,7 +140,8 @@ impl JobDispatcher {
             info.priority,
             info.retry.max_attempts as i32,
         )
-        .with_scheduled_at(scheduled_at);
+        .with_scheduled_at(scheduled_at)
+        .with_owner_subject(owner_subject);
 
         if let Some(cap) = info.worker_capability {
             job = job.with_capability(cap);
@@ -150,6 +158,7 @@ impl JobDispatcher {
         &self,
         idempotency_key: impl Into<String>,
         args: J::Args,
+        owner_subject: Option<String>,
     ) -> Result<Uuid, forge_core::ForgeError>
     where
         J::Args: serde::Serialize,
@@ -161,7 +170,8 @@ impl JobDispatcher {
             info.priority,
             info.retry.max_attempts as i32,
         )
-        .with_idempotency_key(idempotency_key);
+        .with_idempotency_key(idempotency_key)
+        .with_owner_subject(owner_subject);
 
         if let Some(cap) = info.worker_capability {
             job = job.with_capability(cap);
@@ -178,6 +188,7 @@ impl JobDispatcher {
         &self,
         priority: JobPriority,
         args: J::Args,
+        owner_subject: Option<String>,
     ) -> Result<Uuid, forge_core::ForgeError>
     where
         J::Args: serde::Serialize,
@@ -188,7 +199,8 @@ impl JobDispatcher {
             serde_json::to_value(args)?,
             priority,
             info.retry.max_attempts as i32,
-        );
+        )
+        .with_owner_subject(owner_subject);
 
         if let Some(cap) = info.worker_capability {
             job = job.with_capability(cap);

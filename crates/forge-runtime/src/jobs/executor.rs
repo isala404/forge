@@ -123,6 +123,23 @@ impl JobExecutor {
         )
         .with_saved(job.job_context.clone())
         .with_progress(progress_tx);
+        if let Some(ref subject) = job.owner_subject {
+            let auth = if let Ok(uuid) = uuid::Uuid::parse_str(subject) {
+                forge_core::AuthContext::authenticated(
+                    uuid,
+                    Vec::new(),
+                    std::collections::HashMap::new(),
+                )
+            } else {
+                let mut claims = std::collections::HashMap::new();
+                claims.insert(
+                    "sub".to_string(),
+                    serde_json::Value::String(subject.clone()),
+                );
+                forge_core::AuthContext::authenticated_without_uuid(Vec::new(), claims)
+            };
+            ctx = ctx.with_auth(auth);
+        }
         ctx.set_http_timeout(entry.info.http_timeout);
 
         // Keepalive heartbeat prevents stale cleanup from reclaiming healthy long jobs.

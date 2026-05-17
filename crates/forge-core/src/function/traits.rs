@@ -66,6 +66,10 @@ pub struct FunctionInfo {
     pub consistent: bool,
     /// Per-function maximum upload size in bytes. Overrides gateway max_body_size.
     pub max_upload_size_bytes: Option<usize>,
+    /// Whether this query's SQL scopes on `tenant_id`. When true, the runtime
+    /// rejects dispatch if the auth context has no tenant claim, preventing
+    /// silent empty-result bugs from `WHERE tenant_id = NULL`.
+    pub requires_tenant_scope: bool,
 }
 
 /// The kind of function.
@@ -207,6 +211,7 @@ mod tests {
             transactional: false,
             consistent: false,
             max_upload_size_bytes: None,
+            requires_tenant_scope: false,
         };
 
         assert_eq!(info.name, "get_user");

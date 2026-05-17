@@ -12,8 +12,9 @@ use crate::attrs::{
     validate_rate_limit,
 };
 use crate::sql_extractor::{
-    ScopeCheckResult, SqlStringExtractor, TableExtractionResult, extract_columns_from_sql,
-    extract_tables_from_sql, sql_references_identity_scope,
+    DbDelegationDetector, ScopeCheckResult, SqlStringExtractor, TableExtractionResult,
+    extract_columns_from_sql, extract_tables_from_sql, sql_references_identity_scope,
+    sql_scope_requires_tenant,
 };
 use crate::utils::{parse_duration_secs, to_pascal_case};
 
@@ -279,12 +280,31 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
         sorted
     };
 
+    // Detect DB delegation: if no SQL was found but the body calls .pool(),
+    // a helper function is doing the DB work and bypassing scope extraction.
+    if !attrs.is_public
+        && !attrs.is_unscoped
+        && table_dependencies.is_empty()
+        && !has_explicit_tables
+    {
+        let mut delegation = DbDelegationDetector::new();
+        delegation.visit_block(fn_block);
+        if delegation.found {
+            return Err(syn::Error::new_spanned(
+                &input.sig.ident,
+                format!(
+                    "Private query `{fn_name_str}` calls .pool() but contains no inline SQL, so \
+                     table dependencies and scope cannot be verified. Inline the SQL in the handler \
+                     body, or add #[query(tables(\"...\"))] to declare dependencies explicitly."
+                ),
+            ));
+        }
+    }
+
     // Compile-time scope check: private queries that touch tables must filter by user identity.
-    // Skip when tables were explicitly specified (user takes responsibility for scoping).
     if !attrs.is_public
         && !attrs.is_unscoped
         && !table_dependencies.is_empty()
-        && !has_explicit_tables
     {
         let mut scope_extractor = SqlStringExtractor::new();
         scope_extractor.visit_block(fn_block);
@@ -314,6 +334,15 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
             }
         }
     }
+
+    // Detect tenant_id scope for runtime enforcement.
+    let requires_tenant_scope = if !attrs.is_public && !attrs.is_unscoped {
+        let mut tenant_extractor = SqlStringExtractor::new();
+        tenant_extractor.visit_block(fn_block);
+        sql_scope_requires_tenant(&tenant_extractor.sql_strings)
+    } else {
+        false
+    };
 
     // Get remaining params for args struct
     let arg_params: Vec<_> = params.iter().skip(1).cloned().collect();
@@ -575,6 +604,7 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
                         transactional: false,
                         consistent: #consistent,
                         max_upload_size_bytes: None,
+                        requires_tenant_scope: #requires_tenant_scope,
                     }
                 }
 
