@@ -1334,6 +1334,7 @@ dependencies = [
 name = "forge-runtime"
 version = "0.9.0"
 dependencies = [
+ "ahash",
  "aho-corasick",
  "argon2",
  "axum",

@@ -39,10 +39,10 @@ impl EventStore {
         .await
         .map_err(ForgeError::Database)?;
 
-        // Send notification for immediate processing
+        // Wakeup signal only — the scheduler polls for details.
         sqlx::query_scalar!(
             "SELECT pg_notify('forge_workflow_wakeup', $1)",
-            format!("{}:{}", event_name, correlation_id),
+            "",
         )
         .fetch_one(&self.pool)
         .await

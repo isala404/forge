@@ -36,11 +36,11 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `crates/forge-runtime/src/gateway/auth.rs:141` — guard inspects exactly one env var. Users deploying to Railway/Fly/Cloud Run set `NODE_ENV=production` / `RAILWAY_ENVIRONMENT` / `K_SERVICE` instead and silently boot into dev auth.
       Validate: (a) dev mode is opt-in (`FORGE_ENV=development` or `--dev`) not opt-out; (b) presence of any standard production env indicator (`NODE_ENV=production`, `RAILWAY_ENVIRONMENT`, `K_SERVICE`, `FLY_APP_NAME`, `KUBERNETES_SERVICE_HOST`, `AWS_EXECUTION_ENV`) refuses dev mode; (c) tests exercise each indicator.
 
-- [ ] **[04.8] Session cookie has no IP / UA binding** · *Med*
+- [x] **[04.8] Session cookie has no IP / UA binding** · *Med*
       Context: `crates/forge-runtime/src/gateway/auth.rs:740` — session cookie is HMAC over `{session_id, expires_at}`. Stolen cookie usable from anywhere until expiry.
       Validate: (a) the cookie is bound to a coarse IP class (/24 for IPv4, /48 for IPv6) and/or UA hash; (b) logout invalidates the session_id server-side; (c) a privilege-affecting action rotates the cookie.
 
-- [ ] **[04.9] SSRF guard does not resolve DNS** · *Med*
+- [x] **[04.9] SSRF guard does not resolve DNS** · *Med*
       Context: `crates/forge-core/src/http/mod.rs:160` — `url_targets_private_ip` checks only literal IPs in the URL. A hostname resolving to `169.254.169.254`/`127.0.0.1` is accepted. DNS rebinding also bypasses.
       Validate: (a) resolved IP is rechecked at connect time via a custom `reqwest` resolver, and the socket is bound to that resolved IP so a second lookup cannot rebind; (b) a regression test points a TTL-0 record at a metadata IP and asserts the guard blocks it; (c) the limitation is gone from the rustdoc.
 
@@ -112,7 +112,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `crates/forge-macros/src/sql_extractor.rs:32-64` — any 10+ char literal starting with SELECT/INSERT/UPDATE/DELETE/WITH that matches a paired keyword is run through sqlparser. A `tracing::info!("Will UPDATE users WHERE active")` fails parsing.
       Validate: SQL detection is anchored to known call-site contexts; the heuristic visitor for arbitrary literals is removed; a regression test with a log message containing SQL-like text compiles cleanly.
 
-- [ ] **[05.13] `.sqlx/` cache is trust-on-first-use** · *Med*
+- [x] **[05.13] `.sqlx/` cache is trust-on-first-use** · *Med*
       Context: `.sqlx/*.json` is checked in; CI does not re-run `cargo sqlx prepare` and diff. A doctored cache can ship through PR review.
       Validate: a CI job regenerates `.sqlx/` against a fresh PG and runs `git diff --exit-code`; the workflow file change is committed; a PR that hand-edits `.sqlx/` fails CI.
 
@@ -136,11 +136,11 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `crates/forge-runtime/src/function/router.rs:402-418` — `check_result_size` calls `serde_json::to_string(value)` purely to measure length; axum's `Json` then serializes again.
       Validate: a counting serializer measures bytes without allocating, OR one serialize-and-measure feeds the body directly; benchmark proves only one full serialize occurs per response.
 
-- [ ] **[01.3] JSON depth-check buffers body twice** · *High*
+- [x] **[01.3] JSON depth-check buffers body twice** · *High*
       Context: `crates/forge-runtime/src/gateway/server.rs:1056-1102` — middleware reads body via `to_bytes(_, usize::MAX)`, scans, re-wraps; `Json<RpcRequest>` re-parses. Also defeats `DefaultBodyLimit`.
       Validate: (a) middleware parses straight to `Value` and stashes it as an extension OR uses a streaming depth scanner that doesn't buffer; (b) the configured `max_body_size_bytes` is used, not `usize::MAX`; (c) regression test: a 5 MB body is rejected at the configured cap.
 
-- [ ] **[01.4] SSE session map is one process-wide `RwLock<HashMap>`** · *High*
+- [x] **[01.4] SSE session map is one process-wide `RwLock<HashMap>`** · *High*
       Context: `crates/forge-runtime/src/gateway/sse.rs:202` — every subscribe/unsubscribe/new connection takes a tokio write lock; `sse_handler` scans all sessions twice per new connection.
       Validate: replaced with `DashMap` plus `DashMap<UserId, AtomicUsize>` and `DashMap<IpAddr, AtomicUsize>` counters; per-user/per-IP enforcement is O(1); a soak test at 10k SSE sessions does not exhibit subscribe-latency growth.
 
@@ -172,7 +172,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `crates/forge-runtime/src/gateway/server.rs:624-647` — `ConcurrencyLimitLayer(512)` and `TimeoutLayer(30s)` apply to long-lived routes and to health probes.
       Validate: SSE / health / ready are split into a sub-router *before* the concurrency layer (or have their own semaphore); a soak test fills SSE capacity and confirms `/health` still returns 200.
 
-- [ ] **[01.12] `FunctionRegistry` uses default-hash `HashMap<String, _>`** · *Low*
+- [x] **[01.12] `FunctionRegistry` uses default-hash `HashMap<String, _>`** · *Low*
       Context: `crates/forge-runtime/src/function/registry.rs:81, 155` — DoS-resistant SipHash on a startup-fixed table.
       Validate: registry uses `ahash`/`foldhash`/`phf`; bench shows lookup p99 ≤100 ns.
 
@@ -180,7 +180,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `crates/forge-core/src/function/context.rs:891, 917, 944, 983` — fresh `Arc::new(RealEnvProvider::new())` on every construction.
       Validate: the env provider lives in a `OnceLock<Arc<…>>` and `Arc::clone`s; or the field is `&'static dyn EnvProvider`.
 
-- [ ] **[01.14] Multiple `Arc::clone`s per mutation request** · *Low*
+- [x] **[01.14] Multiple `Arc::clone`s per mutation request** · *Low*
       Context: `crates/forge-runtime/src/function/router.rs:511-513, 666-668` — `job_dispatcher.clone()` + `workflow_dispatcher.clone()` + `http_client.clone()` + `issuer.clone()` repeated in `execute_transactional`.
       Validate: deps are batched into a single `Arc<MutationDeps>` cloned once; profiling shows ≥6× reduction in atomic ops per request.
 
@@ -196,11 +196,11 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `migrations/system/v001_initial.sql:380-383`, `v002_change_log.sql:19-73` — a 50k-row UPDATE fires 50k notifies + 50k change-log inserts and can exhaust PG's 8 GB NOTIFY queue.
       Validate: (a) statement-level mode emits one summary notify when affected count crosses a threshold OR `forge_enable_reactivity(table, mode)` exposes the choice; (b) regression test: a 100k-row UPDATE on a reactive table produces a bounded NOTIFY count; (c) docs name the high-write opt-out.
 
-- [ ] **[02.2] Broadcast `Lagged` doesn't trigger durable resync** · *High*
+- [x] **[02.2] Broadcast `Lagged` doesn't trigger durable resync** · *High*
       Context: `realtime/listener.rs:29-32` (1024-slot broadcast) + `realtime/reactor.rs:765-767` — `Err(Lagged(n))` is only `warn!`-logged; `needs_resync` is never set.
       Validate: on `Lagged`, the listener flips `needs_resync` and the next flush tick triggers a full change-log replay; a regression test floods the broadcast and asserts the resync path actually runs.
 
-- [ ] **[02.3] `process_change` serializes every notification through one `RwLock::write`** · *High*
+- [x] **[02.3] `process_change` serializes every notification through one `RwLock::write`** · *High*
       Context: `realtime/invalidation.rs:69-110` — global mutex on every notify.
       Validate: replaced with `DashMap<QueryGroupId, PendingInvalidation>` with shard count matching the manager; concurrent benchmark shows ≥4× throughput on the hot path.
 
@@ -212,19 +212,19 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `realtime/reactor.rs:516-543, 591-690` — post-execution sequence is serial.
       Validate: a two-stage pipeline (execute → commit+fan-out workers) is in place; benchmark with one large + many small groups shows the small groups don't wait.
 
-- [ ] **[02.6] Slow-client backpressure resets `consecutive_drops` on any success** · *Med*
+- [x] **[02.6] Slow-client backpressure resets `consecutive_drops` on any success** · *Med*
       Context: `realtime/message.rs:107, 234` — a chronically-slow client whose buffer fills intermittently never trips eviction; missed messages silently dropped.
       Validate: a "missed_since_last_success" counter is added; lagging sessions emit a `Lagging` event and require explicit resubscribe; a regression test simulates slow drain and asserts the session is evicted or marked lagging.
 
-- [ ] **[02.7] No SSE write timeout; stalled receivers pin tasks** · *Med*
+- [x] **[02.7] No SSE write timeout; stalled receivers pin tasks** · *Med*
       Context: `gateway/sse.rs:601-618, realtime/message.rs:212-257` — `tx.send(...).await` unbounded; `last_active` resets on any 1-byte success.
       Validate: bridge uses `tokio::time::timeout(5s)` per send or `try_send`; a regression test with a stalled TCP receiver evicts the session within the timeout.
 
-- [ ] **[02.8] DashMap eviction holds shard guard across cross-shard removes** · *Med*
+- [x] **[02.8] DashMap eviction holds shard guard across cross-shard removes** · *Med*
       Context: `realtime/manager.rs:188-219, 222-257` — guard pattern is the canonical DashMap deadlock vector.
       Validate: code releases group guards before touching `table_index`; mass-disconnect soak test (10k clients drop in 1s) does not stall.
 
-- [ ] **[02.9] Resync sweep re-executes every group every 60s** · *Med*
+- [x] **[02.9] Resync sweep re-executes every group every 60s** · *Med*
       Context: `realtime/reactor.rs:560-587, 799-807` — 50k groups → 833 query executions/sec just from the sweep.
       Validate: resync is opt-in per group (triggered by `Lagged` or `needs_resync`); the unconditional sweep runs at a far-tail cadence (≥10 min) or is gated by config; idle-baseline DB QPS drops on a 50k-group test.
 
@@ -232,7 +232,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `realtime/manager.rs:261-280` — per-notify cost scales linearly with subscriber count for hot tables.
       Validate: column-filter prefiltering in `table_index`, or batched per-table change resolution within the debounce window; benchmark on a hot table with 20k subscribed groups shows bounded per-notify cost.
 
-- [ ] **[02.11] `update_group_with_data` re-serializes JSON twice for sizing** · *Low/Med*
+- [x] **[02.11] `update_group_with_data` re-serializes JSON twice for sizing** · *Low/Med*
       Context: `realtime/manager.rs:341-379` — re-serialize purely for `max_cached_result_bytes` check.
       Validate: `compute_hash` returns `(hash, serialized_bytes)`; the bytes are reused for sizing; no second serialize on the hot path.
 
@@ -248,7 +248,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `realtime/reactor.rs:547-558, 794-798`, `v002_change_log.sql:77-87` — every node runs the same `DELETE` against the same table the trigger writes.
       Validate: trim runs behind `pg_try_advisory_lock`; consider partitioning `forge_change_log` and dropping old partitions; concurrency test with 5 nodes shows trim contention vanishes.
 
-- [ ] **[02.15] Listener `last_seq` seed races initial `listen()`** · *Low*
+- [x] **[02.15] Listener `last_seq` seed races initial `listen()`** · *Low*
       Context: `realtime/listener.rs:178-191` — duplicate-process possible during the seed window.
       Validate: an idempotency guard (`seq <= last_seq.load()`) skips already-processed seqs; a regression test with concurrent NOTIFY + seed asserts no double-processing.
 
@@ -264,7 +264,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `workflow/scheduler.rs:165-181, 334-392` — every node SELECTs candidates, races UPDATEs on shared rows.
       Validate: either gated behind `is_leader()` (preferred, matches cron) OR the SELECT uses `FOR UPDATE SKIP LOCKED` with hash partitioning; cluster-soak test shows N nodes do not multiply the wakeup-poll load.
 
-- [ ] **[03.3] PgListener tasks have no reconnect** · *P1*
+- [x] **[03.3] PgListener tasks have no reconnect** · *P1*
       Context: `jobs/worker.rs:153-180`, `workflow/scheduler.rs:90-101` — listener connects once; on disconnect, dispatch silently falls back to 5s polling.
       Validate: listeners wrap their connect+recv in an exponential-backoff reconnect loop; on reconnect, the wakeup trigger is signaled; a counter metric reports each reconnect; a chaos test drops the PG connection and observes dispatch latency stays within poll interval.
 
@@ -272,7 +272,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `worker.rs:50`, `workflow/scheduler.rs:30`, `cron/scheduler.rs:133`, `daemon/runner.rs:30-36` — all hard-coded; no tunability.
       Validate: every interval is surfaced under `[worker]` / `[workflow]` / `[cron]` in `forge.toml`; adaptive back-off doubles the interval up to 30s when N consecutive polls find nothing; NOTIFY pre-empts back-off.
 
-- [ ] **[03.5] Stale-reclaim ±1 attempts arithmetic is brittle** · *P1 correctness*
+- [x] **[03.5] Stale-reclaim ±1 attempts arithmetic is brittle** · *P1 correctness*
       Context: `jobs/queue.rs:692-722` — `release_stale` does `attempts - 1`; only works because claim does `+1`. Future change breaks fencing silently.
       Validate: `attempts` is monotonic; if a "retries actually attempted" metric is needed, track it in a separate column; a regression test induces a stale claim and asserts fence correctness without arithmetic coupling.
 
@@ -308,7 +308,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `cron/scheduler.rs:227-263` — 2× `poll_interval` look-back per cron per tick.
       Validate: `last_processed_scheduled_time` tracked in memory; window is `(last_processed, now)`; wider 2s window only on first tick after leader takeover.
 
-- [ ] **[03.14] Workflow event NOTIFY payload is wasted bandwidth** · *P2*
+- [x] **[03.14] Workflow event NOTIFY payload is wasted bandwidth** · *P2*
       Context: `workflow/event_store.rs:43-49` — payload built but scheduler doesn't parse it; just polls.
       Validate: either consume the payload to target specific run IDs or send empty payload to reduce bandwidth; pick one and act.
 
@@ -468,7 +468,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `forge-macros/src/cron.rs:145`.
       Validate: generated schedule is a `const`/`OnceCell` populated from parsed components; expanded macro output contains no `.expect`.
 
-- [ ] **[08.6] Macros vs codegen disagree on primitive integer support** · *Med*
+- [x] **[08.6] Macros vs codegen disagree on primitive integer support** · *Med*
       Context: `forge-macros/src/utils.rs:152` accepts `u32/u64/i8/u8`; `forge-codegen/src/parser.rs:105-119` rejects.
       Validate: supported-primitive list lives in one place in `forge-core` and is consulted by both; unsupported integers fail at macro expansion with a span pointing at the argument.
 
@@ -480,11 +480,11 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `forge-macros/src/workflow.rs:308-368` — `OrderInput` → `PurchaseOrder` (alias) changes signature.
       Validate: signature derived from structural type info (field name + RustType) via shared codegen parser; alias rename doesn't change signature; truly structurally different types with same short name produce different signatures.
 
-- [ ] **[08.9] `darling::Error::custom` drops spans** · *Med*
+- [x] **[08.9] `darling::Error::custom` drops spans** · *Med*
       Context: `forge-macros/src/attrs.rs` — generic span on `#[query(...)]` instead of pointing at the offending value.
       Validate: every `Error::custom` site uses `.with_span(&meta)`; a clippy-style internal lint or grep gate catches new spanless errors in CI.
 
-- [ ] **[08.10] `inventory::submit!` auto-registration has no opt-out** · *Med*
+- [x] **[08.10] `inventory::submit!` auto-registration has no opt-out** · *Med*
       Context: every handler macro emits it unconditionally.
       Validate: `#[query(register = false)]` exists; multi-binary workspace pattern documented.
 

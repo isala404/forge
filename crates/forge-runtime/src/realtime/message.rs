@@ -99,12 +99,18 @@ struct SessionEntry {
     last_active: AtomicI64,
     /// Consecutive failed try_send attempts. Resets on success.
     consecutive_drops: AtomicU32,
+    /// Cumulative drops since connection. Never resets, so intermittently-slow
+    /// clients that drain just enough to avoid consecutive eviction still get
+    /// caught once total drops exceed the lifetime threshold.
+    total_drops: AtomicU32,
     /// JWT expiry as Unix timestamp. `None` for unauthenticated (anonymous) sessions.
     token_exp: Option<i64>,
 }
 
 /// Maximum consecutive drops before evicting a slow client.
 const MAX_CONSECUTIVE_DROPS: u32 = 10;
+/// Maximum lifetime drops before evicting an intermittently-slow client.
+const MAX_TOTAL_DROPS: u32 = 50;
 
 pub struct SessionServer {
     config: RealtimeConfig,
@@ -152,6 +158,7 @@ impl SessionServer {
             connected_at: now,
             last_active: AtomicI64::new(now.timestamp()),
             consecutive_drops: AtomicU32::new(0),
+            total_drops: AtomicU32::new(0),
             token_exp,
         };
         self.connections.insert(session_id, entry);
@@ -237,9 +244,9 @@ impl SessionServer {
                 Ok(())
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
-                let drops = conn.consecutive_drops.fetch_add(1, Ordering::Relaxed);
-                if drops >= MAX_CONSECUTIVE_DROPS {
-                    // Try to send lagging notification before evicting
+                let consecutive = conn.consecutive_drops.fetch_add(1, Ordering::Relaxed);
+                let total = conn.total_drops.fetch_add(1, Ordering::Relaxed);
+                if consecutive >= MAX_CONSECUTIVE_DROPS || total >= MAX_TOTAL_DROPS {
                     let _ = conn.sender.try_send(RealtimeMessage::Lagging);
                     drop(conn);
                     self.evict_session(session_id);
@@ -640,6 +647,43 @@ mod tests {
             ));
         }
         assert_eq!(server.connection_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn total_drops_evicts_intermittently_slow_client() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+        let session_id = SessionId::new();
+        let (tx, mut rx) = mpsc::channel(1);
+        server.register_connection(session_id, tx, None);
+
+        // Simulate an intermittently-slow client: accumulate drops just under
+        // the consecutive threshold, then drain and succeed to reset the
+        // consecutive counter. Repeat until total_drops crosses the lifetime
+        // threshold.
+        let batches_needed = MAX_TOTAL_DROPS / (MAX_CONSECUTIVE_DROPS - 1) + 1;
+        for batch in 0..batches_needed {
+            // Fill the buffer first.
+            let _ = rx.recv().await;
+            assert!(
+                server
+                    .try_send_to_session(session_id, RealtimeMessage::Lagging)
+                    .is_ok(),
+                "batch {batch}: initial send should succeed"
+            );
+
+            for _ in 0..(MAX_CONSECUTIVE_DROPS - 1) {
+                let r = server.try_send_to_session(session_id, RealtimeMessage::Lagging);
+                match r {
+                    Err(SendError::Full) => {}
+                    Err(SendError::Evicted) => {
+                        assert_eq!(server.connection_count(), 0);
+                        return;
+                    }
+                    other => panic!("unexpected result in batch {batch}: {other:?}"),
+                }
+            }
+        }
+        panic!("session should have been evicted by total_drops");
     }
 
     #[test]

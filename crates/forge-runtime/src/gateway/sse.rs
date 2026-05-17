@@ -14,8 +14,11 @@ use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::Stream;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use dashmap::DashMap;
 use subtle::ConstantTimeEq;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 /// Wraps an mpsc::Receiver as a Stream for SSE.
@@ -131,10 +134,9 @@ async fn validate_session(
         ));
     };
 
-    let sessions = state.sessions.read().await;
-    match sessions.get(&session_id) {
+    match state.sessions.get(&session_id) {
         Some(session) => {
-            let auth = authorize_session_access(session, session_secret, request_auth)?;
+            let auth = authorize_session_access(&session, session_secret, request_auth)?;
             Ok((session_id, auth))
         }
         None => Err(subscribe_error(
@@ -198,8 +200,14 @@ struct SseSessionData {
 pub struct SseState {
     reactor: Arc<Reactor>,
     auth_middleware: Arc<AuthMiddleware>,
-    /// Per-session data: auth context and subscription mappings
-    sessions: Arc<RwLock<HashMap<SessionId, SseSessionData>>>,
+    /// Per-session data: auth context and subscription mappings (sharded).
+    sessions: Arc<DashMap<SessionId, SseSessionData>>,
+    /// Per-user session count for O(1) limit enforcement.
+    user_session_counts: Arc<DashMap<uuid::Uuid, AtomicUsize>>,
+    /// Per-IP session count for O(1) limit enforcement.
+    ip_session_counts: Arc<DashMap<String, AtomicUsize>>,
+    /// Per-user subscription count across all sessions.
+    user_subscription_counts: Arc<DashMap<uuid::Uuid, AtomicUsize>>,
     config: SseConfig,
 }
 
@@ -218,14 +226,104 @@ impl SseState {
         Self {
             reactor,
             auth_middleware,
-            sessions: Arc::new(RwLock::new(HashMap::new())),
+            sessions: Arc::new(DashMap::new()),
+            user_session_counts: Arc::new(DashMap::new()),
+            ip_session_counts: Arc::new(DashMap::new()),
+            user_subscription_counts: Arc::new(DashMap::new()),
             config,
         }
     }
 
     /// Check if we can accept new sessions.
-    pub async fn can_accept_session(&self) -> bool {
-        self.sessions.read().await.len() < self.config.max_sessions
+    pub fn can_accept_session(&self) -> bool {
+        self.sessions.len() < self.config.max_sessions
+    }
+
+    fn increment_user_sessions(&self, user_id: uuid::Uuid) {
+        self.user_session_counts
+            .entry(user_id)
+            .or_insert_with(|| AtomicUsize::new(0))
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn decrement_user_sessions(&self, user_id: uuid::Uuid) {
+        if let Some(counter) = self.user_session_counts.get(&user_id) {
+            let prev = counter.fetch_sub(1, Ordering::Relaxed);
+            if prev <= 1 {
+                drop(counter);
+                self.user_session_counts.remove(&user_id);
+            }
+        }
+    }
+
+    fn increment_ip_sessions(&self, ip: &str) {
+        self.ip_session_counts
+            .entry(ip.to_string())
+            .or_insert_with(|| AtomicUsize::new(0))
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn decrement_ip_sessions(&self, ip: &str) {
+        if let Some(counter) = self.ip_session_counts.get(ip) {
+            let prev = counter.fetch_sub(1, Ordering::Relaxed);
+            if prev <= 1 {
+                drop(counter);
+                self.ip_session_counts.remove(ip);
+            }
+        }
+    }
+
+    fn user_session_count(&self, user_id: uuid::Uuid) -> usize {
+        self.user_session_counts
+            .get(&user_id)
+            .map(|c| c.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    fn ip_session_count(&self, ip: &str) -> usize {
+        self.ip_session_counts
+            .get(ip)
+            .map(|c| c.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    fn increment_user_subscriptions(&self, user_id: uuid::Uuid) {
+        self.user_subscription_counts
+            .entry(user_id)
+            .or_insert_with(|| AtomicUsize::new(0))
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn decrement_user_subscriptions(&self, user_id: uuid::Uuid, count: usize) {
+        if let Some(counter) = self.user_subscription_counts.get(&user_id) {
+            let prev = counter.fetch_sub(count, Ordering::Relaxed);
+            if prev <= count {
+                drop(counter);
+                self.user_subscription_counts.remove(&user_id);
+            }
+        }
+    }
+
+    fn user_subscription_count(&self, user_id: uuid::Uuid) -> usize {
+        self.user_subscription_counts
+            .get(&user_id)
+            .map(|c| c.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    fn remove_session(&self, session_id: SessionId) {
+        if let Some((_, session)) = self.sessions.remove(&session_id) {
+            if let Some(user_id) = session.auth_context.user_id() {
+                self.decrement_user_sessions(user_id);
+                let sub_count = session.subscriptions.len();
+                if sub_count > 0 {
+                    self.decrement_user_subscriptions(user_id, sub_count);
+                }
+            }
+            if let Some(ip) = &session.client_ip {
+                self.decrement_ip_sessions(ip);
+            }
+        }
     }
 }
 
@@ -234,20 +332,16 @@ impl SseState {
 struct SessionCleanupGuard {
     session_id: SessionId,
     reactor: Arc<Reactor>,
-    sessions: Arc<RwLock<HashMap<SessionId, SseSessionData>>>,
+    state: Arc<SseState>,
     dropped: bool,
 }
 
 impl SessionCleanupGuard {
-    fn new(
-        session_id: SessionId,
-        reactor: Arc<Reactor>,
-        sessions: Arc<RwLock<HashMap<SessionId, SseSessionData>>>,
-    ) -> Self {
+    fn new(session_id: SessionId, reactor: Arc<Reactor>, state: Arc<SseState>) -> Self {
         Self {
             session_id,
             reactor,
-            sessions,
+            state,
             dropped: false,
         }
     }
@@ -265,19 +359,16 @@ impl Drop for SessionCleanupGuard {
         }
         let session_id = self.session_id;
         let reactor = self.reactor.clone();
-        let sessions = self.sessions.clone();
+        let state = self.state.clone();
 
-        // Spawn cleanup task since we can't await in drop
-        // Use spawn to handle cleanup even if the runtime is shutting down
         crate::observability::set_active_connections("sse", -1);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 reactor.remove_session(session_id).await;
-                sessions.write().await.remove(&session_id);
+                state.remove_session(session_id);
                 tracing::debug!(%session_id, "SSE session cleaned up on disconnect");
             });
         } else {
-            // Runtime not available, likely shutting down. Session will be cleaned up on restart.
             tracing::warn!(%session_id, "Could not spawn cleanup task, runtime unavailable");
         }
     }
@@ -460,7 +551,7 @@ pub async fn sse_handler(
 ) -> impl IntoResponse {
     // Check session limit. Body matches the standard SseError shape so
     // clients can parse capacity rejections the same way as rate limits.
-    if !state.can_accept_session().await {
+    if !state.can_accept_session() {
         let body = SseError::new("SSE_AT_CAPACITY", "Server at maximum SSE session capacity")
             .with_retry_after(SSE_AT_CAPACITY_RETRY_SECS);
         return (
@@ -511,73 +602,67 @@ pub async fn sse_handler(
         None
     };
 
-    // Atomic check-and-insert under a single write lock to prevent TOCTOU
-    // races on per-user and per-IP session limits.
+    // Check per-user and per-IP session limits via atomic counters (O(1)).
+    if let Some(user_id) = auth_context.user_id()
+        && state.user_session_count(user_id) >= state.config.max_sessions_per_user
     {
-        let mut sessions = state.sessions.write().await;
-
-        if let Some(user_id) = auth_context.user_id() {
-            let user_session_count = sessions
-                .values()
-                .filter(|s| s.auth_context.user_id() == Some(user_id))
-                .count();
-            if user_session_count >= state.config.max_sessions_per_user {
-                let body = SseError::new(
-                    "TOO_MANY_SESSIONS",
-                    format!(
-                        "User has reached the maximum of {} concurrent sessions",
-                        state.config.max_sessions_per_user
-                    ),
-                )
-                .with_retry_after(SSE_AT_CAPACITY_RETRY_SECS);
-                return (
-                    StatusCode::TOO_MANY_REQUESTS,
-                    [(
-                        axum::http::header::RETRY_AFTER,
-                        SSE_AT_CAPACITY_RETRY_SECS_STR,
-                    )],
-                    Json(body),
-                )
-                    .into_response();
-            }
-        }
-
-        if let Some(ip) = &client_ip {
-            let ip_session_count = sessions
-                .values()
-                .filter(|s| s.client_ip.as_deref() == Some(ip))
-                .count();
-            if ip_session_count >= state.config.max_sessions_per_ip {
-                let body = SseError::new(
-                    "TOO_MANY_SESSIONS",
-                    format!(
-                        "IP has reached the maximum of {} concurrent sessions",
-                        state.config.max_sessions_per_ip
-                    ),
-                )
-                .with_retry_after(SSE_AT_CAPACITY_RETRY_SECS);
-                return (
-                    StatusCode::TOO_MANY_REQUESTS,
-                    [(
-                        axum::http::header::RETRY_AFTER,
-                        SSE_AT_CAPACITY_RETRY_SECS_STR,
-                    )],
-                    Json(body),
-                )
-                    .into_response();
-            }
-        }
-
-        sessions.insert(
-            session_id,
-            SseSessionData {
-                auth_context: auth_context.clone(),
-                session_secret: session_secret.clone(),
-                client_ip,
-                subscriptions: HashMap::new(),
-            },
-        );
+        let body = SseError::new(
+            "TOO_MANY_SESSIONS",
+            format!(
+                "User has reached the maximum of {} concurrent sessions",
+                state.config.max_sessions_per_user
+            ),
+        )
+        .with_retry_after(SSE_AT_CAPACITY_RETRY_SECS);
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(
+                axum::http::header::RETRY_AFTER,
+                SSE_AT_CAPACITY_RETRY_SECS_STR,
+            )],
+            Json(body),
+        )
+            .into_response();
     }
+
+    if let Some(ip) = &client_ip
+        && state.ip_session_count(ip) >= state.config.max_sessions_per_ip
+    {
+        let body = SseError::new(
+            "TOO_MANY_SESSIONS",
+            format!(
+                "IP has reached the maximum of {} concurrent sessions",
+                state.config.max_sessions_per_ip
+            ),
+        )
+        .with_retry_after(SSE_AT_CAPACITY_RETRY_SECS);
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(
+                axum::http::header::RETRY_AFTER,
+                SSE_AT_CAPACITY_RETRY_SECS_STR,
+            )],
+            Json(body),
+        )
+            .into_response();
+    }
+
+    // Insert session and update counters.
+    if let Some(user_id) = auth_context.user_id() {
+        state.increment_user_sessions(user_id);
+    }
+    if let Some(ip) = &client_ip {
+        state.increment_ip_sessions(ip);
+    }
+    state.sessions.insert(
+        session_id,
+        SseSessionData {
+            auth_context: auth_context.clone(),
+            session_secret: session_secret.clone(),
+            client_ip,
+            subscriptions: HashMap::new(),
+        },
+    );
 
     // Register session with reactor
     let reactor = state.reactor.clone();
@@ -587,11 +672,10 @@ pub async fn sse_handler(
     let (rt_tx, mut rt_rx) = mpsc::channel(buffer_size);
     reactor.register_session(session_id, rt_tx, token_exp);
 
-    // Capture sessions for cleanup guard
-    let sessions = state.sessions.clone();
-
     // Create cleanup guard - will clean up on drop if stream ends unexpectedly
-    let cleanup_guard = SessionCleanupGuard::new(session_id, reactor.clone(), sessions.clone());
+    let state_for_cleanup = Arc::new((*state).clone());
+    let cleanup_guard =
+        SessionCleanupGuard::new(session_id, reactor.clone(), state_for_cleanup.clone());
     crate::observability::set_active_connections("sse", 1);
 
     // Bridge reactor messages to SSE messages.
@@ -604,10 +688,15 @@ pub async fn sse_handler(
                 msg = rt_rx.recv() => {
                     match msg {
                         Some(rt_msg) => {
-                            if let Some(sse_msg) = convert_realtime_to_sse(rt_msg)
-                                && tx.send(sse_msg).await.is_err() {
-                                    break;
+                            if let Some(sse_msg) = convert_realtime_to_sse(rt_msg) {
+                                match tokio::time::timeout(
+                                    Duration::from_secs(5),
+                                    tx.send(sse_msg),
+                                ).await {
+                                    Ok(Err(_)) | Err(_) => break,
+                                    Ok(Ok(())) => {}
                                 }
+                            }
                         }
                         None => break,
                     }
@@ -658,10 +747,14 @@ pub async fn sse_handler(
                                     })
                                 }
                             };
-                            if let Some(evt) = event
-                                && event_tx.send(Ok(evt)).await.is_err()
-                            {
-                                break;
+                            if let Some(evt) = event {
+                                match tokio::time::timeout(
+                                    Duration::from_secs(5),
+                                    event_tx.send(Ok(evt)),
+                                ).await {
+                                    Ok(Err(_)) | Err(_) => break,
+                                    Ok(Ok(())) => {}
+                                }
                             }
                         }
                         None => break,
@@ -675,7 +768,7 @@ pub async fn sse_handler(
         _guard.mark_closed();
         crate::observability::set_active_connections("sse", -1);
         reactor.remove_session(session_id).await;
-        sessions.write().await.remove(&session_id);
+        state_for_cleanup.remove_session(session_id);
     });
 
     let stream = ReceiverStream { rx: event_rx };
@@ -777,11 +870,9 @@ pub async fn sse_subscribe_handler(
         );
     };
 
-    // Get session data (auth context) - use write lock to atomically check limit and prevent TOCTOU
-    let sessions = state.sessions.write().await;
-    let session_data = match sessions.get(&session_id) {
+    // Get session data (auth context) via DashMap — O(1) lookups.
+    let session_data = match state.sessions.get(&session_id) {
         Some(data) => {
-            // Enforce per-session subscription limit to prevent resource exhaustion
             if data.subscriptions.len() >= state.config.max_subscriptions_per_session {
                 return subscribe_error(
                     StatusCode::TOO_MANY_REQUESTS,
@@ -792,25 +883,20 @@ pub async fn sse_subscribe_handler(
                     ),
                 );
             }
-            // Enforce per-user subscription limit across all sessions.
-            if let Some(user_id) = data.auth_context.user_id() {
-                let user_sub_count: usize = sessions
-                    .values()
-                    .filter(|s| s.auth_context.user_id() == Some(user_id))
-                    .map(|s| s.subscriptions.len())
-                    .sum();
-                if user_sub_count >= state.config.max_subscriptions_per_user {
-                    return subscribe_error(
-                        StatusCode::TOO_MANY_REQUESTS,
-                        "TOO_MANY_SUBSCRIPTIONS",
-                        format!(
-                            "User has reached the maximum of {} total subscriptions",
-                            state.config.max_subscriptions_per_user
-                        ),
-                    );
-                }
+            if let Some(user_id) = data.auth_context.user_id()
+                && state.user_subscription_count(user_id)
+                    >= state.config.max_subscriptions_per_user
+            {
+                return subscribe_error(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "TOO_MANY_SUBSCRIPTIONS",
+                    format!(
+                        "User has reached the maximum of {} total subscriptions",
+                        state.config.max_subscriptions_per_user
+                    ),
+                );
             }
-            match authorize_session_access(data, &request.session_secret, &request_auth) {
+            match authorize_session_access(&data, &request.session_secret, &request_auth) {
                 Ok(auth) => auth,
                 Err(resp) => return resp,
             }
@@ -823,7 +909,6 @@ pub async fn sse_subscribe_handler(
             );
         }
     };
-    drop(sessions);
 
     // Subscribe via reactor
     let result = state
@@ -839,18 +924,12 @@ pub async fn sse_subscribe_handler(
 
     match result {
         Ok((subscription_id, data)) => {
-            // Store the subscription mapping. The session may have been evicted
-            // while `reactor.subscribe` was running (long-running query, slow
-            // auth check); if so the subscription is now orphaned in the
-            // reactor and session_server, so we have to unsubscribe before
-            // returning. We also re-check the per-session subscription limit:
-            // concurrent subscribe calls can each pass the pre-call limit
-            // check, so the post-call check is the actual enforcement point.
-            let mut sessions = state.sessions.write().await;
-            match sessions.get_mut(&session_id) {
-                Some(session) => {
+            // Store the subscription mapping. Re-check the per-session limit
+            // as a concurrent subscribe may have raced past the pre-call check.
+            match state.sessions.get_mut(&session_id) {
+                Some(mut session) => {
                     if session.subscriptions.len() >= state.config.max_subscriptions_per_session {
-                        drop(sessions);
+                        drop(session);
                         state.reactor.unsubscribe(subscription_id);
                         return subscribe_error(
                             StatusCode::TOO_MANY_REQUESTS,
@@ -862,9 +941,11 @@ pub async fn sse_subscribe_handler(
                         );
                     }
                     session.subscriptions.insert(request.id, subscription_id);
+                    if let Some(user_id) = session.auth_context.user_id() {
+                        state.increment_user_subscriptions(user_id);
+                    }
                 }
                 None => {
-                    drop(sessions);
                     state.reactor.unsubscribe(subscription_id);
                     return subscribe_error(
                         StatusCode::NOT_FOUND,
@@ -930,9 +1011,8 @@ pub async fn sse_unsubscribe_handler(
     };
 
     // Look up internal subscription ID and validate session ownership
-    let subscription_id = {
-        let sessions = state.sessions.read().await;
-        match sessions.get(&session_id) {
+    let (subscription_id, user_id) = {
+        match state.sessions.get(&session_id) {
             Some(session) => {
                 let secret_match: bool = session
                     .session_secret
@@ -946,9 +1026,12 @@ pub async fn sse_unsubscribe_handler(
                         "Request principal does not match session principal",
                     );
                 }
-                session.subscriptions.get(&request.id).copied()
+                (
+                    session.subscriptions.get(&request.id).copied(),
+                    session.auth_context.user_id(),
+                )
             }
-            None => None,
+            None => (None, None),
         }
     };
 
@@ -964,11 +1047,11 @@ pub async fn sse_unsubscribe_handler(
     state.reactor.unsubscribe(subscription_id);
 
     // Remove from session tracking
-    {
-        let mut sessions = state.sessions.write().await;
-        if let Some(session) = sessions.get_mut(&session_id) {
-            session.subscriptions.remove(&request.id);
-        }
+    if let Some(mut session) = state.sessions.get_mut(&session_id) {
+        session.subscriptions.remove(&request.id);
+    }
+    if let Some(uid) = user_id {
+        state.decrement_user_subscriptions(uid, 1);
     }
 
     tracing::debug!(

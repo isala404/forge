@@ -151,31 +151,68 @@ impl Worker {
         });
 
         // NOTIFY listener for immediate wakeup on job enqueue.
-        // Falls back to poll_interval if the listener connection fails.
+        // Reconnects with exponential backoff on connection loss.
         let wakeup_notify = Arc::new(tokio::sync::Notify::new());
         let wakeup_trigger = wakeup_notify.clone();
         let wakeup_pool = self.pool.clone();
         let wakeup_shutdown = shutdown_notify.clone();
         tokio::spawn(async move {
-            let listener = sqlx::postgres::PgListener::connect_with(&wakeup_pool).await;
-            let mut listener = match listener {
-                Ok(mut l) => {
-                    if l.listen("forge_jobs_available").await.is_err() {
-                        return;
-                    }
-                    l
-                }
-                Err(_) => return,
-            };
+            let mut backoff = std::time::Duration::from_millis(500);
+            let max_backoff = std::time::Duration::from_secs(30);
             loop {
-                tokio::select! {
-                    _ = wakeup_shutdown.notified() => break,
-                    notification = listener.recv() => {
-                        if notification.is_ok() {
-                            wakeup_trigger.notify_one();
+                let mut listener = match sqlx::postgres::PgListener::connect_with(&wakeup_pool)
+                    .await
+                {
+                    Ok(mut l) => match l.listen("forge_jobs_available").await {
+                        Ok(()) => {
+                            backoff = std::time::Duration::from_millis(500);
+                            l
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Job listener LISTEN failed, retrying");
+                            tokio::select! {
+                                _ = tokio::time::sleep(backoff) => {}
+                                _ = wakeup_shutdown.notified() => return,
+                            }
+                            backoff = (backoff * 2).min(max_backoff);
+                            continue;
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Job listener connect failed, retrying");
+                        tokio::select! {
+                            _ = tokio::time::sleep(backoff) => {}
+                            _ = wakeup_shutdown.notified() => return,
+                        }
+                        backoff = (backoff * 2).min(max_backoff);
+                        continue;
+                    }
+                };
+                loop {
+                    tokio::select! {
+                        _ = wakeup_shutdown.notified() => return,
+                        notification = listener.recv() => {
+                            match notification {
+                                Ok(_) => {
+                                    wakeup_trigger.notify_one();
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "Job listener disconnected, reconnecting"
+                                    );
+                                    wakeup_trigger.notify_one();
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
+                tokio::select! {
+                    _ = tokio::time::sleep(backoff) => {}
+                    _ = wakeup_shutdown.notified() => return,
+                }
+                backoff = (backoff * 2).min(max_backoff);
             }
         });
 

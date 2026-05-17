@@ -97,6 +97,11 @@ impl ChangeListener {
         self.needs_resync.swap(false, Ordering::Relaxed)
     }
 
+    /// Mark that a full resync is needed (e.g. after broadcast lag).
+    pub fn set_needs_resync(&self) {
+        self.needs_resync.store(true, Ordering::Relaxed);
+    }
+
     /// Replay changes missed while disconnected by querying the durable
     /// change log. Returns the number of replayed changes, or `None` if
     /// the log read failed (e.g. the table is absent on first boot before
@@ -201,6 +206,11 @@ impl ChangeListener {
                         Ok(notification) => {
                             let recv_time = std::time::Instant::now();
                             if let Some((change, seq)) = self.parse_notification(notification.payload()) {
+                                // Skip already-processed seqs to prevent
+                                // double-processing during the seed window.
+                                if seq > 0 && seq <= self.last_seq.load(Ordering::Relaxed) {
+                                    continue;
+                                }
                                 tracing::trace!(table = %change.table, op = ?change.operation, seq, "Change received");
                                 crate::cluster::metrics::record_notification_processed(&change.table);
                                 let _ = self.change_tx.send(change);

@@ -86,24 +86,77 @@ impl WorkflowScheduler {
         let mut interval = tokio::time::interval(self.config.poll_interval);
         let mut cleanup_interval = tokio::time::interval(Duration::from_secs(3600));
 
-        // Set up NOTIFY listener for immediate wakeup
-        let mut listener = match sqlx::postgres::PgListener::connect_with(&self.pool).await {
-            Ok(mut l) => {
-                if let Err(e) = l.listen("forge_workflow_wakeup").await {
-                    tracing::warn!(error = %e, "Failed to listen on workflow wakeup channel, using poll-only mode");
+        // NOTIFY listener for immediate wakeup. Reconnects with backoff.
+        let wakeup = Arc::new(tokio::sync::Notify::new());
+        let wakeup_trigger = wakeup.clone();
+        let wakeup_pool = self.pool.clone();
+        let wakeup_shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            let mut backoff = std::time::Duration::from_millis(500);
+            let max_backoff = std::time::Duration::from_secs(30);
+            loop {
+                let mut listener =
+                    match sqlx::postgres::PgListener::connect_with(&wakeup_pool).await {
+                        Ok(mut l) => match l.listen("forge_workflow_wakeup").await {
+                            Ok(()) => {
+                                backoff = std::time::Duration::from_millis(500);
+                                l
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "Workflow listener LISTEN failed, retrying"
+                                );
+                                tokio::select! {
+                                    _ = tokio::time::sleep(backoff) => {}
+                                    _ = wakeup_shutdown.cancelled() => return,
+                                }
+                                backoff = (backoff * 2).min(max_backoff);
+                                continue;
+                            }
+                        },
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "Workflow listener connect failed, retrying"
+                            );
+                            tokio::select! {
+                                _ = tokio::time::sleep(backoff) => {}
+                                _ = wakeup_shutdown.cancelled() => return,
+                            }
+                            backoff = (backoff * 2).min(max_backoff);
+                            continue;
+                        }
+                    };
+                loop {
+                    tokio::select! {
+                        _ = wakeup_shutdown.cancelled() => return,
+                        notification = listener.recv() => {
+                            match notification {
+                                Ok(_) => wakeup_trigger.notify_one(),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "Workflow listener disconnected, reconnecting"
+                                    );
+                                    wakeup_trigger.notify_one();
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
-                Some(l)
+                tokio::select! {
+                    _ = tokio::time::sleep(backoff) => {}
+                    _ = wakeup_shutdown.cancelled() => return,
+                }
+                backoff = (backoff * 2).min(max_backoff);
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to create workflow wakeup listener, using poll-only mode");
-                None
-            }
-        };
+        });
 
         tracing::debug!(
             poll_interval = ?self.config.poll_interval,
             batch_size = self.config.batch_size,
-            notify_enabled = listener.is_some(),
             "Workflow scheduler started"
         );
 
@@ -114,21 +167,9 @@ impl WorkflowScheduler {
                         tracing::warn!(error = %e, "Failed to process ready workflows");
                     }
                 }
-                notification = async {
-                    match listener.as_mut() {
-                        Some(l) => l.recv().await,
-                        None => std::future::pending().await,
-                    }
-                } => {
-                    match notification {
-                        Ok(_) => {
-                            if let Err(e) = self.process_ready_workflows().await {
-                                tracing::warn!(error = %e, "Failed to process workflows after wakeup");
-                            }
-                        }
-                        Err(e) => {
-                            tracing::debug!(error = %e, "Workflow wakeup listener error, will retry on next poll");
-                        }
+                _ = wakeup.notified() => {
+                    if let Err(e) = self.process_ready_workflows().await {
+                        tracing::warn!(error = %e, "Failed to process workflows after wakeup");
                     }
                 }
                 _ = cleanup_interval.tick() => {

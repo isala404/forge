@@ -55,7 +55,7 @@ impl Default for ReactorConfig {
             listener_restart_delay_ms: 1000,
             max_concurrent_reexecutions: 64,
             session_cleanup_interval_secs: 60,
-            resync_interval_secs: 60,
+            resync_interval_secs: 600,
             shard_count: 64,
             max_cached_result_bytes: 10_485_760,
         }
@@ -299,7 +299,7 @@ impl Reactor {
                 }
             };
 
-            let result_hash = Self::compute_hash(&data);
+            let (result_hash, serialized_len) = Self::compute_hash(&data);
 
             tracing::trace!(
                 ?group_id,
@@ -313,6 +313,7 @@ impl Reactor {
                 read_set,
                 result_hash,
                 data_arc,
+                serialized_len,
             );
 
             data
@@ -502,13 +503,17 @@ impl Reactor {
 
     /// Compute a content hash of a JSON value for change detection.
     ///
-    /// Uses `to_vec` for direct byte hashing. Falls back to a sentinel on
-    /// serialization failure so two failed serializations don't falsely
-    /// compare as equal (which would silently drop updates).
-    fn compute_hash(data: &serde_json::Value) -> String {
+    /// Returns `(hash, serialized_byte_count)` so callers can reuse the size
+    /// for max-result-size checks without a second serialization pass.
+    /// Falls back to a sentinel hash on serialization failure so two failed
+    /// serializations don't falsely compare as equal.
+    fn compute_hash(data: &serde_json::Value) -> (String, usize) {
         match serde_json::to_vec(data) {
-            Ok(bytes) => crate::stable_hash::sha256_hex(&bytes),
-            Err(_) => "!serialization_failed!".to_string(),
+            Ok(bytes) => {
+                let len = bytes.len();
+                (crate::stable_hash::sha256_hex(&bytes), len)
+            }
+            Err(_) => ("!serialization_failed!".to_string(), usize::MAX),
         }
     }
 
@@ -521,7 +526,7 @@ impl Reactor {
         db_pool: &sqlx::PgPool,
         max_concurrent: usize,
     ) {
-        let invalidated_groups = invalidation_engine.check_pending().await;
+        let invalidated_groups = invalidation_engine.check_pending();
         if invalidated_groups.is_empty() {
             return;
         }
@@ -655,7 +660,7 @@ impl Reactor {
         while let Some((group_id, last_hash, result)) = futures.next().await {
             match result {
                 Ok((new_data, read_set)) => {
-                    let new_hash = Self::compute_hash(&new_data);
+                    let (new_hash, serialized_len) = Self::compute_hash(&new_data);
 
                     if last_hash.as_ref() != Some(&new_hash) {
                         // Update group state with cached result
@@ -665,6 +670,7 @@ impl Reactor {
                             read_set,
                             new_hash,
                             std::sync::Arc::clone(&data_arc),
+                            serialized_len,
                         );
 
                         // Fan out to all subscribers in this group
@@ -767,7 +773,11 @@ impl Reactor {
                                 ).await;
                             }
                             Err(broadcast::error::RecvError::Lagged(n)) => {
-                                tracing::warn!("Reactor lagged by {} messages", n);
+                                tracing::warn!(
+                                    missed = n,
+                                    "Reactor lagged; scheduling full resync"
+                                );
+                                listener.set_needs_resync();
                             }
                             Err(broadcast::error::RecvError::Closed) => {
                                 tracing::debug!("Change channel closed");
@@ -906,7 +916,7 @@ impl Reactor {
         }
 
         // Record change for debounced group invalidation
-        invalidation_engine.process_change(change.clone()).await;
+        invalidation_engine.process_change(change.clone());
     }
 
     async fn handle_job_change(
@@ -1334,7 +1344,7 @@ impl Reactor {
 
     pub async fn stats(&self) -> ReactorStats {
         let session_stats = self.session_server.stats();
-        let inv_stats = self.invalidation_engine.stats().await;
+        let inv_stats = self.invalidation_engine.stats();
 
         ReactorStats {
             connections: session_stats.connections,
@@ -1378,12 +1388,13 @@ mod tests {
         let data2 = serde_json::json!({"name": "test"});
         let data3 = serde_json::json!({"name": "different"});
 
-        let hash1 = Reactor::compute_hash(&data1);
-        let hash2 = Reactor::compute_hash(&data2);
-        let hash3 = Reactor::compute_hash(&data3);
+        let (hash1, len1) = Reactor::compute_hash(&data1);
+        let (hash2, _) = Reactor::compute_hash(&data2);
+        let (hash3, _) = Reactor::compute_hash(&data3);
 
         assert_eq!(hash1, hash2);
         assert_ne!(hash1, hash3);
+        assert!(len1 > 0);
     }
 
     #[test]

@@ -78,14 +78,18 @@ impl SubscriptionManager {
         }
     }
 
-    /// Remove a group from the inverted table index. Covers both compile-time
-    /// `table_deps` and runtime-discovered tables from the read set.
-    fn remove_from_table_index(&self, group: &QueryGroup) {
-        let runtime_tables = group.read_set.tables.iter().map(String::as_str);
-        let compile_tables = group.table_deps.iter().copied();
-        for table in compile_tables.chain(runtime_tables) {
+    /// Remove a group from the inverted table index using pre-extracted data.
+    /// Called after releasing the group guard to avoid cross-shard deadlocks.
+    fn remove_group_from_table_index(
+        &self,
+        group_id: QueryGroupId,
+        table_deps: &[&str],
+        runtime_tables: &[String],
+    ) {
+        let runtime_iter = runtime_tables.iter().map(String::as_str);
+        for table in table_deps.iter().copied().chain(runtime_iter) {
             if let Some(mut set) = self.table_index.get_mut(table) {
-                set.remove(&group.id);
+                set.remove(&group_id);
                 if set.is_empty() {
                     drop(set);
                     self.table_index.remove(table);
@@ -196,21 +200,34 @@ impl SubscriptionManager {
         let group_id = sub.group_id;
         let session_id = sub.session_id;
 
-        if let Some(mut group) = self.groups.get_mut(&group_id) {
+        // Collect eviction data while holding the group guard, then release
+        // before touching table_index to avoid cross-shard deadlocks.
+        let eviction_data = if let Some(mut group) = self.groups.get_mut(&group_id) {
             group.subscribers.retain(|s| *s != subscriber_id);
 
-            // If the group is empty, evict it together with its table-index and lookup entries.
             if group.subscribers.is_empty() {
                 let lookup_key = QueryGroup::compute_lookup_key(
                     &group.query_name,
                     &group.args,
                     &group.auth_scope,
                 );
-                self.remove_from_table_index(&group);
+                let table_deps: Vec<&'static str> = group.table_deps.to_vec();
+                let runtime_tables: Vec<String> =
+                    group.read_set.tables.to_vec();
+                let gid = group.id;
                 drop(group);
-                self.groups.remove(&group_id);
-                self.group_lookup.remove(&lookup_key);
+                Some((lookup_key, table_deps, runtime_tables, gid))
+            } else {
+                None
             }
+        } else {
+            None
+        };
+
+        if let Some((lookup_key, table_deps, runtime_tables, gid)) = eviction_data {
+            self.remove_group_from_table_index(gid, &table_deps, &runtime_tables);
+            self.groups.remove(&gid);
+            self.group_lookup.remove(&lookup_key);
         }
 
         if let Some(mut session_subs) = self.session_subscribers.get_mut(&session_id) {
@@ -234,21 +251,35 @@ impl SubscriptionManager {
                 self.subscription_to_key.remove(&sub.subscription_id);
                 removed_sub_ids.push(sub.subscription_id);
 
-                // Remove from group
-                if let Some(mut group) = self.groups.get_mut(&sub.group_id) {
-                    group.subscribers.retain(|s| *s != sid);
+                // Collect eviction data while holding the group guard, then release
+                // before touching table_index to avoid cross-shard deadlocks.
+                let eviction_data =
+                    if let Some(mut group) = self.groups.get_mut(&sub.group_id) {
+                        group.subscribers.retain(|s| *s != sid);
 
-                    if group.subscribers.is_empty() {
-                        let lookup_key = QueryGroup::compute_lookup_key(
-                            &group.query_name,
-                            &group.args,
-                            &group.auth_scope,
-                        );
-                        self.remove_from_table_index(&group);
-                        drop(group);
-                        self.groups.remove(&sub.group_id);
-                        self.group_lookup.remove(&lookup_key);
-                    }
+                        if group.subscribers.is_empty() {
+                            let lookup_key = QueryGroup::compute_lookup_key(
+                                &group.query_name,
+                                &group.args,
+                                &group.auth_scope,
+                            );
+                            let table_deps: Vec<&'static str> = group.table_deps.to_vec();
+                            let runtime_tables: Vec<String> =
+                                group.read_set.tables.to_vec();
+                            let gid = group.id;
+                            drop(group);
+                            Some((lookup_key, table_deps, runtime_tables, gid))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                if let Some((lookup_key, table_deps, runtime_tables, gid)) = eviction_data {
+                    self.remove_group_from_table_index(gid, &table_deps, &runtime_tables);
+                    self.groups.remove(&gid);
+                    self.group_lookup.remove(&lookup_key);
                 }
             }
         }
@@ -344,15 +375,8 @@ impl SubscriptionManager {
         read_set: ReadSet,
         result_hash: String,
         data: std::sync::Arc<serde_json::Value>,
+        serialized_len: usize,
     ) {
-        // Estimate the serialized size before taking the mutable guard.
-        // `serde_json::to_string` on a `Value` is infallible; `Ok` is the only
-        // reachable branch. Fall back to `usize::MAX` on any unexpected error
-        // so we conservatively skip caching rather than caching a huge value.
-        let serialized_len = serde_json::to_string(&*data)
-            .map(|s| s.len())
-            .unwrap_or(usize::MAX);
-
         if let Some(mut group) = self.groups.get_mut(&group_id) {
             for table in &read_set.tables {
                 let already_indexed = group.table_deps.iter().any(|t| *t == table);
@@ -940,11 +964,13 @@ mod tests {
         let big = std::sync::Arc::new(serde_json::json!({
             "items": vec!["row-with-padding-to-blow-past-the-cache-limit"; 8]
         }));
+        let serialized_len = serde_json::to_vec(&*big).unwrap().len();
         manager.update_group_with_data(
             group_id,
             ReadSet::new(),
             "hash-big".to_string(),
             big.clone(),
+            serialized_len,
         );
 
         let group = manager.get_group(group_id).expect("group");
@@ -972,11 +998,13 @@ mod tests {
             .unwrap();
 
         let small = std::sync::Arc::new(serde_json::json!({"ok": true}));
+        let serialized_len = serde_json::to_vec(&*small).unwrap().len();
         manager.update_group_with_data(
             group_id,
             ReadSet::new(),
             "hash-small".to_string(),
             small.clone(),
+            serialized_len,
         );
 
         let group = manager.get_group(group_id).expect("group");

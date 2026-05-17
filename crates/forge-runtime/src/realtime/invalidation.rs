@@ -1,8 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::RwLock;
+use dashmap::DashMap;
 use tokio::time::Instant;
 
 use forge_core::realtime::{Change, QueryGroupId};
@@ -51,8 +51,8 @@ struct PendingInvalidation {
 pub struct InvalidationEngine {
     subscription_manager: Arc<SubscriptionManager>,
     config: InvalidationConfig,
-    /// Pending invalidations per query group.
-    pending: Arc<RwLock<HashMap<QueryGroupId, PendingInvalidation>>>,
+    /// Pending invalidations per query group (sharded for concurrency).
+    pending: DashMap<QueryGroupId, PendingInvalidation>,
 }
 
 impl InvalidationEngine {
@@ -61,12 +61,12 @@ impl InvalidationEngine {
         Self {
             subscription_manager,
             config,
-            pending: Arc::new(RwLock::new(HashMap::new())),
+            pending: DashMap::with_shard_amount(64),
         }
     }
 
     /// Process a database change. Finds affected groups (not subscriptions).
-    pub async fn process_change(&self, change: Change) {
+    pub fn process_change(&self, change: Change) {
         let affected = self.subscription_manager.find_affected_groups(&change);
 
         if affected.is_empty() {
@@ -80,39 +80,39 @@ impl InvalidationEngine {
         );
 
         let now = Instant::now();
-        let mut pending = self.pending.write().await;
 
         for group_id in affected {
-            let entry = pending
+            self.pending
                 .entry(group_id)
-                .or_insert_with(|| PendingInvalidation {
-                    group_id,
-                    changed_tables: HashSet::new(),
-                    first_change: now,
-                    last_change: now,
+                .and_modify(|entry| {
+                    entry.changed_tables.insert(change.table.clone());
+                    entry.last_change = now;
+                })
+                .or_insert_with(|| {
+                    let mut tables = HashSet::new();
+                    tables.insert(change.table.clone());
+                    PendingInvalidation {
+                        group_id,
+                        changed_tables: tables,
+                        first_change: now,
+                        last_change: now,
+                    }
                 });
-
-            entry.changed_tables.insert(change.table.clone());
-            entry.last_change = now;
         }
 
-        if pending.len() >= self.config.max_buffer_size {
-            // Force all pending groups to be immediately ready on the next
-            // check_pending tick by backdating their timestamps past the
-            // max debounce window. This avoids discarding group IDs (which
-            // flush_all would return with no consumer).
+        if self.pending.len() >= self.config.max_buffer_size {
             let past = Instant::now() - Duration::from_millis(self.config.max_debounce_ms + 1);
-            for inv in pending.values_mut() {
+            self.pending.alter_all(|_, mut inv| {
                 inv.first_change = past;
                 inv.last_change = past;
-            }
+                inv
+            });
         }
     }
 
     /// Check for groups that need to be invalidated (debounce expired).
-    pub async fn check_pending(&self) -> Vec<QueryGroupId> {
-        // Cheap read-lock pre-check: avoid acquiring the write lock when idle.
-        if self.pending.read().await.is_empty() {
+    pub fn check_pending(&self) -> Vec<QueryGroupId> {
+        if self.pending.is_empty() {
             return Vec::new();
         }
 
@@ -120,10 +120,9 @@ impl InvalidationEngine {
         let debounce = Duration::from_millis(self.config.debounce_ms);
         let max_debounce = Duration::from_millis(self.config.max_debounce_ms);
 
-        let mut pending = self.pending.write().await;
         let mut ready = Vec::new();
 
-        pending.retain(|_, inv| {
+        self.pending.retain(|_, inv| {
             let since_last = now.duration_since(inv.last_change);
             let since_first = now.duration_since(inv.first_change);
 
@@ -139,29 +138,26 @@ impl InvalidationEngine {
     }
 
     /// Flush all pending invalidations immediately.
-    pub async fn flush_all(&self) -> Vec<QueryGroupId> {
-        let mut pending = self.pending.write().await;
-        let ready: Vec<QueryGroupId> = pending.keys().copied().collect();
-        pending.clear();
+    pub fn flush_all(&self) -> Vec<QueryGroupId> {
+        let ready: Vec<QueryGroupId> = self.pending.iter().map(|r| *r.key()).collect();
+        self.pending.clear();
         ready
     }
 
     /// Get pending count for monitoring.
-    pub async fn pending_count(&self) -> usize {
-        self.pending.read().await.len()
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
     }
 
     /// Get statistics about the invalidation engine.
-    pub async fn stats(&self) -> InvalidationStats {
-        let pending = self.pending.read().await;
-
+    pub fn stats(&self) -> InvalidationStats {
         let mut tables_pending = HashSet::new();
-        for inv in pending.values() {
-            tables_pending.extend(inv.changed_tables.iter().cloned());
+        for entry in self.pending.iter() {
+            tables_pending.extend(entry.changed_tables.iter().cloned());
         }
 
         InvalidationStats {
-            pending_groups: pending.len(),
+            pending_groups: self.pending.len(),
             pending_tables: tables_pending.len(),
         }
     }
@@ -217,8 +213,8 @@ mod tests {
         let mgr = Arc::new(SubscriptionManager::new(50));
         let engine = engine_with_config(mgr, InvalidationConfig::default());
 
-        assert_eq!(engine.pending_count().await, 0);
-        let stats = engine.stats().await;
+        assert_eq!(engine.pending_count(), 0);
+        let stats = engine.stats();
         assert_eq!(stats.pending_groups, 0);
         assert_eq!(stats.pending_tables, 0);
     }
@@ -227,13 +223,11 @@ mod tests {
     async fn flush_all_on_empty_returns_empty() {
         let mgr = Arc::new(SubscriptionManager::new(50));
         let engine = engine_with_config(mgr, InvalidationConfig::default());
-        assert!(engine.flush_all().await.is_empty());
+        assert!(engine.flush_all().is_empty());
     }
 
     #[tokio::test]
     async fn process_change_without_subscribers_is_noop() {
-        // No subscribers → find_affected_groups returns empty → nothing
-        // should be inserted, even with the tightest debounce.
         let mgr = Arc::new(SubscriptionManager::new(50));
         let config = InvalidationConfig {
             debounce_ms: 0,
@@ -241,10 +235,8 @@ mod tests {
         };
         let engine = engine_with_config(mgr, config);
 
-        engine
-            .process_change(Change::new("users", ChangeOperation::Insert))
-            .await;
-        assert_eq!(engine.pending_count().await, 0);
+        engine.process_change(Change::new("users", ChangeOperation::Insert));
+        assert_eq!(engine.pending_count(), 0);
     }
 
     #[tokio::test]
@@ -252,57 +244,41 @@ mod tests {
         let mgr = manager_with_group("list_users", &["users"]);
         let engine = engine_with_config(mgr, InvalidationConfig::default());
 
-        engine
-            .process_change(Change::new("users", ChangeOperation::Insert))
-            .await;
+        engine.process_change(Change::new("users", ChangeOperation::Insert));
 
-        assert_eq!(engine.pending_count().await, 1);
-        let stats = engine.stats().await;
+        assert_eq!(engine.pending_count(), 1);
+        let stats = engine.stats();
         assert_eq!(stats.pending_groups, 1);
         assert_eq!(stats.pending_tables, 1);
     }
 
     #[tokio::test]
     async fn process_change_coalesces_repeats_for_same_group_into_one_entry() {
-        // Three inserts on the same table for one subscribed group must
-        // collapse to a single pending invalidation (the keying is by
-        // group id, not by change).
         let mgr = manager_with_group("list_users", &["users"]);
         let engine = engine_with_config(mgr, InvalidationConfig::default());
 
         for _ in 0..3 {
-            engine
-                .process_change(Change::new("users", ChangeOperation::Insert))
-                .await;
+            engine.process_change(Change::new("users", ChangeOperation::Insert));
         }
-        assert_eq!(engine.pending_count().await, 1);
+        assert_eq!(engine.pending_count(), 1);
     }
 
     #[tokio::test]
     async fn process_change_aggregates_multiple_tables_for_single_group() {
-        // A group subscribed to both `users` and `orders` gets one pending
-        // entry, but its `changed_tables` set must accumulate every table
-        // the change stream touched.
         let mgr = manager_with_group("dashboard", &["users", "orders"]);
         let engine = engine_with_config(mgr, InvalidationConfig::default());
 
-        engine
-            .process_change(Change::new("users", ChangeOperation::Insert))
-            .await;
-        engine
-            .process_change(Change::new("orders", ChangeOperation::Update))
-            .await;
+        engine.process_change(Change::new("users", ChangeOperation::Insert));
+        engine.process_change(Change::new("orders", ChangeOperation::Update));
 
-        assert_eq!(engine.pending_count().await, 1);
-        let stats = engine.stats().await;
+        assert_eq!(engine.pending_count(), 1);
+        let stats = engine.stats();
         assert_eq!(stats.pending_groups, 1);
         assert_eq!(stats.pending_tables, 2);
     }
 
     #[tokio::test(start_paused = true)]
     async fn check_pending_holds_entry_inside_debounce_window() {
-        // With a 50ms debounce and 200ms max, an entry that just arrived
-        // must not be emitted until at least the quiet window elapses.
         let mgr = manager_with_group("list_users", &["users"]);
         let engine = engine_with_config(
             mgr,
@@ -313,14 +289,11 @@ mod tests {
             },
         );
 
-        engine
-            .process_change(Change::new("users", ChangeOperation::Insert))
-            .await;
+        engine.process_change(Change::new("users", ChangeOperation::Insert));
 
-        // 40ms < debounce 50ms → still pending.
         tokio::time::advance(Duration::from_millis(40)).await;
-        assert!(engine.check_pending().await.is_empty());
-        assert_eq!(engine.pending_count().await, 1);
+        assert!(engine.check_pending().is_empty());
+        assert_eq!(engine.pending_count(), 1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -335,24 +308,17 @@ mod tests {
             },
         );
 
-        engine
-            .process_change(Change::new("users", ChangeOperation::Insert))
-            .await;
+        engine.process_change(Change::new("users", ChangeOperation::Insert));
 
         tokio::time::advance(Duration::from_millis(60)).await;
-        let ready = engine.check_pending().await;
+        let ready = engine.check_pending();
         assert_eq!(ready.len(), 1);
-        // Emission drains the entry — next check sees nothing.
-        assert_eq!(engine.pending_count().await, 0);
-        assert!(engine.check_pending().await.is_empty());
+        assert_eq!(engine.pending_count(), 0);
+        assert!(engine.check_pending().is_empty());
     }
 
     #[tokio::test(start_paused = true)]
     async fn check_pending_emits_via_max_debounce_when_changes_keep_coming() {
-        // A stream of changes faster than `debounce_ms` keeps `last_change`
-        // fresh, but `max_debounce_ms` (from `first_change`) must still
-        // eventually force the entry out. This prevents starvation under
-        // continuous write load.
         let mgr = manager_with_group("list_users", &["users"]);
         let engine = engine_with_config(
             mgr,
@@ -363,23 +329,13 @@ mod tests {
             },
         );
 
-        // First change pins `first_change`. Keep `last_change` fresh with
-        // sub-debounce ticks for 240ms (> max_debounce). We deliberately do
-        // not drain inside the loop — that would let the entry be emitted
-        // early, defeating the test.
-        engine
-            .process_change(Change::new("users", ChangeOperation::Insert))
-            .await;
+        engine.process_change(Change::new("users", ChangeOperation::Insert));
         for _ in 0..12 {
             tokio::time::advance(Duration::from_millis(20)).await;
-            engine
-                .process_change(Change::new("users", ChangeOperation::Insert))
-                .await;
+            engine.process_change(Change::new("users", ChangeOperation::Insert));
         }
 
-        // first_change is now ~240ms old (> max_debounce 200ms), even though
-        // last_change was just refreshed inside the quiet window.
-        let ready = engine.check_pending().await;
+        let ready = engine.check_pending();
         assert_eq!(
             ready.len(),
             1,
@@ -389,12 +345,7 @@ mod tests {
 
     #[tokio::test]
     async fn max_buffer_size_backdates_all_pending_to_force_next_flush() {
-        // When pending.len() crosses max_buffer_size, all existing entries
-        // are backdated past max_debounce so the next check_pending drains
-        // them in one go — preventing unbounded memory growth without
-        // discarding group IDs.
         let mgr = Arc::new(SubscriptionManager::new(50));
-        // Subscribe four distinct query groups (each gets its own group id).
         let session = SessionId::new();
         for i in 0..4 {
             mgr.subscribe(
@@ -417,15 +368,10 @@ mod tests {
             },
         );
 
-        // Single change touches all 4 groups in one pass and trips the
-        // buffer ceiling synchronously inside `process_change`.
-        engine
-            .process_change(Change::new("t", ChangeOperation::Insert))
-            .await;
-        assert_eq!(engine.pending_count().await, 4);
+        engine.process_change(Change::new("t", ChangeOperation::Insert));
+        assert_eq!(engine.pending_count(), 4);
 
-        // No advance needed — backdating already put them past the window.
-        let ready = engine.check_pending().await;
+        let ready = engine.check_pending();
         assert_eq!(ready.len(), 4);
     }
 
@@ -434,20 +380,16 @@ mod tests {
         let mgr = manager_with_group("list_users", &["users"]);
         let engine = engine_with_config(mgr, InvalidationConfig::default());
 
-        engine
-            .process_change(Change::new("users", ChangeOperation::Insert))
-            .await;
-        assert_eq!(engine.pending_count().await, 1);
+        engine.process_change(Change::new("users", ChangeOperation::Insert));
+        assert_eq!(engine.pending_count(), 1);
 
-        let flushed = engine.flush_all().await;
+        let flushed = engine.flush_all();
         assert_eq!(flushed.len(), 1);
-        assert_eq!(engine.pending_count().await, 0);
+        assert_eq!(engine.pending_count(), 0);
     }
 
     #[tokio::test]
     async fn stats_dedupes_tables_across_groups() {
-        // Two groups, both depending on `users`. After a single change to
-        // `users`, stats must report 2 pending_groups but only 1 pending_table.
         let mgr = Arc::new(SubscriptionManager::new(50));
         let session = SessionId::new();
         mgr.subscribe(
@@ -472,11 +414,9 @@ mod tests {
         .unwrap();
         let engine = engine_with_config(mgr, InvalidationConfig::default());
 
-        engine
-            .process_change(Change::new("users", ChangeOperation::Insert))
-            .await;
+        engine.process_change(Change::new("users", ChangeOperation::Insert));
 
-        let stats = engine.stats().await;
+        let stats = engine.stats();
         assert_eq!(stats.pending_groups, 2);
         assert_eq!(stats.pending_tables, 1);
     }

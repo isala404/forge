@@ -698,8 +698,7 @@ impl JobQueue {
                 worker_id = NULL,
                 claimed_at = NULL,
                 started_at = NULL,
-                last_heartbeat = NULL,
-                attempts = attempts - 1
+                last_heartbeat = NULL
             WHERE
                 cancel_requested_at IS NULL
                 AND (
