@@ -20,7 +20,8 @@ pub use db::{extract_table_name, instrumented_query, record_pool_metrics, record
 #[cfg(feature = "otel")]
 pub use metrics::{
     ActiveConnectionsGauge, FnCacheMetrics, FnMetrics, HttpMetrics, JobMetrics, record_fn_cache,
-    record_fn_execution, record_http_request, record_job_execution, set_active_connections,
+    record_fn_execution, record_http_request, record_job_execution, record_lost_claim,
+    set_active_connections,
 };
 #[cfg(feature = "otel")]
 pub use telemetry::{
@@ -119,6 +120,9 @@ mod stub {
 
     #[inline]
     pub fn record_job_execution(_job_type: &str, _status: &'static str, _duration_secs: f64) {}
+
+    #[inline]
+    pub fn record_lost_claim(_job_type: &str) {}
 
     #[inline]
     pub fn set_active_connections(_connection_type: &'static str, _delta: i64) {}

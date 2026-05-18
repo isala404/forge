@@ -6,7 +6,7 @@ use uuid::Uuid;
 use serde::Serialize;
 
 use crate::env::{EnvAccess, EnvProvider, RealEnvProvider};
-use crate::function::AuthContext;
+use crate::function::{AuthContext, KvHandle};
 use crate::http::CircuitBreakerClient;
 
 /// Returns an empty JSON object for initializing job saved data.
@@ -40,6 +40,8 @@ pub struct JobContext {
     progress_tx: Option<mpsc::Sender<ProgressUpdate>>,
     /// Environment variable provider.
     env_provider: Arc<dyn EnvProvider>,
+    /// KV store handle. `None` until threaded in by the runtime.
+    kv: Option<Arc<dyn KvHandle>>,
 }
 
 /// Progress update message.
@@ -75,7 +77,22 @@ impl JobContext {
             http_timeout: None,
             progress_tx: None,
             env_provider: Arc::new(RealEnvProvider::new()),
+            kv: None,
         }
+    }
+
+    /// Attach a KV store handle. Called by the runtime before handing the
+    /// context to the handler.
+    pub fn with_kv(mut self, kv: Arc<dyn KvHandle>) -> Self {
+        self.kv = Some(kv);
+        self
+    }
+
+    /// Access the KV store.
+    pub fn kv(&self) -> crate::error::Result<&dyn KvHandle> {
+        self.kv
+            .as_deref()
+            .ok_or_else(|| crate::error::ForgeError::Internal("KV store not available".into()))
     }
 
     /// Create a new job context with persisted saved data.
@@ -154,6 +171,15 @@ impl JobContext {
         &self.http_client
     }
 
+    /// Get the KV handle for bridge handlers that need to propagate it to
+    /// sub-contexts (e.g., CronContext from a cron bridge job).
+    ///
+    /// Not intended for use in application job handlers. Use `kv()` instead.
+    #[doc(hidden)]
+    pub fn kv_handle(&self) -> Option<Arc<dyn KvHandle>> {
+        self.kv.clone()
+    }
+
     /// Report job progress.
     pub fn progress(&self, percentage: u8, message: impl Into<String>) -> crate::Result<()> {
         let update = ProgressUpdate {
@@ -164,7 +190,7 @@ impl JobContext {
 
         if let Some(ref tx) = self.progress_tx {
             tx.send(update)
-                .map_err(|e| crate::ForgeError::Job(format!("Failed to send progress: {}", e)))?;
+                .map_err(|e| crate::ForgeError::Internal(format!("Failed to send progress: {e}")))?;
         }
 
         Ok(())
@@ -178,25 +204,14 @@ impl JobContext {
         self.saved_data.read().await.clone()
     }
 
-    /// Replace all saved job data.
-    ///
-    /// Replaces the entire saved data object. For updating individual keys,
-    /// use `save()` instead.
-    pub async fn set_saved(&self, data: serde_json::Value) -> crate::Result<()> {
-        let mut guard = self.saved_data.write().await;
-        *guard = data;
-        let persisted = Self::clone_and_drop(guard);
-        if self.job_id.is_nil() {
-            return Ok(());
-        }
-        self.persist_saved_data(persisted).await
-    }
-
     /// Save a key-value pair to persistent job data.
     ///
-    /// Saved data persists across retries and is accessible in compensation handlers.
-    /// Use this to store information needed for rollback (e.g., transaction IDs,
-    /// resource handles, progress markers).
+    /// Merges `key` into the saved data object and persists the result to the
+    /// database. Saved data survives retries and is accessible in compensation
+    /// handlers. Use this to store information needed for rollback (e.g.,
+    /// transaction IDs, resource handles, progress markers).
+    ///
+    /// Read saved data back with [`saved()`](Self::saved).
     ///
     /// # Example
     ///
@@ -250,6 +265,12 @@ impl JobContext {
         .map_err(crate::ForgeError::Database)?;
 
         Ok(id)
+    }
+
+    /// Type-safe dispatch: resolves the job name from the type's `ForgeJob`
+    /// impl and serializes the args at the call site.
+    pub async fn dispatch<J: crate::ForgeJob>(&self, args: &J::Args) -> crate::Result<Uuid> {
+        self.dispatch_job(J::info().name, args).await
     }
 
     /// Start a workflow directly.
@@ -585,10 +606,10 @@ mod tests {
             .progress(10, "lost")
             .expect_err("dropped receiver should fail send");
         match err {
-            crate::ForgeError::Job(msg) => {
+            crate::ForgeError::Internal(msg) => {
                 assert!(msg.contains("Failed to send progress"), "got: {msg}");
             }
-            other => panic!("expected ForgeError::Job, got {other:?}"),
+            other => panic!("expected ForgeError::Internal, got {other:?}"),
         }
     }
 
@@ -613,20 +634,6 @@ mod tests {
 
         assert_eq!(ctx.env("API_KEY"), Some("sk_test".to_string()));
         assert!(ctx.env("MISSING").is_none());
-    }
-
-    #[tokio::test]
-    async fn set_saved_replaces_data_when_job_id_is_nil_without_db_write() {
-        // With job_id == nil the implementation short-circuits before the DB
-        // update, so the in-memory replacement still works against a bogus pool.
-        let ctx = nil_ctx().with_saved(serde_json::json!({"keep": "me"}));
-        ctx.set_saved(serde_json::json!({"only": "this"}))
-            .await
-            .expect("nil-job set_saved should not touch DB");
-
-        let saved = ctx.saved().await;
-        assert!(saved.get("keep").is_none());
-        assert_eq!(saved["only"], "this");
     }
 
     #[tokio::test]

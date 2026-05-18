@@ -261,6 +261,18 @@ impl TestCronContextBuilder {
         self
     }
 
+    /// Add multiple roles.
+    pub fn with_roles(mut self, roles: Vec<String>) -> Self {
+        self.roles.extend(roles);
+        self
+    }
+
+    /// Add a custom claim.
+    pub fn with_claim(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
+        self.claims.insert(key.into(), value);
+        self
+    }
+
     /// Set the database pool.
     pub fn with_pool(mut self, pool: PgPool) -> Self {
         self.pool = Some(pool);

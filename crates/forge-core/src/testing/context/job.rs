@@ -109,18 +109,16 @@ impl TestJobContext {
     }
 
     /// Get all saved job data.
+    ///
+    /// Returns the in-memory data that was written via [`save()`](Self::save).
     pub fn saved(&self) -> serde_json::Value {
         self.saved_data.read().unwrap().clone()
     }
 
-    /// Replace all saved job data.
-    pub fn set_saved(&self, data: serde_json::Value) -> Result<()> {
-        let mut guard = self.saved_data.write().unwrap();
-        *guard = data;
-        Ok(())
-    }
-
     /// Save a key-value pair to job data.
+    ///
+    /// Merges `key` into the saved data object. Use [`saved()`](Self::saved)
+    /// to read it back in assertions.
     pub fn save(&self, key: &str, value: serde_json::Value) -> Result<()> {
         let mut guard = self.saved_data.write().unwrap();
         if let Some(map) = guard.as_object_mut() {
@@ -294,6 +292,18 @@ impl TestJobContextBuilder {
     /// Add a role.
     pub fn with_role(mut self, role: impl Into<String>) -> Self {
         self.roles.push(role.into());
+        self
+    }
+
+    /// Add multiple roles.
+    pub fn with_roles(mut self, roles: Vec<String>) -> Self {
+        self.roles.extend(roles);
+        self
+    }
+
+    /// Add a custom claim.
+    pub fn with_claim(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
+        self.claims.insert(key.into(), value);
         self
     }
 

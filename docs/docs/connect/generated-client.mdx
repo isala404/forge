@@ -2,15 +2,57 @@
 
 Type-safe frontend bindings generated from your Rust code and Forge macros.
 
-## The Code
+## When to Run It
 
-Run codegen after adding or modifying functions:
+`forge generate` is a manual step — it is not part of `cargo build` and does not run automatically when you change handler signatures. Run it whenever you:
+
+- Add a new `#[forge::query]`, `#[forge::mutation]`, or other handler
+- Rename or remove a handler
+- Change a handler's arguments or return type
+- Add, rename, or remove a `#[forge::model]` or `#[forge::forge_enum]`
 
 ```bash
 forge generate
 ```
 
 `forge generate` auto-detects the frontend target from `frontend/` and can also be forced with `--target sveltekit` or `--target dioxus`.
+
+If you forget to run it, `forge check` will catch the drift — it diffs the current bindings against freshly generated output and reports staleness.
+
+### Automating the step
+
+To ensure bindings never drift, add `forge generate -y` to your workflow in one of these places:
+
+**Pre-commit hook** (`.git/hooks/pre-commit`):
+
+```sh
+#!/bin/sh
+forge generate -y
+git add frontend/src/lib/forge   # or frontend/src/forge for Dioxus
+```
+
+**`package.json` script** (SvelteKit projects):
+
+```json
+{
+  "scripts": {
+    "generate": "forge generate -y",
+    "dev": "forge generate -y && vite dev"
+  }
+}
+```
+
+**`Makefile`**:
+
+```makefile
+generate:
+	forge generate -y
+
+dev: generate
+	cargo run
+```
+
+In CI, run `forge check` rather than `forge generate` — it validates that checked-in bindings are already up to date without overwriting them.
 
 ## SvelteKit Output
 

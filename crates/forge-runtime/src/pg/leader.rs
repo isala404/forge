@@ -20,6 +20,14 @@ pub struct LeaderConfig {
     /// a long lease (60s) still detects an out-of-band lock loss within a
     /// second instead of waiting for the next refresh tick.
     pub lock_validate_interval: Duration,
+    /// How often a lightweight `SELECT 1` is issued on the lock-owning
+    /// connection to prevent firewalls, load-balancers, or PostgreSQL's own
+    /// `tcp_keepalives_idle` from silently terminating an idle connection
+    /// and thereby releasing the advisory lock without the process noticing.
+    /// Should be well below the shortest idle-connection timeout in the
+    /// network path (typical firewall idle timeout is 5–10 minutes; 30 s
+    /// gives a comfortable margin).  Defaults to 30 s.
+    pub keepalive_interval: Duration,
 }
 
 impl Default for LeaderConfig {
@@ -28,6 +36,7 @@ impl Default for LeaderConfig {
             check_interval: Duration::from_secs(5),
             lease_duration: Duration::from_secs(60),
             lock_validate_interval: Duration::from_secs(1),
+            keepalive_interval: Duration::from_secs(30),
         }
     }
 }
@@ -101,6 +110,11 @@ impl LeaderElection {
     /// Get a shutdown receiver.
     pub fn shutdown_receiver(&self) -> watch::Receiver<bool> {
         self.shutdown_rx.clone()
+    }
+
+    /// How often the leader validates the advisory lock is still held.
+    pub fn lock_validate_interval(&self) -> Duration {
+        self.config.lock_validate_interval
     }
 
     /// Stop the leader election.
@@ -183,7 +197,7 @@ impl LeaderElection {
             None => {
                 drop(lock_connection);
                 self.drop_leadership_locally();
-                return Err(forge_core::ForgeError::Cluster(
+                return Err(forge_core::ForgeError::Internal(
                     "Lock connection missing during validation; dropped leadership".into(),
                 ));
             }
@@ -222,10 +236,42 @@ impl LeaderElection {
                 role = self.role.as_str(),
                 "Advisory lock no longer held on leader connection; dropped leadership"
             );
-            return Err(forge_core::ForgeError::Cluster(
+            return Err(forge_core::ForgeError::Internal(
                 "Advisory lock no longer held; dropped leadership".into(),
             ));
         }
+
+        Ok(())
+    }
+
+    /// Send a lightweight keepalive ping on the lock-owning connection.
+    ///
+    /// Firewalls and load-balancers silently drop idle TCP connections after
+    /// their idle-timeout (commonly 5–10 minutes). PostgreSQL may do the same
+    /// via `tcp_keepalives_idle`. Either way the advisory lock is released
+    /// without the process knowing, leading to silent leadership loss between
+    /// `validate_lock_held` intervals.
+    ///
+    /// Issuing `SELECT 1` every 30 s keeps the connection active at the TCP
+    /// level and ensures PostgreSQL doesn't reclaim the backend. This is a
+    /// no-op for standbys (no lock connection) and is distinct from
+    /// `validate_lock_held`: that method verifies the lock is still held;
+    /// this method prevents the connection from going idle in the first place.
+    pub async fn keepalive(&self) -> forge_core::Result<()> {
+        if !self.is_leader() {
+            return Ok(());
+        }
+
+        let mut lock_connection = self.lock_connection.lock().await;
+        let conn = match lock_connection.as_mut() {
+            Some(conn) => conn,
+            None => return Ok(()),
+        };
+
+        use sqlx::Connection as _;
+        conn.ping()
+            .await
+            .map_err(forge_core::ForgeError::Database)?;
 
         Ok(())
     }
@@ -251,7 +297,7 @@ impl LeaderElection {
             None => {
                 drop(lock_connection);
                 self.drop_leadership_locally();
-                return Err(forge_core::ForgeError::Cluster(
+                return Err(forge_core::ForgeError::Internal(
                     "Lock connection missing during lease refresh; dropped leadership".into(),
                 ));
             }
@@ -412,6 +458,8 @@ impl LeaderElection {
         validate_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut check_timer = tokio::time::interval(self.config.check_interval);
         check_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut keepalive_timer = tokio::time::interval(self.config.keepalive_interval);
+        keepalive_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
             tokio::select! {
@@ -420,6 +468,11 @@ impl LeaderElection {
                     // need an outer is_leader() guard here.
                     if let Err(e) = self.validate_lock_held().await {
                         tracing::debug!(error = %e, "Lock validation failed");
+                    }
+                }
+                _ = keepalive_timer.tick() => {
+                    if let Err(e) = self.keepalive().await {
+                        tracing::debug!(error = %e, "Leader connection keepalive failed");
                     }
                 }
                 _ = check_timer.tick() => {
@@ -465,9 +518,14 @@ mod tests {
         assert_eq!(config.check_interval, Duration::from_secs(5));
         assert_eq!(config.lease_duration, Duration::from_secs(60));
         assert_eq!(config.lock_validate_interval, Duration::from_secs(1));
+        assert_eq!(config.keepalive_interval, Duration::from_secs(30));
         assert!(
             config.lock_validate_interval < config.check_interval,
             "validate must run faster than check or it serves no purpose",
+        );
+        assert!(
+            config.keepalive_interval < Duration::from_secs(5 * 60),
+            "keepalive must fire well before typical firewall idle timeout (5 min)",
         );
     }
 }
@@ -528,7 +586,7 @@ mod integration_tests {
         }
 
         let err = election.refresh_lease().await.unwrap_err();
-        assert!(matches!(err, forge_core::ForgeError::Cluster(_)));
+        assert!(matches!(err, forge_core::ForgeError::Internal(_)));
         assert!(!election.is_leader());
     }
 
@@ -643,7 +701,7 @@ mod integration_tests {
         }
 
         let err = election.validate_lock_held().await.unwrap_err();
-        assert!(matches!(err, forge_core::ForgeError::Cluster(_)));
+        assert!(matches!(err, forge_core::ForgeError::Internal(_)));
         assert!(!election.is_leader());
     }
 

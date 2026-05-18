@@ -229,6 +229,8 @@ forge check --config ./config/forge.toml
 
 Generate frontend/runtime bindings from backend source code.
 
+`forge generate` is a **manual step** — it is not wired into `cargo build`. Run it after any change to handler signatures, argument types, return types, models, or enums. `forge check` reports staleness if you forget.
+
 ```bash
 forge generate [options]
 ```

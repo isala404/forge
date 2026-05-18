@@ -59,7 +59,7 @@ pub use forge_core::testing;
 
 // Re-export testing assertion macros
 pub use forge_core::{
-    assert_err, assert_err_variant, assert_http_called, assert_http_not_called,
+    assert_err, assert_err_matches, assert_err_variant, assert_http_called, assert_http_not_called,
     assert_job_dispatched, assert_job_not_dispatched, assert_ok, assert_workflow_not_started,
     assert_workflow_started,
 };

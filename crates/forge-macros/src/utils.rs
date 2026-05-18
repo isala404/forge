@@ -176,6 +176,106 @@ pub fn is_primitive_arg_type(ty: &syn::Type) -> bool {
     )
 }
 
+/// Convert an `every = "..."` duration string to a cron expression.
+///
+/// Supported units: `m` (minutes), `h` (hours). Seconds are rejected because
+/// the minimum cron granularity is one minute. Days and other units map to
+/// the equivalent number of minutes/hours when they fit in a valid cron step.
+///
+/// Returns `Ok(cron_expression)` or `Err(human-readable error)`.
+pub fn every_to_cron(s: &str) -> Result<String, String> {
+    let s = s.trim();
+
+    // Reject sub-minute units before numeric parsing. "ms" must be checked
+    // first so that "500ms" doesn't also match the bare-'s' arm.
+    if s.ends_with("ms") {
+        return Err(
+            "cron minimum granularity is 1 minute; use \"1m\" or higher".to_string(),
+        );
+    }
+    if let Some(body) = s.strip_suffix('s') {
+        // Only treat it as a seconds suffix when the body ends with a digit
+        // (e.g. "30s"). Things like "hours" ending in 's' are caught by the
+        // fallthrough error at the end.
+        if body.chars().last().is_some_and(|c| c.is_ascii_digit()) {
+            return Err(
+                "cron minimum granularity is 1 minute; use \"1m\" or higher".to_string(),
+            );
+        }
+    }
+
+    if let Some(num_str) = s.strip_suffix('m') {
+        let n: u64 = num_str
+            .parse()
+            .map_err(|_| format!("invalid duration \"{s}\": expected a positive integer before 'm'"))?;
+        if n == 0 {
+            return Err(format!("invalid duration \"{s}\": value must be >= 1"));
+        }
+        if n == 1 {
+            return Ok("* * * * *".to_string());
+        }
+        if 60 % n == 0 {
+            return Ok(format!("*/{n} * * * *"));
+        }
+        return Err(format!(
+            "every = \"{s}\": {n} must evenly divide 60 for a valid cron step (use 1, 2, 3, 4, 5, 6, 10, 12, 15, 20, or 30)"
+        ));
+    }
+
+    if let Some(num_str) = s.strip_suffix('h') {
+        let n: u64 = num_str
+            .parse()
+            .map_err(|_| format!("invalid duration \"{s}\": expected a positive integer before 'h'"))?;
+        if n == 0 {
+            return Err(format!("invalid duration \"{s}\": value must be >= 1"));
+        }
+        if n == 1 {
+            return Ok("0 * * * *".to_string());
+        }
+        if 24 % n == 0 {
+            return Ok(format!("0 */{n} * * *"));
+        }
+        return Err(format!(
+            "every = \"{s}\": {n} must evenly divide 24 for a valid cron step (use 1, 2, 3, 4, 6, 8, or 12)"
+        ));
+    }
+
+    Err(format!(
+        "invalid duration \"{s}\": use a suffix like \"5m\" or \"1h\""
+    ))
+}
+
+/// Convert a `daily_at = "HH:MM"` string to a cron expression `"0 H * * *"`.
+///
+/// The timezone is handled separately at the runtime level; this function only
+/// produces the schedule string. Returns `Ok(cron_expression)` or `Err(...)`.
+pub fn daily_at_to_cron(s: &str) -> Result<String, String> {
+    let s = s.trim();
+    let (hour_str, minute_str) = s.split_once(':').ok_or_else(|| {
+        format!("invalid daily_at \"{s}\": expected \"HH:MM\" format (e.g. \"03:00\")")
+    })?;
+
+    let hour: u32 = hour_str
+        .parse()
+        .map_err(|_| format!("invalid daily_at \"{s}\": hour must be an integer"))?;
+    let minute: u32 = minute_str
+        .parse()
+        .map_err(|_| format!("invalid daily_at \"{s}\": minute must be an integer"))?;
+
+    if hour > 23 {
+        return Err(format!(
+            "invalid daily_at \"{s}\": hour {hour} is out of range (0–23)"
+        ));
+    }
+    if minute > 59 {
+        return Err(format!(
+            "invalid daily_at \"{s}\": minute {minute} is out of range (0–59)"
+        ));
+    }
+
+    Ok(format!("{minute} {hour} * * *"))
+}
+
 /// Returns an error message if the type is not portable across the wire
 /// (i.e. codegen cannot emit bindings for it). Must match
 /// `forge-codegen/src/parser.rs:unsupported_type_reason`.
@@ -209,12 +309,11 @@ fn leaf_type_ident(ty: &syn::Type) -> Option<&syn::Ident> {
         syn::Type::Path(p) => {
             let seg = p.path.segments.last()?;
             let name = seg.ident.to_string();
-            if matches!(name.as_str(), "Option" | "Vec") {
-                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
-                    if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
-                        return leaf_type_ident(inner);
-                    }
-                }
+            if matches!(name.as_str(), "Option" | "Vec")
+                && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+                && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+            {
+                return leaf_type_ident(inner);
             }
             Some(&seg.ident)
         }
@@ -529,6 +628,78 @@ mod tests {
         // HashMap<String, u32> — leaf is HashMap, not u32, so it passes.
         // Deep inner types are validated by codegen's validate_registry.
         assert!(check_arg_wire_type(&parse_ty("HashMap<String, u32>")).is_none());
+    }
+
+    #[test]
+    fn every_to_cron_converts_minutes() {
+        assert_eq!(every_to_cron("1m").unwrap(), "* * * * *");
+        assert_eq!(every_to_cron("5m").unwrap(), "*/5 * * * *");
+        assert_eq!(every_to_cron("15m").unwrap(), "*/15 * * * *");
+        assert_eq!(every_to_cron("30m").unwrap(), "*/30 * * * *");
+        assert_eq!(every_to_cron("60m").unwrap(), "*/60 * * * *");
+    }
+
+    #[test]
+    fn every_to_cron_converts_hours() {
+        assert_eq!(every_to_cron("1h").unwrap(), "0 * * * *");
+        assert_eq!(every_to_cron("2h").unwrap(), "0 */2 * * *");
+        assert_eq!(every_to_cron("6h").unwrap(), "0 */6 * * *");
+        assert_eq!(every_to_cron("12h").unwrap(), "0 */12 * * *");
+    }
+
+    #[test]
+    fn every_to_cron_rejects_sub_minute() {
+        let err = every_to_cron("30s").unwrap_err();
+        assert!(
+            err.contains("minimum granularity"),
+            "unexpected error: {err}"
+        );
+        let err = every_to_cron("500ms").unwrap_err();
+        assert!(err.contains("minimum granularity"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn every_to_cron_rejects_non_divisors() {
+        // 7m does not evenly divide 60 — must error.
+        let err = every_to_cron("7m").unwrap_err();
+        assert!(err.contains("evenly divide"), "unexpected: {err}");
+        // 5h does not evenly divide 24 — must error.
+        let err = every_to_cron("5h").unwrap_err();
+        assert!(err.contains("evenly divide"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn every_to_cron_rejects_zero_and_invalid() {
+        assert!(every_to_cron("0m").is_err());
+        assert!(every_to_cron("0h").is_err());
+        assert!(every_to_cron("xm").is_err());
+        assert!(every_to_cron("abc").is_err());
+        // No suffix at all.
+        assert!(every_to_cron("5").is_err());
+    }
+
+    #[test]
+    fn daily_at_to_cron_converts_time() {
+        assert_eq!(daily_at_to_cron("03:00").unwrap(), "0 3 * * *");
+        assert_eq!(daily_at_to_cron("00:00").unwrap(), "0 0 * * *");
+        assert_eq!(daily_at_to_cron("23:59").unwrap(), "59 23 * * *");
+        assert_eq!(daily_at_to_cron("12:30").unwrap(), "30 12 * * *");
+    }
+
+    #[test]
+    fn daily_at_to_cron_rejects_bad_input() {
+        // Missing colon.
+        assert!(daily_at_to_cron("0300").is_err());
+        // Hour out of range.
+        let err = daily_at_to_cron("24:00").unwrap_err();
+        assert!(err.contains("out of range"), "unexpected: {err}");
+        // Minute out of range.
+        let err = daily_at_to_cron("12:60").unwrap_err();
+        assert!(err.contains("out of range"), "unexpected: {err}");
+        // Non-numeric.
+        assert!(daily_at_to_cron("ab:cd").is_err());
+        // Leading whitespace is trimmed — valid.
+        assert!(daily_at_to_cron("  09:00  ").is_ok());
     }
 
     #[test]

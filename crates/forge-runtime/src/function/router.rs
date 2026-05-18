@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use forge_core::{
     AuthContext, CircuitBreakerClient, ForgeError, FunctionInfo, FunctionKind, JobDispatch,
-    MutationContext, QueryContext, RequestMetadata, Result, SharedRoleResolver, WorkflowDispatch,
-    default_role_resolver,
+    KvHandle, MutationContext, QueryContext, RequestMetadata, Result, SharedRoleResolver,
+    WorkflowDispatch, default_role_resolver,
     rate_limit::{RateLimitConfig, RateLimiterBackend},
 };
 use serde_json::Value;
@@ -76,6 +76,7 @@ struct MutationDeps {
     token_issuer: Option<Arc<dyn forge_core::TokenIssuer>>,
     token_ttl: forge_core::AuthTokenTtl,
     max_jobs_per_request: usize,
+    kv: Option<Arc<dyn KvHandle>>,
 }
 
 /// Routes and executes function calls with timeout, rate limiting, and observability.
@@ -122,6 +123,7 @@ impl FunctionRouter {
                 token_issuer: None,
                 token_ttl: forge_core::AuthTokenTtl::default(),
                 max_jobs_per_request: 0,
+                kv: None,
             }),
             rate_limiter,
             role_resolver: default_role_resolver(),
@@ -219,6 +221,17 @@ impl FunctionRouter {
     pub fn with_workflow_dispatcher(mut self, dispatcher: Arc<dyn WorkflowDispatch>) -> Self {
         self.deps_mut().workflow_dispatcher = Some(dispatcher);
         self
+    }
+
+    /// Attach a KV store handle so handlers can call `ctx.kv()`.
+    pub fn with_kv(mut self, kv: Arc<dyn KvHandle>) -> Self {
+        self.deps_mut().kv = Some(kv);
+        self
+    }
+
+    /// Attach a KV store handle (mutable reference version).
+    pub fn set_kv(&mut self, kv: Arc<dyn KvHandle>) {
+        self.deps_mut().kv = Some(kv);
     }
 
     /// Set the default timeout applied to all function calls.
@@ -487,7 +500,10 @@ impl FunctionRouter {
                         tracing::Span::current().record("cache.hit", false);
                         crate::observability::record_fn_cache(function_name, false);
 
-                        let ctx = QueryContext::new(pool, auth, request);
+                        let mut ctx = QueryContext::new(pool, auth, request);
+                        if let Some(ref kv) = self.mutation_deps.kv {
+                            ctx.set_kv(Arc::clone(kv));
+                        }
                         let result = handler(&ctx, args.clone()).await?;
                         self.check_result_size(&result)?;
 
@@ -505,7 +521,10 @@ impl FunctionRouter {
                             cache_hit: false,
                         })
                     } else {
-                        let ctx = QueryContext::new(pool, auth, request);
+                        let mut ctx = QueryContext::new(pool, auth, request);
+                        if let Some(ref kv) = self.mutation_deps.kv {
+                            ctx.set_kv(Arc::clone(kv));
+                        }
                         let result = handler(&ctx, args).await?;
                         self.check_result_size(&result)?;
                         Ok(RouteOutcome {
@@ -535,6 +554,9 @@ impl FunctionRouter {
                         ctx.set_http_timeout(info.http_timeout);
                         if deps.max_jobs_per_request > 0 {
                             ctx.set_max_jobs_per_request(deps.max_jobs_per_request);
+                        }
+                        if let Some(ref kv) = deps.kv {
+                            ctx.set_kv(Arc::clone(kv));
                         }
                         let value = handler(&ctx, args).await?;
                         self.check_result_size(&value)?;
@@ -692,6 +714,9 @@ impl FunctionRouter {
             ctx.set_http_timeout(info.http_timeout);
             if deps.max_jobs_per_request > 0 {
                 ctx.set_max_jobs_per_request(deps.max_jobs_per_request);
+            }
+            if let Some(ref kv) = deps.kv {
+                ctx.set_kv(Arc::clone(kv));
             }
 
             let result = handler(&ctx, args).await;

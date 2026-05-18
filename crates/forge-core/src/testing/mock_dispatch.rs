@@ -29,6 +29,9 @@ pub struct DispatchedJob {
     pub in_connection: bool,
     /// When the job was dispatched.
     pub dispatched_at: DateTime<Utc>,
+    /// Explicit scheduled time, if dispatched via `dispatch_job_at` / `dispatch_job_after`.
+    /// `None` for immediately-runnable jobs.
+    pub scheduled_at: Option<DateTime<Utc>>,
     /// Current status (for test simulation).
     pub status: JobStatus,
     /// Cancellation reason (if any).
@@ -79,7 +82,18 @@ impl MockJobDispatch {
 
     /// Dispatch a job (records for later verification).
     pub async fn dispatch<T: serde::Serialize>(&self, job_type: &str, args: T) -> Result<Uuid> {
-        self.dispatch_inner(job_type, args, None, false).await
+        self.dispatch_inner(job_type, args, None, false, None).await
+    }
+
+    /// Dispatch a job at a specific time (records for later verification).
+    pub async fn dispatch_at<T: serde::Serialize>(
+        &self,
+        job_type: &str,
+        args: T,
+        scheduled_at: DateTime<Utc>,
+    ) -> Result<Uuid> {
+        self.dispatch_inner(job_type, args, None, false, Some(scheduled_at))
+            .await
     }
 
     /// Internal dispatch that captures all metadata.
@@ -89,6 +103,7 @@ impl MockJobDispatch {
         args: T,
         owner_subject: Option<String>,
         in_connection: bool,
+        scheduled_at: Option<DateTime<Utc>>,
     ) -> Result<Uuid> {
         let id = Uuid::new_v4();
         let args_json =
@@ -101,6 +116,7 @@ impl MockJobDispatch {
             owner_subject,
             in_connection,
             dispatched_at: Utc::now(),
+            scheduled_at,
             status: JobStatus::Pending,
             cancel_reason: None,
         };
@@ -225,7 +241,21 @@ impl crate::function::JobDispatch for MockJobDispatch {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Uuid>> + Send + '_>> {
         let job_type = job_type.to_string();
         Box::pin(async move {
-            self.dispatch_inner(&job_type, args, owner_subject, false)
+            self.dispatch_inner(&job_type, args, owner_subject, false, None)
+                .await
+        })
+    }
+
+    fn dispatch_by_name_at(
+        &self,
+        job_type: &str,
+        args: serde_json::Value,
+        scheduled_at: DateTime<Utc>,
+        owner_subject: Option<String>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Uuid>> + Send + '_>> {
+        let job_type = job_type.to_string();
+        Box::pin(async move {
+            self.dispatch_inner(&job_type, args, owner_subject, false, Some(scheduled_at))
                 .await
         })
     }
@@ -238,7 +268,21 @@ impl crate::function::JobDispatch for MockJobDispatch {
         owner_subject: Option<String>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Uuid>> + Send + 'a>> {
         Box::pin(async move {
-            self.dispatch_inner(job_type, args, owner_subject, true)
+            self.dispatch_inner(job_type, args, owner_subject, true, None)
+                .await
+        })
+    }
+
+    fn dispatch_in_conn_at<'a>(
+        &'a self,
+        _conn: &'a mut sqlx::PgConnection,
+        job_type: &'a str,
+        args: serde_json::Value,
+        scheduled_at: DateTime<Utc>,
+        owner_subject: Option<String>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Uuid>> + Send + 'a>> {
+        Box::pin(async move {
+            self.dispatch_inner(job_type, args, owner_subject, true, Some(scheduled_at))
                 .await
         })
     }

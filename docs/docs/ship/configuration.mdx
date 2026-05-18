@@ -467,7 +467,7 @@ Built-in product analytics and frontend diagnostics. Enabled by default. See [Si
 | `diagnostics`          | bool     | `true`  | Accept frontend error reports                    |
 | `session_timeout_mins` | u32      | `30`    | Inactivity timeout before closing a session      |
 | `retention_days`       | u32      | `90`    | Drop monthly partitions older than this          |
-| `anonymize_ip`         | bool     | `false` | Store hashed visitor ID instead of raw IP        |
+| `anonymize_ip`         | bool     | `true`  | Store hashed visitor ID instead of raw IP        |
 | `batch_size`           | usize    | `100`   | Events per batch INSERT to PostgreSQL            |
 | `flush_interval_ms`    | u64      | `5000`  | Max milliseconds between event buffer flushes    |
 | `excluded_functions`   | string[] | `[]`    | Function names to skip in auto-capture           |
@@ -482,6 +482,27 @@ excluded_functions = ["health_check"]
 ```
 
 Signal events are stored in monthly-partitioned tables. The collector buffers events in memory and flushes them in batches using PostgreSQL's `UNNEST()` for efficient writes.
+
+## Production Defaults
+
+Most defaults are designed to be safe out of the box. The table below calls out the ones you must review before going to production.
+
+| Setting | Default | Production guidance |
+| ------- | ------- | ------------------- |
+| `auth.*` | unconfigured (no JWT validation) | Auth is **off by default**. Every RPC endpoint is publicly callable unless you configure `[auth]`. Set `jwt_secret` (HS256) or `jwks_url` (RS256) before deploying anything user-facing. |
+| `gateway.cors_enabled` | `false` | CORS is off. Enable it only when a browser client needs cross-origin access, and set explicit origins — never `["*"]` on a credentialed API. |
+| `gateway.hsts` | `false` | Off because local dev uses plain HTTP. Set `hsts = true` when terminating TLS at the gateway (not at a load balancer) to prevent protocol downgrade attacks. |
+| `gateway.trusted_proxies` | `[]` (empty) | `X-Forwarded-For` is ignored and the raw peer IP is used for rate limiting and signals. If your app runs behind a load balancer or ingress controller, set `trusted_proxies` to its CIDR range so client IPs are resolved correctly. |
+| `rate_limit.*` | `hybrid` mode, no per-function limits | The mode controls how counters are stored. Limits themselves are declared per-handler with `#[forge::query(rate_limit = ...)]`. With no annotations, no rate limiting is applied. Add per-function limits to any public or unauthenticated endpoint. |
+| `signals.anonymize_ip` | `true` | IPs are hashed by default. Set `anonymize_ip = false` only if you have a lawful basis for storing raw IPs (e.g. explicit consent or a fraud-investigation requirement). Raw IPs likely qualify as personal data under GDPR. |
+
+### Set `FORGE_ENV=production`
+
+`AuthConfig::dev_mode()` and `AuthMiddleware::permissive()` are test helpers that bypass JWT validation. They fail at construction with a `ForgeError::Config` when `FORGE_ENV=production`, so a stray dev override cannot accidentally ship. Set this variable on every production deployment:
+
+```bash
+FORGE_ENV=production
+```
 
 ## Patterns
 

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use forge_core::function::KvHandle;
 use tokio::sync::mpsc;
 use tracing::Instrument;
 use uuid::Uuid;
@@ -87,6 +88,16 @@ impl Worker {
             executor,
             shutdown_tx: None,
         }
+    }
+
+    /// Attach a KV store handle so job handlers can call `ctx.kv()`.
+    pub fn with_kv(mut self, kv: Arc<dyn KvHandle>) -> Self {
+        // Arc::get_mut succeeds here because `self` holds the only reference to
+        // the executor at construction time (no tasks spawned yet).
+        if let Some(executor) = Arc::get_mut(&mut self.executor) {
+            executor.set_kv(kv);
+        }
+        self
     }
 
     /// Get worker ID.
@@ -235,7 +246,9 @@ impl Worker {
                 _ = tokio::time::sleep(self.config.poll_interval) => {}
             }
 
-            let available = semaphore.available_permits();
+            let user_available = semaphore.available_permits();
+            let system_available = system_semaphore.available_permits();
+            let available = user_available + system_available;
             if available == 0 {
                 continue;
             }
@@ -265,17 +278,35 @@ impl Worker {
                 let is_system_job =
                     job.job_type.starts_with("$workflow_") || job.job_type.starts_with("$cron:");
                 let permit = if is_system_job {
-                    match system_semaphore.clone().acquire_owned().await {
+                    match system_semaphore.clone().try_acquire_owned() {
                         Ok(p) => p,
-                        Err(_) => {
+                        Err(tokio::sync::TryAcquireError::NoPermits) => {
+                            // System slots full; job remains claimed and will be
+                            // reclaimed by stale-job cleanup, then re-queued.
+                            tracing::debug!(
+                                job_id = %job.id,
+                                "System semaphore full, job will be reclaimed"
+                            );
+                            continue;
+                        }
+                        Err(tokio::sync::TryAcquireError::Closed) => {
                             tracing::error!("System semaphore closed, stopping job processing");
                             break;
                         }
                     }
                 } else {
-                    match semaphore.clone().acquire_owned().await {
+                    match semaphore.clone().try_acquire_owned() {
                         Ok(p) => p,
-                        Err(_) => {
+                        Err(tokio::sync::TryAcquireError::NoPermits) => {
+                            // User slots full; job remains claimed and will be
+                            // reclaimed by stale-job cleanup, then re-queued.
+                            tracing::debug!(
+                                job_id = %job.id,
+                                "Worker semaphore full, job will be reclaimed"
+                            );
+                            continue;
+                        }
+                        Err(tokio::sync::TryAcquireError::Closed) => {
                             tracing::error!("Worker semaphore closed, stopping job processing");
                             break;
                         }

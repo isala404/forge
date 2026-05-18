@@ -81,6 +81,20 @@ pub struct WorkflowInfo {
     /// User-facing version identifier (e.g. "2026-03", "v2", "signup-fix-1").
     pub version: &'static str,
     /// Derived signature from the persisted contract. Used as the hard runtime safety gate.
+    ///
+    /// Computed at compile time by the `#[workflow]` macro as a blake3 hash (truncated to
+    /// 128 bits) of: workflow name, version, step keys, wait-for-event keys, timeout, and
+    /// input/output type names.
+    ///
+    /// **Renaming a step or wait key is a breaking change.** When a resumed run finds that
+    /// the current binary's signature differs from the one stored at run creation, the run
+    /// is blocked with `WorkflowStatus::BlockedSignatureMismatch`. The generated struct
+    /// produced by the macro carries a `// forge:contract` comment listing every key that
+    /// contributes to the signature, so `cargo expand` shows what is tracked.
+    ///
+    /// To evolve a workflow safely:
+    /// 1. Keep the old function (mark it `deprecated`) so in-flight runs can drain.
+    /// 2. Create a new function under a new version string with the renamed steps.
     pub signature: &'static str,
     /// Lifecycle status of this version.
     pub status: WorkflowDefStatus,

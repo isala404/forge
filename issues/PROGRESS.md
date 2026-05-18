@@ -228,7 +228,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `realtime/reactor.rs:560-587, 799-807` — 50k groups → 833 query executions/sec just from the sweep.
       Validate: resync is opt-in per group (triggered by `Lagged` or `needs_resync`); the unconditional sweep runs at a far-tail cadence (≥10 min) or is gated by config; idle-baseline DB QPS drops on a 50k-group test.
 
-- [ ] **[02.10] `find_affected_groups` clones full subscriber set per change** · *Med*
+- [x] **[02.10] `find_affected_groups` clones full subscriber set per change** · *Med*
       Context: `realtime/manager.rs:261-280` — per-notify cost scales linearly with subscriber count for hot tables.
       Validate: column-filter prefiltering in `table_index`, or batched per-table change resolution within the debounce window; benchmark on a hot table with 20k subscribed groups shows bounded per-notify cost.
 
@@ -240,7 +240,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `realtime/reactor.rs:1037-1061` — per-step lookup of `workflow_run_id`, then `fetch_workflow_data_static` × 2.
       Validate: (a) trigger payload includes `workflow_run_id`; (b) `handle_workflow_change` is spawned, not awaited inline; (c) step notifies coalesce per (workflow_id, window).
 
-- [ ] **[02.13] JWT-expired sessions occupy state until next push** · *Low*
+- [x] **[02.13] JWT-expired sessions occupy state until next push** · *Low*
       Context: `realtime/message.rs:212-230, 355-382` — cleanup runs every 60s.
       Validate: a min-heap of `(exp, session_id)` schedules precise expiry batches; idle expired sessions vacate within seconds, not a minute.
 
@@ -296,11 +296,11 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `workflow/executor.rs:326-344`, `forge-core/src/workflow/context.rs:617-622` — closures don't survive restart.
       Validate: compensation handlers must be expressed as named jobs/workflows referenced by registry name; OR the macro rejects `.compensate(...)` followed by a suspension point; either way the failure mode is surfaced at design time, not in production.
 
-- [ ] **[03.11] Worker semaphore acquisition blocks the claim loop** · *P2*
+- [x] **[03.11] Worker semaphore acquisition blocks the claim loop** · *P2*
       Context: `jobs/worker.rs:225-308` — `acquire_owned().await` inside `for job in jobs` stalls the loop when system jobs hold the permits.
       Validate: `try_acquire_owned` first; on failure for the system semaphore, the job is returned to the queue with backoff; or claim is split into two queries (system + user) sized appropriately.
 
-- [ ] **[03.12] `start()` fence reset costs a semaphore permit on lost-claim race** · *P2*
+- [x] **[03.12] `start()` fence reset costs a semaphore permit on lost-claim race** · *P2*
       Context: `jobs/executor.rs:64-79`.
       Validate: a `worker_lost_claim_total` metric exists so operators can tune `stale_threshold`; doc warns about the small cost.
 
@@ -312,7 +312,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `workflow/event_store.rs:43-49` — payload built but scheduler doesn't parse it; just polls.
       Validate: either consume the payload to target specific run IDs or send empty payload to reduce bandwidth; pick one and act.
 
-- [ ] **[03.15] Worker pool vs `max_concurrent` interaction is undocumented** · *P2*
+- [x] **[03.15] Worker pool vs `max_concurrent` interaction is undocumented** · *P2*
       Context: `jobs/worker.rs:50-58` + shared pool.
       Validate: `Forge::build()` warns/errors when `pool.max_connections < sum(workers × concurrency) + RPC concurrency`; the formula is documented; heartbeat task gets a small `min_connections` reservation.
 
@@ -388,11 +388,11 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `cron/scheduler.rs:190`, `pg/leader.rs:411` — cached `AtomicBool` is up to 1s stale; both leaders may fire `tick()`.
       Validate: `is_leader()` callers re-validate the lock at the start of each tick; cron claim asserts the caller's node holds the lease row in the same statement.
 
-- [ ] **[07.2] Daemon leader-elected loop never re-checks leadership** · *High*
+- [x] **[07.2] Daemon leader-elected loop never re-checks leadership** · *High*
       Context: `daemon/runner.rs:329-356, 408`.
       Validate: `LeaderElection::run()` is spawned as a sibling task; a `watch::Receiver<bool>` (or `CancellationToken`) is plumbed into `DaemonContext`; daemon handlers are cancelled via `tokio::select!` on leadership drop; a chaos test pulls the lock and observes the handler future is cancelled within `lock_validate_interval`.
 
-- [ ] **[07.3] Lock-owning connection has no proactive keepalive** · *High*
+- [x] **[07.3] Lock-owning connection has no proactive keepalive** · *High*
       Context: `pg/leader.rs:122-126, 161`.
       Validate: `SELECT 1` on the held connection every `min(check_interval/2, 5s)`; OR a leader-only single-conn pool with explicit TCP keepalives and `max_lifetime(Duration::MAX)`; a chaos test that injects a TCP RST is detected within one validate cycle.
 
@@ -424,7 +424,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `workflow/registry.rs:152-176`, `workflow/scheduler.rs:334`.
       Validate: signature mismatch returns the run to its prior `sleeping`/`waiting` state (non-terminal); blocked transition only after N consecutive mismatches across all live nodes; a rolling-deploy chaos test does not strand in-flight runs.
 
-- [ ] **[07.11] Graceful shutdown releases lock before leader-held work drains** · *High*
+- [x] **[07.11] Graceful shutdown releases lock before leader-held work drains** · *High*
       Context: `cluster/shutdown.rs:88-131` — only RPC handlers tracked.
       Validate: leader-elected subsystems signal "cleanly stopped" before `release_leadership`; OR the in-flight counter includes daemon/cron/workflow work; a regression test under SIGTERM shows no overlap between old-leader work and new-leader work.
 
@@ -520,7 +520,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `forge-core/src/error.rs:12-110` — 23 flat variants; many → 500.
       Validate: two-level shape (`Client(ClientError)` vs `Server(ServerError)`) or helper methods (`is_client_error`, `is_retryable`); consumers can pattern-match user vs server faults without enumerating every variant.
 
-- [ ] **[09.3] `WorkflowSuspended` is a control-flow sentinel as an error** · *Med*
+- [x] **[09.3] `WorkflowSuspended` is a control-flow sentinel as an error** · *Med*
       Context: `forge-core/src/error.rs:84-85`.
       Validate: hoisted into the executor's own `StepOutcome { Completed, Suspended, Failed }`; the variant is removed from `ForgeError`.
 
@@ -528,7 +528,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: sqlx errors include connection strings; SSRF Forbidden echoes the private host; token errors echo parameter values.
       Validate: `client_message()` separates from `Display`; passwords stripped at the `From<sqlx::Error>` boundary; private-host echo replaced with a generic refusal; regression test: a sqlx error never reveals the password in `client_message`.
 
-- [ ] **[09.5] `assert_*` macros force brittle substring matching** · *Med*
+- [x] **[09.5] `assert_*` macros force brittle substring matching** · *Med*
       Context: `forge-core/src/testing/assertions.rs:178-187`.
       Validate: structured `ForgeError::Validation { field, message }`; `assert_validation_error!(result, field: "email")` macro; or `assert_err_code!(result, "validation.field_required")`; `error_contains` removed from public API.
 
@@ -700,23 +700,23 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
 
 ## K. Agent-first API ergonomics
 
-- [ ] **[11.F1] Dispatch APIs are string-keyed** · *Crit*
+- [x] **[11.F1] Dispatch APIs are string-keyed** · *Crit*
       Context: `dispatch_job`, `start_workflow` are stringly typed across `MutationContext`/`JobContext`/`WebhookContext`/`DaemonContext`/`McpToolContext`. Macros already generate `SendWelcomeEmailJob` types — dispatch doesn't route through them.
       Validate: `ctx.dispatch::<SendWelcomeEmailJob>(input)` and `ctx.start::<WorkflowType>(input)` exist; `dispatch_by_name` reserved as escape hatch; the string-keyed methods are deprecated or removed; type-safe dispatch is the recommended path in docs.
 
-- [ ] **[11.F2] KV store is implemented but invisible to handlers** · *Crit*
+- [x] **[11.F2] KV store is implemented but invisible to handlers** · *Crit*
       Context: `forge-runtime/src/kv/store.rs` exists; not on any context, not in prelude.
       Validate: `ctx.kv()` exists on `HandlerContext` returning `KvHandle` with `get/set/set_with_ttl/delete/incr`; documented in `api.md`; available from every handler kind.
 
-- [ ] **[11.F3] No `dispatch_job_at` / `dispatch_job_after` on context** · *High*
+- [x] **[11.F3] No `dispatch_job_at` / `dispatch_job_after` on context** · *High*
       Context: `JobQueue::dispatch_with_delay` exists; not on `MutationContext`.
       Validate: `ctx.dispatch_after::<JobType>(input, Duration)` and `ctx.dispatch_at::<JobType>(input, DateTime<Utc>)` exist on every dispatch-capable context.
 
-- [ ] **[11.F4] Context methods drift across handler kinds** · *High*
+- [x] **[11.F4] Context methods drift across handler kinds** · *High*
       Context: `QueryContext::db() → ForgeDb`, `MutationContext::db() → DbConn<'_>`, `JobContext::db() → ForgeDb`; `log_info/warn/error` only on `CronContext`.
       Validate: one canonical name for the pool view, one for the transaction view, applied uniformly across all handler contexts; `ctx.log_*` available everywhere (or removed from `CronContext` for consistency).
 
-- [ ] **[11.F5] `transactional = true` + `ctx.http()` is a silent footgun** · *High*
+- [x] **[11.F5] `transactional = true` + `ctx.http()` is a silent footgun** · *High*
       Context: `forge-macros/src/mutation.rs:106, 199` — `dispatch_job` is compile-checked, HTTP isn't.
       Validate: either `ctx.http()` is buffered-and-flushed-after-commit in transactional mutations, OR a compile-time warning/error fires when `transactional=true` and `ctx.http()` is called, OR `ctx.http()` is only on `MutationContext::after_commit()`. Decide once; enforce it.
 
@@ -724,39 +724,39 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: see 05.7 / 05.1.
       Validate: see 05.7 / 05.1.
 
-- [ ] **[11.F7] `MutationContext::db()` returns active tx; `HandlerContext::db()` returns pool** · *Crit*
+- [x] **[11.F7] `MutationContext::db()` returns active tx; `HandlerContext::db()` returns pool** · *Crit*
       Context: same method name, different semantics; generic helpers silently misbehave.
       Validate: pool stays `db()`, transaction becomes `tx()` (only on `MutationContext`); inherent `db()` no longer shadows the trait; a generic helper `fn count<C: HandlerContext>(ctx: &C)` returns consistent results across handler kinds.
 
-- [ ] **[11.F8] Workflow versioning has hidden compile-time invariants** · *High*
+- [x] **[11.F8] Workflow versioning has hidden compile-time invariants** · *High*
       Context: signature is FNV-1a over step keys; rename → silent signature change → in-flight runs blocked.
       Validate: step keys are idents not strings (or a `forge check` lint catches drift); macro rejects workflows without explicit `version =`; startup signature-conflict errors point at the offending step.
 
-- [ ] **[11.F9] Cron schedules are raw strings only** · *Med*
+- [x] **[11.F9] Cron schedules are raw strings only** · *Med*
       Context: `#[forge::cron]` requires `"*/5 * * * *"` knowledge.
       Validate: duration sugar (`#[forge::cron(every = "5m")]`, `#[forge::cron(daily_at = "03:00", timezone = "UTC")]`) added; sugar maps to cron internally; raw expression still supported.
 
-- [ ] **[11.F10] Daemons require hand-rolled shutdown loop** · *Med*
+- [x] **[11.F10] Daemons require hand-rolled shutdown loop** · *Med*
       Context: every daemon manually selects on `ctx.shutdown_signal()`.
       Validate: `ctx.tick(Duration) -> bool` or generated loop scaffold from a `interval = "60s"` attribute; daemons can't forget the shutdown channel.
 
-- [ ] **[11.F11] `JobContext::saved` / `save` / `set_saved` overlap** · *Med*
+- [x] **[11.F11] `JobContext::saved` / `save` / `set_saved` overlap** · *Med*
       Context: `forge-core/src/job/context.rs:177, 185, 207` — three APIs for one concern.
       Validate: keep `save(key, value)` + `load(key)`; drop `saved()`/`set_saved()` from public API or rename `clear_then_save_all`.
 
-- [ ] **[11.F12] Job `require_role` is dispatch-time only** · *Med*
+- [x] **[11.F12] Job `require_role` is dispatch-time only** · *Med*
       Context: macro doc claims "requires admin to dispatch"; the role check fires only when the job is dispatched without an inherited principal.
       Validate: renamed to `dispatch_requires_role = "admin"` to make semantics explicit; OR role check on jobs removed entirely; doc updated.
 
-- [ ] **[11.F13] `start_workflow` takes a string name with versioning gotchas** · *High*
+- [x] **[11.F13] `start_workflow` takes a string name with versioning gotchas** · *High*
       Context: agent writes `start_workflow("user_onboarding_v2", ...)` thinking it's the v2 file; framework infers the logical name from the function ident.
       Validate: type-safe `ctx.start::<UserOnboardingWorkflow>(input)` enforced; macro refuses to derive a logical name from a function whose ident ends in `_v\d+`.
 
-- [ ] **[11.F14] `MutationContext::http()` is a footgun mid-transaction** · *High* (related to 11.F5)
+- [x] **[11.F14] `MutationContext::http()` is a footgun mid-transaction** · *High* (related to 11.F5)
       Context: Stripe charge inside a mutation; tx rolls back; payment took.
       Validate: see 11.F5.
 
-- [ ] **[11.F15] `forge.toml` defaults aren't safe-by-default** · *Med*
+- [x] **[11.F15] `forge.toml` defaults aren't safe-by-default** · *Med*
       Context: CORS allow-localhost in templates, `pool_size = 50` below documented formula, no `[deploy]` section.
       Validate: `forge.toml` supports `[deploy]` activated by `FORGE_ENV=production` enforcing CORS allowlist non-localhost, JWT secret present, observability enabled; `forge check --production` validates; `pool_size` auto-derives from `worker.max_concurrent`.
 
@@ -764,11 +764,11 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: prelude re-exports types but not the proc macros.
       Validate: either macros re-exported via prelude (`pub use crate::{query, mutation, job, ...}`) OR context types removed from prelude to standardize on `forge::X`; consistent muscle memory across the framework.
 
-- [ ] **[11.F17] `ForgeError::Function` / `Job` / `Cluster` / `Sql` overlap** · *Med* (related to 09.1)
+- [x] **[11.F17] `ForgeError::Function` / `Job` / `Cluster` / `Sql` overlap** · *Med* (related to 09.1)
       Context: ~10 variants are all "Internal with a tag."
       Validate: see 09.1 / 09.2.
 
-- [ ] **[11.F18] Testing contexts don't share a builder shape with production contexts** · *Med*
+- [x] **[11.F18] Testing contexts don't share a builder shape with production contexts** · *Med*
       Context: `TestMutationContext::builder()` exists; production `MutationContext::new(...)` is positional.
       Validate: builder pattern mirrored on production contexts; tests don't need to import `forge-core::testing` for glue code.
 
@@ -780,7 +780,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: no `ctx.replay()` or built-in dead-letter for webhooks.
       Validate: raw webhook body auto-stored keyed by idempotency key with TTL; `forge webhook replay <id>` CLI exists.
 
-- [ ] **[11.F21] `forge generate` is implicit; codegen not in build graph** · *Med*
+- [x] **[11.F21] `forge generate` is implicit; codegen not in build graph** · *Med*
       Context: agent ships without running it.
       Validate: `forge check` runs codegen verification; templates have a `build.rs` step OR generated bindings are committed and `forge check` diffs; CI smoke-test fails on drift.
 
@@ -788,7 +788,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: see 11.F8.
       Validate: see 11.F8.
 
-- [ ] **[11.F23] `public` vs `unscoped` look similar; semantically different axes** · *Med*
+- [x] **[11.F23] `public` vs `unscoped` look similar; semantically different axes** · *Med*
       Context: `public` = no auth, `unscoped` = no row filter; they're the same attribute slot today.
       Validate: renamed to `auth = "none"` and `scope = "global"`; `scope = "global"` requires a louder marker (e.g. doc-comment or explicit `// SAFETY:`).
 
@@ -828,7 +828,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `deny.toml:14-21`.
       Validate: migrated to `rustls-pki-types::PemObject`; the ignore is deleted.
 
-- [ ] **[12.B1] `packages/forge-dioxus` excluded from workspace** · *High*
+- [x] **[12.B1] `packages/forge-dioxus` excluded from workspace** · *High*
       Context: `Cargo.toml:18-20`.
       Validate: brought into the workspace with `[target.'cfg(target_arch = "wasm32")']` gating; clippy/fmt/MSRV runs against it; published via `cargo publish -p forge-dioxus` from workspace root.
 
@@ -836,7 +836,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `to_snake_case`, `to_camel_case`, `to_pascal_case`, `parse_duration` 3-4× in source.
       Validate: macro-side copies consolidated to one helper inside `forge-macros/utils.rs`; runtime-side consolidated to `forge-core/util`; `parse_duration` in `forge-core/src/rate_limit/mod.rs` calls `crate::util::parse_duration`; grep shows zero further duplicates.
 
-- [ ] **[12.B3] Three 1500+ line files marked `// TODO(pre-1.0): Split` but never split** · *Med*
+- [x] **[12.B3] Three 1500+ line files marked `// TODO(pre-1.0): Split` but never split** · *Med*
       Context: `forge/src/runtime.rs`, `forge/src/cli/check.rs`, `forge-runtime/src/gateway/mcp.rs`.
       Validate: each file split into focused modules; line counts under 800 each; TODO markers removed.
 
@@ -848,7 +848,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: not referenced; only `examples.tar` consumed.
       Validate: file deleted; any generation step removed from build scripts.
 
-- [ ] **[12.B6] 99 `clippy::unwrap_used` / `clippy::indexing_slicing` allow escapes** · *Med*
+- [x] **[12.B6] 99 `clippy::unwrap_used` / `clippy::indexing_slicing` allow escapes** · *Med*
       Context: most in test modules; several in non-test code lack rationale comments.
       Validate: every non-test allow has a justification comment; OR is removed by refactoring to `?`/`.get(..).ok_or(...)`.
 
@@ -864,7 +864,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `crates/forge/Cargo.toml:141`.
       Validate: feature dropped from `forgex`; examples enable `forge-core/testcontainers` directly.
 
-- [ ] **[12.C2] Slim presets (`worker`, `api`, `minimal`) untested** · *Med*
+- [x] **[12.C2] Slim presets (`worker`, `api`, `minimal`) untested** · *Med*
       Context: every example pulls in `full`.
       Validate: at least one example or smoke test exercises `worker` or `api`; CI matrix includes a slim-build job.
 
@@ -892,11 +892,11 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: workspace builds it but never runs it.
       Validate: nightly benchmark workflow runs against a fixed commit baseline OR at least `cargo check -p forge-bench --release` runs on PR.
 
-- [ ] **[12.D5] Release pipeline publishes `forge-dioxus` from outside the workspace** · *Low*
+- [x] **[12.D5] Release pipeline publishes `forge-dioxus` from outside the workspace** · *Low*
       Context: `.github/workflows/release.yml:217`.
       Validate: included in workspace (12.B1) and published via `cargo publish -p forge-dioxus` from workspace root.
 
-- [ ] **[12.D6] NPM publish ships raw `.ts`** · *Med*
+- [x] **[12.D6] NPM publish ships raw `.ts`** · *Med*
       Context: `packages/forge-svelte/package.json` lists `.ts` directly; no `.d.ts` or `.js` build.
       Validate: `tsup` or `svelte-package` build step emits `dist/index.js` + `dist/index.d.ts`; `exports` map points at `dist`; `npm publish` artifact verified by a downstream non-Vite consumer.
 

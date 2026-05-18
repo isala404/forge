@@ -14,14 +14,14 @@ Defines a read-only operation. The macro generates a `{PascalCase}Query` struct 
 | Attribute | Description and Rationale |
 |---|---|
 | `name = "x"` | Overrides the default wire name (derived from the function name). |
-| `public` | Disables authentication requirements for the query. |
+| `public` | Skips JWT validation entirely — anonymous callers allowed. `ctx.auth.user_id()` returns `None`. Use for login pages, public APIs, landing data. |
+| `unscoped` | JWT still required; skips the compile-time `user_id`/`owner_id` filter rule. Use for admin or shared data that any authenticated user may read. |
 | `consistent` | Forces the query to read from the primary database to ensure data consistency after a recent write. |
 | `require_role("x")` | Returns a 403 Forbidden error if the user lacks the specified role. |
 | `cache = "30s"` | Enables a per-identity cache with the specified TTL to reduce database load. |
 | `timeout = "30s"` | Sets the maximum execution time. Accepts duration strings: `"30s"`, `"5m"`, `"1h"`. |
 | `rate_limit(requests = N, per = "1m", key = "user")` | Configures rate limiting. `key` values: `"user"`, `"ip"`, `"global"`, `"custom:claim_name"`. |
 | `log = "info"` | Sets the log level for handler execution. |
-| `unscoped` | Skips mandatory scope enforcement checks at compile time. |
 | `tables("foo", "bar")` | Manually specifies table dependencies to trigger reactive cache invalidation. |
 
 ### `#[forge::mutation]`
@@ -30,13 +30,13 @@ Defines a data-modifying operation. The macro generates a `{PascalCase}Mutation`
 | Attribute | Description and Rationale |
 |---|---|
 | `name = "x"` | Overrides the default wire name (derived from the function name). |
-| `public` | Allows unauthenticated access to the mutation. |
+| `public` | Skips JWT validation entirely — anonymous callers allowed. Use for login endpoints and unauthenticated signups. |
+| `unscoped` | JWT still required; skips the compile-time `user_id`/`owner_id` filter rule. Use for admin mutations that operate across all users. |
 | `require_role("x")` | Restricts access to users with the specified role. |
 | `transactional` | Wraps the entire operation in a PostgreSQL transaction. **Default: on.** Opt out with `transactional = false` for high-throughput writes that don't need atomicity. Cannot be disabled when using `dispatch_job()` or `start_workflow()`. |
 | `timeout = "30s"` | Sets the handler timeout. Accepts duration strings: `"30s"`, `"5m"`, `"1h"`. |
 | `max_size = "200mb"` | Defines the maximum allowable request body size for this mutation. |
 | `rate_limit(requests = N, per = "1m", key = "user")` | Configures rate limiting. `key` values: `"user"`, `"ip"`, `"global"`, `"custom:claim_name"`. |
-| `unscoped` | Disables compile-time scope validation. |
 
 ### `#[forge::job]`
 Defines an asynchronous background task. These tasks are durable and automatically retried upon failure.
@@ -147,6 +147,32 @@ Use context methods instead of `std::env::var()` — they are mockable in tests 
 | `ctx.env_require("KEY")` | Returns the value or a `ForgeError::Config` if missing. Use for required secrets. |
 | `ctx.env_or("KEY", "default")` | Returns the value or a fallback string. Use for optional config with a sensible default. |
 
+## KV Store
+
+All handler contexts expose `ctx.kv()` for durable, namespaced key-value storage backed by PostgreSQL. Call `.kv()` to get a `&dyn KvHandle` reference; it returns `ForgeError::Internal` if the runtime did not thread the store in (this cannot happen in production — only in manually constructed test contexts that skip `with_kv`).
+
+```rust
+// Read a flag
+let raw = ctx.kv()?.get("feature:dark-mode").await?;
+let enabled = raw.map(|b| b == b"true").unwrap_or(false);
+
+// Write with a 1-hour TTL
+ctx.kv()?.set("feature:dark-mode", b"true", Some(Duration::from_secs(3600))).await?;
+
+// Set only if the key is absent (distributed lock / idempotency)
+let claimed = ctx.kv()?.set_if_absent("lock:send-email", b"1", Some(Duration::from_secs(60))).await?;
+
+// Atomic counter (rate limiting, usage tracking)
+let count = ctx.kv()?.increment("req:user:123", 1, Some(Duration::from_secs(60))).await?;
+
+// Remove a key
+ctx.kv()?.delete("lock:send-email").await?;
+```
+
+Available in: `QueryContext`, `MutationContext`, `JobContext`, `CronContext`, `DaemonContext`, `WebhookContext`, `WorkflowContext`, `McpToolContext`. Keys are namespaced by the runtime (`handlers:` prefix) so user code does not need to worry about cross-subsystem collisions.
+
+In tests, call `.with_kv(Arc::new(MockKvStore::new()))` on the test context builder to supply a KV handle. Without it, `ctx.kv()` returns an error.
+
 ## HTTP Client
 
 `ctx.http()` returns a circuit-breaker-backed `reqwest` client. The default timeout matches the handler's configured `timeout`. Always use this instead of constructing your own client so circuit breaking and tracing work correctly.
@@ -240,7 +266,7 @@ auto_capture = true           # auto-emit rpc_call events for RPC and server_exe
 diagnostics = true            # accept frontend error reports at /_api/signal (type: "report")
 session_timeout_mins = 30     # inactivity window before a session closes
 retention_days = 90           # drop monthly partitions older than this
-anonymize_ip = false          # drop raw client IPs from stored events (visitor_id stays hashed)
+anonymize_ip = true           # default; set false only with a lawful basis for raw IP storage (GDPR)
 batch_size = 100              # events per batch INSERT
 flush_interval_ms = 5000      # max milliseconds between flushes
 excluded_functions = []       # function names to skip from auto-capture
@@ -461,6 +487,7 @@ Each handler type receives a specific context object providing access to framewo
 | Feature | Query | Mut | Job | Cron | WF | Dmn | Web | MCP |
 |---|---|---|---|---|---|---|---|---|
 | `db()` (Read access) | yes | — | yes | yes | yes | yes | yes | yes |
+| `tx()` (DbConn, mutation only) | — | yes | — | — | — | — | — | — |
 | `conn()` (Write access) | — | yes | yes | yes | yes | yes | yes | yes |
 | `http()` (Client) | — | yes | yes | yes | yes | yes | yes | — |
 | `auth` (Session info) | yes | yes | yes | yes | yes | — | — | yes |
@@ -499,7 +526,7 @@ The canonical status mapping lives on `ForgeError::http_status() -> u16`. Downst
 | Command | Purpose |
 |---|---|
 | `forge new <name>` | Scaffolds a new project from a template. |
-| `forge generate` | Synchronizes backend changes with frontend bindings and types. |
+| `forge generate` | Synchronizes backend changes with frontend bindings and types. **Manual step — not part of `cargo build`.** Run after changing handler signatures, argument/return types, models, or enums. `forge check` catches staleness. In CI, use `forge check` to validate without overwriting. |
 | `forge check` | Runs linting, formatting, and validates SQL and bindings. |
 | `forge migrate up` | Run all pending migrations under advisory lock. Safe against a live cluster. |
 | `forge migrate status` | Show applied/pending migrations. Flags `[DRIFT]` (checksum mismatch) and `[SOURCE FILE MISSING]` anomalies. |

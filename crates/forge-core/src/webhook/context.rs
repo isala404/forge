@@ -5,7 +5,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use crate::env::{EnvAccess, EnvProvider, RealEnvProvider};
-use crate::function::JobDispatch;
+use crate::function::{JobDispatch, KvHandle, WorkflowDispatch};
 use crate::http::CircuitBreakerClient;
 
 /// Context available to webhook handlers.
@@ -28,8 +28,12 @@ pub struct WebhookContext {
     http_timeout: Option<Duration>,
     /// Job dispatcher for async processing.
     job_dispatch: Option<Arc<dyn JobDispatch>>,
+    /// Workflow dispatcher for starting workflows.
+    workflow_dispatch: Option<Arc<dyn WorkflowDispatch>>,
     /// Environment variable provider.
     env_provider: Arc<dyn EnvProvider>,
+    /// KV store handle. `None` until threaded in by the runtime.
+    kv: Option<Arc<dyn KvHandle>>,
 }
 
 impl WebhookContext {
@@ -50,8 +54,24 @@ impl WebhookContext {
             http_client,
             http_timeout: None,
             job_dispatch: None,
+            workflow_dispatch: None,
             env_provider: Arc::new(RealEnvProvider::new()),
+            kv: None,
         }
+    }
+
+    /// Attach a KV store handle. Called by the runtime before handing the
+    /// context to the handler.
+    pub fn with_kv(mut self, kv: Arc<dyn KvHandle>) -> Self {
+        self.kv = Some(kv);
+        self
+    }
+
+    /// Access the KV store.
+    pub fn kv(&self) -> crate::error::Result<&dyn KvHandle> {
+        self.kv
+            .as_deref()
+            .ok_or_else(|| crate::error::ForgeError::Internal("KV store not available".into()))
     }
 
     /// Set idempotency key.
@@ -63,6 +83,12 @@ impl WebhookContext {
     /// Set job dispatcher.
     pub fn with_job_dispatch(mut self, dispatcher: Arc<dyn JobDispatch>) -> Self {
         self.job_dispatch = Some(dispatcher);
+        self
+    }
+
+    /// Set workflow dispatcher.
+    pub fn with_workflow_dispatch(mut self, dispatcher: Arc<dyn WorkflowDispatch>) -> Self {
+        self.workflow_dispatch = Some(dispatcher);
         self
     }
 
@@ -138,6 +164,35 @@ impl WebhookContext {
         })?;
         let args_json = serde_json::to_value(args)?;
         dispatcher.dispatch_by_name(job_type, args_json, None).await
+    }
+
+    /// Type-safe dispatch: resolves the job name from the type's `ForgeJob`
+    /// impl and serializes the args at the call site.
+    pub async fn dispatch<J: crate::ForgeJob>(&self, args: J::Args) -> crate::error::Result<Uuid> {
+        self.dispatch_job(J::info().name, args).await
+    }
+
+    /// Start a workflow.
+    pub async fn start_workflow<T: serde::Serialize>(
+        &self,
+        workflow_name: &str,
+        input: T,
+    ) -> crate::error::Result<Uuid> {
+        let dispatcher = self.workflow_dispatch.as_ref().ok_or_else(|| {
+            crate::error::ForgeError::Internal("Workflow dispatch not available".into())
+        })?;
+        let input_json = serde_json::to_value(input)?;
+        dispatcher
+            .start_by_name(workflow_name, input_json, None, None)
+            .await
+    }
+
+    /// Type-safe workflow start.
+    pub async fn start<W: crate::ForgeWorkflow>(
+        &self,
+        input: W::Input,
+    ) -> crate::error::Result<Uuid> {
+        self.start_workflow(W::info().name, input).await
     }
 
     /// Request cancellation for a job.

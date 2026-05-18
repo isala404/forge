@@ -233,10 +233,24 @@ pub fn cron(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Each workflow has a stable logical name, an explicit user-facing version, and a derived
 /// signature that acts as the hard runtime safety gate for resumption.
 ///
-/// # Versioning
-/// When you make a breaking change to a workflow's persisted contract (add/remove steps,
-/// rename wait keys, change event contracts), create a new version. Keep the old version
-/// in the binary until its incomplete runs drain.
+/// # Versioning and step-name stability
+/// Step names (the string literals passed to `ctx.step()`) and wait keys (the string
+/// literals passed to `ctx.wait_for_event()`) are part of the workflow's **persisted
+/// contract**. The macro hashes them together with the version string, timeout, and
+/// input/output type names into a signature that is stored with every new run.
+///
+/// **Renaming a step or wait key under the same version is a breaking change.** Any
+/// in-flight run that tries to resume after such a rename will be blocked with
+/// `WorkflowStatus::BlockedSignatureMismatch` because the stored signature no longer
+/// matches the binary's signature. Use `cargo expand` to inspect the `forge:contract`
+/// doc comment on the generated struct — it lists every key contributing to the
+/// signature.
+///
+/// When you need to rename a step (or add/remove steps, change event contracts, or
+/// alter the timeout), create a new version instead:
+/// 1. Annotate the old function with `deprecated` — the runtime keeps it alive for draining.
+/// 2. Write a new function with a new `version` string containing your changes.
+/// 3. Remove the old function once all its in-flight runs have completed.
 ///
 /// The runtime derives a signature from step keys, wait keys, timeout, and type shapes.
 /// If you change the persisted contract under the same version, registration will fail.

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use forge_core::CircuitBreakerClient;
 use forge_core::Result;
 use forge_core::daemon::{DaemonContext, DaemonStatus};
-use forge_core::function::{JobDispatch, WorkflowDispatch};
+use forge_core::function::{JobDispatch, KvHandle, WorkflowDispatch};
 use futures_util::FutureExt;
 use sqlx::PgPool;
 use tokio::sync::{broadcast, watch};
@@ -50,6 +50,7 @@ pub struct DaemonRunner {
     shutdown_rx: broadcast::Receiver<()>,
     job_dispatch: Option<Arc<dyn JobDispatch>>,
     workflow_dispatch: Option<Arc<dyn WorkflowDispatch>>,
+    kv: Option<Arc<dyn KvHandle>>,
 }
 
 impl DaemonRunner {
@@ -70,6 +71,7 @@ impl DaemonRunner {
             shutdown_rx,
             job_dispatch: None,
             workflow_dispatch: None,
+            kv: None,
         }
     }
 
@@ -82,6 +84,12 @@ impl DaemonRunner {
     /// Set workflow dispatcher for daemon contexts.
     pub fn with_workflow_dispatch(mut self, dispatcher: Arc<dyn WorkflowDispatch>) -> Self {
         self.workflow_dispatch = Some(dispatcher);
+        self
+    }
+
+    /// Attach a KV store handle so daemon handlers can call `ctx.kv()`.
+    pub fn with_kv(mut self, kv: Arc<dyn KvHandle>) -> Self {
+        self.kv = Some(kv);
         self
     }
 
@@ -155,6 +163,7 @@ impl DaemonRunner {
                 let node_id = self.node_id;
                 let job_dispatch = self.job_dispatch.clone();
                 let workflow_dispatch = self.workflow_dispatch.clone();
+                let kv = self.kv.clone();
 
                 let election = if leader_elected {
                     Some(Arc::new(LeaderElection::new(
@@ -182,6 +191,7 @@ impl DaemonRunner {
                         election,
                         job_dispatch,
                         workflow_dispatch,
+                        kv,
                     )
                     .await
                 });
@@ -288,6 +298,7 @@ async fn run_daemon_loop(
     election: Option<Arc<LeaderElection>>,
     job_dispatch: Option<Arc<dyn JobDispatch>>,
     workflow_dispatch: Option<Arc<dyn WorkflowDispatch>>,
+    kv: Option<Arc<dyn KvHandle>>,
 ) {
     let leader_elected = election.is_some();
     let daemon_span = tracing::info_span!(
@@ -389,6 +400,42 @@ async fn run_daemon_loop(
                     }
                 });
 
+                // For leader-elected daemons, periodically validate the
+                // advisory lock is still held. If leadership is lost
+                // out-of-band (connection drop, PG backend termination),
+                // signal the daemon to stop this iteration so the outer
+                // loop can re-acquire leadership before running again.
+                if let Some(ref election) = election {
+                    let election_clone = Arc::clone(election);
+                    let shutdown_tx_clone = daemon_shutdown_tx.clone();
+                    let validate_interval = election_clone.lock_validate_interval();
+                    tokio::spawn(async move {
+                        loop {
+                            tokio::time::sleep(validate_interval).await;
+                            if *shutdown_tx_clone.borrow() {
+                                break;
+                            }
+                            if let Err(e) = election_clone.validate_lock_held().await {
+                                tracing::warn!(
+                                    error = %e,
+                                    "Lost leadership during daemon execution; stopping iteration"
+                                );
+                                let _ = shutdown_tx_clone.send(true);
+                                break;
+                            }
+                            // validate_lock_held dropped leadership locally on error above;
+                            // also check the flag in case it was dropped without an error path.
+                            if !election_clone.is_leader() {
+                                tracing::warn!(
+                                    "Leadership flag cleared during daemon execution; stopping iteration"
+                                );
+                                let _ = shutdown_tx_clone.send(true);
+                                break;
+                            }
+                        }
+                    });
+                }
+
                 let mut ctx = DaemonContext::new(
                     name.clone(),
                     instance_id,
@@ -402,6 +449,9 @@ async fn run_daemon_loop(
                 }
                 if let Some(ref wd) = workflow_dispatch {
                     ctx = ctx.with_workflow_dispatch(wd.clone());
+                }
+                if let Some(ref kv) = kv {
+                    ctx = ctx.with_kv(Arc::clone(kv));
                 }
 
                 // Run the daemon

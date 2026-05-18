@@ -549,6 +549,18 @@ pub fn workflow_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! {}
     };
 
+    // Build a human-readable contract comment listing the keys that feed into the
+    // signature. This surfaces in `cargo expand` so developers can see exactly
+    // which step/wait names are locked in, making rename-induced mismatches
+    // visible before they reach production.
+    let step_keys_display = contract_extractor.step_keys.iter().cloned().collect::<Vec<_>>().join(", ");
+    let wait_keys_display = contract_extractor.wait_keys.iter().cloned().collect::<Vec<_>>().join(", ");
+    let contract_doc = format!(
+        " forge:contract steps=[{step_keys_display}] waits=[{wait_keys_display}] \
+         timeout={timeout_secs}s input={input_type_str} output={output_type_str} — \
+         renaming any key above is a breaking change that blocks in-flight runs"
+    );
+
     let expanded = quote! {
         #[doc(hidden)]
         #[allow(non_snake_case)]
@@ -556,6 +568,7 @@ pub fn workflow_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             use super::*;
 
             #(#fn_attrs)*
+            #[doc = #contract_doc]
             pub struct #struct_name;
 
             impl forge::forge_core::__sealed::Sealed for #struct_name {}

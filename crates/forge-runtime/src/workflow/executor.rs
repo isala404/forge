@@ -11,7 +11,7 @@ use super::registry::WorkflowRegistry;
 use super::state::{WorkflowRecord, WorkflowStepRecord};
 use crate::jobs::{JobQueue, JobRecord};
 use forge_core::CircuitBreakerClient;
-use forge_core::function::WorkflowDispatch;
+use forge_core::function::{KvHandle, WorkflowDispatch};
 use forge_core::job::JobPriority;
 use forge_core::workflow::{CompensationHandler, StepStatus, WorkflowContext, WorkflowStatus};
 
@@ -46,6 +46,7 @@ pub struct WorkflowExecutor {
     job_queue: JobQueue,
     http_client: CircuitBreakerClient,
     compensation_state: Arc<RwLock<HashMap<Uuid, CompensationState>>>,
+    kv: Option<Arc<dyn KvHandle>>,
 }
 
 impl WorkflowExecutor {
@@ -62,7 +63,14 @@ impl WorkflowExecutor {
             job_queue,
             http_client,
             compensation_state: Arc::new(RwLock::new(HashMap::new())),
+            kv: None,
         }
+    }
+
+    /// Attach a KV store handle so workflow handlers can call `ctx.kv()`.
+    pub fn with_kv(mut self, kv: Arc<dyn KvHandle>) -> Self {
+        self.kv = Some(kv);
+        self
     }
 
     /// Start a new workflow on the active version.
@@ -186,6 +194,9 @@ impl WorkflowExecutor {
                 self.http_client.clone(),
             ),
         };
+        if let Some(ref kv) = self.kv {
+            ctx = ctx.with_kv(Arc::clone(kv));
+        }
         if let Some(ref subject) = owner_subject {
             let auth = if let Ok(uuid) = uuid::Uuid::parse_str(subject) {
                 forge_core::AuthContext::authenticated(
@@ -229,12 +240,18 @@ impl WorkflowExecutor {
                 );
                 Ok(WorkflowResult::Completed(output))
             }
-            Ok(Err(forge_core::ForgeError::WorkflowSuspended)) => {
+            Ok(Err(forge_core::ForgeError::WorkflowSuspended(suspend_reason))) => {
                 self.persist_saved_state(run_id, &ctx.take_saved_state())
                     .await?;
-                Ok(WorkflowResult::Suspended {
-                    reason: "timer".to_string(),
-                })
+                let reason = if suspend_reason.is_sleep() {
+                    "sleep".to_string()
+                } else {
+                    suspend_reason
+                        .event_name()
+                        .map(|n| format!("waiting_event:{n}"))
+                        .unwrap_or_else(|| "suspended".to_string())
+                };
+                Ok(WorkflowResult::Suspended { reason })
             }
             Ok(Err(e)) => {
                 let err_str = e.to_string();
@@ -721,6 +738,7 @@ impl WorkflowExecutor {
     ) -> forge_core::Result<()> {
         // Uses runtime query because the status value is dynamic and the
         // sqlx offline cache doesn't have an entry for this parameterized form.
+        #[allow(clippy::disallowed_methods)]
         sqlx::query(
             "UPDATE forge_workflow_runs SET status = $1, error = $2 WHERE id = $3 AND status IN ('running', 'sleeping', 'waiting', 'pending')",
         )

@@ -8,7 +8,7 @@ use darling::FromMeta;
 use darling::ast::NestedMeta;
 
 use crate::attrs::default_true;
-use crate::utils::{parse_duration_tokens, to_pascal_case};
+use crate::utils::{daily_at_to_cron, every_to_cron, parse_duration_tokens, to_pascal_case};
 
 /// Darling-parsed cron attributes (excludes the positional schedule string).
 #[derive(Debug, Default, FromMeta)]
@@ -16,6 +16,16 @@ struct DarlingCronAttrs {
     /// Override the registry name (default: function name).
     #[darling(default)]
     name: Option<String>,
+    /// Named raw cron expression: `schedule = "0 * * * *"`.
+    #[darling(default)]
+    schedule: Option<String>,
+    /// Duration sugar: `every = "5m"` or `every = "1h"`.
+    /// Converts to a cron expression; minimum granularity is 1 minute.
+    #[darling(default)]
+    every: Option<String>,
+    /// Time-of-day sugar: `daily_at = "03:00"` → runs once a day at 03:00.
+    #[darling(default)]
+    daily_at: Option<String>,
     #[darling(default)]
     timezone: Option<String>,
     #[darling(default)]
@@ -53,14 +63,14 @@ pub fn cron_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     // Extract the positional schedule string (first literal argument)
-    let mut schedule: Option<String> = None;
+    let mut positional_schedule: Option<String> = None;
     let mut remaining_args: Vec<NestedMeta> = Vec::new();
 
     for (i, arg) in attr_args.into_iter().enumerate() {
         if i == 0
             && let NestedMeta::Lit(syn::Lit::Str(s)) = &arg
         {
-            schedule = Some(s.value());
+            positional_schedule = Some(s.value());
             continue;
         }
         remaining_args.push(arg);
@@ -71,9 +81,59 @@ pub fn cron_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         Err(e) => return TokenStream::from(e.write_errors()),
     };
 
+    // Resolve the schedule from the three sources: positional literal,
+    // `schedule = "..."`, `every = "..."`, and `daily_at = "..."`.
+    // Only one may be active at a time.
+    let named_schedule = darling_attrs.schedule;
+    let every = darling_attrs.every;
+    let daily_at = darling_attrs.daily_at;
+
+    // Count how many schedule sources were provided.
+    let source_count = [
+        positional_schedule.is_some(),
+        named_schedule.is_some(),
+        every.is_some(),
+        daily_at.is_some(),
+    ]
+    .into_iter()
+    .filter(|&b| b)
+    .count();
+
+    if source_count > 1 {
+        return syn::Error::new_spanned(
+            &input.sig.ident,
+            "only one of a positional schedule, `schedule`, `every`, or `daily_at` may be specified",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    // Convert sugar forms to raw cron expressions.
+    let resolved_schedule: Option<String> = if let Some(ref e) = every {
+        match every_to_cron(e) {
+            Ok(expr) => Some(expr),
+            Err(msg) => {
+                return syn::Error::new_spanned(&input.sig.ident, msg)
+                    .to_compile_error()
+                    .into();
+            }
+        }
+    } else if let Some(ref d) = daily_at {
+        match daily_at_to_cron(d) {
+            Ok(expr) => Some(expr),
+            Err(msg) => {
+                return syn::Error::new_spanned(&input.sig.ident, msg)
+                    .to_compile_error()
+                    .into();
+            }
+        }
+    } else {
+        positional_schedule.or(named_schedule)
+    };
+
     let attrs = CronAttrs {
         name: darling_attrs.name,
-        schedule,
+        schedule: resolved_schedule,
         timezone: darling_attrs.timezone,
         group: darling_attrs.group,
         catch_up: darling_attrs.catch_up,

@@ -12,7 +12,7 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose};
 use forge_core::CircuitBreakerClient;
-use forge_core::function::JobDispatch;
+use forge_core::function::{JobDispatch, KvHandle, WorkflowDispatch};
 use forge_core::webhook::{
     IdempotencySource, REPLAY_TIMESTAMP_HEADER, SignatureAlgorithm, WebhookContext,
 };
@@ -34,6 +34,8 @@ pub struct WebhookState {
     pool: PgPool,
     http_client: CircuitBreakerClient,
     job_dispatcher: Option<Arc<dyn JobDispatch>>,
+    workflow_dispatcher: Option<Arc<dyn WorkflowDispatch>>,
+    kv: Option<Arc<dyn KvHandle>>,
 }
 
 impl WebhookState {
@@ -44,12 +46,26 @@ impl WebhookState {
             pool,
             http_client: CircuitBreakerClient::with_ssrf_protection(),
             job_dispatcher: None,
+            workflow_dispatcher: None,
+            kv: None,
         }
     }
 
     /// Set job dispatcher.
     pub fn with_job_dispatcher(mut self, dispatcher: Arc<dyn JobDispatch>) -> Self {
         self.job_dispatcher = Some(dispatcher);
+        self
+    }
+
+    /// Set workflow dispatcher.
+    pub fn with_workflow_dispatcher(mut self, dispatcher: Arc<dyn WorkflowDispatch>) -> Self {
+        self.workflow_dispatcher = Some(dispatcher);
+        self
+    }
+
+    /// Attach a KV store handle so webhook handlers can call `ctx.kv()`.
+    pub fn with_kv(mut self, kv: Arc<dyn KvHandle>) -> Self {
+        self.kv = Some(kv);
         self
     }
 }
@@ -276,6 +292,12 @@ pub async fn webhook_handler(
 
     if let Some(ref dispatcher) = state.job_dispatcher {
         ctx = ctx.with_job_dispatch(dispatcher.clone());
+    }
+    if let Some(ref dispatcher) = state.workflow_dispatcher {
+        ctx = ctx.with_workflow_dispatch(dispatcher.clone());
+    }
+    if let Some(ref kv) = state.kv {
+        ctx = ctx.with_kv(Arc::clone(kv));
     }
 
     // Execute handler with timeout

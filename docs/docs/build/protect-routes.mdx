@@ -233,6 +233,32 @@ pub async fn admin_list_orders(ctx: &QueryContext) -> Result<Vec<Order>> {
 
 Public queries skip this check since they don't require authentication.
 
+### `public` vs `unscoped`
+
+These two flags look similar but control different things:
+
+| | `public` | `unscoped` |
+|---|---|---|
+| **JWT required** | No — anonymous access allowed | Yes — valid token still required |
+| **Scope check** | Skipped (no identity to check against) | Skipped explicitly |
+| **Use for** | Login endpoints, public APIs, landing page data | Admin queries, shared/global data that any authenticated user may read |
+
+`public` bypasses JWT validation entirely. The request reaches your handler with no auth context — `ctx.auth.user_id()` returns `None`.
+
+`unscoped` keeps authentication in place but tells the compiler not to enforce the `user_id`/`owner_id` filter rule. The caller must still present a valid JWT. Use it when your SQL intentionally spans all users (e.g., `SELECT * FROM products` — a catalogue that every logged-in user can browse).
+
+```rust
+// Anonymous access — no token needed
+#[forge::query(public)]
+pub async fn get_pricing(ctx: &QueryContext) -> Result<Vec<Plan>> { ... }
+
+// Auth required, but not scoped to a single user
+#[forge::query(unscoped)]
+pub async fn list_all_products(ctx: &QueryContext) -> Result<Vec<Product>> { ... }
+```
+
+Combining both (`public` + `unscoped`) is redundant: `public` already implies no scope check.
+
 ### Accessing Custom Claims
 
 ```rust

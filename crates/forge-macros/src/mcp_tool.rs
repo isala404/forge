@@ -220,10 +220,10 @@ fn expand_mcp_tool_impl(input: ItemFn, attrs: McpToolAttrs) -> syn::Result<Token
 
     // Reject argument types that codegen cannot emit bindings for.
     for p in &arg_params {
-        if let FnArg::Typed(pat_type) = p {
-            if let Some((reason, span)) = crate::utils::check_arg_wire_type(&pat_type.ty) {
-                return Err(syn::Error::new(span, reason));
-            }
+        if let FnArg::Typed(pat_type) = p
+            && let Some((reason, span)) = crate::utils::check_arg_wire_type(&pat_type.ty)
+        {
+            return Err(syn::Error::new(span, reason));
         }
     }
 

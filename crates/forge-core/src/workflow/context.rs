@@ -6,13 +6,12 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
-use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::step::StepStatus;
 use super::suspend::{SuspendReason, WorkflowEvent};
 use crate::env::{EnvAccess, EnvProvider, RealEnvProvider};
-use crate::function::AuthContext;
+use crate::function::{AuthContext, KvHandle};
 use crate::http::CircuitBreakerClient;
 use crate::{ForgeError, Result};
 
@@ -105,8 +104,6 @@ pub struct WorkflowContext {
     completed_steps: Arc<RwLock<Vec<String>>>,
     /// Compensation handlers for completed steps.
     compensation_handlers: Arc<RwLock<HashMap<String, CompensationHandler>>>,
-    /// Channel for signaling suspension (sent by workflow, received by executor).
-    suspend_tx: Option<mpsc::Sender<SuspendReason>>,
     /// Whether this is a resumed execution.
     is_resumed: bool,
     /// Whether this execution resumed specifically from a sleep (timer expired).
@@ -117,6 +114,8 @@ pub struct WorkflowContext {
     env_provider: Arc<dyn EnvProvider>,
     /// User-defined key-value state that persists across suspension points.
     saved_state: Arc<RwLock<HashMap<String, serde_json::Value>>>,
+    /// KV store handle. `None` until threaded in by the runtime.
+    kv: Option<Arc<dyn KvHandle>>,
 }
 
 impl WorkflowContext {
@@ -140,12 +139,13 @@ impl WorkflowContext {
             step_states: Arc::new(RwLock::new(HashMap::new())),
             completed_steps: Arc::new(RwLock::new(Vec::new())),
             compensation_handlers: Arc::new(RwLock::new(HashMap::new())),
-            suspend_tx: None,
+
             is_resumed: false,
             resumed_from_sleep: false,
             tenant_id: None,
             env_provider: Arc::new(RealEnvProvider::new()),
             saved_state: Arc::new(RwLock::new(HashMap::new())),
+            kv: None,
         }
     }
 
@@ -169,13 +169,28 @@ impl WorkflowContext {
             step_states: Arc::new(RwLock::new(HashMap::new())),
             completed_steps: Arc::new(RwLock::new(Vec::new())),
             compensation_handlers: Arc::new(RwLock::new(HashMap::new())),
-            suspend_tx: None,
+
             is_resumed: true,
             resumed_from_sleep: false,
             tenant_id: None,
             env_provider: Arc::new(RealEnvProvider::new()),
             saved_state: Arc::new(RwLock::new(HashMap::new())),
+            kv: None,
         }
+    }
+
+    /// Attach a KV store handle. Called by the runtime before handing the
+    /// context to the handler.
+    pub fn with_kv(mut self, kv: Arc<dyn KvHandle>) -> Self {
+        self.kv = Some(kv);
+        self
+    }
+
+    /// Access the KV store.
+    pub fn kv(&self) -> crate::error::Result<&dyn KvHandle> {
+        self.kv
+            .as_deref()
+            .ok_or_else(|| crate::error::ForgeError::Internal("KV store not available".into()))
     }
 
     /// Set environment provider.
@@ -187,12 +202,6 @@ impl WorkflowContext {
     /// Mark that this context resumed from a sleep (timer expired).
     pub fn with_resumed_from_sleep(mut self) -> Self {
         self.resumed_from_sleep = true;
-        self
-    }
-
-    /// Set the suspend channel.
-    pub fn with_suspend_channel(mut self, tx: mpsc::Sender<SuspendReason>) -> Self {
-        self.suspend_tx = Some(tx);
         self
     }
 
@@ -347,6 +356,13 @@ impl WorkflowContext {
     /// Record step start and persist to the database before returning.
     ///
     /// If the step is already running or beyond (completed/failed), this is a no-op.
+    ///
+    /// **`name` is part of the workflow's persisted contract.** The `#[workflow]` macro
+    /// hashes every step name (along with wait keys, timeout, and type names) into a
+    /// signature stored at run creation. If you rename a step, the next deploy produces
+    /// a different signature, and any in-flight run that tries to resume will be blocked
+    /// with `WorkflowStatus::BlockedSignatureMismatch`. Treat step names as stable
+    /// public identifiers — change them only under a new workflow version.
     pub async fn record_step_start(&self, name: &str) {
         let state_clone = {
             let mut states = self.step_states.write().expect(LOCK_POISONED);
@@ -839,14 +855,11 @@ impl WorkflowContext {
     }
 
     /// Signal suspension to the executor.
+    ///
+    /// Returns `Err(ForgeError::WorkflowSuspended(reason))` which propagates
+    /// through `?` in the user's handler and is caught by the executor.
     async fn signal_suspend(&self, reason: SuspendReason) -> Result<()> {
-        if let Some(ref tx) = self.suspend_tx {
-            tx.send(reason)
-                .await
-                .map_err(|_| ForgeError::Internal("Failed to signal suspension".into()))?;
-        }
-        // Return a special error that the executor catches
-        Err(ForgeError::WorkflowSuspended)
+        Err(ForgeError::WorkflowSuspended(reason))
     }
 }
 

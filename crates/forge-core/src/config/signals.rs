@@ -44,7 +44,12 @@ pub struct SignalsConfig {
     pub retention_days: u32,
 
     /// Hash client IP + UA into a daily-rotating visitor ID instead of storing raw IP.
-    #[serde(default)]
+    ///
+    /// Defaults to `true`. Disable only when you have a lawful basis for storing
+    /// raw IPs (e.g. explicit user consent or a fraud-investigation requirement).
+    /// With `anonymize_ip = false` the raw peer IP is stored in `forge_signals_events`,
+    /// which likely qualifies as personal data under GDPR.
+    #[serde(default = "default_true")]
     pub anonymize_ip: bool,
 
     /// Max events per batch INSERT.
@@ -82,7 +87,7 @@ impl Default for SignalsConfig {
             diagnostics: true,
             session_timeout: default_session_timeout(),
             retention_days: default_retention_days(),
-            anonymize_ip: false,
+            anonymize_ip: true,
             batch_size: default_batch_size(),
             flush_interval: default_flush_interval(),
             channel_capacity: default_channel_capacity(),
@@ -126,7 +131,7 @@ mod tests {
         assert!(config.diagnostics);
         assert_eq!(config.session_timeout.as_secs(), 1800);
         assert_eq!(config.retention_days, 90);
-        assert!(!config.anonymize_ip);
+        assert!(config.anonymize_ip);
         assert_eq!(config.batch_size, 100);
         assert_eq!(config.flush_interval.as_secs(), 5);
         assert!(config.excluded_functions.is_empty());
@@ -150,7 +155,7 @@ mod tests {
             assert!(config.diagnostics);
             assert_eq!(config.session_timeout.as_secs(), 1800);
             assert_eq!(config.retention_days, 90);
-            assert!(!config.anonymize_ip);
+            assert!(config.anonymize_ip);
             assert_eq!(config.batch_size, 100);
             assert_eq!(config.flush_interval.as_secs(), 5);
             assert!(config.excluded_functions.is_empty());
@@ -166,7 +171,7 @@ mod tests {
         assert!(config.diagnostics);
         assert_eq!(config.session_timeout.as_secs(), 1800);
         assert_eq!(config.retention_days, 90);
-        assert!(!config.anonymize_ip);
+        assert!(config.anonymize_ip);
         assert_eq!(config.batch_size, 100);
         assert_eq!(config.flush_interval.as_secs(), 5);
         assert!(config.excluded_functions.is_empty());

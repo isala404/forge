@@ -43,10 +43,7 @@ pub async fn get_iss_location(ctx: &QueryContext) -> Result<Option<IssLocation>>
 /// Polls ISS location every minute from Open Notify API
 #[forge::cron("* * * * *", timezone = "UTC")]
 pub async fn iss_location(ctx: &CronContext) -> Result<()> {
-    ctx.log.info(
-        "Fetching ISS location",
-        serde_json::json!({"run_id": ctx.run_id.to_string()}),
-    );
+    tracing::info!(run_id = %ctx.run_id, "Fetching ISS location");
 
     let response = ctx
         .http()
@@ -56,10 +53,7 @@ pub async fn iss_location(ctx: &CronContext) -> Result<()> {
         .map_err(|e| ForgeError::Internal(format!("HTTP request failed: {}", e)))?;
 
     if !response.status().is_success() {
-        ctx.log.error(
-            "Failed to fetch ISS location",
-            serde_json::json!({"status": response.status().as_u16()}),
-        );
+        tracing::error!(status = response.status().as_u16(), "Failed to fetch ISS location");
         return Err(ForgeError::Internal("Failed to fetch ISS location".into()));
     }
 
@@ -69,10 +63,7 @@ pub async fn iss_location(ctx: &CronContext) -> Result<()> {
         .map_err(|e| ForgeError::Deserialization(format!("Failed to parse: {}", e)))?;
 
     if data.message != "success" {
-        ctx.log.warn(
-            "ISS API non-success",
-            serde_json::json!({"message": data.message}),
-        );
+        tracing::warn!(message = %data.message, "ISS API non-success");
     }
 
     let latitude: f64 = data.iss_position.latitude.parse().unwrap_or(0.0);
@@ -88,13 +79,7 @@ pub async fn iss_location(ctx: &CronContext) -> Result<()> {
     .execute(ctx.db())
     .await?;
 
-    ctx.log.debug(
-        "ISS location stored",
-        serde_json::json!({
-            "latitude": latitude,
-            "longitude": longitude
-        }),
-    );
+    tracing::debug!(latitude, longitude, "ISS location stored");
 
     Ok(())
 }

@@ -13,7 +13,7 @@ use axum::response::Response;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::{Json, body::Body};
 use forge_core::config::McpConfig;
-use forge_core::function::{AuthContext, JobDispatch, RequestMetadata, WorkflowDispatch};
+use forge_core::function::{AuthContext, JobDispatch, KvHandle, RequestMetadata, WorkflowDispatch};
 use forge_core::mcp::McpToolContext;
 use futures_util::Stream;
 use serde_json::Value;
@@ -47,6 +47,7 @@ pub struct McpState {
     sessions: Arc<RwLock<HashMap<String, McpSession>>>,
     job_dispatcher: Option<Arc<dyn JobDispatch>>,
     workflow_dispatcher: Option<Arc<dyn WorkflowDispatch>>,
+    kv: Option<Arc<dyn KvHandle>>,
     rate_limiter: Arc<StrictRateLimiter>,
     /// When set, all registered queries and mutations are also exposed as MCP
     /// tools without requiring a separate `#[mcp_tool]` declaration.
@@ -69,9 +70,16 @@ impl McpState {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             job_dispatcher,
             workflow_dispatcher,
+            kv: None,
             rate_limiter: Arc::new(StrictRateLimiter::new(pool)),
             function_router,
         }
+    }
+
+    /// Attach a KV store handle so MCP tool handlers can call `ctx.kv()`.
+    pub fn with_kv(mut self, kv: Arc<dyn KvHandle>) -> Self {
+        self.kv = Some(kv);
+        self
     }
 
     async fn cleanup_expired_sessions(&self) {
@@ -729,13 +737,16 @@ async fn handle_tools_call(
             .into_response();
     }
 
-    let ctx = McpToolContext::with_dispatch(
+    let mut ctx = McpToolContext::with_dispatch(
         state.pool.clone(),
         auth.clone(),
         request_metadata,
         state.job_dispatcher.clone(),
         state.workflow_dispatcher.clone(),
     );
+    if let Some(ref kv) = state.kv {
+        ctx.set_kv(Arc::clone(kv));
+    }
 
     let result = if let Some(timeout_dur) = entry.info.timeout {
         match tokio::time::timeout(timeout_dur, (entry.handler)(&ctx, args)).await {

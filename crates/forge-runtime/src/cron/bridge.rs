@@ -47,7 +47,7 @@ pub fn register_cron_bridges(cron_registry: &Arc<CronRegistry>, job_registry: &m
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
 
-                let cron_ctx = CronContext::new(
+                let mut cron_ctx = CronContext::new(
                     run_id,
                     cron_name,
                     scheduled_time,
@@ -56,6 +56,9 @@ pub fn register_cron_bridges(cron_registry: &Arc<CronRegistry>, job_registry: &m
                     ctx.pool().clone(),
                     ctx.circuit_breaker_client().clone(),
                 );
+                if let Some(kv) = ctx.kv_handle() {
+                    cron_ctx = cron_ctx.with_kv(kv);
+                }
 
                 handler(&cron_ctx).await?;
                 Ok(serde_json::Value::Null)

@@ -26,7 +26,7 @@
 //!
 //! ```text
 //! BEGIN
-//!   ├── ctx.db().execute(...)
+//!   ├── ctx.tx().execute(...)
 //!   ├── ctx.dispatch_job("send_email", ...)  // INSERT into forge_jobs on this tx
 //!   └── return Ok(result)
 //! COMMIT
@@ -37,6 +37,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
+
 use futures_core::future::BoxFuture;
 use futures_core::stream::BoxStream;
 use sqlx::postgres::{PgConnection, PgQueryResult, PgRow};
@@ -46,7 +48,7 @@ use uuid::Uuid;
 
 use tracing::Instrument;
 
-use super::dispatch::{JobDispatch, WorkflowDispatch};
+use super::dispatch::{JobDispatch, KvHandle, WorkflowDispatch};
 use crate::auth::Claims;
 use crate::env::{EnvAccess, EnvProvider, RealEnvProvider};
 use crate::http::CircuitBreakerClient;
@@ -216,7 +218,7 @@ impl sqlx::Executor<'static> for ForgeDb {
 ///
 /// Allows shared helper functions to work with any context type.
 /// Obtain via `ctx.db_conn()` on pool-based contexts (queries, jobs, crons,
-/// daemons, webhooks, MCP tools) or via `ctx.db()` on `MutationContext`.
+/// daemons, webhooks, MCP tools) or via `ctx.tx()` on `MutationContext`.
 ///
 /// # Example
 ///
@@ -731,6 +733,8 @@ pub struct QueryContext {
     db_pool: sqlx::PgPool,
     /// Environment variable provider.
     env_provider: Arc<dyn EnvProvider>,
+    /// KV store handle. `None` until threaded in by the runtime.
+    kv: Option<Arc<dyn KvHandle>>,
 }
 
 impl QueryContext {
@@ -741,6 +745,7 @@ impl QueryContext {
             request,
             db_pool,
             env_provider: RealEnvProvider::shared(),
+            kv: None,
         }
     }
 
@@ -756,7 +761,25 @@ impl QueryContext {
             request,
             db_pool,
             env_provider,
+            kv: None,
         }
+    }
+
+    /// Attach a KV store handle. Called by the runtime before handing the
+    /// context to the handler.
+    pub fn set_kv(&mut self, kv: Arc<dyn KvHandle>) {
+        self.kv = Some(kv);
+    }
+
+    /// Access the KV store.
+    ///
+    /// Returns an error if the runtime did not supply a KV handle (this should
+    /// not happen in production; it can only occur in unit tests that construct
+    /// a bare `QueryContext` without going through the runtime).
+    pub fn kv(&self) -> crate::error::Result<&dyn KvHandle> {
+        self.kv
+            .as_deref()
+            .ok_or_else(|| crate::error::ForgeError::Internal("KV store not available".into()))
     }
 
     /// Database handle with automatic `db.query` tracing spans.
@@ -875,6 +898,8 @@ pub struct MutationContext {
     dispatched_job_count: Arc<AtomicUsize>,
     /// Maximum number of jobs a single mutation may dispatch. 0 = unlimited.
     max_jobs_per_request: usize,
+    /// KV store handle. `None` until threaded in by the runtime.
+    kv: Option<Arc<dyn KvHandle>>,
 }
 
 impl MutationContext {
@@ -894,6 +919,7 @@ impl MutationContext {
             token_ttl: AuthTokenTtl::default(),
             dispatched_job_count: Arc::new(AtomicUsize::new(0)),
             max_jobs_per_request: 0,
+            kv: None,
         }
     }
 
@@ -920,6 +946,7 @@ impl MutationContext {
             token_ttl: AuthTokenTtl::default(),
             dispatched_job_count: Arc::new(AtomicUsize::new(0)),
             max_jobs_per_request: 0,
+            kv: None,
         }
     }
 
@@ -947,6 +974,7 @@ impl MutationContext {
             token_ttl: AuthTokenTtl::default(),
             dispatched_job_count: Arc::new(AtomicUsize::new(0)),
             max_jobs_per_request: 0,
+            kv: None,
         }
     }
 
@@ -986,9 +1014,27 @@ impl MutationContext {
             token_ttl: AuthTokenTtl::default(),
             dispatched_job_count: Arc::new(AtomicUsize::new(0)),
             max_jobs_per_request: 0,
+            kv: None,
         };
 
         (ctx, tx_handle)
+    }
+
+    /// Attach a KV store handle. Called by the runtime before handing the
+    /// context to the handler.
+    pub fn set_kv(&mut self, kv: Arc<dyn KvHandle>) {
+        self.kv = Some(kv);
+    }
+
+    /// Access the KV store.
+    ///
+    /// Returns an error if the runtime did not supply a KV handle (this should
+    /// not happen in production; it can only occur in unit tests that construct
+    /// a bare `MutationContext` without going through the runtime).
+    pub fn kv(&self) -> crate::error::Result<&dyn KvHandle> {
+        self.kv
+            .as_deref()
+            .ok_or_else(|| crate::error::ForgeError::Internal("KV store not available".into()))
     }
 
     pub fn is_transactional(&self) -> bool {
@@ -1036,19 +1082,19 @@ impl MutationContext {
     ///
     /// #[forge::mutation]
     /// pub async fn items_snapshot(ctx: &MutationContext, input: Input) -> Result<Vec<Item>> {
-    ///     list_items(ctx.db()).await
+    ///     list_items(ctx.tx()).await
     /// }
     /// ```
-    pub fn db(&self) -> DbConn<'_> {
+    pub fn tx(&self) -> DbConn<'_> {
         match &self.tx {
             Some(tx) => DbConn::Transaction(tx.clone(), &self.db_pool),
             None => DbConn::Pool(self.db_pool.clone()),
         }
     }
 
-    /// Get a `DbConn` for use in shared helper functions (alias for `db()`).
+    /// Get a `DbConn` for use in shared helper functions (alias for `tx()`).
     pub fn db_conn(&self) -> DbConn<'_> {
-        self.db()
+        self.tx()
     }
 
     /// Get the HTTP client for external requests.
@@ -1258,6 +1304,106 @@ impl MutationContext {
             .await
     }
 
+    /// Dispatch a background job at a specific time.
+    ///
+    /// The job row is inserted immediately but workers will not pick it up
+    /// until `scheduled_at` is reached. In transactional mutations the insert
+    /// participates in the active transaction, so the job is only committed
+    /// (and becomes schedulable) once the mutation succeeds.
+    ///
+    /// Returns `ForgeError::Validation` when the call would exceed the
+    /// per-request job dispatch cap.
+    pub async fn dispatch_job_at<T: serde::Serialize>(
+        &self,
+        job_type: &str,
+        args: T,
+        scheduled_at: DateTime<Utc>,
+    ) -> crate::error::Result<Uuid> {
+        if self.max_jobs_per_request > 0 {
+            let count = self.dispatched_job_count.fetch_add(1, Ordering::Relaxed);
+            if count >= self.max_jobs_per_request {
+                self.dispatched_job_count.fetch_sub(1, Ordering::Relaxed);
+                return Err(crate::error::ForgeError::Validation(format!(
+                    "max_jobs_per_request limit of {} exceeded",
+                    self.max_jobs_per_request
+                )));
+            }
+        }
+
+        let args_json = serde_json::to_value(args)?;
+        let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
+            crate::error::ForgeError::Internal("Job dispatch not available".into())
+        })?;
+
+        if let Some(tx) = &self.tx {
+            let mut guard = tx.lock().await;
+            let conn = guard.as_mut().ok_or_else(|| {
+                crate::error::ForgeError::Internal(
+                    "Transaction already taken; cannot dispatch job".into(),
+                )
+            })?;
+            return dispatcher
+                .dispatch_in_conn_at(
+                    conn,
+                    job_type,
+                    args_json,
+                    scheduled_at,
+                    self.auth.principal_id(),
+                )
+                .await;
+        }
+
+        dispatcher
+            .dispatch_by_name_at(job_type, args_json, scheduled_at, self.auth.principal_id())
+            .await
+    }
+
+    /// Dispatch a background job after a delay.
+    ///
+    /// Equivalent to `dispatch_job_at(job_type, args, Utc::now() + delay)`.
+    /// The delay is computed at call time.
+    ///
+    /// Returns `ForgeError::Validation` when the call would exceed the
+    /// per-request job dispatch cap, or when `delay` is too large to
+    /// represent as a chrono duration.
+    pub async fn dispatch_job_after<T: serde::Serialize>(
+        &self,
+        job_type: &str,
+        args: T,
+        delay: Duration,
+    ) -> crate::error::Result<Uuid> {
+        let scheduled_at = Utc::now()
+            + chrono::Duration::from_std(delay).map_err(|_| {
+                crate::error::ForgeError::InvalidArgument("delay too large".into())
+            })?;
+        self.dispatch_job_at(job_type, args, scheduled_at).await
+    }
+
+    /// Type-safe dispatch: resolves the job name from the type's `ForgeJob`
+    /// impl and serializes the args at the call site.
+    pub async fn dispatch<J: crate::ForgeJob>(&self, args: J::Args) -> crate::error::Result<Uuid> {
+        self.dispatch_job(J::info().name, args).await
+    }
+
+    /// Type-safe dispatch at a specific time.
+    pub async fn dispatch_at<J: crate::ForgeJob>(
+        &self,
+        args: J::Args,
+        scheduled_at: DateTime<Utc>,
+    ) -> crate::error::Result<Uuid> {
+        self.dispatch_job_at(J::info().name, args, scheduled_at)
+            .await
+    }
+
+    /// Type-safe dispatch after a delay.
+    pub async fn dispatch_after<J: crate::ForgeJob>(
+        &self,
+        args: J::Args,
+        delay: Duration,
+    ) -> crate::error::Result<Uuid> {
+        self.dispatch_job_after(J::info().name, args, delay).await
+    }
+
     /// Request cancellation for a job.
     pub async fn cancel_job(
         &self,
@@ -1314,6 +1460,16 @@ impl MutationContext {
                 trace_id,
             )
             .await
+    }
+
+    /// Type-safe workflow start: resolves the workflow name from the type's
+    /// `ForgeWorkflow` impl.
+    pub async fn start<W: crate::ForgeWorkflow>(
+        &self,
+        input: W::Input,
+    ) -> crate::error::Result<Uuid> {
+        self.start_workflow(W::info().name, input).await
+
     }
 }
 

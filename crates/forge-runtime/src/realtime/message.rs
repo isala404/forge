@@ -359,7 +359,12 @@ impl SessionServer {
 
     /// Evict sessions whose JWT has expired. Sends an auth error event to each
     /// so the client knows to re-authenticate rather than just reconnecting.
-    pub fn cleanup_expired_tokens(&self) {
+    ///
+    /// Returns the session IDs that were evicted so callers can immediately
+    /// clean up associated subscription state (query groups, job/workflow
+    /// subscriptions) without waiting for the SSE bridge task to notice the
+    /// closed channel.
+    pub fn cleanup_expired_tokens(&self) -> Vec<SessionId> {
         let now = chrono::Utc::now().timestamp();
 
         let expired: Vec<SessionId> = self
@@ -370,7 +375,7 @@ impl SessionServer {
             .collect();
 
         if expired.is_empty() {
-            return;
+            return Vec::new();
         }
 
         tracing::debug!(
@@ -378,7 +383,7 @@ impl SessionServer {
             "Evicting sessions with expired tokens"
         );
 
-        for session_id in expired {
+        for &session_id in &expired {
             if let Some(conn) = self.connections.get(&session_id) {
                 let _ = conn.sender.try_send(RealtimeMessage::AuthFailed {
                     reason: "Token expired".to_string(),
@@ -386,6 +391,8 @@ impl SessionServer {
             }
             self.evict_session(session_id);
         }
+
+        expired
     }
 }
 
@@ -831,11 +838,13 @@ mod tests {
         // Token good for another hour.
         server.register_connection(valid, tx_valid, Some(chrono::Utc::now().timestamp() + 3600));
 
-        server.cleanup_expired_tokens();
+        let evicted = server.cleanup_expired_tokens();
 
         // Only the expired session was evicted.
         assert_eq!(server.connection_count(), 1);
         assert!(server.connections.contains_key(&valid));
+        // Returned list contains exactly the evicted session.
+        assert_eq!(evicted, vec![expired]);
 
         // The expired client received an AuthFailed notification before eviction.
         match rx_expired.try_recv() {
@@ -853,8 +862,23 @@ mod tests {
         let (tx, _rx) = mpsc::channel(8);
         server.register_connection(session_id, tx, None);
 
-        server.cleanup_expired_tokens();
+        let evicted = server.cleanup_expired_tokens();
 
         assert_eq!(server.connection_count(), 1);
+        assert!(evicted.is_empty());
+    }
+
+    #[test]
+    fn cleanup_expired_tokens_returns_empty_when_nothing_expired() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+        let session_id = SessionId::new();
+        let (tx, _rx) = mpsc::channel(8);
+        // Token good for another hour — nothing should expire.
+        server.register_connection(session_id, tx, Some(chrono::Utc::now().timestamp() + 3600));
+
+        let evicted = server.cleanup_expired_tokens();
+
+        assert_eq!(server.connection_count(), 1);
+        assert!(evicted.is_empty());
     }
 }

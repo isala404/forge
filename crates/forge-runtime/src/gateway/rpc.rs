@@ -6,7 +6,7 @@ use axum::{
     http::{HeaderMap, header::USER_AGENT},
 };
 use forge_core::function::{
-    AuthContext, FunctionInfo, JobDispatch, RequestMetadata, WorkflowDispatch,
+    AuthContext, FunctionInfo, JobDispatch, KvHandle, RequestMetadata, WorkflowDispatch,
 };
 
 use super::request::RpcRequest;
@@ -107,6 +107,13 @@ impl RpcHandler {
     pub fn set_max_result_size_bytes(&mut self, limit: usize) {
         if let Some(router) = Arc::get_mut(&mut self.router) {
             router.set_max_result_size_bytes(limit);
+        }
+    }
+
+    /// Attach a KV store handle so handlers can call `ctx.kv()`.
+    pub fn set_kv(&mut self, kv: Arc<dyn KvHandle>) {
+        if let Some(router) = Arc::get_mut(&mut self.router) {
+            router.set_kv(kv);
         }
     }
 

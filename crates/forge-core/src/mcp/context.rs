@@ -1,8 +1,10 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::Result;
 use crate::env::{EnvAccess, EnvProvider, RealEnvProvider};
-use crate::function::{AuthContext, JobDispatch, RequestMetadata, WorkflowDispatch};
+use crate::function::{AuthContext, JobDispatch, KvHandle, RequestMetadata, WorkflowDispatch};
+use crate::http::CircuitBreakerClient;
 use uuid::Uuid;
 
 /// Context for MCP tool execution.
@@ -13,9 +15,16 @@ pub struct McpToolContext {
     /// Request metadata.
     pub request: RequestMetadata,
     db_pool: sqlx::PgPool,
+    /// HTTP client for external calls.
+    http_client: CircuitBreakerClient,
+    /// Default timeout for outbound HTTP requests made through the
+    /// circuit-breaker client. `None` means unlimited.
+    http_timeout: Option<Duration>,
     job_dispatch: Option<Arc<dyn JobDispatch>>,
     workflow_dispatch: Option<Arc<dyn WorkflowDispatch>>,
     env_provider: Arc<dyn EnvProvider>,
+    /// KV store handle. `None` until threaded in by the runtime.
+    kv: Option<Arc<dyn KvHandle>>,
 }
 
 impl McpToolContext {
@@ -55,10 +64,32 @@ impl McpToolContext {
             auth,
             request,
             db_pool,
+            http_client: CircuitBreakerClient::with_ssrf_protection(),
+            http_timeout: None,
             job_dispatch,
             workflow_dispatch,
             env_provider,
+            kv: None,
         }
+    }
+
+    /// Set the HTTP client. Called by the runtime to inject the shared client.
+    pub fn with_http_client(mut self, client: CircuitBreakerClient) -> Self {
+        self.http_client = client;
+        self
+    }
+
+    /// Attach a KV store handle. Called by the runtime before handing the
+    /// context to the handler.
+    pub fn set_kv(&mut self, kv: Arc<dyn KvHandle>) {
+        self.kv = Some(kv);
+    }
+
+    /// Access the KV store.
+    pub fn kv(&self) -> crate::error::Result<&dyn KvHandle> {
+        self.kv
+            .as_deref()
+            .ok_or_else(|| crate::error::ForgeError::Internal("KV store not available".into()))
     }
 
     pub fn db(&self) -> crate::function::ForgeDb {
@@ -75,6 +106,21 @@ impl McpToolContext {
         Ok(crate::function::ForgeConn::Pool(
             self.db_pool.acquire().await?,
         ))
+    }
+
+    /// Get the HTTP client for external requests.
+    pub fn http(&self) -> crate::http::HttpClient {
+        self.http_client.with_timeout(self.http_timeout)
+    }
+
+    /// Get the raw reqwest client, bypassing circuit breaker execution.
+    pub fn raw_http(&self) -> &reqwest::Client {
+        self.http_client.inner()
+    }
+
+    /// Set the default timeout for outbound HTTP requests.
+    pub fn set_http_timeout(&mut self, timeout: Option<Duration>) {
+        self.http_timeout = timeout;
     }
 
     /// Get the authenticated user's UUID. Returns 401 if not authenticated.
@@ -99,6 +145,24 @@ impl McpToolContext {
             .await
     }
 
+    /// Type-safe dispatch: resolves the job name from the type's `ForgeJob`
+    /// impl and serializes the args at the call site.
+    pub async fn dispatch<J: crate::ForgeJob>(&self, args: J::Args) -> Result<Uuid> {
+        self.dispatch_job(J::info().name, args).await
+    }
+
+    /// Request cancellation for a job.
+    pub async fn cancel_job(
+        &self,
+        job_id: Uuid,
+        reason: Option<String>,
+    ) -> Result<bool> {
+        let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
+            crate::error::ForgeError::Internal("Job dispatch not available".to_string())
+        })?;
+        dispatcher.cancel(job_id, reason).await
+    }
+
     /// Start a workflow.
     pub async fn start_workflow<T: serde::Serialize>(
         &self,
@@ -118,6 +182,11 @@ impl McpToolContext {
                 Some(self.request.trace_id().to_string()),
             )
             .await
+    }
+
+    /// Type-safe workflow start.
+    pub async fn start<W: crate::ForgeWorkflow>(&self, input: W::Input) -> Result<Uuid> {
+        self.start_workflow(W::info().name, input).await
     }
 }
 

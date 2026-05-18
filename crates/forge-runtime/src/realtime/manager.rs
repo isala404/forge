@@ -294,14 +294,12 @@ impl SubscriptionManager {
             return Vec::new();
         };
 
-        // Collect IDs into a Vec while holding the read guard — cheaper than
-        // cloning the entire HashSet since Vec is contiguous and we only need
-        // the IDs for downstream filtering.
-        let candidates: Vec<QueryGroupId> = set.iter().copied().collect();
-        drop(set);
-
-        candidates
-            .into_iter()
+        // Iterate the table index under its read guard and filter directly.
+        // `self.groups.get(gid)` acquires a shard lock on a different DashMap,
+        // so there is no deadlock risk. This avoids materialising an
+        // intermediate Vec of all candidate IDs before filtering.
+        set.iter()
+            .copied()
             .filter(|gid| {
                 self.groups
                     .get(gid)

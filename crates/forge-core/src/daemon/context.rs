@@ -6,7 +6,7 @@ use tracing::Span;
 use uuid::Uuid;
 
 use crate::env::{EnvAccess, EnvProvider, RealEnvProvider};
-use crate::function::{JobDispatch, WorkflowDispatch};
+use crate::function::{JobDispatch, KvHandle, WorkflowDispatch};
 use crate::http::CircuitBreakerClient;
 
 /// Context available to daemon handlers.
@@ -33,6 +33,8 @@ pub struct DaemonContext {
     env_provider: Arc<dyn EnvProvider>,
     /// Parent span for trace propagation.
     span: Span,
+    /// KV store handle. `None` until threaded in by the runtime.
+    kv: Option<Arc<dyn KvHandle>>,
 }
 
 impl DaemonContext {
@@ -55,7 +57,22 @@ impl DaemonContext {
             workflow_dispatch: None,
             env_provider: Arc::new(RealEnvProvider::new()),
             span: Span::current(),
+            kv: None,
         }
+    }
+
+    /// Attach a KV store handle. Called by the runtime before handing the
+    /// context to the handler.
+    pub fn with_kv(mut self, kv: Arc<dyn KvHandle>) -> Self {
+        self.kv = Some(kv);
+        self
+    }
+
+    /// Access the KV store.
+    pub fn kv(&self) -> crate::error::Result<&dyn KvHandle> {
+        self.kv
+            .as_deref()
+            .ok_or_else(|| crate::error::ForgeError::Internal("KV store not available".into()))
     }
 
     /// Set job dispatcher.
@@ -118,6 +135,24 @@ impl DaemonContext {
         dispatcher.dispatch_by_name(job_type, args_json, None).await
     }
 
+    /// Type-safe dispatch: resolves the job name from the type's `ForgeJob`
+    /// impl and serializes the args at the call site.
+    pub async fn dispatch<J: crate::ForgeJob>(&self, args: J::Args) -> crate::Result<Uuid> {
+        self.dispatch_job(J::info().name, args).await
+    }
+
+    /// Request cancellation for a job.
+    pub async fn cancel_job(
+        &self,
+        job_id: Uuid,
+        reason: Option<String>,
+    ) -> crate::Result<bool> {
+        let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
+            crate::error::ForgeError::Internal("Job dispatch not available".to_string())
+        })?;
+        dispatcher.cancel(job_id, reason).await
+    }
+
     /// Start a workflow.
     pub async fn start_workflow<T: serde::Serialize>(
         &self,
@@ -132,6 +167,11 @@ impl DaemonContext {
         dispatcher
             .start_by_name(workflow_name, input_json, None, None)
             .await
+    }
+
+    /// Type-safe workflow start.
+    pub async fn start<W: crate::ForgeWorkflow>(&self, input: W::Input) -> crate::Result<Uuid> {
+        self.start_workflow(W::info().name, input).await
     }
 
     /// Check if shutdown has been requested.
@@ -161,6 +201,23 @@ impl DaemonContext {
                 // Channel closed, treat as shutdown
                 break;
             }
+        }
+    }
+
+    /// Sleep for `interval`, waking early if shutdown is requested.
+    ///
+    /// Returns `true` if the daemon should continue, `false` if shutdown was
+    /// requested before or during the sleep. Intended for the main daemon loop:
+    ///
+    /// ```ignore
+    /// while ctx.tick(Duration::from_secs(60)).await {
+    ///     // do periodic work
+    /// }
+    /// ```
+    pub async fn tick(&self, interval: Duration) -> bool {
+        tokio::select! {
+            _ = tokio::time::sleep(interval) => true,
+            _ = self.shutdown_signal() => false,
         }
     }
 
@@ -315,6 +372,29 @@ mod tests {
         use crate::env::EnvAccess;
         assert_eq!(ctx.env("FORGE_TEST_KEY"), Some("hello".to_string()));
         assert_eq!(ctx.env("FORGE_MISSING_KEY"), None);
+    }
+
+    #[tokio::test]
+    async fn tick_returns_true_after_interval_elapses() {
+        let (ctx, _tx, _) = lazy_ctx();
+        // Short interval; no shutdown fired — must return true.
+        let should_continue = ctx.tick(Duration::from_millis(10)).await;
+        assert!(should_continue);
+    }
+
+    #[tokio::test]
+    async fn tick_returns_false_when_shutdown_fires_before_interval() {
+        let (ctx, shutdown_tx, _) = lazy_ctx();
+        // Signal shutdown immediately before the long interval would finish.
+        shutdown_tx.send(true).unwrap();
+        // Interval is very long; shutdown should preempt it and return false quickly.
+        let should_continue = tokio::time::timeout(
+            Duration::from_millis(200),
+            ctx.tick(Duration::from_secs(60)),
+        )
+        .await
+        .expect("tick should return promptly on shutdown");
+        assert!(!should_continue);
     }
 
     #[tokio::test]

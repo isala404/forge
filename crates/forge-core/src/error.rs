@@ -56,21 +56,9 @@ pub enum ForgeError {
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
 
-    /// Function execution failed.
-    #[error("Function error: {0}")]
-    Function(String),
-
-    /// Job execution failed.
-    #[error("Job error: {0}")]
-    Job(String),
-
     /// Job was cancelled before completion.
     #[error("Job cancelled: {0}")]
     JobCancelled(String),
-
-    /// Cluster coordination failed.
-    #[error("Cluster error: {0}")]
-    Cluster(String),
 
     /// Failed to serialize data to JSON.
     #[error("Serialization error: {0}")]
@@ -117,8 +105,10 @@ pub enum ForgeError {
     InvalidState(String),
 
     /// Internal signal for workflow suspension. Never returned to clients.
+    ///
+    /// Carries the reason so the executor can persist it without a side-channel.
     #[error("Workflow suspended")]
-    WorkflowSuspended,
+    WorkflowSuspended(crate::workflow::SuspendReason),
 
     /// Rate limit exceeded (429).
     #[error("Rate limit exceeded: retry after {retry_after:?}")]
@@ -276,17 +266,8 @@ mod tests {
                 "Database error: no rows returned by a query that expected to return at least one row",
             ),
             (
-                ForgeError::Function("handler panic".into()),
-                "Function error: handler panic",
-            ),
-            (ForgeError::Job("timeout".into()), "Job error: timeout"),
-            (
                 ForgeError::JobCancelled("user request".into()),
                 "Job cancelled: user request",
-            ),
-            (
-                ForgeError::Cluster("split brain".into()),
-                "Cluster error: split brain",
             ),
             (
                 ForgeError::Serialization("bad json".into()),
@@ -325,7 +306,12 @@ mod tests {
                 ForgeError::InvalidState("already completed".into()),
                 "Invalid state: already completed",
             ),
-            (ForgeError::WorkflowSuspended, "Workflow suspended"),
+            (
+                ForgeError::WorkflowSuspended(crate::workflow::SuspendReason::Sleep {
+                    wake_at: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+                }),
+                "Workflow suspended",
+            ),
         ];
 
         for (error, expected) in cases {
@@ -468,12 +454,11 @@ mod tests {
         for err in [
             ForgeError::Internal("x".into()),
             ForgeError::Database(sqlx::Error::RowNotFound),
-            ForgeError::Function("x".into()),
             ForgeError::Config("x".into()),
-            ForgeError::Cluster("x".into()),
             ForgeError::InvalidState("x".into()),
-            ForgeError::Job("x".into()),
-            ForgeError::WorkflowSuspended,
+            ForgeError::WorkflowSuspended(crate::workflow::SuspendReason::Sleep {
+                wake_at: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+            }),
         ] {
             assert_eq!(err.http_status(), 500, "expected 500 for {err:?}");
         }

@@ -209,17 +209,11 @@ impl From<forge_core::error::ForgeError> for RpcError {
             }
             ref e @ (E::Internal(_)
             | E::Serialization(_)
-            | E::Function(_)
             | E::Config(_)
             | E::Io(_)
-            | E::Cluster(_)
             | E::InvalidState(_)
-            | E::WorkflowSuspended) => {
+            | E::WorkflowSuspended(_)) => {
                 tracing::error!(error = %e, "Internal error in RPC handler");
-                Self::internal("Internal server error")
-            }
-            E::Job(ref msg) => {
-                tracing::error!(error = %msg, "Job error");
                 Self::internal("Internal server error")
             }
             E::Conflict(msg) => Self::new("CONFLICT", msg),
@@ -372,12 +366,13 @@ mod tests {
         let internals: Vec<forge_core::ForgeError> = vec![
             forge_core::ForgeError::Internal("oops".into()),
             forge_core::ForgeError::Serialization("bad".into()),
-            forge_core::ForgeError::Function("handler".into()),
             forge_core::ForgeError::Config("bad toml".into()),
-            forge_core::ForgeError::Cluster("split".into()),
             forge_core::ForgeError::InvalidState("done".into()),
-            forge_core::ForgeError::Job("failed".into()),
-            forge_core::ForgeError::WorkflowSuspended,
+            forge_core::ForgeError::WorkflowSuspended(
+                forge_core::workflow::SuspendReason::Sleep {
+                    wake_at: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+                },
+            ),
         ];
 
         for err in internals {

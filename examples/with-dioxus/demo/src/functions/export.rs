@@ -72,7 +72,7 @@ pub async fn export_users(ctx: &JobContext, input: ExportInput) -> Result<Export
 
     let data = match input.format.as_str() {
         "json" => {
-            serde_json::to_string_pretty(&users).map_err(|e| ForgeError::Job(e.to_string()))?
+            serde_json::to_string_pretty(&users).map_err(|e| ForgeError::Internal(e.to_string()))?
         }
         _ => {
             let mut csv = String::from("id,email,name,role,created_at\n");

@@ -110,6 +110,10 @@ sqlx::query_as!(User, "...", id).fetch_one(&mut conn).await?
 - **Don't re-implement auth in custom handlers**: Middleware already parses the JWT and injects `Extension<AuthContext>`. Do not reach for headers or parse tokens yourself.
 - **Per-file upload cap is independent of total body**: `gateway.max_body_size` caps the full multipart body, but individual files are capped by `gateway.max_file_size` (defaults to `"10mb"`). A mutation that legitimately accepts a big file must declare `max_size = "…"`; that value becomes both the total and per-file limit for that endpoint.
 - **CORS startup validation**: `cors_enabled = true` with an empty `cors_origins` list fails at startup with a config error. Mixing `"*"` with concrete origins in the same list also fails — pick one or the other.
+- **Auth is off by default**: without `[auth]` in `forge.toml`, every RPC endpoint is callable without a token. Non-`public` handlers still check for a JWT if one arrives, but unauthenticated requests are not rejected at the middleware layer. Configure `jwt_secret` or `jwks_url` before deploying anything user-facing.
+- **No per-function rate limits by default**: `[rate_limit]` sets the counter backend, but no limits are enforced without `#[forge::query(rate_limit = ...)]` annotations. Public or unauthenticated endpoints need explicit limits.
+- **`trusted_proxies` must match your infrastructure**: when empty (default), `X-Forwarded-For` is ignored and the raw socket peer IP is used. If your app runs behind a load balancer, set `trusted_proxies` to its CIDR so rate limits and signals see real client IPs.
+- **`signals.anonymize_ip` defaults to `true`**: raw IPs are not stored. If you set it to `false`, raw peer IPs land in `forge_signals_events` — ensure you have a lawful basis under GDPR before doing so.
 
 ## 10. Resilience & Hygiene
 
@@ -156,7 +160,23 @@ sqlx::query_as!(User, "...", id).fetch_one(&mut conn).await?
 - Never create a store inside a `$derived`. Opens a new SSE subscription every recomputation.
 - Set `export const ssr = false;` in `+layout.ts`. SSE / `EventSource` / `localStorage` aren't available server-side.
 
-## 16. Signals v1 → v2 Breaking Changes
+## 16. Job `require_role` Is Dispatch-Time Only [11.F12]
+
+`#[forge::job(require_role = "admin")]` enforces the role check at **RPC dispatch time** (when a client calls the job directly via `/_api/rpc/{job_name}`). When a mutation handler dispatches the job programmatically with `ctx.dispatch_job::<MyJob>(args).await?`, no role check is performed — the mutation's own auth already ran before the handler executed, and jobs do not persist the dispatcher's roles in the DB record.
+
+At execution time the worker reconstructs an `AuthContext` from the persisted `owner_subject` (the principal's UUID or sub claim) with an **empty role list**. The `required_role` check cannot run there without a schema migration to persist roles at dispatch time.
+
+**What this means in practice**:
+- Jobs called via RPC: role enforced correctly.
+- Jobs dispatched from a mutation via `ctx.dispatch_job()`: no role check. The mutation's own auth still ran, so only authenticated users can trigger the dispatch — but `require_role` on the job itself is not re-checked.
+- If the job also has `require_role` and is dispatched programmatically, the runtime logs a `WARN` trace line (`job has require_role but roles are not persisted…`) to make the gap visible.
+
+**Mitigations**:
+- Apply `require_role` on the **mutation** that dispatches the job, not on the job itself, when the access control point is the dispatch call.
+- If the job should only ever run for admin-dispatched contexts, enforce it inside the job handler by checking `ctx.user_id()` against an allowlist stored in your DB.
+- Do not rely on `require_role` on a job for enforcement when the job may be dispatched programmatically.
+
+## 17. Signals v1 → v2 Breaking Changes
 
 `trackVital()` and `identifyUser()` were removed in v2. Use the current API instead:
 

@@ -706,6 +706,8 @@ impl Reactor {
         let subscription_manager = self.subscription_manager.clone();
         let job_subscriptions = self.job_subscriptions.clone();
         let workflow_subscriptions = self.workflow_subscriptions.clone();
+        let session_job_ids = self.session_job_ids.clone();
+        let session_workflow_ids = self.session_workflow_ids.clone();
         let session_server = self.session_server.clone();
         let registry = self.registry.clone();
         let database = self.database.clone();
@@ -807,7 +809,43 @@ impl Reactor {
                     }
                     _ = cleanup_interval.tick() => {
                         session_server.cleanup_stale(std::time::Duration::from_secs(300));
-                        session_server.cleanup_expired_tokens();
+                        let expired_sessions = session_server.cleanup_expired_tokens();
+                        if !expired_sessions.is_empty() {
+                            // Immediately purge query-group subscriptions for
+                            // expired sessions so stale groups are not
+                            // re-executed during the next invalidation flush or
+                            // resync sweep. Job/workflow subscription entries
+                            // are likewise pruned so change fan-out skips them
+                            // without waiting for the SSE bridge task to detect
+                            // the closed channel.
+                            let mut job_subs = job_subscriptions.write().await;
+                            let mut wf_subs = workflow_subscriptions.write().await;
+                            let mut sess_jobs = session_job_ids.write().await;
+                            let mut sess_wfs = session_workflow_ids.write().await;
+
+                            for session_id in expired_sessions {
+                                subscription_manager
+                                    .remove_session_subscriptions(session_id);
+
+                                if let Some(job_ids) = sess_jobs.remove(&session_id) {
+                                    for id in job_ids {
+                                        if let Some(subs) = job_subs.get_mut(&id) {
+                                            subs.retain(|s| s.session_id != session_id);
+                                        }
+                                    }
+                                }
+                                if let Some(wf_ids) = sess_wfs.remove(&session_id) {
+                                    for id in wf_ids {
+                                        if let Some(subs) = wf_subs.get_mut(&id) {
+                                            subs.retain(|s| s.session_id != session_id);
+                                        }
+                                    }
+                                }
+                            }
+
+                            job_subs.retain(|_, v| !v.is_empty());
+                            wf_subs.retain(|_, v| !v.is_empty());
+                        }
                         Self::trim_change_log(database.read_pool()).await;
                     }
                     _ = resync_interval.tick(), if resync_secs != 0 => {

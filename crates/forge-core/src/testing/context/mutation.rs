@@ -4,7 +4,9 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -96,6 +98,55 @@ impl TestMutationContext {
         self.job_dispatch.dispatch(job_type, args).await
     }
 
+    /// Dispatch a job at a specific time (records for later verification).
+    pub async fn dispatch_job_at<T: serde::Serialize>(
+        &self,
+        job_type: &str,
+        args: T,
+        scheduled_at: DateTime<Utc>,
+    ) -> Result<Uuid> {
+        self.job_dispatch.dispatch_at(job_type, args, scheduled_at).await
+    }
+
+    /// Dispatch a job after a delay (records for later verification).
+    pub async fn dispatch_job_after<T: serde::Serialize>(
+        &self,
+        job_type: &str,
+        args: T,
+        delay: Duration,
+    ) -> Result<Uuid> {
+        let scheduled_at = Utc::now()
+            + chrono::Duration::from_std(delay).map_err(|_| {
+                crate::error::ForgeError::InvalidArgument("delay too large".into())
+            })?;
+        self.job_dispatch.dispatch_at(job_type, args, scheduled_at).await
+    }
+
+    /// Type-safe dispatch: resolves the job name from the type's `ForgeJob`
+    /// impl and serializes the args at the call site.
+    pub async fn dispatch<J: crate::ForgeJob>(&self, args: J::Args) -> Result<Uuid> {
+        self.dispatch_job(J::info().name, args).await
+    }
+
+    /// Type-safe dispatch at a specific time.
+    pub async fn dispatch_at<J: crate::ForgeJob>(
+        &self,
+        args: J::Args,
+        scheduled_at: DateTime<Utc>,
+    ) -> Result<Uuid> {
+        self.dispatch_job_at(J::info().name, args, scheduled_at)
+            .await
+    }
+
+    /// Type-safe dispatch after a delay.
+    pub async fn dispatch_after<J: crate::ForgeJob>(
+        &self,
+        args: J::Args,
+        delay: Duration,
+    ) -> Result<Uuid> {
+        self.dispatch_job_after(J::info().name, args, delay).await
+    }
+
     /// Cancel a job (records for later verification).
     pub async fn cancel_job(&self, job_id: Uuid, reason: Option<String>) -> Result<bool> {
         self.job_dispatch.cancel_job(job_id, reason);
@@ -105,6 +156,11 @@ impl TestMutationContext {
     /// Start a workflow (records for later verification).
     pub async fn start_workflow<T: serde::Serialize>(&self, name: &str, input: T) -> Result<Uuid> {
         self.workflow_dispatch.start(name, input).await
+    }
+
+    /// Type-safe workflow start.
+    pub async fn start<W: crate::ForgeWorkflow>(&self, input: W::Input) -> Result<Uuid> {
+        self.start_workflow(W::info().name, input).await
     }
 
     /// Get the mock env provider for verification.

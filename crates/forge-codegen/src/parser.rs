@@ -477,22 +477,21 @@ fn path_to_rust_type(tp: &syn::TypePath) -> RustType {
 
 /// Check if a `Vec` segment has `u8` as its type argument.
 fn is_vec_u8(seg: &syn::PathSegment) -> bool {
-    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
-        if let Some(syn::GenericArgument::Type(syn::Type::Path(tp))) = args.args.first() {
-            if let Some(s) = tp.path.segments.last() {
-                return s.ident == "u8" && s.arguments.is_empty();
-            }
-        }
+    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+        && let Some(syn::GenericArgument::Type(syn::Type::Path(tp))) = args.args.first()
+        && let Some(s) = tp.path.segments.last()
+    {
+        return s.ident == "u8" && s.arguments.is_empty();
     }
     false
 }
 
 /// Extract the first generic type argument from a path segment.
 fn first_generic_arg(seg: &syn::PathSegment) -> RustType {
-    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
-        if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
-            return type_to_rust_type(inner_ty);
-        }
+    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+        && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first()
+    {
+        return type_to_rust_type(inner_ty);
     }
     RustType::Custom(seg.ident.to_string())
 }

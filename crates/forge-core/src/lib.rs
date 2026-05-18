@@ -65,7 +65,7 @@ pub use env::{EnvAccess, EnvProvider, MockEnvProvider, RealEnvProvider};
 pub use error::{ForgeError, Result};
 pub use function::{
     AuthContext, AuthTokenTtl, DbConn, ForgeConn, ForgeDb, ForgeMutation, ForgeQuery, FunctionInfo,
-    FunctionKind, JobDispatch, LogLevel, MutationContext, QueryContext, RequestMetadata,
+    FunctionKind, JobDispatch, KvHandle, LogLevel, MutationContext, QueryContext, RequestMetadata,
     TokenIssuer, WorkflowDispatch,
 };
 pub use http::{

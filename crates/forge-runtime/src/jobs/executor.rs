@@ -2,11 +2,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use forge_core::CircuitBreakerClient;
+use forge_core::function::KvHandle;
 use forge_core::job::{JobContext, ProgressUpdate};
 use tokio::time::timeout;
 
 use super::queue::{JobQueue, JobRecord};
 use super::registry::{JobEntry, JobRegistry};
+use crate::observability;
 
 /// Executes jobs with timeout and retry handling.
 pub struct JobExecutor {
@@ -14,6 +16,7 @@ pub struct JobExecutor {
     registry: Arc<JobRegistry>,
     db_pool: sqlx::PgPool,
     http_client: CircuitBreakerClient,
+    kv: Option<Arc<dyn KvHandle>>,
 }
 
 impl JobExecutor {
@@ -26,10 +29,36 @@ impl JobExecutor {
             registry: Arc::new(registry),
             db_pool,
             http_client: CircuitBreakerClient::with_ssrf_protection(),
+            kv: None,
         }
     }
 
+    /// Attach a KV store handle so job handlers can call `ctx.kv()`.
+    pub fn with_kv(mut self, kv: Arc<dyn KvHandle>) -> Self {
+        self.kv = Some(kv);
+        self
+    }
+
+    /// Attach a KV store handle (mutable reference version for `Worker::with_kv`).
+    pub fn set_kv(&mut self, kv: Arc<dyn KvHandle>) {
+        self.kv = Some(kv);
+    }
+
     /// Execute a claimed job.
+    ///
+    /// # Semaphore cost on lost-claim races
+    ///
+    /// The `start()` fence check (marking the job as running) can fail with
+    /// `RowNotFound` when another worker reclaimed a stale claim between this
+    /// worker's `claim()` and `start()` calls. When that happens execution is
+    /// aborted before any real work is done, but **the semaphore permit is still
+    /// consumed for the full round-trip of the fence check**. Under a sustained
+    /// stale-reclaim storm this can exhaust the worker concurrency limit.
+    ///
+    /// Monitor the `worker_lost_claim_total` metric (tagged by `job_type`) to
+    /// quantify the race rate. Persistent elevation means `stale_threshold` is
+    /// too low relative to observed heartbeat latency; raise it until the
+    /// counter returns to near-zero.
     pub async fn execute(&self, job: &JobRecord) -> ExecutionResult {
         let entry = match self.registry.get(&job.job_type) {
             Some(e) => e,
@@ -63,6 +92,7 @@ impl JobExecutor {
         };
         if let Err(e) = self.queue.start(job.id, worker_id, job.attempts).await {
             if matches!(e, sqlx::Error::RowNotFound) {
+                observability::record_lost_claim(&job.job_type);
                 tracing::warn!(
                     job_id = %job.id,
                     job_type = %job.job_type,
@@ -113,16 +143,22 @@ impl JobExecutor {
         });
 
         // Create job context with progress channel
-        let mut ctx = JobContext::new(
-            job.id,
-            job.job_type.clone(),
-            job.attempts as u32,
-            job.max_attempts as u32,
-            self.db_pool.clone(),
-            self.http_client.clone(),
-        )
-        .with_saved(job.job_context.clone())
-        .with_progress(progress_tx);
+        let mut ctx = {
+            let mut c = JobContext::new(
+                job.id,
+                job.job_type.clone(),
+                job.attempts as u32,
+                job.max_attempts as u32,
+                self.db_pool.clone(),
+                self.http_client.clone(),
+            )
+            .with_saved(job.job_context.clone())
+            .with_progress(progress_tx);
+            if let Some(ref kv) = self.kv {
+                c = c.with_kv(Arc::clone(kv));
+            }
+            c
+        };
         if let Some(ref subject) = job.owner_subject {
             let auth = if let Ok(uuid) = uuid::Uuid::parse_str(subject) {
                 forge_core::AuthContext::authenticated(
@@ -140,6 +176,31 @@ impl JobExecutor {
             };
             ctx = ctx.with_auth(auth);
         }
+
+        // Jobs store the owner subject but not their roles. When a job reaches
+        // the executor, the auth context is reconstructed with an empty role
+        // list regardless of what roles the dispatcher held. A `require_role`
+        // check at execution time is therefore impossible without a schema
+        // migration to persist roles at dispatch time.
+        //
+        // The role check IS enforced at RPC dispatch time (router.rs). Jobs
+        // dispatched programmatically via `ctx.dispatch_job()` bypass that
+        // check. If the job has `require_role` and was NOT dispatched through
+        // the RPC layer, the check is silently skipped here — log a warning so
+        // the gap is visible in production traces.
+        if let Some(required_role) = entry.info.required_role
+            && job.owner_subject.is_some()
+        {
+            tracing::warn!(
+                job_id = %job.id,
+                job_type = %job.job_type,
+                required_role = %required_role,
+                "job has require_role but roles are not persisted in the job \
+                 record; role enforcement is dispatch-time only (RPC path) — \
+                 jobs dispatched programmatically skip this check",
+            );
+        }
+
         ctx.set_http_timeout(entry.info.http_timeout);
 
         // Keepalive heartbeat prevents stale cleanup from reclaiming healthy long jobs.

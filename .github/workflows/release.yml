@@ -243,9 +243,8 @@ jobs:
             publish_crate -p $pkg --allow-dirty
             wait_for_crate "$pkg" "$VERSION"
           done
-          cd packages/forge-dioxus && publish_crate --allow-dirty
+          publish_crate -p forge-dioxus --allow-dirty
           wait_for_crate "forge-dioxus" "$VERSION"
-          cd "$GITHUB_WORKSPACE"
           bash scripts/build-template-archive.sh
           publish_crate -p forgex --allow-dirty
 

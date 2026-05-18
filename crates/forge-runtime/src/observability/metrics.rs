@@ -139,6 +139,7 @@ impl FnCacheMetrics {
 pub struct JobMetrics {
     executions_total: Counter<u64>,
     duration: Histogram<f64>,
+    lost_claim_total: Counter<u64>,
 }
 
 impl JobMetrics {
@@ -157,9 +158,21 @@ impl JobMetrics {
             .with_unit("s")
             .build();
 
+        let lost_claim_total = meter
+            .u64_counter("worker_lost_claim_total")
+            .with_description(
+                "Number of times a worker lost a job claim to a stale-reclaim race. \
+                 Each lost claim consumes one semaphore permit for the duration of \
+                 the start() fence check. Sustained elevation indicates stale_threshold \
+                 is set too low for the observed heartbeat latency.",
+            )
+            .with_unit("claims")
+            .build();
+
         Self {
             executions_total,
             duration,
+            lost_claim_total,
         }
     }
 
@@ -171,6 +184,11 @@ impl JobMetrics {
 
         self.executions_total.add(1, &attributes);
         self.duration.record(duration_secs, &attributes);
+    }
+
+    pub fn record_lost_claim(&self, job_type: &str) {
+        self.lost_claim_total
+            .add(1, &[KeyValue::new("job_type", job_type.to_string())]);
     }
 }
 
@@ -247,6 +265,10 @@ pub fn record_fn_cache(function: &str, hit: bool) {
 
 pub fn record_job_execution(job_type: &str, status: &'static str, duration_secs: f64) {
     job_metrics().record(job_type, status, duration_secs);
+}
+
+pub fn record_lost_claim(job_type: &str) {
+    job_metrics().record_lost_claim(job_type);
 }
 
 pub fn set_active_connections(connection_type: &'static str, delta: i64) {

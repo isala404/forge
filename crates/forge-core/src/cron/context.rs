@@ -6,7 +6,7 @@ use tracing::Span;
 use uuid::Uuid;
 
 use crate::env::{EnvAccess, EnvProvider, RealEnvProvider};
-use crate::function::AuthContext;
+use crate::function::{AuthContext, KvHandle};
 use crate::http::CircuitBreakerClient;
 
 /// Context available to cron handlers.
@@ -33,28 +33,29 @@ pub struct CronContext {
     /// Default timeout for outbound HTTP requests made through the
     /// circuit-breaker client. `None` means unlimited.
     http_timeout: Option<Duration>,
-    /// Structured logger.
-    pub log: CronLog,
     /// Environment variable provider.
     env_provider: Arc<dyn EnvProvider>,
     /// Parent span for trace propagation.
     span: Span,
+    /// KV store handle. `None` until threaded in by the runtime.
+    kv: Option<Arc<dyn KvHandle>>,
 }
 
 impl CronContext {
     /// Create a new cron context.
     pub fn new(
         run_id: Uuid,
-        cron_name: String,
+        cron_name: impl Into<String>,
         scheduled_time: DateTime<Utc>,
         timezone: String,
         is_catch_up: bool,
         db_pool: sqlx::PgPool,
         http_client: CircuitBreakerClient,
     ) -> Self {
+        let cron_name = cron_name.into();
         Self {
             run_id,
-            cron_name: cron_name.clone(),
+            cron_name,
             scheduled_time,
             execution_time: Utc::now(),
             timezone,
@@ -63,10 +64,24 @@ impl CronContext {
             db_pool,
             http_client,
             http_timeout: None,
-            log: CronLog::new(cron_name),
             env_provider: Arc::new(RealEnvProvider::new()),
             span: Span::current(),
+            kv: None,
         }
+    }
+
+    /// Attach a KV store handle. Called by the runtime before handing the
+    /// context to the handler.
+    pub fn with_kv(mut self, kv: Arc<dyn KvHandle>) -> Self {
+        self.kv = Some(kv);
+        self
+    }
+
+    /// Access the KV store.
+    pub fn kv(&self) -> crate::error::Result<&dyn KvHandle> {
+        self.kv
+            .as_deref()
+            .ok_or_else(|| crate::error::ForgeError::Internal("KV store not available".into()))
     }
 
     /// Set environment provider.
@@ -140,59 +155,6 @@ impl CronContext {
 impl EnvAccess for CronContext {
     fn env_provider(&self) -> &dyn EnvProvider {
         self.env_provider.as_ref()
-    }
-}
-
-/// Structured logger for cron jobs.
-#[derive(Clone)]
-pub struct CronLog {
-    cron_name: String,
-}
-
-impl CronLog {
-    /// Create a new cron logger.
-    pub fn new(cron_name: String) -> Self {
-        Self { cron_name }
-    }
-
-    /// Log an info message.
-    pub fn info(&self, message: &str, data: serde_json::Value) {
-        tracing::info!(
-            cron_name = %self.cron_name,
-            data = %data,
-            "{}",
-            message
-        );
-    }
-
-    /// Log a warning message.
-    pub fn warn(&self, message: &str, data: serde_json::Value) {
-        tracing::warn!(
-            cron_name = %self.cron_name,
-            data = %data,
-            "{}",
-            message
-        );
-    }
-
-    /// Log an error message.
-    pub fn error(&self, message: &str, data: serde_json::Value) {
-        tracing::error!(
-            cron_name = %self.cron_name,
-            data = %data,
-            "{}",
-            message
-        );
-    }
-
-    /// Log a debug message.
-    pub fn debug(&self, message: &str, data: serde_json::Value) {
-        tracing::debug!(
-            cron_name = %self.cron_name,
-            data = %data,
-            "{}",
-            message
-        );
     }
 }
 
@@ -288,22 +250,4 @@ mod tests {
         let _ = ctx.http();
     }
 
-    #[test]
-    fn test_cron_log() {
-        let log = CronLog::new("test_cron".to_string());
-        // All four levels must accept the same shape and not panic.
-        log.info("Info", serde_json::json!({"k": 1}));
-        log.warn("Warn", serde_json::json!({"k": 2}));
-        log.error("Error", serde_json::json!({"k": 3}));
-        log.debug("Debug", serde_json::json!({"k": 4}));
-    }
-
-    #[test]
-    fn cron_log_clones_share_name() {
-        let log = CronLog::new("orig".to_string());
-        let log2 = log.clone();
-        // Just exercise both — name is private but cloning must produce a
-        // functional logger that doesn't panic.
-        log2.info("after clone", serde_json::Value::Null);
-    }
 }

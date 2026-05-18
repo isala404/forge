@@ -18,7 +18,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 use forge_core::cluster::NodeId;
 use forge_core::config::McpConfig;
-use forge_core::function::{JobDispatch, WorkflowDispatch};
+use forge_core::function::{JobDispatch, KvHandle, WorkflowDispatch};
 #[cfg(feature = "otel")]
 use opentelemetry::global;
 #[cfg(feature = "otel")]
@@ -213,6 +213,7 @@ pub struct GatewayServer {
     reactor: Arc<Reactor>,
     job_dispatcher: Option<Arc<dyn JobDispatch>>,
     workflow_dispatcher: Option<Arc<dyn WorkflowDispatch>>,
+    kv: Option<Arc<dyn KvHandle>>,
     mcp_registry: Option<McpToolRegistry>,
     token_ttl: forge_core::AuthTokenTtl,
     signals_collector: Option<crate::signals::SignalsCollector>,
@@ -243,6 +244,7 @@ impl GatewayServer {
             reactor,
             job_dispatcher: None,
             workflow_dispatcher: None,
+            kv: None,
             mcp_registry: None,
             token_ttl,
             signals_collector: None,
@@ -288,6 +290,12 @@ impl GatewayServer {
     /// Set the workflow dispatcher.
     pub fn with_workflow_dispatcher(mut self, dispatcher: Arc<dyn WorkflowDispatch>) -> Self {
         self.workflow_dispatcher = Some(dispatcher);
+        self
+    }
+
+    /// Attach a KV store handle so handlers can call `ctx.kv()`.
+    pub fn with_kv(mut self, kv: Arc<dyn KvHandle>) -> Self {
+        self.kv = Some(kv);
         self
     }
 
@@ -401,6 +409,9 @@ impl GatewayServer {
         rpc.set_token_ttl(self.token_ttl.clone());
         rpc.set_max_jobs_per_request(self.config.max_jobs_per_request);
         rpc.set_max_result_size_bytes(self.config.max_result_size_bytes);
+        if let Some(kv) = &self.kv {
+            rpc.set_kv(Arc::clone(kv));
+        }
         if let Some(rate_limiter) = &self.rate_limiter {
             rpc.set_rate_limiter(rate_limiter.clone());
         }
@@ -570,14 +581,18 @@ impl GatewayServer {
         let mut mcp_router = Router::new();
         if self.config.mcp.enabled {
             let path = self.config.mcp.path.clone();
-            let mcp_state = Arc::new(McpState::new(
+            let mut mcp_state = McpState::new(
                 self.config.mcp.clone(),
                 self.mcp_registry.clone().unwrap_or_default(),
                 self.db.primary().clone(),
                 self.job_dispatcher.clone(),
                 self.workflow_dispatcher.clone(),
                 Some(rpc_handler_state.router()),
-            ));
+            );
+            if let Some(ref kv) = self.kv {
+                mcp_state = mcp_state.with_kv(Arc::clone(kv));
+            }
+            let mcp_state = Arc::new(mcp_state);
             mcp_router = mcp_router.route(
                 &path,
                 post(mcp_post_handler)

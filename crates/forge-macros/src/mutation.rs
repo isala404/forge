@@ -54,6 +54,12 @@ struct DarlingMutationAttrs {
     /// Set `register = false` to skip `inventory::submit!` auto-registration.
     #[darling(default = "default_true")]
     register: bool,
+    /// Opt out of the compile-time guard against `ctx.http()` inside a
+    /// transactional mutation. Use only when the HTTP call is genuinely safe
+    /// to leave un-rolled-back on transaction failure (e.g. an idempotent
+    /// read-only request).
+    #[darling(default)]
+    allow_http: bool,
     // Reserved keys
     #[darling(default)]
     coalesce_window: Option<String>,
@@ -95,6 +101,9 @@ struct MutationAttrs {
     /// Override auto-detected table dependencies from SQL extraction.
     tables: Option<Vec<String>>,
     register: bool,
+    /// Opt out of the compile-time guard against `ctx.http()` inside a
+    /// transactional mutation.
+    allow_http: bool,
 }
 
 impl Default for MutationAttrs {
@@ -114,6 +123,7 @@ impl Default for MutationAttrs {
             max_upload_size_bytes: None,
             tables: None,
             register: true,
+            allow_http: false,
         }
     }
 }
@@ -184,6 +194,7 @@ fn convert_mutation_attrs(darling: DarlingMutationAttrs) -> Result<MutationAttrs
         max_upload_size_bytes: darling.max_size.and_then(|s| parse_size_bytes(&s)),
         tables: darling.tables.map(|t| t.0),
         register: darling.register,
+        allow_http: darling.allow_http,
     })
 }
 
@@ -235,6 +246,50 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         ));
     }
 
+    // Calling ctx.http() inside a transactional mutation is a footgun:
+    //   1. The HTTP request cannot be rolled back if the transaction fails,
+    //      so external side-effects may occur even when the DB write is undone.
+    //   2. The DB connection is held open for the full HTTP round-trip, which
+    //      increases contention on the connection pool under load.
+    //
+    // Emit a compile error when this is detected. Opt out with
+    // `#[mutation(allow_http = true)]` when the HTTP call is genuinely safe to
+    // leave un-rolled-back (e.g. an idempotent read-only request).
+    //
+    // The check is skipped for `transactional = false` mutations — HTTP calls
+    // there are fine.
+    if attrs.transactional && !attrs.allow_http {
+        struct HttpCallVisitor {
+            found: bool,
+        }
+        impl<'ast> syn::visit::Visit<'ast> for HttpCallVisitor {
+            fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+                if node.method == "http" {
+                    self.found = true;
+                }
+                syn::visit::visit_expr_method_call(self, node);
+            }
+        }
+        let mut visitor = HttpCallVisitor { found: false };
+        syn::visit::visit_block(&mut visitor, fn_block);
+        if visitor.found {
+            return Err(syn::Error::new_spanned(
+                &input.sig.ident,
+                format!(
+                    "`{fn_name_str}` calls ctx.http() inside a transactional mutation. \
+                     The HTTP request cannot be rolled back if the transaction fails, \
+                     and the database connection is held open for the full HTTP round-trip. \
+                     To fix: move the HTTP call outside the transaction by using \
+                     `#[mutation(transactional = false)]` and dispatching a job for the \
+                     DB write, or restructure so http() is called after the mutation returns. \
+                     If the HTTP call is intentionally safe un-rolled-back (e.g. an \
+                     idempotent read-only request), suppress with \
+                     `#[mutation(allow_http = true)]`."
+                ),
+            ));
+        }
+    }
+
     // Validate async
     if asyncness.is_none() {
         return Err(syn::Error::new_spanned(
@@ -282,10 +337,10 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
 
     // Reject argument types that codegen cannot emit bindings for.
     for p in &arg_params {
-        if let FnArg::Typed(pat_type) = p {
-            if let Some((reason, span)) = crate::utils::check_arg_wire_type(&pat_type.ty) {
-                return Err(syn::Error::new(span, reason));
-            }
+        if let FnArg::Typed(pat_type) = p
+            && let Some((reason, span)) = crate::utils::check_arg_wire_type(&pat_type.ty)
+        {
+            return Err(syn::Error::new(span, reason));
         }
     }
 
@@ -940,6 +995,103 @@ mod tests {
         assert!(
             output_str.contains("table_dependencies : & []"),
             "Should have empty table_dependencies by default: {output_str}"
+        );
+    }
+
+    // --- Validation: http() inside transactional mutation ---
+
+    #[test]
+    fn rejects_http_call_inside_transactional_mutation() {
+        let input: ItemFn = syn::parse_str(
+            r#"
+            pub async fn notify_user(ctx: &MutationContext) -> Result<()> {
+                ctx.http().get("https://example.com/ping").send().await?;
+                Ok(())
+            }
+            "#,
+        )
+        .unwrap();
+
+        // Default is transactional = true, so ctx.http() should be rejected.
+        let attrs = MutationAttrs::default();
+        let result = expand_mutation_impl(input, attrs);
+        assert!(result.is_err(), "Should reject ctx.http() in transactional mutation");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("http"),
+            "Error should mention http: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("transactional"),
+            "Error should mention transactional footgun: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn accepts_http_call_when_transactional_false() {
+        let input: ItemFn = syn::parse_str(
+            r#"
+            pub async fn notify_user(ctx: &MutationContext) -> Result<()> {
+                ctx.http().get("https://example.com/ping").send().await?;
+                Ok(())
+            }
+            "#,
+        )
+        .unwrap();
+
+        let attrs = MutationAttrs {
+            transactional: false,
+            ..MutationAttrs::default()
+        };
+        let result = expand_mutation_impl(input, attrs);
+        assert!(
+            result.is_ok(),
+            "http() in non-transactional mutation is fine: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn accepts_http_call_with_allow_http() {
+        let input: ItemFn = syn::parse_str(
+            r#"
+            pub async fn notify_user(ctx: &MutationContext) -> Result<()> {
+                ctx.http().get("https://example.com/ping").send().await?;
+                Ok(())
+            }
+            "#,
+        )
+        .unwrap();
+
+        let attrs = MutationAttrs {
+            transactional: true,
+            allow_http: true,
+            ..MutationAttrs::default()
+        };
+        let result = expand_mutation_impl(input, attrs);
+        assert!(
+            result.is_ok(),
+            "http() with allow_http = true should be accepted: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn accepts_mutation_without_http_call() {
+        let input: ItemFn = syn::parse_str(
+            r#"
+            pub async fn update_user(ctx: &MutationContext, name: String) -> Result<()> {
+                Ok(())
+            }
+            "#,
+        )
+        .unwrap();
+
+        let attrs = MutationAttrs::default();
+        let result = expand_mutation_impl(input, attrs);
+        assert!(
+            result.is_ok(),
+            "Mutation without http() should always be accepted"
         );
     }
 }
