@@ -28,6 +28,11 @@ pub struct ReactorConfig {
     pub listener_restart_delay_ms: u64,
     /// Maximum concurrent re-executions during flush.
     pub max_concurrent_reexecutions: usize,
+    /// Per-group query timeout during re-execution. A group whose query exceeds
+    /// this deadline is aborted and its permit released so slow groups do not
+    /// block faster ones. The group is treated as unchanged for that cycle.
+    /// Defaults to 5 seconds.
+    pub reexecution_timeout: std::time::Duration,
     /// Session cleanup interval in seconds.
     pub session_cleanup_interval_secs: u64,
     /// Periodic resync sweep interval in seconds. PG silently drops
@@ -54,6 +59,7 @@ impl Default for ReactorConfig {
             max_listener_restarts: 5,
             listener_restart_delay_ms: 1000,
             max_concurrent_reexecutions: 64,
+            reexecution_timeout: std::time::Duration::from_secs(5),
             session_cleanup_interval_secs: 60,
             resync_interval_secs: 600,
             shard_count: 64,
@@ -116,6 +122,9 @@ pub struct Reactor {
     max_listener_restarts: u32,
     listener_restart_delay_ms: u64,
     max_concurrent_reexecutions: usize,
+    /// Per-group query timeout during re-execution. Slow groups are aborted
+    /// and skipped for the cycle so they cannot block faster groups.
+    reexecution_timeout: std::time::Duration,
     session_cleanup_interval_secs: u64,
     resync_interval_secs: u64,
 }
@@ -160,6 +169,7 @@ impl Reactor {
             max_listener_restarts: config.max_listener_restarts,
             listener_restart_delay_ms: config.listener_restart_delay_ms,
             max_concurrent_reexecutions: config.max_concurrent_reexecutions,
+            reexecution_timeout: config.reexecution_timeout,
             session_cleanup_interval_secs: config.session_cleanup_interval_secs,
             resync_interval_secs: config.resync_interval_secs,
         }
@@ -525,6 +535,7 @@ impl Reactor {
         registry: &FunctionRegistry,
         db_pool: &sqlx::PgPool,
         max_concurrent: usize,
+        reexecution_timeout: std::time::Duration,
     ) {
         let invalidated_groups = invalidation_engine.check_pending();
         if invalidated_groups.is_empty() {
@@ -543,6 +554,7 @@ impl Reactor {
             registry,
             db_pool,
             max_concurrent,
+            reexecution_timeout,
         )
         .await;
     }
@@ -572,6 +584,7 @@ impl Reactor {
         registry: &FunctionRegistry,
         db_pool: &sqlx::PgPool,
         max_concurrent: usize,
+        reexecution_timeout: std::time::Duration,
     ) {
         let group_ids = subscription_manager.all_group_ids();
         if group_ids.is_empty() {
@@ -587,12 +600,18 @@ impl Reactor {
             registry,
             db_pool,
             max_concurrent,
+            reexecution_timeout,
         )
         .await;
     }
 
     /// Re-run the queries for `group_ids`, push to subscribers when the result
     /// hash changes. Shared by invalidation flush and the periodic resync.
+    ///
+    /// Each group executes on its own spawned task so a slow query cannot
+    /// head-of-line block faster groups. The semaphore caps total concurrency.
+    /// Groups that exceed `reexecution_timeout` are aborted and skipped for
+    /// that cycle — their permit is released so other groups can proceed.
     async fn reexecute_groups(
         group_ids: &[forge_core::realtime::QueryGroupId],
         subscription_manager: &Arc<SubscriptionManager>,
@@ -600,6 +619,7 @@ impl Reactor {
         registry: &FunctionRegistry,
         db_pool: &sqlx::PgPool,
         max_concurrent: usize,
+        reexecution_timeout: std::time::Duration,
     ) {
         // Collect group data we need for re-execution. Skip groups whose
         // cached auth context has an expired JWT — re-running the query would
@@ -630,7 +650,10 @@ impl Reactor {
             })
             .collect();
 
-        // Parallel re-execution bounded by semaphore
+        // Each group is spawned as an independent task so slow groups cannot
+        // block the progress of faster ones. The semaphore still bounds total
+        // concurrent DB queries; the permit is held only for the duration of
+        // the query, not for the fan-out phase.
         let semaphore = Arc::new(Semaphore::new(max_concurrent));
         let mut futures = FuturesUnordered::new();
 
@@ -642,22 +665,40 @@ impl Reactor {
             let registry = registry.clone();
             let db_pool = db_pool.clone();
 
-            futures.push(async move {
-                let result = Self::execute_query_static(
+            // spawn so this group's query runs concurrently with the result
+            // processing loop below, and does not block other spawned tasks.
+            let handle = tokio::spawn(async move {
+                let query_fut = Self::execute_query_static(
                     &registry,
                     &db_pool,
                     &query_name,
                     &args,
                     &auth_context,
-                )
-                .await;
+                );
+                let result = tokio::time::timeout(reexecution_timeout, query_fut)
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(forge_core::ForgeError::Timeout(format!(
+                            "query '{}' exceeded reexecution timeout ({:?})",
+                            query_name, reexecution_timeout,
+                        )))
+                    });
                 drop(permit);
                 (group_id, last_hash, result)
             });
+
+            futures.push(handle);
         }
 
         // Process results and fan out to subscribers
-        while let Some((group_id, last_hash, result)) = futures.next().await {
+        while let Some(join_result) = futures.next().await {
+            let (group_id, last_hash, result) = match join_result {
+                Ok(inner) => inner,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Re-execution task panicked");
+                    continue;
+                }
+            };
             match result {
                 Ok((new_data, read_set)) => {
                     let (new_hash, serialized_len) = Self::compute_hash(&new_data);
@@ -692,6 +733,13 @@ impl Reactor {
                         }
                     }
                 }
+                Err(forge_core::ForgeError::Timeout(ref msg)) => {
+                    tracing::warn!(
+                        ?group_id,
+                        message = %msg,
+                        "Query group timed out during re-execution"
+                    );
+                }
                 Err(e) => {
                     tracing::warn!(?group_id, error = %e, "Failed to re-execute query group");
                 }
@@ -715,6 +763,7 @@ impl Reactor {
         let max_restarts = self.max_listener_restarts;
         let base_delay_ms = self.listener_restart_delay_ms;
         let max_concurrent = self.max_concurrent_reexecutions;
+        let reexecution_timeout = self.reexecution_timeout;
         let cleanup_secs = self.session_cleanup_interval_secs;
         let resync_secs = self.resync_interval_secs;
 
@@ -796,6 +845,7 @@ impl Reactor {
                                 &registry,
                                 database.read_pool(),
                                 max_concurrent,
+                                reexecution_timeout,
                             ).await;
                         }
                         Self::flush_invalidations(
@@ -805,6 +855,7 @@ impl Reactor {
                             &registry,
                             database.read_pool(),
                             max_concurrent,
+                            reexecution_timeout,
                         ).await;
                     }
                     _ = cleanup_interval.tick() => {
@@ -855,6 +906,7 @@ impl Reactor {
                             &registry,
                             database.read_pool(),
                             max_concurrent,
+                            reexecution_timeout,
                         ).await;
                     }
                     Some(error_msg) = listener_error_rx.recv() => {

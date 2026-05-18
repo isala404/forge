@@ -208,7 +208,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `realtime/reactor.rs:654-690` — `RealtimeMessage::Data { data: serde_json::Value }` carried by value; 10k watchers × 10 KB = 100 MB allocated per tick.
       Validate: (a) `RealtimeMessage::Data` carries `Arc<serde_json::Value>` (breaking enum change — do it now); (b) fan-out is delegated to a worker pool; (c) benchmark: per-tick allocation for 10k subscribers is bounded.
 
-- [ ] **[02.5] Slow fan-out for one group head-of-lines others** · *Med*
+- [x] **[02.5] Slow fan-out for one group head-of-lines others** · *Med*
       Context: `realtime/reactor.rs:516-543, 591-690` — post-execution sequence is serial.
       Validate: a two-stage pipeline (execute → commit+fan-out workers) is in place; benchmark with one large + many small groups shows the small groups don't wait.
 
@@ -244,7 +244,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `realtime/message.rs:212-230, 355-382` — cleanup runs every 60s.
       Validate: a min-heap of `(exp, session_id)` schedules precise expiry batches; idle expired sessions vacate within seconds, not a minute.
 
-- [ ] **[02.14] `forge_change_log` trim is cluster-wide racing DELETE with no advisory lock** · *Low*
+- [x] **[02.14] `forge_change_log` trim is cluster-wide racing DELETE with no advisory lock** · *Low*
       Context: `realtime/reactor.rs:547-558, 794-798`, `v002_change_log.sql:77-87` — every node runs the same `DELETE` against the same table the trigger writes.
       Validate: trim runs behind `pg_try_advisory_lock`; consider partitioning `forge_change_log` and dropping old partitions; concurrency test with 5 nodes shows trim contention vanishes.
 
@@ -260,7 +260,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `workflow/scheduler.rs:165-196`, `migrations/system/v001_initial.sql:166-168`, `v005_workflow_status.sql:17-19` — no `pg_notify('forge_workflow_wakeup', …)` on `wake_at` set or arrival; the partial index filters `status='waiting'` while v005 set `status='sleeping'` on durable sleep. Seq scan at 10M sleeping rows.
       Validate: (a) partial indexes split: `ON wake_at WHERE status='sleeping'` + `ON event_timeout_at WHERE status='waiting'`; (b) a true wakeup table or NOTIFY-on-set is implemented; (c) `EXPLAIN` on the poll query at 10M rows shows index usage; (d) a 30-day `ctx.sleep` survives a restart and wakes within the documented precision.
 
-- [ ] **[03.2] Workflow scheduler is not leader-gated; nodes race on the same rows** · *P1*
+- [x] **[03.2] Workflow scheduler is not leader-gated; nodes race on the same rows** · *P1*
       Context: `workflow/scheduler.rs:165-181, 334-392` — every node SELECTs candidates, races UPDATEs on shared rows.
       Validate: either gated behind `is_leader()` (preferred, matches cron) OR the SELECT uses `FOR UPDATE SKIP LOCKED` with hash partitioning; cluster-soak test shows N nodes do not multiply the wakeup-poll load.
 
@@ -276,11 +276,11 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `jobs/queue.rs:692-722` — `release_stale` does `attempts - 1`; only works because claim does `+1`. Future change breaks fencing silently.
       Validate: `attempts` is monotonic; if a "retries actually attempted" metric is needed, track it in a separate column; a regression test induces a stale claim and asserts fence correctness without arithmetic coupling.
 
-- [ ] **[03.6] Cron catch-up storms; no global rate limit; catch-up runs every tick** · *P1*
+- [x] **[03.6] Cron catch-up storms; no global rate limit; catch-up runs every tick** · *P1*
       Context: `cron/scheduler.rs:283-292, 392-458`.
       Validate: catch-up runs once on leader takeover; per-cron "caught up to" timestamp is tracked in memory; `cron.catch_up_jobs_per_tick` budget caps cluster-wide insertion rate after downtime.
 
-- [ ] **[03.7] Daemons have no failover heartbeat; leader death takes 30s–2h** · *P1*
+- [x] **[03.7] Daemons have no failover heartbeat; leader death takes 30s–2h** · *P1*
       Context: `daemon/runner.rs:333-356` — follower nodes sleep 5s forever waiting on PG-side keepalive.
       Validate: a heartbeat task inside the daemon loop bumps `forge_daemons.last_heartbeat`; followers can detect staleness; `tcp_keepalives_idle = 30` is set on the leader-election connection; `daemon_last_heartbeat_seconds` is exported.
 
@@ -304,7 +304,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `jobs/executor.rs:64-79`.
       Validate: a `worker_lost_claim_total` metric exists so operators can tune `stale_threshold`; doc warns about the small cost.
 
-- [ ] **[03.13] Cron window double-dispatches on clock skew; ON CONFLICT churn** · *P2*
+- [x] **[03.13] Cron window double-dispatches on clock skew; ON CONFLICT churn** · *P2*
       Context: `cron/scheduler.rs:227-263` — 2× `poll_interval` look-back per cron per tick.
       Validate: `last_processed_scheduled_time` tracked in memory; window is `(last_processed, now)`; wider 2s window only on first tick after leader takeover.
 
@@ -324,7 +324,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: per-row PL/pgSQL trigger that does full-row JSONB diff, change-log INSERT, NOTIFY, even on `forge_jobs` heartbeats and `forge_workflow_runs.saved_state` writes nobody subscribes to.
       Validate: (a) per-table reactivity declares a watched-column set; (b) the trigger short-circuits when no watched column changed; (c) `forge_jobs`, `forge_workflow_runs`, `forge_workflow_steps` are off the reactivity firehose; (d) heartbeat writes produce zero NOTIFYs in a regression test.
 
-- [ ] **[06.2] NOTIFY 8 KiB cliff is silent** · *High*
+- [x] **[06.2] NOTIFY 8 KiB cliff is silent** · *High*
       Context: `migrations/system/v002_change_log.sql:61-65`, `pg/notify.rs:48` — payload silently drops column list when over 7900 bytes, forcing table-level invalidation with no metric.
       Validate: `pg_notification_queue_usage()` is polled and exported as a metric; `/ready` flips degraded at >80% queue usage; wide tables (>40 cols) auto-force change-log-only mode.
 
@@ -332,7 +332,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `signals/collector.rs:225-282`, `migrations/system/v002_change_log.sql:5-12`, `workflow/executor.rs:678-705`.
       Validate: (a) GIN on `forge_signals_events.properties` is opt-in via config (default off); (b) per-step write reduced to one UPSERT; (c) `forge_workflow_steps` is off the reactivity firehose unless explicitly subscribed.
 
-- [ ] **[06.4] Default pool size is below the documented sizing formula** · *High*
+- [x] **[06.4] Default pool size is below the documented sizing formula** · *High*
       Context: `pg/pool.rs:9-86`, `config/database.rs:103` — default 50; documented formula is ~130; gateway has no acquire-side semaphore.
       Validate: default pool size raised to match formula; a startup warning fires when `pool_size < worker.max_concurrent + realtime.max_concurrent + 16`; gateway has its own admission semaphore sized below the pool; `pool_size × nodes` against PG `max_connections` is checked at boot.
 
@@ -372,7 +372,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `signals/partition.rs:14-34`, `v001_initial.sql:679-703`.
       Validate: pre-create current + next 3 partitions; healthcheck that `forge_signals_events_default` is empty; partition coverage exposed via admin endpoint.
 
-- [ ] **[06.14] `forge_change_log` retention is 1h with no minimum size floor** · *Med*
+- [x] **[06.14] `forge_change_log` retention is 1h with no minimum size floor** · *Med*
       Context: `v002_change_log.sql:77-87`.
       Validate: retention is `max(1h, N=1e6 rows)`; full-resync rate is capped; `last_seq` is persisted across restarts.
 
@@ -384,7 +384,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
 
 ## G. Cluster coordination
 
-- [ ] **[07.1] Cron-tick split brain inside `lock_validate_interval`** · *High*
+- [x] **[07.1] Cron-tick split brain inside `lock_validate_interval`** · *High*
       Context: `cron/scheduler.rs:190`, `pg/leader.rs:411` — cached `AtomicBool` is up to 1s stale; both leaders may fire `tick()`.
       Validate: `is_leader()` callers re-validate the lock at the start of each tick; cron claim asserts the caller's node holds the lease row in the same statement.
 
@@ -396,19 +396,19 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `pg/leader.rs:122-126, 161`.
       Validate: `SELECT 1` on the held connection every `min(check_interval/2, 5s)`; OR a leader-only single-conn pool with explicit TCP keepalives and `max_lifetime(Duration::MAX)`; a chaos test that injects a TCP RST is detected within one validate cycle.
 
-- [ ] **[07.4] `release_leadership` on pool, not held conn, after partial loss** · *Med*
+- [x] **[07.4] `release_leadership` on pool, not held conn, after partial loss** · *Med*
       Context: `pg/leader.rs:331-341`.
       Validate: a `was_ever_leader` flag gates the DELETE; the DELETE uses `RETURNING node_id` and logs loudly on unexpected races.
 
-- [ ] **[07.5] Heartbeat and lock-validate are decoupled** · *Med*
+- [x] **[07.5] Heartbeat and lock-validate are decoupled** · *Med*
       Context: `cluster/heartbeat.rs:197-211`, `pg/leader.rs:175` — a node can heartbeat fine yet have lost its lock.
       Validate: `validate_lock_held` failure pushes the node to `draining`/`degraded` via the registry; the DB state matches the Prometheus metric.
 
-- [ ] **[07.6] Heartbeat uses shared pool — exhaustion fakes node death** · *Med*
+- [x] **[07.6] Heartbeat uses shared pool — exhaustion fakes node death** · *Med*
       Context: `cluster/heartbeat.rs:198-209`.
       Validate: heartbeat + leader election use a dedicated 1-conn pool independent of the request pool.
 
-- [ ] **[07.7] Cron stale reclaim duplicates jobs without cancelling originals** · *High*
+- [x] **[07.7] Cron stale reclaim duplicates jobs without cancelling originals** · *High*
       Context: `cron/scheduler.rs:330-358` — original `forge_jobs` row stays claimable.
       Validate: on reclaim, the previous job row is cancelled or a `superseded_at` column is set; worker checks the flag at handler entry; a regression test simulates leader transition mid-cron and asserts the handler fires exactly once.
 
@@ -416,7 +416,7 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `forge-core/src/cluster/roles.rs:88-95`.
       Validate: collision detection at startup aborts boot if two `LeaderRole`s map to the same `lock_id`; OR a `forge_daemon_locks` table assigns serial IDs persistently.
 
-- [ ] **[07.9] Workflow scheduler runs on every node (cost, not correctness)** · *Med*
+- [x] **[07.9] Workflow scheduler runs on every node (cost, not correctness)** · *Med*
       Context: `workflow/scheduler.rs:69-75, 113-148`.
       Validate: decision made and documented — either leader-only `process_ready_workflows` (matches cron) or every-node with explicit indexing; the SELECT does not lock-spin; cluster-soak shows linear cost on N nodes.
 
@@ -436,11 +436,11 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `cluster/registry.rs:27-57` — `forge_nodes.version` recorded but never read.
       Validate: a `forge_schema_version` table updated by migrations; nodes compare on startup and on every leader acquire; pre-1.0 strictness: refuse mutations when `version` is older than the max active version; chaos test: a v0.5 node refuses leadership after v0.6 migrates.
 
-- [ ] **[07.14] Time-skew is implicit between Rust process and PG** · *Med*
+- [x] **[07.14] Time-skew is implicit between Rust process and PG** · *Med*
       Context: `pg/leader.rs:139-141, 260-261, 351-364`, `cron/scheduler.rs:227`.
       Validate: all lease/health/stale-reclaim time decisions use PG `NOW()` server-side; `chrono::Utc::now()` removed from paths comparing against PG timestamps.
 
-- [ ] **[07.15] `try_become_leader` never preempts an expired-lease zombie** · *Med*
+- [x] **[07.15] `try_become_leader` never preempts an expired-lease zombie** · *Med*
       Context: `pg/leader.rs:117-166, 431-441` — dead backend can hold the advisory lock for hours.
       Validate: on stale-lease + advisory-lock-busy combo, the standby queries `pg_stat_activity` and surfaces the holder for operator action; aggressive `pg_terminate_backend` is gated behind opt-in config.
 

@@ -493,8 +493,10 @@ impl Forge {
             let heartbeat_node_id = node_id;
             let config = HeartbeatConfig::from_cluster_config(&self.config.cluster);
             handles.push(tokio::spawn(async move {
-                let heartbeat = HeartbeatLoop::new(heartbeat_pool, heartbeat_node_id, config);
-                heartbeat.run().await;
+                match HeartbeatLoop::new(heartbeat_pool, heartbeat_node_id, config).await {
+                    Ok(heartbeat) => heartbeat.run().await,
+                    Err(e) => tracing::error!(error = %e, "Failed to start heartbeat loop"),
+                }
             }));
         }
 
@@ -679,6 +681,7 @@ impl Forge {
                 is_leader: cron_leader_election.is_none(),
                 leader_election: cron_leader_election,
                 run_stale_threshold: Duration::from_secs(15 * 60),
+                ..Default::default()
             };
 
             let cron_runner = Arc::new(CronRunner::new(
@@ -713,6 +716,7 @@ impl Forge {
                 event_store,
                 WorkflowSchedulerConfig {
                     poll_interval: *self.config.workflow.poll_interval,
+                    leader_election: leader_election.clone(),
                     ..WorkflowSchedulerConfig::default()
                 },
             );

@@ -1,0 +1,24 @@
+{
+    "db_name": "PostgreSQL",
+    "query": "\n            SELECT id FROM forge_cron_runs\n            WHERE cron_name = $1\n              AND scheduled_time = $2\n              AND status = 'running'\n              AND started_at < NOW() - make_interval(secs => $3)\n            ",
+    "describe": {
+        "columns": [
+            {
+                "ordinal": 0,
+                "name": "id",
+                "type_info": "Uuid"
+            }
+        ],
+        "parameters": {
+            "Left": [
+                "Varchar",
+                "Timestamptz",
+                "Float8"
+            ]
+        },
+        "nullable": [
+            false
+        ]
+    },
+    "hash": "2d8d69c15e8400d020e8397f02dd352391f1846e32b1eb93db596252a5d6089d"
+}

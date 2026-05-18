@@ -148,6 +148,6 @@ mod stub {
 pub use stub::{
     TelemetryConfig, TelemetryError, build_env_filter, extract_table_name, init_telemetry,
     instrumented_query, record_fn_cache, record_fn_execution, record_http_request,
-    record_job_execution, record_pool_metrics, record_query_duration, set_active_connections,
-    shutdown_telemetry,
+    record_job_execution, record_lost_claim, record_pool_metrics, record_query_duration,
+    set_active_connections, shutdown_telemetry,
 };

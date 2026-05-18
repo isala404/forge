@@ -125,6 +125,14 @@ pub struct CronRunnerConfig {
     pub leader_election: Option<Arc<LeaderElection>>,
     /// Threshold after which a running cron slot is considered stale.
     pub run_stale_threshold: Duration,
+    /// Maximum catch-up runs enqueued per cron per tick.
+    ///
+    /// After a node restart, every catch-up-enabled cron may have a large
+    /// backlog of missed executions. Without this limit, the scheduler would
+    /// attempt to enqueue all of them in a single tick, creating a job storm.
+    /// Setting a per-tick cap lets the worker pool absorb catch-up work
+    /// incrementally across consecutive ticks instead of all at once.
+    pub max_catch_up_per_tick: u32,
 }
 
 impl Default for CronRunnerConfig {
@@ -135,6 +143,7 @@ impl Default for CronRunnerConfig {
             is_leader: true,
             leader_election: None,
             run_stale_threshold: Duration::from_secs(15 * 60),
+            max_catch_up_per_tick: 5,
         }
     }
 }
@@ -187,7 +196,7 @@ impl CronRunner {
                 break;
             }
 
-            if self.is_leader()
+            if self.confirm_leadership_before_tick().await
                 && let Err(e) = self.tick().await
             {
                 tracing::warn!(error = %e, "Cron tick failed");
@@ -206,12 +215,31 @@ impl CronRunner {
         *running = false;
     }
 
-    fn is_leader(&self) -> bool {
-        self.config
-            .leader_election
-            .as_ref()
-            .map(|e| e.is_leader())
-            .unwrap_or(self.config.is_leader)
+    /// Confirm leadership immediately before executing a cron tick.
+    ///
+    /// The cached `is_leader` flag is updated on `lock_validate_interval`
+    /// (default 1 s), which means there is a window of up to 1 s where the
+    /// node has lost the advisory lock but still believes it is leader. For
+    /// cron ticks that window is enough to cause split-brain execution.
+    ///
+    /// When a `LeaderElection` handle is present, this calls
+    /// `validate_lock_held()` synchronously. That re-checks `pg_locks` on the
+    /// lock-owning connection and atomically drops the `is_leader` flag if the
+    /// lock is gone, eliminating the race between the validate interval and the
+    /// next tick. For static-leader mode (no election handle) the check reduces
+    /// to the cached flag, which is correct because static mode is intentionally
+    /// single-node.
+    async fn confirm_leadership_before_tick(&self) -> bool {
+        match self.config.leader_election.as_ref() {
+            Some(election) => {
+                if let Err(e) = election.validate_lock_held().await {
+                    tracing::debug!(error = %e, "Pre-tick lock validation failed; skipping tick");
+                    return false;
+                }
+                election.is_leader()
+            }
+            None => self.config.is_leader,
+        }
     }
 
     /// Execute one tick of the scheduler.
@@ -302,9 +330,9 @@ impl CronRunner {
     /// Atomically claim a cron run and enqueue its job in a single transaction.
     ///
     /// Returns the run ID if claimed (or stale-reclaimed), otherwise None.
-    /// Leadership is already gated by `is_leader()` in `tick()`, and the
-    /// `(cron_name, scheduled_time)` UNIQUE constraint provides the
-    /// exactly-once guarantee against concurrent claimers.
+    /// Leadership is already confirmed by `confirm_leadership_before_tick()` in
+    /// `run()`, and the `(cron_name, scheduled_time)` UNIQUE constraint provides
+    /// the exactly-once guarantee against concurrent claimers.
     ///
     /// The INSERT into `forge_cron_runs` and the INSERT into `forge_jobs` happen
     /// within the same transaction so a crash between the two cannot leave an
@@ -325,6 +353,24 @@ impl CronRunner {
             .begin()
             .await
             .map_err(forge_core::ForgeError::Database)?;
+
+        // Fetch the stale row's ID before overwriting it so we can cancel the
+        // orphaned job it spawned. NULL if no stale row exists for this slot.
+        let stale_run_id = sqlx::query_scalar!(
+            r#"
+            SELECT id FROM forge_cron_runs
+            WHERE cron_name = $1
+              AND scheduled_time = $2
+              AND status = 'running'
+              AND started_at < NOW() - make_interval(secs => $3)
+            "#,
+            info.name,
+            scheduled_time,
+            stale_threshold.num_seconds() as f64,
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(forge_core::ForgeError::Database)?;
 
         // Insert new run, or reclaim stale running row if previous node crashed.
         let result = sqlx::query!(
@@ -355,6 +401,39 @@ impl CronRunner {
         if result.rows_affected() == 0 {
             // Already claimed by another node (or completed); implicit rollback
             return Ok(None);
+        }
+
+        // If we reclaimed a stale slot, cancel the orphaned job the previous
+        // executor spawned. Without this, that job keeps running (or retrying)
+        // alongside the new one, producing duplicate side effects.
+        if let Some(old_run_id) = stale_run_id {
+            let job_type_cancel = format!("$cron:{}", info.name);
+            let old_run_id_str = old_run_id.to_string();
+            sqlx::query!(
+                r#"
+                UPDATE forge_jobs
+                SET
+                    status = 'cancelled',
+                    cancelled_at = NOW(),
+                    cancel_reason = 'stale cron run reclaimed by new leader',
+                    expires_at = NOW() + INTERVAL '7 days'
+                WHERE job_type = $1
+                  AND input->>'run_id' = $2
+                  AND status NOT IN ('completed', 'failed', 'dead_letter', 'cancelled')
+                "#,
+                job_type_cancel,
+                old_run_id_str,
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(forge_core::ForgeError::Database)?;
+
+            tracing::info!(
+                cron.name = info.name,
+                cron.old_run_id = %old_run_id,
+                cron.new_run_id = %claim_id,
+                "Cancelled orphaned job from stale cron run"
+            );
         }
 
         // Enqueue the cron job in the same transaction
@@ -421,11 +500,16 @@ impl CronRunner {
             // Get all scheduled times between last run and now
             let missed_times = info.schedule.between_in_tz(start_time, now, info.timezone);
 
-            // Limit catch-up runs
-            let to_catch_up: Vec<_> = missed_times
-                .into_iter()
-                .take(info.catch_up_limit as usize)
-                .collect();
+            // Apply two caps:
+            //  1. catch_up_limit — total missed runs this cron will ever backfill
+            //     (controlled by the handler author via #[cron(catch_up_limit = N)]).
+            //  2. max_catch_up_per_tick — hard per-tick ceiling regardless of
+            //     catch_up_limit, preventing a job storm on node restart when the
+            //     backlog is large. Remaining slots are deferred to the next tick.
+            let tick_limit = info
+                .catch_up_limit
+                .min(self.config.max_catch_up_per_tick) as usize;
+            let to_catch_up: Vec<_> = missed_times.into_iter().take(tick_limit).collect();
 
             Span::current().record("cron.missed_count", to_catch_up.len());
 
@@ -434,6 +518,7 @@ impl CronRunner {
                     cron.name = info.name,
                     cron.catch_up_count = to_catch_up.len(),
                     cron.catch_up_limit = info.catch_up_limit,
+                    cron.max_catch_up_per_tick = self.config.max_catch_up_per_tick,
                     "Processing catch-up runs"
                 );
             }
@@ -625,6 +710,8 @@ mod integration_tests {
         // If a previous node crashed mid-execution and left a 'running' row,
         // the next leader after `run_stale_threshold` must adopt the slot,
         // re-issue a job, and overwrite started_at so progress tracking restarts.
+        // The orphaned job from the previous executor must be cancelled so it
+        // cannot run in parallel with the fresh replacement.
         let db = setup_db("cron_stale_reclaim").await;
         let pool = db.pool().clone();
         let mut runner = make_runner(pool.clone());
@@ -644,6 +731,17 @@ mod integration_tests {
         .bind(entry.info.name)
         .bind(scheduled)
         .bind(original_node)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Seed the orphaned job the crashed executor would have created.
+        sqlx::query(
+            "INSERT INTO forge_jobs (id, job_type, queue, input, job_context, status, priority, attempts, max_attempts, scheduled_at, created_at)
+             VALUES ($1, '$cron:hourly', 'cron', $2, '{}', 'pending', 50, 0, 3, NOW(), NOW())",
+        )
+        .bind(Uuid::new_v4())
+        .bind(serde_json::json!({"run_id": original_id.to_string(), "cron_name": "hourly"}))
         .execute(&pool)
         .await
         .unwrap();
@@ -668,12 +766,21 @@ mod integration_tests {
         assert_eq!(row.0, "running");
         assert_eq!(row.1, Some(runner.config.node_id));
 
-        // The reclaim must also enqueue a fresh job — orphaned cron_run rows
-        // without a matching $cron: job would silently miss the run.
-        assert_eq!(
-            count_rows(&pool, "SELECT COUNT(*) FROM forge_jobs").await,
-            1
-        );
+        // The orphaned job from the previous run must be cancelled.
+        let cancelled_count = count_rows(
+            &pool,
+            "SELECT COUNT(*) FROM forge_jobs WHERE job_type = '$cron:hourly' AND status = 'cancelled'",
+        )
+        .await;
+        assert_eq!(cancelled_count, 1, "orphaned job must be cancelled");
+
+        // The reclaim must also enqueue a fresh job for the new run.
+        let active_count = count_rows(
+            &pool,
+            "SELECT COUNT(*) FROM forge_jobs WHERE job_type = '$cron:hourly' AND status = 'pending'",
+        )
+        .await;
+        assert_eq!(active_count, 1, "exactly one fresh $cron: job must be enqueued");
     }
 
     #[tokio::test]
@@ -808,9 +915,9 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    async fn is_leader_falls_back_to_static_when_no_election_handle() {
+    async fn confirm_leadership_falls_back_to_static_when_no_election_handle() {
         // The scheduler can run in single-node mode (no advisory-lock election).
-        // is_leader must respect the static flag in that case.
+        // confirm_leadership_before_tick must respect the static flag in that case.
         let registry = Arc::new(CronRegistry::new());
         let pool = setup_db("cron_static_leader").await.pool().clone();
         let job_queue = crate::jobs::JobQueue::new(pool.clone());
@@ -836,7 +943,7 @@ mod integration_tests {
             },
         );
 
-        assert!(leader.is_leader());
-        assert!(!follower.is_leader());
+        assert!(leader.confirm_leadership_before_tick().await);
+        assert!(!follower.confirm_leadership_before_tick().await);
     }
 }

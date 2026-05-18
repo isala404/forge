@@ -291,13 +291,24 @@ CREATE INDEX IF NOT EXISTS idx_forge_subscriptions_query_hash
 -- The leading "v1:" prefix lets future schema bumps land without coordinated
 -- cluster restart: a v2 listener can branch on the prefix while v1 emitters
 -- and listeners stay in service during rolling upgrades.
+--
+-- PostgreSQL NOTIFY payloads are limited to 8000 bytes (NOTIFY_PAYLOAD_MAX_LENGTH).
+-- This function guards against silent truncation or errors by falling back to
+-- progressively smaller payloads when the full payload exceeds 7900 bytes:
+--   1. Full payload with column list (UPDATE only).
+--   2. Payload without column list — invalidation still fires, just broader.
+--   3. Minimal table+op payload — row-level filtering is lost; full resync triggered.
+-- A WARNING is raised on any truncation so it appears in PG logs.
 CREATE OR REPLACE FUNCTION forge_notify_change() RETURNS TRIGGER AS $$
 DECLARE
     row_id TEXT;
     payload TEXT;
+    minimal_payload TEXT;
     old_json JSONB;
     new_json JSONB;
     changed_cols TEXT[];
+    -- 7900 bytes leaves 100 bytes of margin below PG's 8000-byte NOTIFY limit.
+    payload_limit CONSTANT INTEGER := 7900;
 BEGIN
     IF TG_OP = 'DELETE' THEN
         row_id := COALESCE(OLD.id::TEXT, '');
@@ -316,6 +327,29 @@ BEGIN
         );
         IF array_length(changed_cols, 1) > 0 THEN
             payload := payload || ':' || array_to_string(changed_cols, ',');
+        END IF;
+    END IF;
+
+    IF octet_length(payload) > payload_limit THEN
+        -- Full payload is too large. Drop the column list and retry with
+        -- the row-level payload (table:OP:row_id). Downstream invalidation
+        -- will still fire correctly, just without column-level filtering.
+        minimal_payload := 'v1:' || TG_TABLE_NAME || ':' || TG_OP || ':' || row_id;
+        IF octet_length(minimal_payload) <= payload_limit THEN
+            RAISE WARNING
+                'forge_notify_change: payload for %.% exceeded % bytes (%), '
+                'sending without column list',
+                TG_TABLE_NAME, TG_OP, payload_limit, octet_length(payload);
+            payload := minimal_payload;
+        ELSE
+            -- Even the row-level payload is too large (table name must be
+            -- extremely long — very unlikely, but guard anyway). Fall back to
+            -- table+op only. The listener will trigger a full resync.
+            RAISE WARNING
+                'forge_notify_change: row-level payload for %.% exceeded % bytes (%), '
+                'sending table-level fallback',
+                TG_TABLE_NAME, TG_OP, payload_limit, octet_length(minimal_payload);
+            payload := 'v1:' || TG_TABLE_NAME || ':' || TG_OP;
         END IF;
     END IF;
 

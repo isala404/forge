@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT NOW()",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "now",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "6bae2f6ec3f8d5295b935cef18cb3dd649758b5afcf70feb2a6eff7d69925bfc"
+}

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use forge_core::cluster::NodeId;
 use forge_core::config::cluster::ClusterConfig;
-use tokio::sync::watch;
+use tokio::sync::{Mutex, watch};
 
 /// Heartbeat loop configuration.
 #[derive(Debug, Clone)]
@@ -69,6 +69,16 @@ impl HeartbeatConfig {
 }
 
 /// Heartbeat loop for cluster health.
+///
+/// The node's own heartbeat writes (`send_heartbeat`, `update_load`) run on a
+/// dedicated connection that is acquired once at construction and held for the
+/// lifetime of the loop. This ensures liveness updates are never blocked by
+/// shared pool exhaustion: if all pool connections are busy serving queries,
+/// the node's `last_heartbeat` still advances on its private backend.
+///
+/// Observational queries (`active_node_count`, `mark_dead_nodes`) use the
+/// shared pool — they are not on the critical path for the local node's
+/// apparent liveness and tolerate brief delays.
 pub struct HeartbeatLoop {
     pool: sqlx::PgPool,
     node_id: NodeId,
@@ -79,14 +89,30 @@ pub struct HeartbeatLoop {
     current_interval_ms: AtomicU64,
     stable_count: AtomicU32,
     last_active_count: AtomicU32,
+    /// Dedicated connection for heartbeat writes. Held outside the shared pool
+    /// so that pool exhaustion cannot prevent the node from updating its own
+    /// `last_heartbeat`. Protected by a Mutex because
+    /// `sqlx::pool::PoolConnection` is not `Sync`; the lock is only contended
+    /// on the rare reconnect path.
+    heartbeat_conn: Mutex<sqlx::pool::PoolConnection<sqlx::Postgres>>,
 }
 
 impl HeartbeatLoop {
-    /// Create a new heartbeat loop.
-    pub fn new(pool: sqlx::PgPool, node_id: NodeId, config: HeartbeatConfig) -> Self {
+    /// Create a new heartbeat loop, acquiring a dedicated heartbeat connection.
+    ///
+    /// Returns an error if the initial connection cannot be established.
+    pub async fn new(
+        pool: sqlx::PgPool,
+        node_id: NodeId,
+        config: HeartbeatConfig,
+    ) -> forge_core::Result<Self> {
+        let conn = pool
+            .acquire()
+            .await
+            .map_err(forge_core::ForgeError::Database)?;
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let interval_ms = config.interval.as_millis() as u64;
-        Self {
+        Ok(Self {
             pool,
             node_id,
             config,
@@ -96,7 +122,8 @@ impl HeartbeatLoop {
             current_interval_ms: AtomicU64::new(interval_ms),
             stable_count: AtomicU32::new(0),
             last_active_count: AtomicU32::new(0),
-        }
+            heartbeat_conn: Mutex::new(conn),
+        })
     }
 
     /// Check if the loop is running.
@@ -193,8 +220,31 @@ impl HeartbeatLoop {
         self.last_active_count.store(count, Ordering::Relaxed);
     }
 
-    /// Send a heartbeat update.
+    /// Obtain the dedicated heartbeat connection, reconnecting if the backend
+    /// was terminated or the connection became broken.
+    async fn heartbeat_conn(
+        &self,
+    ) -> forge_core::Result<
+        tokio::sync::MutexGuard<'_, sqlx::pool::PoolConnection<sqlx::Postgres>>,
+    > {
+        use sqlx::Connection as _;
+        let mut guard = self.heartbeat_conn.lock().await;
+        if guard.ping().await.is_err() {
+            tracing::debug!("Heartbeat connection lost; reconnecting");
+            let new_conn = self
+                .pool
+                .acquire()
+                .await
+                .map_err(forge_core::ForgeError::Database)?;
+            *guard = new_conn;
+        }
+        Ok(guard)
+    }
+
+    /// Send a heartbeat update on the dedicated connection so pool exhaustion
+    /// cannot block the node's own liveness signal.
     async fn send_heartbeat(&self) -> forge_core::Result<()> {
+        let mut conn = self.heartbeat_conn().await?;
         sqlx::query!(
             r#"
             UPDATE forge_nodes
@@ -203,7 +253,7 @@ impl HeartbeatLoop {
             "#,
             self.node_id.as_uuid(),
         )
-        .execute(&self.pool)
+        .execute(&mut **conn)
         .await
         .map_err(forge_core::ForgeError::Database)?;
 
@@ -242,7 +292,8 @@ impl HeartbeatLoop {
         Ok(count)
     }
 
-    /// Update load metrics.
+    /// Update load metrics on the dedicated connection so the heartbeat refresh
+    /// it performs is also pool-exhaustion-safe.
     pub async fn update_load(
         &self,
         current_connections: u32,
@@ -250,6 +301,7 @@ impl HeartbeatLoop {
         cpu_usage: f32,
         memory_usage: f32,
     ) -> forge_core::Result<()> {
+        let mut conn = self.heartbeat_conn().await?;
         sqlx::query!(
             r#"
             UPDATE forge_nodes
@@ -266,7 +318,7 @@ impl HeartbeatLoop {
             cpu_usage as f64,
             memory_usage as f64,
         )
-        .execute(&self.pool)
+        .execute(&mut **conn)
         .await
         .map_err(forge_core::ForgeError::Database)?;
 
@@ -465,7 +517,7 @@ mod integration_tests {
         .unwrap();
     }
 
-    fn loop_for(pool: sqlx::PgPool, node_id: NodeId) -> HeartbeatLoop {
+    async fn loop_for(pool: sqlx::PgPool, node_id: NodeId) -> HeartbeatLoop {
         HeartbeatLoop::new(
             pool,
             node_id,
@@ -476,6 +528,8 @@ mod integration_tests {
                 max_interval: Duration::from_secs(60),
             },
         )
+        .await
+        .expect("HeartbeatLoop::new")
     }
 
     #[tokio::test]
@@ -484,7 +538,7 @@ mod integration_tests {
         let node = NodeId::new();
         seed_node(db.pool(), node, "active", 30).await;
 
-        let hb = loop_for(db.pool().clone(), node);
+        let hb = loop_for(db.pool().clone(), node).await;
         hb.send_heartbeat().await.unwrap();
 
         let age: f64 = sqlx::query_scalar(
@@ -506,7 +560,7 @@ mod integration_tests {
         seed_node(db.pool(), NodeId::new(), "dead", 0).await;
         seed_node(db.pool(), NodeId::new(), "starting", 0).await;
 
-        let hb = loop_for(db.pool().clone(), self_id);
+        let hb = loop_for(db.pool().clone(), self_id).await;
         let count = hb.active_node_count().await.unwrap();
         assert_eq!(count, 2);
     }
@@ -521,7 +575,7 @@ mod integration_tests {
         seed_node(db.pool(), stale, "active", 120).await; // far past 30s threshold
         seed_node(db.pool(), fresh, "active", 0).await;
 
-        let hb = loop_for(db.pool().clone(), self_id);
+        let hb = loop_for(db.pool().clone(), self_id).await;
         let marked = hb.mark_dead_nodes().await.unwrap();
         assert_eq!(marked, 1);
 
@@ -550,7 +604,7 @@ mod integration_tests {
         seed_node(db.pool(), self_id, "active", 0).await;
         seed_node(db.pool(), already_dead, "dead", 120).await;
 
-        let hb = loop_for(db.pool().clone(), self_id);
+        let hb = loop_for(db.pool().clone(), self_id).await;
         let marked = hb.mark_dead_nodes().await.unwrap();
         assert_eq!(marked, 0, "dead nodes should not be re-touched");
 
@@ -568,7 +622,7 @@ mod integration_tests {
         let node = NodeId::new();
         seed_node(db.pool(), node, "active", 30).await;
 
-        let hb = loop_for(db.pool().clone(), node);
+        let hb = loop_for(db.pool().clone(), node).await;
         hb.update_load(42, 7, 0.5, 0.25).await.unwrap();
 
         let (conns, jobs, cpu, mem, age): (i32, i32, Option<f64>, Option<f64>, f64) =

@@ -117,6 +117,15 @@ impl LeaderElection {
         self.config.lock_validate_interval
     }
 
+    /// How often the leader refreshes its lease row in `forge_leaders`.
+    ///
+    /// Daemon runners use this cadence to call `refresh_lease()` so that
+    /// standbys see a live lease and can distinguish a running leader from a
+    /// zombie whose lease has simply expired.
+    pub fn check_interval(&self) -> Duration {
+        self.config.check_interval
+    }
+
     /// Stop the leader election.
     pub fn stop(&self) {
         let _ = self.shutdown_tx.send(true);
@@ -128,6 +137,17 @@ impl LeaderElection {
     /// connection. If that connection dies between the lock acquire and the
     /// INSERT, PostgreSQL releases the lock and the INSERT fails together —
     /// no torn leader rows pointing at a node that holds nothing.
+    ///
+    /// **Zombie leader preemption**: if `pg_try_advisory_lock` fails but the
+    /// current leader's lease is stale (expired), the application process that
+    /// owned the lock is presumed dead. A connection pooler may be keeping the
+    /// PG backend alive, preventing automatic lock release. In that case we
+    /// locate the lock-holding backend via `pg_locks` and call
+    /// `pg_terminate_backend()` to evict it, then retry the lock acquisition
+    /// once. `pg_terminate_backend` requires superuser or `pg_signal_backend`
+    /// role; if the call is refused or the backend is already gone, we log and
+    /// return `false` rather than erroring out — election will be retried on
+    /// the next check interval tick.
     pub async fn try_become_leader(&self) -> forge_core::Result<bool> {
         if self.is_leader() {
             return Ok(true);
@@ -139,13 +159,33 @@ impl LeaderElection {
             .await
             .map_err(forge_core::ForgeError::Database)?;
 
-        let acquired = sqlx::query_scalar!(
+        let mut acquired = sqlx::query_scalar!(
             r#"SELECT pg_try_advisory_lock($1) as "acquired!""#,
             self.role.lock_id()
         )
         .fetch_one(&mut *conn)
         .await
         .map_err(forge_core::ForgeError::Database)?;
+
+        // If the lock was not acquired, check whether the current leader is a
+        // zombie: its lease is expired (application dead) but its PG backend
+        // is still alive (kept by a connection pooler). If so, forcibly evict
+        // the backend and retry once.
+        if !acquired {
+            match self.try_preempt_zombie_leader(&mut conn).await {
+                Ok(true) => {
+                    acquired = true;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        role = self.role.as_str(),
+                        error = %e,
+                        "Zombie leader preemption attempt failed; will retry next election cycle"
+                    );
+                }
+            }
+        }
 
         crate::cluster::metrics::record_leader_election_attempt(self.role.as_str(), acquired);
 
@@ -175,6 +215,130 @@ impl LeaderElection {
             *self.lock_connection.lock().await = Some(conn);
             tracing::info!(role = self.role.as_str(), "Acquired leadership");
         }
+
+        Ok(acquired)
+    }
+
+    /// Attempt to preempt a zombie leader by terminating its PG backend.
+    ///
+    /// A zombie leader is one whose `forge_leaders` lease has expired but whose
+    /// PG backend is still alive (held open by a connection pooler), preventing
+    /// automatic advisory lock release.
+    ///
+    /// Steps:
+    /// 1. Check if there is a stale lease in `forge_leaders` for this role.
+    /// 2. If stale, find the backend PID holding the advisory lock via `pg_locks`.
+    /// 3. Call `pg_terminate_backend()` to evict it.
+    /// 4. Retry `pg_try_advisory_lock` once on the provided connection.
+    ///
+    /// Returns `true` only if we successfully terminated the zombie backend
+    /// **and** subsequently acquired the lock. Returns `false` if the lease is
+    /// not yet stale, no lock-holding backend is found, termination was refused
+    /// (insufficient privilege), or the retry still failed.
+    async fn try_preempt_zombie_leader(
+        &self,
+        conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+    ) -> forge_core::Result<bool> {
+        // 1. Check for a stale lease. We consider it stale when lease_until is
+        //    in the past — the leader failed to refresh before its own deadline.
+        let lease_expired = sqlx::query_scalar!(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM forge_leaders
+                WHERE role = $1
+                  AND lease_until < NOW()
+            ) AS "expired!"
+            "#,
+            self.role.as_str(),
+        )
+        .fetch_one(&mut **conn)
+        .await
+        .map_err(forge_core::ForgeError::Database)?;
+
+        if !lease_expired {
+            return Ok(false);
+        }
+
+        // 2. Find the PID of the backend holding the advisory lock.
+        //    pg_locks splits a single-int8 lock ID into classid (upper 32 bits)
+        //    and objid (lower 32 bits); we use the same signed cast as
+        //    validate_lock_held to match what PostgreSQL stores internally.
+        let lock_id = self.role.lock_id();
+        let classid = (lock_id >> 32) as i32;
+        let objid = (lock_id & 0xFFFF_FFFF) as i32;
+
+        let zombie_pid = sqlx::query_scalar!(
+            r#"
+            SELECT pid AS "pid?"
+            FROM pg_locks
+            WHERE locktype = 'advisory'
+              AND classid::int = $1
+              AND objid::int = $2
+              AND granted
+            LIMIT 1
+            "#,
+            classid,
+            objid,
+        )
+        .fetch_one(&mut **conn)
+        .await
+        .map_err(forge_core::ForgeError::Database)?;
+
+        let pid = match zombie_pid {
+            Some(p) => p,
+            None => {
+                // Lock was released between our check and now — no zombie to
+                // evict. Return false; the caller will retry next tick.
+                tracing::debug!(
+                    role = self.role.as_str(),
+                    "Stale lease detected but no lock-holding backend found; \
+                     lock may have already been released"
+                );
+                return Ok(false);
+            }
+        };
+
+        // 3. Terminate the zombie backend. pg_terminate_backend returns true if
+        //    the signal was sent, false if permission was denied or the backend
+        //    was already gone. We warn rather than error on false so the caller
+        //    can degrade gracefully.
+        let terminated = sqlx::query_scalar!(
+            r#"SELECT pg_terminate_backend($1) AS "terminated!""#,
+            pid,
+        )
+        .fetch_one(&mut **conn)
+        .await
+        .map_err(forge_core::ForgeError::Database)?;
+
+        if !terminated {
+            tracing::warn!(
+                role = self.role.as_str(),
+                zombie_pid = pid,
+                "Could not terminate zombie leader backend; \
+                 may lack pg_signal_backend privilege or backend already exited. \
+                 Leadership acquisition blocked until the connection pooler \
+                 recycles the holding connection."
+            );
+            return Ok(false);
+        }
+
+        tracing::warn!(
+            role = self.role.as_str(),
+            zombie_pid = pid,
+            "Terminated zombie leader backend with expired lease; retrying lock acquisition"
+        );
+
+        // 4. Retry the lock acquisition on the same connection. A small yield
+        //    lets PG process the termination before we attempt the lock.
+        tokio::task::yield_now().await;
+
+        let acquired = sqlx::query_scalar!(
+            r#"SELECT pg_try_advisory_lock($1) AS "acquired!""#,
+            self.role.lock_id(),
+        )
+        .fetch_one(&mut **conn)
+        .await
+        .map_err(forge_core::ForgeError::Database)?;
 
         Ok(acquired)
     }
@@ -360,6 +524,26 @@ impl LeaderElection {
                      lock was not held by this session"
                 );
             }
+
+            // Clear leadership record on the same connection that held the
+            // advisory lock. Using the shared pool here would risk issuing the
+            // DELETE on a different backend, which is fine for correctness but
+            // would leave a window where the lock is gone but the row still
+            // names us as leader. Running it on the same connection closes that
+            // window entirely. WHERE node_id = $2 makes this safe even when the
+            // lock was lost out-of-band and another node has already overwritten
+            // the row via ON CONFLICT — that node's row stays put.
+            sqlx::query!(
+                r#"
+            DELETE FROM forge_leaders
+            WHERE role = $1 AND node_id = $2
+            "#,
+                self.role.as_str(),
+                self.node_id.as_uuid(),
+            )
+            .execute(&mut *conn)
+            .await
+            .map_err(forge_core::ForgeError::Database)?;
         } else {
             // Reachable when try_become_leader failed mid-way after setting
             // is_leader=true (shouldn't happen with current code) or after a
@@ -370,21 +554,6 @@ impl LeaderElection {
             );
         }
         drop(lock_connection);
-
-        // Clear leadership record. WHERE node_id = $2 makes this safe even
-        // when the lock was lost out-of-band and another node has already
-        // overwritten the row via ON CONFLICT — that node's row stays put.
-        sqlx::query!(
-            r#"
-            DELETE FROM forge_leaders
-            WHERE role = $1 AND node_id = $2
-            "#,
-            self.role.as_str(),
-            self.node_id.as_uuid(),
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(forge_core::ForgeError::Database)?;
 
         self.is_leader.store(false, Ordering::SeqCst);
         crate::cluster::metrics::set_is_leader(self.role.as_str(), false);
@@ -472,7 +641,15 @@ impl LeaderElection {
                 }
                 _ = keepalive_timer.tick() => {
                     if let Err(e) = self.keepalive().await {
-                        tracing::debug!(error = %e, "Leader connection keepalive failed");
+                        tracing::warn!(error = %e, "Leader connection keepalive failed; validating lock");
+                        // A keepalive failure means the lock-owning connection
+                        // may be dead. Validate immediately rather than waiting
+                        // for the next lock_validate_interval tick — a dead
+                        // connection silently releases the advisory lock, and we
+                        // must not keep acting as leader in that case.
+                        if let Err(ve) = self.validate_lock_held().await {
+                            tracing::warn!(error = %ve, "Lock validation after keepalive failure dropped leadership");
+                        }
                     }
                 }
                 _ = check_timer.tick() => {
@@ -733,5 +910,84 @@ mod integration_tests {
                 .expect("validate must succeed while lock held");
             assert!(election.is_leader());
         }
+    }
+
+    /// try_become_leader skips zombie preemption when the lease is still valid.
+    ///
+    /// If another node holds the lock and its lease is current (not expired),
+    /// we must not attempt termination — that would be a hostile preemption of
+    /// a healthy leader. `try_become_leader` must return `false` without issuing
+    /// any `pg_terminate_backend` call.
+    #[tokio::test]
+    async fn try_become_leader_does_not_preempt_healthy_leader() {
+        let db = setup_db("leader_no_preempt_healthy").await;
+
+        // Node A acquires leadership.
+        let leader = LeaderElection::new(
+            db.pool().clone(),
+            NodeId::new(),
+            LeaderRole::Scheduler,
+            LeaderConfig::default(),
+        );
+        assert!(leader.try_become_leader().await.unwrap());
+
+        // Node B tries to acquire but must not succeed — leader A is healthy.
+        let standby = LeaderElection::new(
+            db.pool().clone(),
+            NodeId::new(),
+            LeaderRole::Scheduler,
+            LeaderConfig::default(),
+        );
+        let got = standby.try_become_leader().await.unwrap();
+        assert!(!got, "standby must not preempt a healthy leader");
+        assert!(!standby.is_leader());
+
+        // A is still leader.
+        assert!(leader.is_leader());
+    }
+
+    /// try_become_leader acquires leadership after preempting a zombie.
+    ///
+    /// Simulates a zombie leader: the `forge_leaders` lease is expired (the
+    /// application process died without refreshing), but the PG backend that
+    /// holds the advisory lock is still alive (connection pooler scenario).
+    /// After the standby calls `try_become_leader`, it must terminate the
+    /// zombie backend and take over.
+    #[tokio::test]
+    async fn try_become_leader_preempts_zombie_with_expired_lease() {
+        let db = setup_db("leader_preempt_zombie").await;
+
+        // Acquire leadership normally.
+        let zombie = LeaderElection::new(
+            db.pool().clone(),
+            NodeId::new(),
+            LeaderRole::Scheduler,
+            LeaderConfig::default(),
+        );
+        assert!(zombie.try_become_leader().await.unwrap());
+        assert!(zombie.is_leader());
+
+        // Artificially expire the lease so standbys see a stale leader.
+        #[allow(clippy::disallowed_methods)]
+        sqlx::query("UPDATE forge_leaders SET lease_until = NOW() - INTERVAL '1 second' WHERE role = $1")
+            .bind(LeaderRole::Scheduler.as_str())
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        // The zombie's lock-holding connection is still alive (we haven't
+        // dropped it), simulating a connection-pooler-kept backend.
+        //
+        // A standby now tries to acquire. It should detect the expired lease,
+        // find the lock-holding PID, terminate it, and acquire the lock.
+        let standby = LeaderElection::new(
+            db.pool().clone(),
+            NodeId::new(),
+            LeaderRole::Scheduler,
+            LeaderConfig::default(),
+        );
+        let got = standby.try_become_leader().await.unwrap();
+        assert!(got, "standby must take over after terminating zombie backend");
+        assert!(standby.is_leader());
     }
 }

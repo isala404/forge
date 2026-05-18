@@ -400,12 +400,26 @@ async fn run_daemon_loop(
                     }
                 });
 
-                // For leader-elected daemons, periodically validate the
-                // advisory lock is still held. If leadership is lost
-                // out-of-band (connection drop, PG backend termination),
-                // signal the daemon to stop this iteration so the outer
-                // loop can re-acquire leadership before running again.
+                // For leader-elected daemons, two background tasks run for
+                // the lifetime of this daemon iteration:
+                //
+                // 1. Lock validator (lock_validate_interval, default 1s):
+                //    confirms the advisory lock is still held on the
+                //    lock-owning connection. Catches out-of-band loss (PG
+                //    backend termination, connection recycling) well within
+                //    the lease window.
+                //
+                // 2. Lease refresher (check_interval, default 5s):
+                //    calls refresh_lease() to extend forge_leaders.lease_until
+                //    and updates forge_daemons.last_heartbeat. Without this
+                //    the 60 s lease expires while the daemon runs, standbys
+                //    see a zombie, and failover is delayed by up to the full
+                //    lease_duration (the [03.7] issue).
+                //
+                // Both tasks signal daemon_shutdown_tx on failure so the
+                // outer loop re-acquires leadership before the next iteration.
                 if let Some(ref election) = election {
+                    // Task 1: lock validation.
                     let election_clone = Arc::clone(election);
                     let shutdown_tx_clone = daemon_shutdown_tx.clone();
                     let validate_interval = election_clone.lock_validate_interval();
@@ -431,6 +445,41 @@ async fn run_daemon_loop(
                                 );
                                 let _ = shutdown_tx_clone.send(true);
                                 break;
+                            }
+                        }
+                    });
+
+                    // Task 2: lease refresh + heartbeat.
+                    let election_clone = Arc::clone(election);
+                    let shutdown_tx_clone = daemon_shutdown_tx.clone();
+                    let pool_clone = pool.clone();
+                    let name_clone = name.clone();
+                    let refresh_interval = election_clone.check_interval();
+                    tokio::spawn(async move {
+                        loop {
+                            tokio::time::sleep(refresh_interval).await;
+                            if *shutdown_tx_clone.borrow() {
+                                break;
+                            }
+                            if let Err(e) = election_clone.refresh_lease().await {
+                                tracing::warn!(
+                                    error = %e,
+                                    "Lease refresh failed during daemon execution; stopping iteration"
+                                );
+                                let _ = shutdown_tx_clone.send(true);
+                                break;
+                            }
+                            // Update forge_daemons.last_heartbeat so other
+                            // nodes can see this daemon is alive. Failure is
+                            // non-fatal: we log and continue; the lease
+                            // itself is the authoritative liveness signal.
+                            if let Err(e) =
+                                update_daemon_heartbeat(&pool_clone, &name_clone).await
+                            {
+                                tracing::debug!(
+                                    error = %e,
+                                    "Failed to update daemon heartbeat"
+                                );
                             }
                         }
                     });
@@ -580,6 +629,18 @@ async fn update_daemon_status(pool: &PgPool, name: &str, status: DaemonStatus) -
     sqlx::query!(
         "UPDATE forge_daemons SET status = $1, last_heartbeat = NOW() WHERE name = $2",
         status.as_str(),
+        name,
+    )
+    .execute(pool)
+    .await
+    .map_err(forge_core::ForgeError::Database)?;
+
+    Ok(())
+}
+
+async fn update_daemon_heartbeat(pool: &PgPool, name: &str) -> Result<()> {
+    sqlx::query!(
+        "UPDATE forge_daemons SET last_heartbeat = NOW() WHERE name = $1",
         name,
     )
     .execute(pool)

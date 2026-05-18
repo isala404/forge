@@ -163,12 +163,16 @@ impl WorkflowScheduler {
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    if let Err(e) = self.process_ready_workflows().await {
+                    if self.is_leader()
+                        && let Err(e) = self.process_ready_workflows().await
+                    {
                         tracing::warn!(error = %e, "Failed to process ready workflows");
                     }
                 }
                 _ = wakeup.notified() => {
-                    if let Err(e) = self.process_ready_workflows().await {
+                    if self.is_leader()
+                        && let Err(e) = self.process_ready_workflows().await
+                    {
                         tracing::warn!(error = %e, "Failed to process workflows after wakeup");
                     }
                 }

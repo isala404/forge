@@ -101,7 +101,16 @@ impl DatabaseConfig {
 }
 
 fn default_pool_size() -> u32 {
-    50
+    // Internal baseline with all defaults:
+    //   14 worker slots (8 default + 4 workflows + 2 cron)
+    //  +64 reactor max-concurrent re-executions
+    //  + 6 persistent listeners, leader holds, health check, migration
+    // = 84 connections consumed before any gateway traffic arrives.
+    // 16 added on top as headroom for light gateway traffic, landing at 100.
+    // Users running at scale should set pool_size explicitly based on their
+    // expected concurrent gateway load; see the sizing formula in
+    // `forge_runtime::pg::pool`.
+    100
 }
 
 fn default_pool_timeout() -> DurationStr {
@@ -120,7 +129,7 @@ mod tests {
     #[test]
     fn test_default_database_config() {
         let config = DatabaseConfig::default();
-        assert_eq!(config.pool_size, 50);
+        assert_eq!(config.pool_size, 100);
         assert_eq!(config.pool_timeout.as_secs(), 30);
         assert!(config.url.is_empty());
     }

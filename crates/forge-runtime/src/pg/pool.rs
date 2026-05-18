@@ -58,10 +58,10 @@
 //!            + ~6   // persistent listeners, leader holds, migrations, health check
 //! ```
 //!
-//! For default worker (10) and reactor (64) caps and a steady gateway load
-//! of, say, 50 concurrent requests, that lands around 130. The 50-connection
-//! default fits a small deployment that scales worker/reactor caps down
-//! accordingly.
+//! For default worker (14: 8 default + 4 workflows + 2 cron) and reactor
+//! (64) caps the internal baseline alone is 84 connections. The 100-connection
+//! default covers the internal baseline plus ~16 concurrent gateway requests.
+//! Larger deployments should set `pool_size` explicitly.
 //!
 //! Note that gateway's `max_connections` (default 512) is the request-level
 //! concurrency cap, not the pool-level one. A real deployment rarely sees

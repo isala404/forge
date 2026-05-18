@@ -16,13 +16,16 @@
 //! than the consumer's high-water mark, retention has trimmed past it and the
 //! consumer must fall back to a full resync of its derived state.
 //!
-//! Default retention is 1 hour. Run [`trim_change_log`] periodically from a
-//! background task; the helpers themselves never trim implicitly.
+//! Default retention is 1 hour with a minimum floor of 1 000 rows — trimming
+//! is skipped entirely when the log is smaller than that floor, even if
+//! entries are older than the window. Run [`trim_change_log`] periodically
+//! from a background task; the helpers themselves never trim implicitly.
 
 use chrono::{DateTime, Utc};
 use futures_util::stream::{Stream, StreamExt};
 use sqlx::PgPool;
 
+use forge_core::cluster::LeaderRole;
 use forge_core::error::{ForgeError, Result};
 
 /// One row of `forge_change_log`.
@@ -70,17 +73,69 @@ pub fn drain_change_log(pool: &PgPool, since: i64) -> impl Stream<Item = Result<
     .map(|r| r.map_err(ForgeError::Database))
 }
 
+/// Minimum number of rows that must exist in `forge_change_log` before any
+/// time-based trimming occurs. On quiet systems this prevents the entire log
+/// from being wiped even though the rows are technically past the retention
+/// window; consumers rely on the log for gap-recovery and benefit from having
+/// at least this many recent entries available.
+pub const CHANGE_LOG_MIN_ROWS: i64 = 1_000;
+
 /// Delete every change-log row with `created_at < before`. Returns the number
 /// of rows deleted.
 ///
 /// Run periodically from a background task; the reactor's gap-recovery only
 /// needs the recent tail. Default retention in the framework is 1 hour, set
 /// by passing `Utc::now() - chrono::Duration::hours(1)`.
+///
+/// Trimming is skipped when the total row count is at or below
+/// [`CHANGE_LOG_MIN_ROWS`] (default 1 000). This prevents over-aggressive
+/// cleanup on quiet systems where entries age past the window but the log
+/// itself is small.
+///
+/// Uses `pg_try_advisory_xact_lock` with the [`LeaderRole::LogCompactor`] lock
+/// ID so that only one node in the cluster runs the DELETE at a time. If
+/// another node already holds the lock the function returns `Ok(0)` immediately
+/// rather than blocking or racing.
+#[allow(clippy::disallowed_methods)]
 pub async fn trim_change_log(pool: &PgPool, before: DateTime<Utc>) -> Result<u64> {
-    let result = sqlx::query!("DELETE FROM forge_change_log WHERE created_at < $1", before,)
-        .execute(pool)
+    let lock_id = LeaderRole::LogCompactor.lock_id();
+
+    let mut tx = pool.begin().await.map_err(ForgeError::Database)?;
+
+    // pg_try_advisory_xact_lock is a built-in function with no user-table
+    // schema, so it has no cached .sqlx metadata and must use the runtime API.
+    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+        .bind(lock_id)
+        .fetch_one(&mut *tx)
         .await
         .map_err(ForgeError::Database)?;
+
+    if !acquired {
+        // Another node is already trimming; skip without blocking.
+        return Ok(0);
+    }
+
+    // Enforce a minimum row count floor: don't trim at all when the log is
+    // small, even if the entries are past the retention window. This prevents
+    // total log erasure on quiet systems where consumers still need recent
+    // history for gap-recovery.
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM forge_change_log")
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(ForgeError::Database)?;
+
+    if total <= CHANGE_LOG_MIN_ROWS {
+        // Log is small enough; leave it intact regardless of age.
+        return Ok(0);
+    }
+
+    let result = sqlx::query!("DELETE FROM forge_change_log WHERE created_at < $1", before,)
+        .execute(&mut *tx)
+        .await
+        .map_err(ForgeError::Database)?;
+
+    tx.commit().await.map_err(ForgeError::Database)?;
+
     Ok(result.rows_affected())
 }
 
