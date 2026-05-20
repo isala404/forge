@@ -67,6 +67,10 @@ pub struct LeaderElection {
     lock_connection: Arc<Mutex<Option<sqlx::pool::PoolConnection<sqlx::Postgres>>>>,
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
+    /// Cached result of the last successful `pg_locks` probe. Set to `None`
+    /// when a keepalive failure invalidates the cache, forcing the next
+    /// `validate_lock_held` to actually query `pg_locks`.
+    last_lock_validated: Mutex<Option<std::time::Instant>>,
 }
 
 impl std::fmt::Debug for LeaderElection {
@@ -99,6 +103,7 @@ impl LeaderElection {
             lock_connection: Arc::new(Mutex::new(None)),
             shutdown_tx,
             shutdown_rx,
+            last_lock_validated: Mutex::new(None),
         }
     }
 
@@ -355,14 +360,23 @@ impl LeaderElection {
             return Ok(());
         }
 
+        {
+            let cached = self.last_lock_validated.lock().await;
+            if let Some(last) = *cached
+                && last.elapsed() < self.config.lock_validate_interval
+            {
+                return Ok(());
+            }
+        }
+
         let mut lock_connection = self.lock_connection.lock().await;
         let conn = match lock_connection.as_mut() {
             Some(conn) => conn,
             None => {
                 drop(lock_connection);
                 self.drop_leadership_locally();
-                return Err(forge_core::ForgeError::Internal(
-                    "Lock connection missing during validation; dropped leadership".into(),
+                return Err(forge_core::ForgeError::internal(
+                    "Lock connection missing during validation; dropped leadership",
                 ));
             }
         };
@@ -395,16 +409,18 @@ impl LeaderElection {
         if !still_held {
             *lock_connection = None;
             drop(lock_connection);
+            self.invalidate_lock_cache().await;
             self.drop_leadership_locally();
             tracing::error!(
                 role = self.role.as_str(),
                 "Advisory lock no longer held on leader connection; dropped leadership"
             );
-            return Err(forge_core::ForgeError::Internal(
-                "Advisory lock no longer held; dropped leadership".into(),
+            return Err(forge_core::ForgeError::internal(
+                "Advisory lock no longer held; dropped leadership",
             ));
         }
 
+        *self.last_lock_validated.lock().await = Some(std::time::Instant::now());
         Ok(())
     }
 
@@ -461,8 +477,8 @@ impl LeaderElection {
             None => {
                 drop(lock_connection);
                 self.drop_leadership_locally();
-                return Err(forge_core::ForgeError::Internal(
-                    "Lock connection missing during lease refresh; dropped leadership".into(),
+                return Err(forge_core::ForgeError::internal(
+                    "Lock connection missing during lease refresh; dropped leadership",
                 ));
             }
         };
@@ -485,6 +501,12 @@ impl LeaderElection {
         .map_err(forge_core::ForgeError::Database)?;
 
         Ok(())
+    }
+
+    /// Clear the cached `pg_locks` probe result so the next `validate_lock_held`
+    /// actually queries the database.
+    async fn invalidate_lock_cache(&self) {
+        *self.last_lock_validated.lock().await = None;
     }
 
     fn drop_leadership_locally(&self) {
@@ -643,10 +665,10 @@ impl LeaderElection {
                     if let Err(e) = self.keepalive().await {
                         tracing::warn!(error = %e, "Leader connection keepalive failed; validating lock");
                         // A keepalive failure means the lock-owning connection
-                        // may be dead. Validate immediately rather than waiting
-                        // for the next lock_validate_interval tick — a dead
-                        // connection silently releases the advisory lock, and we
-                        // must not keep acting as leader in that case.
+                        // may be dead. Invalidate the cache and validate
+                        // immediately rather than waiting for the next
+                        // lock_validate_interval tick.
+                        self.invalidate_lock_cache().await;
                         if let Err(ve) = self.validate_lock_held().await {
                             tracing::warn!(error = %ve, "Lock validation after keepalive failure dropped leadership");
                         }
@@ -763,7 +785,7 @@ mod integration_tests {
         }
 
         let err = election.refresh_lease().await.unwrap_err();
-        assert!(matches!(err, forge_core::ForgeError::Internal(_)));
+        assert!(matches!(err, forge_core::ForgeError::Internal { .. }));
         assert!(!election.is_leader());
     }
 
@@ -878,7 +900,7 @@ mod integration_tests {
         }
 
         let err = election.validate_lock_held().await.unwrap_err();
-        assert!(matches!(err, forge_core::ForgeError::Internal(_)));
+        assert!(matches!(err, forge_core::ForgeError::Internal { .. }));
         assert!(!election.is_leader());
     }
 

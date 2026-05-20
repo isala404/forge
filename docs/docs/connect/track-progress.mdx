@@ -98,19 +98,20 @@ interface WorkflowStepState {
     | "running"
     | "completed"
     | "failed"
-    | "compensated"
     | "skipped";
   error: string | null;
 }
 
 type WorkflowStatus =
-  | "created"
+  | "pending"
   | "running"
+  | "sleeping"
   | "waiting"
   | "completed"
-  | "compensating"
-  | "compensated"
   | "failed"
+  | "blocked_missing_version"
+  | "blocked_signature_mismatch"
+  | "blocked_missing_handler"
   | "not_found";
 ```
 

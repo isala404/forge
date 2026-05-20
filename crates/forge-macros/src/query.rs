@@ -47,6 +47,12 @@ struct DarlingQueryAttrs {
     public: bool,
     #[darling(default)]
     unscoped: bool,
+    /// New-style alias for `public`. Accepted values: "none", "required".
+    #[darling(default)]
+    auth: Option<String>,
+    /// New-style alias for `unscoped`. Accepted values: "global", "user".
+    #[darling(default)]
+    scope: Option<String>,
     #[darling(default)]
     consistent: bool,
     /// Set `register = false` to skip `inventory::submit!` auto-registration.
@@ -88,6 +94,23 @@ impl DarlingQueryAttrs {
             "query",
         )
         .map_err(|e| darling::Error::custom(e.to_string()))?;
+
+        if let Some(ref a) = self.auth
+            && !["none", "required"].contains(&a.as_str())
+        {
+            return Err(darling::Error::custom(format!(
+                "invalid auth value \"{a}\": expected \"none\" or \"required\""
+            )));
+        }
+
+        if let Some(ref s) = self.scope
+            && !["global", "user"].contains(&s.as_str())
+        {
+            return Err(darling::Error::custom(format!(
+                "invalid scope value \"{s}\": expected \"global\" or \"user\""
+            )));
+        }
+
         Ok(self)
     }
 }
@@ -178,8 +201,8 @@ fn convert_query_attrs(darling: DarlingQueryAttrs) -> Result<QueryAttrs, syn::Er
         description: darling.description,
         cache_ttl,
         required_role: darling.require_role.map(|r| r.0),
-        is_public: darling.public,
-        is_unscoped: darling.unscoped,
+        is_public: darling.public || darling.auth.as_deref() == Some("none"),
+        is_unscoped: darling.unscoped || darling.scope.as_deref() == Some("global"),
         consistent: darling.consistent,
         timeout,
         rate_limit_requests,
@@ -322,7 +345,7 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
                     format!(
                         "Private query `{fn_name_str}` references table(s) [{tables_str}] but SQL \
                          does not filter by user_id or owner_id. Add a WHERE clause scoped to the \
-                         authenticated user, or use #[query(unscoped)] if this is intentional."
+                         authenticated user, or use #[query(scope = \"global\")] if this is intentional."
                     ),
                 ));
             }
@@ -332,7 +355,7 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
                     &input.sig.ident,
                     format!(
                         "Private query `{fn_name_str}` references table(s) [{tables_str}] but SQL \
-                         could not be parsed to verify scope. Add #[query(unscoped)] to opt out of \
+                         could not be parsed to verify scope. Add #[query(scope = \"global\")] to opt out of \
                          scope checking, or add #[query(tables(\"...\"))] to skip automatic extraction."
                     ),
                 ));

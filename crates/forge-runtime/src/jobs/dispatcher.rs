@@ -153,6 +153,62 @@ impl JobDispatcher {
             .map_err(forge_core::ForgeError::Database)
     }
 
+    /// Dispatch job with explicit info and tenant ID.
+    async fn dispatch_with_info_and_tenant(
+        &self,
+        info: &JobInfo,
+        args: serde_json::Value,
+        owner_subject: Option<String>,
+        tenant_id: Option<Uuid>,
+    ) -> Result<Uuid, forge_core::ForgeError> {
+        let mut job = JobRecord::new(
+            info.name,
+            args,
+            info.priority,
+            info.retry.max_attempts as i32,
+        )
+        .with_owner_subject(owner_subject)
+        .with_tenant_id(tenant_id);
+
+        if let Some(cap) = info.worker_capability {
+            job = job.with_capability(cap);
+        }
+
+        self.queue
+            .enqueue(job)
+            .await
+            .map_err(forge_core::ForgeError::Database)
+    }
+
+    /// Dispatch job at a specific time with explicit info and tenant ID.
+    async fn dispatch_at_with_info_and_tenant(
+        &self,
+        info: &JobInfo,
+        args: serde_json::Value,
+        scheduled_at: DateTime<Utc>,
+        owner_subject: Option<String>,
+        tenant_id: Option<Uuid>,
+    ) -> Result<Uuid, forge_core::ForgeError> {
+        let mut job = JobRecord::new(
+            info.name,
+            args,
+            info.priority,
+            info.retry.max_attempts as i32,
+        )
+        .with_scheduled_at(scheduled_at)
+        .with_owner_subject(owner_subject)
+        .with_tenant_id(tenant_id);
+
+        if let Some(cap) = info.worker_capability {
+            job = job.with_capability(cap);
+        }
+
+        self.queue
+            .enqueue(job)
+            .await
+            .map_err(forge_core::ForgeError::Database)
+    }
+
     /// Dispatch job with idempotency key.
     pub async fn dispatch_idempotent<J: ForgeJob>(
         &self,
@@ -223,9 +279,16 @@ impl JobDispatch for JobDispatcher {
         job_type: &str,
         args: serde_json::Value,
         owner_subject: Option<String>,
+        tenant_id: Option<Uuid>,
     ) -> Pin<Box<dyn Future<Output = forge_core::Result<Uuid>> + Send + '_>> {
         let job_type = job_type.to_string();
-        Box::pin(async move { self.dispatch_by_name(&job_type, args, owner_subject).await })
+        Box::pin(async move {
+            let entry = self.registry.get(&job_type).ok_or_else(|| {
+                forge_core::ForgeError::NotFound(format!("Job type '{}' not found", job_type))
+            })?;
+            self.dispatch_with_info_and_tenant(&entry.info, args, owner_subject, tenant_id)
+                .await
+        })
     }
 
     fn dispatch_by_name_at(
@@ -234,14 +297,21 @@ impl JobDispatch for JobDispatcher {
         args: serde_json::Value,
         scheduled_at: DateTime<Utc>,
         owner_subject: Option<String>,
+        tenant_id: Option<Uuid>,
     ) -> Pin<Box<dyn Future<Output = forge_core::Result<Uuid>> + Send + '_>> {
         let job_type = job_type.to_string();
         Box::pin(async move {
             let entry = self.registry.get(&job_type).ok_or_else(|| {
                 forge_core::ForgeError::NotFound(format!("Job type '{}' not found", job_type))
             })?;
-            self.dispatch_at_with_info(&entry.info, args, scheduled_at, owner_subject)
-                .await
+            self.dispatch_at_with_info_and_tenant(
+                &entry.info,
+                args,
+                scheduled_at,
+                owner_subject,
+                tenant_id,
+            )
+            .await
         })
     }
 
@@ -251,6 +321,7 @@ impl JobDispatch for JobDispatcher {
         job_type: &'a str,
         args: serde_json::Value,
         owner_subject: Option<String>,
+        tenant_id: Option<Uuid>,
     ) -> Pin<Box<dyn Future<Output = forge_core::Result<Uuid>> + Send + 'a>> {
         Box::pin(async move {
             let entry = self.registry.get(job_type).ok_or_else(|| {
@@ -263,7 +334,8 @@ impl JobDispatch for JobDispatcher {
                 entry.info.priority,
                 entry.info.retry.max_attempts as i32,
             )
-            .with_owner_subject(owner_subject);
+            .with_owner_subject(owner_subject)
+            .with_tenant_id(tenant_id);
             if let Some(cap) = entry.info.worker_capability {
                 record = record.with_capability(cap);
             }
@@ -282,6 +354,7 @@ impl JobDispatch for JobDispatcher {
         args: serde_json::Value,
         scheduled_at: DateTime<Utc>,
         owner_subject: Option<String>,
+        tenant_id: Option<Uuid>,
     ) -> Pin<Box<dyn Future<Output = forge_core::Result<Uuid>> + Send + 'a>> {
         Box::pin(async move {
             let entry = self.registry.get(job_type).ok_or_else(|| {
@@ -295,7 +368,8 @@ impl JobDispatch for JobDispatcher {
                 entry.info.retry.max_attempts as i32,
             )
             .with_scheduled_at(scheduled_at)
-            .with_owner_subject(owner_subject);
+            .with_owner_subject(owner_subject)
+            .with_tenant_id(tenant_id);
             if let Some(cap) = entry.info.worker_capability {
                 record = record.with_capability(cap);
             }
@@ -441,6 +515,7 @@ mod integration_tests {
             "ship",
             serde_json::json!({}),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -472,6 +547,7 @@ mod integration_tests {
             "ship",
             serde_json::json!({}),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -497,6 +573,7 @@ mod integration_tests {
             &mut tx,
             "missing",
             serde_json::json!({}),
+            None,
             None,
         )
         .await

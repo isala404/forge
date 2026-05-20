@@ -20,6 +20,10 @@ Read-only database operations with caching and subscriptions.
 | `unscoped`             | flag           | `false` | Opt out of compile-time scope checking. By default, private queries must filter by `user_id` or `owner_id` in SQL. This attribute disables that check for admin or shared data queries. |
 | `rate_limit(...)`      | config         | none    | Rate limiting configuration                                  |
 
+:::note Auth and scope aliases
+`auth = "none"` is an alias for `public`; `auth = "required"` makes the default explicit. `scope = "global"` is an alias for `unscoped`; `scope = "user"` makes the default explicit. Prefer the flag forms (`public`, `unscoped`) — the string aliases exist for programmatic or configuration-driven usage.
+:::
+
 ### Rate Limit Config
 
 ```rust
@@ -30,7 +34,7 @@ rate_limit(requests = 100, per = "1m", key = "user")
 | ---------- | ------------ | ---------------------------------------------------- |
 | `requests` | `u32`        | Requests allowed per window                          |
 | `per`      | `"duration"` | Time window (`"30s"`, `"1m"`, `"1h"`)                |
-| `key`      | `string`     | Bucket key: `"user"`, `"ip"`, `"tenant"`, `"global"` |
+| `key`      | `string`     | Bucket key: `"user"`, `"ip"`, `"tenant"`, `"user_action"`, `"global"`, or `"custom(claim_name)"` |
 
 ### Example
 
@@ -165,7 +169,12 @@ Transactional write operations.
 | `tables("t1", "t2")`   | list         | auto    | Explicit table dependencies (overrides SQL extraction)        |
 | `log`                  | `"level"`    | none    | Log level (`trace`, `debug`, `info`, `warn`, `error`, `off`). Requires a quoted value (e.g., `log = "debug"`); a bare `log` without a value is silently accepted but has no effect. |
 | `unscoped`             | flag         | `false` | Opt out of compile-time scope checking. By default, private queries must filter by `user_id` or `owner_id` in SQL. This attribute disables that check for admin or shared data queries. |
+| `allow_http`           | flag         | `false` | Permit `ctx.http()` calls inside a transactional mutation. Without this flag, calling `ctx.http()` in a transaction is a compile error (outbound HTTP inside a transaction is a footgun — the request cannot be rolled back if the transaction fails). Only use when you understand this tradeoff. |
 | `rate_limit(...)`      | config       | none    | Rate limiting configuration (same as query)                   |
+
+:::note Auth and scope aliases
+`auth = "none"` / `auth = "required"` and `scope = "global"` / `scope = "user"` work the same as in `#[forge::query]`. See the note under that section.
+:::
 
 ### Compile-Time Enforcement
 
@@ -378,13 +387,18 @@ Scheduled tasks with exactly-once execution.
 
 | Attribute        | Type          | Default     | Description                                |
 | ---------------- | ------------- | ----------- | ------------------------------------------ |
-| (first arg)      | `"cron expr"` | required    | Cron schedule (5-part: `"0 9 * * *"`)      |
+| (first arg)      | `"cron expr"` | —           | Positional cron schedule (5-part: `"0 9 * * *"`). Mutually exclusive with `schedule`, `every`, and `daily_at`. |
+| `schedule = "..."` | `"cron expr"` | —         | Named form of the positional cron expression. Use when you prefer keyword syntax: `schedule = "0 9 * * *"`. |
+| `every = "..."`  | `"duration"`  | —           | Sugar for simple interval schedules. Converts to a cron expression automatically. Example: `every = "5m"` runs every 5 minutes. Supports `m` (minutes) and `h` (hours). |
+| `daily_at = "..."` | `"HH:MM"`   | —           | Sugar for daily schedules at a fixed time. Example: `daily_at = "03:00"` runs at 3:00 AM UTC (or the configured `timezone`). |
 | `name = "..."`   | `string`      | fn name     | Override the registry name                 |
 | `timezone`       | `"string"`    | `"UTC"`     | IANA timezone (e.g., `"America/New_York"`) |
 | `timeout`        | `"duration"`  | `"1h"`      | Execution timeout; if explicitly set it also becomes the default outbound HTTP timeout for `ctx.http()` |
 | `catch_up`       | flag          | `false`     | Run missed executions after downtime       |
 | `catch_up_limit` | `u32`         | `10`        | Maximum catch-up runs                      |
 | `group`          | `"string"`    | `"default"` | Sharded leader election group              |
+
+Exactly one of the four schedule forms (positional `"cron expr"`, `schedule`, `every`, `daily_at`) must be provided. Mixing them is a compile error.
 
 ### Cron Expression
 

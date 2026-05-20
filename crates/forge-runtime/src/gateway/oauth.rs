@@ -1068,7 +1068,7 @@ fn mcp_token_issuer(
             .audience(MCP_AUDIENCE)
             .duration_secs(ttl)
             .build()
-            .map_err(forge_core::ForgeError::Internal)?;
+            .map_err(forge_core::ForgeError::internal)?;
         issuer.sign(&claims)
     }
 }

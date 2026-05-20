@@ -24,6 +24,18 @@ const V003_JOB_WAKEUP: &str = include_str!("../../../migrations/system/v003_job_
 const V004_KV: &str = include_str!("../../../migrations/system/v004_kv.sql");
 const V005_WORKFLOW_STATUS: &str =
     include_str!("../../../migrations/system/v005_workflow_status.sql");
+const V006_WORKFLOW_INDEXES: &str =
+    include_str!("../../../migrations/system/v006_workflow_indexes.sql");
+const V007_STATEMENT_TRIGGER: &str =
+    include_str!("../../../migrations/system/v007_statement_trigger.sql");
+const V008_WORKFLOW_STATE: &str =
+    include_str!("../../../migrations/system/v008_workflow_state.sql");
+const V009_JOBS_HISTORY: &str =
+    include_str!("../../../migrations/system/v009_jobs_history.sql");
+const V010_SIGNALS_ROLLUPS: &str =
+    include_str!("../../../migrations/system/v010_signals_rollups.sql");
+const V011_WEBHOOK_REPLAY: &str =
+    include_str!("../../../migrations/system/v011_webhook_replay.sql");
 
 /// A system migration with a version number.
 #[derive(Debug, Clone)]
@@ -78,6 +90,36 @@ pub fn get_system_migrations() -> Vec<SystemMigration> {
             sql: V005_WORKFLOW_STATUS,
             description: "Simplify workflow status to 6 variants",
         },
+        SystemMigration {
+            version: 6,
+            sql: V006_WORKFLOW_INDEXES,
+            description: "Fix partial indexes after status split",
+        },
+        SystemMigration {
+            version: 7,
+            sql: V007_STATEMENT_TRIGGER,
+            description: "Statement-level trigger mode and reactivity controls",
+        },
+        SystemMigration {
+            version: 8,
+            sql: V008_WORKFLOW_STATE,
+            description: "Separate workflow state from runs table",
+        },
+        SystemMigration {
+            version: 9,
+            sql: V009_JOBS_HISTORY,
+            description: "Archive table for completed jobs",
+        },
+        SystemMigration {
+            version: 10,
+            sql: V010_SIGNALS_ROLLUPS,
+            description: "Incremental rollup tables replacing materialized views",
+        },
+        SystemMigration {
+            version: 11,
+            sql: V011_WEBHOOK_REPLAY,
+            description: "Webhook replay storage",
+        },
     ]
 }
 
@@ -121,13 +163,19 @@ mod tests {
     #[test]
     fn test_get_system_migrations() {
         let migrations = get_system_migrations();
-        assert_eq!(migrations.len(), 5);
+        assert_eq!(migrations.len(), 11);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(migrations[0].name(), "__forge_v001");
         assert_eq!(migrations[1].name(), "__forge_v002");
         assert_eq!(migrations[2].name(), "__forge_v003");
         assert_eq!(migrations[3].name(), "__forge_v004");
         assert_eq!(migrations[4].name(), "__forge_v005");
+        assert_eq!(migrations[5].name(), "__forge_v006");
+        assert_eq!(migrations[6].name(), "__forge_v007");
+        assert_eq!(migrations[7].name(), "__forge_v008");
+        assert_eq!(migrations[8].name(), "__forge_v009");
+        assert_eq!(migrations[9].name(), "__forge_v010");
+        assert_eq!(migrations[10].name(), "__forge_v011");
     }
 
     #[test]
@@ -178,6 +226,35 @@ mod tests {
         let v004 = migrations[3].sql;
         assert!(v004.contains("forge_kv"));
         assert!(v004.contains("forge_kv_counters"));
+
+        // v006: workflow indexes
+        let v006 = migrations[5].sql;
+        assert!(v006.contains("idx_forge_workflow_runs_sleeping"));
+        assert!(v006.contains("idx_forge_workflow_runs_pending"));
+
+        // v007: statement trigger
+        let v007 = migrations[6].sql;
+        assert!(v007.contains("forge_notify_change_statement"));
+        assert!(v007.contains("forge_enable_reactivity"));
+
+        // v008: workflow state separation
+        let v008 = migrations[7].sql;
+        assert!(v008.contains("forge_workflow_state"));
+
+        // v009: jobs history
+        let v009 = migrations[8].sql;
+        assert!(v009.contains("forge_jobs_history"));
+        assert!(v009.contains("forge_archive_completed_jobs"));
+
+        // v010: signals rollups
+        let v010 = migrations[9].sql;
+        assert!(v010.contains("forge_signals_hourly_stats"));
+        assert!(v010.contains("forge_signals_daily_rollup"));
+
+        // v011: webhook replay
+        let v011 = migrations[10].sql;
+        assert!(v011.contains("raw_body"));
+        assert!(v011.contains("raw_headers"));
     }
 
     #[test]

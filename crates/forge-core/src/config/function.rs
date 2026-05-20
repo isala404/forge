@@ -43,7 +43,7 @@ impl FunctionConfig {
     /// Advisory memory limit in bytes, parsed from the size string.
     pub fn memory_limit_bytes(&self) -> crate::Result<usize> {
         crate::util::parse_size(&self.memory_limit).ok_or_else(|| {
-            crate::ForgeError::Config(format!(
+            crate::ForgeError::config(format!(
                 "invalid function.memory_limit '{}'. Expected a size like '512mb', '1gb', or '536870912'",
                 self.memory_limit
             ))

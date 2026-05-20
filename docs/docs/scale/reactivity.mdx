@@ -118,7 +118,7 @@ If the SSE send buffer fills up (slow client), the server drops the update and s
 
 ## Periodic Resync
 
-Every 60 seconds, the reactor performs a sweep of all active subscriptions, re-executing each one to catch any changes that NOTIFY may have missed. This is a safety net, not the primary update path.
+Every 600 seconds (10 minutes), the reactor performs a sweep of all active subscriptions, re-executing each one to catch any changes that NOTIFY may have missed. This is a safety net, not the primary update path.
 
 ## Operational Limits
 
@@ -129,7 +129,7 @@ Configure these in `forge.toml` under `[realtime]`:
 | `max_sessions_per_user` | 8 | Max concurrent SSE connections per authenticated user |
 | `max_sessions_per_ip` | 32 | Max concurrent SSE connections per source IP |
 | `max_subscriptions_per_user` | 500 | Max total subscriptions across all of a user's sessions |
-| `max_cached_result_bytes` | 1048576 | Max size of a cached query result (1 MB) |
+| `max_cached_result_bytes` | 10485760 | Max size of a cached query result (10 MiB) |
 
 Exceeding any limit returns HTTP 429 with a `retry_after_secs` hint.
 

@@ -81,7 +81,7 @@ impl CronContext {
     pub fn kv(&self) -> crate::error::Result<&dyn KvHandle> {
         self.kv
             .as_deref()
-            .ok_or_else(|| crate::error::ForgeError::Internal("KV store not available".into()))
+            .ok_or_else(|| crate::error::ForgeError::internal("KV store not available"))
     }
 
     /// Set environment provider.

@@ -160,14 +160,16 @@ impl JobExecutor {
             c
         };
         if let Some(ref subject) = job.owner_subject {
+            let mut claims = std::collections::HashMap::new();
+            if let Some(tid) = job.tenant_id {
+                claims.insert(
+                    "tenant_id".to_string(),
+                    serde_json::Value::String(tid.to_string()),
+                );
+            }
             let auth = if let Ok(uuid) = uuid::Uuid::parse_str(subject) {
-                forge_core::AuthContext::authenticated(
-                    uuid,
-                    Vec::new(),
-                    std::collections::HashMap::new(),
-                )
+                forge_core::AuthContext::authenticated(uuid, Vec::new(), claims)
             } else {
-                let mut claims = std::collections::HashMap::new();
                 claims.insert(
                     "sub".to_string(),
                     serde_json::Value::String(subject.clone()),
@@ -199,6 +201,10 @@ impl JobExecutor {
                  record; role enforcement is dispatch-time only (RPC path) — \
                  jobs dispatched programmatically skip this check",
             );
+        }
+
+        if let Some(tenant_id) = job.tenant_id {
+            ctx = ctx.with_tenant_id(tenant_id);
         }
 
         ctx.set_http_timeout(entry.info.http_timeout);

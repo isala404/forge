@@ -116,7 +116,7 @@ Duration formats: `30s`, `5m`, `1h`, `7d`, `30d`
 
 ## Signature Stability
 
-Forge derives a 64-bit FNV-1a signature from each workflow definition's persisted contract: the name, version, step keys, wait keys, timeout, and input/output types. This signature is recorded when a workflow run starts and checked on every resume.
+Forge derives a blake3 (128-bit, truncated) signature from each workflow definition's persisted contract: the name, version, step keys, wait keys, timeout, and input/output types. This signature is recorded when a workflow run starts and checked on every resume.
 
 If the signature changes between deploys, in-flight runs are blocked rather than resumed with potentially incompatible logic. The `/_api/ready` health endpoint reports unhealthy when blocked runs exist, which prevents rolling deploys from completing until the issue is resolved.
 
@@ -423,17 +423,14 @@ To unblock the runtime, an operator clears the stuck rows directly in Postgres:
 
 ```sql
 UPDATE forge_workflow_runs
-SET status = 'retired_unresumable',
+SET status = 'failed',
     resolution_reason = 'drained for v1 removal'
 WHERE workflow_name = 'user_signup'
   AND workflow_version = 'v1'
-  AND status NOT IN (
-    'completed', 'compensated', 'failed',
-    'retired_unresumable', 'cancelled_by_operator'
-  );
+  AND status NOT IN ('completed', 'failed');
 ```
 
-Use `cancelled_by_operator` if you want the row to read as a cancellation rather than a retirement. Within five seconds, the next `/_api/ready` probe re-runs the drain check and flips back to `200`. There is no admin HTTP route for this; the database is the operator interface.
+Within five seconds, the next `/_api/ready` probe re-runs the drain check and flips back to `200`. To mark a run as an operator-initiated cancellation rather than a plain failure, use the force-abort admin endpoint instead. There is no admin HTTP route for bulk drain; the database is the operator interface.
 
 ## Context Methods
 

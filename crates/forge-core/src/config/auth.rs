@@ -188,17 +188,16 @@ impl AuthConfig {
         match self.jwt_algorithm {
             JwtAlgorithm::HS256 => {
                 if self.jwt_secret.is_none() {
-                    return Err(ForgeError::Config(
+                    return Err(ForgeError::config(
                         "auth.jwt_secret is required for HMAC algorithms (HS256). \
                          Set auth.jwt_secret to a secure random string, \
-                         or switch to RS256 and provide auth.jwks_url for external identity providers."
-                            .into(),
+                         or switch to RS256 and provide auth.jwks_url for external identity providers.",
                     ));
                 }
                 if let Some(secret) = &self.jwt_secret
                     && secret.len() < 32
                 {
-                    return Err(ForgeError::Config(format!(
+                    return Err(ForgeError::config(format!(
                         "auth.jwt_secret is {} bytes but must be at least 32 bytes for HMAC \
                          to be collision-resistant. Generate one with: \
                          openssl rand -base64 32",
@@ -208,22 +207,20 @@ impl AuthConfig {
             }
             JwtAlgorithm::RS256 => {
                 if self.jwks_url.is_none() {
-                    return Err(ForgeError::Config(
+                    return Err(ForgeError::config(
                         "auth.jwks_url is required for RSA algorithms (RS256). \
                          Set auth.jwks_url to your identity provider's JWKS endpoint, \
-                         or switch to HS256 and provide auth.jwt_secret for symmetric signing."
-                            .into(),
+                         or switch to HS256 and provide auth.jwt_secret for symmetric signing.",
                     ));
                 }
             }
         }
 
         if self.audience_required && self.jwt_audience.is_none() {
-            return Err(ForgeError::Config(
+            return Err(ForgeError::config(
                 "auth.jwt_audience is required when auth is enabled. \
                  Set auth.jwt_audience to your application's audience identifier (e.g. \"https://api.example.com\"), \
-                 or set auth.audience_required = false to opt out during migration."
-                    .into(),
+                 or set auth.audience_required = false to opt out during migration.",
             ));
         }
 
@@ -342,7 +339,7 @@ mod tests {
             ..AuthConfig::default()
         };
         let err = cfg.validate().unwrap_err();
-        let ForgeError::Config(msg) = err else {
+        let ForgeError::Config { context: msg, .. } = err else {
             panic!("expected Config error");
         };
         assert!(msg.contains("jwt_secret"));
@@ -356,7 +353,7 @@ mod tests {
             ..AuthConfig::default()
         };
         let err = cfg.validate().unwrap_err();
-        let ForgeError::Config(msg) = err else {
+        let ForgeError::Config { context: msg, .. } = err else {
             panic!("expected Config error");
         };
         assert!(msg.contains("32 bytes"), "{msg}");
@@ -381,7 +378,7 @@ mod tests {
             ..AuthConfig::default()
         };
         let err = cfg.validate().unwrap_err();
-        let ForgeError::Config(msg) = err else {
+        let ForgeError::Config { context: msg, .. } = err else {
             panic!("expected Config error");
         };
         assert!(msg.contains("jwks_url"));
@@ -407,7 +404,7 @@ mod tests {
             ..AuthConfig::default()
         };
         let err = cfg.validate().unwrap_err();
-        let ForgeError::Config(msg) = err else {
+        let ForgeError::Config { context: msg, .. } = err else {
             panic!("expected Config error");
         };
         assert!(msg.contains("jwt_audience"));

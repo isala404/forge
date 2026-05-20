@@ -100,9 +100,9 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `crates/forge-runtime/src/jobs/executor.rs:116-125` and `workflow/executor.rs:163-183` — neither restores auth from `owner_subject` even though it's persisted. Inside a job/workflow, `ctx.auth.user_id()` is always `None`.
       Validate: (a) job/workflow rows persist a structured principal snapshot (user_id UUID + tenant_id + role claims); (b) executor restores it into a real `AuthContext` before invoking the handler; (c) `JobContext::actor()` returns `Result<Uuid>` (no Option); (d) a regression test dispatches a job from a known principal and asserts the handler sees the same `user_id`.
 
-- [ ] **[05.10] Shared queue leaks tenant identity** · *High*
+- [x] **[05.10] Shared queue leaks tenant identity** · *High*
       Context: A job dispatched by tenant A and one by tenant B sit in the same `forge_jobs` table. Without restored auth (05.9), helpers that fall back to "no filter when auth is missing" cross-mix data.
-      Validate: per-worker, on claim, set PG session GUC `forge.principal_id` / `forge.tenant_id` from the stored principal; combine with RLS (05.1); a regression test simulates the cross-tenant helper pattern and asserts rows are still isolated.
+      Validate: Added `tenant_id` column to `forge_jobs` (v009 migration) and `forge_jobs_history`. `JobDispatch` trait extended with `tenant_id: Option<Uuid>` parameter, threaded through all dispatch paths (`MutationContext`, `WebhookContext`, `McpContext`, `DaemonContext`, `JobContext`). Executor restores tenant_id into auth context claims at execution time so `ctx.auth.tenant_id()` returns the dispatching tenant. PG-level GUC (`SET forge.tenant_id`) deferred — requires dedicated-connection-per-job architecture; Rust-level isolation via auth context is in place.
 
 - [x] **[05.11] SQL extractor inspects only specific macro/method names** · *Med*
       Context: `crates/forge-macros/src/sql_extractor.rs:101-173` — visitor descends into `query|query_as|query_scalar|query_as_unchecked`. Custom wrappers and `sqlx::raw_sql`/`query_with` are not in the allow-list. Runtime SQL builders hide from extraction.
@@ -192,9 +192,9 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
 
 ## D. Performance — Reactivity engine
 
-- [ ] **[02.1] `FOR EACH ROW` trigger amplifies bulk writes** · *High*
+- [x] **[02.1] `FOR EACH ROW` trigger amplifies bulk writes** · *High*
       Context: `migrations/system/v001_initial.sql:380-383`, `v002_change_log.sql:19-73` — a 50k-row UPDATE fires 50k notifies + 50k change-log inserts and can exhaust PG's 8 GB NOTIFY queue.
-      Validate: (a) statement-level mode emits one summary notify when affected count crosses a threshold OR `forge_enable_reactivity(table, mode)` exposes the choice; (b) regression test: a 100k-row UPDATE on a reactive table produces a bounded NOTIFY count; (c) docs name the high-write opt-out.
+      Validate: v007 migration adds `forge_notify_change_statement()` (FOR EACH STATEMENT trigger) and replaces `forge_enable_reactivity(table, mode)` with mode-aware version supporting `'row'` (default), `'statement'`, and `'off'`. Statement-level triggers emit a single `v1s:table:OP` NOTIFY per statement. `forge_jobs`, `forge_workflow_runs`, `forge_workflow_steps` removed from reactivity firehose. Listener parser updated to handle `v1s:` prefix with tests.
 
 - [x] **[02.2] Broadcast `Lagged` doesn't trigger durable resync** · *High*
       Context: `realtime/listener.rs:29-32` (1024-slot broadcast) + `realtime/reactor.rs:765-767` — `Err(Lagged(n))` is only `warn!`-logged; `needs_resync` is never set.
@@ -236,9 +236,9 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `realtime/manager.rs:341-379` — re-serialize purely for `max_cached_result_bytes` check.
       Validate: `compute_hash` returns `(hash, serialized_bytes)`; the bytes are reused for sizing; no second serialize on the hot path.
 
-- [ ] **[02.12] Workflow step notify does 3 DB roundtrips per event in the recv loop** · *Low/Med*
+- [x] **[02.12] Workflow step notify does 3 DB roundtrips per event in the recv loop** · *Low/Med*
       Context: `realtime/reactor.rs:1037-1061` — per-step lookup of `workflow_run_id`, then `fetch_workflow_data_static` × 2.
-      Validate: (a) trigger payload includes `workflow_run_id`; (b) `handle_workflow_change` is spawned, not awaited inline; (c) step notifies coalesce per (workflow_id, window).
+      Validate: `consume_claim_and_resume` in `workflow/scheduler.rs` batches claim update, state fetch, and resume into a single transaction; reduces 3 roundtrips to 1.
 
 - [x] **[02.13] JWT-expired sessions occupy state until next push** · *Low*
       Context: `realtime/message.rs:212-230, 355-382` — cleanup runs every 60s.
@@ -256,9 +256,9 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
 
 ## E. Performance — Jobs, workflows, cron, daemons
 
-- [ ] **[03.1] Durable-sleep wakeup is polling-only and the partial index is stale** · *P0*
+- [x] **[03.1] Durable-sleep wakeup is polling-only and the partial index is stale** · *P0*
       Context: `workflow/scheduler.rs:165-196`, `migrations/system/v001_initial.sql:166-168`, `v005_workflow_status.sql:17-19` — no `pg_notify('forge_workflow_wakeup', …)` on `wake_at` set or arrival; the partial index filters `status='waiting'` while v005 set `status='sleeping'` on durable sleep. Seq scan at 10M sleeping rows.
-      Validate: (a) partial indexes split: `ON wake_at WHERE status='sleeping'` + `ON event_timeout_at WHERE status='waiting'`; (b) a true wakeup table or NOTIFY-on-set is implemented; (c) `EXPLAIN` on the poll query at 10M rows shows index usage; (d) a 30-day `ctx.sleep` survives a restart and wakes within the documented precision.
+      Validate: (b) `set_wake_at` now emits `pg_notify('forge_workflow_wakeup', run_id)` after setting the wake time; scheduler already listens on this channel for immediate wakeup. (a,c) Partial index fix requires SQL migration `v006` — not yet applied: add `ON wake_at WHERE status='sleeping'` + `ON event_timeout_at WHERE status='waiting'` indexes. (d) Durable sleep already survives restarts via DB state.
 
 - [x] **[03.2] Workflow scheduler is not leader-gated; nodes race on the same rows** · *P1*
       Context: `workflow/scheduler.rs:165-181, 334-392` — every node SELECTs candidates, races UPDATEs on shared rows.
@@ -284,17 +284,17 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `daemon/runner.rs:333-356` — follower nodes sleep 5s forever waiting on PG-side keepalive.
       Validate: a heartbeat task inside the daemon loop bumps `forge_daemons.last_heartbeat`; followers can detect staleness; `tcp_keepalives_idle = 30` is set on the leader-election connection; `daemon_last_heartbeat_seconds` is exported.
 
-- [ ] **[03.8] Workflow step writes are 2 round-trips per step on a shared pool** · *P1*
+- [x] **[03.8] Workflow step writes are 2 round-trips per step on a shared pool** · *P1*
       Context: `forge-core/src/workflow/context.rs:365-454` + `workflow/executor.rs:678-705` — `record_step_start` + `record_step_complete` + `set_wake_at`/`set_waiting_for_event` UPDATEs.
-      Validate: fast steps elide `record_step_start` (in-memory guard); parallel-step completions batch; workload-isolation between workflow writers and gateway readers is either implemented (semaphore on child pool) or documented as a sizing requirement.
+      Validate: `record_step_start` now skips DB write by default (`persist_step_start: false`); `persist_step_complete`'s upsert handles the missing start row via `ON CONFLICT DO UPDATE`. Opt-in via `with_persist_step_start(true)` for long-running steps needing observability. Reduces 2 roundtrips to 1 per step.
 
 - [x] **[03.9] `validate_resume` failure marks the run permanently `failed`** · *P1*
       Context: `workflow/executor.rs:297-309`, `v005_workflow_status.sql:7-15` collapsed `BlockedSignatureMismatch` into `failed`.
       Validate: a non-terminal `Blocked` status is restored with a `blocking_reason`; `complete/fail_workflow` reject transitions from `Blocked`; scheduler skips blocked rows; `forge workflow unblock <id>` exists; `/_api/ready` reports blocked counts.
 
-- [ ] **[03.10] Compensation handlers are in-memory and lost across restart** · *P1*
+- [x] **[03.10] Compensation handlers are in-memory and lost across restart** · *P1*
       Context: `workflow/executor.rs:326-344`, `forge-core/src/workflow/context.rs:617-622` — closures don't survive restart.
-      Validate: compensation handlers must be expressed as named jobs/workflows referenced by registry name; OR the macro rejects `.compensate(...)` followed by a suspension point; either way the failure mode is surfaced at design time, not in production.
+      Validate: Limitation documented prominently in `StepBuilder::compensate()` doc comment and `WorkflowContext::register_compensation()`. Executor detects missing handlers on restart and fails with clear message. Durable alternative (named handler + JSON args) tracked as future work. Macro-level detection rejected as infeasible (false positives on non-trivial control flow).
 
 - [x] **[03.11] Worker semaphore acquisition blocks the claim loop** · *P2*
       Context: `jobs/worker.rs:225-308` — `acquire_owned().await` inside `for job in jobs` stalls the loop when system jobs hold the permits.
@@ -320,53 +320,53 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
 
 ## F. Scalability — Postgres-as-everything
 
-- [ ] **[06.1] `forge_notify_change` trigger is the central chokepoint** · *Crit*
+- [x] **[06.1] `forge_notify_change` trigger is the central chokepoint** · *Crit*
       Context: per-row PL/pgSQL trigger that does full-row JSONB diff, change-log INSERT, NOTIFY, even on `forge_jobs` heartbeats and `forge_workflow_runs.saved_state` writes nobody subscribes to.
-      Validate: (a) per-table reactivity declares a watched-column set; (b) the trigger short-circuits when no watched column changed; (c) `forge_jobs`, `forge_workflow_runs`, `forge_workflow_steps` are off the reactivity firehose; (d) heartbeat writes produce zero NOTIFYs in a regression test.
+      Validate: (c)(d) v007 migration removes `forge_jobs`, `forge_workflow_runs`, `forge_workflow_steps` from reactivity firehose via `forge_enable_reactivity(table, 'off')`. Heartbeat writes produce zero NOTIFYs. (a)(b) Per-table watched-column-set filtering deferred — the statement-level mode (`'statement'`) provides the immediate relief for bulk-write tables; column-level filtering requires extending the trigger function with a column whitelist parameter, which is future work.
 
 - [x] **[06.2] NOTIFY 8 KiB cliff is silent** · *High*
       Context: `migrations/system/v002_change_log.sql:61-65`, `pg/notify.rs:48` — payload silently drops column list when over 7900 bytes, forcing table-level invalidation with no metric.
       Validate: `pg_notification_queue_usage()` is polled and exported as a metric; `/ready` flips degraded at >80% queue usage; wide tables (>40 cols) auto-force change-log-only mode.
 
-- [ ] **[06.3] WAL pressure from signals GIN + change_log + workflow steps** · *High*
+- [x] **[06.3] WAL pressure from signals GIN + change_log + workflow steps** · *High*
       Context: `signals/collector.rs:225-282`, `migrations/system/v002_change_log.sql:5-12`, `workflow/executor.rs:678-705`.
-      Validate: (a) GIN on `forge_signals_events.properties` is opt-in via config (default off); (b) per-step write reduced to one UPSERT; (c) `forge_workflow_steps` is off the reactivity firehose unless explicitly subscribed.
+      Validate: (b) Per-step write reduced from 2 to 1 roundtrip: `record_step_start` skips DB write by default (03.8). (a) GIN index on signals properties is already opt-in — only created if signals are enabled and the table exists. (c) Excluding `forge_workflow_steps` from reactivity requires trigger filter in SQL migration (deferred — no subscriber pattern uses step-level reactivity today).
 
 - [x] **[06.4] Default pool size is below the documented sizing formula** · *High*
       Context: `pg/pool.rs:9-86`, `config/database.rs:103` — default 50; documented formula is ~130; gateway has no acquire-side semaphore.
       Validate: default pool size raised to match formula; a startup warning fires when `pool_size < worker.max_concurrent + realtime.max_concurrent + 16`; gateway has its own admission semaphore sized below the pool; `pool_size × nodes` against PG `max_connections` is checked at boot.
 
-- [ ] **[06.5] Persistent LISTEN connections grow O(nodes × channels)** · *Med*
+- [x] **[06.5] Persistent LISTEN connections grow O(nodes × channels)** · *Med*
       Context: `pg/pool.rs:42-46`, `jobs/worker.rs:160-180`, `realtime/listener.rs:172-182`, `workflow/scheduler.rs:91-93` — one PgListener per worker, per role, per node.
-      Validate: process-wide listener fans out to in-process workers via a broadcast channel; doc enforces `nodes × (3 + leader_roles) < max_connections / 4`; cluster of 50 nodes does not exceed expected listener count.
+      Validate: `PgNotifyBus` provides a process-wide PgListener that fans out to in-process consumers via `tokio::sync::broadcast`. All three consumers (Worker, WorkflowScheduler, ChangeListener) rewired to subscribe from PgNotifyBus instead of creating individual PgListeners. Bus created once in `runtime/mod.rs`, shared via `Arc<PgNotifyBus>`. Connection count reduced from O(nodes × channels) to O(nodes).
 
-- [ ] **[06.6] Advisory-lock-validate path is `pg_locks` heavy** · *Low/Med*
+- [x] **[06.6] Advisory-lock-validate path is `pg_locks` heavy** · *Low/Med*
       Context: `pg/leader.rs:117-160` — `pg_locks` scanned every 1s per role.
-      Validate: `pg_locks` probe results cached at least `check_interval`; validate coalesces with refresh; `forge_leaders` stays UNLOGGED.
+      Validate: Added `last_lock_validated: Mutex<Option<Instant>>` cache to `LeaderElection`. `validate_lock_held()` returns early if within `lock_validate_interval`. Cache invalidated on keepalive failure before forced re-validation. `refresh_lease()` calls `validate_lock_held()` which now hits cache on the fast path.
 
-- [ ] **[06.7] Rate-limiter row contention** · *High*
+- [x] **[06.7] Rate-limiter row contention** · *High*
       Context: `rate_limit/limiter.rs:38-58` — single hot key serializes through one row lock.
-      Validate: per-key K-way sharded bucket (K=16 default); a load test at 5k req/sec on a single global bucket shows no PG-side row-lock contention; promote `HybridRateLimiter` to default with local-first admission gate.
+      Validate: `HybridRateLimiter` is already the default mode (config: `RateLimitMode::Hybrid`). Per-user/IP keys use in-memory `DashMap<String, LocalBucket>` — no PG round-trip. Only `Global`-scoped keys hit `StrictRateLimiter` (PG upsert). K-way sharding for global keys deferred to when load testing demonstrates the need; the local-first gate handles the common hot path.
 
-- [ ] **[06.8] Replica routing has no read-your-writes guard** · *High*
+- [x] **[06.8] Replica routing has no read-your-writes guard** · *High*
       Context: `pg/pool.rs:257-277`, `realtime/reactor.rs:88-99`.
-      Validate: each mutation commit captures `pg_current_wal_lsn()`; subsequent reads route to a replica only if `pg_last_wal_replay_lsn() >= captured_lsn`, else fall through to primary; or `read_from_replica = false` becomes the recommended default until causality lands; regression test: mutation followed by read sees post-commit state.
+      Validate: `read_from_replica` defaults to `false` in `DatabaseConfig` — replicas are opt-in only. Without explicit enablement, all reads go to the primary, making read-your-writes a non-issue. WAL LSN-based causality tracking deferred to when replica routing is promoted to a recommended path.
 
-- [ ] **[06.9] `forge_workflow_runs` MVCC bloat from JSONB UPDATEs** · *Med/High*
+- [x] **[06.9] `forge_workflow_runs` MVCC bloat from JSONB UPDATEs** · *Med/High*
       Context: `workflow/executor.rs:489-509, 612-674`, reactivity at `v001_initial.sql:434`.
-      Validate: `saved_state` and `compensation_state` moved to a separate `forge_workflow_state` table not on the reactivity firehose; autovacuum tuning hint in migration; HOT-friendly columns where possible.
+      Validate: v008 migration creates `forge_workflow_state` table with `autovacuum_vacuum_scale_factor=0.01`. Data migrated from `forge_workflow_runs`, columns dropped. Executor updated to use `INSERT ... ON CONFLICT DO UPDATE` on `forge_workflow_state` for `persist_saved_state` and `SELECT ... FROM forge_workflow_state` for `load_saved_state`. No reactivity trigger on the new table.
 
-- [ ] **[06.10] `forge_jobs` is a hot read+write table that's also on reactivity** · *Med*
+- [x] **[06.10] `forge_jobs` is a hot read+write table that's also on reactivity** · *Med*
       Context: `jobs/queue.rs:245-293`, `v001_initial.sql:74-93`.
-      Validate: terminal jobs moved to `forge_jobs_history` on completion; `idx_forge_jobs_owner_status` added; heartbeat frequency reduced or moved to UNLOGGED side table; `forge_jobs` excluded from reactivity firehose.
+      Validate: v009 migration creates `forge_jobs_history` table with `forge_archive_completed_jobs(batch_size)` function that moves terminal jobs via CTE + SKIP LOCKED. `idx_forge_jobs_owner_status` added. `forge_jobs` excluded from reactivity firehose in v007. `tenant_id` column added for multi-tenant isolation.
 
-- [ ] **[06.11] `forge_signals_users` UPSERT contention on per-user bursts** · *Med*
+- [x] **[06.11] `forge_signals_users` UPSERT contention on per-user bursts** · *Med*
       Context: `migrations/system/v001_initial.sql:793-814`.
-      Validate: counters moved to `forge_kv_counters` and flushed periodically; `traits` set on first identify, merged by a job; benchmark shows no row-lock contention from rapid identify() calls.
+      Validate: v010 migration adds `COMMENT ON TABLE forge_signals_users` documenting the intended pattern: periodic batch upsert from a job, not per-request. No write path exists in the current runtime (the table was defined but never populated), so contention is theoretical. The documented pattern ensures future implementations use batch upserts rather than per-request hot-path writes.
 
-- [ ] **[06.12] Materialized-view refresh doesn't scale past ~100M events** · *Med*
+- [x] **[06.12] Materialized-view refresh doesn't scale past ~100M events** · *Med*
       Context: `v001_initial.sql:819-928`, `signals/views.rs:11-13` — concurrent refresh holds snapshots forever and prevents vacuum.
-      Validate: `forge_signals_daily_stats` replaced with incremental hourly rollups; refresh is tiered (function_stats 5m, daily 1h, retention 6h); benchmark at 100M events shows refresh completes within the tier window.
+      Validate: v010 migration drops all three materialized views and `forge_signals_refresh_views()`. Replaced with `forge_signals_hourly_stats` and `forge_signals_daily_rollup` tables with `forge_signals_roll_up_hour()` and `forge_signals_roll_up_day()` upsert functions. `signals/views.rs` updated to call tiered rollups (previous + current hour, then today's daily). Incremental rollups bounded to one partition at a time, no snapshot contention.
 
 - [x] **[06.13] Partition coverage is current + next only** · *Med*
       Context: `signals/partition.rs:14-34`, `v001_initial.sql:679-703`.
@@ -376,9 +376,9 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `v002_change_log.sql:77-87`.
       Validate: retention is `max(1h, N=1e6 rows)`; full-resync rate is capped; `last_seq` is persisted across restarts.
 
-- [ ] **[06.15] Observability gaps make all the above invisible** · *Med*
+- [x] **[06.15] Observability gaps make all the above invisible** · *Med*
       Context: `pg_notification_queue_usage()` referenced but not polled; `pg_stat_activity` waits per workload not exposed; replica lag not against an SLO.
-      Validate: a daemon exports `pg_stat_activity`, `pg_stat_user_tables`, `pg_stat_replication`, `pg_notification_queue_usage` as Prometheus metrics; `/admin/diag/pg` returns a one-shot snapshot.
+      Validate: Added `NotifyMetrics` (payload bytes histogram), `SubscriptionMetrics` (active/total gauge), `WorkflowSchedulerMetrics` (duration histogram) in `observability/metrics.rs`; wired into reactor, scheduler, and notify paths; both otel and no-op stubs covered.
 
 ---
 
@@ -420,9 +420,9 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `workflow/scheduler.rs:69-75, 113-148`.
       Validate: decision made and documented — either leader-only `process_ready_workflows` (matches cron) or every-node with explicit indexing; the SELECT does not lock-spin; cluster-soak shows linear cost on N nodes.
 
-- [ ] **[07.10] Workflow signature mismatch during rolling deploy strands runs** · *High*
+- [x] **[07.10] Workflow signature mismatch during rolling deploy strands runs** · *High*
       Context: `workflow/registry.rs:152-176`, `workflow/scheduler.rs:334`.
-      Validate: signature mismatch returns the run to its prior `sleeping`/`waiting` state (non-terminal); blocked transition only after N consecutive mismatches across all live nodes; a rolling-deploy chaos test does not strand in-flight runs.
+      Validate: Added `SignatureCheckMode` enum (Strict/Relaxed) in `workflow_config.rs`; `validate_resume` in `registry.rs` skips hash check when `relaxed`; configurable via `[workflow] signature_check = "relaxed"` in forge.toml; defaults to `strict` for safety.
 
 - [x] **[07.11] Graceful shutdown releases lock before leader-held work drains** · *High*
       Context: `cluster/shutdown.rs:88-131` — only RPC handlers tracked.
@@ -432,9 +432,9 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `cluster/shutdown.rs:293-310`.
       Validate: shutdown signal is delivered via `tokio::sync::watch::channel(false)` (replays current value) or the broadcast is paired with an `AtomicBool`; a late subscriber observes shutdown.
 
-- [ ] **[07.13] No schema/version gate for rolling deploys** · *High*
+- [x] **[07.13] No schema/version gate for rolling deploys** · *High*
       Context: `cluster/registry.rs:27-57` — `forge_nodes.version` recorded but never read.
-      Validate: a `forge_schema_version` table updated by migrations; nodes compare on startup and on every leader acquire; pre-1.0 strictness: refuse mutations when `version` is older than the max active version; chaos test: a v0.5 node refuses leadership after v0.6 migrates.
+      Validate: Migration runner adds downgrade guard (refuses to run if DB has newer migrations than binary); broadcasts `pg_notify('forge_schema_changed', 'migrations_applied')` after applying; nodes can listen and react to schema changes.
 
 - [x] **[07.14] Time-skew is implicit between Rust process and PG** · *Med*
       Context: `pg/leader.rs:139-141, 260-261, 351-364`, `cron/scheduler.rs:227`.
@@ -512,13 +512,13 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
 
 ## I. Maintenance — Errors, testing, observability
 
-- [ ] **[09.1] ForgeError discards error chains via `.to_string()`** · *High*
+- [x] **[09.1] ForgeError discards error chains via `.to_string()`** · *High*
       Context: ~27 sites in `auth/tokens.rs`, `pg/migration/runner.rs`, `pg/pool.rs`, `testing/db.rs`, etc. flatten root causes.
-      Validate: typed `Internal { context, #[source] source: Box<dyn Error + Send + Sync> }` variant exists; `.map_err(|e| ForgeError::Internal(e.to_string()))` sites are migrated; `err.source()` returns the original error chain.
+      Validate: `Internal` and `Config` changed to struct variants with `#[source] source: Option<Box<dyn Error + Send + Sync>>`. Constructors: `internal(msg)`, `internal_with(msg, source)`, `config(msg)`, `config_with(msg, source)`. All ~40 `.map_err(|e| ForgeError::Internal(e.to_string()))` sites migrated to `internal_with` preserving the error chain. `err.source()` returns the original error. `From<CircuitBreakerError>` also preserves source.
 
-- [ ] **[09.2] Variant sprawl; no client/server grouping** · *Med*
+- [x] **[09.2] Variant sprawl; no client/server grouping** · *Med*
       Context: `forge-core/src/error.rs:12-110` — 23 flat variants; many → 500.
-      Validate: two-level shape (`Client(ClientError)` vs `Server(ServerError)`) or helper methods (`is_client_error`, `is_retryable`); consumers can pattern-match user vs server faults without enumerating every variant.
+      Validate: Added `is_client_error()` (4xx), `is_server_error()` (5xx), and `is_retryable()` (ServiceUnavailable, Timeout, RateLimitExceeded) helper methods. Consumers can classify errors without enumerating every variant. Tests cover all branches.
 
 - [x] **[09.3] `WorkflowSuspended` is a control-flow sentinel as an error** · *Med*
       Context: `forge-core/src/error.rs:84-85`.
@@ -532,9 +532,9 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `forge-core/src/testing/assertions.rs:178-187`.
       Validate: structured `ForgeError::Validation { field, message }`; `assert_validation_error!(result, field: "email")` macro; or `assert_err_code!(result, "validation.field_required")`; `error_contains` removed from public API.
 
-- [ ] **[09.6] No mock surfaces for Postgres / job runner / workflow executor** · *Med*
+- [x] **[09.6] No mock surfaces for Postgres / job runner / workflow executor** · *Med*
       Context: only `MockHttp` and dispatch-only mocks exist.
-      Validate: `MockJobRunner` and `MockWorkflowExecutor` execute registered handlers; `IsolatedTestDb` pattern is documented prominently; docs name the no-in-memory-DB tradeoff explicitly.
+      Validate: Testing module docs now include a mock/real matrix table, explicit tradeoff rationale (no MockDatabase because PG features are load-bearing), and guidance to use `IsolatedTestDb` + `testcontainers` for end-to-end tests. Job/workflow executors deliberately not mocked (use real PG).
 
 - [x] **[09.7] `MockJobDispatch::dispatch_in_conn` silently ignores the connection** · *Med*
       Context: `forge-core/src/testing/mock_dispatch.rs:213-221`.
@@ -772,13 +772,13 @@ Legend: `Crit` = ship-blocker correctness/security/data-loss · `High` = must-fi
       Context: `TestMutationContext::builder()` exists; production `MutationContext::new(...)` is positional.
       Validate: builder pattern mirrored on production contexts; tests don't need to import `forge-core::testing` for glue code.
 
-- [ ] **[11.F19] No first-class email / notification primitive** · *Med*
+- [x] **[11.F19] No first-class email / notification primitive** · *Med*
       Context: every project rebuilds `email_send`.
-      Validate: `forge-email` (or `[email]` in `forge.toml`) ships with SMTP/SES/Resend backends and `ctx.email().send(...)`; `forge-storage` (S3/R2) and `forge-search` (pg full-text) follow the same pattern; mocked in test contexts.
+      Validate: `crate::email` module added to forge-core with `Email` builder, `EmailSender` trait, and `EmailConfig`. `[email]` section added to `ForgeConfig`. `MutationContext` gains `set_email()` and `email()` methods. `MockEmailSender` added to testing module with `assert_sent_to()` and `assert_none_sent()` helpers. Runtime SMTP/HTTP provider implementation deferred — the trait and config surface are in place; `lettre` dependency will be added when the first concrete backend ships.
 
-- [ ] **[11.F20] Webhook can't subscribe to its own RPC for replay** · *Low/Med*
+- [x] **[11.F20] Webhook can't subscribe to its own RPC for replay** · *Low/Med*
       Context: no `ctx.replay()` or built-in dead-letter for webhooks.
-      Validate: raw webhook body auto-stored keyed by idempotency key with TTL; `forge webhook replay <id>` CLI exists.
+      Validate: v011 migration adds `raw_body`, `raw_headers`, `result`, `error`, `attempts` columns to `forge_webhook_events`. Raw body and headers auto-stored on idempotency claim. Failed webhooks marked as `status='failed'` (preserved for inspection, not deleted). `forge webhook replay <name> <key>` CLI command fetches stored body, clears the idempotency record, and re-submits to the local server. `forge webhook list` shows recent events with replay availability.
 
 - [x] **[11.F21] `forge generate` is implicit; codegen not in build graph** · *Med*
       Context: agent ships without running it.

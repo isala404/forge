@@ -71,7 +71,7 @@ impl WebhookContext {
     pub fn kv(&self) -> crate::error::Result<&dyn KvHandle> {
         self.kv
             .as_deref()
-            .ok_or_else(|| crate::error::ForgeError::Internal("KV store not available".into()))
+            .ok_or_else(|| crate::error::ForgeError::internal("KV store not available"))
     }
 
     /// Set idempotency key.
@@ -160,10 +160,12 @@ impl WebhookContext {
         args: T,
     ) -> crate::error::Result<Uuid> {
         let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::Internal("Job dispatch not available".into())
+            crate::error::ForgeError::internal("Job dispatch not available")
         })?;
         let args_json = serde_json::to_value(args)?;
-        dispatcher.dispatch_by_name(job_type, args_json, None).await
+        dispatcher
+            .dispatch_by_name(job_type, args_json, None, None)
+            .await
     }
 
     /// Type-safe dispatch: resolves the job name from the type's `ForgeJob`
@@ -179,7 +181,7 @@ impl WebhookContext {
         input: T,
     ) -> crate::error::Result<Uuid> {
         let dispatcher = self.workflow_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::Internal("Workflow dispatch not available".into())
+            crate::error::ForgeError::internal("Workflow dispatch not available")
         })?;
         let input_json = serde_json::to_value(input)?;
         dispatcher
@@ -202,7 +204,7 @@ impl WebhookContext {
         reason: Option<String>,
     ) -> crate::error::Result<bool> {
         let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::Internal("Job dispatch not available".into())
+            crate::error::ForgeError::internal("Job dispatch not available")
         })?;
         dispatcher.cancel(job_id, reason).await
     }

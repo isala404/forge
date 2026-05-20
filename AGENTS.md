@@ -53,7 +53,7 @@ docker run -d --name forge-sqlx-pg -e POSTGRES_PASSWORD=forge -e POSTGRES_DB=for
 until docker exec forge-sqlx-pg pg_isready -U postgres -d forge 2>/dev/null; do sleep 1; done
 
 # 2. Apply bootstrap + system schema in version order
-for f in v000_bootstrap.sql v001_initial.sql v002_change_log.sql v003_job_wakeup.sql v004_kv.sql; do
+for f in v000_bootstrap.sql v001_initial.sql v002_change_log.sql v003_job_wakeup.sql v004_kv.sql v005_workflow_status.sql v006_workflow_indexes.sql v007_statement_trigger.sql v008_workflow_state.sql v009_jobs_history.sql v010_signals_rollups.sql v011_webhook_replay.sql; do
   docker exec -i forge-sqlx-pg psql -U postgres -d forge \
     < "crates/forge-runtime/migrations/system/$f"
 done
@@ -96,9 +96,9 @@ Generated output per handler:
 1. Args struct (if multiple params, or `type Args = ()` / single type)
 2. Named struct (e.g., `GetUserQuery`)
 3. Trait impl (`ForgeQuery` with `info()` + `execute()`)
-4. `inventory::submit!(AutoQuery(|registry| registry.register_query::<GetUserQuery>()))`;
+4. `inventory::submit!(AutoHandler(|registries| { registries.functions.register_query::<GetUserQuery>(); }))`;
 
-SQL table extraction: finds string literals in fn body, parses with sqlparser (PG dialect), extracts FROM/JOIN/INSERT/UPDATE/DELETE tables + SELECT columns. Falls back to regex for unparseable dynamic SQL.
+SQL table extraction: finds string literals in fn body, parses with sqlparser (PG dialect), extracts FROM/JOIN/INSERT/UPDATE/DELETE tables + SELECT columns. Parse failure is a compile error requiring explicit `tables(...)` attribute.
 
 Query macro validates: private queries must filter by `user_id` or `owner_id` in SQL. Compile-time error if missing. `#[query(unscoped)]` opts out for shared/admin data.
 
@@ -106,37 +106,37 @@ Mutation macro validates: detects `dispatch_job()`/`start_workflow()` without `t
 
 Cron macro validates: cron expression checked at compile time via `cron` crate.
 
-Workflow macro: supports `name`, `version`, `active`/`deprecated`, `timeout`, `public`, `require_role` attributes. Extracts step/wait keys from function body via AST visitor. Derives FNV-1a signature from persisted contract (name, version, step keys, wait keys, timeout, input/output types). Fails if both `active` and `deprecated` are set.
+Workflow macro: supports `name`, `version`, `status` (`active`/`deprecated`/`staging`), `timeout`, `public`, `require_role` attributes. Extracts step/wait keys from function body via AST visitor. Derives blake3 signature (128-bit, truncated) from persisted contract (name, version, step keys, wait keys, timeout, input/output types).
 
 ### forge-core: Types and Traits
 
 Handler traits: `ForgeQuery`, `ForgeMutation`, `ForgeJob`, `ForgeCron`, `ForgeWorkflow`, `ForgeDaemon`, `ForgeWebhook`, `ForgeMcpTool`. All follow pattern: `type Args`, `type Output`, `fn info() -> XInfo`, `fn execute(ctx, args) -> Pin<Box<Future>>`.
 
-`WorkflowInfo` fields: `name`, `version`, `signature`, `is_active`, `is_deprecated`, `timeout`, `http_timeout`, `is_public`, `required_role`. `WorkflowStatus` variants: Created, Running, Waiting, Completed, Compensating, Compensated, Failed, BlockedMissingVersion, BlockedSignatureMismatch, BlockedMissingHandler, RetiredUnresumable, CancelledByOperator.
+`WorkflowInfo` fields: `name`, `version`, `signature`, `status: WorkflowDefStatus`, `timeout`, `http_timeout`, `is_public`, `required_role`. Methods: `is_active()`, `is_deprecated()`. `WorkflowStatus` variants: Pending, Running, Sleeping, Waiting, Completed, Failed, BlockedMissingVersion, BlockedSignatureMismatch, BlockedMissingHandler.
 
-Contexts: `QueryContext` (db pool, auth, env), `MutationContext` (+ conn, http circuit breaker, dispatch, token issuer, outbox buffer), `JobContext` (+ progress channel, saved data, cancellation), `WorkflowContext` (+ step states, compensation handlers, suspend signal, durable sleep), `CronContext`, `DaemonContext` (+ shutdown signal), `WebhookContext`, `McpToolContext`.
+Contexts: `QueryContext` (db pool, auth, env), `MutationContext` (+ conn, http circuit breaker, dispatch, token issuer, kv, email_sender), `JobContext` (+ progress channel, saved data, cancellation), `WorkflowContext` (+ step states, compensation handlers, suspend signal, durable sleep), `CronContext`, `DaemonContext` (+ shutdown via watch channel), `WebhookContext`, `McpToolContext`.
 
-ForgeError variants: Config, Database, Function, Job, JobCancelled, Cluster, Serialization, Deserialization, Io, Sql, InvalidArgument(400), NotFound(404), Unauthorized(401), Forbidden(403), Validation(400), Timeout(504), Internal(500), InvalidState, WorkflowSuspended, RateLimitExceeded(429).
+ForgeError variants: Config, Database, JobCancelled, Serialization, Deserialization, Io, InvalidArgument(400), NotFound(404), Unauthorized(401), Forbidden(403), Validation(400), Conflict(409), UnprocessableEntity(422), Timeout(504), RateLimitExceeded(429, with retry_after/limit/remaining fields), Internal(500), ServiceUnavailable(503), InvalidState.
 
-Config: `ForgeConfig` loaded from TOML with `${ENV_VAR}` and `${VAR-default}` substitution. Sections: project, database (single primary pool, optional replicas), gateway, function, worker, cluster, auth, mcp, observability, signals.
+Config: `ForgeConfig` loaded from TOML with `${ENV_VAR}` and `${VAR-default}` substitution. Sections: project, database (single primary pool, optional replicas), gateway, function, worker, cluster, auth, mcp, observability, signals, node, workflow, cron, daemon, security, rate_limit, realtime, email.
 
-Testing module: `TestQueryContext`, `TestMutationContext`, `TestJobContext`, `TestCronContext`, `TestWorkflowContext`, `TestDaemonContext`, `TestWebhookContext`. Builders with `.as_user()`, `.with_role()`, `.with_claim()`, `.with_tenant()`, `.with_pool()`, `.with_env()`, `.mock_http()`. Assertion macros: `assert_ok!`, `assert_err!`, `assert_err_variant!`, `assert_job_dispatched!`, `assert_workflow_started!`, `assert_http_called!`.
+Testing module: `TestQueryContext`, `TestMutationContext`, `TestJobContext`, `TestCronContext`, `TestWorkflowContext`, `TestDaemonContext`, `TestWebhookContext`. Builders with `.as_user()`, `.with_role()`, `.with_claim()`, `.with_tenant()`, `.with_pool()`, `.with_env()`, `.mock_http()`. Assertion macros: `assert_ok!`, `assert_err!`, `assert_err_variant!`, `assert_err_matches!`, `assert_job_dispatched!`, `assert_job_not_dispatched!`, `assert_workflow_started!`, `assert_workflow_not_started!`, `assert_http_called!`, `assert_http_not_called!`.
 
 ### forge-runtime: Server and Workers
 
-**Gateway** (`gateway/`): Axum router. Routes: `/_api/rpc/{function}` (POST), `/_api/rpc/{function}/upload` (POST multipart), `/_api/events` (GET SSE), `/_api/subscribe` (POST), `/_api/health`, `/_api/ready`. Middleware stack: concurrency limit -> timeout -> CORS -> auth (JWT validation) -> tracing.
+**Gateway** (`gateway/`): Axum router. Routes: `/_api/rpc/{function}` (POST), `/_api/rpc/{function}/upload` (POST multipart), `/_api/events` (GET SSE), `/_api/subscribe` (POST), `/_api/health`, `/_api/ready`. Middleware stack (outermost to innermost): CORS -> security_headers -> api_version -> resolve_client_ip -> auth (JWT validation) -> tracing. Concurrency limit and timeout applied separately on the bounded sub-router.
 
 **RPC dispatch** (`function/`): `FunctionRouter` checks auth/rate limits -> `FunctionExecutor` applies timeout -> calls handler. Queries check cache first. Mutations flush outbox buffer (buffered job/workflow dispatches) after handler returns.
 
-**Reactivity** (`realtime/`): `ChangeListener` (dedicated PG connection, LISTEN on `forge_changes` channel) -> `InvalidationEngine` (debounce 50ms quiet / 200ms max, coalesce by table) -> `SubscriptionManager` (DashMap with 64 shards, dedup by hash of query+args+auth_scope) -> `Reactor` (re-execute affected queries, hash comparison, bounded concurrency 64) -> `SessionServer` (SSE fan-out via mpsc channels). Adaptive tracking: row-level (<100 subs) vs table-level (>100 subs) per table.
+**Reactivity** (`realtime/`): `ChangeListener` (dedicated PG connection, LISTEN on `forge_changes` channel) -> `InvalidationEngine` (debounce 50ms quiet / 200ms max, coalesce by table) -> `SubscriptionManager` (DashMap with 64 shards, dedup by hash of query+args+auth_scope) -> `Reactor` (re-execute affected queries, hash comparison, bounded concurrency 64) -> `SessionServer` (SSE fan-out via mpsc channels). Table-level inverted index for invalidation tracking.
 
-**Jobs** (`jobs/`): `JobQueue` (PG-backed, SKIP LOCKED). `Worker` polls with semaphore-bounded concurrency. Claim: `FOR UPDATE SKIP LOCKED` ordered by priority DESC, scheduled_at ASC. `JobExecutor` spawns task, creates progress channel, applies timeout. Stale reclaim after 5min. Status: Pending -> Claimed -> Running -> Completed/Failed/DeadLetter/Cancelled.
+**Jobs** (`jobs/`): `JobQueue` (PG-backed, SKIP LOCKED). `Worker` polls with semaphore-bounded concurrency (default poll interval 5s, wakeup via NOTIFY `forge_jobs_available`). Claim: `FOR UPDATE SKIP LOCKED` ordered by priority DESC, scheduled_at ASC. `JobExecutor` spawns task, creates progress channel, applies timeout. Stale reclaim after 5min. Status: Pending -> Claimed -> Running -> Completed/Failed (-> Retry -> Pending)/DeadLetter/CancelRequested -> Cancelled.
 
-**Workflows** (`workflow/`): Versioned, signature-guarded durable workflows. `WorkflowRegistry` keyed by (name, version) with one active version per name. `WorkflowExecutor` persists state to DB, pins new runs to active version+signature. Resume requires exact version+signature match; mismatches mark run as blocked. Steps cached by name (completed steps skip on resume). Compensation runs in reverse. Durable sleep survives restarts. Wait for external events with timeout. Parallel steps via `ParallelBuilder`. On startup, definitions upserted to `forge_workflow_definitions`; signature conflict under same name+version fails startup. `/_api/ready` reports unhealthy if blocked runs exist. Operator terminal actions: cancel_by_operator, retire_unresumable.
+**Workflows** (`workflow/`): Versioned, signature-guarded durable workflows. `WorkflowRegistry` keyed by (name, version) with one active version per name. `WorkflowExecutor` persists state to DB, pins new runs to active version+signature. Resume requires exact version+signature match; mismatches mark run as blocked. Steps cached by name (completed steps skip on resume). Compensation runs in reverse. Durable sleep survives restarts. Wait for external events with timeout. Parallel steps via `ParallelBuilder`. On startup, definitions upserted to `forge_workflow_definitions`; signature conflict under same name+version fails startup. Blocked runs logged as warnings at boot. Operator terminal actions via admin endpoints: cancel, force-abort (sets cancelled_by_operator).
 
 **Cron** (`cron/`): Leader-only execution via advisory lock. Exactly-once via UNIQUE constraint on (cron_name, scheduled_time). Catch-up for missed executions.
 
-**Daemons** (`daemon/`): `DaemonRunner` runs all registered daemons concurrently. Leader-elected (advisory lock) or replicated (per-node). Auto-restart on failure. Shutdown signal via `AtomicBool`.
+**Daemons** (`daemon/`): `DaemonRunner` runs all registered daemons concurrently. Leader-elected (advisory lock) or replicated (per-node). Auto-restart on failure. Shutdown signal via `tokio::sync::watch::Receiver<bool>`.
 
 **Cluster** (`cluster/`): `LeaderElection` via `pg_try_advisory_lock`. Lock held by connection. `NodeRegistry` for node discovery and heartbeat.
 
@@ -156,7 +156,7 @@ Context parameter detection: structural check for types ending with "Context". N
 
 ### forge (CLI): Commands
 
-`forge new`: Embedded templates (include_dir!), {{placeholder}} substitution, post-setup: generate -> format -> lockfile -> git init. Debug builds patch Cargo.toml with `[patch.crates-io]` pointing to local workspace crates.
+`forge new`: Embedded templates (include_dir!), {{placeholder}} substitution, post-setup: install_frontend_deps -> forge generate -> format -> lockfile -> install_skill -> git init (last). Debug builds patch Cargo.toml with `[patch.crates-io]` pointing to local workspace crates.
 
 `forge generate`: Detect frontend target (SvelteKit: svelte.config.js, Dioxus: Dioxus.toml) -> parse_project -> generate bindings -> svelte-kit sync (SvelteKit only).
 
@@ -166,7 +166,7 @@ Context parameter detection: structural check for types ending with "Context". N
 
 `forge migrate`: up/status/prepare subcommands (forward-only, no rollback). Advisory lock for cluster safety.
 
-Builder: `Forge::builder().config(cfg).auto_register().build()?.run().await`. Auto-registration iterates `inventory::iter::<AutoQuery>` etc.
+Builder: `Forge::builder().config(cfg).auto_register().build()?.run().await`. Auto-registration iterates `inventory::iter::<AutoHandler>` and calls the closure for each handler.
 
 ## Coding Rules (derived from codebase)
 
@@ -264,7 +264,7 @@ Note: Integration testing means running `target/debug/forge test` on each exampl
 
 **Macro expansion**: `#[forge::query] pub async fn get_users(ctx: &QueryContext) -> Result<Vec<User>>` -> generates `GetUsersQuery` struct + `ForgeQuery` impl with `FunctionInfo` (name, cache_ttl, table_dependencies extracted from SQL, selected_columns) + `inventory::submit!` for auto-registration.
 
-**Signals** (product analytics + diagnostics): Auto-captures RPC calls in `FunctionExecutor`. Client trackers (`ForgeSignals` in forge-svelte/forge-dioxus) send page views, custom events, and error reports to `/_api/signal/{event,view,user,report}`. Events are buffered via mpsc channel and batch-inserted using UNNEST into `forge_signals_events` (partitioned by month). Daily-rotating visitor ID from `SHA256(ip+ua+daily_salt)` for GDPR-compliant tracking without cookies. Correlation IDs (`x-correlation-id` header) link frontend events to backend RPC calls. Bot detection via UA patterns. Grafana dashboard over PostgreSQL datasource. Config: `[signals]` in forge.toml (enabled by default).
+**Signals** (product analytics + diagnostics): Auto-captures RPC calls in `FunctionExecutor`. Client trackers (`ForgeSignals` in forge-svelte/forge-dioxus) send page views, custom events, and error reports to `POST /_api/signal` (single endpoint, discriminated by `type` field). Events are buffered via mpsc channel and batch-inserted using UNNEST into `forge_signals_events` (partitioned by month). Daily-rotating visitor ID from `SHA256(ip+ua+SHA256(server_secret+date))` for GDPR-compliant tracking without cookies. Correlation IDs (`x-correlation-id` header) link frontend events to backend RPC calls. Bot detection via UA patterns. Grafana dashboard over PostgreSQL datasource. Config: `[signals]` in forge.toml (enabled by default).
 
 ## Extending the Framework
 

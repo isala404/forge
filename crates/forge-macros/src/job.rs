@@ -42,6 +42,9 @@ struct DarlingJobAttrs {
     compensate: Option<String>,
     #[darling(default)]
     public: bool,
+    /// New-style alias for `public`. Accepted values: "none", "required".
+    #[darling(default)]
+    auth: Option<String>,
     #[darling(default)]
     require_role: Option<RequireRole>,
     #[darling(default)]
@@ -91,6 +94,14 @@ impl DarlingJobAttrs {
                 "Invalid backoff strategy '{}'. Valid values: {}",
                 b,
                 VALID_BACKOFFS.join(", ")
+            )));
+        }
+
+        if let Some(ref a) = self.auth
+            && !["none", "required"].contains(&a.as_str())
+        {
+            return Err(darling::Error::custom(format!(
+                "invalid auth value \"{a}\": expected \"none\" or \"required\""
             )));
         }
 
@@ -389,7 +400,7 @@ fn convert_job_attrs(darling: DarlingJobAttrs) -> JobAttrs {
         idempotent,
         idempotency_key,
         compensate: darling.compensate,
-        is_public: darling.public,
+        is_public: darling.public || darling.auth.as_deref() == Some("none"),
         required_role: darling.require_role.map(|r| r.0),
         ttl: darling.ttl,
         register: darling.register,

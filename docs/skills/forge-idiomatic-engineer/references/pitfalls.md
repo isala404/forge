@@ -76,8 +76,8 @@ sqlx::query_as!(User, "...", id).fetch_one(&mut conn).await?
 
 - `ctx.sleep()`, not `tokio::sleep` — only `ctx.sleep()` persists across restarts.
 - Step names are cache keys. Renaming breaks resume. Bump the workflow version instead.
-- Signature mismatch at startup blocks runs and flips `/_api/ready` to 503. Check for in-flight runs before removing an old version.
-- Removing a deprecated version's code while runs are still in-flight strands them: `/_api/ready` reports `workflows: false` (with the per-group warning logged on the server) until an operator clears the rows directly in PG (`UPDATE forge_workflow_runs SET status = 'retired_unresumable' ...`). There's no admin HTTP route — the database is the operator interface, and the public probe deliberately omits the drain count so it can't be polled anonymously.
+- Signature mismatch at startup blocks runs. The runtime logs a warning at boot. Check for in-flight runs before removing an old version.
+- Removing a deprecated version's code while runs are still in-flight strands them. The runtime logs per-group warnings at boot. Use admin endpoints to resolve: `POST /_api/admin/workflows/{id}/cancel` (with compensation) or `POST /_api/admin/workflows/{id}/force-abort` (terminal `cancelled_by_operator`).
 - Always set a timeout on `wait_for_event` so stalls become observable.
 
 ## 6. Frontend

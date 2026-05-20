@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use forge_core::ForgeError;
+use forge_core::config::SignatureCheckMode;
 use forge_core::workflow::{ForgeWorkflow, WorkflowContext, WorkflowInfo};
 use serde_json::Value;
 use sqlx::PgPool;
@@ -82,12 +83,19 @@ pub struct WorkflowVersionKey {
 }
 
 /// Registry of all workflows, supporting multiple versions per workflow name.
-#[derive(Default)]
 pub struct WorkflowRegistry {
     /// All entries keyed by (name, version).
     entries: HashMap<WorkflowVersionKey, WorkflowEntry>,
     /// Maps workflow name to its active version string.
     active_versions: HashMap<String, String>,
+    /// Controls how strictly signatures are validated on resume.
+    pub signature_check: SignatureCheckMode,
+}
+
+impl Default for WorkflowRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl WorkflowRegistry {
@@ -96,6 +104,7 @@ impl WorkflowRegistry {
         Self {
             entries: HashMap::new(),
             active_versions: HashMap::new(),
+            signature_check: SignatureCheckMode::Strict,
         }
     }
 
@@ -149,6 +158,11 @@ impl WorkflowRegistry {
 
     /// Validate that a run can be safely resumed.
     /// Returns the matching entry, or a blocking reason.
+    ///
+    /// When [`SignatureCheckMode::Relaxed`] is configured, only the
+    /// `(name, version)` pair is checked and the signature hash is ignored.
+    /// Use relaxed mode during rolling deploys to prevent in-flight runs from
+    /// being blocked while nodes are transitioning between binary versions.
     pub fn validate_resume(
         &self,
         name: &str,
@@ -165,7 +179,9 @@ impl WorkflowRegistry {
             .get_version(name, version)
             .ok_or(ResumeBlockReason::MissingVersion)?;
 
-        if entry.info.signature != signature {
+        if self.signature_check == SignatureCheckMode::Strict
+            && entry.info.signature != signature
+        {
             return Err(ResumeBlockReason::SignatureMismatch {
                 expected: signature.to_string(),
                 actual: entry.info.signature.to_string(),
@@ -317,6 +333,7 @@ impl Clone for WorkflowRegistry {
                 })
                 .collect(),
             active_versions: self.active_versions.clone(),
+            signature_check: self.signature_check,
         }
     }
 }
@@ -588,6 +605,37 @@ mod tests {
             "v1"
         );
         assert_eq!(clone.get_active("wf").expect("active").info.version, "v2");
+    }
+
+    // --- relaxed signature check mode ---
+
+    #[test]
+    fn validate_resume_relaxed_mode_accepts_signature_mismatch() {
+        // In relaxed mode a run whose stored signature differs from the binary's
+        // compiled signature must still resume. This is the rolling-deploy case:
+        // a minor change produced a new hash but the workflow logic is compatible.
+        let mut reg = WorkflowRegistry::new();
+        reg.signature_check = SignatureCheckMode::Relaxed;
+        insert(&mut reg, "wf", "v1", "new-sig", WorkflowDefStatus::Active);
+
+        let entry = reg
+            .validate_resume("wf", "v1", "old-sig")
+            .expect("relaxed mode must accept signature mismatch");
+        assert_eq!(entry.info.version, "v1");
+    }
+
+    #[test]
+    fn validate_resume_relaxed_mode_still_blocks_on_missing_version() {
+        // Relaxed mode skips the hash check but cannot conjure a handler for a
+        // version that was never registered in this binary.
+        let mut reg = WorkflowRegistry::new();
+        reg.signature_check = SignatureCheckMode::Relaxed;
+        insert(&mut reg, "wf", "v1", "sig1", WorkflowDefStatus::Active);
+
+        match reg.validate_resume("wf", "v2", "sig2") {
+            Err(ResumeBlockReason::MissingVersion) => (),
+            other => panic!("expected MissingVersion, got {:?}", other.err()),
+        }
     }
 
     // --- ResumeBlockReason::description ---

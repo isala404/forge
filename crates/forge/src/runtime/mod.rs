@@ -48,7 +48,7 @@ use forge_runtime::cron::{CronRegistry, CronRunner, CronRunnerConfig};
 use forge_runtime::daemon::{DaemonRegistry, DaemonRunner};
 use forge_runtime::function::FunctionRegistry;
 use forge_runtime::pg::Database;
-use forge_runtime::pg::{LeaderConfig, LeaderElection};
+use forge_runtime::pg::{LeaderConfig, LeaderElection, PgNotifyBus};
 // CircuitBreakerClient wraps reqwest; used by cron/daemon/workflow for
 // outbound HTTP. (Gateway uses its own reqwest path.)
 #[cfg(any(feature = "cron", feature = "daemons", feature = "workflows"))]
@@ -293,7 +293,7 @@ impl Forge {
 
             if let Some(row) = existing {
                 if row.workflow_signature != info.signature {
-                    return Err(ForgeError::Config(format!(
+                    return Err(ForgeError::config(format!(
                         "Workflow '{}' version '{}' has a different signature than previously registered. \
                          Persisted contract changed under the same version. \
                          Expected signature: {}, got: {}. \
@@ -516,6 +516,35 @@ impl Forge {
 
         let job_queue = JobQueue::new(pool.clone());
 
+        let notify_bus = Arc::new(PgNotifyBus::new(
+            pool.clone(),
+            &[
+                "forge_changes",
+                "forge_jobs_available",
+                "forge_workflow_wakeup",
+            ],
+        ));
+        // Spawn the bus run loop. The gateway role re-uses this same bus via
+        // the reactor (which also spawns it), so we gate the direct spawn on
+        // the absence of a gateway role to avoid running two run() tasks on
+        // the same PgNotifyBus instance.
+        #[cfg(feature = "gateway")]
+        let notify_bus_needs_direct_spawn = !roles.contains(&NodeRole::Gateway);
+        #[cfg(not(feature = "gateway"))]
+        let notify_bus_needs_direct_spawn = true;
+        if notify_bus_needs_direct_spawn {
+            let (bus_shutdown_tx, bus_shutdown_rx) = tokio::sync::watch::channel(false);
+            let bus_for_task = notify_bus.clone();
+            handles.push(tokio::spawn(async move {
+                bus_for_task.run(bus_shutdown_rx).await;
+            }));
+            let mut bus_broadcast_rx = self.shutdown_tx.subscribe();
+            tokio::spawn(async move {
+                let _ = bus_broadcast_rx.recv().await;
+                let _ = bus_shutdown_tx.send(true);
+            });
+        }
+
         // Shared KV store handle threaded into all handler contexts.
         // Handlers call `ctx.kv()` to get/set durable key-value data backed by
         // the `forge_kv` / `forge_kv_counters` tables.
@@ -581,6 +610,7 @@ impl Forge {
                     job_queue.clone(),
                     self.job_registry.clone(),
                     pool.clone(),
+                    notify_bus.clone(),
                 )
                 .with_kv(Arc::clone(&kv_handle));
 
@@ -719,6 +749,7 @@ impl Forge {
                     leader_election: leader_election.clone(),
                     ..WorkflowSchedulerConfig::default()
                 },
+                notify_bus.clone(),
             );
 
             let shutdown_token = workflow_shutdown_token.clone();
@@ -801,28 +832,41 @@ impl Forge {
                     .any(|(_, info)| !info.is_public || info.required_role.is_some());
 
             if any_requires_auth && !self.config.auth.is_configured() {
-                return Err(ForgeError::Config(
+                return Err(ForgeError::config(
                     "One or more handlers require authentication (private scope or require_role) \
                      but auth is not configured. Set auth.jwt_secret (≥32 bytes) for HMAC or \
-                     auth.jwks_url for external identity providers."
-                        .into(),
+                     auth.jwks_url for external identity providers.",
                 ));
             }
 
-            // CORS wildcard is a security risk in production: any origin can reach
-            // the gateway, and credentialed requests silently fail.
+            // CORS wildcard is only allowed in development. Block startup
+            // unless FORGE_ENV is explicitly set to "development".
             if self.config.gateway.cors_enabled
                 && self.config.gateway.cors_origins.iter().any(|o| o == "*")
-                && std::env::var("FORGE_ENV")
-                    .ok()
-                    .as_deref()
-                    .is_some_and(|v| v.eq_ignore_ascii_case("production"))
             {
-                return Err(ForgeError::Config(
-                    "gateway.cors_origins = [\"*\"] is not allowed when FORGE_ENV=production. \
-                     Set explicit origins (e.g. cors_origins = [\"https://yourdomain.com\"])."
-                        .into(),
-                ));
+                let forge_env = std::env::var("FORGE_ENV").ok();
+                let is_dev = forge_env
+                    .as_deref()
+                    .is_some_and(|v| v.eq_ignore_ascii_case("development"));
+                if !is_dev {
+                    let production_indicators = [
+                        ("FORGE_ENV", std::env::var("FORGE_ENV").ok()),
+                        ("NODE_ENV", std::env::var("NODE_ENV").ok()),
+                        ("RAILWAY_ENVIRONMENT", std::env::var("RAILWAY_ENVIRONMENT").ok()),
+                        ("K_SERVICE", std::env::var("K_SERVICE").ok()),
+                        ("FLY_APP_NAME", std::env::var("FLY_APP_NAME").ok()),
+                        ("KUBERNETES_SERVICE_HOST", std::env::var("KUBERNETES_SERVICE_HOST").ok()),
+                        ("AWS_EXECUTION_ENV", std::env::var("AWS_EXECUTION_ENV").ok()),
+                    ];
+                    let hint = production_indicators
+                        .iter()
+                        .find_map(|(name, val)| val.as_ref().map(|v| format!(" ({name}={v} detected)")))
+                        .unwrap_or_default();
+                    return Err(ForgeError::config(format!(
+                        "gateway.cors_origins = [\"*\"] is only allowed when FORGE_ENV=development{hint}. \
+                         Set explicit origins (e.g. cors_origins = [\"https://yourdomain.com\"])."
+                    )));
+                }
             }
 
             let gateway_config = RuntimeGatewayConfig {
@@ -833,7 +877,7 @@ impl Forge {
                 cors_enabled: self.config.gateway.cors_enabled,
                 cors_origins: self.config.gateway.cors_origins.clone(),
                 auth: AuthConfig::from_forge_config(&self.config.auth)
-                    .map_err(|e| ForgeError::Config(e.to_string()))?,
+                    .map_err(|e| ForgeError::config(e.to_string()))?,
                 mcp: self.config.mcp.clone(),
                 quiet_paths: self.config.gateway.quiet_paths.clone(),
                 max_body_size_bytes: self.config.gateway.max_body_size.as_bytes(),
@@ -892,12 +936,13 @@ impl Forge {
             let db_ref = self
                 .db
                 .clone()
-                .ok_or_else(|| ForgeError::Internal("Database not initialized".into()))?;
+                .ok_or_else(|| ForgeError::internal("Database not initialized"))?;
 
             let gateway = GatewayServer::new(
                 gateway_config,
                 self.function_registry.clone(),
                 db_ref.clone(),
+                notify_bus.clone(),
             )
             .with_node_id(self.node_id);
             #[cfg(feature = "jobs")]

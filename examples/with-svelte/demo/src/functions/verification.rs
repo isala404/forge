@@ -26,7 +26,7 @@ pub struct VerificationOutput {
     version = "2026-03",
     active,
     timeout = "24h",
-    public
+    auth = "none"
 )]
 pub async fn account_verification(
     ctx: &WorkflowContext,
@@ -112,7 +112,7 @@ pub struct ConfirmVerificationInput {
     pub workflow_id: String,
 }
 
-#[forge::mutation(public)]
+#[forge::mutation(auth = "none")]
 // forge_workflow_events is owned by the runtime, so the framework user's .sqlx
 // cache doesn't see it. Runtime sqlx::query is the right tool here.
 #[allow(clippy::disallowed_methods)]

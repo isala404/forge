@@ -98,7 +98,7 @@ Spans are created via `tracing::info_span!` and bridged to OTel through the `tra
 
 The workflow signature is a **frozen** contract. The set of fields fed into the hash and the algorithm will never change without a major version bump.
 
-**Algorithm**: FNV-1a 64-bit, hex-encoded. Fields fed in order, each separated by a `0xff` byte:
+**Algorithm**: blake3 (128-bit, truncated), hex-encoded. Fields fed in order, each separated by a `0xff` byte:
 
 1. `name` (workflow name string)
 2. `version` (version string)

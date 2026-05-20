@@ -671,7 +671,7 @@ impl HttpRequestBuilder {
     pub fn build(self) -> crate::Result<Request> {
         self.request
             .build()
-            .map_err(|e| crate::ForgeError::Internal(e.to_string()))
+            .map_err(|e| crate::ForgeError::internal_with("Failed to build HTTP request", e))
     }
 
     pub async fn send(self) -> crate::Result<Response> {

@@ -18,7 +18,7 @@ port = 9081
 
 [worker]
 max_concurrent_jobs = 10
-poll_interval = "100ms"
+poll_interval = "5s"
 
 [auth]
 jwt_algorithm = "RS256"
@@ -271,7 +271,7 @@ sse_max_sessions = 10000
 debounce_quiet_window = "50ms"
 debounce_max_wait = "200ms"
 max_concurrent_reexecutions = 64
-resync_interval = "60s"
+resync_interval = "600s"
 ```
 
 The debounce window matters for write-heavy workloads: `debounce_quiet_window` prevents re-execution storms when rows are updated in rapid succession, while `debounce_max_wait` puts a ceiling on how long a client can wait for an update.
@@ -310,7 +310,7 @@ With default API routing, `path = "/mcp"` resolves to `/_api/mcp`.
 | --------------------- | ----- | ------- | ------------------------------- |
 | `max_concurrent_jobs` | usize | `50`    | Concurrent job limit per worker |
 | `job_timeout`         | string | `"1h"` | Default job timeout             |
-| `poll_interval`       | string | `"100ms"` | Queue polling interval       |
+| `poll_interval`       | string | `"5s"` | Fallback queue polling interval (wakeups are NOTIFY-driven) |
 
 Workers maintain a semaphore sized to `max_concurrent_jobs`. They only poll when permits are available. Backpressure propagates naturally.
 

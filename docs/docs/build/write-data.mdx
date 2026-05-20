@@ -30,9 +30,9 @@ pub async fn create_order(ctx: &MutationContext, input: CreateOrderInput) -> Res
 
 ## What Happens
 
-By default, mutations execute directly against the database pool without a transaction wrapper. For single-statement mutations, this is fine since individual SQL statements are atomic.
+By default, mutations execute inside a database transaction. If the function returns `Err`, the entire transaction rolls back automatically.
 
-For multi-statement mutations or when dispatching jobs/workflows, add `#[forge::mutation(transactional)]` to wrap everything in a database transaction. If the function returns `Err` or panics, the entire transaction rolls back.
+To opt out of the transaction wrapper — for example, when running a single idempotent statement where the overhead is unnecessary — add `transactional = false`: `#[forge::mutation(transactional = false)]`.
 
 The generated TypeScript client calls this mutation as a type-safe RPC.
 
@@ -44,7 +44,7 @@ The generated TypeScript client calls this mutation as a type-safe RPC.
 | `require_role("x")` | string | - | Require specific role |
 | `timeout` | seconds | from `[function]` config | Request timeout (overrides global `timeout_secs`) |
 | `rate_limit(...)` | - | - | Token bucket rate limiting |
-| `transactional` | flag | - | Wrap in database transaction with outbox pattern for jobs/workflows |
+| `transactional` | bool | `true` | Wrap in database transaction with outbox pattern for jobs/workflows. Set `transactional = false` to opt out. |
 | `log` | string | - | Log level override |
 
 ## Patterns
@@ -116,12 +116,12 @@ pub async fn create_order(ctx: &MutationContext, input: CreateOrderInput) -> Res
 
 The `transactional` attribute enables the outbox pattern: jobs are buffered in memory during the mutation and only inserted into the database after the transaction commits successfully. If the mutation fails, no jobs are dispatched.
 
-**Runtime enforcement**: If your mutation calls `dispatch_job()` or `start_workflow()` without `transactional`, you get an error at runtime:
+**Compile-time enforcement**: If your mutation calls `dispatch_job()` or `start_workflow()` with `transactional = false`, you get an error at compile time:
 
 ```
 error: Mutations that call `dispatch_job()` or `start_workflow()` must use
-       #[forge::mutation(transactional)] to ensure atomicity. Without it,
-       jobs may be dispatched but database changes rolled back on error.
+       the transactional outbox pattern. Remove `transactional = false` or
+       avoid dispatching jobs/workflows from a non-transactional mutation.
 ```
 
 ### Start Workflows from Mutations

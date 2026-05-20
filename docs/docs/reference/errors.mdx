@@ -510,7 +510,7 @@ WHERE state = 'idle' AND query_start < NOW() - INTERVAL '1 hour';
    ```sql
    SELECT workflow_name, status, error
    FROM forge_workflow_runs
-   WHERE status IN ('failed', 'compensated')
+   WHERE status IN ('failed')
    ORDER BY started_at DESC;
    ```
 

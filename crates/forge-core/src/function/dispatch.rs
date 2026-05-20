@@ -30,6 +30,7 @@ pub trait JobDispatch: Send + Sync {
         job_type: &str,
         args: serde_json::Value,
         owner_subject: Option<String>,
+        tenant_id: Option<Uuid>,
     ) -> Pin<Box<dyn Future<Output = Result<Uuid>> + Send + '_>>;
 
     /// Dispatch a job at a specific time by its registered name.
@@ -42,6 +43,7 @@ pub trait JobDispatch: Send + Sync {
         args: serde_json::Value,
         scheduled_at: DateTime<Utc>,
         owner_subject: Option<String>,
+        tenant_id: Option<Uuid>,
     ) -> Pin<Box<dyn Future<Output = Result<Uuid>> + Send + '_>>;
 
     /// Dispatch a job on an existing connection — typically the live
@@ -54,6 +56,7 @@ pub trait JobDispatch: Send + Sync {
         job_type: &'a str,
         args: serde_json::Value,
         owner_subject: Option<String>,
+        tenant_id: Option<Uuid>,
     ) -> Pin<Box<dyn Future<Output = Result<Uuid>> + Send + 'a>>;
 
     /// Dispatch a job at a specific time on an existing connection.
@@ -68,6 +71,7 @@ pub trait JobDispatch: Send + Sync {
         args: serde_json::Value,
         scheduled_at: DateTime<Utc>,
         owner_subject: Option<String>,
+        tenant_id: Option<Uuid>,
     ) -> Pin<Box<dyn Future<Output = Result<Uuid>> + Send + 'a>>;
 
     /// Request cancellation for a job.

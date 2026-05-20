@@ -19,9 +19,11 @@ mod telemetry;
 pub use db::{extract_table_name, instrumented_query, record_pool_metrics, record_query_duration};
 #[cfg(feature = "otel")]
 pub use metrics::{
-    ActiveConnectionsGauge, FnCacheMetrics, FnMetrics, HttpMetrics, JobMetrics, record_fn_cache,
-    record_fn_execution, record_http_request, record_job_execution, record_lost_claim,
-    set_active_connections,
+    ActiveConnectionsGauge, FnCacheMetrics, FnMetrics, HttpMetrics, JobMetrics,
+    NotifyMetrics, SubscriptionMetrics, WorkflowSchedulerMetrics,
+    record_fn_cache, record_fn_execution, record_http_request, record_job_execution,
+    record_lost_claim, record_notify_payload_bytes, record_subscription_counts,
+    record_workflow_scheduler_duration, set_active_connections,
 };
 #[cfg(feature = "otel")]
 pub use telemetry::{
@@ -127,6 +129,15 @@ mod stub {
     #[inline]
     pub fn set_active_connections(_connection_type: &'static str, _delta: i64) {}
 
+    #[inline]
+    pub fn record_notify_payload_bytes(_channel: &str, _bytes: usize) {}
+
+    #[inline]
+    pub fn record_subscription_counts(_subscribers: usize, _groups: usize, _tables: usize) {}
+
+    #[inline]
+    pub fn record_workflow_scheduler_duration(_duration_secs: f64) {}
+
     pub fn extract_table_name(_sql: &str) -> Option<&str> {
         None
     }
@@ -148,6 +159,7 @@ mod stub {
 pub use stub::{
     TelemetryConfig, TelemetryError, build_env_filter, extract_table_name, init_telemetry,
     instrumented_query, record_fn_cache, record_fn_execution, record_http_request,
-    record_job_execution, record_lost_claim, record_pool_metrics, record_query_duration,
+    record_job_execution, record_lost_claim, record_notify_payload_bytes, record_pool_metrics,
+    record_query_duration, record_subscription_counts, record_workflow_scheduler_duration,
     set_active_connections, shutdown_telemetry,
 };

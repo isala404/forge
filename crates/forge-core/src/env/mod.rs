@@ -215,7 +215,7 @@ pub trait EnvAccess {
     /// Returns an error if the variable is not set.
     fn env_require(&self, key: &str) -> Result<String> {
         self.env_provider().get(key).ok_or_else(|| {
-            ForgeError::Config(format!("Required environment variable '{}' not set", key))
+            ForgeError::config(format!("Required environment variable '{}' not set", key))
         })
     }
 
@@ -230,7 +230,7 @@ pub trait EnvAccess {
     {
         let value = self.env_require(key)?;
         value.parse().map_err(|e: T::Err| {
-            ForgeError::Config(format!(
+            ForgeError::config(format!(
                 "Failed to parse env var '{}' value '{}': {}",
                 key, value, e
             ))
@@ -247,7 +247,7 @@ pub trait EnvAccess {
     {
         match self.env_provider().get(key) {
             Some(value) => value.parse().map_err(|e: T::Err| {
-                ForgeError::Config(format!(
+                ForgeError::config(format!(
                     "Failed to parse env var '{}' value '{}': {}",
                     key, value, e
                 ))
@@ -444,7 +444,7 @@ mod tests {
 
         let err = ctx.env_require("STRIPE_API_KEY").unwrap_err();
         match err {
-            ForgeError::Config(msg) => {
+            ForgeError::Config { context: msg, .. } => {
                 assert!(msg.contains("STRIPE_API_KEY"), "msg should name the key: {msg}");
                 assert!(msg.contains("not set"), "msg should describe failure: {msg}");
             }
@@ -460,7 +460,7 @@ mod tests {
 
         let err: ForgeError = ctx.env_parse::<u16>("PORT").unwrap_err();
         match err {
-            ForgeError::Config(msg) => {
+            ForgeError::Config { context: msg, .. } => {
                 assert!(msg.contains("PORT"), "msg should name the key: {msg}");
                 assert!(msg.contains("not_a_port"), "msg should show the bad value: {msg}");
             }
@@ -487,7 +487,7 @@ mod tests {
 
         let err = ctx.env_parse_or::<u32>("RETRIES", 5).unwrap_err();
         match err {
-            ForgeError::Config(msg) => {
+            ForgeError::Config { context: msg, .. } => {
                 assert!(msg.contains("RETRIES"));
                 assert!(msg.contains("lots"));
             }

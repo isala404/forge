@@ -331,10 +331,9 @@ Operators clear stuck runs directly in Postgres (no admin HTTP surface):
 
 ```sql
 UPDATE forge_workflow_runs
-SET status = 'retired_unresumable', resolution_reason = '...'
+SET status = 'failed', resolution_reason = '...'
 WHERE workflow_name = '...' AND workflow_version = '...'
-  AND status NOT IN ('completed','compensated','failed',
-                     'retired_unresumable','cancelled_by_operator');
+  AND status NOT IN ('completed', 'failed');
 ```
 
 Within five seconds the next readiness probe re-runs the check and flips back to `200`. See the [workflow migration guide](../build/long-processes.mdx#migrating-a-workflow-safely) for the full deprecate→drain→remove flow.

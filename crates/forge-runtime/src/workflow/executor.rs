@@ -240,20 +240,20 @@ impl WorkflowExecutor {
                 );
                 Ok(WorkflowResult::Completed(output))
             }
-            Ok(Err(forge_core::ForgeError::WorkflowSuspended(suspend_reason))) => {
-                self.persist_saved_state(run_id, &ctx.take_saved_state())
-                    .await?;
-                let reason = if suspend_reason.is_sleep() {
-                    "sleep".to_string()
-                } else {
-                    suspend_reason
-                        .event_name()
-                        .map(|n| format!("waiting_event:{n}"))
-                        .unwrap_or_else(|| "suspended".to_string())
-                };
-                Ok(WorkflowResult::Suspended { reason })
-            }
             Ok(Err(e)) => {
+                if let Some(suspend_reason) = ctx.take_suspend_reason() {
+                    self.persist_saved_state(run_id, &ctx.take_saved_state())
+                        .await?;
+                    let reason = if suspend_reason.is_sleep() {
+                        "sleep".to_string()
+                    } else {
+                        suspend_reason
+                            .event_name()
+                            .map(|n| format!("waiting_event:{n}"))
+                            .unwrap_or_else(|| "suspended".to_string())
+                    };
+                    return Ok(WorkflowResult::Suspended { reason });
+                }
                 let err_str = e.to_string();
                 self.fail_workflow(run_id, &err_str).await?;
                 crate::signals::emit_server_execution(
@@ -496,7 +496,7 @@ impl WorkflowExecutor {
         rows.into_iter()
             .map(|row| {
                 let status = row.status.parse().map_err(|e| {
-                    forge_core::ForgeError::Internal(format!(
+                    forge_core::ForgeError::internal(format!(
                         "Invalid step status '{}': {}",
                         row.status, e
                     ))
@@ -553,12 +553,16 @@ impl WorkflowExecutor {
         }
         let json = serde_json::to_value(state)
             .map_err(|e| forge_core::ForgeError::Serialization(e.to_string()))?;
-        sqlx::query("UPDATE forge_workflow_runs SET saved_state = $1 WHERE id = $2")
-            .bind(json)
-            .bind(run_id)
-            .execute(&self.pool)
-            .await
-            .map_err(forge_core::ForgeError::Database)?;
+        sqlx::query(
+            "INSERT INTO forge_workflow_state (run_id, saved_state, updated_at) \
+             VALUES ($1, $2, NOW()) \
+             ON CONFLICT (run_id) DO UPDATE SET saved_state = $2, updated_at = NOW()",
+        )
+        .bind(run_id)
+        .bind(json)
+        .execute(&self.pool)
+        .await
+        .map_err(forge_core::ForgeError::Database)?;
         Ok(())
     }
 
@@ -569,7 +573,7 @@ impl WorkflowExecutor {
         run_id: Uuid,
     ) -> forge_core::Result<std::collections::HashMap<String, serde_json::Value>> {
         let row: Option<(serde_json::Value,)> =
-            sqlx::query_as("SELECT saved_state FROM forge_workflow_runs WHERE id = $1")
+            sqlx::query_as("SELECT saved_state FROM forge_workflow_state WHERE run_id = $1")
                 .bind(run_id)
                 .fetch_optional(&self.pool)
                 .await
@@ -636,7 +640,7 @@ impl WorkflowExecutor {
         })?;
 
         let status = row.status.parse().map_err(|e| {
-            forge_core::ForgeError::Internal(format!(
+            forge_core::ForgeError::internal(format!(
                 "Invalid workflow status '{}': {}",
                 row.status, e
             ))

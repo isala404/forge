@@ -89,7 +89,7 @@ impl McpToolContext {
     pub fn kv(&self) -> crate::error::Result<&dyn KvHandle> {
         self.kv
             .as_deref()
-            .ok_or_else(|| crate::error::ForgeError::Internal("KV store not available".into()))
+            .ok_or_else(|| crate::error::ForgeError::internal("KV store not available"))
     }
 
     pub fn db(&self) -> crate::function::ForgeDb {
@@ -136,12 +136,17 @@ impl McpToolContext {
     /// Dispatch a background job.
     pub async fn dispatch_job<T: serde::Serialize>(&self, job_type: &str, args: T) -> Result<Uuid> {
         let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::Internal("Job dispatch not available".to_string())
+            crate::error::ForgeError::internal("Job dispatch not available")
         })?;
 
         let args_json = serde_json::to_value(args)?;
         dispatcher
-            .dispatch_by_name(job_type, args_json, self.auth.principal_id())
+            .dispatch_by_name(
+                job_type,
+                args_json,
+                self.auth.principal_id(),
+                self.auth.tenant_id(),
+            )
             .await
     }
 
@@ -158,7 +163,7 @@ impl McpToolContext {
         reason: Option<String>,
     ) -> Result<bool> {
         let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::Internal("Job dispatch not available".to_string())
+            crate::error::ForgeError::internal("Job dispatch not available")
         })?;
         dispatcher.cancel(job_id, reason).await
     }
@@ -170,7 +175,7 @@ impl McpToolContext {
         input: T,
     ) -> Result<Uuid> {
         let dispatcher = self.workflow_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::Internal("Workflow dispatch not available".to_string())
+            crate::error::ForgeError::internal("Workflow dispatch not available")
         })?;
 
         let input_json = serde_json::to_value(input)?;

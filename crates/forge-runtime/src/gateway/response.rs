@@ -207,12 +207,11 @@ impl From<forge_core::error::ForgeError> for RpcError {
                 tracing::error!(error = %e, "Database error in RPC handler");
                 Self::internal("Internal server error")
             }
-            ref e @ (E::Internal(_)
+            ref e @ (E::Internal { .. }
             | E::Serialization(_)
-            | E::Config(_)
+            | E::Config { .. }
             | E::Io(_)
-            | E::InvalidState(_)
-            | E::WorkflowSuspended(_)) => {
+            | E::InvalidState(_)) => {
                 tracing::error!(error = %e, "Internal error in RPC handler");
                 Self::internal("Internal server error")
             }
@@ -364,15 +363,10 @@ mod tests {
     #[test]
     fn forge_internal_variants_all_map_to_500() {
         let internals: Vec<forge_core::ForgeError> = vec![
-            forge_core::ForgeError::Internal("oops".into()),
+            forge_core::ForgeError::internal("oops"),
             forge_core::ForgeError::Serialization("bad".into()),
-            forge_core::ForgeError::Config("bad toml".into()),
+            forge_core::ForgeError::config("bad toml"),
             forge_core::ForgeError::InvalidState("done".into()),
-            forge_core::ForgeError::WorkflowSuspended(
-                forge_core::workflow::SuspendReason::Sleep {
-                    wake_at: chrono::DateTime::from_timestamp(0, 0).unwrap(),
-                },
-            ),
         ];
 
         for err in internals {

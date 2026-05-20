@@ -72,7 +72,7 @@ impl DaemonContext {
     pub fn kv(&self) -> crate::error::Result<&dyn KvHandle> {
         self.kv
             .as_deref()
-            .ok_or_else(|| crate::error::ForgeError::Internal("KV store not available".into()))
+            .ok_or_else(|| crate::error::ForgeError::internal("KV store not available"))
     }
 
     /// Set job dispatcher.
@@ -128,11 +128,13 @@ impl DaemonContext {
         args: T,
     ) -> crate::Result<Uuid> {
         let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::Internal("Job dispatch not available".to_string())
+            crate::error::ForgeError::internal("Job dispatch not available")
         })?;
 
         let args_json = serde_json::to_value(args)?;
-        dispatcher.dispatch_by_name(job_type, args_json, None).await
+        dispatcher
+            .dispatch_by_name(job_type, args_json, None, None)
+            .await
     }
 
     /// Type-safe dispatch: resolves the job name from the type's `ForgeJob`
@@ -148,7 +150,7 @@ impl DaemonContext {
         reason: Option<String>,
     ) -> crate::Result<bool> {
         let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::Internal("Job dispatch not available".to_string())
+            crate::error::ForgeError::internal("Job dispatch not available")
         })?;
         dispatcher.cancel(job_id, reason).await
     }
@@ -160,7 +162,7 @@ impl DaemonContext {
         input: T,
     ) -> crate::Result<Uuid> {
         let dispatcher = self.workflow_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::Internal("Workflow dispatch not available".to_string())
+            crate::error::ForgeError::internal("Workflow dispatch not available")
         })?;
 
         let input_json = serde_json::to_value(input)?;
@@ -325,7 +327,7 @@ mod tests {
             .await
             .unwrap_err();
         match err {
-            ForgeError::Internal(msg) => assert!(msg.contains("Job dispatch")),
+            ForgeError::Internal { context: msg, .. } => assert!(msg.contains("Job dispatch")),
             other => panic!("expected Internal error, got {other:?}"),
         }
     }
@@ -338,7 +340,7 @@ mod tests {
             .await
             .unwrap_err();
         match err {
-            ForgeError::Internal(msg) => assert!(msg.contains("Workflow dispatch")),
+            ForgeError::Internal { context: msg, .. } => assert!(msg.contains("Workflow dispatch")),
             other => panic!("expected Internal error, got {other:?}"),
         }
     }

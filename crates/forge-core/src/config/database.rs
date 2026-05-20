@@ -89,11 +89,10 @@ impl DatabaseConfig {
     /// Validate the database configuration.
     pub fn validate(&self) -> Result<()> {
         if self.url.is_empty() {
-            return Err(ForgeError::Config(
+            return Err(ForgeError::config(
                 "database.url is required. \
                  Set database.url to a PostgreSQL connection string \
-                 (e.g., \"postgres://user:pass@localhost/mydb\")."
-                    .into(),
+                 (e.g., \"postgres://user:pass@localhost/mydb\").",
             ));
         }
         Ok(())

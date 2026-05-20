@@ -92,7 +92,7 @@ impl JobContext {
     pub fn kv(&self) -> crate::error::Result<&dyn KvHandle> {
         self.kv
             .as_deref()
-            .ok_or_else(|| crate::error::ForgeError::Internal("KV store not available".into()))
+            .ok_or_else(|| crate::error::ForgeError::internal("KV store not available"))
     }
 
     /// Create a new job context with persisted saved data.
@@ -104,6 +104,30 @@ impl JobContext {
     /// Set authentication context.
     pub fn with_auth(mut self, auth: AuthContext) -> Self {
         self.auth = auth;
+        self
+    }
+
+    /// Inject a tenant ID into the auth context claims.
+    ///
+    /// Merges the `tenant_id` claim into the existing auth context so that
+    /// `ctx.auth.tenant_id()` returns the value for the duration of this job.
+    /// Used by the executor when the job record carries a tenant ID.
+    pub fn with_tenant_id(mut self, tenant_id: Uuid) -> Self {
+        let mut claims = self.auth.claims().clone();
+        claims.insert(
+            "tenant_id".to_string(),
+            serde_json::Value::String(tenant_id.to_string()),
+        );
+        self.auth = if self.auth.is_authenticated() {
+            if let Some(user_id) = self.auth.user_id() {
+                AuthContext::authenticated(user_id, self.auth.roles().to_vec(), claims)
+            } else {
+                AuthContext::authenticated_without_uuid(self.auth.roles().to_vec(), claims)
+            }
+        } else {
+            // Unauthenticated job — still carry the tenant_id for scoping.
+            AuthContext::authenticated_without_uuid(Vec::new(), claims)
+        };
         self
     }
 
@@ -190,7 +214,7 @@ impl JobContext {
 
         if let Some(ref tx) = self.progress_tx {
             tx.send(update)
-                .map_err(|e| crate::ForgeError::Internal(format!("Failed to send progress: {e}")))?;
+                .map_err(|e| crate::ForgeError::internal(format!("Failed to send progress: {e}")))?;
         }
 
         Ok(())
@@ -606,7 +630,7 @@ mod tests {
             .progress(10, "lost")
             .expect_err("dropped receiver should fail send");
         match err {
-            crate::ForgeError::Internal(msg) => {
+            crate::ForgeError::Internal { context: msg, .. } => {
                 assert!(msg.contains("Failed to send progress"), "got: {msg}");
             }
             other => panic!("expected ForgeError::Internal, got {other:?}"),

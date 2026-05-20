@@ -170,15 +170,13 @@ impl TlsConfig {
     pub fn validate(&self) -> crate::Result<()> {
         match (self.cert_path.as_deref(), self.key_path.as_deref()) {
             (Some(_), Some(_)) | (None, None) => Ok(()),
-            (Some(_), None) => Err(crate::ForgeError::Config(
+            (Some(_), None) => Err(crate::ForgeError::config(
                 "gateway.tls.cert_path is set but gateway.tls.key_path is missing. \
-                 Set both to enable TLS, or neither to serve plain HTTP."
-                    .into(),
+                 Set both to enable TLS, or neither to serve plain HTTP.",
             )),
-            (None, Some(_)) => Err(crate::ForgeError::Config(
+            (None, Some(_)) => Err(crate::ForgeError::config(
                 "gateway.tls.key_path is set but gateway.tls.cert_path is missing. \
-                 Set both to enable TLS, or neither to serve plain HTTP."
-                    .into(),
+                 Set both to enable TLS, or neither to serve plain HTTP.",
             )),
         }
     }

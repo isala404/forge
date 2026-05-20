@@ -29,7 +29,7 @@ struct BinanceTrade {
 }
 
 /// Get the 4 most recent trades
-#[forge::query(public)]
+#[forge::query(auth = "none")]
 pub async fn get_trades(ctx: &QueryContext) -> Result<Vec<Trade>> {
     sqlx::query_as!(
         Trade,
@@ -59,7 +59,7 @@ pub async fn trade_stream(ctx: &DaemonContext) -> Result<()> {
 
     let (ws_stream, _) = connect_async(url)
         .await
-        .map_err(|e| ForgeError::Internal(format!("WebSocket connect failed: {}", e)))?;
+        .map_err(|e| ForgeError::internal(format!("WebSocket connect failed: {}", e)))?;
 
     let (_, mut read) = ws_stream.split();
     tracing::info!("Connected to Binance trade stream");

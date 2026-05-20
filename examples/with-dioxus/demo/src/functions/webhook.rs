@@ -10,7 +10,7 @@ pub struct WebhookEvent {
 }
 
 /// Get the 4 most recent webhook events
-#[forge::query(public)]
+#[forge::query(auth = "none")]
 pub async fn get_webhook_events(ctx: &QueryContext) -> Result<Vec<WebhookEvent>> {
     sqlx::query_as!(
         WebhookEvent,

@@ -154,6 +154,9 @@ struct DarlingWorkflowAttrs {
     timeout: Option<String>,
     #[darling(default)]
     public: bool,
+    /// New-style alias for `public`. Accepted values: "none", "required".
+    #[darling(default)]
+    auth: Option<String>,
     #[darling(default)]
     active: bool,
     #[darling(default)]
@@ -175,6 +178,14 @@ impl DarlingWorkflowAttrs {
         {
             return Err(darling::Error::custom(format!(
                 "invalid workflow status \"{s}\": expected one of \"active\", \"deprecated\", \"staging\""
+            )));
+        }
+
+        if let Some(ref a) = self.auth
+            && !["none", "required"].contains(&a.as_str())
+        {
+            return Err(darling::Error::custom(format!(
+                "invalid auth value \"{a}\": expected \"none\" or \"required\""
             )));
         }
 
@@ -246,7 +257,7 @@ fn convert_workflow_attrs(darling: DarlingWorkflowAttrs) -> WorkflowAttrs {
         name: darling.name,
         version: darling.version,
         timeout: darling.timeout,
-        is_public: darling.public,
+        is_public: darling.public || darling.auth.as_deref() == Some("none"),
         status,
         required_role: darling.require_role.map(|r| r.0),
         register: darling.register,

@@ -200,9 +200,7 @@ fn rustfmt_files(paths: &[&Path]) {
         .status();
 }
 
-fn to_snake_case(name: &str) -> String {
-    forge_core::util::to_snake_case(name)
-}
+use forge_core::util::to_snake_case;
 
 fn ensure_mod_entry(dir: &Path, name: &str) -> Result<()> {
     let mod_path = dir.join("mod.rs");

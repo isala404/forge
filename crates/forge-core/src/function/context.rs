@@ -779,7 +779,7 @@ impl QueryContext {
     pub fn kv(&self) -> crate::error::Result<&dyn KvHandle> {
         self.kv
             .as_deref()
-            .ok_or_else(|| crate::error::ForgeError::Internal("KV store not available".into()))
+            .ok_or_else(|| crate::error::ForgeError::internal("KV store not available"))
     }
 
     /// Database handle with automatic `db.query` tracing spans.
@@ -900,6 +900,8 @@ pub struct MutationContext {
     max_jobs_per_request: usize,
     /// KV store handle. `None` until threaded in by the runtime.
     kv: Option<Arc<dyn KvHandle>>,
+    /// Email sender. `None` until threaded in by the runtime.
+    email_sender: Option<Arc<dyn crate::email::EmailSender>>,
 }
 
 impl MutationContext {
@@ -920,6 +922,7 @@ impl MutationContext {
             dispatched_job_count: Arc::new(AtomicUsize::new(0)),
             max_jobs_per_request: 0,
             kv: None,
+            email_sender: None,
         }
     }
 
@@ -947,6 +950,7 @@ impl MutationContext {
             dispatched_job_count: Arc::new(AtomicUsize::new(0)),
             max_jobs_per_request: 0,
             kv: None,
+            email_sender: None,
         }
     }
 
@@ -975,6 +979,7 @@ impl MutationContext {
             dispatched_job_count: Arc::new(AtomicUsize::new(0)),
             max_jobs_per_request: 0,
             kv: None,
+            email_sender: None,
         }
     }
 
@@ -1015,6 +1020,7 @@ impl MutationContext {
             dispatched_job_count: Arc::new(AtomicUsize::new(0)),
             max_jobs_per_request: 0,
             kv: None,
+            email_sender: None,
         };
 
         (ctx, tx_handle)
@@ -1034,7 +1040,19 @@ impl MutationContext {
     pub fn kv(&self) -> crate::error::Result<&dyn KvHandle> {
         self.kv
             .as_deref()
-            .ok_or_else(|| crate::error::ForgeError::Internal("KV store not available".into()))
+            .ok_or_else(|| crate::error::ForgeError::internal("KV store not available"))
+    }
+
+    /// Attach an email sender.
+    pub fn set_email(&mut self, sender: Arc<dyn crate::email::EmailSender>) {
+        self.email_sender = Some(sender);
+    }
+
+    /// Access the email sender.
+    pub fn email(&self) -> crate::error::Result<&dyn crate::email::EmailSender> {
+        self.email_sender
+            .as_deref()
+            .ok_or_else(|| crate::error::ForgeError::internal("Email not configured"))
     }
 
     pub fn is_transactional(&self) -> bool {
@@ -1159,15 +1177,14 @@ impl MutationContext {
     ///     .user_id(user.id)
     ///     .duration_secs(7 * 24 * 3600)
     ///     .build()
-    ///     .map_err(|e| ForgeError::Internal(e))?;
+    ///     .map_err(ForgeError::internal)?;
     ///
     /// let token = ctx.issue_token(&claims)?;
     /// ```
     pub fn issue_token(&self, claims: &Claims) -> crate::error::Result<String> {
         let issuer = self.token_issuer.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::Internal(
-                "Token issuer not available. Configure [auth] with an HMAC algorithm in forge.toml"
-                    .into(),
+            crate::error::ForgeError::internal(
+                "Token issuer not available. Configure [auth] with an HMAC algorithm in forge.toml",
             )
         })?;
         issuer.sign(claims)
@@ -1188,8 +1205,8 @@ impl MutationContext {
         roles: &[&str],
     ) -> crate::error::Result<crate::auth::TokenPair> {
         let issuer = self.token_issuer.clone().ok_or_else(|| {
-            crate::error::ForgeError::Internal(
-                "Token issuer not available. Configure [auth] in forge.toml".into(),
+            crate::error::ForgeError::internal(
+                "Token issuer not available. Configure [auth] in forge.toml",
             )
         })?;
         let access_ttl = self.token_ttl.access_token_secs;
@@ -1206,7 +1223,7 @@ impl MutationContext {
                     .roles(r.iter().map(|s| s.to_string()).collect())
                     .duration_secs(ttl)
                     .build()
-                    .map_err(crate::error::ForgeError::Internal)?;
+                    .map_err(crate::error::ForgeError::internal)?;
                 issuer.sign(&claims)
             },
         )
@@ -1222,8 +1239,8 @@ impl MutationContext {
         old_refresh_token: &str,
     ) -> crate::error::Result<crate::auth::TokenPair> {
         let issuer = self.token_issuer.clone().ok_or_else(|| {
-            crate::error::ForgeError::Internal(
-                "Token issuer not available. Configure [auth] in forge.toml".into(),
+            crate::error::ForgeError::internal(
+                "Token issuer not available. Configure [auth] in forge.toml",
             )
         })?;
         let access_ttl = self.token_ttl.access_token_secs;
@@ -1239,7 +1256,7 @@ impl MutationContext {
                     .roles(r.iter().map(|s| s.to_string()).collect())
                     .duration_secs(ttl)
                     .build()
-                    .map_err(crate::error::ForgeError::Internal)?;
+                    .map_err(crate::error::ForgeError::internal)?;
                 issuer.sign(&claims)
             },
         )
@@ -1284,23 +1301,34 @@ impl MutationContext {
 
         let args_json = serde_json::to_value(args)?;
         let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::Internal("Job dispatch not available".into())
+            crate::error::ForgeError::internal("Job dispatch not available")
         })?;
 
         if let Some(tx) = &self.tx {
             let mut guard = tx.lock().await;
             let conn = guard.as_mut().ok_or_else(|| {
-                crate::error::ForgeError::Internal(
-                    "Transaction already taken; cannot dispatch job".into(),
+                crate::error::ForgeError::internal(
+                    "Transaction already taken; cannot dispatch job",
                 )
             })?;
             return dispatcher
-                .dispatch_in_conn(conn, job_type, args_json, self.auth.principal_id())
+                .dispatch_in_conn(
+                    conn,
+                    job_type,
+                    args_json,
+                    self.auth.principal_id(),
+                    self.auth.tenant_id(),
+                )
                 .await;
         }
 
         dispatcher
-            .dispatch_by_name(job_type, args_json, self.auth.principal_id())
+            .dispatch_by_name(
+                job_type,
+                args_json,
+                self.auth.principal_id(),
+                self.auth.tenant_id(),
+            )
             .await
     }
 
@@ -1332,14 +1360,14 @@ impl MutationContext {
 
         let args_json = serde_json::to_value(args)?;
         let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::Internal("Job dispatch not available".into())
+            crate::error::ForgeError::internal("Job dispatch not available")
         })?;
 
         if let Some(tx) = &self.tx {
             let mut guard = tx.lock().await;
             let conn = guard.as_mut().ok_or_else(|| {
-                crate::error::ForgeError::Internal(
-                    "Transaction already taken; cannot dispatch job".into(),
+                crate::error::ForgeError::internal(
+                    "Transaction already taken; cannot dispatch job",
                 )
             })?;
             return dispatcher
@@ -1349,12 +1377,19 @@ impl MutationContext {
                     args_json,
                     scheduled_at,
                     self.auth.principal_id(),
+                    self.auth.tenant_id(),
                 )
                 .await;
         }
 
         dispatcher
-            .dispatch_by_name_at(job_type, args_json, scheduled_at, self.auth.principal_id())
+            .dispatch_by_name_at(
+                job_type,
+                args_json,
+                scheduled_at,
+                self.auth.principal_id(),
+                self.auth.tenant_id(),
+            )
             .await
     }
 
@@ -1411,7 +1446,7 @@ impl MutationContext {
         reason: Option<String>,
     ) -> crate::error::Result<bool> {
         let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::Internal("Job dispatch not available".into())
+            crate::error::ForgeError::internal("Job dispatch not available")
         })?;
         dispatcher.cancel(job_id, reason).await
     }
@@ -1429,7 +1464,7 @@ impl MutationContext {
     ) -> crate::error::Result<Uuid> {
         let input_json = serde_json::to_value(input)?;
         let dispatcher = self.workflow_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::Internal("Workflow dispatch not available".into())
+            crate::error::ForgeError::internal("Workflow dispatch not available")
         })?;
 
         let trace_id = Some(self.request.trace_id().to_string());
@@ -1437,8 +1472,8 @@ impl MutationContext {
         if let Some(tx) = &self.tx {
             let mut guard = tx.lock().await;
             let conn = guard.as_mut().ok_or_else(|| {
-                crate::error::ForgeError::Internal(
-                    "Transaction already taken; cannot start workflow".into(),
+                crate::error::ForgeError::internal(
+                    "Transaction already taken; cannot start workflow",
                 )
             })?;
             return dispatcher

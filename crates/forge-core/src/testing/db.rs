@@ -66,10 +66,9 @@ impl TestDatabase {
                 }
                 #[cfg(not(feature = "testcontainers"))]
                 {
-                    Err(ForgeError::Internal(
+                    Err(ForgeError::internal(
                         "TEST_DATABASE_URL not set. Set it explicitly for database tests, \
-                         or enable the `testcontainers` feature for automatic provisioning."
-                            .to_string(),
+                         or enable the `testcontainers` feature for automatic provisioning.",
                     ))
                 }
             }
@@ -87,12 +86,12 @@ impl TestDatabase {
             .with_tag("18-alpine")
             .start()
             .await
-            .map_err(|e| ForgeError::Internal(format!("Failed to start PG container: {e}")))?;
+            .map_err(|e| ForgeError::internal_with("Failed to start PG container", e))?;
 
         let port = container
             .get_host_port_ipv4(5432)
             .await
-            .map_err(|e| ForgeError::Internal(format!("Failed to get container port: {e}")))?;
+            .map_err(|e| ForgeError::internal_with("Failed to get container port", e))?;
 
         let url = format!("postgres://postgres:postgres@localhost:{port}/postgres");
         let pool = sqlx::postgres::PgPoolOptions::new()
@@ -233,7 +232,7 @@ impl IsolatedTestDb {
             sqlx::query(stmt)
                 .execute(&self.pool)
                 .await
-                .map_err(|e| ForgeError::Internal(format!("Failed to execute SQL: {e}")))?;
+                .map_err(|e| ForgeError::internal_with("Failed to execute SQL", e))?;
         }
         Ok(())
     }
@@ -302,7 +301,7 @@ impl IsolatedTestDb {
                 let name = path
                     .file_stem()
                     .and_then(|s| s.to_str())
-                    .ok_or_else(|| ForgeError::Config("Invalid migration filename".into()))?
+                    .ok_or_else(|| ForgeError::config("Invalid migration filename"))?
                     .to_string();
 
                 let content = std::fs::read_to_string(&path).map_err(ForgeError::Io)?;
@@ -326,7 +325,7 @@ impl IsolatedTestDb {
                     continue;
                 }
                 sqlx::query(stmt).execute(&self.pool).await.map_err(|e| {
-                    ForgeError::Internal(format!("Failed to apply migration '{name}': {e}"))
+                    ForgeError::internal(format!("Failed to apply migration '{name}': {e}"))
                 })?;
             }
         }

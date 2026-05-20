@@ -116,6 +116,15 @@ pub struct WorkflowContext {
     saved_state: Arc<RwLock<HashMap<String, serde_json::Value>>>,
     /// KV store handle. `None` until threaded in by the runtime.
     kv: Option<Arc<dyn KvHandle>>,
+    /// When `false` (default), `record_step_start` only updates in-memory
+    /// state and skips the DB write. `persist_step_complete`'s upsert
+    /// handles the missing start row, so this saves one roundtrip per step.
+    /// Set to `true` for long-running steps where observability of
+    /// in-progress state matters.
+    persist_step_start: bool,
+    /// Suspension reason stored by `signal_suspend()` so the executor can
+    /// read it without a `ForgeError` variant as a side-channel.
+    suspend_reason: Arc<std::sync::Mutex<Option<SuspendReason>>>,
 }
 
 impl WorkflowContext {
@@ -146,7 +155,18 @@ impl WorkflowContext {
             env_provider: Arc::new(RealEnvProvider::new()),
             saved_state: Arc::new(RwLock::new(HashMap::new())),
             kv: None,
+            persist_step_start: false,
+            suspend_reason: Arc::new(std::sync::Mutex::new(None)),
         }
+    }
+
+    /// Enable DB writes for `record_step_start`. By default, only
+    /// `record_step_complete` writes to the database (its upsert handles
+    /// the missing start row). Enable this for long-running steps where
+    /// observing in-progress state is important.
+    pub fn with_persist_step_start(mut self, persist: bool) -> Self {
+        self.persist_step_start = persist;
+        self
     }
 
     /// Create a resumed workflow context.
@@ -176,6 +196,8 @@ impl WorkflowContext {
             env_provider: Arc::new(RealEnvProvider::new()),
             saved_state: Arc::new(RwLock::new(HashMap::new())),
             kv: None,
+            persist_step_start: false,
+            suspend_reason: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -190,7 +212,7 @@ impl WorkflowContext {
     pub fn kv(&self) -> crate::error::Result<&dyn KvHandle> {
         self.kv
             .as_deref()
-            .ok_or_else(|| crate::error::ForgeError::Internal("KV store not available".into()))
+            .ok_or_else(|| crate::error::ForgeError::internal("KV store not available"))
     }
 
     /// Set environment provider.
@@ -377,6 +399,10 @@ impl WorkflowContext {
             state.start();
             state.clone()
         };
+
+        if !self.persist_step_start {
+            return;
+        }
 
         let step_id = Uuid::new_v4();
         let step_name = name.to_string();
@@ -815,7 +841,7 @@ impl WorkflowContext {
         }))
     }
 
-    /// Persist wake time to database.
+    /// Persist wake time to database and notify the scheduler.
     async fn set_wake_at(&self, wake_at: DateTime<Utc>) -> Result<()> {
         sqlx::query!(
             r#"
@@ -829,6 +855,22 @@ impl WorkflowContext {
         .execute(&self.db_pool)
         .await
         .map_err(ForgeError::Database)?;
+
+        // Notify the scheduler so it can pick up this workflow without
+        // waiting for the next poll interval.
+        #[allow(clippy::disallowed_methods)]
+        if let Err(e) = sqlx::query("SELECT pg_notify('forge_workflow_wakeup', $1::text)")
+            .bind(self.run_id.to_string())
+            .execute(&self.db_pool)
+            .await
+        {
+            tracing::debug!(
+                workflow_run_id = %self.run_id,
+                error = %e,
+                "Failed to send workflow wakeup notify (scheduler will poll)",
+            );
+        }
+
         Ok(())
     }
 
@@ -856,10 +898,27 @@ impl WorkflowContext {
 
     /// Signal suspension to the executor.
     ///
-    /// Returns `Err(ForgeError::WorkflowSuspended(reason))` which propagates
-    /// through `?` in the user's handler and is caught by the executor.
+    /// Stores the reason in the context so the executor can retrieve it via
+    /// `take_suspend_reason()`, then returns `Err(ForgeError::internal(…))`
+    /// to short-circuit the handler via `?`. The executor checks for a stored
+    /// reason before treating the error as a real failure.
     async fn signal_suspend(&self, reason: SuspendReason) -> Result<()> {
-        Err(ForgeError::WorkflowSuspended(reason))
+        *self
+            .suspend_reason
+            .lock()
+            .expect(LOCK_POISONED) = Some(reason);
+        Err(ForgeError::internal("workflow suspended"))
+    }
+
+    /// Take the stored suspension reason, if any.
+    ///
+    /// Called by the executor after the handler returns an error to determine
+    /// whether the error represents a suspension or a real failure.
+    pub fn take_suspend_reason(&self) -> Option<SuspendReason> {
+        self.suspend_reason
+            .lock()
+            .expect(LOCK_POISONED)
+            .take()
     }
 }
 
@@ -878,6 +937,7 @@ mod tests {
     async fn test_workflow_context_creation() {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(1))
             .connect_lazy("postgres://localhost/nonexistent")
             .expect("Failed to create mock pool");
 
@@ -897,6 +957,7 @@ mod tests {
     async fn test_step_state_tracking() {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(1))
             .connect_lazy("postgres://localhost/nonexistent")
             .expect("Failed to create mock pool");
 
@@ -935,6 +996,7 @@ mod tests {
     fn lazy_ctx() -> WorkflowContext {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(1))
             .connect_lazy("postgres://localhost/nonexistent")
             .expect("Failed to create mock pool");
         WorkflowContext::new(

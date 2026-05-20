@@ -30,6 +30,7 @@ pub mod config;
 pub mod context;
 pub mod cron;
 pub mod daemon;
+pub mod email;
 pub mod env;
 pub mod error;
 pub mod function;

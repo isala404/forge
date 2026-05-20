@@ -9,7 +9,7 @@ use uuid::Uuid;
 use super::executor::JobExecutor;
 use super::queue::JobQueue;
 use super::registry::JobRegistry;
-use crate::pg::LeaderElection;
+use crate::pg::{LeaderElection, PgNotifyBus};
 
 /// Worker configuration.
 #[derive(Debug, Clone)]
@@ -64,7 +64,7 @@ pub struct Worker {
     id: Uuid,
     config: WorkerConfig,
     queue: JobQueue,
-    pool: sqlx::PgPool,
+    notify_bus: Arc<PgNotifyBus>,
     executor: Arc<JobExecutor>,
     shutdown_tx: Option<mpsc::Sender<()>>,
 }
@@ -76,6 +76,7 @@ impl Worker {
         queue: JobQueue,
         registry: JobRegistry,
         db_pool: sqlx::PgPool,
+        notify_bus: Arc<PgNotifyBus>,
     ) -> Self {
         let id = config.id.unwrap_or_else(Uuid::new_v4);
         let executor = Arc::new(JobExecutor::new(queue.clone(), registry, db_pool.clone()));
@@ -84,7 +85,7 @@ impl Worker {
             id,
             config,
             queue,
-            pool: db_pool,
+            notify_bus,
             executor,
             shutdown_tx: None,
         }
@@ -161,71 +162,29 @@ impl Worker {
             }
         });
 
-        // NOTIFY listener for immediate wakeup on job enqueue.
-        // Reconnects with exponential backoff on connection loss.
+        // NOTIFY wakeup via the shared PgNotifyBus (no dedicated connection).
         let wakeup_notify = Arc::new(tokio::sync::Notify::new());
         let wakeup_trigger = wakeup_notify.clone();
-        let wakeup_pool = self.pool.clone();
         let wakeup_shutdown = shutdown_notify.clone();
-        tokio::spawn(async move {
-            let mut backoff = std::time::Duration::from_millis(500);
-            let max_backoff = std::time::Duration::from_secs(30);
-            loop {
-                let mut listener = match sqlx::postgres::PgListener::connect_with(&wakeup_pool)
-                    .await
-                {
-                    Ok(mut l) => match l.listen("forge_jobs_available").await {
-                        Ok(()) => {
-                            backoff = std::time::Duration::from_millis(500);
-                            l
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "Job listener LISTEN failed, retrying");
-                            tokio::select! {
-                                _ = tokio::time::sleep(backoff) => {}
-                                _ = wakeup_shutdown.notified() => return,
-                            }
-                            backoff = (backoff * 2).min(max_backoff);
-                            continue;
-                        }
-                    },
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Job listener connect failed, retrying");
-                        tokio::select! {
-                            _ = tokio::time::sleep(backoff) => {}
-                            _ = wakeup_shutdown.notified() => return,
-                        }
-                        backoff = (backoff * 2).min(max_backoff);
-                        continue;
-                    }
-                };
+        if let Some(mut rx) = self.notify_bus.subscribe("forge_jobs_available") {
+            tokio::spawn(async move {
                 loop {
                     tokio::select! {
                         _ = wakeup_shutdown.notified() => return,
-                        notification = listener.recv() => {
-                            match notification {
-                                Ok(_) => {
+                        result = rx.recv() => {
+                            match result {
+                                Ok(_) => wakeup_trigger.notify_one(),
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                    tracing::debug!(missed = n, "Job wakeup receiver lagged");
                                     wakeup_trigger.notify_one();
                                 }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        error = %e,
-                                        "Job listener disconnected, reconnecting"
-                                    );
-                                    wakeup_trigger.notify_one();
-                                    break;
-                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                             }
                         }
                     }
                 }
-                tokio::select! {
-                    _ = tokio::time::sleep(backoff) => {}
-                    _ = wakeup_shutdown.notified() => return,
-                }
-                backoff = (backoff * 2).min(max_backoff);
-            }
-        });
+            });
+        }
 
         tracing::debug!(
             worker_id = %self.id,

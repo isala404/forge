@@ -152,6 +152,15 @@ where
     }
 
     /// Set the compensation function.
+    ///
+    /// # Warning
+    ///
+    /// Compensation handlers are in-memory closures. They do **not** survive
+    /// process restarts. If the workflow suspends (via `ctx.sleep()` or
+    /// `ctx.wait_for_event()`) and the process restarts before the workflow
+    /// completes, registered compensation handlers are lost. The executor
+    /// detects this and fails the workflow with a message requiring manual
+    /// remediation.
     pub fn compensate<CF>(mut self, f: CF) -> Self
     where
         CF: Fn(T) -> Pin<Box<C>> + Send + Sync + 'a,

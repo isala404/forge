@@ -10,14 +10,34 @@
 //!
 //! # Philosophy
 //!
-//! Following sqlx's testing philosophy, we recommend testing against real databases
-//! rather than mocks. However, for unit tests that don't need database access,
-//! the test contexts can be used without a database connection.
+//! FORGE tests against real PostgreSQL, not in-memory substitutes. There is no
+//! `MockDatabase` because PostgreSQL-specific features (advisory locks, LISTEN/NOTIFY,
+//! GIN indexes, `FOR UPDATE SKIP LOCKED`) are load-bearing and not faithfully
+//! reproduced by SQLite or in-memory stubs. This is a deliberate tradeoff: tests
+//! are slower (seconds, not milliseconds) but catch real integration bugs.
+//!
+//! For unit tests that don't need database access, the test contexts can be used
+//! without a pool.
+//!
+//! # What's mocked and what's not
+//!
+//! | Layer | Mock | Real |
+//! |---|---|---|
+//! | HTTP calls | [`MockHttp`] | — |
+//! | Job dispatch | [`MockJobDispatch`] | `JobQueue` (needs PG) |
+//! | Workflow dispatch | [`MockWorkflowDispatch`] | `WorkflowExecutor` (needs PG) |
+//! | Auth context | Builder (`.as_user()`, `.with_role()`) | JWT middleware (needs gateway) |
+//! | KV store | Builder (`.with_kv()`) | `KvStore` (needs PG) |
+//! | Database | [`IsolatedTestDb`] (real PG, isolated schema) | Production pool |
+//!
+//! Job and workflow *executors* are not mocked: use `IsolatedTestDb` with the
+//! `testcontainers` feature for integration tests that need end-to-end execution.
 //!
 //! # Database Setup
 //!
 //! Set `TEST_DATABASE_URL` and use `TestDatabase::from_env()` to connect to a
-//! PostgreSQL instance for tests.
+//! PostgreSQL instance, or enable the `testcontainers` feature for automatic
+//! container provisioning via [`IsolatedTestDb`].
 //!
 //! # Example
 //!
@@ -40,12 +60,14 @@ pub mod assertions;
 pub mod context;
 pub mod db;
 pub mod mock_dispatch;
+pub mod mock_email;
 pub mod mock_http;
 
 pub use assertions::*;
 pub use context::*;
 pub use db::{IsolatedTestDb, TestDatabase};
 pub use mock_dispatch::{DispatchedJob, MockJobDispatch, MockWorkflowDispatch, StartedWorkflow};
+pub use mock_email::{MockEmailSender, SentEmail};
 pub use mock_http::{MockHttp, MockHttpBuilder, MockRequest, MockResponse};
 
 use std::time::Duration;

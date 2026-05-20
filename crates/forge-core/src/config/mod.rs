@@ -41,7 +41,7 @@ pub use security::SecurityConfig;
 pub use signals::SignalsConfig;
 pub use types::{DurationStr, SizeStr};
 pub use worker::{CRON_QUEUE, DEFAULT_QUEUE, QueueWorkerConfig, WORKFLOWS_QUEUE, WorkerConfig};
-pub use workflow_config::WorkflowConfig;
+pub use workflow_config::{SignatureCheckMode, WorkflowConfig};
 
 pub use loader::substitute_env_vars;
 
@@ -149,13 +149,17 @@ pub struct ForgeConfig {
     /// Real-time subscription and SSE knobs.
     #[serde(default)]
     pub realtime: RealtimeConfig,
+
+    /// Email sending configuration.
+    #[serde(default)]
+    pub email: crate::email::EmailConfig,
 }
 
 impl ForgeConfig {
     /// Load configuration from a TOML file.
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
         let content = std::fs::read_to_string(path.as_ref())
-            .map_err(|e| ForgeError::Config(format!("Failed to read config file: {}", e)))?;
+            .map_err(|e| ForgeError::config_with("Failed to read config file", e))?;
 
         Self::parse_toml(&content)
     }
@@ -165,7 +169,7 @@ impl ForgeConfig {
         let content = loader::substitute_env_vars(content);
 
         let config: Self = toml::from_str(&content)
-            .map_err(|e| ForgeError::Config(format!("Failed to parse config: {}", e)))?;
+            .map_err(|e| ForgeError::config_with("Failed to parse config", e))?;
 
         config.validate()?;
         Ok(config)
@@ -179,7 +183,7 @@ impl ForgeConfig {
         let body_limit = self.gateway.max_body_size.as_bytes();
         let file_limit = self.gateway.max_file_size.as_bytes();
         if file_limit > body_limit {
-            return Err(ForgeError::Config(format!(
+            return Err(ForgeError::config(format!(
                 "gateway.max_file_size ({}) cannot exceed gateway.max_body_size ({})",
                 self.gateway.max_file_size, self.gateway.max_body_size
             )));
@@ -188,33 +192,30 @@ impl ForgeConfig {
 
         // Cross-field: OAuth requires jwt_secret for signing tokens
         if self.mcp.oauth && self.auth.jwt_secret.is_none() {
-            return Err(ForgeError::Config(
+            return Err(ForgeError::config(
                 "mcp.oauth = true requires auth.jwt_secret to be set. \
                  OAuth-issued tokens are signed with this secret, even when using \
-                 an external provider (JWKS) for identity verification."
-                    .into(),
+                 an external provider (JWKS) for identity verification.",
             ));
         }
         if self.mcp.oauth && !self.mcp.enabled {
-            return Err(ForgeError::Config(
-                "mcp.oauth = true requires mcp.enabled = true".into(),
+            return Err(ForgeError::config(
+                "mcp.oauth = true requires mcp.enabled = true",
             ));
         }
 
         if !self.gateway.cors_enabled && !self.gateway.cors_origins.is_empty() {
-            return Err(ForgeError::Config(
+            return Err(ForgeError::config(
                 "gateway.cors_origins is set but gateway.cors_enabled = false. \
-                 Set cors_enabled = true to activate CORS, or remove cors_origins."
-                    .into(),
+                 Set cors_enabled = true to activate CORS, or remove cors_origins.",
             ));
         }
 
         if self.gateway.cors_enabled {
             if self.gateway.cors_origins.is_empty() {
-                return Err(ForgeError::Config(
+                return Err(ForgeError::config(
                     "gateway.cors_enabled = true requires at least one origin. \
-                     Use cors_origins = [\"*\"] to allow any origin."
-                        .into(),
+                     Use cors_origins = [\"*\"] to allow any origin.",
                 ));
             }
             // Wildcard mixed with concrete origins is ignored by browsers on
@@ -222,10 +223,9 @@ impl ForgeConfig {
             let has_wildcard = self.gateway.cors_origins.iter().any(|o| o == "*");
             let has_concrete = self.gateway.cors_origins.iter().any(|o| o != "*");
             if has_wildcard && has_concrete {
-                return Err(ForgeError::Config(
+                return Err(ForgeError::config(
                     "gateway.cors_origins cannot mix \"*\" with concrete origins. \
-                     Browsers ignore wildcards on credentialed requests."
-                        .into(),
+                     Browsers ignore wildcards on credentialed requests.",
                 ));
             }
 
@@ -234,13 +234,13 @@ impl ForgeConfig {
                     continue;
                 }
                 if origin.bytes().any(|b| b < 32 || b == 127) {
-                    return Err(ForgeError::Config(format!(
+                    return Err(ForgeError::config(format!(
                         "gateway.cors_origins contains invalid origin \"{origin}\". \
                          Origins must be valid HTTP header values."
                     )));
                 }
                 if !origin.starts_with("http://") && !origin.starts_with("https://") {
-                    return Err(ForgeError::Config(format!(
+                    return Err(ForgeError::config(format!(
                         "gateway.cors_origins contains \"{origin}\" which is not a valid origin. \
                          Origins must start with http:// or https://."
                     )));
@@ -249,15 +249,15 @@ impl ForgeConfig {
         }
 
         if self.gateway.max_multipart_fields < 1 {
-            return Err(ForgeError::Config(
-                "gateway.max_multipart_fields must be at least 1".into(),
+            return Err(ForgeError::config(
+                "gateway.max_multipart_fields must be at least 1",
             ));
         }
 
         let quiet_ms = self.realtime.debounce_quiet_window.as_millis();
         let max_ms = self.realtime.debounce_max_wait.as_millis();
         if quiet_ms > max_ms {
-            return Err(ForgeError::Config(format!(
+            return Err(ForgeError::config(format!(
                 "realtime.debounce_quiet_window ({}) cannot exceed \
                  realtime.debounce_max_wait ({})",
                 self.realtime.debounce_quiet_window, self.realtime.debounce_max_wait
@@ -267,7 +267,7 @@ impl ForgeConfig {
         for entry in &self.gateway.trusted_proxies {
             if entry.parse::<std::net::IpAddr>().is_err() && entry.parse::<ipnet::IpNet>().is_err()
             {
-                return Err(ForgeError::Config(format!(
+                return Err(ForgeError::config(format!(
                     "gateway.trusted_proxies contains invalid entry \"{entry}\". \
                      Expected an IP address (e.g. \"10.0.0.1\") or CIDR range (e.g. \"10.0.0.0/8\")."
                 )));
@@ -297,6 +297,7 @@ impl ForgeConfig {
             signals: SignalsConfig::default(),
             rate_limit: RateLimitSettings::default(),
             realtime: RealtimeConfig::default(),
+            email: crate::email::EmailConfig::default(),
         }
     }
 }

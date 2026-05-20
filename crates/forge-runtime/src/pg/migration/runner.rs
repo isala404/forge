@@ -174,12 +174,41 @@ impl MigrationRunner {
         if let (Some(applied_max), Some(known_max)) = (max_applied_version, max_known_version)
             && applied_max > known_max
         {
-            return Err(ForgeError::Internal(format!(
+            return Err(ForgeError::internal(format!(
                 "Database is at system migration v{applied_max} but this binary only knows up to v{known_max}. \
                  Refusing to start — running an older binary on a newer schema risks data loss. \
                  Upgrade the binary or restore the database to a compatible version."
             )));
         }
+
+        // Check for user migrations the DB has applied that this binary does not
+        // know about. This catches the rolling-deploy case where a newer binary
+        // ran user migrations and an older binary is now starting up against the
+        // updated schema. The binary's known set is the `user_migrations` slice
+        // passed by the caller; any DB row whose version is not in that set (and
+        // is not a system migration) is evidence of an ahead-of-binary schema.
+        let known_user_versions: std::collections::HashSet<&str> =
+            user_migrations.iter().map(|m| m.version.as_str()).collect();
+        let mut unknown_applied: Vec<&str> = applied
+            .keys()
+            .filter(|v| {
+                !super::builtin::is_system_migration(v)
+                    && !known_user_versions.contains(v.as_str())
+            })
+            .map(|v| v.as_str())
+            .collect();
+        if !unknown_applied.is_empty() {
+            unknown_applied.sort_unstable();
+            return Err(ForgeError::internal(format!(
+                "Database has {} user migration(s) this binary does not know about: [{}]. \
+                 Refusing to start — the database schema is ahead of this binary. \
+                 Deploy the latest binary version.",
+                unknown_applied.len(),
+                unknown_applied.join(", "),
+            )));
+        }
+
+        let mut new_migrations_applied = false;
 
         for sys_migration in system_migrations {
             let migration = sys_migration.to_migration();
@@ -196,6 +225,7 @@ impl MigrationRunner {
                 migration.version, sys_migration.description
             );
             self.apply_migration(&migration).await?;
+            new_migrations_applied = true;
         }
 
         for migration in user_migrations {
@@ -208,9 +238,31 @@ impl MigrationRunner {
                 continue;
             }
             self.apply_migration(&migration).await?;
+            new_migrations_applied = true;
+        }
+
+        if new_migrations_applied {
+            self.notify_schema_changed().await;
         }
 
         Ok(())
+    }
+
+    /// Broadcast a schema-changed notification over `forge_schema_changed` so
+    /// any node listening (monitoring, ops tooling, or a future auto-restart
+    /// mechanism) can react without polling.
+    ///
+    /// This is best-effort: a failure to notify must never abort the migration
+    /// sequence — the schema changes already committed are the authoritative
+    /// state. We log the error and move on.
+    async fn notify_schema_changed(&self) {
+        match sqlx::query("SELECT pg_notify('forge_schema_changed', 'migrations_applied')")
+            .execute(&self.pool)
+            .await
+        {
+            Ok(_) => debug!("Schema change notification sent"),
+            Err(e) => warn!(error = %e, "Failed to send schema change notification (non-fatal)"),
+        }
     }
 
     fn get_max_system_version(&self, applied: &HashMap<String, String>) -> Option<u32> {
@@ -223,7 +275,7 @@ impl MigrationRunner {
             "Acquiring migration lock..."
         );
         let mut conn = self.pool.acquire().await.map_err(|e| {
-            ForgeError::Internal(format!("Failed to acquire lock connection: {}", e))
+            ForgeError::internal_with("Failed to acquire lock connection", e)
         })?;
 
         // Decompose the i64 lock id into the (classid, objid) split that
@@ -252,7 +304,7 @@ impl MigrationRunner {
             .fetch_one(&mut *conn)
             .await
             .map_err(|e| {
-                ForgeError::Internal(format!("Failed to attempt migration lock: {}", e))
+                ForgeError::internal_with("Failed to attempt migration lock", e)
             })?;
 
             if acquired {
@@ -263,7 +315,7 @@ impl MigrationRunner {
             let now = Instant::now();
             if now >= deadline {
                 let holder = lookup_lock_holder(&mut conn, classid, objid).await;
-                return Err(ForgeError::Internal(format!(
+                return Err(ForgeError::internal(format!(
                     "Timed out after {:?} waiting for migration lock (holder pid: {:?}). \
                      Another node is likely running migrations or stalled holding the lock.",
                     self.config.lock_acquire_timeout, holder
@@ -291,7 +343,7 @@ impl MigrationRunner {
             .fetch_one(&mut **conn)
             .await
             .map_err(|e| {
-                ForgeError::Internal(format!("Failed to release migration lock: {}", e))
+                ForgeError::internal_with("Failed to release migration lock", e)
             })?;
         debug!("Migration lock released");
         Ok(())
@@ -301,7 +353,7 @@ impl MigrationRunner {
     /// Statements are split because the bootstrap file may contain multiple.
     async fn bootstrap_tracking_table(&self) -> Result<()> {
         let mut conn = self.pool.acquire().await.map_err(|e| {
-            ForgeError::Internal(format!("Failed to acquire bootstrap connection: {}", e))
+            ForgeError::internal_with("Failed to acquire bootstrap connection", e)
         })?;
         for statement in split_sql_statements(BOOTSTRAP_SQL) {
             let stmt = statement.trim();
@@ -311,7 +363,7 @@ impl MigrationRunner {
             sqlx::query(stmt)
                 .execute(&mut *conn)
                 .await
-                .map_err(|e| ForgeError::Internal(format!("Bootstrap failed: {}", e)))?;
+                .map_err(|e| ForgeError::internal_with("Bootstrap failed", e))?;
         }
         Ok(())
     }
@@ -321,7 +373,7 @@ impl MigrationRunner {
             .fetch_all(&self.pool)
             .await
             .map_err(|e| {
-                ForgeError::Internal(format!("Failed to get applied migrations: {}", e))
+                ForgeError::internal_with("Failed to get applied migrations", e)
             })?;
 
         Ok(rows
@@ -343,10 +395,13 @@ impl MigrationRunner {
         let start = Instant::now();
 
         let mut tx = self.pool.begin().await.map_err(|e| {
-            ForgeError::Internal(format!(
-                "Failed to begin migration transaction for '{}': {e}",
-                migration.version
-            ))
+            ForgeError::internal_with(
+                format!(
+                    "Failed to begin migration transaction for '{}'",
+                    migration.version
+                ),
+                e,
+            )
         })?;
 
         // SET LOCAL only takes effect inside a transaction; it scopes these
@@ -354,11 +409,11 @@ impl MigrationRunner {
         sqlx::query("SET LOCAL lock_timeout = '5s'")
             .execute(&mut *tx)
             .await
-            .map_err(|e| ForgeError::Internal(format!("Failed to set lock_timeout: {e}")))?;
+            .map_err(|e| ForgeError::internal_with("Failed to set lock_timeout", e))?;
         sqlx::query("SET LOCAL statement_timeout = '5min'")
             .execute(&mut *tx)
             .await
-            .map_err(|e| ForgeError::Internal(format!("Failed to set statement_timeout: {e}")))?;
+            .map_err(|e| ForgeError::internal_with("Failed to set statement_timeout", e))?;
 
         for statement in split_sql_statements(&migration.up_sql) {
             let statement = statement.trim();
@@ -370,10 +425,10 @@ impl MigrationRunner {
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| {
-                    ForgeError::Internal(format!(
-                        "Failed to apply migration '{}': {e}",
-                        migration.version
-                    ))
+                    ForgeError::internal_with(
+                        format!("Failed to apply migration '{}'", migration.version),
+                        e,
+                    )
                 })?;
         }
 
@@ -386,17 +441,17 @@ impl MigrationRunner {
         .execute(&mut *tx)
         .await
         .map_err(|e| {
-            ForgeError::Internal(format!(
-                "Failed to record migration '{}': {e}",
-                migration.version
-            ))
+            ForgeError::internal_with(
+                format!("Failed to record migration '{}'", migration.version),
+                e,
+            )
         })?;
 
         tx.commit().await.map_err(|e| {
-            ForgeError::Internal(format!(
-                "Failed to commit migration '{}': {e}",
-                migration.version
-            ))
+            ForgeError::internal_with(
+                format!("Failed to commit migration '{}'", migration.version),
+                e,
+            )
         })?;
 
         info!(
@@ -429,10 +484,13 @@ impl MigrationRunner {
         let start = Instant::now();
 
         let mut conn = self.pool.acquire().await.map_err(|e| {
-            ForgeError::Internal(format!(
-                "Failed to acquire connection for migration '{}': {e}",
-                migration.version
-            ))
+            ForgeError::internal_with(
+                format!(
+                    "Failed to acquire connection for migration '{}'",
+                    migration.version
+                ),
+                e,
+            )
         })?;
 
         // Session-level SET (no LOCAL) since there's no surrounding tx; the
@@ -444,11 +502,11 @@ impl MigrationRunner {
         sqlx::query("SET lock_timeout = '5s'")
             .execute(&mut *conn)
             .await
-            .map_err(|e| ForgeError::Internal(format!("Failed to set lock_timeout: {e}")))?;
+            .map_err(|e| ForgeError::internal_with("Failed to set lock_timeout", e))?;
         sqlx::query("SET statement_timeout = '30min'")
             .execute(&mut *conn)
             .await
-            .map_err(|e| ForgeError::Internal(format!("Failed to set statement_timeout: {e}")))?;
+            .map_err(|e| ForgeError::internal_with("Failed to set statement_timeout", e))?;
 
         let exec_result: Result<()> = async {
             for statement in split_sql_statements(&migration.up_sql) {
@@ -460,10 +518,10 @@ impl MigrationRunner {
                     .execute(&mut *conn)
                     .await
                     .map_err(|e| {
-                        ForgeError::Internal(format!(
-                            "Failed to apply migration '{}': {e}",
-                            migration.version
-                        ))
+                        ForgeError::internal_with(
+                            format!("Failed to apply migration '{}'", migration.version),
+                            e,
+                        )
                     })?;
             }
             Ok(())
@@ -498,10 +556,10 @@ impl MigrationRunner {
         .execute(&self.pool)
         .await
         .map_err(|e| {
-            ForgeError::Internal(format!(
-                "Failed to record migration '{}': {e}",
-                migration.version
-            ))
+            ForgeError::internal_with(
+                format!("Failed to record migration '{}'", migration.version),
+                e,
+            )
         })?;
 
         info!(
@@ -533,7 +591,7 @@ impl MigrationRunner {
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| ForgeError::Internal(format!("Failed to get migrations: {}", e)))?
+        .map_err(|e| ForgeError::internal_with("Failed to get migrations", e))?
         .into_iter()
         .map(|row| {
             let drift = match available_by_version.get(row.version.as_str()) {
@@ -618,7 +676,7 @@ pub struct MigrationStatus {
 fn verify_checksum(migration: &Migration, recorded: &str) -> Result<()> {
     let computed = crate::stable_hash::sha256_hex(migration.up_sql.as_bytes());
     if computed != recorded {
-        return Err(ForgeError::Internal(format!(
+        return Err(ForgeError::internal(format!(
             "Migration '{}' has changed since it was applied. \
              Recorded checksum: {recorded}, but current file checksum: {computed}. \
              Migrations are immutable once applied — revert the file or create a new migration.",
@@ -815,14 +873,14 @@ pub fn load_migrations_from_dir(dir: &Path) -> Result<Vec<Migration>> {
             let name = path
                 .file_stem()
                 .and_then(|s| s.to_str())
-                .ok_or_else(|| ForgeError::Config("Invalid migration filename".into()))?
+                .ok_or_else(|| ForgeError::config("Invalid migration filename"))?
                 .to_string();
 
             let (digits, version) = parse_migration_prefix(&name)?;
 
             match prefix_width {
                 Some(w) if w != digits.len() => {
-                    return Err(ForgeError::Config(format!(
+                    return Err(ForgeError::config(format!(
                         "Inconsistent migration prefix width: {} uses {} digits but earlier migrations use {}. \
                          Pad all migration filenames to the same width (e.g. 0001_*.sql).",
                         name,
@@ -835,7 +893,7 @@ pub fn load_migrations_from_dir(dir: &Path) -> Result<Vec<Migration>> {
             }
 
             if !seen_versions.insert(version) {
-                return Err(ForgeError::Config(format!(
+                return Err(ForgeError::config(format!(
                     "Duplicate migration version {} for {}",
                     version, name
                 )));
@@ -861,14 +919,14 @@ fn parse_migration_prefix(name: &str) -> Result<(&str, u64)> {
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(name.len());
     if digits_end == 0 {
-        return Err(ForgeError::Config(format!(
+        return Err(ForgeError::config(format!(
             "Migration {} is missing a numeric prefix (expected NNNN_name.sql)",
             name
         )));
     }
     let digits = name.get(..digits_end).unwrap_or("");
     let version: u64 = digits.parse().map_err(|_| {
-        ForgeError::Config(format!(
+        ForgeError::config(format!(
             "Migration {} has an unparseable numeric prefix",
             name
         ))
@@ -1509,6 +1567,39 @@ mod integration_tests {
             .execute(db.pool())
             .await
             .expect("normal identifier must be accepted");
+    }
+
+    /// Starting with migrations the binary does not know about must fail.
+    /// This simulates the rolling-deploy case: a newer binary ran user migration
+    /// `0002_extra`; the older binary then starts up and must refuse rather than
+    /// silently ignoring the unknown row.
+    #[tokio::test]
+    async fn startup_rejects_schema_ahead_of_binary() {
+        let db = setup_db("mig_schema_ahead").await;
+        let runner = MigrationRunner::new(db.pool().clone());
+
+        // Newer binary ran both migrations.
+        let m1 = Migration::new("0001_users", "CREATE TABLE users (id INT PRIMARY KEY);");
+        let m2 = Migration::new("0002_extra", "CREATE TABLE extra (id INT PRIMARY KEY);");
+        runner
+            .run(vec![m1.clone(), m2])
+            .await
+            .expect("newer binary applies both cleanly");
+
+        // Older binary only knows about 0001 — must refuse to start.
+        let err = runner
+            .run(vec![m1])
+            .await
+            .expect_err("older binary must refuse to start against a newer schema");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("0002_extra"),
+            "error must name the unknown migration: {msg}",
+        );
+        assert!(
+            msg.to_lowercase().contains("ahead") || msg.to_lowercase().contains("does not know"),
+            "error must explain the schema-ahead condition: {msg}",
+        );
     }
 
     /// `forge_enable_reactivity` must catch the case where the input passes

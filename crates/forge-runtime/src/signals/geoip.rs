@@ -68,10 +68,10 @@ impl GeoIpResolver {
     #[cfg(feature = "geoip")]
     pub fn from_mmdb(path: &Path) -> Result<Self, ForgeError> {
         let reader = maxminddb::Reader::open_readfile(path).map_err(|e| {
-            ForgeError::Config(format!(
-                "failed to load GeoIP database {}: {e}",
-                path.display()
-            ))
+            ForgeError::config_with(
+                format!("failed to load GeoIP database {}", path.display()),
+                e,
+            )
         })?;
         Ok(Self {
             backend: Arc::new(Backend::Mmdb(reader)),
@@ -82,8 +82,8 @@ impl GeoIpResolver {
     /// operators discover the misconfiguration immediately at startup.
     #[cfg(not(feature = "geoip"))]
     pub fn from_mmdb(_path: &Path) -> Result<Self, ForgeError> {
-        Err(ForgeError::Config(
-            "geoip MMDB support requires the `geoip` feature on forge-runtime".into(),
+        Err(ForgeError::config(
+            "geoip MMDB support requires the `geoip` feature on forge-runtime",
         ))
     }
 

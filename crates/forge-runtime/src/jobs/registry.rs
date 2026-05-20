@@ -86,7 +86,7 @@ impl JobRegistry {
                     .map_err(|e| forge_core::ForgeError::Validation(e.to_string()))?;
                 let result = J::execute(ctx, parsed_args).await?;
                 serde_json::to_value(result)
-                    .map_err(|e| forge_core::ForgeError::Internal(e.to_string()))
+                    .map_err(|e| forge_core::ForgeError::internal_with("Failed to serialize job result", e))
             })
         });
 

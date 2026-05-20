@@ -170,23 +170,27 @@ Inside the provider tree, use these hooks:
 
 ### Rust to TypeScript
 
-| Rust Type                  | TypeScript Type     |
-| -------------------------- | ------------------- |
-| `String`, `&str`           | `string`            |
-| `Uuid`                     | `string`            |
-| `i32`, `i64`, `f32`, `f64` | `number`            |
-| `bool`                     | `boolean`           |
-| `Instant`                  | `string`            |
-| `LocalDate`, `LocalTime`   | `string`            |
-| `Option<T>`                | `T \| null`         |
-| `Vec<T>`                   | `T[]`               |
-| `HashMap<K, V>`            | `Record<string, V>` |
-| `Value` (JSON)             | `unknown`           |
-| `Page<T>`                  | `Page<T>`           |
-| `Cursor`                   | `string`            |
-| `Upload`                   | `File \| Blob`      |
-| `Bytes` (return)           | `Blob`              |
-| `Bytes` (arg)              | `Uint8Array`        |
+| Rust Type                           | TypeScript Type     |
+| ----------------------------------- | ------------------- |
+| `String`, `&str`                    | `string`            |
+| `Uuid`                              | `string`            |
+| `i32`, `i64`, `f32`, `f64`          | `number`            |
+| `bool`                              | `boolean`           |
+| `Instant`                           | `string`            |
+| `LocalDate`, `LocalTime`            | `string`            |
+| `DateTime<Utc>`                     | `string`            |
+| `NaiveDateTime`                     | `string`            |
+| `NaiveDate`                         | `string`            |
+| `Timestamp`                         | `string`            |
+| `Option<T>`                         | `T \| null`         |
+| `Vec<T>`                            | `T[]`               |
+| `HashMap<K, V>`                     | `Record<string, V>` |
+| `Value` (JSON)                      | `unknown`           |
+| `Page<T>`                           | `Page<T>`           |
+| `Cursor`                            | `string`            |
+| `Upload`                            | `File \| Blob`      |
+| `Bytes` (return)                    | `Blob`              |
+| `Bytes` (arg)                       | `Uint8Array`        |
 
 ### Rust to Dioxus
 
@@ -195,7 +199,16 @@ Inside the provider tree, use these hooks:
 | `String`, `&str`           | `String`                |
 | `Uuid`                     | `String`                |
 | `Instant`                  | `String` (ISO 8601)     |
-| `i32`, `i64`, `f32`, `f64` | same                   |
+| `DateTime<Utc>`            | `String`                |
+| `NaiveDateTime`            | `String`                |
+| `NaiveDate`                | `String`                |
+| `Timestamp`                | `String`                |
+| `i32`                      | `i32`                   |
+| `i64`                      | `i64`                   |
+| `f32`                      | `f32`                   |
+| `f64`                      | `f64`                   |
+| `u32`, `usize`, `isize`    | `i64`                   |
+| `u64`                      | `i64`                   |
 | `bool`                     | `bool`                  |
 | `Option<T>`                | `Option<T>`             |
 | `Vec<T>`                   | `Vec<T>`                |
@@ -289,24 +302,26 @@ The generated stores are built on top of a few primitives you can use directly:
 
 All subscription stores expose the same shape:
 
+**SvelteKit:**
+
 ```typescript
 interface SubscriptionResult<T> {
   loading: boolean; // true until first data arrives
   data: T | null; // the query result
   error: Error | null;
   stale: boolean; // reserved for reconnect-aware UIs
-  connection_state: ConnectionState; // Disconnected | Connecting | Connected
 }
 ```
 
-| Field     | When True                                                                                     |
+| Field     | Description                                                                                   |
 | --------- | --------------------------------------------------------------------------------------------- |
 | `loading` | Initial fetch in progress                                                                     |
-| `stale`            | Currently reserved in the Svelte runtime; use `createConnectionStore()` for connection status |
-| `error`            | Initial query or subscription registration failed                                             |
-| `connection_state` | Tracks the underlying SSE connection (`Disconnected`, `Connecting`, `Connected`)              |
+| `stale`   | Currently reserved in the Svelte runtime; use `createConnectionStore()` for connection status |
+| `error`   | Initial query or subscription registration failed                                             |
 
 The current Svelte runtime keeps `stale` at `false` and exposes connection state separately through `createConnectionStore()`.
+
+**Dioxus:** The `SubscriptionState<T>` type also includes a `connection_state: ConnectionState` field that tracks the underlying SSE connection (`Disconnected`, `Connecting`, `Connected`). This field is not present in the Svelte runtime.
 
 In Dioxus generated types, `WorkflowStepState.status` is an untyped `String` rather than a union type. TypeScript targets get a proper string union, but the Dioxus codegen emits a plain `String` since Rust doesn't have an equivalent inline union.
 
@@ -427,7 +442,7 @@ After `forge generate`, a SvelteKit target gets:
 | `types.ts`           | Interfaces from `#[forge::model]`, input DTOs, and union types from `#[forge::forge_enum]` |
 | `api.ts`             | Query, mutation, job, and workflow bindings                                                |
 | `stores.ts`          | Re-exports from `@forge-rs/svelte`                                                         |
-| `runes.svelte.ts`    | Svelte 5 `toReactive()` helper                                                             |
+| `runes.svelte.ts`    | Svelte 5 `toReactive()` and `toReactiveMutation()` helpers, plus `ReactiveQuery` and `ReactiveMutation` interfaces |
 | `reactive.svelte.ts` | Runes-based subscription functions (`getUser$`), generated when queries exist              |
 | `auth.svelte.ts`     | Auth store (when auth configured)                                                          |
 | `index.ts`           | Barrel export                                                                              |
@@ -630,7 +645,7 @@ The store value is `JobState<TOutput> & { loading: boolean }`:
 | Field      | Type                                                                             | Description                                |
 | ---------- | -------------------------------------------------------------------------------- | ------------------------------------------ |
 | `jobId`    | `string`                                                                         | UUID assigned by the server.               |
-| `status`   | `'pending' \| 'claimed' \| 'running' \| 'completed' \| 'failed' \| 'cancelled'` | Current job status.                        |
+| `status`   | `'pending' \| 'claimed' \| 'running' \| 'completed' \| 'failed' \| 'cancelled' \| 'retry' \| 'dead_letter' \| 'cancel_requested'` | Current job status.                        |
 | `progress` | `number \| null`                                                                 | 0–100 progress percentage, if reported.    |
 | `message`  | `string \| null`                                                                 | Latest progress message from the job.      |
 | `output`   | `TOutput \| null`                                                                | Final output once status is `completed`.   |
@@ -652,7 +667,7 @@ The store value is `WorkflowState<TOutput> & { loading: boolean }`:
 | Field        | Type                                                                              | Description                                              |
 | ------------ | --------------------------------------------------------------------------------- | -------------------------------------------------------- |
 | `workflowId` | `string`                                                                          | UUID assigned by the server.                             |
-| `status`     | `'pending' \| 'running' \| 'sleeping' \| 'waiting' \| 'completed' \| 'failed'`   | Overall workflow status.                                 |
+| `status`     | `'pending' \| 'running' \| 'sleeping' \| 'waiting' \| 'completed' \| 'failed' \| 'blocked_missing_version' \| 'blocked_signature_mismatch' \| 'blocked_missing_handler'` | Overall workflow status. The three `blocked_*` variants indicate the workflow cannot resume until an operator intervenes. |
 | `step`       | `string \| null`                                                                  | Name of the currently executing step.                    |
 | `waitingFor` | `string \| null`                                                                  | Name of the external event the workflow is waiting on.   |
 | `steps`      | `WorkflowStepState[]`                                                             | All step records with individual `status` and `error`.   |

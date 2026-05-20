@@ -20,7 +20,8 @@ Defines a read-only operation. The macro generates a `{PascalCase}Query` struct 
 | `require_role("x")` | Returns a 403 Forbidden error if the user lacks the specified role. |
 | `cache = "30s"` | Enables a per-identity cache with the specified TTL to reduce database load. |
 | `timeout = "30s"` | Sets the maximum execution time. Accepts duration strings: `"30s"`, `"5m"`, `"1h"`. |
-| `rate_limit(requests = N, per = "1m", key = "user")` | Configures rate limiting. `key` values: `"user"`, `"ip"`, `"global"`, `"custom:claim_name"`. |
+| `rate_limit(requests = N, per = "1m", key = "user")` | Configures rate limiting. `key` values: `"user"`, `"ip"`, `"global"`, `"tenant"`, `"user_action"`, `"custom(claim_name)"`. |
+| `description = "..."` | Adds a human-readable description to the function metadata. |
 | `log = "info"` | Sets the log level for handler execution. |
 | `tables("foo", "bar")` | Manually specifies table dependencies to trigger reactive cache invalidation. |
 
@@ -36,14 +37,16 @@ Defines a data-modifying operation. The macro generates a `{PascalCase}Mutation`
 | `transactional` | Wraps the entire operation in a PostgreSQL transaction. **Default: on.** Opt out with `transactional = false` for high-throughput writes that don't need atomicity. Cannot be disabled when using `dispatch_job()` or `start_workflow()`. |
 | `timeout = "30s"` | Sets the handler timeout. Accepts duration strings: `"30s"`, `"5m"`, `"1h"`. |
 | `max_size = "200mb"` | Defines the maximum allowable request body size for this mutation. |
-| `rate_limit(requests = N, per = "1m", key = "user")` | Configures rate limiting. `key` values: `"user"`, `"ip"`, `"global"`, `"custom:claim_name"`. |
+| `rate_limit(requests = N, per = "1m", key = "user")` | Configures rate limiting. `key` values: `"user"`, `"ip"`, `"global"`, `"tenant"`, `"user_action"`, `"custom(claim_name)"`. |
+| `description = "..."` | Adds a human-readable description to the function metadata. |
+| `allow_http` | Permits `ctx.http()` calls inside a transactional mutation (normally a compile error). |
 
 ### `#[forge::job]`
 Defines an asynchronous background task. These tasks are durable and automatically retried upon failure.
 
 **Queue model**: PG-backed (`forge_jobs` table). Workers claim with `FOR UPDATE SKIP LOCKED`, ordered `priority DESC, scheduled_at ASC`. Concurrency bounded by a semaphore (`max_concurrent`, default 8). System jobs (workflow resumes, cron) hold 4 reserved permits so user job floods cannot starve them. Stale `claimed`/`running` jobs without a heartbeat for 5 minutes are released back to `pending` automatically.
 
-**Status lifecycle**: `Pending` → `Claimed` (locked, not yet executing) → `Running` → `Completed` / `Failed` (retries remaining returns to `Pending`) / `DeadLetter` (max_attempts exhausted) / `CancelRequested` → `Cancelled`.
+**Status lifecycle**: `Pending` → `Claimed` (locked, not yet executing) → `Running` → `Completed` / `Failed` (retries remaining → `Retry` → `Pending`) / `DeadLetter` (max_attempts exhausted) / `CancelRequested` → `Cancelled`.
 
 | Attribute | Description and Rationale |
 |---|---|
@@ -62,6 +65,9 @@ Defines a task that runs on a recurring schedule. Execution is guaranteed to hap
 | Attribute | Description and Rationale |
 |---|---|
 | `name = "x"` | Overrides the default registry name (derived from the function name). |
+| `schedule = "0 9 * * *"` | Named form of the positional cron expression. |
+| `every = "5m"` | Sugar for simple interval schedules. Converts to a cron expression internally. |
+| `daily_at = "03:00"` | Sugar for daily schedules at a specific time. |
 | `timezone = "UTC"` | Sets the schedule's timezone. |
 | `group = "default"` | Groups crons for concurrency management. |
 | `timeout = "1h"` | Sets the maximum allowed execution time. |
@@ -78,6 +84,8 @@ Defines a durable, multi-step business process. Workflows are versioned to ensur
 | `active` | Shorthand flag equivalent to `status = "active"`. |
 | `deprecated` | Shorthand flag equivalent to `status = "deprecated"`. |
 | `timeout = "24h"` | Sets the maximum time a workflow run is allowed to execute. |
+| `public` | Skips JWT validation for workflow trigger endpoints. |
+| `require_role("x")` | Restricts who can trigger the workflow. |
 
 ### `#[forge::webhook]`
 Defines an HTTP endpoint for receiving events from external services. The handler is registered at `POST /webhooks/{path}`.
@@ -213,7 +221,7 @@ jwt_audience = "https://api.example.com"  # required by default (audience_requir
 
 [database]
 url = "${DATABASE_URL}"
-max_connections = 20          # default pool size
+pool_size = 20                # default pool size
 
 [gateway]
 max_body_size = "20mb"        # total multipart body cap (default)
@@ -222,7 +230,7 @@ max_file_size = "10mb"        # per-file cap when mutation has no max_size (defa
 
 [worker]
 job_timeout = "1h"            # default per-job timeout
-poll_interval = "100ms"       # fallback poll cadence; wakeups are NOTIFY-driven otherwise
+poll_interval = "5s"          # fallback poll cadence; wakeups are NOTIFY-driven otherwise
 
 # Per-queue worker pool reservations. Reserved queues:
 #   default   — untagged user jobs                  (default: 8 workers)
@@ -250,7 +258,7 @@ mode = "hybrid"               # "hybrid" (default, per-node DashMap for user/ip)
 debounce_quiet_window = "50ms"       # coalesce window for change notifications
 debounce_max_wait = "200ms"          # max wait before forcing a flush
 max_concurrent_reexecutions = 64     # parallel query re-runs during invalidation
-resync_interval = "60s"              # periodic sweep to recover dropped NOTIFYs; "0s" disables
+resync_interval = "600s"             # periodic sweep to recover dropped NOTIFYs (10 min); "0s" disables
 postgres_change_buffer_size = 1024   # broadcast channel buffer for raw PG change events
 subscription_max_per_session = 100   # max subscriptions a single SSE client may hold
 sse_max_sessions = 10000             # max concurrent SSE sessions across all clients
@@ -351,9 +359,9 @@ All `/_api/admin/*` routes require the `admin` role on `AuthContext`. Every stat
 | `POST` | `/_api/admin/jobs/{id}/force-abort` | Move job to `dead_letter` regardless of state. Use sparingly. |
 | `GET`  | `/_api/admin/workflows?status=&workflow_name=&limit=` | List workflow runs. |
 | `GET`  | `/_api/admin/workflows/{id}` | Inspect a single run with step states. |
-| `POST` | `/_api/admin/workflows/{id}/cancel` | Set `cancel_requested_at` + NOTIFY `forge_workflow_cancelled`; sleeping runs wake within 50 ms and run compensation. Lands in `cancelled_by_operator`. |
+| `POST` | `/_api/admin/workflows/{id}/cancel` | Set `cancel_requested_at` + NOTIFY `forge_workflow_wakeup`; sleeping runs wake within 50 ms and run compensation. Lands in `cancelled_by_operator`. |
 | `POST` | `/_api/admin/workflows/{id}/retry` | Re-pin a `blocked_*` run to the active version after signature reconciliation. |
-| `POST` | `/_api/admin/workflows/{id}/force-abort` | Move run to `retired_unresumable` without compensation. |
+| `POST` | `/_api/admin/workflows/{id}/force-abort` | Move run to `cancelled_by_operator` without compensation. |
 | `GET`  | `/_api/admin/queues` | List queues with reserved worker pool size, paused flag, depth. |
 | `POST` | `/_api/admin/queues/{name}/pause` | Insert into `forge_paused_queues`; claim SQL skips entries via `NOT EXISTS`. In-flight work finishes. |
 | `POST` | `/_api/admin/queues/{name}/resume` | Remove the queue from `forge_paused_queues`. |
@@ -368,11 +376,11 @@ One binary runs all subsystems: gateway (Axum HTTP), function executor, job work
 
 **Node roles** (`[node] roles = [...]`): `gateway` (HTTP server), `function` (query/mutation execution), `worker` (job processing), `scheduler` (cron, leader-only). Default is all four. Omit `worker` on API nodes, omit `gateway` on dedicated worker nodes.
 
-**Cluster config** (`[cluster]`): `discovery = "postgres"` (only supported backend), `heartbeat_interval` (default `"5s"`), `dead_threshold` (default `"15s"`). No extra infrastructure beyond PostgreSQL.
+**Cluster config** (`[cluster]`): `discovery = "postgres"` (also supports `"dns"`, `"kubernetes"`, and `"static"`), `heartbeat_interval` (default `"5s"`), `dead_threshold` (default `"15s"`). No extra infrastructure beyond PostgreSQL.
 
 **Minimum production**: 2 nodes (all roles) + PostgreSQL + load balancer routing on `/_api/ready`. One node wins the scheduler advisory lock; the other stands by. If the leader crashes, the lock releases when its PG connection closes and the standby acquires within the next heartbeat interval (default 5 s).
 
-**Daemon leader election**: daemons marked leader-elected get an advisory lock derived from the daemon's name via FNV-1a hash (`0x464F52474000` namespace). Stable across restarts; collisions between different daemon names are not possible in practice.
+**Daemon leader election**: daemons marked leader-elected get an advisory lock derived from the daemon's name via FNV-1a hash (offset basis `0x464F52474000`). Stable across restarts; collisions between different daemon names are not possible in practice.
 
 **Required infrastructure**: PostgreSQL 18 only. No Redis, no message bus, no separate scheduler process. Optional: read replicas (`[database.replicas]`), OTLP collector (`[observability]`), PgBouncer/RDS Proxy if approaching `max_connections`.
 
@@ -478,7 +486,7 @@ The resolver is called once per `require_role` check. Cache expensive lookups in
 Testing: use `.with_tenant(uuid)` on any test context builder.
 
 ## Duration Formats
-Time durations can be expressed as `500ms`, `30s`, `5m`, `2h`, `7d`, or a bare number representing seconds. Note that `query`, `mutation`, and `mcp_tool` timeout attributes specifically require a bare `u64` integer representing seconds.
+Time durations can be expressed as `500ms`, `30s`, `5m`, `2h`, `7d`, or a bare number representing seconds. All handler timeout attributes accept these duration strings.
 
 ## Context Capability Matrix
 
@@ -494,7 +502,8 @@ Each handler type receives a specific context object providing access to framewo
 | `dispatch_job` | — | yes | — | — | — | yes | yes | yes |
 | `issue_token_pair` | — | yes | — | — | — | — | — | — |
 | `step()` / `sleep()` | — | — | — | — | yes | — | — | — |
-| `heartbeat()` / `save()` | — | — | yes | — | — | yes | — | — |
+| `heartbeat()` | — | — | yes | — | — | yes | — | — |
+| `save()` | — | — | yes | — | — | — | — | — |
 | `EnvAccess` | yes | yes | yes | yes | yes | yes | yes | yes |
 
 ### Context Usage Notes
@@ -519,6 +528,9 @@ The canonical status mapping lives on `ForgeError::http_status() -> u16`. Downst
 | `Timeout` | 504 | `TIMEOUT` | Operation exceeded its allotted time. |
 | `RateLimitExceeded` | 429 | `RATE_LIMITED` | Too many requests from the same identity. Includes top-level `retry_after_secs` on the wire. |
 | `JobCancelled` | 409 | `JOB_CANCELLED` | Job was cancelled before it could complete. |
+| `Conflict` | 409 | `CONFLICT` | Resource state conflicts with the requested operation. |
+| `UnprocessableEntity` | 422 | `UNPROCESSABLE_ENTITY` | Request is syntactically valid but semantically invalid. |
+| `ServiceUnavailable` | 503 | `SERVICE_UNAVAILABLE` | Service temporarily unable to handle the request. |
 | `Internal` / all others | 500 | `INTERNAL_ERROR` | Server-side error; details never leak to clients. |
 
 ## CLI Command Reference
@@ -561,7 +573,7 @@ Subsystems are feature-gated; default is `full`. Opt out with `default-features 
 forgex = { version = "0.9", default-features = false, features = ["worker"] }
 ```
 
-`#[forge::job/cron/workflow/daemon/webhook/mcp_tool]` without the matching feature errors at the generated `forge::Auto{Job,Cron,Workflow,Daemon,Webhook,McpTool}` reference. Without `otel`, `tracing-subscriber` still logs to stderr. `geoip` fetches a ~10 MB DB at compile time — disable for air-gapped builds or when not using signals.
+`#[forge::job/cron/workflow/daemon/webhook/mcp_tool]` without the matching feature errors at the generated `forge::AutoHandler` reference. Without `otel`, `tracing-subscriber` still logs to stderr. `geoip` fetches a ~10 MB DB at compile time — disable for air-gapped builds or when not using signals.
 
 ## Build Profiles
 
@@ -585,7 +597,7 @@ Full catalog at `docs/docs/reference/observability-catalog.mdx`. Key points for 
 
 **Stable span names**: `http.request`, `fn.execute`, `db.query`, `db.transaction`, `job.execute`, `cron.tick`, `cron.execute`, `daemon.lifecycle`, `daemon.execute`.
 
-**Workflow signature (frozen)**: FNV-1a 64-bit hash of: name → version → step keys (sorted) → wait keys (sorted) → timeout_secs (u64 LE) → input type string → output type string. Never add fields to this derivation.
+**Workflow signature (frozen)**: blake3 hash (128-bit, truncated) of: name → version → step keys (sorted) → wait keys (sorted) → timeout_secs (u64 LE) → input type string → output type string. Never add fields to this derivation.
 
 **Step name rules**: string literals only, max 64 chars, `[a-zA-Z0-9_-]`.
 

@@ -71,8 +71,8 @@ test("export job and verification workflow complete from the UI", async ({
   const exportSection = page.locator("section", {
     has: page.getByText("Export Job"),
   });
-  // Jobs run as background tasks with polling, so they need more time than simple CRUD
-  const JOB_TIMEOUT = 15_000;
+  // Export job has ~8s of artificial delays (10 × 800ms) plus DB/SSE overhead
+  const JOB_TIMEOUT = 30_000;
 
   await exportSection.getByRole("button", { name: "Start Export" }).click();
   await expect(exportSection.getByText(/Export complete/i)).toBeVisible({

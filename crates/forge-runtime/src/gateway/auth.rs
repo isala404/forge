@@ -178,10 +178,9 @@ impl AuthConfig {
             .as_deref()
             .is_some_and(|v| v.eq_ignore_ascii_case("production"))
         {
-            return Err(forge_core::ForgeError::Config(
+            return Err(forge_core::ForgeError::config(
                 "AuthConfig::dev_mode() refused: FORGE_ENV=production. \
-                 Configure a real jwt_secret or jwks_url instead."
-                    .into(),
+                 Configure a real jwt_secret or jwks_url instead.",
             ));
         }
         if env
@@ -189,10 +188,9 @@ impl AuthConfig {
             .as_deref()
             .is_some_and(|v| v.eq_ignore_ascii_case("production"))
         {
-            return Err(forge_core::ForgeError::Config(
+            return Err(forge_core::ForgeError::config(
                 "AuthConfig::dev_mode() refused: NODE_ENV=production detected. \
-                 Configure a real jwt_secret or jwks_url instead."
-                    .into(),
+                 Configure a real jwt_secret or jwks_url instead.",
             ));
         }
         let indicators = [
@@ -204,7 +202,7 @@ impl AuthConfig {
         ];
         for (name, val) in &indicators {
             if val.is_some() {
-                return Err(forge_core::ForgeError::Config(
+                return Err(forge_core::ForgeError::config(
                     format!(
                         "AuthConfig::dev_mode() refused: {name} is set, indicating a production \
                          environment. Configure a real jwt_secret or jwks_url instead."
@@ -329,7 +327,7 @@ impl forge_core::TokenIssuer for HmacTokenIssuer {
             claims,
             &jsonwebtoken::EncodingKey::from_secret(self.secret.as_bytes()),
         )
-        .map_err(|e| forge_core::ForgeError::Internal(format!("token signing error: {e}")))
+        .map_err(|e| forge_core::ForgeError::internal_with("token signing error", e))
     }
 }
 
@@ -1105,7 +1103,7 @@ mod tests {
             forge_env: Some("production".into()),
             ..DevModeEnv::default()
         });
-        assert!(matches!(result, Err(forge_core::ForgeError::Config(_))));
+        assert!(matches!(result, Err(forge_core::ForgeError::Config { .. })));
     }
 
     #[test]
@@ -1115,7 +1113,7 @@ mod tests {
                 forge_env: Some(v.into()),
                 ..DevModeEnv::default()
             });
-            assert!(matches!(result, Err(forge_core::ForgeError::Config(_))));
+            assert!(matches!(result, Err(forge_core::ForgeError::Config { .. })));
         }
     }
 
@@ -1125,7 +1123,7 @@ mod tests {
             node_env: Some("production".into()),
             ..DevModeEnv::default()
         });
-        assert!(matches!(result, Err(forge_core::ForgeError::Config(_))));
+        assert!(matches!(result, Err(forge_core::ForgeError::Config { .. })));
     }
 
     #[test]
@@ -1148,7 +1146,7 @@ mod tests {
             }
             let result = AuthConfig::dev_mode_with_env(env);
             assert!(
-                matches!(result, Err(forge_core::ForgeError::Config(_))),
+                matches!(result, Err(forge_core::ForgeError::Config { .. })),
                 "{field} should block dev mode"
             );
         }

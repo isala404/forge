@@ -19,7 +19,7 @@ forge new [project-name] --template <id> [options]
 | `--template <id>`    | Required template id copied from the embedded example catalog    |
 | `--output, -o <dir>` | Output directory (defaults to project name)                      |
 | `--no-lock`          | Skip generating `Cargo.lock` before the initial commit           |
-| `--include-skill`    | Run the skill installer non-interactively after project creation |
+| `--yes, -y`          | Accept all prompts non-interactively (skips confirmations during project creation) |
 
 ### 2. Scaffold a handler in an existing project
 
@@ -61,11 +61,14 @@ forge new my-app --template with-svelte/demo --output /path/to/projects/my-app
 
 After scaffolding the project directory, `forge new` automatically:
 
-1. Runs `git init` and creates an initial commit
-2. Runs `forge generate -y` to produce frontend bindings
+1. Installs frontend dependencies (`bun install`)
+2. Runs `forge generate` to produce frontend bindings
 3. Runs `cargo fmt` and `bun run format` to normalize code style
+4. Generates `Cargo.lock` (optional, skipped with `--no-lock`)
+5. Runs the skill installer if applicable
+6. Runs `git init` and creates an initial commit
 
-If a formatter binary is not installed (e.g., `bun` is missing), the command prints a warning and continues. The project is still fully usable.
+If a step's binary is not installed (e.g., `bun` is missing), the command prints a warning and continues. The project is still fully usable.
 
 ---
 

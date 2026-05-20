@@ -16,7 +16,7 @@ use super::message::{
     JobData, RealtimeConfig, RealtimeMessage, SessionServer, WorkflowData, WorkflowStepData,
 };
 use crate::function::{FunctionEntry, FunctionRegistry};
-use crate::pg::Database;
+use crate::pg::{Database, PgNotifyBus};
 
 #[derive(Debug, Clone)]
 pub struct ReactorConfig {
@@ -107,6 +107,7 @@ pub struct Reactor {
     subscription_manager: Arc<SubscriptionManager>,
     session_server: Arc<SessionServer>,
     change_listener: Arc<ChangeListener>,
+    notify_bus: Arc<PgNotifyBus>,
     invalidation_engine: Arc<InvalidationEngine>,
     /// Job subscriptions: job_id -> list of subscribers.
     job_subscriptions: Arc<RwLock<HashMap<Uuid, Vec<JobSubscription>>>>,
@@ -119,6 +120,7 @@ pub struct Reactor {
     /// Enables O(1) cleanup in `remove_session` instead of scanning all entries.
     session_workflow_ids: Arc<RwLock<HashMap<SessionId, HashSet<Uuid>>>>,
     shutdown_tx: broadcast::Sender<()>,
+    bus_shutdown_tx: tokio::sync::watch::Sender<bool>,
     max_listener_restarts: u32,
     listener_restart_delay_ms: u64,
     max_concurrent_reexecutions: usize,
@@ -136,6 +138,7 @@ impl Reactor {
         database: Arc<Database>,
         registry: FunctionRegistry,
         config: ReactorConfig,
+        notify_bus: Arc<PgNotifyBus>,
     ) -> Self {
         let subscription_manager = Arc::new(SubscriptionManager::with_config(
             config.realtime.max_subscriptions_per_session,
@@ -152,6 +155,7 @@ impl Reactor {
             config.invalidation,
         ));
         let (shutdown_tx, _) = broadcast::channel(1);
+        let (bus_shutdown_tx, _) = tokio::sync::watch::channel(false);
 
         Self {
             node_id,
@@ -160,12 +164,14 @@ impl Reactor {
             subscription_manager,
             session_server,
             change_listener,
+            notify_bus,
             invalidation_engine,
             job_subscriptions: Arc::new(RwLock::new(HashMap::new())),
             workflow_subscriptions: Arc::new(RwLock::new(HashMap::new())),
             session_job_ids: Arc::new(RwLock::new(HashMap::new())),
             session_workflow_ids: Arc::new(RwLock::new(HashMap::new())),
             shutdown_tx,
+            bus_shutdown_tx,
             max_listener_restarts: config.max_listener_restarts,
             listener_restart_delay_ms: config.listener_restart_delay_ms,
             max_concurrent_reexecutions: config.max_concurrent_reexecutions,
@@ -749,7 +755,14 @@ impl Reactor {
 
     /// Start the reactor.
     pub async fn start(&self) -> forge_core::Result<()> {
+        let bus = self.notify_bus.clone();
+        let bus_shutdown_rx = self.bus_shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            bus.run(bus_shutdown_rx).await;
+        });
+
         let listener = self.change_listener.clone();
+        let notify_bus = self.notify_bus.clone();
         let invalidation_engine = self.invalidation_engine.clone();
         let subscription_manager = self.subscription_manager.clone();
         let job_subscriptions = self.job_subscriptions.clone();
@@ -777,9 +790,10 @@ impl Reactor {
 
             // Start initial listener
             let listener_clone = listener.clone();
+            let bus_clone = notify_bus.clone();
             let error_tx = listener_error_tx.clone();
             let mut listener_handle = Some(tokio::spawn(async move {
-                if let Err(e) = listener_clone.run().await {
+                if let Err(e) = listener_clone.run(&bus_clone).await {
                     let _ = error_tx.send(format!("Change listener error: {}", e)).await;
                 }
             }));
@@ -898,6 +912,15 @@ impl Reactor {
                             wf_subs.retain(|_, v| !v.is_empty());
                         }
                         Self::trim_change_log(database.read_pool()).await;
+
+                        // Emit subscription cardinality gauges on the cleanup
+                        // cadence so dashboards show steady-state counts.
+                        let counts = subscription_manager.counts();
+                        crate::observability::record_subscription_counts(
+                            counts.total,
+                            counts.unique_queries,
+                            counts.indexed_tables,
+                        );
                     }
                     _ = resync_interval.tick(), if resync_secs != 0 => {
                         Self::resync_all_groups(
@@ -932,13 +955,14 @@ impl Reactor {
                         tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
 
                         let listener_clone = listener.clone();
+                        let bus_clone = notify_bus.clone();
                         let error_tx = listener_error_tx.clone();
                         if let Some(handle) = listener_handle.take() {
                             handle.abort();
                         }
                         change_rx = listener.subscribe();
                         listener_handle = Some(tokio::spawn(async move {
-                            if let Err(e) = listener_clone.run().await {
+                            if let Err(e) = listener_clone.run(&bus_clone).await {
                                 let _ = error_tx.send(format!("Change listener error: {}", e)).await;
                             }
                         }));
@@ -975,6 +999,20 @@ impl Reactor {
                 if let Some(job_id) = change.row_id {
                     Self::handle_job_change(job_id, job_subscriptions, session_server, db_pool)
                         .await;
+                } else {
+                    // Statement-level trigger: refresh all active job subscriptions
+                    let subs = job_subscriptions.read().await;
+                    let job_ids: Vec<Uuid> = subs.keys().copied().collect();
+                    drop(subs);
+                    for job_id in job_ids {
+                        Self::handle_job_change(
+                            job_id,
+                            job_subscriptions,
+                            session_server,
+                            db_pool,
+                        )
+                        .await;
+                    }
                 }
                 return;
             }
@@ -987,6 +1025,19 @@ impl Reactor {
                         db_pool,
                     )
                     .await;
+                } else {
+                    let subs = workflow_subscriptions.read().await;
+                    let workflow_ids: Vec<Uuid> = subs.keys().copied().collect();
+                    drop(subs);
+                    for workflow_id in workflow_ids {
+                        Self::handle_workflow_change(
+                            workflow_id,
+                            workflow_subscriptions,
+                            session_server,
+                            db_pool,
+                        )
+                        .await;
+                    }
                 }
                 return;
             }
@@ -999,6 +1050,19 @@ impl Reactor {
                         db_pool,
                     )
                     .await;
+                } else {
+                    let subs = workflow_subscriptions.read().await;
+                    let workflow_ids: Vec<Uuid> = subs.keys().copied().collect();
+                    drop(subs);
+                    for workflow_id in workflow_ids {
+                        Self::handle_workflow_change(
+                            workflow_id,
+                            workflow_subscriptions,
+                            session_server,
+                            db_pool,
+                        )
+                        .await;
+                    }
                 }
                 return;
             }
@@ -1429,6 +1493,7 @@ impl Reactor {
 
     pub fn stop(&self) {
         let _ = self.shutdown_tx.send(());
+        let _ = self.bus_shutdown_tx.send(true);
         self.change_listener.stop();
     }
 

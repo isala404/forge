@@ -279,7 +279,7 @@ impl SessionServer {
         sender
             .send(message)
             .await
-            .map_err(|_| forge_core::ForgeError::Internal("Failed to send message".to_string()))
+            .map_err(|_| forge_core::ForgeError::internal("Failed to send message"))
     }
 
     /// Send a delta to all sessions subscribed to a subscription.

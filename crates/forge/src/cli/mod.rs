@@ -12,6 +12,7 @@ mod template;
 mod template_catalog;
 mod test;
 mod ui;
+mod webhook;
 
 pub use check::CheckCommand;
 pub use doctor::DoctorCommand;
@@ -20,6 +21,7 @@ pub use generate::GenerateCommand;
 pub use migrate::MigrateCommand;
 pub use new::NewCommand;
 pub use test::TestCommand;
+pub use webhook::WebhookCommand;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -83,6 +85,9 @@ pub enum Commands {
 
     /// Print shell-init snippets (eval "$(forge env)")
     Env(EnvCommand),
+
+    /// Manage webhooks (list events, replay failed deliveries)
+    Webhook(WebhookCommand),
 }
 
 impl Cli {
@@ -96,6 +101,7 @@ impl Cli {
             Commands::Migrate(cmd) => cmd.execute().await,
             Commands::Doctor(cmd) => cmd.execute().await,
             Commands::Env(cmd) => cmd.execute().await,
+            Commands::Webhook(cmd) => cmd.execute().await.map_err(|e| anyhow::anyhow!("{e}")),
         }
     }
 }

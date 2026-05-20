@@ -566,24 +566,8 @@ fn extract_name_value(s: &str) -> Option<String> {
 // Pluralization
 // ---------------------------------------------------------------------------
 
-/// Simple English pluralization for table names.
 fn pluralize(s: &str) -> String {
-    if s.ends_with('s')
-        || s.ends_with("sh")
-        || s.ends_with("ch")
-        || s.ends_with('x')
-        || s.ends_with('z')
-    {
-        format!("{}es", s)
-    } else if let Some(stem) = s.strip_suffix('y') {
-        if !s.ends_with("ay") && !s.ends_with("ey") && !s.ends_with("oy") && !s.ends_with("uy") {
-            format!("{}ies", stem)
-        } else {
-            format!("{}s", s)
-        }
-    } else {
-        format!("{}s", s)
-    }
+    forge_core::util::pluralize(s)
 }
 
 #[cfg(test)]

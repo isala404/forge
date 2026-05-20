@@ -117,7 +117,7 @@ pub use pg::{
     AppliedMigration, Database, DriftStatus, Migration, MigrationRunner, MigrationStatus,
     load_migrations_from_dir,
 };
-pub use pg::{LeaderConfig, LeaderElection};
+pub use pg::{LeaderConfig, LeaderElection, PgNotifyBus};
 pub use rate_limit::{HybridRateLimiter, StrictRateLimiter};
 
 #[cfg(feature = "cron")]

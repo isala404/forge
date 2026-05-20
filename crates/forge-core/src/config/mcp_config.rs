@@ -95,24 +95,24 @@ impl McpConfig {
     /// Validate the MCP configuration.
     pub fn validate(&self) -> Result<()> {
         if self.path.is_empty() || !self.path.starts_with('/') {
-            return Err(ForgeError::Config(
-                "mcp.path must start with '/' (example: /mcp)".to_string(),
+            return Err(ForgeError::config(
+                "mcp.path must start with '/' (example: /mcp)",
             ));
         }
         if self.path.contains(' ') {
-            return Err(ForgeError::Config(
-                "mcp.path cannot contain spaces".to_string(),
+            return Err(ForgeError::config(
+                "mcp.path cannot contain spaces",
             ));
         }
         if Self::RESERVED_PATHS.contains(&self.path.as_str()) {
-            return Err(ForgeError::Config(format!(
+            return Err(ForgeError::config(format!(
                 "mcp.path '{}' conflicts with a reserved gateway route",
                 self.path
             )));
         }
         if self.session_ttl.as_secs() == 0 {
-            return Err(ForgeError::Config(
-                "mcp.session_ttl must be greater than 0".to_string(),
+            return Err(ForgeError::config(
+                "mcp.session_ttl must be greater than 0",
             ));
         }
         Ok(())

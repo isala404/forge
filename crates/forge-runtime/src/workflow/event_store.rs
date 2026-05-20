@@ -66,6 +66,31 @@ impl EventStore {
         correlation_id: &str,
         workflow_run_id: Uuid,
     ) -> Result<Option<WorkflowEvent>> {
+        Self::consume_event_in_conn(
+            &mut *self
+                .pool
+                .acquire()
+                .await
+                .map_err(ForgeError::Database)?,
+            event_name,
+            correlation_id,
+            workflow_run_id,
+        )
+        .await
+    }
+
+    /// Consume an event on an existing connection (typically inside a transaction).
+    ///
+    /// Callers that need consume + claim + enqueue to be atomic should open a
+    /// transaction and pass the connection here so all three writes share one
+    /// transaction boundary — one network round-trip instead of three separate
+    /// autocommit statements.
+    pub async fn consume_event_in_conn(
+        conn: &mut sqlx::PgConnection,
+        event_name: &str,
+        correlation_id: &str,
+        workflow_run_id: Uuid,
+    ) -> Result<Option<WorkflowEvent>> {
         let result = sqlx::query!(
             r#"
                 UPDATE forge_workflow_events
@@ -82,7 +107,7 @@ impl EventStore {
             correlation_id,
             workflow_run_id
         )
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *conn)
         .await
         .map_err(ForgeError::Database)?;
 

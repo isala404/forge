@@ -101,6 +101,7 @@ where
                 MAX_PAYLOAD_BYTES,
             )));
         }
+        crate::observability::record_notify_payload_bytes(self.name, body.len());
         sqlx::query!("SELECT pg_notify($1, $2)", self.name, &body)
             .execute(executor)
             .await

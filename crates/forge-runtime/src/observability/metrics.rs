@@ -1,6 +1,6 @@
 use opentelemetry::{
     KeyValue, global,
-    metrics::{Counter, Histogram, UpDownCounter},
+    metrics::{Counter, Gauge, Histogram, UpDownCounter},
 };
 use std::sync::OnceLock;
 
@@ -11,6 +11,9 @@ static FN_METRICS: OnceLock<FnMetrics> = OnceLock::new();
 static FN_CACHE_METRICS: OnceLock<FnCacheMetrics> = OnceLock::new();
 static JOB_METRICS: OnceLock<JobMetrics> = OnceLock::new();
 static CONNECTIONS_GAUGE: OnceLock<ActiveConnectionsGauge> = OnceLock::new();
+static NOTIFY_METRICS: OnceLock<NotifyMetrics> = OnceLock::new();
+static SUBSCRIPTION_METRICS: OnceLock<SubscriptionMetrics> = OnceLock::new();
+static WORKFLOW_SCHEDULER_METRICS: OnceLock<WorkflowSchedulerMetrics> = OnceLock::new();
 
 pub struct HttpMetrics {
     requests_total: Counter<u64>,
@@ -225,6 +228,122 @@ impl ActiveConnectionsGauge {
     }
 }
 
+/// Metrics for PostgreSQL NOTIFY payload sizes.
+///
+/// The PG NOTIFY payload ceiling is 8 KiB. `NotifyChannel` enforces a 7 KiB
+/// soft limit but payload growth is invisible without a metric. Tracking
+/// payload bytes makes it easy to spot channels approaching the truncation
+/// boundary before they hit it in production.
+pub struct NotifyMetrics {
+    /// Histogram of serialized payload sizes in bytes, labelled by channel.
+    payload_bytes: Histogram<u64>,
+}
+
+impl NotifyMetrics {
+    fn new() -> Self {
+        let meter = global::meter(METER_NAME);
+
+        let payload_bytes = meter
+            .u64_histogram("notify.payload_bytes")
+            .with_description(
+                "Size of PostgreSQL NOTIFY payloads in bytes. \
+                 Payloads approaching 7168 bytes (the NotifyChannel soft limit) \
+                 risk hitting the 8000-byte PostgreSQL hard ceiling.",
+            )
+            .with_unit("By")
+            .build();
+
+        Self { payload_bytes }
+    }
+
+    pub fn record(&self, channel: &str, bytes: usize) {
+        self.payload_bytes.record(
+            bytes as u64,
+            &[KeyValue::new("channel", channel.to_string())],
+        );
+    }
+}
+
+/// Metrics for the realtime subscription manager.
+///
+/// These gauges are updated on the cleanup interval (every 60 s by default)
+/// so they reflect steady-state cardinality rather than per-event churn.
+pub struct SubscriptionMetrics {
+    /// Total number of active subscribers across all groups.
+    subscribers_total: Gauge<i64>,
+    /// Number of unique query groups (deduplicated by query+args+auth).
+    groups_total: Gauge<i64>,
+    /// Number of tables currently indexed by the subscription manager.
+    tables_indexed: Gauge<i64>,
+}
+
+impl SubscriptionMetrics {
+    fn new() -> Self {
+        let meter = global::meter(METER_NAME);
+
+        let subscribers_total = meter
+            .i64_gauge("subscriptions.subscribers_total")
+            .with_description("Total active SSE subscribers across all query groups")
+            .build();
+
+        let groups_total = meter
+            .i64_gauge("subscriptions.groups_total")
+            .with_description(
+                "Number of unique query groups (query+args+auth combinations). \
+                 Each group re-executes independently on invalidation.",
+            )
+            .build();
+
+        let tables_indexed = meter
+            .i64_gauge("subscriptions.tables_indexed")
+            .with_description(
+                "Number of tables currently tracked in the subscription inverted index. \
+                 A NOTIFY on an un-indexed table is a no-op for the reactor.",
+            )
+            .build();
+
+        Self {
+            subscribers_total,
+            groups_total,
+            tables_indexed,
+        }
+    }
+
+    pub fn record(&self, subscribers: usize, groups: usize, tables: usize) {
+        self.subscribers_total.record(subscribers as i64, &[]);
+        self.groups_total.record(groups as i64, &[]);
+        self.tables_indexed.record(tables as i64, &[]);
+    }
+}
+
+/// Metrics for the workflow scheduler's `process_ready_workflows` loop.
+pub struct WorkflowSchedulerMetrics {
+    /// How long each `process_ready_workflows` call takes end-to-end.
+    processing_duration: Histogram<f64>,
+}
+
+impl WorkflowSchedulerMetrics {
+    fn new() -> Self {
+        let meter = global::meter(METER_NAME);
+
+        let processing_duration = meter
+            .f64_histogram("workflow.scheduler.processing_duration_seconds")
+            .with_description(
+                "Duration of each workflow scheduler processing cycle (cancel scan, \
+                 timer wakeups, event wakeups). Sustained high values indicate the \
+                 scheduler is falling behind the poll interval.",
+            )
+            .with_unit("s")
+            .build();
+
+        Self { processing_duration }
+    }
+
+    pub fn record_processing_duration(&self, duration_secs: f64) {
+        self.processing_duration.record(duration_secs, &[]);
+    }
+}
+
 fn http_metrics() -> &'static HttpMetrics {
     HTTP_METRICS.get_or_init(HttpMetrics::new)
 }
@@ -243,6 +362,18 @@ fn job_metrics() -> &'static JobMetrics {
 
 fn connections_gauge() -> &'static ActiveConnectionsGauge {
     CONNECTIONS_GAUGE.get_or_init(ActiveConnectionsGauge::new)
+}
+
+fn notify_metrics() -> &'static NotifyMetrics {
+    NOTIFY_METRICS.get_or_init(NotifyMetrics::new)
+}
+
+fn subscription_metrics() -> &'static SubscriptionMetrics {
+    SUBSCRIPTION_METRICS.get_or_init(SubscriptionMetrics::new)
+}
+
+fn workflow_scheduler_metrics() -> &'static WorkflowSchedulerMetrics {
+    WORKFLOW_SCHEDULER_METRICS.get_or_init(WorkflowSchedulerMetrics::new)
 }
 
 pub fn record_http_request(method: &str, path: &str, status: u16, duration_secs: f64) {
@@ -275,6 +406,23 @@ pub fn set_active_connections(connection_type: &'static str, delta: i64) {
     connections_gauge().set(connection_type, delta);
 }
 
+/// Record the size of a NOTIFY payload before it is sent.
+pub fn record_notify_payload_bytes(channel: &str, bytes: usize) {
+    notify_metrics().record(channel, bytes);
+}
+
+/// Update subscription cardinality gauges. Call periodically (e.g. on the
+/// cleanup interval) rather than on every subscribe/unsubscribe to avoid
+/// per-event overhead.
+pub fn record_subscription_counts(subscribers: usize, groups: usize, tables: usize) {
+    subscription_metrics().record(subscribers, groups, tables);
+}
+
+/// Record the wall-clock duration of one workflow scheduler processing cycle.
+pub fn record_workflow_scheduler_duration(duration_secs: f64) {
+    workflow_scheduler_metrics().record_processing_duration(duration_secs);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,5 +440,20 @@ mod tests {
     #[test]
     fn test_connections_gauge_creation() {
         let _gauge = ActiveConnectionsGauge::new();
+    }
+
+    #[test]
+    fn test_notify_metrics_creation() {
+        let _metrics = NotifyMetrics::new();
+    }
+
+    #[test]
+    fn test_subscription_metrics_creation() {
+        let _metrics = SubscriptionMetrics::new();
+    }
+
+    #[test]
+    fn test_workflow_scheduler_metrics_creation() {
+        let _metrics = WorkflowSchedulerMetrics::new();
     }
 }

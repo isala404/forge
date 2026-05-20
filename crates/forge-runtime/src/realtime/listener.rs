@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use tokio::sync::{broadcast, watch};
 
 use forge_core::realtime::Change;
+use crate::pg::PgNotifyBus;
 
 // Reserved Forge-owned NOTIFY channels. Documented here so apps don't squat
 // on these names with their own LISTEN/NOTIFY traffic before the runtime
@@ -170,25 +171,18 @@ impl ChangeListener {
     }
 
     /// Run the listener loop.
-    pub async fn run(&self) -> forge_core::Result<()> {
+    pub async fn run(&self, bus: &PgNotifyBus) -> forge_core::Result<()> {
+        let Some(mut rx) = bus.subscribe(&self.config.channel) else {
+            return Err(forge_core::ForgeError::config(format!(
+                "PgNotifyBus not configured for channel '{}'",
+                self.config.channel
+            )));
+        };
+
         self.running.store(true, Ordering::SeqCst);
 
-        // Create a dedicated listener connection
-        let mut listener = sqlx::postgres::PgListener::connect_with(&self.pool)
-            .await
-            .map_err(forge_core::ForgeError::Database)?;
-
-        // Subscribe BEFORE seeding last_seq so the LISTEN buffer covers any
+        // Seed last_seq AFTER subscribing so the broadcast buffer covers any
         // changes appended after we snapshot max_seq.
-        listener
-            .listen(&self.config.channel)
-            .await
-            .map_err(forge_core::ForgeError::Database)?;
-
-        // Seed last_seq from the current log high-water mark so that if the
-        // listener disconnects shortly after startup, `replay_missed` can
-        // recover gaps relative to a meaningful baseline instead of giving up
-        // on its zero-sentinel check.
         if self.last_seq.load(Ordering::Relaxed) == 0
             && let Ok(Some(seq)) = crate::pg::max_seq(&self.pool).await
         {
@@ -201,11 +195,11 @@ impl ChangeListener {
 
         loop {
             tokio::select! {
-                notification = listener.recv() => {
-                    match notification {
-                        Ok(notification) => {
+                result = rx.recv() => {
+                    match result {
+                        Ok(payload) => {
                             let recv_time = std::time::Instant::now();
-                            if let Some((change, seq)) = self.parse_notification(notification.payload()) {
+                            if let Some((change, seq)) = self.parse_notification(&payload) {
                                 // Skip already-processed seqs to prevent
                                 // double-processing during the seed window.
                                 if seq > 0 && seq <= self.last_seq.load(Ordering::Relaxed) {
@@ -219,13 +213,16 @@ impl ChangeListener {
                                 }
                                 crate::cluster::metrics::record_notification_latency(recv_time.elapsed().as_secs_f64());
                             } else {
-                                tracing::debug!(payload = %notification.payload(), "Failed to parse notification");
+                                tracing::debug!(payload = %payload, "Failed to parse notification");
                             }
                         }
-                        Err(e) => {
-                            tracing::debug!(error = %e, "Error receiving notification, attempting recovery");
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::debug!(missed = n, "Change listener lagged, attempting recovery");
                             self.replay_missed().await;
-                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            tracing::debug!("Change listener shutting down");
+                            break;
                         }
                     }
                 }
@@ -244,11 +241,21 @@ impl ChangeListener {
 
     /// Parse a notification payload into a Change and optional sequence number.
     ///
-    /// v1 format: `v1:table:OP:row_id[:col1,col2,...][#seq]`
+    /// Row-level format: `v1:table:OP:row_id[:col1,col2,...][#seq]`
+    /// Statement-level format: `v1s:table:OP`
+    ///
     /// The `#seq` suffix is appended by the v002 trigger and enables gap
     /// recovery from `forge_change_log`. Pre-v002 payloads without `#seq`
-    /// still parse correctly (seq = 0).
+    /// still parse correctly (seq = 0). Statement-level payloads never
+    /// carry a seq (no change-log row is written).
     fn parse_notification(&self, payload: &str) -> Option<(Change, i64)> {
+        if let Some(body) = payload.strip_prefix("v1s:") {
+            let parts: Vec<&str> = body.split(':').collect();
+            let table = parts.first()?;
+            let operation = parts.get(1)?.parse().ok()?;
+            return Some((Change::new(table.to_string(), operation), 0));
+        }
+
         // Split off the optional #seq suffix
         let (body_with_version, seq) = match payload.rsplit_once('#') {
             Some((prefix, seq_str)) => match seq_str.parse::<i64>() {
@@ -434,6 +441,27 @@ mod tests {
         let listener = make_listener();
         let payload = "v1:projects:NUKE:550e8400-e29b-41d4-a716-446655440000";
         assert!(listener.parse_notification(payload).is_none());
+    }
+
+    #[tokio::test]
+    async fn parse_statement_level_notification() {
+        let listener = make_listener();
+        let payload = "v1s:orders:INSERT";
+        let (change, seq) = listener.parse_notification(payload).unwrap();
+        assert_eq!(change.table, "orders");
+        assert_eq!(change.operation, ChangeOperation::Insert);
+        assert!(change.row_id.is_none());
+        assert!(change.changed_columns.is_empty());
+        assert_eq!(seq, 0);
+    }
+
+    #[tokio::test]
+    async fn parse_statement_level_update() {
+        let listener = make_listener();
+        let payload = "v1s:users:UPDATE";
+        let (change, _) = listener.parse_notification(payload).unwrap();
+        assert_eq!(change.table, "users");
+        assert_eq!(change.operation, ChangeOperation::Update);
     }
 
     #[tokio::test]

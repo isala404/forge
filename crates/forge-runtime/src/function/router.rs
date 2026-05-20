@@ -430,7 +430,7 @@ impl FunctionRouter {
         }
         let serialized_len = json_byte_length(value);
         if serialized_len > self.max_result_size_bytes {
-            return Err(ForgeError::Internal(format!(
+            return Err(ForgeError::internal(format!(
                 "Response size {} bytes exceeds max_result_size_bytes limit of {} bytes",
                 serialized_len, self.max_result_size_bytes
             )));
@@ -586,7 +586,12 @@ impl FunctionRouter {
                 &self.role_resolver,
             )?;
             match job_dispatcher
-                .dispatch_by_name(function_name, args.clone(), auth.principal_id())
+                .dispatch_by_name(
+                    function_name,
+                    args.clone(),
+                    auth.principal_id(),
+                    auth.tenant_id(),
+                )
                 .await
             {
                 Ok(job_id) => {
@@ -729,7 +734,7 @@ impl FunctionRouter {
             // DbConn, the take() leaves a None behind that prevents further
             // misuse rather than leaking the transaction.
             let tx = tx_handle.lock().await.take().ok_or_else(|| {
-                ForgeError::Internal("Transaction already taken from handle".into())
+                ForgeError::internal("Transaction already taken from handle")
             })?;
 
             match result {

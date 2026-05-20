@@ -49,8 +49,14 @@ use thiserror::Error;
 #[non_exhaustive]
 pub enum ForgeError {
     /// Configuration file parsing or validation failed.
-    #[error("Configuration error: {0}")]
-    Config(String),
+    #[error("Configuration error: {context}")]
+    Config {
+        /// What went wrong.
+        context: String,
+        /// The underlying error, if any.
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     /// Database operation failed.
     #[error("Database error: {0}")]
@@ -97,18 +103,18 @@ pub enum ForgeError {
     Timeout(String),
 
     /// Unexpected internal error (500).
-    #[error("Internal error: {0}")]
-    Internal(String),
+    #[error("Internal error: {context}")]
+    Internal {
+        /// What went wrong.
+        context: String,
+        /// The underlying error, if any.
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     /// Invalid state transition attempted.
     #[error("Invalid state: {0}")]
     InvalidState(String),
-
-    /// Internal signal for workflow suspension. Never returned to clients.
-    ///
-    /// Carries the reason so the executor can persist it without a side-channel.
-    #[error("Workflow suspended")]
-    WorkflowSuspended(crate::workflow::SuspendReason),
 
     /// Rate limit exceeded (429).
     #[error("Rate limit exceeded: retry after {retry_after:?}")]
@@ -147,6 +153,14 @@ impl ForgeError {
         ForgeError::NotFound(msg.into())
     }
 
+    /// Build a [`ForgeError::Config`] without a source error.
+    pub fn config(msg: impl Into<String>) -> Self {
+        ForgeError::Config {
+            context: msg.into(),
+            source: None,
+        }
+    }
+
     /// Build a 401 [`ForgeError::Unauthorized`].
     pub fn unauthorized(msg: impl Into<String>) -> Self {
         ForgeError::Unauthorized(msg.into())
@@ -175,7 +189,32 @@ impl ForgeError {
     /// Build a 500 [`ForgeError::Internal`]. Use sparingly — prefer one of
     /// the typed variants when the cause is known.
     pub fn internal(msg: impl Into<String>) -> Self {
-        ForgeError::Internal(msg.into())
+        ForgeError::Internal {
+            context: msg.into(),
+            source: None,
+        }
+    }
+
+    /// Build a 500 [`ForgeError::Internal`] that preserves the source error chain.
+    pub fn internal_with(
+        msg: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        ForgeError::Internal {
+            context: msg.into(),
+            source: Some(Box::new(source)),
+        }
+    }
+
+    /// Build a [`ForgeError::Config`] that preserves the source error chain.
+    pub fn config_with(
+        msg: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        ForgeError::Config {
+            context: msg.into(),
+            source: Some(Box::new(source)),
+        }
     }
 
     /// Build a [`ForgeError::InvalidState`] (also surfaces as 500).
@@ -219,6 +258,25 @@ impl ForgeError {
             _ => 500,
         }
     }
+
+    /// Returns `true` for client errors (4xx status codes).
+    pub fn is_client_error(&self) -> bool {
+        let status = self.http_status();
+        (400..500).contains(&status)
+    }
+
+    /// Returns `true` for server errors (5xx status codes).
+    pub fn is_server_error(&self) -> bool {
+        self.http_status() >= 500
+    }
+
+    /// Returns `true` for errors that are safe to retry.
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::ServiceUnavailable(_) | Self::Timeout(_) | Self::RateLimitExceeded { .. }
+        )
+    }
 }
 
 impl From<serde_json::Error> for ForgeError {
@@ -236,7 +294,10 @@ impl From<crate::http::CircuitBreakerError> for ForgeError {
             crate::http::CircuitBreakerError::Request(err) if err.is_timeout() => {
                 ForgeError::Timeout(err.to_string())
             }
-            crate::http::CircuitBreakerError::Request(err) => ForgeError::Internal(err.to_string()),
+            crate::http::CircuitBreakerError::Request(err) => ForgeError::Internal {
+                context: "HTTP request failed".to_string(),
+                source: Some(Box::new(err)),
+            },
             crate::http::CircuitBreakerError::PrivateHostBlocked(host) => {
                 ForgeError::Forbidden(format!("Outbound request to private host '{host}' blocked"))
             }
@@ -250,6 +311,8 @@ pub type Result<T> = std::result::Result<T, ForgeError>;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
+    use std::error::Error as _;
+
     use super::*;
 
     // --- Display / error messages ---
@@ -258,7 +321,7 @@ mod tests {
     fn display_preserves_inner_message() {
         let cases: Vec<(ForgeError, &str)> = vec![
             (
-                ForgeError::Config("bad toml".into()),
+                ForgeError::config("bad toml"),
                 "Configuration error: bad toml",
             ),
             (
@@ -299,18 +362,12 @@ mod tests {
                 "Timeout: 5s exceeded",
             ),
             (
-                ForgeError::Internal("null pointer".into()),
+                ForgeError::internal("null pointer"),
                 "Internal error: null pointer",
             ),
             (
                 ForgeError::InvalidState("already completed".into()),
                 "Invalid state: already completed",
-            ),
-            (
-                ForgeError::WorkflowSuspended(crate::workflow::SuspendReason::Sleep {
-                    wake_at: chrono::DateTime::from_timestamp(0, 0).unwrap(),
-                }),
-                "Workflow suspended",
             ),
         ];
 
@@ -381,7 +438,7 @@ mod tests {
             ForgeError::Validation("x".into()),
             ForgeError::InvalidArgument("x".into()),
             ForgeError::Timeout("x".into()),
-            ForgeError::Internal("x".into()),
+            ForgeError::internal("x"),
         ];
 
         // Each variant must match only its own pattern
@@ -393,7 +450,7 @@ mod tests {
                 ForgeError::Validation(_) => 3,
                 ForgeError::InvalidArgument(_) => 4,
                 ForgeError::Timeout(_) => 5,
-                ForgeError::Internal(_) => 6,
+                ForgeError::Internal { .. } => 6,
                 _ => usize::MAX,
             };
             assert_eq!(matched, i, "Variant at index {i} matched wrong pattern");
@@ -452,15 +509,54 @@ mod tests {
         );
         // Internal variants all map to 500
         for err in [
-            ForgeError::Internal("x".into()),
+            ForgeError::internal("x"),
             ForgeError::Database(sqlx::Error::RowNotFound),
-            ForgeError::Config("x".into()),
+            ForgeError::config("x"),
             ForgeError::InvalidState("x".into()),
-            ForgeError::WorkflowSuspended(crate::workflow::SuspendReason::Sleep {
-                wake_at: chrono::DateTime::from_timestamp(0, 0).unwrap(),
-            }),
         ] {
             assert_eq!(err.http_status(), 500, "expected 500 for {err:?}");
         }
+    }
+
+    #[test]
+    fn is_client_error_for_4xx() {
+        assert!(ForgeError::not_found("x").is_client_error());
+        assert!(ForgeError::unauthorized("x").is_client_error());
+        assert!(ForgeError::forbidden("x").is_client_error());
+        assert!(ForgeError::validation("x").is_client_error());
+        assert!(!ForgeError::internal("x").is_client_error());
+        assert!(!ForgeError::timeout("x").is_client_error());
+    }
+
+    #[test]
+    fn is_server_error_for_5xx() {
+        assert!(ForgeError::internal("x").is_server_error());
+        assert!(ForgeError::timeout("x").is_server_error());
+        assert!(ForgeError::config("x").is_server_error());
+        assert!(!ForgeError::not_found("x").is_server_error());
+        assert!(!ForgeError::unauthorized("x").is_server_error());
+    }
+
+    #[test]
+    fn is_retryable_for_transient_errors() {
+        assert!(ForgeError::ServiceUnavailable("x".into()).is_retryable());
+        assert!(ForgeError::timeout("x").is_retryable());
+        assert!(ForgeError::RateLimitExceeded {
+            retry_after: Duration::from_secs(1),
+            limit: 10,
+            remaining: 0,
+        }
+        .is_retryable());
+        assert!(!ForgeError::not_found("x").is_retryable());
+        assert!(!ForgeError::internal("x").is_retryable());
+        assert!(!ForgeError::validation("x").is_retryable());
+    }
+
+    #[test]
+    fn internal_with_preserves_source_chain() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe broken");
+        let err = ForgeError::internal_with("connection failed", io_err);
+        assert_eq!(err.to_string(), "Internal error: connection failed");
+        assert!(err.source().is_some(), "source should be preserved");
     }
 }

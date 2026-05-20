@@ -75,10 +75,10 @@ forge = { version = "0.9", default-features = false, features = [
 ## Compile-time errors when a macro doesn't match the feature set
 
 If you write `#[forge::job]` but don't enable the `jobs` feature, you'll
-get an error at the generated `forge::AutoJob` reference. Same pattern for
-`#[forge::cron]`/`AutoCron`, `#[forge::workflow]`/`AutoWorkflow`,
-`#[forge::daemon]`/`AutoDaemon`, `#[forge::webhook]`/`AutoWebhook`,
-`#[forge::mcp_tool]`/`AutoMcpTool`. Fix by enabling the feature (or
+get an error at the generated `forge::AutoHandler` reference — all macros
+(`#[forge::job]`, `#[forge::cron]`, `#[forge::workflow]`, `#[forge::daemon]`,
+`#[forge::webhook]`, `#[forge::mcp_tool]`) emit registrations through the
+same `AutoHandler` type. Fix by enabling the corresponding feature (or
 remove the unused handler).
 
 ## Build profile tuning

@@ -39,6 +39,12 @@ struct DarlingMutationAttrs {
     public: bool,
     #[darling(default)]
     unscoped: bool,
+    /// New-style alias for `public`. Accepted values: "none", "required".
+    #[darling(default)]
+    auth: Option<String>,
+    /// New-style alias for `unscoped`. Accepted values: "global", "user".
+    #[darling(default)]
+    scope: Option<String>,
     #[darling(default)]
     require_role: Option<RequireRole>,
     #[darling(default)]
@@ -78,6 +84,23 @@ impl DarlingMutationAttrs {
             "mutation",
         )
         .map_err(|e| darling::Error::custom(e.to_string()))?;
+
+        if let Some(ref a) = self.auth
+            && !["none", "required"].contains(&a.as_str())
+        {
+            return Err(darling::Error::custom(format!(
+                "invalid auth value \"{a}\": expected \"none\" or \"required\""
+            )));
+        }
+
+        if let Some(ref s) = self.scope
+            && !["global", "user"].contains(&s.as_str())
+        {
+            return Err(darling::Error::custom(format!(
+                "invalid scope value \"{s}\": expected \"global\" or \"user\""
+            )));
+        }
+
         Ok(self)
     }
 }
@@ -183,8 +206,8 @@ fn convert_mutation_attrs(darling: DarlingMutationAttrs) -> Result<MutationAttrs
         name: darling.name,
         description: darling.description,
         required_role: darling.require_role.map(|r| r.0),
-        is_public: darling.public,
-        is_unscoped: darling.unscoped,
+        is_public: darling.public || darling.auth.as_deref() == Some("none"),
+        is_unscoped: darling.unscoped || darling.scope.as_deref() == Some("global"),
         timeout,
         rate_limit_requests,
         rate_limit_per_secs,
@@ -544,7 +567,7 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
                     format!(
                         "Private mutation `{fn_name_str}` references table(s) [{tables_str}] but \
                          SQL does not filter by user_id or owner_id. Add a WHERE clause scoped to \
-                         the authenticated user, or use #[mutation(unscoped)] if this is \
+                         the authenticated user, or use #[mutation(scope = \"global\")] if this is \
                          intentional."
                     ),
                 ));
@@ -555,7 +578,7 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
                     &input.sig.ident,
                     format!(
                         "Private mutation `{fn_name_str}` references table(s) [{tables_str}] but \
-                         SQL could not be parsed to verify scope. Add #[mutation(unscoped)] to \
+                         SQL could not be parsed to verify scope. Add #[mutation(scope = \"global\")] to \
                          opt out of scope checking, or add #[mutation(tables(\"...\"))] to skip \
                          automatic extraction."
                     ),

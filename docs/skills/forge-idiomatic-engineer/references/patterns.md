@@ -75,27 +75,25 @@ pub async fn onboarding_wf(ctx: &WorkflowContext, user_id: Uuid) -> Result<()> {
 ```
 
 - Steps cached by **name** — renaming breaks resume.
-- Version bump required when step keys, wait keys, or data types change. Signature mismatch blocks runs and flips `/_api/ready` to 503.
+- Version bump required when step keys, wait keys, or data types change. Signature mismatch blocks runs.
 - Step names: string literals only, max 64 chars, `[a-zA-Z0-9_-]`. No format strings or runtime values.
-- Signature derivation is frozen at GA — FNV-1a 64-bit over: name, version, step keys (sorted), wait keys (sorted), timeout_secs, input type, output type. Never add fields without bumping version.
+- Signature derivation is frozen at GA — blake3 hash (128-bit, truncated) over: name, version, step keys (sorted), wait keys (sorted), timeout_secs, input type, output type. Never add fields without bumping version.
 - `ctx.sleep()` / `ctx.wait_for_event()` survive restarts. Never use `tokio::sleep`.
 
 ### Migrating a workflow safely (deprecate → drain → remove)
 
 1. Bump `version`, mark old as `deprecated`, deploy. Both versions ship in the same binary; new dispatches go to the active version, in-flight runs of the old version keep going on the old code.
 2. Wait for in-flight runs of the old version to drain (query `forge_workflow_runs` filtering by name, version, and non-terminal status).
-3. Delete the old handler code and redeploy. If anything is still in-flight, the runtime detects it at boot, logs a warning, and flips `/_api/ready` to 503 with `workflows: false`. Boot succeeds; LB rotates traffic away. The drain count stays in logs (not in the public probe payload).
-4. Operator unblocks via direct PG (no admin HTTP route):
+3. Delete the old handler code and redeploy. If anything is still in-flight, the runtime detects it at boot and logs a warning. Boot succeeds.
+4. Operator unblocks via admin endpoints: `POST /_api/admin/workflows/{id}/cancel` (with compensation) or `POST /_api/admin/workflows/{id}/force-abort` (terminal `cancelled_by_operator`, no compensation).
 
 ```sql
+-- If you must use direct SQL (prefer admin endpoints):
 UPDATE forge_workflow_runs
-SET status = 'retired_unresumable', resolution_reason = '...'
+SET status = 'failed', resolution_reason = '...'
 WHERE workflow_name = '...' AND workflow_version = '...'
-  AND status NOT IN ('completed','compensated','failed',
-                     'retired_unresumable','cancelled_by_operator');
+  AND status NOT IN ('completed', 'failed');
 ```
-
-Use `cancelled_by_operator` instead of `retired_unresumable` if the run should read as a cancellation. Within 5s the next `/_api/ready` flips back to 200.
 
 ## 2. Authentication and Authorization
 
@@ -221,7 +219,7 @@ Forge::builder()
 - **Consistent reads**: `#[query(consistent)]` forces the primary when eventual consistency is unacceptable.
 - **Single pool**: queries, mutations, jobs, cron, daemons, workflows, observability, and signals all share `[database] pool_size`. Size for the union of expected concurrency. Use `statement_timeout` to bound runaway queries; isolate heavy workloads with dedicated worker nodes, not extra pools.
 - **Observability**: enable OTLP in `forge.toml`; `x-correlation-id` propagates across RPC boundaries. Full metric/span catalog: `docs/docs/reference/observability-catalog.mdx`.
-- **Workflow safety**: startup validates active versions against persisted signatures; run the binary before shipping or `/_api/ready` reports unhealthy.
+- **Workflow safety**: startup validates active versions against persisted signatures; run the binary before shipping. Signature mismatches are logged as warnings at boot.
 - **Cluster fencing**: leader-exclusive writes (cron scheduling, stale reclaim, workflow recovery) check `current_term` against the DB before executing. If a stale leader lost its election during a partition, the fencing check rejects the write. Custom leader-mode daemons should follow the same pattern.
 - **Webhook idempotency**: best-effort via `INSERT ... ON CONFLICT`. Narrow race window between claim and handler completion. For strict exactly-once (financial ops), add application-level dedup inside your handler's transaction.
 - **Signal analytics**: approximate by design. Unauthenticated endpoints, bounded channel that drops under pressure, UA-based bot detection, daily-rotating visitor IDs. Not suitable as a security audit log.
@@ -234,9 +232,9 @@ Forge::builder()
 The `/_api/admin/*` surface is operator-grade. Every state-changing call requires `AuthContext::has_role("admin")` and appends a row to `forge_admin_audit` (actor, roles, target type/id, reason, request_id, trace_id). Read-only list/inspect calls are dashboard hot paths and don't audit.
 
 - **Stop a runaway job**: `POST /_api/admin/jobs/{id}/cancel`. The worker checks `JobContext::is_cancelled()` between iterations. For unkillable jobs (no cancel check), `/force-abort` moves to `dead_letter`.
-- **Stop a runaway workflow**: `POST /_api/admin/workflows/{id}/cancel`. Sets `cancel_requested_at` and fires NOTIFY `forge_workflow_cancelled`. A run in `ctx.sleep("...", 24h)` wakes within 50 ms, runs its compensation chain, and lands in `cancelled_by_operator`. No process restart needed.
+- **Stop a runaway workflow**: `POST /_api/admin/workflows/{id}/cancel`. Sets `cancel_requested_at` and fires NOTIFY `forge_workflow_wakeup`. A run in `ctx.sleep("...", 24h)` wakes within 50 ms, runs its compensation chain, and lands in `cancelled_by_operator`. No process restart needed.
 - **Bleed off a hot queue**: `POST /_api/admin/queues/{name}/pause`. In-flight jobs finish, no new ones claim until `/resume`. The claim SQL uses `NOT EXISTS (SELECT 1 FROM forge_paused_queues ...)`.
-- **Recover a stranded workflow**: when `/_api/ready` shows blocked runs and a version mismatch is intended (you removed the old binary), use `/cancel` (with compensation) or `/force-abort` (no compensation, terminal `retired_unresumable`). Don't edit `forge_workflow_runs` directly — the admin path captures the reason.
+- **Recover a stranded workflow**: when blocked runs are detected (server logs a warning at boot), use `/cancel` (with compensation) or `/force-abort` (no compensation, terminal `cancelled_by_operator`). Don't edit `forge_workflow_runs` directly — the admin path captures the reason.
 - **Diagnostics**: `/_api/admin/nodes` returns `forge_nodes` with heartbeat + load; `/_api/admin/leaders` shows which node holds each advisory lock. Use these instead of `pg_locks` inspection.
 
 Pass `{"reason": "..."}` on every state-changing call. The audit log is searched after incidents — empty reasons make post-mortems harder.

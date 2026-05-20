@@ -240,6 +240,7 @@ CREATE TABLE forge_cron_runs (
     cron_name TEXT NOT NULL,
     scheduled_time TIMESTAMPTZ NOT NULL,
     status TEXT NOT NULL,
+    owner_subject TEXT,
     node_id UUID,
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,

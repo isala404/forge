@@ -24,7 +24,7 @@ struct IssPosition {
 }
 
 /// Get the latest ISS location from database
-#[forge::query(public)]
+#[forge::query(auth = "none")]
 pub async fn get_iss_location(ctx: &QueryContext) -> Result<Option<IssLocation>> {
     sqlx::query_as!(
         IssLocation,
@@ -50,11 +50,11 @@ pub async fn iss_location(ctx: &CronContext) -> Result<()> {
         .get("http://api.open-notify.org/iss-now.json")
         .send()
         .await
-        .map_err(|e| ForgeError::Internal(format!("HTTP request failed: {}", e)))?;
+        .map_err(|e| ForgeError::internal(format!("HTTP request failed: {}", e)))?;
 
     if !response.status().is_success() {
         tracing::error!(status = response.status().as_u16(), "Failed to fetch ISS location");
-        return Err(ForgeError::Internal("Failed to fetch ISS location".into()));
+        return Err(ForgeError::internal("Failed to fetch ISS location"));
     }
 
     let data: IssApiResponse = response

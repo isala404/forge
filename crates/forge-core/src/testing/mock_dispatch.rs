@@ -238,6 +238,7 @@ impl crate::function::JobDispatch for MockJobDispatch {
         job_type: &str,
         args: serde_json::Value,
         owner_subject: Option<String>,
+        _tenant_id: Option<Uuid>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Uuid>> + Send + '_>> {
         let job_type = job_type.to_string();
         Box::pin(async move {
@@ -252,6 +253,7 @@ impl crate::function::JobDispatch for MockJobDispatch {
         args: serde_json::Value,
         scheduled_at: DateTime<Utc>,
         owner_subject: Option<String>,
+        _tenant_id: Option<Uuid>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Uuid>> + Send + '_>> {
         let job_type = job_type.to_string();
         Box::pin(async move {
@@ -266,6 +268,7 @@ impl crate::function::JobDispatch for MockJobDispatch {
         job_type: &'a str,
         args: serde_json::Value,
         owner_subject: Option<String>,
+        _tenant_id: Option<Uuid>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Uuid>> + Send + 'a>> {
         Box::pin(async move {
             self.dispatch_inner(job_type, args, owner_subject, true, None)
@@ -280,6 +283,7 @@ impl crate::function::JobDispatch for MockJobDispatch {
         args: serde_json::Value,
         scheduled_at: DateTime<Utc>,
         owner_subject: Option<String>,
+        _tenant_id: Option<Uuid>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Uuid>> + Send + 'a>> {
         Box::pin(async move {
             self.dispatch_inner(job_type, args, owner_subject, true, Some(scheduled_at))

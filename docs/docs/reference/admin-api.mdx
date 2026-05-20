@@ -168,7 +168,7 @@ Query parameters (all optional):
 | `workflow_name` | `string` | Filter by workflow name |
 | `limit` | `integer` | Max results, 1–1000. Default 100. |
 
-Workflow statuses: `pending`, `running`, `sleeping`, `waiting`, `completed`, `compensating`, `compensated`, `failed`, `blocked_missing_version`, `blocked_signature_mismatch`, `blocked_missing_handler`, `retired_unresumable`, `cancelled_by_operator`.
+Workflow statuses: `pending`, `running`, `sleeping`, `waiting`, `completed`, `failed`, `blocked_missing_version`, `blocked_signature_mismatch`, `blocked_missing_handler`. The DB may also contain legacy strings `cancelled_by_operator` and `compensated`, which resolve to `failed` at the Rust level.
 
 Response:
 
@@ -224,7 +224,7 @@ Authorization: Bearer <jwt>
 { "reason": "handler redeployed" }
 ```
 
-Resets the run to `pending`. Valid for terminal or blocked statuses: `failed`, `cancelled_by_operator`, `blocked_missing_version`, `blocked_signature_mismatch`, `blocked_missing_handler`, `retired_unresumable`, `compensated`. Already-completed steps are preserved and skipped on resume.
+Resets the run to `pending`. Valid for terminal or blocked statuses: `failed`, `blocked_missing_version`, `blocked_signature_mismatch`, `blocked_missing_handler`. This also covers legacy DB strings `cancelled_by_operator` and `compensated`, which are treated as `failed`. Already-completed steps are preserved and skipped on resume.
 
 ### Force-abort workflow
 

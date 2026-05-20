@@ -41,7 +41,7 @@ use super::tls::{TlsListenConfig, bind_listener};
 use super::tracing::{REQUEST_ID_HEADER, SPAN_ID_HEADER, TRACE_ID_HEADER, TracingState};
 use crate::function::FunctionRegistry;
 use crate::mcp::McpToolRegistry;
-use crate::pg::Database;
+use crate::pg::{Database, PgNotifyBus};
 use crate::realtime::{Reactor, ReactorConfig};
 
 const DEFAULT_MAX_JSON_BODY_SIZE: usize = 1024 * 1024;
@@ -227,13 +227,19 @@ pub struct GatewayServer {
 
 impl GatewayServer {
     /// Create a new gateway server.
-    pub fn new(config: GatewayConfig, registry: FunctionRegistry, db: Database) -> Self {
+    pub fn new(
+        config: GatewayConfig,
+        registry: FunctionRegistry,
+        db: Database,
+        notify_bus: Arc<PgNotifyBus>,
+    ) -> Self {
         let node_id = NodeId::new();
         let reactor = Arc::new(Reactor::new(
             node_id,
             Arc::new(db.clone()),
             registry.clone(),
             config.reactor_config.clone(),
+            notify_bus,
         ));
 
         let token_ttl = config.token_ttl.clone();

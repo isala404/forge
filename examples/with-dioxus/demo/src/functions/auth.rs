@@ -28,7 +28,7 @@ async fn auth_response(ctx: &MutationContext, user: &User) -> Result<AuthRespons
     })
 }
 
-#[forge::mutation(public)]
+#[forge::mutation(auth = "none")]
 pub async fn register(ctx: &MutationContext, input: RegisterInput) -> Result<AuthResponse> {
     if input.email.trim().is_empty() {
         return Err(ForgeError::Validation("Email is required".into()));
@@ -48,7 +48,7 @@ pub async fn register(ctx: &MutationContext, input: RegisterInput) -> Result<Aut
         let salt = SaltString::generate(&mut password_hash::rand_core::OsRng);
         argon2::Argon2::default()
             .hash_password(input.password.as_bytes(), &salt)
-            .map_err(|e| ForgeError::Internal(e.to_string()))?
+            .map_err(|e| ForgeError::internal(e.to_string()))?
             .to_string()
     };
 
@@ -89,7 +89,7 @@ pub async fn register(ctx: &MutationContext, input: RegisterInput) -> Result<Aut
     auth_response(ctx, &user).await
 }
 
-#[forge::mutation(public)]
+#[forge::mutation(auth = "none")]
 pub async fn login(ctx: &MutationContext, input: LoginInput) -> Result<AuthResponse> {
     let mut conn = ctx.conn().await?;
 
@@ -117,7 +117,7 @@ pub async fn login(ctx: &MutationContext, input: LoginInput) -> Result<AuthRespo
     let valid = {
         use argon2::PasswordVerifier;
         let parsed = password_hash::PasswordHash::new(hash)
-            .map_err(|e| ForgeError::Internal(e.to_string()))?;
+            .map_err(|e| ForgeError::internal(e.to_string()))?;
         argon2::Argon2::default()
             .verify_password(input.password.as_bytes(), &parsed)
             .map_err(|_| ForgeError::Validation("Invalid email or password".into()))?;
@@ -131,7 +131,7 @@ pub async fn login(ctx: &MutationContext, input: LoginInput) -> Result<AuthRespo
     auth_response(ctx, &user).await
 }
 
-#[forge::mutation(public)]
+#[forge::mutation(auth = "none")]
 pub async fn refresh_token(ctx: &MutationContext, input: RefreshInput) -> Result<TokenPair> {
     ctx.rotate_refresh_token(&input.refresh_token).await
 }

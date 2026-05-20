@@ -40,7 +40,7 @@
 //! - Change listener (`LISTEN forge_changes`), one connection per node.
 //! - Workflow scheduler listener (`LISTEN forge_workflow_wakeup`), one per
 //!   node when workflows are registered.
-//! - Job worker wakeup listener (`LISTEN forge_jobs_wakeup`), one per worker.
+//! - Job worker wakeup listener (`LISTEN forge_jobs_available`), one per worker.
 //! - Leader election lock holder, one per leader role this node owns. A node
 //!   that wins both the cron and signals leader roles holds two.
 //!
@@ -126,8 +126,8 @@ impl Database {
         service_name: &str,
     ) -> Result<Self> {
         if config.url.is_empty() {
-            return Err(ForgeError::Internal(
-                "database.url cannot be empty. Provide a PostgreSQL connection URL.".into(),
+            return Err(ForgeError::internal(
+                "database.url cannot be empty. Provide a PostgreSQL connection URL.",
             ));
         }
 
@@ -141,7 +141,7 @@ impl Database {
             service_name,
         )
         .await
-        .map_err(|e| ForgeError::Internal(format!("Failed to connect to primary: {}", e)))?;
+        .map_err(|e| ForgeError::internal_with("Failed to connect to primary", e))?;
 
         verify_postgres_version(&primary, "primary").await?;
         detect_pgbouncer(&primary).await?;
@@ -155,7 +155,7 @@ impl Database {
                 service_name,
             )
             .await
-            .map_err(|e| ForgeError::Internal(format!("Failed to connect to replica: {}", e)))?;
+            .map_err(|e| ForgeError::internal_with("Failed to connect to replica", e))?;
             verify_postgres_version(&pool, "replica").await?;
             replicas.push(ReplicaEntry {
                 pool: Arc::new(pool),
@@ -336,7 +336,7 @@ impl Database {
         sqlx::query_scalar!("SELECT 1 as \"v!\"")
             .fetch_one(self.primary.as_ref())
             .await
-            .map_err(|e| ForgeError::Internal(format!("Health check failed: {}", e)))?;
+            .map_err(|e| ForgeError::internal_with("Health check failed", e))?;
         Ok(())
     }
 
@@ -368,7 +368,7 @@ async fn verify_postgres_version(pool: &PgPool, role: &str) -> Result<()> {
         .fetch_one(pool)
         .await
         .map_err(|e| {
-            ForgeError::Internal(format!(
+            ForgeError::internal(format!(
                 "Failed to read PostgreSQL server_version_num from {}: {}",
                 role, e
             ))
@@ -376,14 +376,14 @@ async fn verify_postgres_version(pool: &PgPool, role: &str) -> Result<()> {
 
     let version_num: i32 = row
         .ok_or_else(|| {
-            ForgeError::Internal(format!(
+            ForgeError::internal(format!(
                 "PostgreSQL {} returned NULL for server_version_num",
                 role
             ))
         })?
         .parse()
         .map_err(|e| {
-            ForgeError::Internal(format!(
+            ForgeError::internal(format!(
                 "Could not parse PostgreSQL server_version_num from {}: {}",
                 role, e
             ))
@@ -391,7 +391,7 @@ async fn verify_postgres_version(pool: &PgPool, role: &str) -> Result<()> {
 
     let major = version_num / 10_000;
     if major < MIN_POSTGRES_MAJOR {
-        return Err(ForgeError::Internal(format!(
+        return Err(ForgeError::internal(format!(
             "PostgreSQL {} is at version {} but Forge requires {} or newer. \
              See https://forge.dev/scale/hosting for supported versions.",
             role, major, MIN_POSTGRES_MAJOR
@@ -435,7 +435,7 @@ async fn detect_pgbouncer(pool: &PgPool) -> Result<()> {
             .fetch_one(pool)
             .await
             .map_err(|e| {
-                ForgeError::Internal(format!(
+                ForgeError::internal(format!(
                     "PgBouncer detection query failed: {}. \
                      Forge requires a direct PostgreSQL connection.",
                     e
@@ -444,14 +444,13 @@ async fn detect_pgbouncer(pool: &PgPool) -> Result<()> {
     let version_lower = version_str.to_lowercase();
 
     if backend_pid == 0 || version_lower.contains("pgbouncer") {
-        return Err(ForgeError::Config(
+        return Err(ForgeError::config(
             "Forge detected a PgBouncer proxy in the connection path. \
              Forge requires direct PostgreSQL connections because it relies on \
              `pg_try_advisory_lock` (for leader election) and persistent `LISTEN/NOTIFY` \
              listeners (for real-time reactivity). Both break under PgBouncer's transaction \
              pooling mode. Connect directly to PostgreSQL, or use a session-level pooler \
-             that preserves connection identity (e.g. pgcat in query-router mode)."
-                .into(),
+             that preserves connection identity (e.g. pgcat in query-router mode).",
         ));
     }
 

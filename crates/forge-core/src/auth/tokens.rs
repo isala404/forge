@@ -149,7 +149,7 @@ async fn issue_token_in_family(
     )
     .execute(pool)
     .await
-    .map_err(|e| ForgeError::Internal(format!("Failed to store refresh token: {e}")))?;
+    .map_err(|e| ForgeError::internal_with("Failed to store refresh token", e))?;
 
     Ok(TokenPair {
         access_token,
@@ -249,7 +249,7 @@ pub async fn rotate_refresh_token_with_client(
             })
         })
     }
-    .map_err(|e| ForgeError::Internal(format!("Failed to rotate refresh token: {e}")))?;
+    .map_err(|e| ForgeError::internal_with("Failed to rotate refresh token", e))?;
 
     match row {
         Some(token) => {
@@ -306,7 +306,7 @@ pub async fn revoke_refresh_token(pool: &sqlx::PgPool, refresh_token: &str) -> R
     )
     .execute(pool)
     .await
-    .map_err(|e| ForgeError::Internal(format!("Failed to revoke refresh token: {e}")))?;
+    .map_err(|e| ForgeError::internal_with("Failed to revoke refresh token", e))?;
     Ok(())
 }
 
@@ -318,7 +318,7 @@ pub async fn revoke_all_refresh_tokens(pool: &sqlx::PgPool, user_id: Uuid) -> Re
     )
     .execute(pool)
     .await
-    .map_err(|e| ForgeError::Internal(format!("Failed to revoke refresh tokens: {e}")))?;
+    .map_err(|e| ForgeError::internal_with("Failed to revoke refresh tokens", e))?;
     Ok(())
 }
 

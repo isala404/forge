@@ -340,11 +340,18 @@ impl ForgeBuilder {
     pub fn build(self) -> Result<Forge> {
         let config = self
             .config
-            .ok_or_else(|| ForgeError::Config("Configuration is required".to_string()))?;
+            .ok_or_else(|| ForgeError::config("Configuration is required"))?;
 
         config.auth.validate()?;
 
         let (shutdown_tx, _) = broadcast::channel(1);
+
+        #[cfg(feature = "workflows")]
+        let workflow_registry = {
+            let mut reg = self.workflow_registry;
+            reg.signature_check = config.workflow.signature_check;
+            reg
+        };
 
         Ok(Forge {
             config,
@@ -358,7 +365,7 @@ impl ForgeBuilder {
             #[cfg(feature = "cron")]
             cron_registry: Arc::new(self.cron_registry),
             #[cfg(feature = "workflows")]
-            workflow_registry: self.workflow_registry,
+            workflow_registry,
             #[cfg(feature = "daemons")]
             daemon_registry: Arc::new(self.daemon_registry),
             #[cfg(feature = "gateway")]
