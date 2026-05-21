@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-05-21
+
 This release collapses the runtime into a single-pool doctrine, unifies handler registration, overhauls reactivity, and hardens the security surface. Pre-1.0 policy applies: breaking changes are listed but no migration shims are kept.
 
 ### Added
@@ -621,7 +623,8 @@ This release collapses the runtime into a single-pool doctrine, unifies handler 
 - Rust 2024 edition unsafe block compatibility
 - Release workflow cargo-edit installation
 
-[unreleased]: https://github.com/isala404/forge/compare/v0.9.0...HEAD
+[unreleased]: https://github.com/isala404/forge/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/isala404/forge/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/isala404/forge/compare/v0.8.4...v0.9.0
 [0.8.4]: https://github.com/isala404/forge/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/isala404/forge/compare/v0.8.2...v0.8.3
