@@ -473,15 +473,14 @@ impl LeaderElection {
 
     /// Refresh the leadership lease.
     ///
-    /// Validates the advisory lock first (`validate_lock_held`), then
-    /// extends `forge_leaders.lease_until`. Both queries run against the
-    /// same PG backend (the lock-owning connection), but the Mutex is
-    /// released between them and re-acquired here, so they are *not* a
-    /// single critical section. That's fine: the only racer is `validate`
-    /// itself on a faster cadence, which is idempotent when the lock is
-    /// held and drops leadership atomically when it isn't.
+    /// Validates the advisory lock and extends `forge_leaders.lease_until`
+    /// as a single critical section: the `lock_connection` Mutex is held
+    /// across both the `pg_locks` probe and the UPDATE. That guarantees a
+    /// concurrent `try_become_leader` cannot repopulate the slot with a
+    /// different backend's connection between validate and refresh, which
+    /// would otherwise leave us extending the lease against a connection
+    /// that no longer holds the lock we just checked.
     pub async fn refresh_lease(&self) -> forge_core::Result<()> {
-        self.validate_lock_held().await?;
         if !self.is_leader() {
             return Ok(());
         }
@@ -497,6 +496,45 @@ impl LeaderElection {
                 ));
             }
         };
+
+        // Probe pg_locks on the held connection. Same query as
+        // `validate_lock_held`, but inlined so the Mutex stays locked across
+        // both the probe and the UPDATE below.
+        let lock_id = self.role.lock_id();
+        let classid = (lock_id >> 32) as i32;
+        let objid = (lock_id & 0xFFFF_FFFF) as i32;
+
+        let still_held = sqlx::query_scalar!(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM pg_locks
+                WHERE locktype = 'advisory'
+                  AND classid::int = $1
+                  AND objid::int = $2
+                  AND pid = pg_backend_pid()
+                  AND granted
+            ) AS "held!"
+            "#,
+            classid,
+            objid,
+        )
+        .fetch_one(&mut **conn)
+        .await
+        .map_err(forge_core::ForgeError::Database)?;
+
+        if !still_held {
+            *lock_connection = None;
+            drop(lock_connection);
+            self.invalidate_lock_cache().await;
+            self.drop_leadership_locally();
+            tracing::error!(
+                role = self.role.as_str(),
+                "Advisory lock no longer held on leader connection; dropped leadership"
+            );
+            return Err(forge_core::ForgeError::internal(
+                "Advisory lock no longer held; dropped leadership",
+            ));
+        }
 
         let lease_until =
             Utc::now() + chrono::Duration::seconds(self.config.lease_duration.as_secs() as i64);
@@ -514,6 +552,12 @@ impl LeaderElection {
         .execute(&mut **conn)
         .await
         .map_err(forge_core::ForgeError::Database)?;
+
+        // Refresh the validate cache: we just confirmed the lock is held on
+        // this connection, so the next `validate_lock_held` tick can skip
+        // the pg_locks probe within `lock_validate_interval`.
+        drop(lock_connection);
+        *self.last_lock_validated.lock().await = Some(std::time::Instant::now());
 
         Ok(())
     }

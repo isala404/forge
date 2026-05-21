@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use forge_core::CircuitBreakerClient;
-use forge_core::function::KvHandle;
+use forge_core::function::{JobDispatch, KvHandle, WorkflowDispatch};
 use forge_core::job::{JobContext, ProgressUpdate};
 use tokio::time::timeout;
 
@@ -17,6 +17,8 @@ pub struct JobExecutor {
     db_pool: sqlx::PgPool,
     http_client: CircuitBreakerClient,
     kv: Option<Arc<dyn KvHandle>>,
+    job_dispatch: Option<Arc<dyn JobDispatch>>,
+    workflow_dispatch: Option<Arc<dyn WorkflowDispatch>>,
 }
 
 impl JobExecutor {
@@ -30,6 +32,8 @@ impl JobExecutor {
             db_pool,
             http_client: CircuitBreakerClient::with_ssrf_protection(),
             kv: None,
+            job_dispatch: None,
+            workflow_dispatch: None,
         }
     }
 
@@ -42,6 +46,20 @@ impl JobExecutor {
     /// Attach a KV store handle (mutable reference version for `Worker::with_kv`).
     pub fn set_kv(&mut self, kv: Arc<dyn KvHandle>) {
         self.kv = Some(kv);
+    }
+
+    /// Attach a job dispatcher so `ctx.dispatch_job(...)` calls inside
+    /// handlers route through the `JobDispatch` trait. Mutable-reference
+    /// variant for `Worker::with_dispatchers`.
+    pub fn set_job_dispatch(&mut self, dispatcher: Arc<dyn JobDispatch>) {
+        self.job_dispatch = Some(dispatcher);
+    }
+
+    /// Attach a workflow dispatcher so `ctx.start_workflow(...)` calls inside
+    /// handlers route through the `WorkflowDispatch` trait (which writes the
+    /// active version + signature onto the run row).
+    pub fn set_workflow_dispatch(&mut self, dispatcher: Arc<dyn WorkflowDispatch>) {
+        self.workflow_dispatch = Some(dispatcher);
     }
 
     /// Execute a claimed job.
@@ -156,6 +174,12 @@ impl JobExecutor {
             .with_progress(progress_tx);
             if let Some(ref kv) = self.kv {
                 c = c.with_kv(Arc::clone(kv));
+            }
+            if let Some(ref dispatcher) = self.job_dispatch {
+                c = c.with_job_dispatch(Arc::clone(dispatcher));
+            }
+            if let Some(ref dispatcher) = self.workflow_dispatch {
+                c = c.with_workflow_dispatch(Arc::clone(dispatcher));
             }
             c
         };

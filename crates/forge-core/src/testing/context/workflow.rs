@@ -130,7 +130,11 @@ impl TestWorkflowContext {
     }
 
     /// Record step start.
-    pub async fn record_step_start(&self, name: &str) {
+    ///
+    /// Mirrors `WorkflowContext::record_step_start` so workflow code that
+    /// uses `?` on the call compiles unchanged in tests. The in-memory test
+    /// implementation can never fail, but the signature must match.
+    pub async fn record_step_start(&self, name: &str) -> Result<()> {
         let mut states = self.step_states.write().unwrap();
         states
             .entry(name.to_string())
@@ -138,10 +142,11 @@ impl TestWorkflowContext {
                 completed: false,
                 result: None,
             });
+        Ok(())
     }
 
     /// Record step completion.
-    pub async fn record_step_complete(&self, name: &str, result: serde_json::Value) {
+    pub async fn record_step_complete(&self, name: &str, result: serde_json::Value) -> Result<()> {
         let mut states = self.step_states.write().unwrap();
         let state = states
             .entry(name.to_string())
@@ -157,10 +162,11 @@ impl TestWorkflowContext {
         if !completed.contains(&name.to_string()) {
             completed.push(name.to_string());
         }
+        Ok(())
     }
 
     /// Record step failure.
-    pub async fn record_step_failure(&self, name: &str, _error: impl Into<String>) {
+    pub async fn record_step_failure(&self, name: &str, _error: impl Into<String>) -> Result<()> {
         let mut states = self.step_states.write().unwrap();
         states
             .entry(name.to_string())
@@ -168,6 +174,7 @@ impl TestWorkflowContext {
                 completed: false,
                 result: None,
             });
+        Ok(())
     }
 
     /// Get completed step names in order.
@@ -423,9 +430,10 @@ mod tests {
 
         assert!(!ctx.is_step_completed("step1"));
 
-        ctx.record_step_start("step1").await;
+        ctx.record_step_start("step1").await.unwrap();
         ctx.record_step_complete("step1", serde_json::json!({"result": "ok"}))
-            .await;
+            .await
+            .unwrap();
 
         assert!(ctx.is_step_completed("step1"));
 
@@ -452,11 +460,14 @@ mod tests {
         let ctx = TestWorkflowContext::builder("test").build();
 
         ctx.record_step_complete("step1", serde_json::json!({}))
-            .await;
+            .await
+            .unwrap();
         ctx.record_step_complete("step2", serde_json::json!({}))
-            .await;
+            .await
+            .unwrap();
         ctx.record_step_complete("step3", serde_json::json!({}))
-            .await;
+            .await
+            .unwrap();
 
         let completed = ctx.completed_step_names();
         assert_eq!(completed, vec!["step1", "step2", "step3"]);

@@ -3,24 +3,27 @@
 //! Implements Authorization Code + PKCE flow so MCP clients like Claude Code
 //! can auto-authenticate via browser login.
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::Extension;
 use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use forge_core::auth::Claims;
 use forge_core::oauth::{self, validate_redirect_uri};
+use forge_core::rate_limit::{RateLimitConfig, RateLimitKey};
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use subtle::ConstantTimeEq;
-use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use super::auth::AuthMiddleware;
+use crate::rate_limit::StrictRateLimiter;
 
 const AUTHORIZE_PAGE: &str = include_str!("oauth_authorize.html");
 const AUTH_CODE_TTL_SECS: i64 = 60;
@@ -31,42 +34,88 @@ const MCP_AUDIENCE: &str = "forge:mcp";
 // Rate limiting constants
 const REGISTER_RATE_LIMIT: u32 = 10; // per minute per IP
 const LOGIN_FAIL_RATE_LIMIT: u32 = 5; // per minute per IP
-const RATE_WINDOW_SECS: u64 = 60;
-const RATE_CLEANUP_THRESHOLD: usize = 100;
+const RATE_WINDOW: Duration = Duration::from_secs(60);
 
-/// In-memory rate limiter for OAuth endpoints.
+/// CSRF token TTL. OAuth authorize -> form-post is interactive; 5 minutes is
+/// generous for a human consent step while still bounding replay surface.
+const CSRF_TTL_SECS: u64 = 300;
+
+/// Length of the random nonce inside a CSRF token, in bytes. 16 bytes of
+/// entropy is plenty when paired with an HMAC over (timestamp || nonce).
+const CSRF_NONCE_LEN: usize = 16;
+
+/// Stateless HMAC-signed CSRF token: `base64url(ts_be_u64 || nonce || hmac)`.
 ///
-/// Per-node rate limiting. With N nodes behind a load balancer, the effective
-/// limit is N× the configured value. For exact cluster-wide OAuth rate limiting,
-/// integrate with StrictRateLimiter (PG-backed).
-// TODO(pre-1.0): migrate to StrictRateLimiter for cluster-wide enforcement
-#[derive(Clone, Default)]
-struct OAuthRateLimiter {
-    buckets: Arc<RwLock<HashMap<String, (u32, Instant)>>>,
+/// Lives entirely in the cookie and the form field — no node-local state — so
+/// the OAuth flow tolerates a load balancer that bounces the authorize and the
+/// POST callback to different nodes.
+fn mint_csrf_token(secret: &[u8]) -> String {
+    // CSPRNG nonce sourced from UUIDv4 (avoids pulling `rand` into the gateway
+    // crate). 16 bytes matches the constant.
+    let nonce: [u8; CSRF_NONCE_LEN] = *Uuid::new_v4().as_bytes();
+    let ts: u64 = chrono::Utc::now().timestamp().max(0) as u64;
+
+    let mut payload = Vec::with_capacity(8 + CSRF_NONCE_LEN);
+    payload.extend_from_slice(&ts.to_be_bytes());
+    payload.extend_from_slice(&nonce);
+
+    let mac = match Hmac::<Sha256>::new_from_slice(secret) {
+        Ok(m) => m,
+        Err(_) => return String::new(),
+    };
+    let mut mac = mac;
+    mac.update(&payload);
+    let sig = mac.finalize().into_bytes();
+
+    let mut out = Vec::with_capacity(payload.len() + sig.len());
+    out.extend_from_slice(&payload);
+    out.extend_from_slice(&sig);
+    URL_SAFE_NO_PAD.encode(&out)
 }
 
-impl OAuthRateLimiter {
-    async fn check(&self, key: &str, limit: u32) -> bool {
-        let mut buckets = self.buckets.write().await;
-        let now = Instant::now();
-        let window = Duration::from_secs(RATE_WINDOW_SECS);
-
-        // Purge stale entries periodically to prevent unbounded growth
-        if buckets.len() > RATE_CLEANUP_THRESHOLD {
-            buckets.retain(|_, (_, ts)| now.duration_since(*ts) <= window);
-        }
-
-        let entry = buckets.entry(key.to_string()).or_insert((0, now));
-        if now.duration_since(entry.1) > window {
-            *entry = (1, now);
-            return true;
-        }
-        if entry.0 >= limit {
-            return false;
-        }
-        entry.0 += 1;
-        true
+/// Verify a CSRF token: signature must match and the timestamp must be inside
+/// the TTL window. Returns true only when both checks pass.
+fn verify_csrf_token(token: &str, secret: &[u8]) -> bool {
+    let bytes = match URL_SAFE_NO_PAD.decode(token) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    // 8 byte ts + 16 byte nonce + 32 byte HMAC-SHA256 output.
+    const EXPECTED_LEN: usize = 8 + CSRF_NONCE_LEN + 32;
+    if bytes.len() != EXPECTED_LEN {
+        return false;
     }
+    let (payload, sig) = match bytes.split_at_checked(8 + CSRF_NONCE_LEN) {
+        Some(parts) => parts,
+        None => return false,
+    };
+
+    let mut mac = match Hmac::<Sha256>::new_from_slice(secret) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    mac.update(payload);
+    if mac.verify_slice(sig).is_err() {
+        return false;
+    }
+
+    // Bounds-checked: payload is exactly 8 + CSRF_NONCE_LEN bytes, so the
+    // first 8 are always present.
+    let ts_slice = match payload.get(..8) {
+        Some(s) => s,
+        None => return false,
+    };
+    let mut ts_bytes = [0u8; 8];
+    ts_bytes.copy_from_slice(ts_slice);
+    let ts = u64::from_be_bytes(ts_bytes);
+
+    let now = chrono::Utc::now().timestamp().max(0) as u64;
+    // Reject tokens issued in the (significant) future, allowing only minor
+    // clock drift.
+    if ts > now.saturating_add(60) {
+        return false;
+    }
+    now.saturating_sub(ts) <= CSRF_TTL_SECS
 }
 
 /// Shared state for OAuth endpoints.
@@ -81,9 +130,10 @@ pub struct OAuthState {
     project_name: String,
     jwt_secret: String,
     session_cookie_ttl_secs: i64,
-    rate_limiter: OAuthRateLimiter,
-    /// CSRF tokens: token -> expiry
-    csrf_tokens: Arc<RwLock<HashMap<String, Instant>>>,
+    /// PG-backed rate limiter, shared across nodes. The OAuth endpoints used
+    /// to keep their own in-memory limiter, which multiplied the effective
+    /// quota by the cluster size.
+    rate_limiter: Arc<StrictRateLimiter>,
     /// Whether `POST /_api/oauth/register` accepts unauthenticated callers.
     /// Mirrors `mcp.allow_unauthenticated_dcr` from forge.toml. Defaults
     /// to `false` so a fresh deployment is not an open client registry.
@@ -104,6 +154,7 @@ impl OAuthState {
         session_cookie_ttl_secs: i64,
         allow_unauthenticated_dcr: bool,
     ) -> Self {
+        let rate_limiter = Arc::new(StrictRateLimiter::new(pool.clone()));
         Self {
             pool,
             auth_middleware,
@@ -114,30 +165,32 @@ impl OAuthState {
             project_name,
             jwt_secret,
             session_cookie_ttl_secs,
-            rate_limiter: OAuthRateLimiter::default(),
-            csrf_tokens: Arc::new(RwLock::new(HashMap::new())),
+            rate_limiter,
             allow_unauthenticated_dcr,
         }
     }
 
-    async fn store_csrf(&self, token: &str) {
-        let mut tokens = self.csrf_tokens.write().await;
-        let now = Instant::now();
-        let expiry = now + Duration::from_secs(600); // 10 min
-        tokens.insert(token.to_string(), expiry);
-        // Purge expired tokens periodically, not on every insert
-        if tokens.len() > RATE_CLEANUP_THRESHOLD {
-            tokens.retain(|_, exp| *exp > now);
+    /// Cluster-wide rate-limit check. Returns `true` when the request is
+    /// inside the configured quota. On DB errors we fail closed — the OAuth
+    /// surface is a known abuse target and unbounded access during a DB hiccup
+    /// is worse than rejecting a few legitimate retries.
+    async fn rate_check(&self, key: &str, limit: u32) -> bool {
+        let cfg = RateLimitConfig::new(limit, RATE_WINDOW).with_key(RateLimitKey::Global);
+        match self.rate_limiter.check(key, &cfg).await {
+            Ok(r) => r.allowed,
+            Err(e) => {
+                tracing::warn!(error = %e, key = %key, "OAuth rate-limit check failed; denying");
+                false
+            }
         }
     }
 
-    async fn validate_csrf(&self, token: &str) -> bool {
-        let mut tokens = self.csrf_tokens.write().await;
-        if let Some(expiry) = tokens.remove(token) {
-            expiry > Instant::now()
-        } else {
-            false
-        }
+    fn mint_csrf(&self) -> String {
+        mint_csrf_token(self.jwt_secret.as_bytes())
+    }
+
+    fn validate_csrf(&self, token: &str) -> bool {
+        verify_csrf_token(token, self.jwt_secret.as_bytes())
     }
 }
 
@@ -249,12 +302,8 @@ pub async fn oauth_register(
     }
 
     let ip = resolved_ip.0.as_deref().unwrap_or("unknown");
-    let rate_key = format!("oauth_register:{ip}");
-    if !state
-        .rate_limiter
-        .check(&rate_key, REGISTER_RATE_LIMIT)
-        .await
-    {
+    let rate_key = format!("oauth:register:{ip}");
+    if !state.rate_check(&rate_key, REGISTER_RATE_LIMIT).await {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({
@@ -505,9 +554,9 @@ pub async fn oauth_authorize_get(
     });
     let has_session = session_subject.is_some();
 
-    // Generate CSRF token (T5)
-    let csrf_token = oauth::generate_random_token();
-    state.store_csrf(&csrf_token).await;
+    // Generate CSRF token (T5). Stateless HMAC-signed token so the form-post
+    // callback can verify it on any node behind a load balancer.
+    let csrf_token = state.mint_csrf();
 
     let auth_mode = if has_session {
         "session" // user is known from cookie, show consent directly
@@ -550,10 +599,12 @@ pub async fn oauth_authorize_get(
         "Content-Security-Policy",
         HeaderValue::from_static("frame-ancestors 'none'"),
     );
-    // Set CSRF cookie (T1, T5)
+    // Set CSRF cookie (T1, T5). Cookie max-age tracks the token's HMAC TTL so
+    // the browser drops the cookie at roughly the same time the server would
+    // reject the token.
     let csrf_secure_flag = "; Secure";
     let cookie = format!(
-        "forge_oauth_csrf={csrf_token}; Path=/_api/oauth/; HttpOnly; SameSite=Lax; Max-Age=600{csrf_secure_flag}"
+        "forge_oauth_csrf={csrf_token}; Path=/_api/oauth/; HttpOnly; SameSite=Lax; Max-Age={CSRF_TTL_SECS}{csrf_secure_flag}"
     );
     if let Ok(cookie_val) = HeaderValue::from_str(&cookie) {
         response
@@ -586,14 +637,16 @@ pub async fn oauth_authorize_post(
     State(state): State<Arc<OAuthState>>,
     axum::Form(form): axum::Form<AuthorizeForm>,
 ) -> Response {
-    // Validate CSRF (T5): check both cookie and form value
+    // Validate CSRF (T5): check both cookie and form value. The token itself
+    // is HMAC-verified — node-local state no longer constrains which node
+    // serves the form-post callback.
     let csrf_from_cookie = extract_cookie(&headers, "forge_oauth_csrf");
     let csrf_valid = if let Some(cookie_csrf) = csrf_from_cookie {
         let cookie_match: bool = cookie_csrf
             .as_bytes()
             .ct_eq(form.csrf_token.as_bytes())
             .into();
-        cookie_match && state.validate_csrf(&form.csrf_token).await
+        cookie_match && state.validate_csrf(&form.csrf_token)
     } else {
         false
     };
@@ -608,9 +661,10 @@ pub async fn oauth_authorize_post(
             .into_response();
     }
 
-    // Rate limit login failures (T7)
+    // Rate limit login failures (T7). PG-backed key so the budget is shared
+    // across cluster nodes.
     let ip = resolved_ip.0.as_deref().unwrap_or("unknown");
-    let rate_key = format!("oauth_login:{ip}");
+    let rate_key = format!("oauth:login:{ip}");
 
     // Validate client and redirect_uri again (form could be tampered)
     let client = sqlx::query!(
@@ -708,11 +762,7 @@ pub async fn oauth_authorize_post(
             );
         }
 
-        if !state
-            .rate_limiter
-            .check(&rate_key, LOGIN_FAIL_RATE_LIMIT)
-            .await
-        {
+        if !state.rate_check(&rate_key, LOGIN_FAIL_RATE_LIMIT).await {
             return authorize_error_redirect(
                 &form.redirect_uri,
                 form.state.as_deref(),
@@ -1268,47 +1318,66 @@ mod tests {
         assert_eq!(extract_cookie(&headers, "real"), Some("value".into()));
     }
 
-    // ── OAuthRateLimiter ────────────────────────────────────────────────
+    // ── CSRF (stateless HMAC) ───────────────────────────────────────────
 
-    #[tokio::test]
-    async fn rate_limiter_allows_up_to_limit_then_rejects() {
-        let limiter = OAuthRateLimiter::default();
-        for _ in 0..3 {
-            assert!(limiter.check("ip-a", 3).await);
-        }
-        // 4th attempt for the same key is rejected.
-        assert!(!limiter.check("ip-a", 3).await);
+    #[test]
+    fn csrf_round_trip_accepts_freshly_minted_token() {
+        let secret = b"oauth-csrf-secret-32-bytes-pad!!!";
+        let token = mint_csrf_token(secret);
+        assert!(!token.is_empty());
+        assert!(verify_csrf_token(&token, secret));
     }
 
-    #[tokio::test]
-    async fn rate_limiter_buckets_are_per_key() {
-        let limiter = OAuthRateLimiter::default();
-        // Exhaust ip-a.
-        for _ in 0..2 {
-            assert!(limiter.check("ip-a", 2).await);
-        }
-        assert!(!limiter.check("ip-a", 2).await);
-        // ip-b has its own bucket.
-        assert!(limiter.check("ip-b", 2).await);
-        assert!(limiter.check("ip-b", 2).await);
-        assert!(!limiter.check("ip-b", 2).await);
+    #[test]
+    fn csrf_verify_rejects_wrong_secret() {
+        let token = mint_csrf_token(b"secret-A-32-bytes-pad!!!!!!!!!!!");
+        assert!(!verify_csrf_token(
+            &token,
+            b"secret-B-32-bytes-pad!!!!!!!!!!!"
+        ));
     }
 
-    #[tokio::test]
-    async fn rate_limiter_window_reset_via_backdated_entry() {
-        let limiter = OAuthRateLimiter::default();
-        // Burn the budget for "ip-c".
-        assert!(limiter.check("ip-c", 1).await);
-        assert!(!limiter.check("ip-c", 1).await);
+    #[test]
+    fn csrf_verify_rejects_tampered_payload() {
+        let secret = b"oauth-csrf-secret-32-bytes-pad!!!";
+        let token = mint_csrf_token(secret);
+        // Flip the last char of the base64url string to perturb the HMAC.
+        let mut tampered = token.clone();
+        let last = tampered.pop().expect("token non-empty");
+        tampered.push(if last == 'A' { 'B' } else { 'A' });
+        assert!(!verify_csrf_token(&tampered, secret));
+    }
 
-        // Force the timestamp to look older than the window so the next call
-        // takes the "rollover" branch.
-        {
-            let mut buckets = limiter.buckets.write().await;
-            let entry = buckets.get_mut("ip-c").unwrap();
-            entry.1 = Instant::now() - Duration::from_secs(RATE_WINDOW_SECS + 1);
-        }
-        assert!(limiter.check("ip-c", 1).await);
+    #[test]
+    fn csrf_verify_rejects_garbage_input() {
+        let secret = b"oauth-csrf-secret-32-bytes-pad!!!";
+        assert!(!verify_csrf_token("not-base64-!!!", secret));
+        assert!(!verify_csrf_token("", secret));
+        assert!(!verify_csrf_token("AAAA", secret)); // valid base64 but wrong length
+    }
+
+    #[test]
+    fn csrf_verify_rejects_token_older_than_ttl() {
+        let secret = b"oauth-csrf-secret-32-bytes-pad!!!";
+
+        // Hand-craft a token with a stale timestamp so we don't have to wait
+        // CSRF_TTL_SECS in a unit test.
+        let stale_ts: u64 = (chrono::Utc::now().timestamp() - (CSRF_TTL_SECS as i64) - 5) as u64;
+        let nonce: [u8; CSRF_NONCE_LEN] = *Uuid::new_v4().as_bytes();
+        let mut payload = Vec::with_capacity(8 + CSRF_NONCE_LEN);
+        payload.extend_from_slice(&stale_ts.to_be_bytes());
+        payload.extend_from_slice(&nonce);
+
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("hmac accepts any key");
+        mac.update(&payload);
+        let sig = mac.finalize().into_bytes();
+
+        let mut out = Vec::with_capacity(payload.len() + sig.len());
+        out.extend_from_slice(&payload);
+        out.extend_from_slice(&sig);
+        let stale_token = URL_SAFE_NO_PAD.encode(&out);
+
+        assert!(!verify_csrf_token(&stale_token, secret));
     }
 
     // ── token_error ─────────────────────────────────────────────────────

@@ -379,7 +379,11 @@ impl WorkflowContext {
     /// a different signature, and any in-flight run that tries to resume will be blocked
     /// with `WorkflowStatus::BlockedSignatureMismatch`. Treat step names as stable
     /// public identifiers — change them only under a new workflow version.
-    pub async fn record_step_start(&self, name: &str) {
+    ///
+    /// Persistence errors are propagated. A swallowed error here would let
+    /// the workflow continue running while its on-disk state diverged from
+    /// memory, producing a "completed" run with no recorded step rows.
+    pub async fn record_step_start(&self, name: &str) -> crate::Result<()> {
         let state_clone = {
             let mut states = self.step_states.write().expect(LOCK_POISONED);
             let state = states
@@ -387,7 +391,7 @@ impl WorkflowContext {
                 .or_insert_with(|| StepState::new(name));
 
             if state.status != StepStatus::Pending {
-                return;
+                return Ok(());
             }
 
             state.start();
@@ -395,12 +399,12 @@ impl WorkflowContext {
         };
 
         if !self.persist_step_start {
-            return;
+            return Ok(());
         }
 
         let step_id = Uuid::new_v4();
         let step_name = name.to_string();
-        if let Err(e) = sqlx::query!(
+        sqlx::query!(
             r#"
                 INSERT INTO forge_workflow_steps (id, workflow_run_id, step_name, status, started_at)
                 VALUES ($1, $2, $3, $4, $5)
@@ -414,23 +418,25 @@ impl WorkflowContext {
         )
         .execute(&self.db_pool)
         .await
-        {
-            tracing::warn!(
-                workflow_run_id = %self.run_id,
-                step = %name,
-                "Failed to persist step start: {}",
-                e
-            );
-        }
+        .map_err(crate::ForgeError::Database)?;
+        Ok(())
     }
 
     /// Record step completion and persist to the database before returning.
-    pub async fn record_step_complete(&self, name: &str, result: serde_json::Value) {
+    ///
+    /// Errors from the persist call are propagated so the workflow can react
+    /// rather than continuing past a step the database never observed.
+    pub async fn record_step_complete(
+        &self,
+        name: &str,
+        result: serde_json::Value,
+    ) -> crate::Result<()> {
         let state_clone = self.update_step_state_complete(name, result);
 
         if let Some(state) = state_clone {
-            Self::persist_step_complete(&self.db_pool, self.run_id, name, &state).await;
+            Self::persist_step_complete(&self.db_pool, self.run_id, name, &state).await?;
         }
+        Ok(())
     }
 
     /// Update in-memory step state to completed.
@@ -461,9 +467,9 @@ impl WorkflowContext {
         run_id: Uuid,
         step_name: &str,
         state: &StepState,
-    ) {
+    ) -> crate::Result<()> {
         // Use UPSERT to handle race condition where persist_step_start hasn't completed yet
-        if let Err(e) = sqlx::query!(
+        sqlx::query!(
             r#"
             INSERT INTO forge_workflow_steps (id, workflow_run_id, step_name, status, result, started_at, completed_at)
             VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6)
@@ -479,18 +485,20 @@ impl WorkflowContext {
         )
         .execute(pool)
         .await
-        {
-            tracing::warn!(
-                workflow_run_id = %run_id,
-                step = %step_name,
-                "Failed to persist step completion: {}",
-                e
-            );
-        }
+        .map_err(crate::ForgeError::Database)?;
+        Ok(())
     }
 
     /// Record step failure and persist to the database before returning.
-    pub async fn record_step_failure(&self, name: &str, error: impl Into<String>) {
+    ///
+    /// Errors from the persist call are propagated so the workflow doesn't
+    /// declare a step "failed" only in memory while the row still claims it
+    /// is running.
+    pub async fn record_step_failure(
+        &self,
+        name: &str,
+        error: impl Into<String>,
+    ) -> crate::Result<()> {
         let error_str = error.into();
         let state_clone = {
             let mut states = self.step_states.write().expect(LOCK_POISONED);
@@ -502,7 +510,7 @@ impl WorkflowContext {
 
         if let Some(state) = state_clone {
             let step_name = name.to_string();
-            if let Err(e) = sqlx::query!(
+            sqlx::query!(
                 r#"
                     UPDATE forge_workflow_steps
                     SET status = $3, error = $4, completed_at = $5
@@ -516,54 +524,44 @@ impl WorkflowContext {
             )
             .execute(&self.db_pool)
             .await
-            {
-                tracing::warn!(
-                    workflow_run_id = %self.run_id,
-                    step = %name,
-                    "Failed to persist step failure: {}",
-                    e
-                );
-            }
+            .map_err(crate::ForgeError::Database)?;
         }
+        Ok(())
     }
 
-    /// Record step compensation.
-    pub fn record_step_compensated(&self, name: &str) {
-        let mut states = self.step_states.write().expect(LOCK_POISONED);
-        if let Some(state) = states.get_mut(name) {
-            state.compensate();
-        }
-        let state_clone = states.get(name).cloned();
-        drop(states);
+    /// Record step compensation and persist to the database before returning.
+    ///
+    /// Persistence is inline (not `tokio::spawn`'d): if the process crashes
+    /// after the in-memory state changes but before the row update lands, a
+    /// later resume would see the step as still completed and re-run its
+    /// compensation handler. Inline await ties durability to the caller and
+    /// surfaces failures through `Result`.
+    pub async fn record_step_compensated(&self, name: &str) -> crate::Result<()> {
+        let state_clone = {
+            let mut states = self.step_states.write().expect(LOCK_POISONED);
+            if let Some(state) = states.get_mut(name) {
+                state.compensate();
+            }
+            states.get(name).cloned()
+        };
 
-        // Persist to database in background
         if let Some(state) = state_clone {
-            let pool = self.db_pool.clone();
-            let run_id = self.run_id;
             let step_name = name.to_string();
-            tokio::spawn(async move {
-                if let Err(e) = sqlx::query!(
-                    r#"
+            sqlx::query!(
+                r#"
                     UPDATE forge_workflow_steps
                     SET status = $3
                     WHERE workflow_run_id = $1 AND step_name = $2
                     "#,
-                    run_id,
-                    step_name,
-                    state.status.as_str(),
-                )
-                .execute(&pool)
-                .await
-                {
-                    tracing::warn!(
-                        workflow_run_id = %run_id,
-                        step = %step_name,
-                        "Failed to persist step compensation: {}",
-                        e
-                    );
-                }
-            });
+                self.run_id,
+                step_name,
+                state.status.as_str(),
+            )
+            .execute(&self.db_pool)
+            .await
+            .map_err(crate::ForgeError::Database)?;
         }
+        Ok(())
     }
 
     pub fn completed_steps_reversed(&self) -> Vec<String> {
@@ -624,19 +622,35 @@ impl WorkflowContext {
             if let Some(handler) = handler {
                 let step_result = result.unwrap_or(serde_json::Value::Null);
                 match handler(step_result).await {
-                    Ok(()) => {
-                        self.record_step_compensated(&step_name);
-                        results.push((step_name, true));
-                    }
+                    Ok(()) => match self.record_step_compensated(&step_name).await {
+                        Ok(()) => results.push((step_name, true)),
+                        Err(e) => {
+                            tracing::error!(
+                                step = %step_name,
+                                error = %e,
+                                "Failed to persist step compensation; marking compensation as failed",
+                            );
+                            results.push((step_name, false));
+                        }
+                    },
                     Err(e) => {
                         tracing::error!(step = %step_name, error = %e, "Compensation failed");
                         results.push((step_name, false));
                     }
                 }
             } else {
-                // No compensation handler, mark as compensated anyway
-                self.record_step_compensated(&step_name);
-                results.push((step_name, true));
+                // No compensation handler, mark as compensated anyway.
+                match self.record_step_compensated(&step_name).await {
+                    Ok(()) => results.push((step_name, true)),
+                    Err(e) => {
+                        tracing::error!(
+                            step = %step_name,
+                            error = %e,
+                            "Failed to persist step compensation",
+                        );
+                        results.push((step_name, false));
+                    }
+                }
             }
         }
 
@@ -884,12 +898,13 @@ impl WorkflowContext {
     /// Signal suspension to the executor.
     ///
     /// Stores the reason in the context so the executor can retrieve it via
-    /// `take_suspend_reason()`, then returns `Err(ForgeError::internal(…))`
-    /// to short-circuit the handler via `?`. The executor checks for a stored
-    /// reason before treating the error as a real failure.
+    /// `take_suspend_reason()` and returns a typed
+    /// [`ForgeError::WorkflowSuspended`] so the handler short-circuits via `?`.
+    /// The executor matches on the variant — no string parsing, no risk of a
+    /// real internal error being misclassified as a suspension.
     async fn signal_suspend(&self, reason: SuspendReason) -> Result<()> {
-        *self.suspend_reason.lock().expect(LOCK_POISONED) = Some(reason);
-        Err(ForgeError::internal("workflow suspended"))
+        *self.suspend_reason.lock().expect(LOCK_POISONED) = Some(reason.clone());
+        Err(ForgeError::WorkflowSuspended(reason))
     }
 
     /// Take the stored suspension reason, if any.
@@ -947,11 +962,25 @@ mod tests {
             CircuitBreakerClient::with_defaults(reqwest::Client::new()),
         );
 
-        ctx.record_step_start("step1").await;
+        // `persist_step_start` defaults to false, so record_step_start does
+        // not touch the database and is safe with a non-routable pool.
+        ctx.record_step_start("step1")
+            .await
+            .expect("record_step_start should not touch db when persist disabled");
         assert!(!ctx.is_step_completed("step1"));
 
-        ctx.record_step_complete("step1", serde_json::json!({"result": "ok"}))
-            .await;
+        // record_step_complete must always persist (it's the only path that
+        // writes the row), so without a live database it must surface an
+        // error rather than silently succeeding.
+        let complete_err = ctx
+            .record_step_complete("step1", serde_json::json!({"result": "ok"}))
+            .await
+            .expect_err("record_step_complete should propagate db errors");
+        assert!(
+            matches!(complete_err, crate::ForgeError::Database(_)),
+            "expected Database error, got {complete_err:?}",
+        );
+        // In-memory state still moved forward — the DB error doesn't roll it back.
         assert!(ctx.is_step_completed("step1"));
 
         let result: Option<serde_json::Value> = ctx.get_step_result("step1");

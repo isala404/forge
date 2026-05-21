@@ -342,9 +342,10 @@ pub struct AuthMiddleware {
     /// each paired with the kid of the underlying secret. The kid lets the
     /// validator look up the right key directly when the token carries one.
     legacy_hmac_keys: Vec<(String, DecodingKey)>,
-    /// Positive token cache: maps token hash -> (Claims, expiry). Avoids
-    /// re-validating the same JWT on every request.
-    token_cache: Arc<dashmap::DashMap<u64, (Claims, std::time::Instant)>>,
+    /// Positive token cache: maps full SHA-256 of the token bytes ->
+    /// (Claims, expiry). The 256-bit key makes collisions cryptographically
+    /// infeasible, so a hit unambiguously identifies the same token.
+    token_cache: Arc<dashmap::DashMap<[u8; 32], (Claims, std::time::Instant)>>,
 }
 
 impl std::fmt::Debug for AuthMiddleware {
@@ -462,12 +463,12 @@ impl AuthMiddleware {
         Ok(claims)
     }
 
-    /// Hash a token to a u64 for cache key. Uses FxHash-style fast hashing.
-    fn hash_token(token: &str) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        token.hash(&mut hasher);
-        hasher.finish()
+    /// Hash a token to a 32-byte SHA-256 digest used as the cache key.
+    /// Cryptographic-strength width eliminates the collision risk that a
+    /// 64-bit non-crypto hash would carry — a collision there would let
+    /// a forged token short-circuit validation with another token's claims.
+    fn hash_token(token: &str) -> [u8; 32] {
+        Sha256::digest(token.as_bytes()).into()
     }
 
     /// Compute cache TTL as `min(exp - now, 60s)`.

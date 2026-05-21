@@ -584,6 +584,21 @@ impl Forge {
             );
         }
 
+        // Job dispatcher is constructed here (before workers) so it can be
+        // threaded into each worker's JobExecutor. Handlers running inside the
+        // worker call `ctx.dispatch_job(...)` / `ctx.start_workflow(...)`,
+        // which require live dispatcher handles — without them the calls would
+        // either fail or (for workflows) write blank version/signature columns
+        // and immediately block on resume.
+        #[cfg(feature = "jobs")]
+        let job_dispatcher = {
+            let job_queue_for_dispatch = JobQueue::new(pool.clone());
+            Arc::new(JobDispatcher::new(
+                job_queue_for_dispatch,
+                self.job_registry.clone(),
+            ))
+        };
+
         // Start one worker pool per configured queue if worker role.
         //
         // Each queue gets its own Worker instance with a single capability
@@ -616,14 +631,26 @@ impl Forge {
                     ..Default::default()
                 };
 
-                let mut worker = Worker::new(
+                let worker_base = Worker::new(
                     worker_config,
                     job_queue.clone(),
                     self.job_registry.clone(),
                     pool.clone(),
                     notify_bus.clone(),
                 )
-                .with_kv(Arc::clone(&kv_handle));
+                .with_kv(Arc::clone(&kv_handle))
+                .with_job_dispatch(job_dispatcher.clone());
+
+                // Workflow dispatch is feature-gated; with it, handlers
+                // calling `ctx.start_workflow(...)` route through the trait
+                // so the active version + signature are written. Without it,
+                // the call fails with a clear "Workflow dispatch not
+                // available" error.
+                #[cfg(feature = "workflows")]
+                let mut worker =
+                    worker_base.with_workflow_dispatch(workflow_bridge_executor.clone());
+                #[cfg(not(feature = "workflows"))]
+                let mut worker = worker_base;
 
                 let queue_label = queue_name.clone();
                 handles.push(tokio::spawn(async move {
@@ -766,16 +793,9 @@ impl Forge {
             tracing::debug!("Workflow scheduler started");
         }
 
-        // Create job dispatcher (used by daemon, gateway, webhook routes).
-        #[cfg(feature = "jobs")]
-        let job_dispatcher = {
-            let job_queue_for_dispatch = JobQueue::new(pool.clone());
-            Arc::new(JobDispatcher::new(
-                job_queue_for_dispatch,
-                self.job_registry.clone(),
-            ))
-        };
-        // Reuse the bridge executor for dispatch (daemon, gateway).
+        // Reuse the bridge executor for dispatch (daemon, gateway). The job
+        // dispatcher itself was constructed earlier so workers could be wired
+        // with it; daemon/gateway/webhook routes share the same handle.
         #[cfg(feature = "workflows")]
         let workflow_executor = workflow_bridge_executor;
 

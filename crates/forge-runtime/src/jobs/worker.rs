@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use forge_core::function::KvHandle;
+use forge_core::function::{JobDispatch, KvHandle, WorkflowDispatch};
 use tokio::sync::mpsc;
 use tracing::Instrument;
 use uuid::Uuid;
@@ -38,6 +38,11 @@ pub struct WorkerConfig {
     pub stale_cleanup_interval: Duration,
     /// Stale job threshold.
     pub stale_threshold: chrono::Duration,
+    /// Grace period to wait for in-flight jobs to finish on shutdown before
+    /// aborting their tasks. Jobs that exceed this are aborted so shutdown
+    /// completes deterministically — they will be reclaimed by the next
+    /// startup's stale-reclaim sweep.
+    pub shutdown_grace_period: Duration,
     /// Whether this worker is the leader (gates cleanup).
     pub leader_election: Option<Arc<LeaderElection>>,
 }
@@ -54,6 +59,7 @@ impl Default for WorkerConfig {
             batch_size: 10,
             stale_cleanup_interval: Duration::from_secs(60),
             stale_threshold: chrono::Duration::minutes(5),
+            shutdown_grace_period: Duration::from_secs(30),
             leader_election: None,
         }
     }
@@ -97,6 +103,26 @@ impl Worker {
         // the executor at construction time (no tasks spawned yet).
         if let Some(executor) = Arc::get_mut(&mut self.executor) {
             executor.set_kv(kv);
+        }
+        self
+    }
+
+    /// Attach a job dispatcher so handlers can call `ctx.dispatch_job(...)`.
+    /// Must be called before [`run`](Self::run) starts spawning tasks — the
+    /// executor `Arc` is uniquely owned at construction and shared by `run`.
+    pub fn with_job_dispatch(mut self, dispatcher: Arc<dyn JobDispatch>) -> Self {
+        if let Some(executor) = Arc::get_mut(&mut self.executor) {
+            executor.set_job_dispatch(dispatcher);
+        }
+        self
+    }
+
+    /// Attach a workflow dispatcher so handlers can call
+    /// `ctx.start_workflow(...)`. Must be called before
+    /// [`run`](Self::run) starts spawning tasks.
+    pub fn with_workflow_dispatch(mut self, dispatcher: Arc<dyn WorkflowDispatch>) -> Self {
+        if let Some(executor) = Arc::get_mut(&mut self.executor) {
+            executor.set_workflow_dispatch(dispatcher);
         }
         self
     }
@@ -192,6 +218,11 @@ impl Worker {
             "Worker started"
         );
 
+        // Track in-flight job tasks so shutdown can join (or abort) them
+        // instead of dropping the handles and silently abandoning long
+        // running jobs.
+        let mut job_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+
         loop {
             // Wait for either a NOTIFY wakeup, poll interval, or shutdown.
             tokio::select! {
@@ -199,11 +230,16 @@ impl Worker {
                     tracing::debug!(worker_id = %self.id, "Worker shutting down");
                     shutdown_notify.notify_waiters();
                     let _ = cleanup_handle.await;
+                    self.drain_jobs(&mut job_tasks).await;
                     break;
                 }
                 _ = wakeup_notify.notified() => {}
                 _ = tokio::time::sleep(self.config.poll_interval) => {}
             }
+
+            // Reap finished tasks so the JoinSet doesn't grow unboundedly
+            // between shutdowns. `try_join_next` is non-blocking.
+            while job_tasks.try_join_next().is_some() {}
 
             let user_available = semaphore.available_permits();
             let system_available = system_semaphore.available_permits();
@@ -240,12 +276,22 @@ impl Worker {
                     match system_semaphore.clone().try_acquire_owned() {
                         Ok(p) => p,
                         Err(tokio::sync::TryAcquireError::NoPermits) => {
-                            // System slots full; job remains claimed and will be
-                            // reclaimed by stale-job cleanup, then re-queued.
+                            // We over-claimed relative to free permits (e.g. a
+                            // race with another permit acquisition). Release the
+                            // claim immediately so the row goes back to
+                            // `pending` with attempts undone, rather than
+                            // sitting claimed-but-unstarted until stale-reclaim.
                             tracing::debug!(
                                 job_id = %job.id,
-                                "System semaphore full, job will be reclaimed"
+                                "System semaphore full, releasing claim"
                             );
+                            if let Err(e) = self.queue.release_claim(job.id, self.id).await {
+                                tracing::warn!(
+                                    job_id = %job.id,
+                                    error = %e,
+                                    "Failed to release claim after semaphore exhaustion",
+                                );
+                            }
                             continue;
                         }
                         Err(tokio::sync::TryAcquireError::Closed) => {
@@ -257,12 +303,18 @@ impl Worker {
                     match semaphore.clone().try_acquire_owned() {
                         Ok(p) => p,
                         Err(tokio::sync::TryAcquireError::NoPermits) => {
-                            // User slots full; job remains claimed and will be
-                            // reclaimed by stale-job cleanup, then re-queued.
+                            // Same rationale as the system-permit branch.
                             tracing::debug!(
                                 job_id = %job.id,
-                                "Worker semaphore full, job will be reclaimed"
+                                "Worker semaphore full, releasing claim"
                             );
+                            if let Err(e) = self.queue.release_claim(job.id, self.id).await {
+                                tracing::warn!(
+                                    job_id = %job.id,
+                                    error = %e,
+                                    "Failed to release claim after semaphore exhaustion",
+                                );
+                            }
                             continue;
                         }
                         Err(tokio::sync::TryAcquireError::Closed) => {
@@ -275,7 +327,7 @@ impl Worker {
                 let job_id = job.id;
                 let job_type = job.job_type.clone();
 
-                tokio::spawn(async move {
+                job_tasks.spawn(async move {
                     let start = std::time::Instant::now();
                     let span = tracing::info_span!(
                         "job.execute",
@@ -344,6 +396,56 @@ impl Worker {
         if let Some(ref tx) = self.shutdown_tx {
             let _ = tx.send(()).await;
         }
+    }
+
+    /// Wait for in-flight job tasks to finish within the configured grace
+    /// period. Tasks that exceed the grace period are aborted so shutdown
+    /// can complete — they will be requeued by the next process's
+    /// stale-reclaim sweep on the `claimed`/`running` rows they left behind.
+    async fn drain_jobs(&self, job_tasks: &mut tokio::task::JoinSet<()>) {
+        let total = job_tasks.len();
+        if total == 0 {
+            return;
+        }
+
+        let grace = self.config.shutdown_grace_period;
+        tracing::info!(
+            worker_id = %self.id,
+            in_flight = total,
+            grace_secs = grace.as_secs(),
+            "Draining in-flight jobs before shutdown",
+        );
+
+        let mut completed: usize = 0;
+        let deadline = tokio::time::Instant::now() + grace;
+        loop {
+            tokio::select! {
+                joined = job_tasks.join_next() => {
+                    match joined {
+                        Some(_) => completed += 1,
+                        None => break,
+                    }
+                }
+                _ = tokio::time::sleep_until(deadline) => {
+                    break;
+                }
+            }
+        }
+
+        let aborted = job_tasks.len();
+        if aborted > 0 {
+            job_tasks.abort_all();
+            // Reap the aborted handles so they don't dangle.
+            while job_tasks.join_next().await.is_some() {}
+        }
+
+        tracing::info!(
+            worker_id = %self.id,
+            completed,
+            aborted,
+            total,
+            "Worker drain finished",
+        );
     }
 }
 

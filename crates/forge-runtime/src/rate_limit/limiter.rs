@@ -35,17 +35,28 @@ impl StrictRateLimiter {
         let max_tokens = config.requests as f64;
         let refill_rate = config.refill_rate();
 
-        // Atomic upsert with token bucket logic
+        // Atomic upsert with token bucket logic.
+        //
+        // We compute the *refilled* token count first, then decide whether to
+        // consume one. Subtracting unconditionally — even when the bucket is
+        // already empty — drove `tokens` arbitrarily negative under sustained
+        // overload, inflating `retry_after = (1 - tokens) / refill_rate` into
+        // multi-minute waits that clients ignored. Clamping the consume step
+        // with GREATEST(refilled - 1, 0) keeps `retry_after` proportional to
+        // the actual single-token refill time.
         let result = sqlx::query!(
             r#"
             INSERT INTO forge_rate_limits (bucket_key, tokens, last_refill, max_tokens, refill_rate)
             VALUES ($1, $2 - 1, NOW(), $2, $3)
             ON CONFLICT (bucket_key) DO UPDATE SET
-                tokens = LEAST(
-                    forge_rate_limits.max_tokens::double precision,
-                    forge_rate_limits.tokens +
-                        (EXTRACT(EPOCH FROM (NOW() - forge_rate_limits.last_refill)) * forge_rate_limits.refill_rate)
-                ) - 1,
+                tokens = GREATEST(
+                    LEAST(
+                        forge_rate_limits.max_tokens::double precision,
+                        forge_rate_limits.tokens +
+                            (EXTRACT(EPOCH FROM (NOW() - forge_rate_limits.last_refill)) * forge_rate_limits.refill_rate)
+                    ) - 1,
+                    -1.0
+                ),
                 last_refill = NOW()
             RETURNING tokens, max_tokens, last_refill, (tokens >= 0) as "allowed!"
             "#,
@@ -68,6 +79,9 @@ impl StrictRateLimiter {
         if allowed {
             Ok(RateLimitResult::allowed(remaining, reset_at))
         } else {
+            // tokens is clamped to >= -1, so retry_after is bounded by
+            // (1 - (-1)) / refill_rate = 2 / refill_rate — proportional to
+            // one refill interval rather than runaway.
             let retry_after = Duration::from_secs_f64((1.0 - tokens) / refill_rate);
             Ok(RateLimitResult::denied(remaining, reset_at, retry_after))
         }

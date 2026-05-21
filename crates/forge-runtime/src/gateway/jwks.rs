@@ -7,10 +7,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use dashmap::DashMap;
 use jsonwebtoken::DecodingKey;
 use serde::Deserialize;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, warn};
+
+/// How long to remember that a `kid` was absent from the latest JWKS fetch.
+/// Short enough to pick up a legitimate key rotation within one cache cycle,
+/// long enough to absorb a flood of forged-kid tokens without hammering the
+/// JWKS endpoint.
+const NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(30);
 
 /// JWKS response structure from providers.
 #[derive(Debug, Deserialize)]
@@ -78,6 +85,15 @@ pub struct JwksClient {
     cache: Arc<RwLock<Option<CachedJwks>>>,
     /// Cache time-to-live.
     cache_ttl: Duration,
+    /// Singleflight guard: only one refresh at a time. Concurrent callers
+    /// wait on the same lock and re-read the cache once it's released,
+    /// preventing a thundering herd of JWKS HTTP fetches after key rotation.
+    refresh_lock: Arc<Mutex<()>>,
+    /// Short-lived negative cache for unknown `kid` values. Without it, an
+    /// attacker can amplify each forged token into one JWKS HTTP fetch.
+    /// Populated only after a refresh completes and the kid is still missing
+    /// — never before — so legitimate rotations are not blocked.
+    negative_cache: Arc<DashMap<String, Instant>>,
 }
 
 impl std::fmt::Debug for JwksClient {
@@ -107,6 +123,8 @@ impl JwksClient {
             http_client,
             cache: Arc::new(RwLock::new(None)),
             cache_ttl: Duration::from_secs(cache_ttl_secs),
+            refresh_lock: Arc::new(Mutex::new(())),
+            negative_cache: Arc::new(DashMap::new()),
         })
     }
 
@@ -127,23 +145,60 @@ impl JwksClient {
             }
         }
 
-        // Cache miss or expired - refresh
+        // Short-circuit forged-kid flood: if we previously failed to find
+        // this kid right after a refresh and the negative cache entry is
+        // still fresh, do not trigger another refresh. The entry is only
+        // ever written *after* a refresh has run, so legitimate rotation is
+        // not blocked.
+        if let Some(entry) = self.negative_cache.get(kid) {
+            if entry.value().elapsed() < NEGATIVE_CACHE_TTL {
+                return Err(JwksError::KeyNotFound(kid.to_string()));
+            }
+            drop(entry);
+            self.negative_cache.remove(kid);
+        }
+
+        // Cache miss or expired — refresh, but coalesce concurrent callers.
         debug!(kid = %kid, "JWKS cache miss, refreshing");
-        self.refresh().await?;
+        self.refresh_if_needed().await?;
 
         // Try again from refreshed cache
         let cache = self.cache.read().await;
         if let Some(ref cached) = *cache {
-            cached
-                .keys
-                .get(kid)
-                .cloned()
-                .ok_or_else(|| JwksError::KeyNotFound(kid.to_string()))
+            match cached.keys.get(kid).cloned() {
+                Some(key) => Ok(key),
+                None => {
+                    drop(cache);
+                    // Record the miss so subsequent requests for this kid
+                    // don't each trigger another refresh.
+                    self.negative_cache.insert(kid.to_string(), Instant::now());
+                    Err(JwksError::KeyNotFound(kid.to_string()))
+                }
+            }
         } else {
             Err(JwksError::FetchFailed(
                 "Cache empty after refresh".to_string(),
             ))
         }
+    }
+
+    /// Refresh once across concurrent callers. Holds a Mutex while the HTTP
+    /// fetch is in flight; waiters re-check the cache after the lock is
+    /// released so they pick up the freshly fetched keys without firing
+    /// another request.
+    async fn refresh_if_needed(&self) -> Result<(), JwksError> {
+        let _guard = self.refresh_lock.lock().await;
+        // Re-check the cache under the lock: if another caller already
+        // refreshed while we were waiting, skip the second fetch.
+        {
+            let cache = self.cache.read().await;
+            if let Some(ref cached) = *cache
+                && cached.fetched_at.elapsed() < self.cache_ttl
+            {
+                return Ok(());
+            }
+        }
+        self.refresh().await
     }
 
     /// Get any available key (for tokens without kid header).
@@ -163,9 +218,9 @@ impl JwksClient {
             }
         }
 
-        // Cache miss or expired - refresh
+        // Cache miss or expired — refresh, coalescing concurrent callers.
         debug!("JWKS cache miss for any key, refreshing");
-        self.refresh().await?;
+        self.refresh_if_needed().await?;
 
         let cache = self.cache.read().await;
         if let Some(ref cached) = *cache {
@@ -236,6 +291,13 @@ impl JwksClient {
         }
 
         debug!(count = keys.len(), "Cached JWKS keys");
+
+        // Drop negative-cache entries for any kid that's now present, so a
+        // rotation that hands us a previously-missing kid takes effect
+        // immediately rather than after the negative TTL.
+        for kid in keys.keys() {
+            self.negative_cache.remove(kid);
+        }
 
         let mut cache = self.cache.write().await;
         *cache = Some(CachedJwks {

@@ -41,60 +41,60 @@ pub async fn account_verification(
         ctx.get_step_result::<String>("generate_token")
             .unwrap_or_else(|| format!("verify_{}", Uuid::new_v4()))
     } else {
-        ctx.record_step_start("generate_token").await;
+        ctx.record_step_start("generate_token").await?;
         tracing::info!("Generating verification token");
         tokio::time::sleep(Duration::from_millis(600)).await;
         let token = format!("verify_{}", Uuid::new_v4());
         ctx.record_step_complete("generate_token", serde_json::json!(token))
-            .await;
+            .await?;
         token
     };
 
     // Step 2: Store token
     if !ctx.is_step_completed("store_token") {
-        ctx.record_step_start("store_token").await;
+        ctx.record_step_start("store_token").await?;
         tracing::info!("Storing verification token");
         tokio::time::sleep(Duration::from_millis(600)).await;
         ctx.record_step_complete("store_token", serde_json::json!({"stored": true}))
-            .await;
+            .await?;
     }
 
     // Step 3: Send verification email
     if !ctx.is_step_completed("send_email") {
-        ctx.record_step_start("send_email").await;
+        ctx.record_step_start("send_email").await?;
         tracing::info!(email = %input.email, "Sending verification email");
         tokio::time::sleep(Duration::from_millis(600)).await;
         ctx.record_step_complete("send_email", serde_json::json!({"sent": true}))
-            .await;
+            .await?;
     }
 
     // Step 4: Wait for user confirmation (event-driven, user clicks a button in the UI)
     if !ctx.is_step_completed("await_confirmation") {
-        ctx.record_step_start("await_confirmation").await;
+        ctx.record_step_start("await_confirmation").await?;
         tracing::info!(workflow_id = %ctx.run_id, "Waiting for user confirmation");
         let _confirmation: serde_json::Value = ctx
             .wait_for_event("verification_confirmed", Some(Duration::from_secs(300)))
             .await?;
         ctx.record_step_complete("await_confirmation", serde_json::json!({"confirmed": true}))
-            .await;
+            .await?;
     }
 
     // Step 5: Short wait period (durable sleep, survives restarts)
     if !ctx.is_step_completed("wait_period") {
-        ctx.record_step_start("wait_period").await;
+        ctx.record_step_start("wait_period").await?;
         tracing::info!("Entering brief wait period");
         ctx.sleep(Duration::from_secs(2)).await?;
         ctx.record_step_complete("wait_period", serde_json::json!({"waited": true}))
-            .await;
+            .await?;
     }
 
     // Step 6: Mark verified
     if !ctx.is_step_completed("mark_verified") {
-        ctx.record_step_start("mark_verified").await;
+        ctx.record_step_start("mark_verified").await?;
         tracing::info!(account_id = %input.account_id, "Marking account verified");
         tokio::time::sleep(Duration::from_millis(600)).await;
         ctx.record_step_complete("mark_verified", serde_json::json!(true))
-            .await;
+            .await?;
     }
 
     tracing::info!(workflow_id = %ctx.run_id, "Verification complete");
@@ -156,9 +156,12 @@ mod tests {
 
         assert!(!ctx.is_step_completed("step1"));
 
-        ctx.record_step_start("step1").await;
+        ctx.record_step_start("step1")
+            .await
+            .expect("record_step_start should succeed in tests");
         ctx.record_step_complete("step1", serde_json::json!({"result": "ok"}))
-            .await;
+            .await
+            .expect("record_step_complete should succeed in tests");
 
         assert!(ctx.is_step_completed("step1"));
 
@@ -188,11 +191,14 @@ mod tests {
         let ctx = TestWorkflowContext::builder("account_verification").build();
 
         ctx.record_step_complete("step_a", serde_json::json!(1))
-            .await;
+            .await
+            .expect("step_a complete");
         ctx.record_step_complete("step_b", serde_json::json!(2))
-            .await;
+            .await
+            .expect("step_b complete");
         ctx.record_step_complete("step_c", serde_json::json!(3))
-            .await;
+            .await
+            .expect("step_c complete");
 
         let names = ctx.completed_step_names();
         assert_eq!(names, vec!["step_a", "step_b", "step_c"]);

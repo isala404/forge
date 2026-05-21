@@ -245,16 +245,21 @@ impl WorkflowExecutor {
                 Ok(WorkflowResult::Completed(output))
             }
             Ok(Err(e)) => {
-                if let Some(suspend_reason) = ctx.take_suspend_reason() {
+                // Suspension is signaled via a typed error variant. Match on
+                // the variant directly — never inspect message text — and
+                // handle it before any failure-mapping path so it never
+                // surfaces as an internal error to callers.
+                if matches!(e, forge_core::ForgeError::WorkflowSuspended(_)) {
+                    let suspend_reason = ctx.take_suspend_reason();
                     self.persist_saved_state(run_id, &ctx.take_saved_state())
                         .await?;
-                    let reason = if suspend_reason.is_sleep() {
-                        "sleep".to_string()
-                    } else {
-                        suspend_reason
+                    let reason = match suspend_reason {
+                        Some(r) if r.is_sleep() => "sleep".to_string(),
+                        Some(r) => r
                             .event_name()
                             .map(|n| format!("waiting_event:{n}"))
-                            .unwrap_or_else(|| "suspended".to_string())
+                            .unwrap_or_else(|| "suspended".to_string()),
+                        None => "suspended".to_string(),
                     };
                     return Ok(WorkflowResult::Suspended { reason });
                 }
@@ -671,9 +676,17 @@ impl WorkflowExecutor {
     }
 
     /// Atomically claim a workflow for execution (transition to Running).
+    ///
+    /// The WHERE clause deliberately excludes `'running'`. Admitting it would
+    /// let two resume attempts (e.g., a duplicate `$workflow_resume` job, or a
+    /// scheduler tick racing the bridge handler) both win the UPDATE and
+    /// execute the same run concurrently. The price for excluding it is that
+    /// a stale `'running'` row left behind by a crashed worker must first be
+    /// reclaimed (status reset by the scheduler's stale-run sweep) before
+    /// resume can proceed — but that's the only safe direction.
     async fn claim_for_execution(&self, run_id: Uuid) -> forge_core::Result<()> {
         let result = sqlx::query!(
-            "UPDATE forge_workflow_runs SET status = 'running' WHERE id = $1 AND status IN ('pending', 'sleeping', 'waiting', 'running')",
+            "UPDATE forge_workflow_runs SET status = 'running' WHERE id = $1 AND status IN ('pending', 'sleeping', 'waiting')",
             run_id,
         )
         .execute(&self.pool)

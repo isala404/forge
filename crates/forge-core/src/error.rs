@@ -2,6 +2,8 @@ use std::time::Duration;
 
 use thiserror::Error;
 
+use crate::workflow::SuspendReason;
+
 /// Core error type mapping variants to HTTP status codes.
 #[derive(Error, Debug)]
 #[non_exhaustive]
@@ -66,6 +68,12 @@ pub enum ForgeError {
     /// Service unavailable (503).
     #[error("Service unavailable: {0}")]
     ServiceUnavailable(String),
+
+    /// Internal control signal raised when a workflow handler suspends
+    /// (`ctx.sleep(...)` / `ctx.wait_for_event(...)`). The executor handles
+    /// it before any HTTP mapping layer; it is never returned to a client.
+    #[error("Workflow suspended")]
+    WorkflowSuspended(SuspendReason),
 }
 
 impl ForgeError {

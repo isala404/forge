@@ -6,7 +6,7 @@ use uuid::Uuid;
 use serde::Serialize;
 
 use crate::env::{EnvAccess, EnvProvider, RealEnvProvider};
-use crate::function::{AuthContext, KvHandle};
+use crate::function::{AuthContext, JobDispatch, KvHandle, WorkflowDispatch};
 use crate::http::CircuitBreakerClient;
 
 /// Returns an empty JSON object for initializing job saved data.
@@ -42,6 +42,14 @@ pub struct JobContext {
     env_provider: Arc<dyn EnvProvider>,
     /// KV store handle. `None` until threaded in by the runtime.
     kv: Option<Arc<dyn KvHandle>>,
+    /// Job dispatcher used by `dispatch_job`. `None` until threaded in by the
+    /// runtime; if a handler calls dispatch without one being attached, the
+    /// call fails with an internal error rather than bypassing the trait.
+    job_dispatch: Option<Arc<dyn JobDispatch>>,
+    /// Workflow dispatcher used by `start_workflow`. `None` until threaded in
+    /// by the runtime; required so dispatched workflows resolve the active
+    /// version + signature instead of resuming as BlockedSignatureMismatch.
+    workflow_dispatch: Option<Arc<dyn WorkflowDispatch>>,
 }
 
 /// Progress update message.
@@ -78,6 +86,8 @@ impl JobContext {
             progress_tx: None,
             env_provider: Arc::new(RealEnvProvider::new()),
             kv: None,
+            job_dispatch: None,
+            workflow_dispatch: None,
         }
     }
 
@@ -85,6 +95,23 @@ impl JobContext {
     /// context to the handler.
     pub fn with_kv(mut self, kv: Arc<dyn KvHandle>) -> Self {
         self.kv = Some(kv);
+        self
+    }
+
+    /// Attach a job dispatcher so `dispatch_job` routes through the
+    /// `JobDispatch` trait (the only path that resolves registered job
+    /// metadata).
+    pub fn with_job_dispatch(mut self, dispatcher: Arc<dyn JobDispatch>) -> Self {
+        self.job_dispatch = Some(dispatcher);
+        self
+    }
+
+    /// Attach a workflow dispatcher so `start_workflow` routes through the
+    /// `WorkflowDispatch` trait, which writes the active version + signature.
+    /// Without this, dispatched workflows would resume as
+    /// `BlockedSignatureMismatch` on first attempt.
+    pub fn with_workflow_dispatch(mut self, dispatcher: Arc<dyn WorkflowDispatch>) -> Self {
+        self.workflow_dispatch = Some(dispatcher);
         self
     }
 
@@ -256,40 +283,30 @@ impl JobContext {
 
     /// Dispatch a sub-job directly.
     ///
-    /// The job is inserted into the queue immediately. If the parent job
-    /// subsequently fails, the sub-job remains enqueued (fire-and-forget
-    /// semantics). Use transactional dispatch in MutationContext for
-    /// commit-dependent dispatch.
+    /// Routes through the `JobDispatch` trait so registered job metadata
+    /// (queue/capability, priority, retry policy) is honoured. The dispatch is
+    /// non-transactional: once the parent job returns, the child remains
+    /// enqueued regardless of success. Use the transactional dispatch on
+    /// `MutationContext` for commit-dependent fan-out.
     pub async fn dispatch_job<T: Serialize>(
         &self,
         job_type: &str,
         args: &T,
     ) -> crate::Result<Uuid> {
-        let id = Uuid::new_v4();
         let args_json = serde_json::to_value(args)
             .map_err(|e| crate::ForgeError::Serialization(e.to_string()))?;
-
-        // Runtime query: these INSERTs are new in the direct-dispatch refactor
-        // and the .sqlx cache hasn't been regenerated yet. Convert to compile-time
-        // query! after next `cargo sqlx prepare`.
-        #[allow(clippy::disallowed_methods)]
-        sqlx::query(
-            r#"
-            INSERT INTO forge_jobs (
-                id, job_type, input, job_context, status, priority, attempts, max_attempts,
-                owner_subject, scheduled_at, created_at
-            ) VALUES ($1, $2, $3, '{}', 'pending', 50, 0, 3, $4, NOW(), NOW())
-            "#,
-        )
-        .bind(id)
-        .bind(job_type)
-        .bind(&args_json)
-        .bind(self.auth.subject())
-        .execute(&self.db_pool)
-        .await
-        .map_err(crate::ForgeError::Database)?;
-
-        Ok(id)
+        let dispatcher = self
+            .job_dispatch
+            .as_ref()
+            .ok_or_else(|| crate::ForgeError::internal("Job dispatch not available"))?;
+        dispatcher
+            .dispatch_by_name(
+                job_type,
+                args_json,
+                self.auth.principal_id(),
+                self.auth.tenant_id(),
+            )
+            .await
     }
 
     /// Type-safe dispatch: resolves the job name from the type's `ForgeJob`
@@ -300,56 +317,32 @@ impl JobContext {
 
     /// Start a workflow directly.
     ///
-    /// Inserts the workflow run row and a `$workflow_resume` job immediately.
-    /// The workflow will be picked up by the worker pool.
+    /// Routes through the `WorkflowDispatch` trait, which writes the active
+    /// version + signature onto the run row and enqueues the
+    /// `$workflow_resume` job. Calling raw SQL here would leave both columns
+    /// blank and the executor would immediately mark the run as
+    /// `BlockedSignatureMismatch`.
     pub async fn start_workflow<T: Serialize>(
         &self,
         workflow_name: &str,
         args: &T,
     ) -> crate::Result<Uuid> {
-        let id = Uuid::new_v4();
         let input_json = serde_json::to_value(args)
             .map_err(|e| crate::ForgeError::Serialization(e.to_string()))?;
-
-        // Runtime query: convert to query! after next `cargo sqlx prepare`.
-        #[allow(clippy::disallowed_methods)]
-        sqlx::query(
-            r#"
-            INSERT INTO forge_workflow_runs (
-                id, workflow_name, workflow_version, workflow_signature,
-                input, status, owner_subject, started_at
-            ) VALUES ($1, $2, '', '', $3, 'pending', $4, NOW())
-            "#,
-        )
-        .bind(id)
-        .bind(workflow_name)
-        .bind(&input_json)
-        .bind(self.auth.subject())
-        .execute(&self.db_pool)
-        .await
-        .map_err(crate::ForgeError::Database)?;
-
-        // Enqueue resume job so the worker picks it up
-        let resume_input = serde_json::json!({
-            "run_id": id.to_string(),
-            "from_sleep": false,
-        });
-        // Runtime query: convert to query! after next `cargo sqlx prepare`.
-        #[allow(clippy::disallowed_methods)]
-        sqlx::query(
-            r#"
-            INSERT INTO forge_jobs (
-                id, job_type, input, job_context, status, priority, attempts, max_attempts,
-                worker_capability, scheduled_at, created_at
-            ) VALUES (gen_random_uuid(), '$workflow_resume', $1, '{}', 'pending', 75, 0, 3, 'workflows', NOW(), NOW())
-            "#,
-        )
-        .bind(&resume_input)
-        .execute(&self.db_pool)
-        .await
-        .map_err(crate::ForgeError::Database)?;
-
-        Ok(id)
+        let dispatcher = self
+            .workflow_dispatch
+            .as_ref()
+            .ok_or_else(|| crate::ForgeError::internal("Workflow dispatch not available"))?;
+        dispatcher
+            .start_by_name(
+                workflow_name,
+                input_json,
+                self.auth.principal_id(),
+                // Jobs don't carry an HTTP trace id; observability links via
+                // the job id instead.
+                None,
+            )
+            .await
     }
 
     /// Check if cancellation has been requested for this job.

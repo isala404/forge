@@ -89,7 +89,13 @@ impl Default for WorkflowInfo {
 }
 
 /// Workflow execution status. Blocked variants are non-terminal.
+///
+/// `Compensating` is non-terminal — the run is actively unwinding completed
+/// steps. `Compensated`, `Retired`, and `CancelledByOperator` are terminal:
+/// they each describe a distinct end state that callers must be able to
+/// distinguish from a generic `Failed`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WorkflowStatus {
     Pending,
     Running,
@@ -97,6 +103,18 @@ pub enum WorkflowStatus {
     Waiting,
     Completed,
     Failed,
+    /// Compensation is running (reverse-order rollback of completed steps).
+    /// Non-terminal — the run will transition to `Compensated` (or `Failed`
+    /// if a handler errored).
+    Compensating,
+    /// Compensation finished successfully; the run is rolled back and done.
+    Compensated,
+    /// Operator marked the run as unresumable (e.g., schema drift after a
+    /// failed deploy). Terminal — manual intervention required to re-run.
+    Retired,
+    /// Operator force-aborted the run. Terminal — distinct from `Failed`
+    /// because the cause was external, not the workflow itself.
+    CancelledByOperator,
     BlockedMissingVersion,
     BlockedSignatureMismatch,
     BlockedMissingHandler,
@@ -111,6 +129,10 @@ impl WorkflowStatus {
             Self::Waiting => "waiting",
             Self::Completed => "completed",
             Self::Failed => "failed",
+            Self::Compensating => "compensating",
+            Self::Compensated => "compensated",
+            Self::Retired => "retired_unresumable",
+            Self::CancelledByOperator => "cancelled_by_operator",
             Self::BlockedMissingVersion => "blocked_missing_version",
             Self::BlockedSignatureMismatch => "blocked_signature_mismatch",
             Self::BlockedMissingHandler => "blocked_missing_handler",
@@ -118,7 +140,14 @@ impl WorkflowStatus {
     }
 
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Completed | Self::Failed)
+        matches!(
+            self,
+            Self::Completed
+                | Self::Failed
+                | Self::Compensated
+                | Self::Retired
+                | Self::CancelledByOperator
+        )
     }
 
     pub fn is_blocked(&self) -> bool {
@@ -152,11 +181,11 @@ impl FromStr for WorkflowStatus {
             "sleeping" => Ok(Self::Sleeping),
             "waiting" => Ok(Self::Waiting),
             "completed" => Ok(Self::Completed),
-            "failed"
-            | "compensating"
-            | "compensated"
-            | "retired_unresumable"
-            | "cancelled_by_operator" => Ok(Self::Failed),
+            "failed" => Ok(Self::Failed),
+            "compensating" => Ok(Self::Compensating),
+            "compensated" => Ok(Self::Compensated),
+            "retired_unresumable" => Ok(Self::Retired),
+            "cancelled_by_operator" => Ok(Self::CancelledByOperator),
             "blocked_missing_version" => Ok(Self::BlockedMissingVersion),
             "blocked_signature_mismatch" => Ok(Self::BlockedSignatureMismatch),
             "blocked_missing_handler" => Ok(Self::BlockedMissingHandler),
@@ -204,18 +233,28 @@ mod tests {
     }
 
     #[test]
-    fn test_workflow_status_legacy_parsing() {
+    fn test_workflow_status_distinct_parsing() {
+        // `created` is the only true legacy alias — every other previously
+        // collapsed string now parses to its own distinct variant.
         assert_eq!(
             "created".parse::<WorkflowStatus>(),
             Ok(WorkflowStatus::Pending)
         );
         assert_eq!(
             "compensating".parse::<WorkflowStatus>(),
-            Ok(WorkflowStatus::Failed)
+            Ok(WorkflowStatus::Compensating)
         );
         assert_eq!(
             "compensated".parse::<WorkflowStatus>(),
-            Ok(WorkflowStatus::Failed)
+            Ok(WorkflowStatus::Compensated)
+        );
+        assert_eq!(
+            "retired_unresumable".parse::<WorkflowStatus>(),
+            Ok(WorkflowStatus::Retired)
+        );
+        assert_eq!(
+            "cancelled_by_operator".parse::<WorkflowStatus>(),
+            Ok(WorkflowStatus::CancelledByOperator)
         );
         assert_eq!(
             "blocked_missing_version".parse::<WorkflowStatus>(),
@@ -229,14 +268,6 @@ mod tests {
             "blocked_missing_handler".parse::<WorkflowStatus>(),
             Ok(WorkflowStatus::BlockedMissingHandler)
         );
-        assert_eq!(
-            "cancelled_by_operator".parse::<WorkflowStatus>(),
-            Ok(WorkflowStatus::Failed)
-        );
-        assert_eq!(
-            "retired_unresumable".parse::<WorkflowStatus>(),
-            Ok(WorkflowStatus::Failed)
-        );
     }
 
     #[test]
@@ -245,11 +276,31 @@ mod tests {
         assert!(!WorkflowStatus::Waiting.is_terminal());
         assert!(!WorkflowStatus::Sleeping.is_terminal());
         assert!(!WorkflowStatus::Pending.is_terminal());
+        // Compensating is non-terminal — it's actively unwinding.
+        assert!(!WorkflowStatus::Compensating.is_terminal());
         assert!(!WorkflowStatus::BlockedMissingVersion.is_terminal());
         assert!(!WorkflowStatus::BlockedSignatureMismatch.is_terminal());
         assert!(!WorkflowStatus::BlockedMissingHandler.is_terminal());
         assert!(WorkflowStatus::Completed.is_terminal());
         assert!(WorkflowStatus::Failed.is_terminal());
+        // Each new terminal variant resolves to its own end-state.
+        assert!(WorkflowStatus::Compensated.is_terminal());
+        assert!(WorkflowStatus::Retired.is_terminal());
+        assert!(WorkflowStatus::CancelledByOperator.is_terminal());
+    }
+
+    #[test]
+    fn workflow_status_terminal_variants_round_trip_as_str() {
+        for variant in [
+            WorkflowStatus::Compensating,
+            WorkflowStatus::Compensated,
+            WorkflowStatus::Retired,
+            WorkflowStatus::CancelledByOperator,
+        ] {
+            let s = variant.as_str();
+            let parsed: WorkflowStatus = s.parse().expect("round trip");
+            assert_eq!(parsed, variant, "{s} did not round-trip");
+        }
     }
 
     #[test]
@@ -335,23 +386,6 @@ mod tests {
             ParseWorkflowStatusError("x".to_string()),
             ParseWorkflowStatusError("y".to_string())
         );
-    }
-
-    #[test]
-    fn workflow_status_legacy_aliases_collapse_to_failed() {
-        for legacy in [
-            "compensating",
-            "compensated",
-            "retired_unresumable",
-            "cancelled_by_operator",
-        ] {
-            let parsed: WorkflowStatus = legacy.parse().unwrap();
-            assert_eq!(
-                parsed,
-                WorkflowStatus::Failed,
-                "{legacy} did not map to Failed"
-            );
-        }
     }
 
     #[test]

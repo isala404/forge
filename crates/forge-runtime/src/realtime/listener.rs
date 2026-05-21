@@ -172,6 +172,27 @@ impl ChangeListener {
 
     /// Run the listener loop.
     pub async fn run(&self, bus: &PgNotifyBus) -> forge_core::Result<()> {
+        // Snapshot last_seq BEFORE subscribing. If we subscribed first and
+        // then queried max_seq, a NOTIFY carrying a seq <= the snapshot could
+        // arrive in the broadcast buffer between subscribe and max_seq; the
+        // recv loop's dedup check (`seq <= last_seq`) would then silently
+        // discard real events that were appended after we sampled max_seq.
+        // Sampling first means every seq the buffer can later deliver is
+        // strictly greater than `last_seq`, so the dedup check only filters
+        // genuinely replayed entries.
+        if self.last_seq.load(Ordering::Relaxed) == 0
+            && let Ok(Some(seq)) = crate::pg::max_seq(&self.pool).await
+        {
+            self.last_seq.store(seq, Ordering::Relaxed);
+        }
+
+        // Snapshot the reconnect generation BEFORE subscribing to payloads so
+        // a reconnect that happens after this point is visible as a strictly
+        // greater value. Without the snapshot, the initial-connect tick
+        // (generation 1) would look like a reconnect to a brand-new boot.
+        let mut reconnect_rx = bus.subscribe_reconnects();
+        let initial_generation = *reconnect_rx.borrow();
+
         let Some(mut rx) = bus.subscribe(&self.config.channel) else {
             return Err(forge_core::ForgeError::config(format!(
                 "PgNotifyBus not configured for channel '{}'",
@@ -181,20 +202,28 @@ impl ChangeListener {
 
         self.running.store(true, Ordering::SeqCst);
 
-        // Seed last_seq AFTER subscribing so the broadcast buffer covers any
-        // changes appended after we snapshot max_seq.
-        if self.last_seq.load(Ordering::Relaxed) == 0
-            && let Ok(Some(seq)) = crate::pg::max_seq(&self.pool).await
-        {
-            self.last_seq.store(seq, Ordering::Relaxed);
-        }
-
         tracing::debug!(channel = %self.config.channel, "Listening for changes");
 
         let mut shutdown_rx = self.shutdown_rx.clone();
 
         loop {
             tokio::select! {
+                _ = reconnect_rx.changed() => {
+                    let current = *reconnect_rx.borrow();
+                    if current > initial_generation {
+                        // PgNotifyBus reconnected after we attached. Any
+                        // NOTIFY emitted while the connection was down is
+                        // gone — replay from the durable change log to
+                        // close the gap. `replay_missed` is a no-op when
+                        // last_seq is still 0 (no prior progress) and sets
+                        // needs_resync if the log was trimmed past us.
+                        tracing::info!(
+                            generation = current,
+                            "PgNotifyBus reconnected; replaying missed changes"
+                        );
+                        self.replay_missed().await;
+                    }
+                }
                 result = rx.recv() => {
                     match result {
                         Ok(payload) => {

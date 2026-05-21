@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
 /// Per-channel broadcast buffer size. Subscribers that fall behind by more
 /// than this many messages will see `RecvError::Lagged` and can decide
@@ -50,6 +50,15 @@ pub struct PgNotifyBus {
     /// Channel name -> broadcast sender. Populated at construction time;
     /// immutable afterwards.
     senders: Arc<HashMap<String, broadcast::Sender<String>>>,
+    /// Ticks once per successful (re)connect. The initial connect publishes
+    /// generation `1`; subsequent reconnects publish `2`, `3`, ... so a
+    /// subscriber that snapshots the value at startup can detect a reconnect
+    /// strictly later than its own start without being woken by the boot
+    /// connect. Subscribers that need replay-on-reconnect call
+    /// [`subscribe_reconnects`](Self::subscribe_reconnects) and react to
+    /// changes whose value is greater than the snapshot they observed when
+    /// they subscribed.
+    reconnect_tx: watch::Sender<u64>,
 }
 
 impl PgNotifyBus {
@@ -64,9 +73,15 @@ impl PgNotifyBus {
             let (tx, _) = broadcast::channel(CHANNEL_BUFFER_SIZE);
             senders.insert(ch.to_string(), tx);
         }
+        // Generation starts at 0 so the first successful connect (which
+        // publishes 1) is distinguishable from "never connected" and the
+        // value a subscriber sees the moment they call
+        // `subscribe_reconnects()` doesn't already look like a reconnect.
+        let (reconnect_tx, _) = watch::channel(0u64);
         Self {
             pool,
             senders: Arc::new(senders),
+            reconnect_tx,
         }
     }
 
@@ -81,6 +96,25 @@ impl PgNotifyBus {
     /// Returns the set of channel names this bus is configured for.
     pub fn channels(&self) -> Vec<&str> {
         self.senders.keys().map(|s| s.as_str()).collect()
+    }
+
+    /// Subscribe to reconnect events.
+    ///
+    /// The returned receiver's value is bumped once per successful (re)connect
+    /// of the underlying `PgListener`. The initial connect publishes `1`;
+    /// subsequent reconnects publish `2`, `3`, etc. Subscribers that want to
+    /// trigger gap recovery on reconnect should:
+    ///
+    /// 1. Call `subscribe_reconnects()` and snapshot the current generation
+    ///    via `*rx.borrow()`.
+    /// 2. In their main loop, `select!` on `rx.changed()` alongside their
+    ///    payload `recv()`.
+    /// 3. On a change, compare `*rx.borrow()` to the snapshot and only treat
+    ///    it as a reconnect if it is strictly greater than the snapshot —
+    ///    this filters the first-boot connect for subscribers that attach
+    ///    before `run()` succeeds.
+    pub fn subscribe_reconnects(&self) -> watch::Receiver<u64> {
+        self.reconnect_tx.subscribe()
     }
 
     /// Run the listener loop until `shutdown` fires.
@@ -98,6 +132,13 @@ impl PgNotifyBus {
             let listener = match self.connect_and_listen(&channel_names).await {
                 Ok(l) => {
                     backoff = INITIAL_BACKOFF;
+                    // Bump the reconnect generation. Subscribers compare the
+                    // observed value against the snapshot they took at
+                    // subscribe-time, so the first connect (generation 1)
+                    // only fires gap recovery for late subscribers — which
+                    // is the safe behaviour anyway since a late subscriber
+                    // could have missed events before attaching.
+                    self.reconnect_tx.send_modify(|g| *g = g.saturating_add(1));
                     l
                 }
                 Err(e) => {
@@ -258,5 +299,28 @@ mod tests {
         let bus = make_bus(&[]);
         assert!(bus.channels().is_empty());
         assert!(bus.subscribe("anything").is_none());
+    }
+
+    #[tokio::test]
+    async fn reconnect_subscriber_starts_at_zero_and_observes_ticks() {
+        // The reconnect generation starts at 0 so a freshly-attached
+        // subscriber can distinguish the boot-time first connect from a
+        // genuine reconnect by snapshotting the value at subscribe time.
+        // Every successful (re)connect bumps the generation by one — we
+        // simulate that by directly calling `send_modify` the way `run()`
+        // does, since the real connect path requires a live PG backend.
+        let bus = make_bus(&["test_channel"]);
+        let mut rx = bus.subscribe_reconnects();
+        assert_eq!(*rx.borrow(), 0, "fresh bus starts at generation 0");
+
+        // First connect.
+        bus.reconnect_tx.send_modify(|g| *g = g.saturating_add(1));
+        rx.changed().await.unwrap();
+        assert_eq!(*rx.borrow(), 1, "first connect publishes generation 1");
+
+        // Reconnect.
+        bus.reconnect_tx.send_modify(|g| *g = g.saturating_add(1));
+        rx.changed().await.unwrap();
+        assert_eq!(*rx.borrow(), 2, "reconnect publishes generation 2");
     }
 }

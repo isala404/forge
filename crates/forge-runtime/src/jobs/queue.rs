@@ -305,39 +305,81 @@ impl JobQueue {
 
         let jobs = rows
             .into_iter()
-            .map(|row| JobRecord {
-                id: row.get("id"),
-                job_type: row.get("job_type"),
-                input: row.get("input"),
-                output: row.get("output"),
-                job_context: row.get("job_context"),
-                status: row
-                    .get::<String, _>("status")
-                    .parse()
-                    .unwrap_or(forge_core::job::JobStatus::Failed),
-                priority: row.get("priority"),
-                attempts: row.get("attempts"),
-                max_attempts: row.get("max_attempts"),
-                last_error: row.get("last_error"),
-                worker_capability: row.get("worker_capability"),
-                worker_id: row.get("worker_id"),
-                idempotency_key: row.get("idempotency_key"),
-                owner_subject: row.get("owner_subject"),
-                tenant_id: row.get("tenant_id"),
-                scheduled_at: row.get("scheduled_at"),
-                created_at: row.get("created_at"),
-                claimed_at: row.get("claimed_at"),
-                started_at: row.get("started_at"),
-                completed_at: row.get("completed_at"),
-                failed_at: row.get("failed_at"),
-                last_heartbeat: row.get("last_heartbeat"),
-                cancel_requested_at: row.get("cancel_requested_at"),
-                cancelled_at: row.get("cancelled_at"),
-                cancel_reason: row.get("cancel_reason"),
+            .map(|row| {
+                // Fail fast on unknown status strings instead of silently
+                // coercing to a terminal state. A schema drift that adds a
+                // new status must surface as a decode error so the worker
+                // refuses to act on the row, not get auto-marked as Failed.
+                let status_str: String = row.get("status");
+                let status = status_str.parse::<forge_core::job::JobStatus>().map_err(
+                    |e| sqlx::Error::Decode(
+                        format!("unknown job status '{}': {e}", status_str).into(),
+                    ),
+                )?;
+                Ok::<JobRecord, sqlx::Error>(JobRecord {
+                    id: row.get("id"),
+                    job_type: row.get("job_type"),
+                    input: row.get("input"),
+                    output: row.get("output"),
+                    job_context: row.get("job_context"),
+                    status,
+                    priority: row.get("priority"),
+                    attempts: row.get("attempts"),
+                    max_attempts: row.get("max_attempts"),
+                    last_error: row.get("last_error"),
+                    worker_capability: row.get("worker_capability"),
+                    worker_id: row.get("worker_id"),
+                    idempotency_key: row.get("idempotency_key"),
+                    owner_subject: row.get("owner_subject"),
+                    tenant_id: row.get("tenant_id"),
+                    scheduled_at: row.get("scheduled_at"),
+                    created_at: row.get("created_at"),
+                    claimed_at: row.get("claimed_at"),
+                    started_at: row.get("started_at"),
+                    completed_at: row.get("completed_at"),
+                    failed_at: row.get("failed_at"),
+                    last_heartbeat: row.get("last_heartbeat"),
+                    cancel_requested_at: row.get("cancel_requested_at"),
+                    cancelled_at: row.get("cancelled_at"),
+                    cancel_reason: row.get("cancel_reason"),
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(jobs)
+    }
+
+    /// Release a claim back to `pending`, undoing the attempts increment.
+    ///
+    /// The claim path always bumps `attempts`, so a worker that can't actually
+    /// run the job (semaphore exhausted between claim and `try_acquire_owned`)
+    /// would otherwise burn an attempt and wait ~5min for stale-reclaim to
+    /// requeue it. Repeated permit thrash would silently exhaust `max_attempts`
+    /// and push live work to dead_letter. This inverts the claim immediately so
+    /// the row is available to other workers with attempts unchanged.
+    pub async fn release_claim(&self, job_id: Uuid, worker_id: Uuid) -> Result<(), sqlx::Error> {
+        // Runtime query: avoids touching `.sqlx/` cache for this small helper.
+        // The query is fully parameterized and the columns are stable.
+        #[allow(clippy::disallowed_methods)]
+        sqlx::query(
+            r#"
+            UPDATE forge_jobs
+            SET
+                status = 'pending',
+                worker_id = NULL,
+                claimed_at = NULL,
+                attempts = GREATEST(attempts - 1, 0)
+            WHERE id = $1
+              AND worker_id = $2
+              AND status = 'claimed'
+            "#,
+        )
+        .bind(job_id)
+        .bind(worker_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
     }
 
     /// Mark job as running.
