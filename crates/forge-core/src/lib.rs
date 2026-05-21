@@ -29,7 +29,6 @@ pub mod util;
 pub mod webhook;
 pub mod workflow;
 
-// Testing utilities
 pub mod testing;
 
 pub use auth::{

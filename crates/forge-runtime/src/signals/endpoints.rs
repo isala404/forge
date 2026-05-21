@@ -92,7 +92,6 @@ pub async fn signal_handler(
     headers: HeaderMap,
     Json(payload): Json<SignalPayload>,
 ) -> impl IntoResponse {
-    // Rate limiting applies to all subtypes.
     let limiter_ip = resolve_rate_limit_ip(&resolved_ip, &headers);
     if !state.rate_limiter.check(limiter_ip.as_deref()) {
         return rate_limited_response();

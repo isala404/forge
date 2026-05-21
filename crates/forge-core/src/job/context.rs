@@ -17,49 +17,34 @@ pub fn empty_saved_data() -> serde_json::Value {
 /// Context available to job handlers.
 #[non_exhaustive]
 pub struct JobContext {
-    /// Job ID.
+    /// Current attempt (1-based).
     pub job_id: Uuid,
-    /// Job type/name.
     pub job_type: String,
-    /// Current attempt number (1-based).
     pub attempt: u32,
-    /// Maximum attempts allowed.
     pub max_attempts: u32,
-    /// Authentication context (for queries/mutations).
     pub auth: AuthContext,
-    /// Persisted job data (survives retries, accessible during compensation).
+    /// Persisted across retries; accessible in compensation handlers.
     saved_data: Arc<tokio::sync::RwLock<serde_json::Value>>,
-    /// Database pool.
     db_pool: sqlx::PgPool,
-    /// HTTP client for external calls.
     http_client: CircuitBreakerClient,
-    /// Default timeout for outbound HTTP requests made through the
-    /// circuit-breaker client. `None` means unlimited.
+    /// `None` means unlimited.
     http_timeout: Option<Duration>,
-    /// Progress reporter (sync channel for simplicity).
     progress_tx: Option<mpsc::Sender<ProgressUpdate>>,
-    /// Environment variable provider.
     env_provider: Arc<dyn EnvProvider>,
-    /// KV store handle. `None` until threaded in by the runtime.
     kv: Option<Arc<dyn KvHandle>>,
-    /// Job dispatcher used by `dispatch_job`. `None` until threaded in by the
-    /// runtime; if a handler calls dispatch without one being attached, the
-    /// call fails with an internal error rather than bypassing the trait.
+    /// If absent, `dispatch_job` fails with an internal error rather than bypassing the trait.
     job_dispatch: Option<Arc<dyn JobDispatch>>,
-    /// Workflow dispatcher used by `start_workflow`. `None` until threaded in
-    /// by the runtime; required so dispatched workflows resolve the active
-    /// version + signature instead of resuming as BlockedSignatureMismatch.
+    /// Required so dispatched workflows resolve the active version + signature
+    /// instead of resuming as `BlockedSignatureMismatch`.
     workflow_dispatch: Option<Arc<dyn WorkflowDispatch>>,
 }
 
 /// Progress update message.
 #[derive(Debug, Clone)]
 pub struct ProgressUpdate {
-    /// Job ID.
     pub job_id: Uuid,
-    /// Progress percentage (0-100).
+    /// 0–100.
     pub percentage: u8,
-    /// Status message.
     pub message: String,
 }
 
@@ -152,7 +137,6 @@ impl JobContext {
                 AuthContext::authenticated_without_uuid(self.auth.roles().to_vec(), claims)
             }
         } else {
-            // Unauthenticated job — still carry the tenant_id for scoping.
             AuthContext::authenticated_without_uuid(Vec::new(), claims)
         };
         self
@@ -334,14 +318,7 @@ impl JobContext {
             .as_ref()
             .ok_or_else(|| crate::ForgeError::internal("Workflow dispatch not available"))?;
         dispatcher
-            .start_by_name(
-                workflow_name,
-                input_json,
-                self.auth.principal_id(),
-                // Jobs don't carry an HTTP trace id; observability links via
-                // the job id instead.
-                None,
-            )
+            .start_by_name(workflow_name, input_json, self.auth.principal_id(), None)
             .await
     }
 
@@ -600,7 +577,6 @@ mod tests {
     #[tokio::test]
     async fn progress_without_channel_is_a_noop() {
         let ctx = nil_ctx();
-        // No `.with_progress(...)` was attached — progress should succeed silently.
         ctx.progress(42, "boot")
             .expect("noop progress should not error");
     }

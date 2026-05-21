@@ -11,17 +11,14 @@ use super::roles::NodeRole;
 pub struct NodeId(pub Uuid);
 
 impl NodeId {
-    /// Generate a new random node ID.
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
 
-    /// Create from an existing UUID.
     pub fn from_uuid(id: Uuid) -> Self {
         Self(id)
     }
 
-    /// Get the inner UUID.
     pub fn as_uuid(&self) -> Uuid {
         self.0
     }
@@ -54,7 +51,6 @@ pub enum NodeStatus {
 }
 
 impl NodeStatus {
-    /// Convert to string for database storage.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Joining => "joining",
@@ -64,7 +60,6 @@ impl NodeStatus {
         }
     }
 
-    /// Check if node can accept new work.
     pub fn can_accept_work(&self) -> bool {
         matches!(self, Self::Active)
     }
@@ -98,40 +93,24 @@ impl FromStr for NodeStatus {
 /// Information about a node in the cluster.
 #[derive(Debug, Clone)]
 pub struct NodeInfo {
-    /// Unique node ID.
     pub id: NodeId,
-    /// Hostname.
     pub hostname: String,
-    /// IP address.
     pub ip_address: IpAddr,
-    /// HTTP port.
     pub http_port: u16,
-    /// gRPC port for inter-node communication.
     pub grpc_port: u16,
-    /// Enabled roles.
     pub roles: Vec<NodeRole>,
-    /// Worker capabilities.
     pub worker_capabilities: Vec<String>,
-    /// Current status.
     pub status: NodeStatus,
-    /// Last heartbeat time.
     pub last_heartbeat: DateTime<Utc>,
-    /// Version string.
     pub version: String,
-    /// When the node started.
     pub started_at: DateTime<Utc>,
-    /// Current connection count.
     pub current_connections: u32,
-    /// Current job count.
     pub current_jobs: u32,
-    /// CPU usage percentage.
     pub cpu_usage: f32,
-    /// Memory usage percentage.
     pub memory_usage: f32,
 }
 
 impl NodeInfo {
-    /// Create a new node info for the local node.
     pub fn new_local(
         hostname: String,
         ip_address: IpAddr,
@@ -160,19 +139,16 @@ impl NodeInfo {
         }
     }
 
-    /// Check if this node has a specific role.
     pub fn has_role(&self, role: NodeRole) -> bool {
         self.roles.contains(&role)
     }
 
-    /// Check if this node has a specific worker capability.
     pub fn has_capability(&self, capability: &str) -> bool {
         self.worker_capabilities.iter().any(|c| c == capability)
     }
 
-    /// Calculate node load (0.0 to 1.0).
+    /// Average of CPU and memory, normalized to 0.0–1.0.
     pub fn load(&self) -> f32 {
-        // Simple average of CPU and memory
         (self.cpu_usage + self.memory_usage) / 2.0 / 100.0
     }
 }

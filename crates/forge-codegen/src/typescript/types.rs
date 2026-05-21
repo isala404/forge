@@ -60,7 +60,6 @@ pub fn generate(registry: &SchemaRegistry, referenced_types: &[String]) -> Resul
         "export type Cursor = string;\n\nexport interface PageInfo {\n  has_next_page: boolean;\n  end_cursor?: Cursor;\n  total_count?: number;\n}\n\nexport interface Page<T> {\n  items: T[];\n  page_info: PageInfo;\n}\n\n",
     );
 
-    // Emit built-in types that are referenced by API bindings but not in the registry.
     for (name, definition) in BUILTIN_TYPES {
         if !defined_names.contains(*name) && referenced_types.iter().any(|t| t.as_str() == *name) {
             output.push_str(definition);

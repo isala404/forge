@@ -11,39 +11,25 @@ use super::queue::JobQueue;
 use super::registry::JobRegistry;
 use crate::pg::{LeaderElection, PgNotifyBus};
 
-/// Worker configuration.
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
-    /// Worker ID (auto-generated if not provided).
     pub id: Option<Uuid>,
-    /// Worker capabilities. Each capability is the name of a queue this
-    /// worker serves; jobs are claimed only when their `worker_capability`
-    /// matches one of these tags.
+    /// Each capability is a queue tag this worker serves.
     pub capabilities: Vec<String>,
-    /// When true, also claim jobs whose `worker_capability` is NULL. Set on
-    /// the `default` queue worker so untagged user jobs run somewhere; other
-    /// queues must leave it false to preserve isolation.
+    /// When true, also claim untagged jobs (`worker_capability IS NULL`).
+    /// Set on the `default` queue worker; other queues leave it false to preserve isolation.
     pub claim_untagged: bool,
-    /// Maximum concurrent jobs.
     pub max_concurrent: usize,
-    /// Reserved capacity for system jobs ($workflow_resume, $cron:*).
-    /// These permits are only used by system jobs, preventing user job
-    /// floods from starving workflow/cron execution.
+    /// Reserved permits for system jobs (`$workflow_resume`, `$cron:*`) so user floods
+    /// cannot starve workflow/cron execution.
     pub system_reserved: usize,
-    /// Poll interval when queue is empty.
     pub poll_interval: Duration,
-    /// Batch size for claiming jobs.
     pub batch_size: i32,
-    /// Stale job cleanup interval.
     pub stale_cleanup_interval: Duration,
-    /// Stale job threshold.
     pub stale_threshold: chrono::Duration,
-    /// Grace period to wait for in-flight jobs to finish on shutdown before
-    /// aborting their tasks. Jobs that exceed this are aborted so shutdown
-    /// completes deterministically — they will be reclaimed by the next
-    /// startup's stale-reclaim sweep.
+    /// Abort in-flight tasks after this grace period on shutdown; stale-reclaim requeues them.
     pub shutdown_grace_period: Duration,
-    /// Whether this worker is the leader (gates cleanup).
+    /// Gates stale/expired cleanup to the leader.
     pub leader_election: Option<Arc<LeaderElection>>,
 }
 
@@ -65,7 +51,6 @@ impl Default for WorkerConfig {
     }
 }
 
-/// Background job worker.
 pub struct Worker {
     id: Uuid,
     config: WorkerConfig,
@@ -76,7 +61,6 @@ pub struct Worker {
 }
 
 impl Worker {
-    /// Create a new worker.
     pub fn new(
         config: WorkerConfig,
         queue: JobQueue,
@@ -99,8 +83,6 @@ impl Worker {
 
     /// Attach a KV store handle so job handlers can call `ctx.kv()`.
     pub fn with_kv(mut self, kv: Arc<dyn KvHandle>) -> Self {
-        // Arc::get_mut succeeds here because `self` holds the only reference to
-        // the executor at construction time (no tasks spawned yet).
         if let Some(executor) = Arc::get_mut(&mut self.executor) {
             executor.set_kv(kv);
         }
@@ -108,8 +90,7 @@ impl Worker {
     }
 
     /// Attach a job dispatcher so handlers can call `ctx.dispatch_job(...)`.
-    /// Must be called before [`run`](Self::run) starts spawning tasks — the
-    /// executor `Arc` is uniquely owned at construction and shared by `run`.
+    /// Must be called before [`run`](Self::run) — executor Arc is uniquely owned at construction.
     pub fn with_job_dispatch(mut self, dispatcher: Arc<dyn JobDispatch>) -> Self {
         if let Some(executor) = Arc::get_mut(&mut self.executor) {
             executor.set_job_dispatch(dispatcher);
@@ -117,9 +98,8 @@ impl Worker {
         self
     }
 
-    /// Attach a workflow dispatcher so handlers can call
-    /// `ctx.start_workflow(...)`. Must be called before
-    /// [`run`](Self::run) starts spawning tasks.
+    /// Attach a workflow dispatcher so handlers can call `ctx.start_workflow(...)`.
+    /// Must be called before [`run`](Self::run).
     pub fn with_workflow_dispatch(mut self, dispatcher: Arc<dyn WorkflowDispatch>) -> Self {
         if let Some(executor) = Arc::get_mut(&mut self.executor) {
             executor.set_workflow_dispatch(dispatcher);
@@ -127,12 +107,10 @@ impl Worker {
         self
     }
 
-    /// Get worker ID.
     pub fn id(&self) -> Uuid {
         self.id
     }
 
-    /// Get worker capabilities.
     pub fn capabilities(&self) -> &[String] {
         &self.config.capabilities
     }
@@ -142,14 +120,12 @@ impl Worker {
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
         self.shutdown_tx = Some(shutdown_tx);
 
-        // Semaphore for user jobs
         let semaphore = Arc::new(tokio::sync::Semaphore::new(self.config.max_concurrent));
-        // Separate semaphore for system jobs ($workflow_resume, $cron:*)
-        // so user job floods cannot starve workflow/cron execution.
+        // Separate semaphore so system jobs ($workflow_resume, $cron:*) cannot be starved
+        // by user job floods.
         let system_semaphore = Arc::new(tokio::sync::Semaphore::new(self.config.system_reserved));
 
-        // Spawn stale and expired cleanup task, gated behind leader election.
-        // Only the leader runs cleanup to avoid thundering herd on multi-node.
+        // Stale/expired cleanup is leader-gated to avoid thundering herd on multi-node.
         let cleanup_queue = self.queue.clone();
         let cleanup_interval = self.config.stale_cleanup_interval;
         let stale_threshold = self.config.stale_threshold;
@@ -163,7 +139,6 @@ impl Worker {
                     _ = tokio::time::sleep(cleanup_interval) => {}
                 }
 
-                // Only run cleanup if we are the leader (or no election configured)
                 let is_leader = cleanup_leader
                     .as_ref()
                     .map(|e| e.is_leader())
@@ -188,7 +163,6 @@ impl Worker {
             }
         });
 
-        // NOTIFY wakeup via the shared PgNotifyBus (no dedicated connection).
         let wakeup_notify = Arc::new(tokio::sync::Notify::new());
         let wakeup_trigger = wakeup_notify.clone();
         let wakeup_shutdown = shutdown_notify.clone();
@@ -218,13 +192,9 @@ impl Worker {
             "Worker started"
         );
 
-        // Track in-flight job tasks so shutdown can join (or abort) them
-        // instead of dropping the handles and silently abandoning long
-        // running jobs.
         let mut job_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
         loop {
-            // Wait for either a NOTIFY wakeup, poll interval, or shutdown.
             tokio::select! {
                 _ = shutdown_rx.recv() => {
                     tracing::debug!(worker_id = %self.id, "Worker shutting down");
@@ -237,8 +207,6 @@ impl Worker {
                 _ = tokio::time::sleep(self.config.poll_interval) => {}
             }
 
-            // Reap finished tasks so the JoinSet doesn't grow unboundedly
-            // between shutdowns. `try_join_next` is non-blocking.
             while job_tasks.try_join_next().is_some() {}
 
             let user_available = semaphore.available_permits();
@@ -276,11 +244,9 @@ impl Worker {
                     match system_semaphore.clone().try_acquire_owned() {
                         Ok(p) => p,
                         Err(tokio::sync::TryAcquireError::NoPermits) => {
-                            // We over-claimed relative to free permits (e.g. a
-                            // race with another permit acquisition). Release the
-                            // claim immediately so the row goes back to
-                            // `pending` with attempts undone, rather than
-                            // sitting claimed-but-unstarted until stale-reclaim.
+                            // Over-claimed relative to free permits (race). Release immediately so
+                            // the row returns to `pending` with attempts undone rather than sitting
+                            // claimed-but-unstarted until stale-reclaim.
                             tracing::debug!(
                                 job_id = %job.id,
                                 "System semaphore full, releasing claim"
@@ -303,7 +269,6 @@ impl Worker {
                     match semaphore.clone().try_acquire_owned() {
                         Ok(p) => p,
                         Err(tokio::sync::TryAcquireError::NoPermits) => {
-                            // Same rationale as the system-permit branch.
                             tracing::debug!(
                                 job_id = %job.id,
                                 "Worker semaphore full, releasing claim"
@@ -391,7 +356,6 @@ impl Worker {
         Ok(())
     }
 
-    /// Request graceful shutdown.
     pub async fn shutdown(&self) {
         if let Some(ref tx) = self.shutdown_tx {
             let _ = tx.send(()).await;
@@ -435,7 +399,6 @@ impl Worker {
         let aborted = job_tasks.len();
         if aborted > 0 {
             job_tasks.abort_all();
-            // Reap the aborted handles so they don't dangle.
             while job_tasks.join_next().await.is_some() {}
         }
 
@@ -449,7 +412,6 @@ impl Worker {
     }
 }
 
-/// Worker errors.
 #[derive(Debug, thiserror::Error)]
 pub enum WorkerError {
     #[error("Database error: {0}")]

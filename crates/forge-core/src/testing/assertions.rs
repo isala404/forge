@@ -360,7 +360,6 @@ mod tests {
             }
         });
 
-        // Partial match
         assert!(assert_json_matches(
             &actual,
             &serde_json::json!({"id": 123})
@@ -374,7 +373,6 @@ mod tests {
             &serde_json::json!({"nested": {"foo": "bar"}})
         ));
 
-        // Non-match
         assert!(!assert_json_matches(
             &actual,
             &serde_json::json!({"id": 456})

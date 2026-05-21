@@ -7,7 +7,6 @@ use forge_core::schema::RustType;
 
 use crate::emit;
 
-/// Get the parameter type for a builder method.
 /// String fields use `impl Into<String>` for ergonomics.
 pub fn param_type(rust_type: &RustType) -> String {
     let ty = emit::dioxus_type(rust_type);
@@ -18,8 +17,7 @@ pub fn param_type(rust_type: &RustType) -> String {
     }
 }
 
-/// Get the value expression for a builder field assignment.
-/// String fields call `.into()` to match the `impl Into<String>` parameter.
+/// String fields call `.into()` to match `impl Into<String>`.
 pub fn value_expr(name: &str, rust_type: &RustType) -> String {
     if emit::dioxus_type(rust_type) == "String" {
         format!("{name}.into()")

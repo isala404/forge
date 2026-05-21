@@ -4,15 +4,6 @@
 //!
 //! 1. **Phase 1** — Parser reads Rust source, produces `forge.schema.json`.
 //! 2. **Phase 2** — Emitters read the schema, produce per-language client code.
-//!
-//! # Architecture
-//!
-//! - **Parser** (`parser.rs`) — Extracts schema definitions from Rust AST.
-//! - **Schema JSON** (`schema_json.rs`) — Serializes registry to `forge.schema.json`.
-//! - **Binding IR** (`binding.rs`) — Pre-computes function binding facts once.
-//! - **Emitters** (`emit.rs`, `typescript/`, `dioxus/`) — Generate target code
-//!   using shared type mapping functions, eliminating duplication.
-//! - **Builder** (`dioxus/builder.rs`) — Shared constructor/setter helpers.
 
 mod binding;
 pub mod dioxus;

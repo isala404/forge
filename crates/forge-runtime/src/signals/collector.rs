@@ -117,7 +117,6 @@ async fn flush_loop(
         tokio::select! {
             biased;
             ack = &mut shutdown_rx => {
-                // Drain anything still in the channel, flush, then ack
                 while let Ok(event) = rx.try_recv() {
                     buffer.push(event);
                 }
@@ -139,7 +138,6 @@ async fn flush_loop(
                         }
                     }
                     None => {
-                        // All senders dropped, flush remaining and exit
                         if !buffer.is_empty() {
                             flush_batch(&pool, &mut buffer).await;
                         }

@@ -30,7 +30,6 @@ fn expand_enum_impl(attr: TokenStream2, input: DeriveInput) -> syn::Result<Token
     let sql_name = to_snake_case(&enum_name.to_string());
     let enum_attrs = &input.attrs;
 
-    // Extract variants
     let variants = match &input.data {
         Data::Enum(data) => &data.variants,
         _ => {
@@ -53,7 +52,6 @@ fn expand_enum_impl(attr: TokenStream2, input: DeriveInput) -> syn::Result<Token
         });
     }
 
-    // Generate variant arms for Display (to SQL string)
     let to_string_arms: Vec<TokenStream2> = variant_infos
         .iter()
         .map(|v| {
@@ -65,7 +63,6 @@ fn expand_enum_impl(attr: TokenStream2, input: DeriveInput) -> syn::Result<Token
         })
         .collect();
 
-    // Generate variant arms for FromStr (from SQL string)
     let from_string_arms: Vec<TokenStream2> = variant_infos
         .iter()
         .map(|v| {
@@ -77,7 +74,6 @@ fn expand_enum_impl(attr: TokenStream2, input: DeriveInput) -> syn::Result<Token
         })
         .collect();
 
-    // Generate variant definitions for the original enum
     let variant_defs: Vec<TokenStream2> = variants
         .iter()
         .map(|v| {

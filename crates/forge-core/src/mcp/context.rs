@@ -10,20 +10,15 @@ use uuid::Uuid;
 /// Context for MCP tool execution.
 #[non_exhaustive]
 pub struct McpToolContext {
-    /// Authentication context.
     pub auth: AuthContext,
-    /// Request metadata.
     pub request: RequestMetadata,
     db_pool: sqlx::PgPool,
-    /// HTTP client for external calls.
     http_client: CircuitBreakerClient,
-    /// Default timeout for outbound HTTP requests made through the
-    /// circuit-breaker client. `None` means unlimited.
+    /// `None` means unlimited.
     http_timeout: Option<Duration>,
     job_dispatch: Option<Arc<dyn JobDispatch>>,
     workflow_dispatch: Option<Arc<dyn WorkflowDispatch>>,
     env_provider: Arc<dyn EnvProvider>,
-    /// KV store handle. `None` until threaded in by the runtime.
     kv: Option<Arc<dyn KvHandle>>,
 }
 

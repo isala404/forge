@@ -14,13 +14,9 @@ use forge_core::Result;
 /// Configuration for the workflow scheduler.
 #[derive(Debug, Clone)]
 pub struct WorkflowSchedulerConfig {
-    /// How often to poll for ready workflows.
     pub poll_interval: Duration,
-    /// Maximum workflows to process per poll.
     pub batch_size: i32,
-    /// Whether to process event-based wakeups.
     pub process_events: bool,
-    /// Leader election handle for leader-gated operations (cleanup).
     pub leader_election: Option<Arc<LeaderElection>>,
 }
 
@@ -51,7 +47,6 @@ pub struct WorkflowScheduler {
 }
 
 impl WorkflowScheduler {
-    /// Create a new workflow scheduler.
     pub fn new(
         pool: PgPool,
         job_queue: JobQueue,
@@ -172,14 +167,12 @@ impl WorkflowScheduler {
         }
     }
 
-    /// Process workflows that are ready to resume.
     async fn process_ready_workflows(&self) -> Result<()> {
         // Cancellations take priority over timer/event wakeups: if an operator
         // requested cancel, we run the cancel job first and skip any pending
         // resume work for the same run.
         self.process_cancel_requests().await?;
 
-        // Query for workflows ready to wake (timer or event timeout)
         let workflows = sqlx::query!(
             r#"
             SELECT id, workflow_name, workflow_version, workflow_signature, waiting_for_event
@@ -212,7 +205,6 @@ impl WorkflowScheduler {
             }
         }
 
-        // Also check for workflows waiting for events that now have events
         if self.config.process_events {
             self.process_event_wakeups().await?;
         }
@@ -220,11 +212,8 @@ impl WorkflowScheduler {
         Ok(())
     }
 
-    /// Process workflows with a pending cancel request.
-    ///
-    /// These rows are surfaced by the `forge_workflow_runs_cancel_notify`
-    /// trigger on `forge_workflow_wakeup`, so this method is normally
-    /// driven by NOTIFY and completes within a single poll cycle.
+    /// Rows are surfaced by the `forge_workflow_runs_cancel_notify` trigger on
+    /// `forge_workflow_wakeup`, so this normally completes within one poll cycle.
     async fn process_cancel_requests(&self) -> Result<()> {
         let workflows = sqlx::query!(
             r#"
@@ -254,7 +243,6 @@ impl WorkflowScheduler {
         Ok(())
     }
 
-    /// Enqueue a `$workflow_resume` job carrying the cancel flag.
     async fn enqueue_cancel(&self, workflow_run_id: Uuid, reason: &str) {
         let input = serde_json::json!({
             "run_id": workflow_run_id.to_string(),
@@ -288,9 +276,7 @@ impl WorkflowScheduler {
         }
     }
 
-    /// Process workflows that have pending events.
     async fn process_event_wakeups(&self) -> Result<()> {
-        // Find workflows waiting for events that have matching events.
         let workflows = sqlx::query!(
             r#"
             SELECT wr.id, wr.waiting_for_event
@@ -357,7 +343,6 @@ impl WorkflowScheduler {
                 return Ok(());
             }
 
-            // Claim the run: transition from waiting to running.
             #[allow(clippy::disallowed_methods)]
             let claimed = sqlx::query(
                 r#"
@@ -377,7 +362,6 @@ impl WorkflowScheduler {
                 return Ok(());
             }
 
-            // Enqueue the resume job in the same transaction.
             let input = serde_json::json!({
                 "run_id": workflow_run_id.to_string(),
                 "from_sleep": false,
@@ -419,9 +403,8 @@ impl WorkflowScheduler {
         let result: std::result::Result<(), sqlx::Error> = async {
             let mut tx = self.pool.begin().await?;
 
-            // Claim: transition from sleeping/waiting to running
-            // Runtime query: rewritten for single-transaction claim+resume.
-            // Convert to query!() after next `cargo sqlx prepare`.
+            // Runtime query: rewritten for single-transaction claim+resume;
+            // convert to query!() after next `cargo sqlx prepare`.
             #[allow(clippy::disallowed_methods)]
             let claimed = sqlx::query(
                 r#"
@@ -440,7 +423,6 @@ impl WorkflowScheduler {
                 return Ok(());
             }
 
-            // Enqueue resume job in the same transaction
             let input = serde_json::json!({
                 "run_id": workflow_run_id.to_string(),
                 "from_sleep": from_sleep,

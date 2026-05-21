@@ -95,8 +95,6 @@ mod stub {
         tracing_subscriber::EnvFilter::new("info")
     }
 
-    // --- Recording stubs (compile to nothing) ---
-
     #[inline]
     pub fn record_pool_metrics(_pool: &PgPool) {}
 

@@ -6,60 +6,36 @@ use uuid::Uuid;
 /// A job record in the database.
 #[derive(Debug, Clone)]
 pub struct JobRecord {
-    /// Unique job ID.
     pub id: Uuid,
-    /// Job type/name.
     pub job_type: String,
-    /// Job input as JSON.
     pub input: serde_json::Value,
-    /// Job output as JSON (if completed).
     pub output: Option<serde_json::Value>,
-    /// Persisted context data.
     pub job_context: serde_json::Value,
-    /// Current status.
     pub status: JobStatus,
-    /// Priority level.
     pub priority: i32,
-    /// Number of attempts made.
     pub attempts: i32,
-    /// Maximum attempts allowed.
     pub max_attempts: i32,
-    /// Last error message.
     pub last_error: Option<String>,
-    /// Required worker capability.
     pub worker_capability: Option<String>,
-    /// Worker ID that claimed the job.
     pub worker_id: Option<Uuid>,
-    /// Idempotency key for deduplication.
     pub idempotency_key: Option<String>,
     /// Principal that created the job (for access control).
     pub owner_subject: Option<String>,
     /// Tenant that owns this job (for multi-tenant isolation).
     pub tenant_id: Option<Uuid>,
-    /// When the job is scheduled to run.
     pub scheduled_at: DateTime<Utc>,
-    /// When the job was created.
     pub created_at: DateTime<Utc>,
-    /// When the job was claimed.
     pub claimed_at: Option<DateTime<Utc>>,
-    /// When the job started running.
     pub started_at: Option<DateTime<Utc>>,
-    /// When the job completed.
     pub completed_at: Option<DateTime<Utc>>,
-    /// When the job failed.
     pub failed_at: Option<DateTime<Utc>>,
-    /// Last heartbeat time.
     pub last_heartbeat: Option<DateTime<Utc>>,
-    /// Cancellation requested at.
     pub cancel_requested_at: Option<DateTime<Utc>>,
-    /// Cancellation completed at.
     pub cancelled_at: Option<DateTime<Utc>>,
-    /// Cancellation reason.
     pub cancel_reason: Option<String>,
 }
 
 impl JobRecord {
-    /// Create a new job record.
     pub fn new(
         job_type: impl Into<String>,
         input: serde_json::Value,
@@ -95,38 +71,32 @@ impl JobRecord {
         }
     }
 
-    /// Set worker capability requirement.
     pub fn with_capability(mut self, capability: impl Into<String>) -> Self {
         self.worker_capability = Some(capability.into());
         self
     }
 
-    /// Set scheduled time.
     pub fn with_scheduled_at(mut self, at: DateTime<Utc>) -> Self {
         self.scheduled_at = at;
         self
     }
 
-    /// Set idempotency key.
     pub fn with_idempotency_key(mut self, key: impl Into<String>) -> Self {
         self.idempotency_key = Some(key.into());
         self
     }
 
-    /// Set owner subject.
     pub fn with_owner_subject(mut self, owner_subject: Option<String>) -> Self {
         self.owner_subject = owner_subject;
         self
     }
 
-    /// Set tenant ID for multi-tenant isolation.
     pub fn with_tenant_id(mut self, tenant_id: Option<Uuid>) -> Self {
         self.tenant_id = tenant_id;
         self
     }
 }
 
-/// Job queue operations.
 #[derive(Clone)]
 pub struct JobQueue {
     pool: sqlx::PgPool,
@@ -137,7 +107,6 @@ impl JobQueue {
     pub(crate) const DEFAULT_RETENTION: std::time::Duration =
         std::time::Duration::from_secs(7 * 24 * 3600);
 
-    /// Create a new job queue.
     pub fn new(pool: sqlx::PgPool) -> Self {
         Self { pool }
     }
@@ -185,7 +154,6 @@ impl JobQueue {
             }
         }
 
-        // Derive queue from worker_capability (or "default" if untagged)
         let queue = job.worker_capability.as_deref().unwrap_or("default");
 
         #[allow(clippy::disallowed_methods)]
@@ -311,11 +279,13 @@ impl JobQueue {
                 // new status must surface as a decode error so the worker
                 // refuses to act on the row, not get auto-marked as Failed.
                 let status_str: String = row.get("status");
-                let status = status_str.parse::<forge_core::job::JobStatus>().map_err(
-                    |e| sqlx::Error::Decode(
-                        format!("unknown job status '{}': {e}", status_str).into(),
-                    ),
-                )?;
+                let status = status_str
+                    .parse::<forge_core::job::JobStatus>()
+                    .map_err(|e| {
+                        sqlx::Error::Decode(
+                            format!("unknown job status '{}': {e}", status_str).into(),
+                        )
+                    })?;
                 Ok::<JobRecord, sqlx::Error>(JobRecord {
                     id: row.get("id"),
                     job_type: row.get("job_type"),
@@ -382,7 +352,6 @@ impl JobQueue {
         Ok(())
     }
 
-    /// Mark job as running.
     /// Mark a claimed job as running. The `(worker_id, attempts)` tuple
     /// fences the transition: stale-reclaim resets the row to `pending` and
     /// a new worker gets a fresh `attempts`, so the original claimant's
@@ -417,10 +386,7 @@ impl JobQueue {
         Ok(())
     }
 
-    /// Mark job as completed.
-    ///
-    /// Sets `expires_at` for automatic cleanup. Uses the provided TTL or
-    /// defaults to 7 days so completed jobs don't accumulate forever.
+    /// Sets `expires_at` for automatic cleanup; defaults to 7 days.
     pub async fn complete(
         &self,
         job_id: Uuid,
@@ -456,9 +422,7 @@ impl JobQueue {
         Ok(())
     }
 
-    /// Mark job as failed, schedule retry or move to dead letter.
-    ///
-    /// If `ttl` is provided and job moves to dead_letter, sets `expires_at` for automatic cleanup.
+    /// Mark job as failed; retry if `retry_delay` is set, otherwise dead-letter.
     pub async fn fail(
         &self,
         job_id: Uuid,
@@ -467,7 +431,6 @@ impl JobQueue {
         ttl: Option<std::time::Duration>,
     ) -> Result<(), sqlx::Error> {
         if let Some(delay) = retry_delay {
-            // Schedule retry
             sqlx::query!(
                 r#"
                 UPDATE forge_jobs
@@ -490,7 +453,6 @@ impl JobQueue {
             .execute(&self.pool)
             .await?;
         } else {
-            // Move to dead letter
             let retention = ttl.unwrap_or(Self::DEFAULT_RETENTION);
             let expires_at = Some(
                 chrono::Utc::now()
@@ -521,7 +483,6 @@ impl JobQueue {
         Ok(())
     }
 
-    /// Update heartbeat for a running job.
     pub async fn heartbeat(&self, job_id: Uuid) -> Result<(), sqlx::Error> {
         sqlx::query!(
             r#"
@@ -537,7 +498,6 @@ impl JobQueue {
         Ok(())
     }
 
-    /// Update job progress.
     pub async fn update_progress(
         &self,
         job_id: Uuid,
@@ -560,7 +520,6 @@ impl JobQueue {
         Ok(())
     }
 
-    /// Replace persisted job context.
     pub async fn set_context(
         &self,
         job_id: Uuid,
@@ -672,10 +631,7 @@ impl JobQueue {
         Ok(updated.rows_affected() > 0)
     }
 
-    /// Mark job as cancelled.
-    ///
-    /// Sets `expires_at` for automatic cleanup. Uses the provided TTL or
-    /// defaults to 7 days.
+    /// Mark job as cancelled. Sets `expires_at`; defaults to 7 days.
     pub async fn cancel(
         &self,
         job_id: Uuid,
@@ -774,10 +730,7 @@ impl JobQueue {
         Ok(finalized.rows_affected() + reset.rows_affected())
     }
 
-    /// Delete expired job records.
-    ///
-    /// Only deletes terminal jobs (completed, cancelled, failed, dead_letter)
-    /// that have passed their TTL.
+    /// Delete terminal jobs that have passed their TTL.
     pub async fn cleanup_expired(&self) -> Result<u64, sqlx::Error> {
         let result = sqlx::query!(
             r#"
@@ -793,7 +746,6 @@ impl JobQueue {
         Ok(result.rows_affected())
     }
 
-    /// Get queue statistics.
     pub async fn stats(&self) -> Result<QueueStats, sqlx::Error> {
         let row = sqlx::query!(
             r#"
@@ -823,7 +775,6 @@ impl JobQueue {
     }
 }
 
-/// Queue statistics.
 #[derive(Debug, Clone, Default)]
 pub struct QueueStats {
     pub pending: u64,
@@ -889,8 +840,6 @@ mod tests {
     }
 }
 
-/// Integration tests requiring a real PostgreSQL database.
-/// Run with: cargo test -p forge-runtime --features testcontainers
 #[cfg(all(test, feature = "testcontainers"))]
 #[allow(
     clippy::unwrap_used,
@@ -925,7 +874,6 @@ mod integration_tests {
         let queue = JobQueue::new(db.pool().clone());
         let worker_id = Uuid::new_v4();
 
-        // Enqueue a job
         let job = JobRecord::new(
             "send_email",
             serde_json::json!({"to": "a@b.com"}),
@@ -934,7 +882,6 @@ mod integration_tests {
         );
         let job_id = queue.enqueue(job).await.expect("Failed to enqueue");
 
-        // Claim it
         let claimed = queue
             .claim(worker_id, &[], true, 10)
             .await
@@ -954,7 +901,6 @@ mod integration_tests {
         let db = setup_db("claim_skip_locked").await;
         let queue = JobQueue::new(db.pool().clone());
 
-        // Enqueue 3 jobs
         for i in 0..3 {
             let job = JobRecord::new(
                 format!("job_{i}"),
@@ -965,17 +911,14 @@ mod integration_tests {
             queue.enqueue(job).await.expect("enqueue");
         }
 
-        // Worker 1 claims 2
         let worker1 = Uuid::new_v4();
         let batch1 = queue.claim(worker1, &[], true, 2).await.expect("claim1");
         assert_eq!(batch1.len(), 2);
 
-        // Worker 2 claims remaining
         let worker2 = Uuid::new_v4();
         let batch2 = queue.claim(worker2, &[], true, 2).await.expect("claim2");
         assert_eq!(batch2.len(), 1);
 
-        // No overlap
         let ids1: Vec<Uuid> = batch1.iter().map(|j| j.id).collect();
         let ids2: Vec<Uuid> = batch2.iter().map(|j| j.id).collect();
         for id in &ids2 {
@@ -994,14 +937,12 @@ mod integration_tests {
         let queue = JobQueue::new(db.pool().clone());
         let worker_id = Uuid::new_v4();
 
-        // Enqueue low then high priority
         let low = JobRecord::new("low_job", serde_json::json!({}), JobPriority::Low, 3);
         queue.enqueue(low).await.expect("enqueue low");
 
         let high = JobRecord::new("high_job", serde_json::json!({}), JobPriority::Critical, 3);
         queue.enqueue(high).await.expect("enqueue high");
 
-        // Claim 1 - should get the high-priority job first
         let claimed = queue.claim(worker_id, &[], true, 1).await.expect("claim");
         assert_eq!(claimed.len(), 1);
         assert_eq!(claimed[0].job_type, "high_job");
@@ -1018,19 +959,13 @@ mod integration_tests {
         let job = JobRecord::new("process", serde_json::json!({}), JobPriority::Normal, 3);
         let job_id = queue.enqueue(job).await.expect("enqueue");
 
-        // Claim
         queue.claim(worker_id, &[], true, 1).await.expect("claim");
-
-        // Start
         queue.start(job_id, worker_id, 1).await.expect("start");
-
-        // Complete
         queue
             .complete(job_id, serde_json::json!({"result": "done"}), None)
             .await
             .expect("complete");
 
-        // Verify via stats
         let stats = queue.stats().await.expect("stats");
         assert_eq!(stats.completed, 1);
         assert_eq!(stats.pending, 0);
@@ -1050,7 +985,6 @@ mod integration_tests {
         queue.claim(worker_id, &[], true, 1).await.expect("claim");
         queue.start(job_id, worker_id, 1).await.expect("start");
 
-        // Fail with retry delay
         queue
             .fail(
                 job_id,
@@ -1061,7 +995,6 @@ mod integration_tests {
             .await
             .expect("fail");
 
-        // Should be pending again (retryable)
         let stats = queue.stats().await.expect("stats");
         assert_eq!(stats.pending, 1);
         assert_eq!(stats.dead_letter, 0);
@@ -1081,7 +1014,6 @@ mod integration_tests {
         queue.claim(worker_id, &[], true, 1).await.expect("claim");
         queue.start(job_id, worker_id, 1).await.expect("start");
 
-        // Fail without retry (None delay) -> dead letter
         queue
             .fail(job_id, "permanent error", None, None)
             .await
@@ -1103,7 +1035,6 @@ mod integration_tests {
             .with_idempotency_key("pay-123");
         let id1 = queue.enqueue(job1).await.expect("enqueue1");
 
-        // Same key -> returns existing job ID
         let job2 = JobRecord::new(
             "pay",
             serde_json::json!({"amount": 200}),
@@ -1115,7 +1046,6 @@ mod integration_tests {
 
         assert_eq!(id1, id2, "Idempotency key should return same job ID");
 
-        // Only one job should exist
         let stats = queue.stats().await.expect("stats");
         assert_eq!(stats.pending, 1);
 
@@ -1152,14 +1082,12 @@ mod integration_tests {
             .with_owner_subject(Some("user-alice".into()));
         let job_id = queue.enqueue(job).await.expect("enqueue");
 
-        // Wrong owner can't cancel
         let denied = queue
             .request_cancel(job_id, Some("reason"), Some("user-bob"))
             .await
             .expect("cancel attempt");
         assert!(!denied, "Should deny cancellation from non-owner");
 
-        // Right owner can cancel
         let allowed = queue
             .request_cancel(job_id, Some("reason"), Some("user-alice"))
             .await
@@ -1174,12 +1102,10 @@ mod integration_tests {
         let db = setup_db("claim_capability").await;
         let queue = JobQueue::new(db.pool().clone());
 
-        // Job requires "gpu" capability
         let job = JobRecord::new("render", serde_json::json!({}), JobPriority::Normal, 3)
             .with_capability("gpu");
         queue.enqueue(job).await.expect("enqueue");
 
-        // Worker without capability can't claim
         let worker_no_cap = Uuid::new_v4();
         let claimed = queue
             .claim(worker_no_cap, &["cpu".into()], false, 10)
@@ -1190,7 +1116,6 @@ mod integration_tests {
             "Worker without gpu cap should not claim gpu job"
         );
 
-        // Worker with capability can claim
         let worker_with_cap = Uuid::new_v4();
         let claimed = queue
             .claim(worker_with_cap, &["gpu".into()], false, 10)
@@ -1267,7 +1192,6 @@ mod integration_tests {
         queue.claim(worker_id, &[], true, 1).await.expect("claim");
         queue.start(job_id, worker_id, 1).await.expect("start");
 
-        // Heartbeat should not error
         queue.heartbeat(job_id).await.expect("heartbeat");
 
         db.cleanup().await.expect("cleanup");
@@ -1312,11 +1236,9 @@ mod integration_tests {
         let db = setup_db("stats").await;
         let queue = JobQueue::new(db.pool().clone());
 
-        // Start empty
         let stats = queue.stats().await.expect("stats");
         assert_eq!(stats.pending, 0);
 
-        // Add 3 pending
         for _ in 0..3 {
             let job = JobRecord::new("task", serde_json::json!({}), JobPriority::Normal, 3);
             queue.enqueue(job).await.expect("enqueue");

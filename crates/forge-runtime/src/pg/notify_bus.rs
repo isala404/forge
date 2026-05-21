@@ -128,7 +128,6 @@ impl PgNotifyBus {
         let mut shutdown = shutdown;
 
         loop {
-            // --- connect + LISTEN on all channels ---
             let listener = match self.connect_and_listen(&channel_names).await {
                 Ok(l) => {
                     backoff = INITIAL_BACKOFF;
@@ -164,14 +163,11 @@ impl PgNotifyBus {
                 channel_names.len(),
             );
 
-            // --- recv loop ---
             if self.recv_loop(listener, &mut shutdown).await {
-                // shutdown requested
                 tracing::debug!("PgNotifyBus: shutting down");
                 return;
             }
 
-            // recv_loop returned false => connection error, reconnect
             tracing::warn!("PgNotifyBus: connection lost, reconnecting");
         }
     }

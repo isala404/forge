@@ -20,31 +20,21 @@ pub type WebhookTxHandle = Arc<AsyncMutex<Option<Transaction<'static, Postgres>>
 /// Context available to webhook handlers.
 #[non_exhaustive]
 pub struct WebhookContext {
-    /// Webhook name.
     pub webhook_name: String,
-    /// Unique request ID for this webhook invocation.
     pub request_id: String,
-    /// Idempotency key if extracted from request.
     pub idempotency_key: Option<String>,
-    /// Request headers (lowercase keys).
+    /// Lowercase keys.
     headers: HashMap<String, String>,
-    /// Database pool.
     db_pool: sqlx::PgPool,
-    /// Active transaction for atomic dispatch. Held by the runtime; the
-    /// handler's dispatches piggy-back on this connection.
+    /// Held by the runtime; handler dispatches piggy-back on this connection
+    /// so they roll back with the webhook on error.
     tx: Option<WebhookTxHandle>,
-    /// HTTP client for external calls.
     http_client: CircuitBreakerClient,
-    /// Default timeout for outbound HTTP requests made through the
-    /// circuit-breaker client. `None` means unlimited.
+    /// `None` means unlimited.
     http_timeout: Option<Duration>,
-    /// Job dispatcher for async processing.
     job_dispatch: Option<Arc<dyn JobDispatch>>,
-    /// Workflow dispatcher for starting workflows.
     workflow_dispatch: Option<Arc<dyn WorkflowDispatch>>,
-    /// Environment variable provider.
     env_provider: Arc<dyn EnvProvider>,
-    /// KV store handle. `None` until threaded in by the runtime.
     kv: Option<Arc<dyn KvHandle>>,
 }
 

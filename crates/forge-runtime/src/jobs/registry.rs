@@ -7,9 +7,7 @@ use forge_core::Result;
 use forge_core::job::{ForgeJob, JobContext, JobInfo};
 use serde_json::Value;
 
-/// Normalize args for deserialization.
-/// - Converts `null` to `{}` so both unit `()` and empty structs deserialize correctly.
-/// - Unwraps `{"args": ...}` or `{"input": ...}` wrapper if present (callers may use either format).
+/// Converts `null` to `{}` and unwraps single-key `args`/`input` envelopes.
 fn normalize_args(args: Value) -> Value {
     let unwrapped = match &args {
         Value::Object(map) if map.len() == 1 => {
@@ -30,7 +28,6 @@ fn normalize_args(args: Value) -> Value {
     }
 }
 
-/// Type alias for boxed job handler function.
 pub type BoxedJobHandler = Arc<
     dyn Fn(&JobContext, Value) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + '_>>
         + Send
@@ -47,31 +44,24 @@ pub type BoxedJobCompensation = Arc<
         + Sync,
 >;
 
-/// Entry in the job registry.
 pub struct JobEntry {
-    /// Job metadata.
     pub info: JobInfo,
-    /// Job handler function.
     pub handler: BoxedJobHandler,
-    /// Job compensation handler.
     pub compensation: BoxedJobCompensation,
 }
 
-/// Registry of all FORGE jobs.
 #[derive(Clone, Default)]
 pub struct JobRegistry {
     jobs: HashMap<String, Arc<JobEntry>>,
 }
 
 impl JobRegistry {
-    /// Create a new empty registry.
     pub fn new() -> Self {
         Self {
             jobs: HashMap::new(),
         }
     }
 
-    /// Register a job type.
     pub fn register<J: ForgeJob>(&mut self)
     where
         J::Args: serde::de::DeserializeOwned + Send + 'static,
@@ -109,43 +99,35 @@ impl JobRegistry {
         );
     }
 
-    /// Get a job entry by name.
     pub fn get(&self, name: &str) -> Option<Arc<JobEntry>> {
         self.jobs.get(name).cloned()
     }
 
-    /// Get job info by name.
     pub fn info(&self, name: &str) -> Option<&JobInfo> {
         self.jobs.get(name).map(|e| &e.info)
     }
 
-    /// Check if a job exists.
     pub fn exists(&self, name: &str) -> bool {
         self.jobs.contains_key(name)
     }
 
-    /// Get all job names.
     pub fn job_names(&self) -> impl Iterator<Item = &str> {
         self.jobs.keys().map(|s| s.as_str())
     }
 
-    /// Get all jobs.
     pub fn jobs(&self) -> impl Iterator<Item = (&str, &Arc<JobEntry>)> {
         self.jobs.iter().map(|(k, v)| (k.as_str(), v))
     }
 
-    /// Get the number of registered jobs.
     pub fn len(&self) -> usize {
         self.jobs.len()
     }
 
-    /// Check if registry is empty.
     pub fn is_empty(&self) -> bool {
         self.jobs.is_empty()
     }
 
-    /// Register a system job handler with a raw name and handler function.
-    /// Used for internal bridge handlers (`$cron:*`, `$daemon:*`, `$workflow_resume`).
+    /// Register internal bridge handlers (`$cron:*`, `$workflow_resume`, etc.).
     pub fn register_system(
         &mut self,
         name: impl Into<String>,
@@ -171,10 +153,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // --- normalize_args: jobs/registry collapses null to {} so derive(Default)
-    // empty-struct args deserialize correctly. function/registry deliberately
-    // keeps null as-is for unit `()` — this divergence is the contract.
-
+    // jobs/registry collapses null to {} so derive(Default) empty-struct args deserialize correctly;
+    // function/registry keeps null as-is for unit () — this divergence is the contract.
     #[test]
     fn normalize_args_converts_null_to_empty_object() {
         assert_eq!(normalize_args(json!(null)), json!({}));
@@ -218,8 +198,6 @@ mod tests {
         assert_eq!(normalize_args(json!([1])), json!([1]));
         assert_eq!(normalize_args(json!(true)), json!(true));
     }
-
-    // --- registry construction + lookup ---
 
     fn sample_info(name: &'static str) -> JobInfo {
         JobInfo {

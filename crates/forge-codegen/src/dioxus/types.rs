@@ -15,7 +15,6 @@ pub fn generate(registry: &SchemaRegistry) -> Result<String, Error> {
     );
     output.push_str("use serde::{Deserialize, Serialize};\n");
 
-    // Conditional imports based on usage.
     let tables = registry.all_tables();
     let uses_upload = tables
         .iter()
@@ -34,7 +33,6 @@ pub fn generate(registry: &SchemaRegistry) -> Result<String, Error> {
         output.push('\n');
     }
 
-    // Structs.
     let mut sorted_tables = tables;
     sorted_tables.sort_by(|a, b| a.struct_name.cmp(&b.struct_name));
     for table in sorted_tables {
@@ -42,7 +40,6 @@ pub fn generate(registry: &SchemaRegistry) -> Result<String, Error> {
         output.push('\n');
     }
 
-    // Enums.
     let mut enums = registry.all_enums();
     enums.sort_by(|a, b| a.name.cmp(&b.name));
     for enum_def in enums {
@@ -61,7 +58,7 @@ pub fn generate(registry: &SchemaRegistry) -> Result<String, Error> {
 fn render_struct(table: &TableDef) -> String {
     let has_upload = table.fields.iter().any(|f| contains_upload(&f.rust_type));
 
-    // Upload fields are not PartialEq-comparable.
+    // Upload fields cannot derive PartialEq.
     let derives = if has_upload {
         "#[derive(Debug, Clone)]\n"
     } else {

@@ -2,7 +2,6 @@
 
 pub use sqlx;
 
-// Always-on infrastructure
 pub mod cluster;
 pub mod function;
 pub mod kv;
@@ -11,7 +10,6 @@ pub mod pg;
 pub mod rate_limit;
 pub(crate) mod stable_hash;
 
-// Optional subsystems
 #[cfg(feature = "cron")]
 pub mod cron;
 #[cfg(feature = "daemons")]

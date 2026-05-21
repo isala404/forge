@@ -50,113 +50,67 @@ use std::path::Path;
 
 use crate::error::{ForgeError, Result};
 
-/// Root configuration for FORGE.
-///
-/// Configuration is loaded from a TOML file (typically `forge.toml`) and supports
-/// `${ENV_VAR}` and `${VAR-default}` substitution throughout. Only `database.url`
-/// is required; every other section has a sensible default.
-///
-/// # Examples
-///
-/// Parse a minimal TOML snippet:
-///
-/// ```
-/// use forge_core::config::ForgeConfig;
-///
-/// let config = ForgeConfig::parse_toml(r#"
-///     [database]
-///     url = "postgres://localhost/myapp"
-/// "#).unwrap();
-///
-/// assert_eq!(config.database.url(), "postgres://localhost/myapp");
-/// assert_eq!(config.gateway.port, 9081); // default port
-/// ```
-///
-/// Construct programmatically (useful in tests):
-///
-/// ```
-/// use forge_core::config::ForgeConfig;
-///
-/// let config = ForgeConfig::default_with_database_url("postgres://localhost/test");
-/// assert_eq!(config.database.url(), "postgres://localhost/test");
-/// ```
+/// Root configuration. Loaded from `forge.toml` with `${ENV_VAR}` / `${VAR-default}`
+/// substitution. Only `database.url` is required.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ForgeConfig {
-    /// Project metadata.
     #[serde(default)]
     pub project: ProjectConfig,
 
-    /// Database configuration.
     pub database: DatabaseConfig,
 
-    /// Node configuration.
     #[serde(default)]
     pub node: NodeConfig,
 
-    /// Gateway configuration.
     #[serde(default)]
     pub gateway: GatewayConfig,
 
-    /// Function execution configuration.
     #[serde(default)]
     pub function: FunctionConfig,
 
-    /// Worker configuration.
     #[serde(default)]
     pub worker: WorkerConfig,
 
-    /// Workflow scheduler configuration.
     #[serde(default)]
     pub workflow: WorkflowConfig,
 
-    /// Cron scheduler configuration.
     #[serde(default)]
     pub cron: CronConfig,
 
-    /// Daemon runner configuration.
     #[serde(default)]
     pub daemon: DaemonConfig,
 
-    /// Cluster configuration.
     #[serde(default)]
     pub cluster: ClusterConfig,
 
-    /// Security configuration.
     #[serde(default)]
     pub security: SecurityConfig,
 
-    /// Authentication configuration.
     #[serde(default)]
     pub auth: AuthConfig,
 
-    /// Observability configuration.
     #[serde(default)]
     pub observability: ObservabilityConfig,
 
-    /// MCP server configuration.
     #[serde(default)]
     pub mcp: McpConfig,
 
-    /// Signals configuration for product analytics and diagnostics.
     #[serde(default)]
     pub signals: SignalsConfig,
 
-    /// Rate-limiter configuration.
     #[serde(default)]
     pub rate_limit: RateLimitSettings,
 
-    /// Real-time subscription and SSE knobs.
     #[serde(default)]
     pub realtime: RealtimeConfig,
 
-    /// Email sending configuration.
     #[serde(default)]
     pub email: crate::email::EmailConfig,
 }
 
 impl ForgeConfig {
-    /// Load configuration from a TOML file.
+    /// Load from a TOML file.
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
         let content = std::fs::read_to_string(path.as_ref())
             .map_err(|e| ForgeError::config_with("Failed to read config file", e))?;
@@ -164,7 +118,7 @@ impl ForgeConfig {
         Self::parse_toml(&content)
     }
 
-    /// Parse configuration from a TOML string.
+    /// Parse from a TOML string.
     pub fn parse_toml(content: &str) -> Result<Self> {
         let content = loader::substitute_env_vars(content);
 
@@ -175,7 +129,7 @@ impl ForgeConfig {
         Ok(config)
     }
 
-    /// Validate the configuration for invalid combinations.
+    /// Validate cross-field constraints.
     pub fn validate(&self) -> Result<()> {
         self.database.validate()?;
         self.auth.validate()?;
@@ -277,7 +231,7 @@ impl ForgeConfig {
         Ok(())
     }
 
-    /// Load configuration with defaults.
+    /// Construct with defaults and the given database URL.
     pub fn default_with_database_url(url: &str) -> Self {
         Self {
             project: ProjectConfig::default(),
@@ -302,7 +256,6 @@ impl ForgeConfig {
     }
 }
 
-/// `default_true` serde helper re-exported for sub-modules.
 pub(crate) fn default_true() -> bool {
     true
 }

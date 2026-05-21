@@ -13,34 +13,12 @@ use crate::Result;
 use crate::env::{EnvAccess, EnvProvider, MockEnvProvider};
 use crate::function::{AuthContext, RequestMetadata};
 
-/// Test context for query functions.
-///
-/// Provides an isolated testing environment for queries with configurable
-/// authentication and optional database access.
-///
-/// # Example
-///
-/// ```ignore
-/// // Simple authenticated context
-/// let ctx = TestQueryContext::authenticated(Uuid::new_v4());
-///
-/// // Context with roles and claims
-/// let ctx = TestQueryContext::builder()
-///     .as_user(Uuid::new_v4())
-///     .with_role("admin")
-///     .with_claim("org_id", json!("org-123"))
-///     .build();
-/// ```
+/// Test context for query functions with optional DB access.
 pub struct TestQueryContext {
-    /// Authentication context.
     pub auth: AuthContext,
-    /// Request metadata.
     pub request: RequestMetadata,
-    /// Optional database pool for integration tests.
     pool: Option<PgPool>,
-    /// Tenant ID for multi-tenant testing.
     tenant_id: Option<Uuid>,
-    /// Mock environment provider.
     env_provider: Arc<MockEnvProvider>,
 }
 

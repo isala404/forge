@@ -21,12 +21,10 @@ pub struct StrictRateLimiter {
 }
 
 impl StrictRateLimiter {
-    /// Create a new rate limiter.
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
 
-    /// Check rate limit for a bucket key.
     pub async fn check(
         &self,
         bucket_key: &str,
@@ -35,15 +33,10 @@ impl StrictRateLimiter {
         let max_tokens = config.requests as f64;
         let refill_rate = config.refill_rate();
 
-        // Atomic upsert with token bucket logic.
-        //
-        // We compute the *refilled* token count first, then decide whether to
-        // consume one. Subtracting unconditionally — even when the bucket is
-        // already empty — drove `tokens` arbitrarily negative under sustained
-        // overload, inflating `retry_after = (1 - tokens) / refill_rate` into
-        // multi-minute waits that clients ignored. Clamping the consume step
-        // with GREATEST(refilled - 1, 0) keeps `retry_after` proportional to
-        // the actual single-token refill time.
+        // Unconditional subtraction drove `tokens` arbitrarily negative under
+        // sustained overload, inflating `retry_after` into multi-minute waits.
+        // GREATEST(refilled - 1, 0) keeps `retry_after` proportional to the
+        // actual single-token refill time.
         let result = sqlx::query!(
             r#"
             INSERT INTO forge_rate_limits (bucket_key, tokens, last_refill, max_tokens, refill_rate)
@@ -87,7 +80,6 @@ impl StrictRateLimiter {
         }
     }
 
-    /// Build a bucket key for the given parameters.
     pub fn build_key(
         &self,
         key_type: RateLimitKey,
@@ -137,7 +129,6 @@ impl StrictRateLimiter {
         }
     }
 
-    /// Check rate limit and return an error if exceeded.
     pub async fn enforce(
         &self,
         bucket_key: &str,
@@ -172,7 +163,6 @@ impl StrictRateLimiter {
         Ok(result)
     }
 
-    /// Clean up old rate limit entries.
     pub async fn cleanup(&self, older_than: DateTime<Utc>) -> Result<u64> {
         let result = sqlx::query!(
             r#"
@@ -265,8 +255,6 @@ impl HybridRateLimiter {
         }
     }
 
-    /// Check rate limit. Uses local fast path for per-user/per-IP keys,
-    /// database for global keys.
     pub async fn check(
         &self,
         bucket_key: &str,
@@ -279,7 +267,6 @@ impl HybridRateLimiter {
         let max_tokens = config.requests as f64;
         let refill_rate = config.refill_rate();
 
-        // Evict idle buckets when the map gets too large to prevent memory exhaustion
         if self.local.len() > self.max_local_buckets {
             self.cleanup_local(Duration::from_secs(300)); // evict entries idle > 5 min
         }

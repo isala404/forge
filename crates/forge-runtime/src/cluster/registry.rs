@@ -8,12 +8,10 @@ pub struct NodeRegistry {
 }
 
 impl NodeRegistry {
-    /// Create a new node registry.
     pub fn new(pool: sqlx::PgPool, local_node: NodeInfo) -> Self {
         Self { pool, local_node }
     }
 
-    /// Register the local node in the cluster.
     pub async fn register(&self) -> Result<()> {
         let roles: Vec<String> = self
             .local_node
@@ -57,7 +55,6 @@ impl NodeRegistry {
         Ok(())
     }
 
-    /// Update node status.
     pub async fn set_status(&self, status: NodeStatus) -> Result<()> {
         sqlx::query!(
             r#"
@@ -75,7 +72,6 @@ impl NodeRegistry {
         Ok(())
     }
 
-    /// Deregister the local node from the cluster.
     pub async fn deregister(&self) -> Result<()> {
         sqlx::query!(
             r#"

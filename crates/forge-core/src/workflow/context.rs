@@ -98,32 +98,24 @@ pub struct WorkflowContext {
     /// Default timeout for outbound HTTP requests made through the
     /// circuit-breaker client. `None` means unlimited.
     http_timeout: Option<Duration>,
-    /// Step states (for resumption).
     step_states: Arc<RwLock<HashMap<String, StepState>>>,
-    /// Completed steps in order (for compensation).
+    /// Ordered list of completed step names, used to drive compensation in reverse.
     completed_steps: Arc<RwLock<Vec<String>>>,
-    /// Compensation handlers for completed steps.
     compensation_handlers: Arc<RwLock<HashMap<String, CompensationHandler>>>,
-    /// Whether this is a resumed execution.
     is_resumed: bool,
-    /// Whether this execution resumed specifically from a sleep (timer expired).
     resumed_from_sleep: bool,
-    /// Tenant ID for multi-tenancy.
     tenant_id: Option<Uuid>,
-    /// Environment variable provider.
     env_provider: Arc<dyn EnvProvider>,
-    /// User-defined key-value state that persists across suspension points.
+    /// Persists across suspension points.
     saved_state: Arc<RwLock<HashMap<String, serde_json::Value>>>,
-    /// KV store handle. `None` until threaded in by the runtime.
     kv: Option<Arc<dyn KvHandle>>,
-    /// When `false` (default), `record_step_start` only updates in-memory
-    /// state and skips the DB write. `persist_step_complete`'s upsert
-    /// handles the missing start row, so this saves one roundtrip per step.
-    /// Set to `true` for long-running steps where observability of
-    /// in-progress state matters.
+    /// When `false` (default), `record_step_start` skips the DB write;
+    /// `persist_step_complete`'s upsert covers the missing start row, saving
+    /// one roundtrip per step. Set `true` for long-running steps where
+    /// in-progress observability matters.
     persist_step_start: bool,
-    /// Suspension reason stored by `signal_suspend()` so the executor can
-    /// read it without a `ForgeError` variant as a side-channel.
+    /// Set by `signal_suspend()` so the executor can read the reason without
+    /// a `ForgeError` variant as a side-channel.
     suspend_reason: Arc<std::sync::Mutex<Option<SuspendReason>>>,
 }
 

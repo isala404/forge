@@ -11,12 +11,10 @@ pub struct EventStore {
 }
 
 impl EventStore {
-    /// Create a new event store.
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
 
-    /// Send an event to a workflow.
     pub async fn send_event(
         &self,
         event_name: &str,
@@ -55,7 +53,6 @@ impl EventStore {
         Ok(id)
     }
 
-    /// Consume an event for a workflow.
     #[allow(clippy::type_complexity)]
     pub async fn consume_event(
         &self,
@@ -113,7 +110,6 @@ impl EventStore {
         }))
     }
 
-    /// List pending events for a workflow.
     #[allow(clippy::type_complexity)]
     pub async fn list_pending_events(&self, correlation_id: &str) -> Result<Vec<WorkflowEvent>> {
         let results = sqlx::query!(
@@ -141,7 +137,6 @@ impl EventStore {
             .collect())
     }
 
-    /// Clean up old consumed events.
     pub async fn cleanup_consumed_events(&self, older_than: DateTime<Utc>) -> Result<u64> {
         let result = sqlx::query!(
             r#"

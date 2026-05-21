@@ -195,8 +195,6 @@ async fn audit(
     }
 }
 
-// --- Jobs ---
-
 #[derive(Serialize)]
 struct JobRow {
     id: Uuid,
@@ -552,8 +550,6 @@ async fn force_abort_job(
     .into_response()
 }
 
-// --- Workflows ---
-
 #[derive(Serialize)]
 struct WorkflowRow {
     id: Uuid,
@@ -875,8 +871,6 @@ async fn force_abort_workflow(
     .into_response()
 }
 
-// --- Queues ---
-
 #[derive(Serialize)]
 struct QueueRow {
     name: String,
@@ -1073,8 +1067,6 @@ async fn resume_queue(
     .into_response()
 }
 
-// --- Nodes / leaders ---
-
 async fn list_nodes(
     State(state): State<Arc<AdminState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1184,8 +1176,6 @@ mod tests {
         )
     }
 
-    // ── admin_err ───────────────────────────────────────────────────────
-
     #[tokio::test]
     async fn admin_err_shapes_response_with_status_code_and_message() {
         let resp = admin_err(StatusCode::FORBIDDEN, "forbidden", "no entry");
@@ -1196,8 +1186,6 @@ mod tests {
         assert_eq!(json["error"], "forbidden");
         assert_eq!(json["message"], "no entry");
     }
-
-    // ── require_admin ───────────────────────────────────────────────────
 
     #[tokio::test]
     async fn require_admin_rejects_unauthenticated_with_401() {
@@ -1236,8 +1224,6 @@ mod tests {
         assert!(require_admin(&auth).is_ok());
     }
 
-    // ── actor_subject ───────────────────────────────────────────────────
-
     #[test]
     fn actor_subject_prefers_uuid_user_id() {
         let id = Uuid::new_v4();
@@ -1266,8 +1252,6 @@ mod tests {
         // The UUID branch wins per actor_subject's precedence.
         assert_eq!(actor_subject(&auth), Some(id.to_string()));
     }
-
-    // ── actor_roles ─────────────────────────────────────────────────────
 
     #[test]
     fn actor_roles_returns_full_role_list() {

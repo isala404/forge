@@ -20,12 +20,10 @@ pub struct KvStore {
 }
 
 impl KvStore {
-    /// Create a new KV store backed by the given pool with a namespace prefix.
     pub fn new(pool: PgPool, namespace: &'static str) -> Self {
         Self { pool, namespace }
     }
 
-    /// Build the full namespaced key.
     fn prefixed_key(&self, key: &str) -> String {
         format!("{}:{}", self.namespace, key)
     }
@@ -84,8 +82,8 @@ impl KvStore {
     ) -> Result<bool> {
         let full_key = self.prefixed_key(key);
         let expires_at = ttl.map(|d| Utc::now() + d);
-        // Runtime query: rewritten to use ON CONFLICT WHERE for atomic expired-row
-        // handling. Convert to query!() after next `cargo sqlx prepare`.
+        // ON CONFLICT WHERE treats expired rows as absent atomically.
+        // Convert to query!() after next `cargo sqlx prepare`.
         #[allow(clippy::disallowed_methods)]
         let rows = sqlx::query(
             r#"
@@ -128,7 +126,7 @@ impl KvStore {
     pub async fn increment(&self, key: &str, delta: i64, ttl: Option<Duration>) -> Result<i64> {
         let full_key = self.prefixed_key(key);
         let expires_at = ttl.map(|d| Utc::now() + d);
-        // Runtime query: rewritten to handle expired counters atomically.
+        // Expired counters reset to delta rather than accumulating.
         // Convert to query_scalar!() after next `cargo sqlx prepare`.
         #[allow(clippy::disallowed_methods)]
         let row: (i64,) = sqlx::query_as(
@@ -158,7 +156,6 @@ impl KvStore {
     }
 
     /// Remove expired keys from both tables. Returns total rows cleaned up.
-    /// Called by the runtime's periodic leader-only maintenance loop.
     pub async fn cleanup_expired(&self) -> Result<u64> {
         let kv_deleted = sqlx::query!(
             "DELETE FROM forge_kv WHERE expires_at IS NOT NULL AND expires_at <= NOW()"

@@ -1198,8 +1198,6 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
 
-    // ── html_escape ─────────────────────────────────────────────────────
-
     #[test]
     fn html_escape_neutralizes_script_tags() {
         let xss = "<script>alert('xss')</script>";
@@ -1228,8 +1226,6 @@ mod tests {
         assert_eq!(html_escape("<"), "&lt;");
     }
 
-    // ── urlencoding ─────────────────────────────────────────────────────
-
     #[test]
     fn urlencoding_percent_encodes_non_alphanumeric() {
         // NON_ALPHANUMERIC encodes everything except [A-Za-z0-9].
@@ -1241,8 +1237,6 @@ mod tests {
     fn urlencoding_preserves_alphanumerics() {
         assert_eq!(urlencoding("AbCdEf123"), "AbCdEf123");
     }
-
-    // ── base_url_from_headers ───────────────────────────────────────────
 
     #[test]
     fn base_url_defaults_to_https_for_remote_host() {
@@ -1276,8 +1270,6 @@ mod tests {
         let headers = HeaderMap::new();
         assert_eq!(base_url_from_headers(&headers), "http://localhost:9081");
     }
-
-    // ── extract_cookie ──────────────────────────────────────────────────
 
     #[test]
     fn extract_cookie_finds_named_value() {
@@ -1317,8 +1309,6 @@ mod tests {
         assert_eq!(extract_cookie(&headers, "malformed"), None);
         assert_eq!(extract_cookie(&headers, "real"), Some("value".into()));
     }
-
-    // ── CSRF (stateless HMAC) ───────────────────────────────────────────
 
     #[test]
     fn csrf_round_trip_accepts_freshly_minted_token() {
@@ -1380,8 +1370,6 @@ mod tests {
         assert!(!verify_csrf_token(&stale_token, secret));
     }
 
-    // ── token_error ─────────────────────────────────────────────────────
-
     #[tokio::test]
     async fn token_error_returns_400_with_oauth_error_shape() {
         let resp = token_error("invalid_grant", "bad code");
@@ -1392,8 +1380,6 @@ mod tests {
         assert_eq!(json["error"], "invalid_grant");
         assert_eq!(json["error_description"], "bad code");
     }
-
-    // ── authorize_error_redirect ────────────────────────────────────────
 
     #[test]
     fn authorize_error_redirect_encodes_query_params_and_state() {
@@ -1442,8 +1428,6 @@ mod tests {
             "got {location}"
         );
     }
-
-    // ── default_s256 ────────────────────────────────────────────────────
 
     #[test]
     fn default_s256_returns_canonical_pkce_method() {

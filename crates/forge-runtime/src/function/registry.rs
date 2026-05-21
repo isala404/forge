@@ -260,8 +260,6 @@ mod tests {
         }
     }
 
-    // --- normalize_args: arg-shape contract for the dispatch path ---
-
     #[test]
     fn normalize_args_passes_null_through_untouched() {
         // Unit `()` deserializes from JSON null; do not collapse it elsewhere.

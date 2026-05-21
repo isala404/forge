@@ -143,7 +143,6 @@ impl CheckResult {
 }
 
 impl CheckCommand {
-    /// Execute the check command.
     pub async fn execute(self) -> Result<()> {
         let root = super::project_root::enter_project_root()?;
 
@@ -162,9 +161,8 @@ impl CheckCommand {
 
         let mut result = CheckResult::new(self.format);
 
-        // Auto-refresh the offline cache before downstream checks so cache-miss
-        // noise doesn't bury real type errors. `--no-prepare` opts out (CI),
-        // `--prepare-only` exits after this step.
+        // Refresh the offline cache before downstream checks so cache-miss noise
+        // doesn't bury real type errors. `--no-prepare` opts out.
         if !self.no_prepare {
             result.section("Offline Cache Refresh");
             self.refresh_sqlx_cache_if_stale(&mut result)?;

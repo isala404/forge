@@ -366,7 +366,6 @@ impl AuthMiddleware {
             tracing::warn!("JWT signature verification is DISABLED. Do not use in production.");
         }
 
-        // Pre-compute HMAC key if using HMAC algorithm
         let active_secret = if !config.skips_verification() && config.is_hmac() {
             config.jwt_secret.as_deref().filter(|s| !s.is_empty())
         } else {
@@ -536,14 +535,12 @@ impl AuthMiddleware {
             AuthError::InvalidToken("JWKS URL not configured for RSA".to_string())
         })?;
 
-        // Extract key ID from token header
         let header = jsonwebtoken::decode_header(token)
             .map_err(|e| AuthError::InvalidToken(format!("Invalid token header: {}", e)))?;
 
         let safe_kid = header.kid.as_deref().map(sanitize_for_log);
         debug!(kid = ?safe_kid, alg = ?header.alg, "Validating RSA token");
 
-        // Get key from JWKS
         let key = if let Some(kid) = header.kid {
             jwks.get_key(&kid).await.map_err(|e| {
                 AuthError::InvalidToken(format!("Failed to get key '{}': {}", kid, e))
@@ -578,13 +575,10 @@ impl AuthMiddleware {
         }
 
         let mut validation = Validation::new(self.config.algorithm.into());
-
-        // Configure validation
         validation.validate_exp = true;
         validation.validate_nbf = true;
         validation.leeway = self.config.leeway_secs;
 
-        // Require configured spec claims (defaults: exp, sub)
         let required: Vec<&str> = self
             .config
             .required_claims
@@ -593,12 +587,10 @@ impl AuthMiddleware {
             .collect();
         validation.set_required_spec_claims(&required);
 
-        // Validate issuer if configured
         if let Some(ref issuer) = self.config.issuer {
             validation.set_issuer(&[issuer]);
         }
 
-        // Validate audience if configured
         if let Some(ref audience) = self.config.audience {
             validation.set_audience(&[audience]);
         } else {
@@ -644,7 +636,6 @@ impl AuthMiddleware {
                 _ => AuthError::InvalidToken(e.to_string()),
             })?;
 
-        // Still check expiration in dev mode
         if token_data.claims.is_expired() {
             return Err(AuthError::TokenExpired);
         }
@@ -746,20 +737,15 @@ pub fn build_auth_context_from_claims(claims: Claims) -> AuthContext {
     // Capture exp before moving claims — needed for SSE session expiry checks.
     let exp = claims.exp();
 
-    // Try to parse subject as UUID first (before moving claims)
     let user_id = claims.user_id();
 
-    // Build custom claims with raw subject included, filtering out reserved JWT claims
     let mut custom_claims = claims.sanitized_custom();
     let sub = claims.sub().to_string();
     let roles = claims.into_roles();
     custom_claims.insert("sub".to_string(), serde_json::Value::String(sub));
 
     let ctx = match user_id {
-        Some(uuid) => {
-            // Subject is a valid UUID
-            AuthContext::authenticated(uuid, roles, custom_claims)
-        }
+        Some(uuid) => AuthContext::authenticated(uuid, roles, custom_claims),
         None => {
             // Subject is not a UUID (e.g., Firebase uid, Clerk user_xxx, email)
             // Still authenticated, but user_id() will return None

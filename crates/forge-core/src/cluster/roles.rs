@@ -15,7 +15,6 @@ pub enum NodeRole {
 }
 
 impl NodeRole {
-    /// Convert to string for database storage.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Gateway => "gateway",
@@ -25,7 +24,6 @@ impl NodeRole {
         }
     }
 
-    /// Get all default roles.
     pub fn all() -> Vec<Self> {
         vec![Self::Gateway, Self::Function, Self::Worker, Self::Scheduler]
     }
@@ -77,17 +75,14 @@ pub enum LeaderRole {
 }
 
 impl LeaderRole {
-    /// Get the PostgreSQL advisory lock ID for this role.
+    /// Advisory lock ID. Fixed slots for named roles; FNV-1a in the FORGE
+    /// daemon namespace (0x464F_5247_4000) for `Daemon` variants.
     pub fn lock_id(&self) -> i64 {
-        // Use a unique ID based on "FORGE" + role number
-        // 0x464F524745 = "FORGE" in hex
         match self {
             Self::Scheduler => 0x464F_5247_0001,
             Self::MetricsAggregator => 0x464F_5247_0002,
             Self::LogCompactor => 0x464F_5247_0003,
             Self::Daemon(name) => {
-                // FNV-1a 64-bit hash in the FORGE daemon namespace.
-                // Standard FNV-1a: XOR byte, then multiply by the FNV prime.
                 const FNV_OFFSET: i64 = 0x464F_5247_4000;
                 const FNV_PRIME: i64 = 0x0100_0000_01b3; // 1099511628211
                 let mut h: i64 = FNV_OFFSET;
@@ -100,7 +95,6 @@ impl LeaderRole {
         }
     }
 
-    /// Convert to string for database storage.
     pub fn as_str(&self) -> &str {
         match self {
             Self::Scheduler => "scheduler",

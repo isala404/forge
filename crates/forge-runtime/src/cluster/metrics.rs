@@ -133,8 +133,6 @@ pub fn record_notification_latency(latency_secs: f64) {
     metrics().notification_latency.record(latency_secs, &[]);
 }
 
-// --- No-op stubs when otel is disabled ---
-
 #[cfg(not(feature = "otel"))]
 #[inline]
 pub fn record_heartbeat_latency(_latency_secs: f64) {}

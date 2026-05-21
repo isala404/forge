@@ -13,7 +13,6 @@ const WIRE_VERSION: &str = "2";
 /// Forge framework version stamped into the schema.
 const FORGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Emit a `forge.schema.json` document from a schema registry.
 pub fn emit(registry: &SchemaRegistry) -> Value {
     json!({
         "$schema": "https://forge-rs.dev/schema/v2.json",
@@ -24,7 +23,7 @@ pub fn emit(registry: &SchemaRegistry) -> Value {
     })
 }
 
-/// Serialize the schema to a pretty-printed JSON string with trailing newline.
+/// Serialize to a pretty-printed JSON string with trailing newline.
 pub fn emit_string(registry: &SchemaRegistry) -> Result<String, serde_json::Error> {
     let value = emit(registry);
     let mut output = serde_json::to_string_pretty(&value)?;
@@ -294,8 +293,7 @@ mod tests {
 
     #[test]
     fn emit_rust_type_covers_every_numeric_and_temporal_variant() {
-        // Each branch in emit_rust_type is part of the public wire contract;
-        // a missing variant would emit `null` silently and break consumers.
+        // Missing variants would emit `null` silently and break wire consumers.
         assert_eq!(
             emit_rust_type(&RustType::I64),
             json!({"base": "number", "format": "i64"})
@@ -327,7 +325,6 @@ mod tests {
 
     #[test]
     fn emit_rust_type_nests_option_and_vec_recursively() {
-        // Option<Vec<Custom>> exercises three combined transforms.
         let ty = RustType::Option(Box::new(RustType::Vec(Box::new(RustType::Custom(
             "Role".into(),
         )))));
@@ -355,10 +352,7 @@ mod tests {
         assert_eq!(with_doc["doc"], "Primary contact address");
 
         let plain = emit_field(&FieldDef::new("id", RustType::Uuid));
-        assert!(
-            plain.as_object().unwrap().get("doc").is_none(),
-            "absent doc must not emit the key"
-        );
+        assert!(plain.as_object().unwrap().get("doc").is_none());
     }
 
     #[test]
@@ -374,7 +368,6 @@ mod tests {
         assert_eq!(json["variants"][0]["int_value"], 1);
         assert_eq!(json["variants"][0]["doc"], "Currently in use");
 
-        // The bare variant must NOT emit int_value or doc keys.
         let second = json["variants"][1].as_object().unwrap();
         assert!(second.get("int_value").is_none());
         assert!(second.get("doc").is_none());

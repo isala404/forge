@@ -70,7 +70,6 @@ impl HandlerKind {
         }
     }
 
-    /// Schemas (`model`, `enum`) live under `src/schema/`; everything else under `src/functions/`.
     fn target_dir(self) -> &'static str {
         match self {
             Self::Model | Self::Enum => "src/schema",

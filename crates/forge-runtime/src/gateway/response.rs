@@ -248,8 +248,6 @@ mod tests {
         assert_eq!(resp.request_id, Some("req-123".to_string()));
     }
 
-    // --- ForgeError -> RpcError conversion (HTTP boundary contract) ---
-
     #[test]
     fn forge_not_found_maps_to_not_found_404() {
         let rpc: RpcError = forge_core::ForgeError::NotFound("user 42".into()).into();

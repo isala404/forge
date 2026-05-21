@@ -12,28 +12,18 @@ use crate::http::CircuitBreakerClient;
 /// Context available to daemon handlers.
 #[non_exhaustive]
 pub struct DaemonContext {
-    /// Daemon name.
     pub daemon_name: String,
-    /// Unique instance ID for this daemon execution.
     pub instance_id: Uuid,
-    /// Database pool.
     db_pool: sqlx::PgPool,
-    /// HTTP client for external calls.
     http_client: CircuitBreakerClient,
-    /// Default timeout for outbound HTTP requests made through the
-    /// circuit-breaker client. `None` means unlimited.
+    /// `None` means unlimited.
     http_timeout: Option<Duration>,
-    /// Shutdown signal receiver (wrapped in Mutex for interior mutability).
+    /// Wrapped in `Mutex` for interior mutability across async boundaries.
     shutdown_rx: Mutex<watch::Receiver<bool>>,
-    /// Job dispatcher for background jobs.
     job_dispatch: Option<Arc<dyn JobDispatch>>,
-    /// Workflow dispatcher for starting workflows.
     workflow_dispatch: Option<Arc<dyn WorkflowDispatch>>,
-    /// Environment variable provider.
     env_provider: Arc<dyn EnvProvider>,
-    /// Parent span for trace propagation.
     span: Span,
-    /// KV store handle. `None` until threaded in by the runtime.
     kv: Option<Arc<dyn KvHandle>>,
 }
 

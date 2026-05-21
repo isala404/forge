@@ -153,5 +153,3 @@ pub fn daemon_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     TokenStream::from(expanded)
 }
-
-// Tests for to_pascal_case and parse_duration are in utils.rs (single source of truth).

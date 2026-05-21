@@ -6,8 +6,7 @@
 
 use forge_core::schema::RustType;
 
-/// Position context for type mapping.
-/// Some types map differently depending on usage context.
+/// Position context for type mapping. Some types map differently by position.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Position {
     /// Function argument or struct field.
@@ -15,10 +14,6 @@ pub enum Position {
     /// Function return type.
     Return,
 }
-
-// ---------------------------------------------------------------------------
-// TypeScript type mapping
-// ---------------------------------------------------------------------------
 
 /// Convert a RustType to its TypeScript representation.
 pub fn ts_type(rust_type: &RustType, pos: Position) -> String {
@@ -48,9 +43,8 @@ pub fn ts_type(rust_type: &RustType, pos: Position) -> String {
         },
 
         RustType::Option(inner) => format!("{} | null", ts_type(inner, pos)),
-        // `Option<T>` renders with " | null", which without parens would parse
-        // as `T | (null[])` inside an array. Use `Array<...>` to keep the union
-        // unambiguous on the element type.
+        // `Option<T>` inside an array renders as `Array<T | null>` not `(T | null)[]`
+        // to keep the union bound to the element type, not the whole array.
         RustType::Vec(inner) => match inner.as_ref() {
             RustType::Option(_) => format!("Array<{}>", ts_type(inner, pos)),
             _ => format!("{}[]", ts_type(inner, pos)),
@@ -78,7 +72,6 @@ fn ts_custom(name: &str, pos: Position) -> String {
 
         "Value" | "serde_json::Value" => "unknown".into(),
 
-        // Unparsed generic types that leaked through as Custom.
         _ if name.starts_with("Vec<") => {
             let inner = name
                 .strip_prefix("Vec<")
@@ -143,11 +136,7 @@ fn split_top_level_comma(s: &str) -> Option<(&str, &str)> {
     None
 }
 
-// ---------------------------------------------------------------------------
-// Dioxus (Rust frontend) type mapping
-// ---------------------------------------------------------------------------
-
-/// Convert a RustType to its Dioxus/Rust representation for generated frontend code.
+/// Convert a RustType to its Dioxus/Rust representation.
 pub fn dioxus_type(rust_type: &RustType) -> String {
     match rust_type {
         RustType::String | RustType::Uuid => "String".into(),
@@ -226,11 +215,6 @@ fn dioxus_hashmap(name: &str) -> String {
     format!("std::collections::HashMap<String, {}>", value_type)
 }
 
-// ---------------------------------------------------------------------------
-// Recursive type tree queries
-// ---------------------------------------------------------------------------
-
-/// Recursively walk a RustType tree, returning true if the predicate matches any node.
 fn walk_type(rust_type: &RustType, predicate: &dyn Fn(&RustType) -> bool) -> bool {
     if predicate(rust_type) {
         return true;
@@ -241,14 +225,12 @@ fn walk_type(rust_type: &RustType, predicate: &dyn Fn(&RustType) -> bool) -> boo
     }
 }
 
-/// Check if a RustType tree contains an Upload type anywhere.
 pub fn contains_upload(rust_type: &RustType) -> bool {
     walk_type(rust_type, &|t| {
         matches!(t, RustType::Upload) || matches!(t, RustType::Custom(n) if n == "Upload")
     })
 }
 
-/// Check if a RustType tree contains a Json type anywhere.
 pub fn contains_json(rust_type: &RustType) -> bool {
     walk_type(rust_type, &|t| {
         matches!(t, RustType::Json)
@@ -256,7 +238,7 @@ pub fn contains_json(rust_type: &RustType) -> bool {
     })
 }
 
-/// Collect custom type names that need to be imported in TypeScript.
+/// Collect custom type names that need importing in TypeScript.
 pub fn collect_type_imports(rust_type: &RustType, imports: &mut Vec<String>) {
     match rust_type {
         RustType::Custom(name) if is_importable_type(name) => {
@@ -267,8 +249,6 @@ pub fn collect_type_imports(rust_type: &RustType, imports: &mut Vec<String>) {
     }
 }
 
-/// A custom type name is importable if it represents a user-defined type
-/// (not a built-in, container, or type that maps to a primitive).
 fn is_importable_type(name: &str) -> bool {
     !matches!(
         name,
@@ -282,8 +262,6 @@ fn is_importable_type(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // -- TypeScript mapping --
 
     #[test]
     fn ts_primitives() {
@@ -371,8 +349,6 @@ mod tests {
         );
     }
 
-    // -- Dioxus mapping --
-
     #[test]
     fn dioxus_primitives() {
         assert_eq!(dioxus_type(&RustType::String), "String");
@@ -417,8 +393,6 @@ mod tests {
             "std::collections::HashMap<String, String>"
         );
     }
-
-    // -- Type tree queries --
 
     #[test]
     fn upload_detection() {
@@ -487,12 +461,8 @@ mod tests {
         );
     }
 
-    // --- Cross-target consistency ---
-
-    /// Ensure every RustType variant maps to a non-empty string in both targets.
-    /// Uses `RustType::leaf_variants()` so adding a new variant without updating
-    /// both emitters fails this test (and the exhaustive match in the emitters
-    /// themselves produces a compile error).
+    /// Adding a new RustType variant without updating both emitters fails this test.
+    /// The exhaustive `match` in the emitters themselves also produces a compile error.
     #[test]
     fn all_types_map_to_nonempty_in_both_targets() {
         let mut types = RustType::leaf_variants();
@@ -521,25 +491,20 @@ mod tests {
         );
     }
 
-    /// Nested generics should produce valid type strings without panicking.
     #[test]
     fn nested_option_vec_maps_correctly() {
-        // Option<Vec<String>> => TS: "string[] | null"
         let ty = RustType::Option(Box::new(RustType::Vec(Box::new(RustType::String))));
         assert_eq!(ts_type(&ty, Position::Arg), "string[] | null");
         assert_eq!(dioxus_type(&ty), "Option<Vec<String>>");
 
-        // Vec<Option<i32>> emits Array<...> form so the union binds to the
-        // element type (avoids the `number | (null[])` precedence trap).
+        // Vec<Option<i32>> uses Array<...> to avoid the `T | (null[])` precedence trap.
         let ty2 = RustType::Vec(Box::new(RustType::Option(Box::new(RustType::I32))));
         assert_eq!(ts_type(&ty2, Position::Arg), "Array<number | null>");
         assert_eq!(dioxus_type(&ty2), "Vec<Option<i32>>");
     }
 
-    /// Position-dependent types should produce different results for Arg vs Return.
     #[test]
     fn position_sensitive_types_differ() {
-        // Bytes: Uint8Array (arg) vs Blob (return)
         assert_ne!(
             ts_type(&RustType::Bytes, Position::Arg),
             ts_type(&RustType::Bytes, Position::Return)

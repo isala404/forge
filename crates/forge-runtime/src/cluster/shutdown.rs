@@ -37,7 +37,6 @@ pub struct GracefulShutdown {
 }
 
 impl GracefulShutdown {
-    /// Create a new graceful shutdown coordinator.
     pub fn new(
         registry: Arc<NodeRegistry>,
         leader_election: Option<Arc<LeaderElection>>,
@@ -54,22 +53,18 @@ impl GracefulShutdown {
         }
     }
 
-    /// Check if shutdown has been requested.
     pub fn is_shutdown_requested(&self) -> bool {
         self.shutdown_requested.load(Ordering::SeqCst)
     }
 
-    /// Get the current in-flight count.
     pub fn in_flight_count(&self) -> u32 {
         self.in_flight_count.load(Ordering::SeqCst)
     }
 
-    /// Increment the in-flight counter.
     pub fn increment_in_flight(&self) {
         self.in_flight_count.fetch_add(1, Ordering::SeqCst);
     }
 
-    /// Decrement the in-flight counter.
     pub fn decrement_in_flight(&self) {
         self.in_flight_count.fetch_sub(1, Ordering::SeqCst);
     }
@@ -81,27 +76,20 @@ impl GracefulShutdown {
         self.shutdown_tx.subscribe()
     }
 
-    /// Check if new work should be accepted.
     pub fn should_accept_work(&self) -> bool {
         !self.shutdown_requested.load(Ordering::SeqCst)
     }
 
-    /// Perform graceful shutdown.
     pub async fn shutdown(&self) -> forge_core::Result<()> {
-        // Mark shutdown as requested
         self.shutdown_requested.store(true, Ordering::SeqCst);
-
-        // Notify all listeners (watch replays current value to new subscribers)
         self.shutdown_tx.send_replace(true);
 
         tracing::info!("Starting graceful shutdown");
 
-        // 1. Set status to draining
         if let Err(e) = self.registry.set_status(NodeStatus::Draining).await {
             tracing::warn!("Failed to set draining status: {}", e);
         }
 
-        // 2. Wait for in-flight requests with timeout
         let drain_result = self.wait_for_drain().await;
         match drain_result {
             DrainResult::Completed => {
@@ -115,7 +103,6 @@ impl GracefulShutdown {
             }
         }
 
-        // 3. Release leadership explicitly so another node can take over immediately
         if let Some(ref election) = self.leader_election {
             if let Err(e) = election.release_leadership().await {
                 tracing::warn!("Failed to release leadership: {}", e);
@@ -124,7 +111,6 @@ impl GracefulShutdown {
             }
         }
 
-        // 4. Deregister from cluster
         if let Err(e) = self.registry.deregister().await {
             tracing::warn!("Failed to deregister from cluster: {}", e);
         }
@@ -133,7 +119,6 @@ impl GracefulShutdown {
         Ok(())
     }
 
-    /// Wait for all in-flight requests to complete.
     async fn wait_for_drain(&self) -> DrainResult {
         let deadline = tokio::time::Instant::now() + self.config.drain_timeout;
 
@@ -156,9 +141,7 @@ impl GracefulShutdown {
 /// Result of drain operation.
 #[derive(Debug)]
 enum DrainResult {
-    /// All requests completed.
     Completed,
-    /// Timeout reached with remaining requests.
     Timeout(u32),
 }
 
@@ -168,8 +151,7 @@ pub struct InFlightGuard {
 }
 
 impl InFlightGuard {
-    /// Create a new in-flight guard.
-    /// Returns None if shutdown is in progress.
+    /// Returns `None` if shutdown is in progress.
     pub fn try_new(shutdown: Arc<GracefulShutdown>) -> Option<Self> {
         if shutdown.should_accept_work() {
             shutdown.increment_in_flight();

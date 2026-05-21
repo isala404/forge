@@ -12,21 +12,14 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Claims {
-    /// Subject (user ID). Use [`Claims::sub`] / [`Claims::user_id`].
     pub(crate) sub: String,
-    /// Issued at (Unix timestamp). Use [`Claims::iat`].
     pub(crate) iat: i64,
-    /// Expiration time (Unix timestamp). Use [`Claims::exp`] /
-    /// [`Claims::is_expired`].
     pub(crate) exp: i64,
-    /// Audience (`aud` claim). Use [`Claims::audience`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) aud: Option<String>,
-    /// User roles. Use [`Claims::roles`] / [`Claims::has_role`].
     #[serde(default)]
     pub(crate) roles: Vec<String>,
-    /// Custom claims, with reserved JWT claims filtered out on read.
-    /// Use [`Claims::get_claim`] / [`Claims::sanitized_custom`].
+    /// Reserved JWT claims are filtered out on read; use [`Claims::get_claim`] / [`Claims::sanitized_custom`].
     #[serde(flatten)]
     pub(crate) custom: HashMap<String, serde_json::Value>,
 }
@@ -142,7 +135,7 @@ impl ClaimsBuilder {
             aud: None,
             roles: Vec::new(),
             custom: HashMap::new(),
-            duration_secs: 3600, // 1 hour default
+            duration_secs: 3600,
         }
     }
 
@@ -286,7 +279,7 @@ mod tests {
         let claims = Claims {
             sub: "user-1".to_string(),
             iat: 0,
-            exp: 1, // Expired timestamp
+            exp: 1,
             aud: None,
             roles: vec![],
             custom: HashMap::new(),
@@ -324,7 +317,6 @@ mod tests {
             .duration_secs(120)
             .build()
             .unwrap();
-        // exp == iat + duration_secs.
         assert_eq!(claims.exp() - claims.iat(), 120);
     }
 
@@ -352,7 +344,6 @@ mod tests {
     fn user_id_returns_none_for_non_uuid_subject() {
         let claims = Claims::builder().subject("not-a-uuid").build().unwrap();
         assert!(claims.user_id().is_none());
-        // sub accessor still returns the raw string verbatim.
         assert_eq!(claims.sub(), "not-a-uuid");
     }
 
@@ -372,7 +363,6 @@ mod tests {
             .role("b")
             .build()
             .unwrap();
-        // Clone to use after into_*.
         let roles = claims.clone().into_roles();
         assert_eq!(roles, vec!["a".to_string(), "b".to_string()]);
         let sub = claims.into_sub();
@@ -387,7 +377,6 @@ mod tests {
             .roles(vec!["one".into(), "two".into()])
             .build()
             .unwrap();
-        // `.roles()` replaces, doesn't extend, so "first" is gone.
         assert_eq!(claims.roles(), &["one".to_string(), "two".to_string()]);
     }
 
@@ -434,7 +423,6 @@ mod tests {
             custom,
         };
         let safe = claims.sanitized_custom();
-        // Only the non-reserved key survives.
         assert_eq!(safe.len(), 1);
         assert_eq!(safe.get("org_id"), Some(&serde_json::json!("o1")));
         for reserved in Claims::RESERVED_CLAIMS {

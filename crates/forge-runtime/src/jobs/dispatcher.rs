@@ -10,7 +10,6 @@ use uuid::Uuid;
 use super::queue::{JobQueue, JobRecord};
 use super::registry::JobRegistry;
 
-/// Dispatches jobs to the queue.
 #[derive(Clone)]
 pub struct JobDispatcher {
     queue: JobQueue,
@@ -18,12 +17,10 @@ pub struct JobDispatcher {
 }
 
 impl JobDispatcher {
-    /// Create a new job dispatcher.
     pub fn new(queue: JobQueue, registry: JobRegistry) -> Self {
         Self { queue, registry }
     }
 
-    /// Dispatch a job immediately.
     pub async fn dispatch<J: ForgeJob>(
         &self,
         args: J::Args,
@@ -37,7 +34,6 @@ impl JobDispatcher {
             .await
     }
 
-    /// Dispatch a job with a delay.
     pub async fn dispatch_in<J: ForgeJob>(
         &self,
         delay: Duration,
@@ -60,7 +56,6 @@ impl JobDispatcher {
         .await
     }
 
-    /// Dispatch a job at a specific time.
     pub async fn dispatch_at<J: ForgeJob>(
         &self,
         at: DateTime<Utc>,
@@ -75,7 +70,6 @@ impl JobDispatcher {
             .await
     }
 
-    /// Dispatch job by name (dynamic).
     pub async fn dispatch_by_name(
         &self,
         job_type: &str,
@@ -90,7 +84,6 @@ impl JobDispatcher {
             .await
     }
 
-    /// Dispatch job with explicit info.
     async fn dispatch_with_info(
         &self,
         info: &JobInfo,
@@ -131,7 +124,6 @@ impl JobDispatcher {
             .map_err(forge_core::ForgeError::Database)
     }
 
-    /// Dispatch job at specific time with explicit info.
     async fn dispatch_at_with_info(
         &self,
         info: &JobInfo,
@@ -158,7 +150,6 @@ impl JobDispatcher {
             .map_err(forge_core::ForgeError::Database)
     }
 
-    /// Dispatch job with explicit info and tenant ID.
     async fn dispatch_with_info_and_tenant(
         &self,
         info: &JobInfo,
@@ -185,7 +176,6 @@ impl JobDispatcher {
             .map_err(forge_core::ForgeError::Database)
     }
 
-    /// Dispatch job at a specific time with explicit info and tenant ID.
     async fn dispatch_at_with_info_and_tenant(
         &self,
         info: &JobInfo,
@@ -214,7 +204,6 @@ impl JobDispatcher {
             .map_err(forge_core::ForgeError::Database)
     }
 
-    /// Dispatch job with idempotency key.
     pub async fn dispatch_idempotent<J: ForgeJob>(
         &self,
         idempotency_key: impl Into<String>,
@@ -244,7 +233,6 @@ impl JobDispatcher {
             .map_err(forge_core::ForgeError::Database)
     }
 
-    /// Dispatch job with custom priority.
     pub async fn dispatch_with_priority<J: ForgeJob>(
         &self,
         priority: JobPriority,
@@ -524,7 +512,6 @@ mod integration_tests {
         )
         .await
         .unwrap();
-        // Rollback before commit — the job must disappear.
         tx.rollback().await.unwrap();
 
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM forge_jobs WHERE id = $1")

@@ -59,7 +59,6 @@ export function createConnectionStore(): ConnectionStatusStore {
   };
 }
 
-// Type helper to reject empty objects - use null for no-arg functions
 type RejectEmptyObject<T> = T extends Record<string, never> ? never : T;
 
 export function createQueryStore<TArgs, TResult>(
@@ -389,11 +388,7 @@ export function createWorkflowStore<TArgs, TOutput>(
   };
 }
 
-/**
- * Fire-and-forget wrapper for mutations. Errors route to the global
- * `onMutationError` handler registered on the ForgeClient, or to the
- * optional per-call `onError` callback.
- */
+/** Fire-and-forget mutation. Errors go to the per-call `onError` or the global `onMutationError`. */
 export function fireMutation<TArgs, TResult>(
   mutationFn: (args: TArgs) => Promise<TResult>,
   args: TArgs,
@@ -414,17 +409,11 @@ export function fireMutation<TArgs, TResult>(
 }
 
 export interface OptimisticMutationStore<TArgs, TData> {
-  /** Fire the mutation with optimistic update applied immediately. */
   fire: (args: TArgs) => void;
-  /** Readable store of the derived data (subscription + optimistic patches). */
   data: Readable<TData | null>;
 }
 
-/**
- * Create an optimistic mutation that layers local patches over a live
- * subscription. Fires the mutation, applies the transform immediately,
- * and auto-reverts on error or TTL expiry (default 3s).
- */
+/** Optimistic mutation over a live subscription; auto-reverts on error or TTL expiry (default 3s). */
 export function createOptimisticMutation<TArgs, TResult, TData>(
   mutationFn: (args: TArgs) => Promise<TResult>,
   subscription: SubscriptionStore<TData>,
@@ -441,7 +430,6 @@ export function createOptimisticMutation<TArgs, TResult, TData>(
 
   const notify = () => subscribers.forEach((run) => run(currentView));
 
-  // Track subscription data and handle SSE confirmations
   const unsubscribeSub = subscription.subscribe((result) => {
     latestSubData = result.data;
     if (pendingGeneration > 0) {
@@ -480,7 +468,6 @@ export function createOptimisticMutation<TArgs, TResult, TData>(
 
     const generation = ++pendingGeneration;
 
-    // TTL safety net
     if (ttlTimer) clearTimeout(ttlTimer);
     ttlTimer = setTimeout(() => {
       if (pendingGeneration === generation) {
@@ -490,9 +477,7 @@ export function createOptimisticMutation<TArgs, TResult, TData>(
       }
     }, ttlMs);
 
-    // Send the actual mutation
     mutationFn(args).catch((err: unknown) => {
-      // Rollback on error
       if (pendingGeneration === generation) {
         pendingGeneration = 0;
         if (ttlTimer) {

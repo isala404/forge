@@ -33,7 +33,6 @@ pub struct GenerateCommand {
 }
 
 impl GenerateCommand {
-    /// Execute the generate command.
     pub async fn execute(self) -> Result<()> {
         let root = super::project_root::enter_project_root()?;
         eprintln!(
@@ -54,7 +53,6 @@ impl GenerateCommand {
             .unwrap_or_else(|| detected_target.default_output_dir().to_string());
         let output_path = Path::new(&output_dir);
 
-        // Parse source files
         eprint!("  Scanning Rust source files...");
         let registry = if src_path.exists() {
             let outcome = forge_codegen::parse_project(src_path)?;
@@ -92,7 +90,6 @@ impl GenerateCommand {
             || !registry.all_enums().is_empty()
             || !registry.all_functions().is_empty();
 
-        // Phase 1: emit forge.schema.json
         let schema_path = Path::new("forge.schema.json");
         let schema_json = forge_codegen::emit_schema_json(&registry)
             .map_err(|e| anyhow::anyhow!("Failed to serialize schema: {}", e))?;

@@ -77,7 +77,6 @@ impl TelemetryConfig {
         }
     }
 
-    /// Create config from ForgeConfig's observability settings.
     pub fn from_observability_config(
         obs: &forge_core::config::ObservabilityConfig,
         project_name: &str,
@@ -257,7 +256,6 @@ pub fn init_telemetry(
         .with_line_number(false)
         .with_filter(build_console_filter(project_name, log_level));
 
-    // Build optional trace layer (includes sqlx debug for DB-level spans)
     let otel_trace_layer = if config.enable_traces {
         match init_tracer(config) {
             Ok(tracer_provider) => {
@@ -283,10 +281,8 @@ pub fn init_telemetry(
         None
     };
 
-    // Build optional log bridge layer.
-    // Uses the OTel filter (includes sqlx debug) plus an anti-recursion guard
-    // that blocks events from the OTLP transport stack (hyper, reqwest, h2,
-    // etc.) to prevent infinite feedback through the HTTP exporter.
+    // Anti-recursion guard blocks hyper/reqwest/h2/tonic events from feeding
+    // back through the HTTP exporter.
     let otel_log_layer = if config.enable_logs {
         match init_logger(config) {
             Ok(logger_provider) => {

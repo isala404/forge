@@ -402,7 +402,6 @@ where
             }
         });
 
-        // Send the actual mutation
         let client = self.mutation.client.clone();
         let function_name = self.mutation.function_name;
         dioxus::prelude::spawn(async move {

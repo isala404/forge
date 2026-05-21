@@ -1,7 +1,4 @@
 //! SQL string extraction and table dependency parsing.
-//!
-//! This module extracts SQL strings from function bodies and parses them
-//! to identify table dependencies at compile time.
 
 use std::collections::HashSet;
 
@@ -37,7 +34,6 @@ impl<'ast> Visit<'ast> for DbDelegationDetector {
 
 /// Visitor that extracts SQL string literals from function bodies.
 pub struct SqlStringExtractor {
-    /// Collected SQL strings.
     pub sql_strings: Vec<String>,
 }
 
@@ -66,7 +62,6 @@ impl SqlStringExtractor {
 
         let upper = trimmed.to_uppercase();
 
-        // Must start with a SQL statement keyword
         let starts_with_keyword = upper.starts_with("SELECT")
             || upper.starts_with("INSERT")
             || upper.starts_with("UPDATE")
@@ -76,7 +71,6 @@ impl SqlStringExtractor {
             return false;
         }
 
-        // Require keyword pairs that form valid SQL statement patterns
         (upper.contains("SELECT") && upper.contains("FROM"))
             || (upper.contains("INSERT") && upper.contains("INTO"))
             || (upper.contains("UPDATE") && upper.contains("SET"))
@@ -84,16 +78,11 @@ impl SqlStringExtractor {
             || (upper.starts_with("WITH") && upper.contains("SELECT"))
     }
 
-    /// Extract SQL strings from macro tokens.
-    /// This handles sqlx macros like query_as!(Type, "SQL", args...)
     fn extract_sql_from_tokens(&mut self, tokens: &proc_macro2::TokenStream) {
         for token in tokens.clone() {
             match token {
                 proc_macro2::TokenTree::Literal(lit) => {
-                    // Try to parse as a string literal
                     let lit_str = lit.to_string();
-                    // Raw string literals look like r#"..."# or r"..."
-                    // Regular string literals look like "..."
                     if let Some(sql) = Self::extract_string_content(&lit_str)
                         && Self::looks_like_sql(&sql)
                     {
@@ -101,7 +90,6 @@ impl SqlStringExtractor {
                     }
                 }
                 proc_macro2::TokenTree::Group(group) => {
-                    // Recurse into groups (parentheses, brackets, braces)
                     self.extract_sql_from_tokens(&group.stream());
                 }
                 _ => {}
@@ -132,19 +120,15 @@ impl<'ast> Visit<'ast> for SqlStringExtractor {
                 | "query_scalar_unchecked"
                 | "query_with"
                 | "raw_sql"
-        ) {
-            // The first argument is typically the SQL string
-            if let Some(first_arg) = node.args.first() {
-                self.visit_expr(first_arg);
-            }
+        ) && let Some(first_arg) = node.args.first()
+        {
+            self.visit_expr(first_arg);
         }
 
-        // Continue visiting children
         syn::visit::visit_expr_method_call(self, node);
     }
 
     fn visit_expr_call(&mut self, node: &'ast ExprCall) {
-        // Check for sqlx::query("...") style calls
         if let SynExpr::Path(path) = &*node.func {
             let path_str = path
                 .path
@@ -175,7 +159,6 @@ impl<'ast> Visit<'ast> for SqlStringExtractor {
     }
 
     fn visit_expr_macro(&mut self, node: &'ast ExprMacro) {
-        // Handle sqlx macros: query!, query_as!, query_scalar!, etc.
         let macro_name = node
             .mac
             .path
@@ -188,7 +171,6 @@ impl<'ast> Visit<'ast> for SqlStringExtractor {
             macro_name.as_str(),
             "query" | "query_as" | "query_scalar" | "query_as_unchecked" | "query_scalar_unchecked"
         ) {
-            // Extract string literals from the macro tokens
             self.extract_sql_from_tokens(&node.mac.tokens);
         }
 
@@ -298,8 +280,8 @@ fn extract_changed_columns_from_statement(stmt: &Statement, columns: &mut HashSe
     match stmt {
         Statement::Insert(insert) => {
             if insert.columns.is_empty() {
-                // INSERT without column list relies on table column order; we
-                // can't know which columns are written without schema info.
+                // No column list means positional insertion; we can't know which
+                // columns are written without schema info.
                 return false;
             }
             for col in &insert.columns {
@@ -330,8 +312,7 @@ fn extract_changed_columns_from_statement(stmt: &Statement, columns: &mut HashSe
             true
         }
         Statement::Delete(_) => {
-            // DELETE removes the row, which conceptually invalidates every
-            // column. Widen to full invalidation.
+            // DELETE invalidates every column; widen to full invalidation.
             false
         }
         Statement::Query(_) => true,
@@ -339,12 +320,11 @@ fn extract_changed_columns_from_statement(stmt: &Statement, columns: &mut HashSe
     }
 }
 
-/// Parse SQL strings and extract all referenced tables.
 /// Result of SQL table extraction.
 pub enum TableExtractionResult {
-    /// All SQL strings parsed successfully. Tables may be empty if no SQL found.
+    /// All SQL strings parsed successfully.
     Ok(HashSet<String>),
-    /// At least one SQL string failed to parse. Contains the unparseable SQL.
+    /// At least one SQL string failed to parse; contains the unparseable SQL.
     ParseFailed(String),
 }
 
@@ -368,18 +348,15 @@ pub fn extract_tables_from_sql(sql_strings: &[String]) -> TableExtractionResult 
     TableExtractionResult::Ok(tables)
 }
 
-/// Extract tables from a parsed SQL statement.
 fn extract_tables_from_statement(stmt: &Statement, tables: &mut HashSet<String>) {
     match stmt {
         Statement::Query(query) => {
             extract_tables_from_query(query, tables);
         }
         Statement::Insert(insert) => {
-            // INSERT INTO table_name - use table field
             let name = normalize_table_name(&insert.table.to_string());
             tables.insert(name);
 
-            // Also check subqueries in INSERT ... SELECT
             if let Some(src) = &insert.source {
                 extract_tables_from_query(src, tables);
             }
@@ -387,16 +364,12 @@ fn extract_tables_from_statement(stmt: &Statement, tables: &mut HashSet<String>)
         Statement::Update {
             table, selection, ..
         } => {
-            // UPDATE table_name
             extract_tables_from_table_with_joins(table, tables);
-
-            // WHERE clause might have subqueries
             if let Some(sel) = selection {
                 extract_tables_from_expr(sel, tables);
             }
         }
         Statement::Delete(delete) => {
-            // DELETE FROM - handle FromTable enum
             extract_tables_from_from_table(&delete.from, tables);
 
             if let Some(sel) = &delete.selection {
@@ -407,7 +380,6 @@ fn extract_tables_from_statement(stmt: &Statement, tables: &mut HashSet<String>)
     }
 }
 
-/// Extract tables from a FromTable (used in DELETE statements).
 fn extract_tables_from_from_table(from: &sqlparser::ast::FromTable, tables: &mut HashSet<String>) {
     match from {
         sqlparser::ast::FromTable::WithFromKeyword(table_with_joins_list) => {
@@ -423,22 +395,16 @@ fn extract_tables_from_from_table(from: &sqlparser::ast::FromTable, tables: &mut
     }
 }
 
-/// Extract tables from a query (SELECT statement).
 fn extract_tables_from_query(query: &Query, tables: &mut HashSet<String>) {
-    // Handle CTEs (WITH clause)
     if let Some(with) = &query.with {
         for cte in &with.cte_tables {
-            // The CTE itself defines a temporary table, but we need
-            // to extract tables from its definition
             extract_tables_from_query(&cte.query, tables);
         }
     }
 
-    // Handle the main query body
     extract_tables_from_set_expr(&query.body, tables);
 }
 
-/// Extract tables from a SET expression (UNION, INTERSECT, etc.).
 fn extract_tables_from_set_expr(set_expr: &SetExpr, tables: &mut HashSet<String>) {
     match set_expr {
         SetExpr::Select(select) => {
@@ -453,7 +419,6 @@ fn extract_tables_from_set_expr(set_expr: &SetExpr, tables: &mut HashSet<String>
         }
         SetExpr::Values(_) => {}
         SetExpr::Insert(insert_stmt) => {
-            // Handle nested INSERT - insert_stmt is a Box<Statement>
             extract_tables_from_statement(insert_stmt, tables);
         }
         SetExpr::Table(t) => {
@@ -465,14 +430,11 @@ fn extract_tables_from_set_expr(set_expr: &SetExpr, tables: &mut HashSet<String>
     }
 }
 
-/// Extract tables from a SELECT statement.
 fn extract_tables_from_select(select: &Select, tables: &mut HashSet<String>) {
-    // FROM clause
     for table_with_joins in &select.from {
         extract_tables_from_table_with_joins(table_with_joins, tables);
     }
 
-    // SELECT list (might have subqueries)
     for item in &select.projection {
         match item {
             SelectItem::ExprWithAlias { expr, .. } => {
@@ -485,18 +447,15 @@ fn extract_tables_from_select(select: &Select, tables: &mut HashSet<String>) {
         }
     }
 
-    // WHERE clause (might have subqueries)
     if let Some(selection) = &select.selection {
         extract_tables_from_expr(selection, tables);
     }
 
-    // HAVING clause
     if let Some(having) = &select.having {
         extract_tables_from_expr(having, tables);
     }
 }
 
-/// Extract tables from a table with joins.
 fn extract_tables_from_table_with_joins(twj: &TableWithJoins, tables: &mut HashSet<String>) {
     extract_tables_from_table_factor(&twj.relation, tables);
 
@@ -505,7 +464,6 @@ fn extract_tables_from_table_with_joins(twj: &TableWithJoins, tables: &mut HashS
     }
 }
 
-/// Extract table name from a table factor.
 fn extract_tables_from_table_factor(factor: &TableFactor, tables: &mut HashSet<String>) {
     match factor {
         TableFactor::Table { name, .. } => {
@@ -520,12 +478,10 @@ fn extract_tables_from_table_factor(factor: &TableFactor, tables: &mut HashSet<S
         } => {
             extract_tables_from_table_with_joins(table_with_joins, tables);
         }
-        // Handle all other variants - they don't contain table references we need
         _ => {}
     }
 }
 
-/// Extract tables from expressions (for subqueries).
 fn extract_tables_from_expr(expr: &Expr, tables: &mut HashSet<String>) {
     match expr {
         Expr::Subquery(query) => {
@@ -575,7 +531,6 @@ fn extract_tables_from_expr(expr: &Expr, tables: &mut HashSet<String>) {
             }
         }
         Expr::Function(func) => {
-            // Check function arguments for subqueries
             if let sqlparser::ast::FunctionArguments::List(arg_list) = &func.args {
                 for arg in &arg_list.args {
                     if let sqlparser::ast::FunctionArg::Unnamed(
@@ -606,15 +561,10 @@ fn extract_tables_from_expr(expr: &Expr, tables: &mut HashSet<String>) {
     }
 }
 
-/// Normalize a table name by removing schema qualifiers.
-/// e.g., "public.users" -> "users", "\"Users\"" -> "Users"
+/// Strips schema qualifiers and outer quotes: `"public.users"` → `"users"`.
 fn normalize_table_name(name: &str) -> String {
     let name = name.trim();
-
-    // Remove quotes
     let name = name.trim_matches('"').trim_matches('\'');
-
-    // Handle schema.table format - take the last part
     if let Some(pos) = name.rfind('.') {
         name[pos + 1..].trim_matches('"').to_string()
     } else {
@@ -749,11 +699,8 @@ pub fn sql_references_identity_scope(sql_strings: &[String]) -> ScopeCheckResult
     }
 }
 
-/// Tracks CTE scoping state during scope analysis.
 struct ScopeCtx {
-    /// Names of CTEs whose bodies have been determined to be scoped.
     scoped_ctes: HashSet<String>,
-    /// All CTE names defined in the current query, scoped or not.
     all_ctes: HashSet<String>,
 }
 
@@ -891,7 +838,6 @@ fn source_is_scoped(factor: &TableFactor, ctx: &ScopeCtx) -> bool {
     }
 }
 
-/// Walk a WHERE/ON expression looking for any scope-column reference.
 fn expr_has_scope(e: &Expr) -> bool {
     match e {
         Expr::Identifier(ident) => is_scope_col(&ident.value),
@@ -949,9 +895,7 @@ fn expr_has_scope(e: &Expr) -> bool {
     }
 }
 
-/// Check if an expression directly resolves to a scope column reference
-/// (not just contains one somewhere in the tree). Walks through casts and
-/// JSON arrow operators.
+/// True if the expression resolves directly to a scope column (not merely contains one).
 fn is_direct_scope_ref(e: &Expr) -> bool {
     match e {
         Expr::Identifier(ident) => is_scope_col(&ident.value),
@@ -970,9 +914,8 @@ fn is_direct_scope_ref(e: &Expr) -> bool {
     }
 }
 
-/// Check if an expression is a non-placeholder literal (string, number, etc.).
-/// Placeholders ($1, $2) are dynamic bindings and are acceptable as scope
-/// column counterparts.
+/// True if the expression is a non-placeholder literal. Placeholders ($1, $2) are
+/// acceptable scope column counterparts; hardcoded literals are not.
 fn is_literal_value(e: &Expr) -> bool {
     match e {
         Expr::Value(v) => !matches!(v, sqlparser::ast::Value::Placeholder(_)),
@@ -981,8 +924,8 @@ fn is_literal_value(e: &Expr) -> bool {
     }
 }
 
-/// Check if an expression is a string literal naming a scope column.
-/// Used for the right-hand side of JSON arrow operators like `->>'user_id'`.
+/// True if the expression is a string literal whose value names a scope column.
+/// Used for the RHS of JSON arrow operators like `->>'user_id'`.
 fn value_is_scope_col(e: &Expr) -> bool {
     match e {
         Expr::Value(sqlparser::ast::Value::SingleQuotedString(s)) => is_scope_col(s),
@@ -991,7 +934,6 @@ fn value_is_scope_col(e: &Expr) -> bool {
     }
 }
 
-/// Check if a JsonPath (Snowflake-style) references a scope column name.
 fn json_path_has_scope(path: &sqlparser::ast::JsonPath) -> bool {
     path.path.iter().any(|elem| match elem {
         sqlparser::ast::JsonPathElem::Dot { key, .. } => is_scope_col(key),
@@ -1008,7 +950,6 @@ fn is_scope_col(name: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// Helper to unwrap a successful table extraction result.
     fn unwrap_tables(result: TableExtractionResult) -> HashSet<String> {
         let TableExtractionResult::Ok(tables) = result else {
             panic!("expected successful extraction");
@@ -1162,7 +1103,6 @@ mod tests {
 
     #[test]
     fn test_sql_with_placeholders() {
-        // PostgreSQL dialect in sqlparser supports $1 placeholders, so this parses successfully
         let tables = unwrap_tables(extract_tables_from_sql(&[
             "SELECT * FROM users WHERE id = $1 AND name = $2".to_string(),
         ]));
@@ -1256,7 +1196,6 @@ mod tests {
 
     #[test]
     fn test_scope_check_multiple_sql_one_unscoped_fails() {
-        // ALL statements must be scoped. One unscoped SELECT makes it unscoped.
         assert!(matches!(
             sql_references_identity_scope(&[
                 "SELECT count(*) FROM tasks".to_string(),
@@ -1566,7 +1505,6 @@ mod tests {
 
     #[test]
     fn test_stillpoint_query() {
-        // This is the actual SQL from stillpoint's get_rituals query
         let sql = r#"
         SELECT
             r.id,

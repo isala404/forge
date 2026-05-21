@@ -181,11 +181,8 @@ impl Reactor {
 
     /// Remove a session and all its subscriptions.
     pub async fn remove_session(&self, session_id: SessionId) {
-        // Clean up query subscriptions via the subscription manager
         self.subscription_manager
             .remove_session_subscriptions(session_id);
-
-        // Clean up session server
         self.session_server.remove_connection(session_id);
 
         // Clean up job subscriptions using reverse index for O(1) lookup
@@ -232,7 +229,6 @@ impl Reactor {
         args: serde_json::Value,
         auth_context: forge_core::function::AuthContext,
     ) -> forge_core::Result<(SubscriptionId, serde_json::Value)> {
-        // Look up function info for compile-time metadata
         let (table_deps, selected_cols) = match self.registry.get(&query_name) {
             Some(FunctionEntry::Query { info, .. }) => {
                 (info.table_dependencies, info.selected_columns)
@@ -250,7 +246,6 @@ impl Reactor {
             selected_cols,
         )?;
 
-        // Register subscription in session server for message routing
         if let Err(error) = self
             .session_server
             .add_subscription(session_id, subscription_id)
@@ -289,7 +284,6 @@ impl Reactor {
 
             data
         } else {
-            // Group exists — use cached result if available, otherwise re-execute
             let cached = self
                 .subscription_manager
                 .get_group(group_id)
@@ -369,7 +363,6 @@ impl Reactor {
         subs.retain(|_, v| !v.is_empty());
         drop(subs);
 
-        // Update reverse index
         if !removed_ids.is_empty() {
             let mut session_jobs = self.session_job_ids.write().await;
             if let Some(ids) = session_jobs.get_mut(&session_id) {
@@ -432,7 +425,6 @@ impl Reactor {
         subs.retain(|_, v| !v.is_empty());
         drop(subs);
 
-        // Update reverse index
         if !removed_ids.is_empty() {
             let mut session_wfs = self.session_workflow_ids.write().await;
             if let Some(ids) = session_wfs.get_mut(&session_id) {
@@ -636,7 +628,6 @@ impl Reactor {
             futures.push(handle);
         }
 
-        // Process results and fan out to subscribers
         while let Some(join_result) = futures.next().await {
             let (group_id, last_hash, result) = match join_result {
                 Ok(inner) => inner,
@@ -650,7 +641,6 @@ impl Reactor {
                     let (new_hash, serialized_len) = Self::compute_hash(&new_data);
 
                     if last_hash.as_ref() != Some(&new_hash) {
-                        // Update group state with cached result
                         let data_arc = std::sync::Arc::new(new_data);
                         subscription_manager.update_group_with_data(
                             group_id,
@@ -660,7 +650,6 @@ impl Reactor {
                             serialized_len,
                         );
 
-                        // Fan out to all subscribers in this group
                         let subscribers = subscription_manager.get_group_subscribers(group_id);
                         for (session_id, client_sub_id) in subscribers {
                             let message = RealtimeMessage::Data {
@@ -1004,7 +993,6 @@ impl Reactor {
             _ => {}
         }
 
-        // Record change for debounced group invalidation
         invalidation_engine.process_change(change.clone());
     }
 

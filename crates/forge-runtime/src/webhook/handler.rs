@@ -39,7 +39,6 @@ pub struct WebhookState {
 }
 
 impl WebhookState {
-    /// Create new webhook state.
     pub fn new(registry: Arc<WebhookRegistry>, pool: PgPool) -> Self {
         Self {
             registry,
@@ -51,19 +50,16 @@ impl WebhookState {
         }
     }
 
-    /// Set job dispatcher.
     pub fn with_job_dispatcher(mut self, dispatcher: Arc<dyn JobDispatch>) -> Self {
         self.job_dispatcher = Some(dispatcher);
         self
     }
 
-    /// Set workflow dispatcher.
     pub fn with_workflow_dispatcher(mut self, dispatcher: Arc<dyn WorkflowDispatch>) -> Self {
         self.workflow_dispatcher = Some(dispatcher);
         self
     }
 
-    /// Attach a KV store handle so webhook handlers can call `ctx.kv()`.
     pub fn with_kv(mut self, kv: Arc<dyn KvHandle>) -> Self {
         self.kv = Some(kv);
         self
@@ -71,13 +67,6 @@ impl WebhookState {
 }
 
 /// Handle webhook requests.
-///
-/// This handler:
-/// 1. Looks up webhook by path
-/// 2. Validates signature if configured
-/// 3. Checks idempotency
-/// 4. Executes handler
-/// 5. Records idempotency key
 pub async fn webhook_handler(
     State(state): State<Arc<WebhookState>>,
     Path(path): Path<String>,
@@ -87,7 +76,6 @@ pub async fn webhook_handler(
     let full_path = format!("/webhooks/{}", path);
     let request_id = Uuid::new_v4().to_string();
 
-    // Look up webhook by path
     let entry = match state.registry.get_by_path(&full_path) {
         Some(e) => e,
         None => {
@@ -120,9 +108,7 @@ pub async fn webhook_handler(
             .into_response();
     }
 
-    // Validate signature if configured
     if let Some(ref sig_config) = info.signature {
-        // Get signature from header
         let signature = match headers
             .get(sig_config.header_name)
             .and_then(|v| v.to_str().ok())
@@ -138,8 +124,7 @@ pub async fn webhook_handler(
             }
         };
 
-        // Get secret(s) from environment. Comma-separated values support
-        // rotation: set to "new-secret,old-secret" during rollover.
+        // Comma-separated values support rotation: "new-secret,old-secret".
         let secrets_raw = match std::env::var(sig_config.secret_env) {
             Ok(s) => s,
             Err(_) => {
@@ -156,7 +141,6 @@ pub async fn webhook_handler(
             }
         };
 
-        // Try each secret, first match wins
         let secrets: Vec<&str> = secrets_raw
             .split(',')
             .map(str::trim)
@@ -182,7 +166,6 @@ pub async fn webhook_handler(
         }
     }
 
-    // Extract idempotency key if configured
     let idempotency_key = if let Some(ref idem_config) = info.idempotency {
         match &idem_config.source {
             IdempotencySource::Header(header_name) => headers
@@ -190,7 +173,6 @@ pub async fn webhook_handler(
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string()),
             IdempotencySource::Body(json_path) => {
-                // Parse body and extract value using JSON path
                 if let Ok(payload) = serde_json::from_slice::<Value>(&body) {
                     extract_json_path(&payload, json_path)
                 } else {
@@ -204,7 +186,6 @@ pub async fn webhook_handler(
         None
     };
 
-    // Atomically claim idempotency key before execution.
     let mut idempotency_claimed = false;
     if let Some(ref key) = idempotency_key
         && let Some(ref idem_config) = info.idempotency
@@ -258,7 +239,6 @@ pub async fn webhook_handler(
         }
     }
 
-    // Parse payload
     let payload: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
@@ -281,7 +261,6 @@ pub async fn webhook_handler(
         }
     };
 
-    // Build headers map (lowercase keys)
     let header_map: HashMap<String, String> = headers
         .iter()
         .filter_map(|(k, v)| {
@@ -343,7 +322,6 @@ pub async fn webhook_handler(
         ctx = ctx.with_kv(Arc::clone(kv));
     }
 
-    // Execute handler with timeout
     let exec_start = std::time::Instant::now();
     let result = tokio::time::timeout(info.timeout, (entry.handler)(&ctx, payload)).await;
     let exec_duration_ms = exec_start.elapsed().as_millis().min(i32::MAX as u128) as i32;

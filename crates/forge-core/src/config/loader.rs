@@ -12,7 +12,6 @@ pub fn substitute_env_vars(content: &str) -> String {
     let mut remaining = content;
 
     while let Some(start) = remaining.find("${") {
-        // Copy everything before the `${`
         result.push_str(&remaining[..start]);
 
         let after_open = &remaining[start + 2..];
@@ -31,20 +30,17 @@ pub fn substitute_env_vars(content: &str) -> String {
                         result.push_str(&remaining[start..start + 2 + end + 1]);
                     }
                 } else {
-                    // Not a valid env var name, preserve literal
                     result.push_str(&remaining[start..start + 2 + end + 1]);
                 }
                 remaining = &after_open[end + 1..];
             }
             None => {
-                // No closing brace, preserve rest of string as-is
                 result.push_str(&remaining[start..]);
                 remaining = "";
             }
         }
     }
 
-    // Append any trailing content after the last substitution
     result.push_str(remaining);
     result
 }

@@ -6,11 +6,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ProjectConfig {
-    /// Project name.
     #[serde(default = "default_project_name")]
     pub name: String,
 
-    /// Project version.
     #[serde(default = "default_version")]
     pub version: String,
 }

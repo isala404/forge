@@ -14,15 +14,11 @@ use std::net::{IpAddr, SocketAddr};
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct CircuitState {
-    /// Current state of the circuit.
     pub state: CircuitStatus,
-    /// Number of consecutive failures.
     pub failure_count: u32,
-    /// Number of consecutive successes (used in half-open state).
+    /// Consecutive successes in half-open state.
     pub success_count: u32,
-    /// When the circuit was opened (for timeout calculation).
     pub opened_at: Option<Instant>,
-    /// Current backoff duration.
     pub current_backoff: Duration,
 }
 
@@ -53,24 +49,15 @@ impl Default for CircuitState {
 /// Configuration for the circuit breaker.
 #[derive(Debug, Clone)]
 pub struct CircuitBreakerConfig {
-    /// Number of failures before opening the circuit.
     pub failure_threshold: u32,
-    /// Number of successes in half-open state before closing.
     pub success_threshold: u32,
-    /// Initial timeout before trying half-open.
     pub base_timeout: Duration,
-    /// Maximum backoff duration.
     pub max_backoff: Duration,
-    /// Backoff multiplier for exponential backoff.
     pub backoff_multiplier: f64,
-    /// Whether the circuit breaker is enabled.
     pub enabled: bool,
-    /// Allow requests to private/loopback/link-local IPs.
-    /// Defaults to `false` to block SSRF targets like `127.0.0.1`
-    /// and the AWS/GCE metadata endpoint `169.254.169.254`. Flip to `true`
-    /// in development or when calling internal services on private CIDRs.
-    /// Clients built via `build_ssrf_safe_client` also block hostnames
-    /// that resolve to private IPs at the DNS layer.
+    /// Defaults to `false` to block SSRF targets (`127.0.0.1`, `169.254.169.254`, etc.).
+    /// Set `true` in development or when intentionally calling private CIDRs.
+    /// Clients built via `build_ssrf_safe_client` also block hostnames resolving to private IPs.
     pub allow_private: bool,
 }
 
@@ -80,7 +67,7 @@ impl Default for CircuitBreakerConfig {
             failure_threshold: 5,
             success_threshold: 2,
             base_timeout: Duration::from_secs(30),
-            max_backoff: Duration::from_secs(600), // 10 minutes
+            max_backoff: Duration::from_secs(600),
             backoff_multiplier: 1.5,
             enabled: true,
             allow_private: false,
@@ -91,9 +78,7 @@ impl Default for CircuitBreakerConfig {
 /// Error returned when circuit breaker is open.
 #[derive(Debug, Clone)]
 pub struct CircuitBreakerOpen {
-    /// The host that is being blocked.
     pub host: String,
-    /// Time until the circuit may try again.
     pub retry_after: Duration,
 }
 

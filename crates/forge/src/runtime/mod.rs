@@ -1,12 +1,4 @@
-//! FORGE - The Rust Full-Stack Framework
-//!
-//! Single binary runtime that provides:
-//! - HTTP Gateway with RPC endpoints
-//! - SSE server for real-time subscriptions
-//! - Background job workers
-//! - Cron scheduler
-//! - Workflow engine
-//! - Cluster coordination
+//! FORGE runtime — single binary that runs the gateway, workers, scheduler, and cluster.
 
 mod builder;
 pub use builder::ForgeBuilder;
@@ -83,49 +75,28 @@ pub type FrontendHandler = fn(Request<Body>) -> Pin<Box<dyn Future<Output = Resp
 
 /// Common imports for Forge applications.
 ///
-/// Glob-importing this module covers everyday handler code:
+/// **Stability contract:** all `pub use` items here are part of Forge's stable
+/// surface. Removing or renaming an item is a breaking change.
 ///
-/// ```ignore
-/// use forge::prelude::*;
-///
-/// #[forge::query(public)]
-/// async fn ping(_ctx: &QueryContext) -> Result<String> {
-///     Ok("pong".to_string())
-/// }
-/// ```
-///
-/// **Stability contract:** the `pub use` items here become part of the
-/// framework's stable surface. Removing or renaming an item is a breaking
-/// change. Items intentionally absent (e.g. `SchemaRegistry`, `FieldDef`)
-/// are reachable via fully-qualified paths in `forge_core` for the rare
-/// case that needs them; macro-generated code uses those paths directly.
-///
-/// **Upstream crates:** re-exporting `axum` (the `custom_routes` factory
-/// signature returns `axum::Router`) and `schemars` (via `JsonSchema` for
-/// the `#[model]` and `#[mcp_tool]` macros) commits Forge to upgrading
-/// these in lockstep with our minor releases. A breaking upstream change
-/// would mean a Forge minor or major bump.
+/// **Upstream crates:** `axum` is re-exported so `custom_routes` factories
+/// compile against the same version the runtime uses. A breaking axum change
+/// requires a Forge minor or major bump.
 pub mod prelude {
-    // Common types — stable upstream re-exports.
     pub use chrono::{DateTime, Utc};
     pub use uuid::Uuid;
 
-    // Serde re-exports for user code (load-bearing for serde_json! macro etc.).
     pub use serde::{Deserialize, Serialize};
     pub use serde_json;
     pub use serde_json::Value;
 
-    /// Timestamp type alias for convenience.
     pub type Timestamp = DateTime<Utc>;
 
-    // Core types
     pub use forge_core::auth::TokenPair;
     pub use forge_core::config::ForgeConfig;
     pub use forge_core::cron::{CronContext, ForgeCron};
     pub use forge_core::daemon::{DaemonContext, ForgeDaemon};
-    // EnvAccess is a trait that adds `ctx.env(...)` / `ctx.env_require(...)`
-    // methods — keeping it in the glob avoids forcing every handler to import
-    // it explicitly.
+    // EnvAccess adds `ctx.env(...)` / `ctx.env_require(...)` — kept in the
+    // glob so handlers don't need an explicit import.
     pub use forge_core::env::EnvAccess;
     pub use forge_core::error::{ForgeError, Result};
     pub use forge_core::function::{
@@ -139,8 +110,7 @@ pub mod prelude {
     pub use forge_core::webhook::{ForgeWebhook, WebhookContext, WebhookResult, WebhookSignature};
     pub use forge_core::workflow::{ForgeWorkflow, WorkflowContext};
 
-    // Same axum version the runtime uses, avoids type mismatches in custom_routes.
-    // Only available when the `gateway` feature is enabled.
+    // Same axum version the runtime uses; avoids type mismatches in custom_routes factories.
     #[cfg(feature = "gateway")]
     pub use axum;
 
@@ -171,108 +141,85 @@ pub struct Forge {
     #[cfg(feature = "gateway")]
     pub(super) webhook_registry: Arc<WebhookRegistry>,
     pub(super) shutdown_tx: broadcast::Sender<()>,
-    /// Path to user migrations directory (default: ./migrations).
     pub(super) migrations_dir: PathBuf,
-    /// Additional migrations provided programmatically.
     pub(super) extra_migrations: Vec<Migration>,
-    /// Optional frontend handler for embedded SPA.
     #[cfg(feature = "gateway")]
     pub(super) frontend_handler: Option<FrontendHandler>,
-    /// Factory that produces custom axum routes once the pool is available.
-    /// The returned router is merged into the gateway's `/_api` router, so
-    /// the full middleware stack (auth, CORS, tracing, concurrency, timeouts)
-    /// applies automatically.
     #[cfg(feature = "gateway")]
     pub(super) custom_routes_factory: Option<Box<dyn FnOnce(sqlx::PgPool) -> Router + Send + Sync>>,
-    /// Optional pluggable role resolver for RBAC.
     #[cfg(feature = "gateway")]
     pub(super) role_resolver: Option<forge_core::SharedRoleResolver>,
 }
 
 impl Forge {
-    /// Create a new builder for configuring FORGE.
     pub fn builder() -> ForgeBuilder {
         ForgeBuilder::new()
     }
 
-    /// Get the node ID.
     pub fn node_id(&self) -> NodeId {
         self.node_id
     }
 
-    /// Get the configuration.
     pub fn config(&self) -> &ForgeConfig {
         &self.config
     }
 
-    /// Get the function registry.
     pub fn function_registry(&self) -> &FunctionRegistry {
         &self.function_registry
     }
 
-    /// Get the function registry mutably.
     pub fn function_registry_mut(&mut self) -> &mut FunctionRegistry {
         &mut self.function_registry
     }
 
-    /// Get the MCP tool registry mutably.
     #[cfg(feature = "gateway")]
     pub fn mcp_registry_mut(&mut self) -> &mut McpToolRegistry {
         &mut self.mcp_registry
     }
 
-    /// Register an MCP tool without manually accessing the registry.
     #[cfg(feature = "gateway")]
     pub fn register_mcp_tool<T: ForgeMcpTool>(&mut self) -> &mut Self {
         self.mcp_registry.register::<T>();
         self
     }
 
-    /// Get the job registry.
     #[cfg(feature = "jobs")]
     pub fn job_registry(&self) -> &JobRegistry {
         &self.job_registry
     }
 
-    /// Get the job registry mutably.
     #[cfg(feature = "jobs")]
     pub fn job_registry_mut(&mut self) -> &mut JobRegistry {
         &mut self.job_registry
     }
 
-    /// Get the cron registry.
     #[cfg(feature = "cron")]
     pub fn cron_registry(&self) -> Arc<CronRegistry> {
         self.cron_registry.clone()
     }
 
-    /// Get the workflow registry.
     #[cfg(feature = "workflows")]
     pub fn workflow_registry(&self) -> &WorkflowRegistry {
         &self.workflow_registry
     }
 
-    /// Get the workflow registry mutably.
     #[cfg(feature = "workflows")]
     pub fn workflow_registry_mut(&mut self) -> &mut WorkflowRegistry {
         &mut self.workflow_registry
     }
 
-    /// Get the daemon registry.
     #[cfg(feature = "daemons")]
     pub fn daemon_registry(&self) -> Arc<DaemonRegistry> {
         self.daemon_registry.clone()
     }
 
-    /// Get the webhook registry.
     #[cfg(feature = "gateway")]
     pub fn webhook_registry(&self) -> Arc<WebhookRegistry> {
         self.webhook_registry.clone()
     }
 
-    /// Persist all registered workflow definitions to the database.
-    /// Fails startup if a definition's signature conflicts with a previously
-    /// registered one under the same name+version.
+    /// Persist all workflow definitions. Fails startup if a signature conflicts
+    /// under the same name+version (contract changed without a version bump).
     #[cfg(feature = "workflows")]
     async fn persist_workflow_definitions(&self, pool: &sqlx::PgPool) -> Result<()> {
         for info in self.workflow_registry.definitions() {
@@ -301,7 +248,6 @@ impl Forge {
                         info.name, info.version, row.workflow_signature, info.signature
                     )));
                 }
-                // Update status if changed
                 sqlx::query!(
                     "UPDATE forge_workflow_definitions SET status = $3 WHERE workflow_name = $1 AND workflow_version = $2",
                     info.name,
@@ -339,9 +285,8 @@ impl Forge {
         Ok(())
     }
 
-    /// Run the FORGE server.
+    /// Start the runtime. Blocks until a ctrl-c or `Forge::shutdown()` is called.
     pub async fn run(mut self) -> Result<()> {
-        // Users shouldn't need tracing_subscriber boilerplate to see logs
         let telemetry_config = forge_runtime::TelemetryConfig::from_observability_config(
             &self.config.observability,
             &self.config.project.name,
@@ -363,46 +308,39 @@ impl Forge {
                     "Telemetry initialized"
                 );
             }
-            // init_telemetry failed before a subscriber could be installed, so
-            // tracing macros would be silently dropped. eprintln! is the fallback.
+            // init_telemetry failed before a subscriber could be installed; tracing
+            // macros would be silently dropped, so fall back to eprintln!.
             Err(e) => eprintln!("forge: failed to initialize telemetry: {e}"),
         }
 
         tracing::debug!("Connecting to database");
 
-        // Connect to database
         let db =
             Database::from_config_with_service(&self.config.database, &self.config.project.name)
                 .await?;
         let pool = db.primary().clone();
-        // Health monitor self-terminates on shutdown_tx, so we don't need to
-        // hold the JoinHandle. Drop it and let the broadcast signal stop it.
+        // Health monitor self-terminates on shutdown_tx; drop the handle.
         let _ = db.start_health_monitor(self.shutdown_tx.subscribe());
         self.db = Some(db);
 
         tracing::debug!("Database connected");
 
-        // Run migrations with mesh-safe locking
-        // This acquires an advisory lock, so only one node runs migrations at a time
         let runner = MigrationRunner::new(pool.clone());
 
-        // Load user migrations from directory + any programmatic ones
         let mut user_migrations = load_migrations_from_dir(&self.migrations_dir)?;
         user_migrations.extend(self.extra_migrations.clone());
 
         runner.run(user_migrations).await?;
         tracing::debug!("Migrations applied");
 
-        // Persist workflow definitions and validate signatures
         #[cfg(feature = "workflows")]
         if !self.workflow_registry.is_empty() {
             self.persist_workflow_definitions(&pool).await?;
         }
 
-        // Get local node info
         let hostname = get_hostname();
 
-        // Support HOST env var (default 0.0.0.0), PORT env var (overrides config)
+        // HOST env var overrides bind address; PORT env var overrides config port.
         let ip_address: IpAddr = std::env::var("HOST")
             .unwrap_or_else(|_| "0.0.0.0".to_string())
             .parse()
@@ -435,24 +373,19 @@ impl Forge {
         let node_id = node_info.id;
         self.node_id = node_id;
 
-        // Create node registry
         let node_registry = Arc::new(NodeRegistry::new(pool.clone(), node_info));
 
-        // Register node in cluster
         if let Err(e) = node_registry.register().await {
             tracing::debug!("Failed to register node (tables may not exist): {}", e);
         }
 
-        // Set node status to active
         if let Err(e) = node_registry.set_status(NodeStatus::Active).await {
             tracing::debug!("Failed to set node status: {}", e);
         }
 
         // Construct the shared PG NOTIFY bus up front so the leader election
         // can subscribe to `forge_leader_released` and react instantly to a
-        // sibling's voluntary release instead of waiting for the next
-        // `check_interval` tick. The bus is only an in-memory map until
-        // `run()` is spawned further down.
+        // sibling's voluntary release instead of waiting for the next tick.
         let notify_bus = Arc::new(PgNotifyBus::new(
             pool.clone(),
             &[
@@ -463,7 +396,6 @@ impl Forge {
             ],
         ));
 
-        // Create leader election for scheduler role
         let leader_election = if roles.contains(&NodeRole::Scheduler) {
             let election = Arc::new(
                 LeaderElection::new(
@@ -485,27 +417,20 @@ impl Forge {
             None
         };
 
-        // Create graceful shutdown coordinator
         let shutdown = Arc::new(GracefulShutdown::new(
             node_registry.clone(),
             leader_election.clone(),
             ShutdownConfig::default(),
         ));
 
-        // Create HTTP client with circuit breaker for actions and crons.
-        // Used by cron, daemons, and workflow executor for outbound HTTP.
         #[cfg(any(feature = "cron", feature = "daemons", feature = "workflows"))]
         let http_client = CircuitBreakerClient::with_ssrf_protection();
 
-        // Start background tasks based on roles
         let mut handles = Vec::new();
-        // Handles for tasks that hold (or depend on) leadership — cron, daemon,
-        // workflow scheduler. These must finish before we release the advisory
-        // lock so another node cannot acquire leadership and start duplicate work
-        // while we are still mid-tick.
+        // Leader handles: cron, daemon, workflow scheduler. Must finish before
+        // releasing the advisory lock so no sibling starts duplicate work mid-tick.
         let mut leader_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
-        // Start heartbeat loop
         {
             let heartbeat_pool = pool.clone();
             let heartbeat_node_id = node_id;
@@ -518,7 +443,6 @@ impl Forge {
             }));
         }
 
-        // Start leader election loop if scheduler role
         if let Some(ref election) = leader_election {
             let election = election.clone();
             handles.push(tokio::spawn(async move {
@@ -526,7 +450,6 @@ impl Forge {
             }));
         }
 
-        // Register cron bridge handlers so the worker pool can execute cron jobs.
         #[cfg(feature = "cron")]
         {
             forge_runtime::cron::register_cron_bridges(&self.cron_registry, &mut self.job_registry);
@@ -535,10 +458,9 @@ impl Forge {
         #[cfg(feature = "jobs")]
         let job_queue = JobQueue::new(pool.clone());
 
-        // Spawn the bus run loop. The gateway role re-uses this same bus via
-        // the reactor (which also spawns it), so we gate the direct spawn on
-        // the absence of a gateway role to avoid running two run() tasks on
-        // the same PgNotifyBus instance.
+        // Gate the direct bus spawn on the absence of a gateway role: the reactor
+        // already calls bus.run() for gateway nodes, and two spawns on the same
+        // PgNotifyBus instance would race.
         #[cfg(feature = "gateway")]
         let notify_bus_needs_direct_spawn = !roles.contains(&NodeRole::Gateway);
         #[cfg(not(feature = "gateway"))]
@@ -556,16 +478,12 @@ impl Forge {
             });
         }
 
-        // Shared KV store handle threaded into all handler contexts.
-        // Handlers call `ctx.kv()` to get/set durable key-value data backed by
-        // the `forge_kv` / `forge_kv_counters` tables.
         let kv_handle: Arc<dyn forge_core::function::KvHandle> =
             Arc::new(forge_runtime::KvStore::new(pool.clone(), "handlers"));
 
-        // Register the workflow bridge handler BEFORE spawning workers.
-        // `JobRegistry` is a plain map cloned by value when handed to each
-        // worker; any registration after worker startup is invisible to them
-        // and `$workflow_resume` jobs would fail with "unknown job type".
+        // Must register the workflow bridge BEFORE spawning workers: JobRegistry
+        // is cloned by value per worker, so late registration is invisible and
+        // `$workflow_resume` jobs would fail with "unknown job type".
         #[cfg(feature = "workflows")]
         let workflow_bridge_executor = Arc::new(
             WorkflowExecutor::new(
@@ -584,12 +502,9 @@ impl Forge {
             );
         }
 
-        // Job dispatcher is constructed here (before workers) so it can be
-        // threaded into each worker's JobExecutor. Handlers running inside the
-        // worker call `ctx.dispatch_job(...)` / `ctx.start_workflow(...)`,
-        // which require live dispatcher handles — without them the calls would
-        // either fail or (for workflows) write blank version/signature columns
-        // and immediately block on resume.
+        // Dispatcher must be constructed before workers so it can be threaded
+        // into each JobExecutor. Without it, `ctx.start_workflow(...)` writes
+        // blank version/signature columns and immediately blocks on resume.
         #[cfg(feature = "jobs")]
         let job_dispatcher = {
             let job_queue_for_dispatch = JobQueue::new(pool.clone());
@@ -599,14 +514,8 @@ impl Forge {
             ))
         };
 
-        // Start one worker pool per configured queue if worker role.
-        //
-        // Each queue gets its own Worker instance with a single capability
-        // tag, so heavy traffic on `default` cannot starve `workflows` or
-        // `cron`. The `default` queue's worker is the only one that also
-        // claims jobs whose `worker_capability` is NULL (untagged user jobs).
-        // Custom queues are isolated to jobs explicitly tagged with their
-        // capability via `JobInfo::worker_capability` or the dispatcher.
+        // One Worker per queue so `default` traffic can't starve `workflows` or `cron`.
+        // Only the `default` queue's worker claims untagged (NULL capability) jobs.
         #[cfg(feature = "jobs")]
         if roles.contains(&NodeRole::Worker) {
             let mut node_capabilities: Vec<String> = self.config.node.worker_capabilities.clone();
@@ -641,11 +550,6 @@ impl Forge {
                 .with_kv(Arc::clone(&kv_handle))
                 .with_job_dispatch(job_dispatcher.clone());
 
-                // Workflow dispatch is feature-gated; with it, handlers
-                // calling `ctx.start_workflow(...)` route through the trait
-                // so the active version + signature are written. Without it,
-                // the call fails with a clear "Workflow dispatch not
-                // available" error.
                 #[cfg(feature = "workflows")]
                 let mut worker =
                     worker_base.with_workflow_dispatch(workflow_bridge_executor.clone());
@@ -666,17 +570,9 @@ impl Forge {
                 );
             }
 
-            // Warn when the pool cannot satisfy peak worker demand.
-            //
-            // Formula: pool_size >= sum(workers per queue) + 6
-            //   sum(workers per queue) — one connection held per concurrent job
-            //   +6 — persistent connections: change listener, leader advisory lock,
-            //         heartbeat, health monitor, migration lock, and headroom
-            //
-            // Gateway RPC handlers also draw from the pool, but they hold
-            // connections briefly and the pool queues requests up to
-            // `pool_timeout`. If the worker sum alone already exceeds pool_size,
-            // RPC handlers will stall under load.
+            // pool_size >= sum(workers) + 6 (persistent conns: change listener,
+            // leader lock, heartbeat, health monitor, migration lock, headroom).
+            // Gateway handlers draw from the same pool but hold connections briefly.
             let total_worker_concurrency: usize =
                 self.config.worker.queues.values().map(|q| q.workers).sum();
             const PERSISTENT_CONN_OVERHEAD: usize = 6;
@@ -698,7 +594,6 @@ impl Forge {
             }
         }
 
-        // KV TTL + rate limit bucket cleanup runs leader-only every 5 minutes.
         #[cfg(feature = "jobs")]
         if roles.contains(&NodeRole::Worker) {
             let kv_pool = pool.clone();
@@ -731,7 +626,6 @@ impl Forge {
             }));
         }
 
-        // Start cron runner if scheduler role and is leader
         #[cfg(feature = "cron")]
         let cron_runner_handle: Option<Arc<CronRunner>> = if roles.contains(&NodeRole::Scheduler) {
             let cron_registry = self.cron_registry.clone();
@@ -767,7 +661,6 @@ impl Forge {
             None
         };
 
-        // Start workflow scheduler if scheduler role
         #[cfg(feature = "workflows")]
         let workflow_shutdown_token = CancellationToken::new();
         #[cfg(feature = "workflows")]
@@ -793,13 +686,9 @@ impl Forge {
             tracing::debug!("Workflow scheduler started");
         }
 
-        // Reuse the bridge executor for dispatch (daemon, gateway). The job
-        // dispatcher itself was constructed earlier so workers could be wired
-        // with it; daemon/gateway/webhook routes share the same handle.
         #[cfg(feature = "workflows")]
         let workflow_executor = workflow_bridge_executor;
 
-        // Start daemon runner if scheduler role (daemons run as singletons)
         #[cfg(feature = "daemons")]
         if roles.contains(&NodeRole::Scheduler) && !self.daemon_registry.is_empty() {
             let daemon_registry = self.daemon_registry.clone();
@@ -833,11 +722,9 @@ impl Forge {
             tracing::debug!("Daemon runner started");
         }
 
-        // Reactor handle for shutdown
         #[cfg(feature = "gateway")]
         let mut reactor_handle = None;
 
-        // Start HTTP gateway if gateway role
         #[cfg(feature = "gateway")]
         if roles.contains(&NodeRole::Gateway) {
             // `from_core` enforces the both-or-neither contract here too, so
@@ -966,7 +853,6 @@ impl Forge {
                 max_json_depth: self.config.gateway.max_json_depth,
             };
 
-            // Build gateway server (pass Database wrapper for read replica routing)
             let db_ref = self
                 .db
                 .clone()
@@ -1024,7 +910,6 @@ impl Forge {
             if let Some(resolver) = self.role_resolver.take() {
                 gateway = gateway.with_role_resolver(resolver);
             }
-            // Wire signals (product analytics + diagnostics)
             if self.config.signals.enabled {
                 let signals_pool = std::sync::Arc::new(db_ref.primary().clone());
                 let collector = forge_runtime::signals::SignalsCollector::spawn(
@@ -1050,16 +935,13 @@ impl Forge {
                     .with_signals_anonymize_ip(self.config.signals.anonymize_ip)
                     .with_signals_geoip(geoip);
 
-                // Spawn session reaper
                 forge_runtime::signals::session::spawn_session_reaper(
                     signals_pool.clone(),
                     (self.config.signals.session_timeout.as_secs() / 60) as u32,
                 );
 
-                // Ensure signal partitions exist at startup
                 forge_runtime::signals::partition::ensure_partitions(&signals_pool).await;
 
-                // Spawn daily partition maintenance (leader-only via leader_election)
                 {
                     let partition_pool = signals_pool.clone();
                     let retention_days = self.config.signals.retention_days;
@@ -1071,7 +953,6 @@ impl Forge {
                                 _ = partition_shutdown.recv() => break,
                                 _ = tokio::time::sleep(Duration::from_secs(21_600)) => {}
                             }
-                            // Only run on the leader node
                             let is_leader = partition_leader
                                 .as_ref()
                                 .map(|e| e.is_leader())
@@ -1103,7 +984,6 @@ impl Forge {
                 tracing::debug!("Custom routes merged into gateway middleware stack");
             }
 
-            // Start the reactor for real-time updates
             let reactor = gateway.reactor();
             if let Err(e) = reactor.start().await {
                 tracing::error!("Failed to start reactor: {}", e);
@@ -1112,13 +992,9 @@ impl Forge {
                 reactor_handle = Some(reactor);
             }
 
-            // Build API router (all under /_api)
             let api_router = gateway.router();
-
-            // Build final router with API
             let mut router = Router::new().nest("/_api", api_router);
 
-            // Mount webhook routes under /_api (bypasses gateway auth middleware)
             if !self.webhook_registry.is_empty() {
                 use axum::routing::post;
                 use tower_http::cors::{Any, CorsLayer};
@@ -1132,8 +1008,7 @@ impl Forge {
                 let webhook_state = webhook_state.with_kv(Arc::clone(&kv_handle));
                 let webhook_state = Arc::new(webhook_state);
 
-                // Webhook routes need their own CORS layer since they're outside the API router.
-                // Reuse gateway CORS policy rather than forcing wildcard access.
+                // Webhook routes sit outside the API router so they need their own CORS layer.
                 let webhook_cors = if self.config.gateway.cors_enabled
                     || !self.config.gateway.cors_origins.is_empty()
                 {
@@ -1210,13 +1085,11 @@ impl Forge {
                 );
             }
 
-            // MCP OAuth: mount OAuth routes or return JSON 404 for discovery
             if self.config.mcp.enabled {
                 use axum::routing::get;
 
-                // Well-known discovery routes: either live OAuth metadata (when
-                // `mcp-oauth` is compiled in and configured) or a parseable JSON 404
-                // that tells clients this server does not support OAuth.
+                // Return a parseable JSON 404 when OAuth is not configured so
+                // MCP clients get a clear signal rather than an HTML error page.
                 async fn oauth_not_supported() -> impl axum::response::IntoResponse {
                     (
                         axum::http::StatusCode::NOT_FOUND,
@@ -1229,10 +1102,7 @@ impl Forge {
 
                 #[cfg(feature = "mcp-oauth")]
                 if let Some((oauth_api_router, oauth_state)) = gateway.oauth_router() {
-                    // OAuth API routes under /_api/oauth/* (bypass auth middleware)
                     router = router.nest("/_api", oauth_api_router);
-
-                    // Well-known metadata at root level
                     router = router
                         .route(
                             "/.well-known/oauth-authorization-server",
@@ -1272,7 +1142,6 @@ impl Forge {
                 }
             }
 
-            // Add frontend handler as fallback if configured
             if let Some(handler) = self.frontend_handler {
                 use axum::routing::get;
                 router = router.fallback(get(handler));
@@ -1281,11 +1150,9 @@ impl Forge {
 
             let addr = gateway.addr();
             let tls = gateway.tls().cloned();
-            // Hand the gateway a shutdown signal so Axum stops accepting new
-            // connections and waits for in-flight requests to finish before
-            // we release leadership. This is what drains the outbox: each
-            // mutation's `dispatch_job`/`start_workflow` flush is part of the
-            // request's transaction, so finishing the request finishes the flush.
+            // Graceful shutdown drains in-flight requests before we release the
+            // advisory lock, which also drains the mutation outbox (each flush
+            // is part of the request transaction).
             let mut gateway_shutdown_rx = shutdown.subscribe();
 
             handles.push(tokio::spawn(async move {
@@ -1307,7 +1174,6 @@ impl Forge {
             }));
         }
 
-        // Use 0 as the count for any registry whose feature is disabled.
         #[cfg(feature = "jobs")]
         let jobs_count = self.job_registry.len();
         #[cfg(not(feature = "jobs"))]
@@ -1355,7 +1221,6 @@ impl Forge {
             });
         }
 
-        // Startup banner: summary of config, roles, and capabilities
         let role_names: Vec<&str> = roles.iter().map(|r| r.as_str()).collect();
         let capabilities = &self.config.node.worker_capabilities;
         tracing::info!(
@@ -1372,7 +1237,6 @@ impl Forge {
             "Forge started"
         );
 
-        // Wait for shutdown signal
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
         tokio::select! {
@@ -1384,16 +1248,12 @@ impl Forge {
             }
         }
 
-        // Graceful shutdown
         tracing::debug!("Graceful shutdown starting");
 
-        // Broadcast shutdown to all broadcast-subscribed tasks (daemon runner,
-        // KV cleanup, partition maintenance). This is a no-op if the shutdown
-        // was already triggered via `Forge::shutdown()`.
+        // No-op if already triggered via `Forge::shutdown()`.
         let _ = self.shutdown_tx.send(());
 
-        // Signal leader-held tasks to stop. Order matters: cancel these before
-        // joining so they all start winding down concurrently.
+        // Cancel leader tasks before joining so they wind down concurrently.
         #[cfg(feature = "workflows")]
         workflow_shutdown_token.cancel();
 
@@ -1402,34 +1262,28 @@ impl Forge {
             runner.stop().await;
         }
 
-        // Wait for all leader-held tasks (cron, daemon, workflow scheduler) to
-        // finish before releasing the advisory lock. This prevents another node
-        // from acquiring leadership and starting duplicate work while we are
-        // still mid-tick.
+        // Drain leader tasks before releasing the advisory lock to prevent a
+        // sibling from starting duplicate work while we are mid-tick.
         tracing::debug!("Waiting for leader-held tasks to drain");
         for handle in leader_handles {
             let _ = handle.await;
         }
         tracing::debug!("Leader-held tasks drained");
 
-        // Release leadership and deregister from cluster. The advisory lock is
-        // dropped here; only after leader tasks have fully stopped.
+        // Advisory lock released here — only after leader tasks have fully stopped.
         if let Err(e) = shutdown.shutdown().await {
             tracing::warn!(error = %e, "Shutdown error");
         }
 
-        // Stop leader election
         if let Some(ref election) = leader_election {
             election.stop();
         }
 
-        // Stop reactor before closing database
         #[cfg(feature = "gateway")]
         if let Some(ref reactor) = reactor_handle {
             reactor.stop();
         }
 
-        // Close database connections
         if let Some(ref db) = self.db {
             db.close().await;
         }

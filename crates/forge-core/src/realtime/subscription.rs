@@ -118,28 +118,23 @@ impl AuthScope {
     }
 }
 
-/// A query group is the primary unit of execution.
-/// Multiple subscribers watching the same query+args+auth_scope share a single group.
-/// On invalidation, the query executes once per group (not per subscriber).
+/// Coalesces subscriptions sharing the same query+args+auth_scope.
+/// On invalidation the query executes once per group, not per subscriber.
 pub struct QueryGroup {
     pub id: QueryGroupId,
     pub query_name: String,
     pub args: Arc<serde_json::Value>,
     pub auth_scope: AuthScope,
-    /// Cached at subscribe time. Not refreshed during the group's lifetime.
-    /// Auth is bound to token lifetime: the reactor skips re-execution for
-    /// groups with expired tokens, and session cleanup evicts them.
+    /// Cached at subscribe time; not refreshed mid-lifetime. The reactor skips
+    /// re-execution for groups with expired tokens; session cleanup evicts them.
     pub auth_context: crate::function::AuthContext,
-    /// Compile-time table dependencies from FunctionInfo.
     pub table_deps: &'static [&'static str],
-    /// Compile-time selected columns from FunctionInfo.
     pub selected_cols: &'static [&'static str],
     pub read_set: ReadSet,
-    /// Result hash for delta detection. Shared across all subscribers.
+    /// Shared across all subscribers for delta detection.
     pub last_result_hash: Option<String>,
-    /// Cached last result for sending to new subscribers joining an existing group.
+    /// Sent to new subscribers joining an existing group.
     pub last_result: Option<Arc<serde_json::Value>>,
-    /// All subscribers in this group.
     pub subscribers: Vec<SubscriberId>,
     pub created_at: DateTime<Utc>,
     pub execution_count: u64,

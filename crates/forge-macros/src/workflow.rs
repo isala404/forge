@@ -117,7 +117,6 @@ impl<'ast> Visit<'ast> for TokioSleepDetector {
     }
 
     fn visit_expr_await(&mut self, node: &'ast ExprAwait) {
-        // Check for tokio::time::sleep(...).await pattern
         if let syn::Expr::Call(call) = &*node.base
             && let syn::Expr::Path(path) = &*call.func
         {
@@ -172,7 +171,6 @@ struct DarlingWorkflowAttrs {
 
 impl DarlingWorkflowAttrs {
     fn validate(self) -> darling::Result<Self> {
-        // Validate status value if provided
         if let Some(ref s) = self.status
             && !["active", "deprecated", "staging"].contains(&s.as_str())
         {
@@ -189,14 +187,12 @@ impl DarlingWorkflowAttrs {
             )));
         }
 
-        // Can't use both status= and legacy flags
         if self.status.is_some() && (self.active || self.deprecated) {
             return Err(darling::Error::custom(
                 "use either `status = \"...\"` or the legacy `active`/`deprecated` flag, not both",
             ));
         }
 
-        // Can't be both active and deprecated
         if self.active && self.deprecated {
             return Err(darling::Error::custom(
                 "workflow cannot be both `active` and `deprecated`",
@@ -350,7 +346,6 @@ impl<'ast> Visit<'ast> for ContractExtractor {
         let method_name = node.method.to_string();
 
         match method_name.as_str() {
-            // ctx.step("key", ...) or ctx.parallel().step("key", ...)
             "step" if self.receiver_is_ctx(&node.receiver) => {
                 if let Some(first_arg) = node.args.first() {
                     if let Some(key) = Self::extract_string_lit(first_arg) {
@@ -363,7 +358,6 @@ impl<'ast> Visit<'ast> for ContractExtractor {
                     }
                 }
             }
-            // ctx.wait_for_event::<T>("event_name", ...)
             "wait_for_event" if self.receiver_is_ctx(&node.receiver) => {
                 if let Some(first_arg) = node.args.first() {
                     if let Some(key) = Self::extract_string_lit(first_arg) {
@@ -379,19 +373,15 @@ impl<'ast> Visit<'ast> for ContractExtractor {
             _ => {}
         }
 
-        // Continue visiting child nodes
         syn::visit::visit_expr_method_call(self, node);
     }
 }
 
-/// Derive a workflow signature from its persisted contract.
-/// The signature is a 32-char hex-encoded blake3 hash (128 bits, truncated) of:
-/// name, version, step keys, wait keys, timeout, and input/output type names.
+/// Derives a 32-char hex-encoded blake3 hash (128 bits) of name, version,
+/// step keys, wait keys, timeout, and input/output type name strings.
 ///
-/// NOTE: Input/output types are hashed as their source-level type name strings,
-/// not full JSON schemas. This means renaming a type alias without changing its
-/// structure will produce a different signature. Full schemars-based structural
-/// hashing is deferred to a future pass.
+/// Types are hashed as source-level strings, not schemas. Renaming a type
+/// alias under the same version will change the signature.
 fn derive_signature(
     name: &str,
     version: &str,
@@ -403,7 +393,6 @@ fn derive_signature(
 ) -> String {
     let mut hasher = blake3::Hasher::new();
 
-    // Domain separator prevents collisions with other uses of blake3 in the project
     hasher.update(b"forge_workflow_signature_v1\x00");
     hasher.update(name.as_bytes());
     hasher.update(b"\x00");
@@ -427,8 +416,6 @@ fn derive_signature(
 
     let hash = hasher.finalize();
     let bytes = hash.as_bytes();
-    // Truncate to 128 bits (16 bytes) -> 32 hex chars. Collision-resistant
-    // enough for workflow signature matching (birthday bound ~2^64 runs).
     format!(
         "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
         bytes[0],
@@ -474,7 +461,6 @@ pub fn workflow_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let _vis = &input.vis;
     let block = &input.block;
 
-    // Detect tokio::sleep usage (only for long sleeps > 100s)
     let mut sleep_detector = TokioSleepDetector::new();
     sleep_detector.visit_block(block);
     if let Some(span) = sleep_detector.violation_span {
@@ -488,10 +474,6 @@ pub fn workflow_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         .into();
     }
 
-    // Pull the workflow context binding (usually `ctx`) from the first fn
-    // argument so the ContractExtractor can scope its `.step()`/`.wait_for_event()`
-    // matches to that binding's call chain. Falling back to None keeps the
-    // previous behavior if the signature is unusual.
     let ctx_ident: Option<syn::Ident> = input.sig.inputs.iter().next().and_then(|arg| {
         if let syn::FnArg::Typed(pat_type) = arg
             && let syn::Pat::Ident(pat_ident) = pat_type.pat.as_ref()
@@ -502,7 +484,6 @@ pub fn workflow_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     });
 
-    // Extract step/wait keys from function body for signature derivation
     let mut contract_extractor = ContractExtractor::new(ctx_ident);
     contract_extractor.visit_block(block);
 
@@ -513,14 +494,13 @@ pub fn workflow_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         return TokenStream::from(first_err.to_compile_error());
     }
 
-    // Parse input type from function signature
     let mut input_type = quote! { () };
     let mut input_ident = format_ident!("_input");
     let mut input_type_str = String::from("()");
 
     for (i, input_arg) in input.sig.inputs.iter().enumerate() {
         if i == 0 {
-            continue; // Skip context
+            continue;
         }
         if let syn::FnArg::Typed(pat_type) = input_arg {
             if let syn::Pat::Ident(ident) = pat_type.pat.as_ref() {
@@ -532,7 +512,6 @@ pub fn workflow_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
 
-    // Parse return type
     let mut output_type_str = String::from("()");
     let output_type = match &input.sig.output {
         syn::ReturnType::Default => quote! { () },
@@ -588,10 +567,9 @@ pub fn workflow_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let timeout = if let Some(ref t) = attrs.timeout {
         parse_duration_tokens(t, 86400)
     } else {
-        quote! { std::time::Duration::from_secs(86400) } // 24 hours default
+        quote! { std::time::Duration::from_secs(86400) }
     };
 
-    // Compute timeout seconds for signature
     let timeout_secs: u64 = if let Some(ref t) = attrs.timeout {
         crate::utils::parse_duration_secs(t).unwrap_or(86400)
     } else {
@@ -605,7 +583,6 @@ pub fn workflow_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! { None }
     };
 
-    // Derive the workflow signature from its persisted contract
     let signature = derive_signature(
         workflow_name,
         version_str,
@@ -628,10 +605,8 @@ pub fn workflow_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! {}
     };
 
-    // Build a human-readable contract comment listing the keys that feed into the
-    // signature. This surfaces in `cargo expand` so developers can see exactly
-    // which step/wait names are locked in, making rename-induced mismatches
-    // visible before they reach production.
+    // Emitted as a doc comment on the generated struct so `cargo expand` makes
+    // rename-induced signature mismatches visible before they reach production.
     let step_keys_display = contract_extractor
         .step_keys
         .iter()
@@ -698,8 +673,6 @@ pub fn workflow_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 mod tests {
     use super::*;
 
-    // Tests for to_pascal_case and parse_duration are in utils.rs (single source of truth).
-
     #[test]
     fn test_derive_signature_deterministic() {
         let mut steps = BTreeSet::new();
@@ -710,7 +683,6 @@ mod tests {
         let sig1 = derive_signature("onboarding", "v1", &steps, &waits, 86400, "Input", "Output");
         let sig2 = derive_signature("onboarding", "v1", &steps, &waits, 86400, "Input", "Output");
         assert_eq!(sig1, sig2);
-        // blake3 truncated to 128 bits -> 32 hex chars
         assert_eq!(sig1.len(), 32);
     }
 
@@ -749,8 +721,4 @@ mod tests {
         let sig2 = derive_signature("wf", "v1", &steps, &waits2, 86400, "()", "()");
         assert_ne!(sig1, sig2);
     }
-
-    // Note: parse_workflow_attrs takes proc_macro::TokenStream which can't be used
-    // outside of a proc macro context. Attribute parsing is tested via integration
-    // tests (macro expansion in the demo example).
 }

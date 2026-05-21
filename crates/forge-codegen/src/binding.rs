@@ -16,11 +16,9 @@ use crate::emit;
 pub struct FunctionBinding {
     /// Original function name (snake_case).
     pub name: String,
-    /// Function kind.
     pub kind: FunctionKind,
-    /// Arguments (context argument already stripped by the parser).
+    /// Context argument already stripped by the parser.
     pub args: Vec<FunctionArg>,
-    /// Return type.
     pub return_type: RustType,
     /// Whether the single argument is a known custom Args/Input struct.
     pub is_custom_args: bool,
@@ -34,7 +32,7 @@ impl FunctionBinding {
     }
 }
 
-/// All function bindings grouped by kind, sorted for deterministic output.
+/// All bindings grouped by kind, sorted for deterministic output.
 pub struct BindingSet {
     pub queries: Vec<FunctionBinding>,
     pub mutations: Vec<FunctionBinding>,
@@ -43,7 +41,7 @@ pub struct BindingSet {
 }
 
 impl BindingSet {
-    /// Build a complete BindingSet from the schema registry.
+    /// Build from the schema registry.
     pub fn from_registry(registry: &SchemaRegistry) -> Self {
         let functions = registry.all_functions();
         let tables = registry.all_tables();
@@ -60,11 +58,10 @@ impl BindingSet {
                 FunctionKind::Mutation => mutations.push(binding),
                 FunctionKind::Job => jobs.push(binding),
                 FunctionKind::Workflow => workflows.push(binding),
-                FunctionKind::Cron => {} // Not client-callable, skip.
+                FunctionKind::Cron => {} // Not client-callable.
             }
         }
 
-        // Sort each group for deterministic output.
         queries.sort_by(|a, b| a.name.cmp(&b.name));
         mutations.sort_by(|a, b| a.name.cmp(&b.name));
         jobs.sort_by(|a, b| a.name.cmp(&b.name));
@@ -90,7 +87,6 @@ impl BindingSet {
         !self.workflows.is_empty()
     }
 
-    /// Iterate over all bindings across all groups.
     pub fn all(&self) -> impl Iterator<Item = &FunctionBinding> {
         self.queries
             .iter()
@@ -184,7 +180,6 @@ mod tests {
     fn custom_args_requires_registry_entry() {
         let registry = SchemaRegistry::new();
 
-        // Register the DTO so it exists in the registry.
         let table = TableDef::new("CreateUserArgs", "CreateUserArgs");
         registry.register_table(table);
 
@@ -209,7 +204,6 @@ mod tests {
     fn custom_args_false_without_registry_entry() {
         let registry = SchemaRegistry::new();
 
-        // "CreateUserArgs" is NOT in the registry.
         let mut func = FunctionDef::mutation("create_user", RustType::Custom("User".into()));
         func.args.push(FunctionArg::new(
             "args",

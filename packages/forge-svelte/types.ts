@@ -73,11 +73,7 @@ export interface WorkflowState<TOutput = unknown> {
   error: string | null;
 }
 
-/**
- * Reactive wrapper around a one-shot mutation call. Mirrors the shape produced
- * by the generated `toReactiveMutation()` helper so user components can type
- * their `mutationFn$()` results without reaching into the generated module.
- */
+/** Shape produced by the generated `toReactiveMutation()` helper. */
 export interface ReactiveMutation<TArgs, TResult> {
   mutate: (args: TArgs) => Promise<TResult>;
   pending: boolean;

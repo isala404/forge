@@ -11,21 +11,14 @@ use crate::error::Result;
 /// An email message.
 #[derive(Debug, Clone)]
 pub struct Email {
-    /// Sender address (overrides the default `from` in config if set).
+    /// Overrides the default `from` in config if set.
     pub from: Option<String>,
-    /// Recipient addresses.
     pub to: Vec<String>,
-    /// CC recipients.
     pub cc: Vec<String>,
-    /// BCC recipients.
     pub bcc: Vec<String>,
-    /// Subject line.
     pub subject: String,
-    /// Plain text body.
     pub text: Option<String>,
-    /// HTML body.
     pub html: Option<String>,
-    /// Reply-to address.
     pub reply_to: Option<String>,
 }
 
@@ -53,55 +46,46 @@ pub struct EmailBuilder {
 }
 
 impl EmailBuilder {
-    /// Add another recipient.
     pub fn to(mut self, recipient: impl Into<String>) -> Self {
         self.email.to.push(recipient.into());
         self
     }
 
-    /// Set the sender address.
     pub fn from(mut self, sender: impl Into<String>) -> Self {
         self.email.from = Some(sender.into());
         self
     }
 
-    /// Add a CC recipient.
     pub fn cc(mut self, recipient: impl Into<String>) -> Self {
         self.email.cc.push(recipient.into());
         self
     }
 
-    /// Add a BCC recipient.
     pub fn bcc(mut self, recipient: impl Into<String>) -> Self {
         self.email.bcc.push(recipient.into());
         self
     }
 
-    /// Set the subject line.
     pub fn subject(mut self, subject: impl Into<String>) -> Self {
         self.email.subject = subject.into();
         self
     }
 
-    /// Set the plain text body.
     pub fn text(mut self, body: impl Into<String>) -> Self {
         self.email.text = Some(body.into());
         self
     }
 
-    /// Set the HTML body.
     pub fn html(mut self, body: impl Into<String>) -> Self {
         self.email.html = Some(body.into());
         self
     }
 
-    /// Set the reply-to address.
     pub fn reply_to(mut self, address: impl Into<String>) -> Self {
         self.email.reply_to = Some(address.into());
         self
     }
 
-    /// Build the email message.
     pub fn build(self) -> Email {
         self.email
     }
@@ -123,17 +107,15 @@ pub trait EmailSender: Send + Sync + 'static {
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct EmailConfig {
-    /// Whether email sending is enabled.
     pub enabled: bool,
     /// Provider: "smtp", "resend", "ses", "log" (development).
     pub provider: String,
     /// Default sender address.
     pub from: String,
-    /// SMTP host (for smtp provider).
     pub smtp_host: Option<String>,
-    /// SMTP port (for smtp provider, default 587).
+    /// Default 587.
     pub smtp_port: Option<u16>,
-    /// Environment variable containing the API key or SMTP password.
+    /// Env var containing the API key or SMTP password.
     pub secret_env: Option<String>,
 }
 

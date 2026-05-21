@@ -10,17 +10,14 @@ use crate::cluster::NodeId;
 pub struct SessionId(pub Uuid);
 
 impl SessionId {
-    /// Generate a new random session ID.
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
 
-    /// Create from an existing UUID.
     pub fn from_uuid(id: Uuid) -> Self {
         Self(id)
     }
 
-    /// Get the inner UUID.
     pub fn as_uuid(&self) -> Uuid {
         self.0
     }
@@ -42,18 +39,13 @@ impl std::fmt::Display for SessionId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SessionStatus {
-    /// Session is connecting.
     Connecting,
-    /// Session is connected and active.
     Connected,
-    /// Session is reconnecting.
     Reconnecting,
-    /// Session is disconnected.
     Disconnected,
 }
 
 impl SessionStatus {
-    /// Convert to string.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Connecting => "connecting",
@@ -81,28 +73,18 @@ impl FromStr for SessionStatus {
 /// Information about a WebSocket session.
 #[derive(Debug, Clone)]
 pub struct SessionInfo {
-    /// Unique session ID.
     pub id: SessionId,
-    /// Node hosting this session.
     pub node_id: NodeId,
-    /// User ID if authenticated.
     pub user_id: Option<String>,
-    /// Current status.
     pub status: SessionStatus,
-    /// Number of active subscriptions.
     pub subscription_count: u32,
-    /// When the session was created.
     pub created_at: DateTime<Utc>,
-    /// When the session was last active.
     pub last_active_at: DateTime<Utc>,
-    /// Client IP address.
     pub client_ip: Option<String>,
-    /// User agent string.
     pub user_agent: Option<String>,
 }
 
 impl SessionInfo {
-    /// Create a new session info.
     pub fn new(node_id: NodeId) -> Self {
         let now = Utc::now();
         Self {
@@ -118,13 +100,11 @@ impl SessionInfo {
         }
     }
 
-    /// Set user ID after authentication.
     pub fn with_user_id(mut self, user_id: impl Into<String>) -> Self {
         self.user_id = Some(user_id.into());
         self
     }
 
-    /// Set client metadata.
     pub fn with_client_info(
         mut self,
         client_ip: Option<String>,
@@ -135,35 +115,29 @@ impl SessionInfo {
         self
     }
 
-    /// Mark session as connected.
     pub fn connect(&mut self) {
         self.status = SessionStatus::Connected;
         self.last_active_at = Utc::now();
     }
 
-    /// Mark session as disconnected.
     pub fn disconnect(&mut self) {
         self.status = SessionStatus::Disconnected;
         self.last_active_at = Utc::now();
     }
 
-    /// Mark session as reconnecting.
     pub fn reconnecting(&mut self) {
         self.status = SessionStatus::Reconnecting;
         self.last_active_at = Utc::now();
     }
 
-    /// Update last activity time.
     pub fn touch(&mut self) {
         self.last_active_at = Utc::now();
     }
 
-    /// Check if session is connected.
     pub fn is_connected(&self) -> bool {
         matches!(self.status, SessionStatus::Connected)
     }
 
-    /// Check if session is authenticated.
     pub fn is_authenticated(&self) -> bool {
         self.user_id.is_some()
     }
@@ -209,15 +183,12 @@ mod tests {
         let node_id = NodeId::new();
         let mut session = SessionInfo::new(node_id);
 
-        // Connect
         session.connect();
         assert!(session.is_connected());
 
-        // Authenticate
         session = session.with_user_id("user123");
         assert!(session.is_authenticated());
 
-        // Disconnect
         session.disconnect();
         assert!(!session.is_connected());
     }

@@ -35,12 +35,7 @@ impl Default for DaemonRunnerConfig {
     }
 }
 
-/// Manages running all registered daemons.
-///
-/// Pre-1.0 architecture: Daemons run as separate long-lived tasks rather than
-/// jobs because they require different lifecycle semantics (no retry, no timeout,
-/// graceful shutdown signal). The per-job retry/timeout model doesn't map to
-/// continuously-running services.
+/// Runs all registered daemons as long-lived tasks with restart and leader-election support.
 pub struct DaemonRunner {
     registry: Arc<DaemonRegistry>,
     pool: PgPool,
@@ -54,7 +49,6 @@ pub struct DaemonRunner {
 }
 
 impl DaemonRunner {
-    /// Create a new daemon runner.
     pub fn new(
         registry: Arc<DaemonRegistry>,
         pool: PgPool,
@@ -75,31 +69,26 @@ impl DaemonRunner {
         }
     }
 
-    /// Set job dispatcher for daemon contexts.
     pub fn with_job_dispatch(mut self, dispatcher: Arc<dyn JobDispatch>) -> Self {
         self.job_dispatch = Some(dispatcher);
         self
     }
 
-    /// Set workflow dispatcher for daemon contexts.
     pub fn with_workflow_dispatch(mut self, dispatcher: Arc<dyn WorkflowDispatch>) -> Self {
         self.workflow_dispatch = Some(dispatcher);
         self
     }
 
-    /// Attach a KV store handle so daemon handlers can call `ctx.kv()`.
     pub fn with_kv(mut self, kv: Arc<dyn KvHandle>) -> Self {
         self.kv = Some(kv);
         self
     }
 
-    /// Set custom configuration.
     pub fn with_config(mut self, config: DaemonRunnerConfig) -> Self {
         self.config = config;
         self
     }
 
-    /// Run all registered daemons.
     pub async fn run(mut self) -> Result<()> {
         let runner_span = tracing::info_span!(
             "daemon.runner",
@@ -120,14 +109,11 @@ impl DaemonRunner {
 
             tracing::info!(count = self.registry.len(), "Daemon runner starting");
 
-            // Create individual shutdown channels for each daemon
             let mut daemon_handles: HashMap<String, DaemonHandle> = HashMap::new();
 
-            // Start each daemon
             for (name, entry) in self.registry.daemons() {
                 let info = &entry.info;
 
-                // Create shutdown channel for this daemon
                 let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
                 let handle = DaemonHandle {
@@ -138,7 +124,6 @@ impl DaemonRunner {
                     status: DaemonStatus::Pending,
                 };
 
-                // Record daemon in database
                 if let Err(e) = self.record_daemon_start(&handle).await {
                     tracing::debug!(daemon = name, error = %e, "Failed to record daemon start");
                 }
@@ -150,7 +135,6 @@ impl DaemonRunner {
                     "Starting daemon"
                 );
 
-                // Spawn daemon task
                 let daemon_entry = entry.clone();
                 let pool = self.pool.clone();
                 let http_client = self.http_client.clone();
@@ -199,20 +183,16 @@ impl DaemonRunner {
                 daemon_handles.insert(name.to_string(), handle);
             }
 
-            // Wait for shutdown signal
             let _ = self.shutdown_rx.recv().await;
             tracing::info!("Daemon runner received shutdown signal");
 
-            // Signal all daemons to stop
             for (name, handle) in &daemon_handles {
                 tracing::info!(daemon.name = name, "Signaling daemon to stop");
                 let _ = handle.shutdown_tx.send(true);
             }
 
-            // Give daemons time to clean up
             tokio::time::sleep(Duration::from_secs(2)).await;
 
-            // Update daemon status in database
             for (name, handle) in &daemon_handles {
                 if let Err(e) = self.record_daemon_stop(handle).await {
                     tracing::debug!(daemon = name, error = %e, "Failed to record daemon stop");
@@ -316,7 +296,6 @@ async fn run_daemon_loop(
     async {
         let mut restarts = 0u32;
 
-        // Apply startup delay
         if !startup_delay.is_zero() {
             tracing::debug!(delay_ms = startup_delay.as_millis() as u64, "Waiting startup delay");
             tokio::select! {
@@ -330,7 +309,6 @@ async fn run_daemon_loop(
         }
 
         loop {
-            // Check shutdown before attempting to run
             if *shutdown_rx.borrow() {
                 tracing::debug!("Daemon shutting down");
                 Span::current().record("daemon.final_status", "shutdown");
@@ -366,7 +344,6 @@ async fn run_daemon_loop(
                 }
             }
 
-            // Update status to running
             if let Err(e) = update_daemon_status(&pool, &name, DaemonStatus::Running).await {
                 tracing::debug!(error = %e, "Failed to update daemon status");
             }
@@ -390,10 +367,8 @@ async fn run_daemon_loop(
             let result = async {
                 tracing::info!(instance_id = %instance_id, "Daemon instance starting");
 
-                // Create context with shutdown receiver
                 let (daemon_shutdown_tx, daemon_shutdown_rx) = watch::channel(false);
 
-                // Forward shutdown signal
                 let shutdown_rx_clone = shutdown_rx.clone();
                 let shutdown_tx_clone = daemon_shutdown_tx.clone();
                 iteration_handles.push(tokio::spawn(async move {
@@ -425,7 +400,6 @@ async fn run_daemon_loop(
                 // Both tasks signal daemon_shutdown_tx on failure so the
                 // outer loop re-acquires leadership before the next iteration.
                 if let Some(ref election) = election {
-                    // Task 1: lock validation.
                     let election_clone = Arc::clone(election);
                     let shutdown_tx_clone = daemon_shutdown_tx.clone();
                     let validate_interval = election_clone.lock_validate_interval();
@@ -455,7 +429,6 @@ async fn run_daemon_loop(
                         }
                     }));
 
-                    // Task 2: lease refresh + heartbeat.
                     let election_clone = Arc::clone(election);
                     let shutdown_tx_clone = daemon_shutdown_tx.clone();
                     let pool_clone = pool.clone();
@@ -509,7 +482,6 @@ async fn run_daemon_loop(
                     ctx = ctx.with_kv(Arc::clone(kv));
                 }
 
-                // Run the daemon
                 let result = std::panic::AssertUnwindSafe((entry.handler)(&ctx))
                     .catch_unwind()
                     .await;
@@ -564,14 +536,12 @@ async fn run_daemon_loop(
                 }
             }
 
-            // Check shutdown again
             if *shutdown_rx.borrow() {
                 tracing::debug!("Daemon shutting down after failure");
                 Span::current().record("daemon.final_status", "shutdown_after_failure");
                 break;
             }
 
-            // Check restart policy
             if !restart_on_panic {
                 tracing::warn!("Restart disabled, daemon stopping");
                 Span::current().record("daemon.final_status", "failed_no_restart");
@@ -584,7 +554,6 @@ async fn run_daemon_loop(
             restarts += 1;
             Span::current().record("daemon.restart_count", restarts);
 
-            // Check max restarts
             if let Some(max) = max_restarts
                 && restarts >= max
             {
@@ -596,7 +565,6 @@ async fn run_daemon_loop(
                 break;
             }
 
-            // Update status to restarting
             if let Err(e) = update_daemon_status(&pool, &name, DaemonStatus::Restarting).await {
                 tracing::debug!(daemon = %name, error = %e, "Status update failed");
             }
@@ -607,7 +575,6 @@ async fn run_daemon_loop(
                 "Restarting daemon"
             );
 
-            // Wait before restart
             tokio::select! {
                 _ = tokio::time::sleep(restart_delay) => {}
                 _ = shutdown_rx.changed() => {

@@ -16,21 +16,17 @@ use super::template_catalog::{
 };
 use super::ui;
 
-// In debug builds, embed the path to the forge source directory
 #[cfg(debug_assertions)]
 const FORGE_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 
-/// Get the forge workspace root directory (only available in debug builds).
-/// CARGO_MANIFEST_DIR points to crates/forge, so we go up two levels.
+/// Returns the workspace root from `CARGO_MANIFEST_DIR` (crates/forge → two levels up).
 #[cfg(debug_assertions)]
 fn get_forge_workspace_dir() -> Option<&'static str> {
     let manifest_dir = Path::new(FORGE_MANIFEST_DIR);
-    // Go up from crates/forge to the workspace root
     manifest_dir.parent()?.parent()?.to_str()
 }
 
-/// Append cargo patch section to use local forge crates (only in debug builds).
-/// The `patches` slice contains `(crate_name, relative_path_from_workspace)` pairs.
+/// Append `[patch.crates-io]` entries pointing at the local workspace (debug builds only).
 #[cfg(debug_assertions)]
 fn append_cargo_patch(cargo_toml_path: &Path, patches: &[(&str, &str)]) -> Result<()> {
     let workspace_dir = get_forge_workspace_dir()
@@ -42,9 +38,8 @@ fn append_cargo_patch(cargo_toml_path: &Path, patches: &[(&str, &str)]) -> Resul
         .collect::<Vec<_>>()
         .join("\n");
 
-    let patch_section = format!(
-        "\n# Local dev patches (debug build) - remove before publishing\n[patch.crates-io]\n{entries}\n"
-    );
+    let patch_section =
+        format!("\n# Local dev patches — remove before publishing\n[patch.crates-io]\n{entries}\n");
 
     let mut content = fs::read_to_string(cargo_toml_path)?;
     content.push_str(&patch_section);
@@ -53,10 +48,8 @@ fn append_cargo_patch(cargo_toml_path: &Path, patches: &[(&str, &str)]) -> Resul
     Ok(())
 }
 
-/// Add forge workspace volume to docker-compose.yml (only in debug builds).
-///
-/// Mounts the host workspace at the same absolute path inside the container
-/// so cargo patch paths resolve identically in both environments.
+/// Mount the host workspace at the same absolute path inside the container so
+/// cargo patch paths resolve identically in both environments (debug builds only).
 #[cfg(debug_assertions)]
 fn patch_docker_compose(docker_compose_path: &Path) -> Result<()> {
     let workspace_dir = get_forge_workspace_dir()
@@ -75,8 +68,7 @@ fn patch_docker_compose(docker_compose_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Extract project name from a path (last segment only).
-/// Handles: "my-app", "path/to/my-app", "./my-app", "../my-app"
+/// Extracts the last path segment as the project name.
 pub(super) fn extract_project_name(input: &str) -> String {
     Path::new(input)
         .file_name()
@@ -85,7 +77,6 @@ pub(super) fn extract_project_name(input: &str) -> String {
         .to_string()
 }
 
-/// Check if git is available on the system.
 fn is_git_available() -> bool {
     StdCommand::new("git")
         .arg("--version")
@@ -94,7 +85,6 @@ fn is_git_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Check if the directory is inside an existing git repository.
 fn is_inside_git_repo(dir: &Path) -> bool {
     StdCommand::new("git")
         .args(["rev-parse", "--git-dir"])
@@ -104,11 +94,9 @@ fn is_inside_git_repo(dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Run forge generate to create frontend types.
 fn run_forge_generate(dir: &Path) -> Result<()> {
     println!("  {} Generating frontend types...", ui::step());
 
-    // Get the current executable path to run forge generate
     let forge_exe = std::env::current_exe().unwrap_or_else(|_| "forge".into());
 
     let output = StdCommand::new(&forge_exe)
@@ -136,11 +124,9 @@ fn run_forge_generate(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Run formatters (bun format / cargo fmt) to ensure clean code.
 fn run_formatters(dir: &Path, frontend: FrontendTarget) -> Result<()> {
     let frontend_dir = dir.join("frontend");
 
-    // Run bun format when package.json exists (covers both SvelteKit and Dioxus with JS tooling)
     if frontend_dir.join("package.json").exists() {
         println!("  {} Formatting frontend...", ui::step());
         let output = StdCommand::new("bun")
@@ -153,7 +139,6 @@ fn run_formatters(dir: &Path, frontend: FrontendTarget) -> Result<()> {
         }
     }
 
-    // Dioxus also needs cargo fmt on the frontend manifest
     if frontend == FrontendTarget::Dioxus {
         frontend.extra_format(dir)?;
     }
@@ -174,8 +159,6 @@ fn run_formatters(dir: &Path, frontend: FrontendTarget) -> Result<()> {
     Ok(())
 }
 
-/// Generate Cargo.lock before initial commit.
-/// Also generates frontend/Cargo.lock for Dioxus projects.
 fn generate_cargo_lockfile(dir: &Path, frontend: FrontendTarget) -> Result<()> {
     println!("  {} Generating Cargo.lock...", ui::step());
 
@@ -225,7 +208,6 @@ fn generate_cargo_lockfile(dir: &Path, frontend: FrontendTarget) -> Result<()> {
     Ok(())
 }
 
-/// Install frontend dependencies via bun when package.json exists.
 fn install_frontend_deps(dir: &Path, _frontend: FrontendTarget) -> Result<()> {
     let frontend_dir = dir.join("frontend");
     if !frontend_dir.join("package.json").exists() {
@@ -271,8 +253,6 @@ fn install_frontend_deps(dir: &Path, _frontend: FrontendTarget) -> Result<()> {
 const SKILL_INSTALL_URL: &str =
     "https://github.com/isala404/forge/tree/main/docs/skills/forge-idiomatic-engineer";
 
-/// Runs `bunx skills add` so AI agents get project-aware conventions out of the box.
-/// When `non_interactive` is true, passes `-y` to skip prompts.
 async fn install_skill(dir: &Path, non_interactive: bool) -> Result<()> {
     println!(
         "  {} Preparing forge-idiomatic-engineer skill installer...",
@@ -424,25 +404,20 @@ async fn install_skill(dir: &Path, non_interactive: bool) -> Result<()> {
     Ok(())
 }
 
-/// Initialize git repository and create initial commit.
-/// Skips if directory is already inside a git repository.
 fn init_git_repo(dir: &Path) -> Result<()> {
-    // Skip if already inside a git repo (parent or current)
     if is_inside_git_repo(dir) {
         return Ok(());
     }
 
-    // git init
     let init = StdCommand::new("git")
         .args(["init"])
         .current_dir(dir)
         .output()?;
 
     if !init.status.success() {
-        return Ok(()); // Silently skip if init fails
+        return Ok(());
     }
 
-    // git add .
     let add = StdCommand::new("git")
         .args(["add", "."])
         .current_dir(dir)
@@ -452,7 +427,6 @@ fn init_git_repo(dir: &Path) -> Result<()> {
         return Ok(());
     }
 
-    // git commit
     let _ = StdCommand::new("git")
         .args(["commit", "-m", "Initialize project with Forge"])
         .current_dir(dir)
@@ -511,9 +485,8 @@ EXAMPLES:
   forge new model Invoice"#;
 
 impl NewCommand {
-    /// Execute the new project command.
     pub async fn execute(self) -> Result<()> {
-        // Handler mode: first arg matches a handler kind, no `--template`, second positional present.
+        // Handler mode: first arg is a known kind and no --template was given.
         if self.template.is_none()
             && let Some(kind) = super::handler_scaffold::HandlerKind::from_str(&self.name)
         {
@@ -526,7 +499,6 @@ impl NewCommand {
             return super::handler_scaffold::scaffold_handler(kind, handler_name).await;
         }
 
-        // Project mode requires --template.
         let template_id = self.template.as_deref().ok_or_else(|| {
             anyhow::anyhow!(
                 "Missing --template.\n\nUsage:\n  \
@@ -729,9 +701,8 @@ fn is_cargo_manifest(relative_path: &str) -> bool {
     relative_path == "Cargo.toml" || relative_path.ends_with("/Cargo.toml")
 }
 
-/// Rewrite the `[package]` version line to `1.0.0`.
-/// Scaffolded projects start their own version history; the template's version
-/// tracks the forge release and isn't meaningful for the user's project.
+/// Pin `[package].version` to `1.0.0`. The template version tracks the Forge
+/// release and has no meaning for the scaffolded project.
 fn pin_package_version(content: &str) -> String {
     let mut result = String::with_capacity(content.len());
     let mut in_package = false;

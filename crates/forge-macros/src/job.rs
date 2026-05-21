@@ -164,7 +164,6 @@ pub fn job_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let _vis = &input.vis;
     let block = &input.block;
 
-    // Parse context and args types from function signature
     let mut args_type = quote! { () };
     let mut args_ident = format_ident!("_args");
 
@@ -178,7 +177,6 @@ pub fn job_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
 
-    // Parse return type
     let output_type = match &input.sig.output {
         syn::ReturnType::Default => quote! { () },
         syn::ReturnType::Type(_, ty) => {
@@ -410,8 +408,6 @@ fn convert_job_attrs(darling: DarlingJobAttrs) -> JobAttrs {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // Tests for to_pascal_case and parse_duration are in utils.rs (single source of truth).
 
     #[test]
     fn test_valid_priorities() {

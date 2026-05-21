@@ -25,9 +25,8 @@ use tracing::{debug, info, warn};
 
 use super::builtin::extract_version;
 
-/// Lock ID for migration advisory lock (arbitrary but consistent).
-/// Using a fixed value derived from "FORGE" ascii values.
-const MIGRATION_LOCK_ID: i64 = 0x464F524745; // "FORGE" in hex
+/// Advisory lock ID for migrations, derived from "FORGE" in ASCII.
+const MIGRATION_LOCK_ID: i64 = 0x464F524745;
 
 /// Bootstrap SQL embedded at compile time. Creates `forge_system_migrations`.
 /// Runs idempotently on every startup before any tracked migration applies.
@@ -181,12 +180,6 @@ impl MigrationRunner {
             )));
         }
 
-        // Check for user migrations the DB has applied that this binary does not
-        // know about. This catches the rolling-deploy case where a newer binary
-        // ran user migrations and an older binary is now starting up against the
-        // updated schema. The binary's known set is the `user_migrations` slice
-        // passed by the caller; any DB row whose version is not in that set (and
-        // is not a system migration) is evidence of an ahead-of-binary schema.
         let known_user_versions: std::collections::HashSet<&str> =
             user_migrations.iter().map(|m| m.version.as_str()).collect();
         let mut unknown_applied: Vec<&str> = applied
@@ -279,24 +272,15 @@ impl MigrationRunner {
             .await
             .map_err(|e| ForgeError::internal_with("Failed to acquire lock connection", e))?;
 
-        // Decompose the i64 lock id into the (classid, objid) split that
-        // pg_locks exposes so we can look up the holder PID for diagnostics.
         let classid = (MIGRATION_LOCK_ID >> 32) as i32;
         let objid = (MIGRATION_LOCK_ID & 0xFFFF_FFFF) as i32;
 
         let deadline = Instant::now() + self.config.lock_acquire_timeout;
-        // Backdate the warn timestamp so the *first* contended iteration emits
-        // a WARN immediately — operators see "lock busy, holder X" right away
-        // instead of staring at silence for the full warn_interval.
+        // Backdate so the first contended iteration logs immediately.
         let mut last_warn = Instant::now()
             .checked_sub(self.config.lock_warn_interval)
             .unwrap_or_else(Instant::now);
 
-        // Invariant: this loop must either return `Ok(conn)` *with* the lock
-        // held or return `Err` *without* the lock held. The lock is acquired
-        // atomically by `pg_try_advisory_lock`, and we only ever look up the
-        // holder PID *after* the try returned false, so there is no path
-        // where we hold the lock and then leak it via a follow-up query.
         loop {
             let acquired = sqlx::query_scalar!(
                 r#"SELECT pg_try_advisory_lock($1) AS "acquired!""#,
@@ -346,8 +330,6 @@ impl MigrationRunner {
         Ok(())
     }
 
-    /// Idempotent bootstrap: runs the `forge_system_migrations` table DDL.
-    /// Statements are split because the bootstrap file may contain multiple.
     async fn bootstrap_tracking_table(&self) -> Result<()> {
         let mut conn =
             self.pool.acquire().await.map_err(|e| {
@@ -400,8 +382,7 @@ impl MigrationRunner {
             )
         })?;
 
-        // SET LOCAL only takes effect inside a transaction; it scopes these
-        // timeouts to this migration and never leaks to other pool connections.
+        // SET LOCAL scopes these timeouts to this transaction only.
         sqlx::query("SET LOCAL lock_timeout = '5s'")
             .execute(&mut *tx)
             .await
@@ -489,12 +470,9 @@ impl MigrationRunner {
             )
         })?;
 
-        // Session-level SET (no LOCAL) since there's no surrounding tx; the
-        // RESETs at the end keep the connection neutral for the pool.
-        // Statement timeout is longer here than the transactional path
-        // (5min) because the canonical use cases — CREATE INDEX
-        // CONCURRENTLY on real-world tables, REINDEX CONCURRENTLY,
-        // VACUUM — routinely run 10+ minutes on production data sets.
+        // Session-level SET without LOCAL — no transaction to scope to.
+        // Statement timeout is 30 min because CREATE INDEX CONCURRENTLY and
+        // REINDEX CONCURRENTLY routinely run 10+ minutes on production tables.
         sqlx::query("SET lock_timeout = '5s'")
             .execute(&mut *conn)
             .await
@@ -524,12 +502,8 @@ impl MigrationRunner {
         }
         .await;
 
-        // Always neutralise the session settings before returning the
-        // connection to the pool, even on failure. Errors are demoted to
-        // WARN: a failed RESET is rare (PG accepts RESET even after errors),
-        // but if it ever happens the connection still goes back into the
-        // pool with non-default timeouts, which is something operators
-        // need visibility into.
+        // Always reset before returning the connection to the pool — even on
+        // failure. A failed RESET is rare but operators need visibility into it.
         if let Err(e) = sqlx::query("RESET lock_timeout").execute(&mut *conn).await {
             warn!(error = %e, "Failed to RESET lock_timeout after non-tx migration");
         }

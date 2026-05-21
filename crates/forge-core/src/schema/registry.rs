@@ -1,15 +1,7 @@
 //! Schema registration system.
 //!
-//! The [`SchemaRegistry`] collects all schema definitions at startup. Proc macros
-//! (`#[forge::model]`, `#[forge::query]`, etc.) register their definitions here.
-//!
-//! The registry uses `BTreeMap` for deterministic iteration order, which ensures
-//! consistent TypeScript generation and migration diffing across runs.
-//!
-//! # Thread Safety
-//!
-//! Registration happens during single-threaded startup. After startup, the registry
-//! is read-only. `RwLock` provides interior mutability for the registration phase.
+//! `BTreeMap` storage ensures deterministic iteration order for codegen and migration diffs.
+//! `RwLock` supports the registration phase; the registry is effectively read-only after startup.
 
 use std::collections::BTreeMap;
 use std::sync::RwLock;
@@ -19,17 +11,10 @@ use super::model::TableDef;
 
 const LOCK_POISONED: &str = "schema registry lock poisoned";
 
-/// Global registry of all schema definitions.
-/// This is populated at compile time by the proc macros.
-/// Uses BTreeMap for deterministic iteration order.
+/// Global registry of all schema definitions, populated by proc macros.
 pub struct SchemaRegistry {
-    /// All registered tables by name.
     tables: RwLock<BTreeMap<String, TableDef>>,
-
-    /// All registered enums by name.
     enums: RwLock<BTreeMap<String, EnumDef>>,
-
-    /// All registered functions by name.
     functions: RwLock<BTreeMap<String, FunctionDef>>,
 }
 

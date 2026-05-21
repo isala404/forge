@@ -20,60 +20,24 @@ use crate::function::AuthContext;
 /// Progress update recorded during testing.
 #[derive(Debug, Clone)]
 pub struct TestProgressUpdate {
-    /// Progress percentage (0-100).
     pub percent: u8,
-    /// Progress message.
     pub message: String,
 }
 
 /// Test context for job functions.
-///
-/// Provides an isolated testing environment for jobs with progress tracking,
-/// retry simulation, cancellation testing, and HTTP mocking.
-///
-/// # Example
-///
-/// ```ignore
-/// let ctx = TestJobContext::builder("export_users")
-///     .with_job_id(Uuid::new_v4())
-///     .build();
-///
-/// // Simulate progress
-/// ctx.progress(50, "Halfway there")?;
-///
-/// // Verify progress was recorded
-/// assert_eq!(ctx.progress_updates().len(), 1);
-///
-/// // Test cancellation
-/// ctx.request_cancellation();
-/// assert!(ctx.is_cancel_requested().unwrap());
-/// ```
 pub struct TestJobContext {
-    /// Job ID.
     pub job_id: Uuid,
-    /// Job type name.
     pub job_type: String,
-    /// Current attempt number (1-based).
     pub attempt: u32,
-    /// Maximum attempts allowed.
     pub max_attempts: u32,
-    /// Authentication context.
     pub auth: AuthContext,
-    /// Optional database pool.
     pool: Option<PgPool>,
-    /// Mock HTTP client.
     http: Arc<MockHttp>,
-    /// Progress updates recorded during execution.
     progress_updates: Arc<RwLock<Vec<TestProgressUpdate>>>,
-    /// Mock environment provider.
     env_provider: Arc<MockEnvProvider>,
-    /// Persisted saved data (in-memory).
     saved_data: Arc<RwLock<serde_json::Value>>,
-    /// Whether cancellation has been requested.
     cancel_requested: Arc<AtomicBool>,
-    /// Dispatched sub-jobs (for assertion).
     dispatched_jobs: Arc<RwLock<Vec<(String, serde_json::Value, Uuid)>>>,
-    /// Started workflows (for assertion).
     started_workflows: Arc<RwLock<Vec<(String, serde_json::Value, Uuid)>>>,
 }
 

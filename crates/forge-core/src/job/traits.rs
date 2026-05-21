@@ -53,7 +53,7 @@ impl Default for JobInfo {
         Self {
             name: "",
             description: None,
-            timeout: Duration::from_secs(3600), // 1 hour default
+            timeout: Duration::from_secs(3600),
             http_timeout: None,
             priority: JobPriority::Normal,
             retry: RetryConfig::default(),
@@ -204,8 +204,8 @@ impl Default for RetryConfig {
         Self {
             max_attempts: 3,
             backoff: BackoffStrategy::Exponential,
-            max_backoff: Duration::from_secs(300), // 5 minutes
-            retry_on: Vec::new(),                  // Retry on all errors
+            max_backoff: Duration::from_secs(300),
+            retry_on: Vec::new(),
         }
     }
 }

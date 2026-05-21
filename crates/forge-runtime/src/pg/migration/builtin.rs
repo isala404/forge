@@ -23,11 +23,8 @@ const V001_INITIAL: &str = include_str!("../../../migrations/system/v001_initial
 /// A system migration with a version number.
 #[derive(Debug, Clone)]
 pub struct SystemMigration {
-    /// Version number (1, 2, 3, ...)
     pub version: u32,
-    /// The SQL to execute
     pub sql: &'static str,
-    /// Description of what this migration does
     pub description: &'static str,
 }
 
@@ -37,15 +34,12 @@ impl SystemMigration {
         format!("{}{:03}", SYSTEM_MIGRATION_PREFIX, self.version)
     }
 
-    /// Convert to a Migration struct.
     pub fn to_migration(&self) -> Migration {
         Migration::new(self.name(), self.sql)
     }
 }
 
-/// Get all built-in FORGE system migrations in version order.
-///
-/// These are applied in order before any user migrations.
+/// All built-in FORGE system migrations in version order.
 pub fn get_system_migrations() -> Vec<SystemMigration> {
     vec![SystemMigration {
         version: 1,
@@ -54,7 +48,6 @@ pub fn get_system_migrations() -> Vec<SystemMigration> {
     }]
 }
 
-/// Get system migrations as Migration structs.
 pub fn get_builtin_migrations() -> Vec<Migration> {
     get_system_migrations()
         .into_iter()
@@ -62,10 +55,7 @@ pub fn get_builtin_migrations() -> Vec<Migration> {
         .collect()
 }
 
-/// Get all system migrations SQL concatenated.
-///
-/// Use for test setup before running user migrations.
-/// In production, use [`get_builtin_migrations`] for versioned application.
+/// All system SQL concatenated. Use for test setup; production code should use [`get_builtin_migrations`].
 pub fn get_all_system_sql() -> String {
     get_system_migrations()
         .into_iter()
@@ -74,13 +64,11 @@ pub fn get_all_system_sql() -> String {
         .join("\n\n")
 }
 
-/// Check if a migration name is a system migration.
 pub fn is_system_migration(name: &str) -> bool {
     name.starts_with(SYSTEM_MIGRATION_PREFIX)
 }
 
-/// Extract version number from a system migration name.
-/// Returns None if not a valid system migration name.
+/// Returns `None` if `name` is not a valid system migration name.
 pub fn extract_version(name: &str) -> Option<u32> {
     name.strip_prefix(SYSTEM_MIGRATION_PREFIX)
         .and_then(|suffix| suffix.parse().ok())

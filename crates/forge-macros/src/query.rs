@@ -136,12 +136,6 @@ struct QueryAttrs {
     register: bool,
 }
 
-/// Expand the #[forge::query] attribute.
-///
-/// This transforms an async function into a query handler that:
-/// - Takes a QueryContext as the first parameter
-/// - Returns a Result<T>
-/// - Generates a struct implementing ForgeQuery trait
 pub fn expand_query(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
 
@@ -229,7 +223,6 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
     let fn_block = &input.block;
     let fn_attrs = &input.attrs;
 
-    // Validate async
     if asyncness.is_none() {
         return Err(syn::Error::new_spanned(
             &input.sig,
@@ -237,7 +230,6 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
         ));
     }
 
-    // Extract parameters (skip first which should be &QueryContext)
     let params: Vec<_> = input.sig.inputs.iter().collect();
     if params.is_empty() {
         return Err(syn::Error::new_spanned(
@@ -246,7 +238,6 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
         ));
     }
 
-    // Get context param - extract name and ensure it uses reference
     let (ctx_name, ctx_type) = match &params[0] {
         FnArg::Typed(pat_type) => {
             let name = if let Pat::Ident(pat_ident) = &*pat_type.pat {
@@ -267,11 +258,9 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
         }
     };
 
-    // Determine the context type string
     let type_str = quote! { #ctx_type }.to_string();
     let is_ref = type_str.starts_with('&');
 
-    // Extract table dependencies from function body or use explicit override
     let has_explicit_tables = attrs.tables.is_some();
     let table_dependencies: Vec<String> = if let Some(explicit_tables) = attrs.tables {
         explicit_tables
@@ -298,7 +287,6 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
         }
     };
 
-    // Extract selected columns from SQL
     let selected_columns: Vec<String> = {
         let mut extractor = SqlStringExtractor::new();
         extractor.visit_block(fn_block);
@@ -308,8 +296,6 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
         sorted
     };
 
-    // Detect DB delegation: if no SQL was found but the body calls .pool(),
-    // a helper function is doing the DB work and bypassing scope extraction.
     if !attrs.is_public
         && !attrs.is_unscoped
         && table_dependencies.is_empty()
@@ -329,7 +315,6 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
         }
     }
 
-    // Compile-time scope check: private queries that touch tables must filter by user identity.
     if !attrs.is_public && !attrs.is_unscoped && !table_dependencies.is_empty() {
         let mut scope_extractor = SqlStringExtractor::new();
         scope_extractor.visit_block(fn_block);
@@ -364,7 +349,6 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
         }
     }
 
-    // Detect tenant_id scope for runtime enforcement.
     let requires_tenant_scope = if !attrs.is_public && !attrs.is_unscoped {
         let mut tenant_extractor = SqlStringExtractor::new();
         tenant_extractor.visit_block(fn_block);
@@ -373,10 +357,8 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
         false
     };
 
-    // Get remaining params for args struct
     let arg_params: Vec<_> = params.iter().skip(1).cloned().collect();
 
-    // Reject argument types that codegen cannot emit bindings for.
     for p in &arg_params {
         if let FnArg::Typed(pat_type) = p
             && let Some((reason, span)) = crate::utils::check_arg_wire_type(&pat_type.ty)
@@ -385,7 +367,6 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
         }
     }
 
-    // Build args struct fields
     let args_fields: Vec<TokenStream2> = arg_params
         .iter()
         .filter_map(|p| {
@@ -400,7 +381,6 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
         })
         .collect();
 
-    // Build destructuring for function call
     let arg_names: Vec<TokenStream2> = arg_params
         .iter()
         .filter_map(|p| {
@@ -414,11 +394,9 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
         })
         .collect();
 
-    // Get return type
     let output_type = match &input.sig.output {
         ReturnType::Default => quote! { () },
         ReturnType::Type(_, ty) => {
-            // Extract T from Result<T> or Result<T, E>
             if let Type::Path(type_path) = &**ty {
                 if let Some(segment) = type_path.path.segments.last() {
                     if segment.ident == "Result" {
@@ -443,13 +421,11 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
         }
     };
 
-    // Generate cache_ttl option
     let cache_ttl = match attrs.cache_ttl {
         Some(ttl) => quote! { Some(#ttl) },
         None => quote! { None },
     };
 
-    // Generate timeout option as Duration so all handler Info structs agree.
     let timeout = match attrs.timeout {
         Some(t) => quote! { Some(::std::time::Duration::from_secs(#t)) },
         None => quote! { None },
@@ -514,7 +490,6 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
         None => quote! { None },
     };
 
-    // Generate table_dependencies token
     let table_deps_tokens = if table_dependencies.is_empty() {
         quote! { &[] }
     } else {
@@ -522,7 +497,6 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
         quote! { &[#(#table_strs),*] }
     };
 
-    // Generate selected_columns token
     let selected_cols_tokens = if selected_columns.is_empty() {
         quote! { &[] }
     } else {
@@ -530,9 +504,8 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
         quote! { &[#(#col_strs),*] }
     };
 
-    // A single non-primitive struct argument is passed through to the handler
-    // as the args type directly. Primitives and collections get wrapped in a
-    // generated #StructNameArgs struct so RPC payloads stay JSON-named.
+    // Single non-primitive struct args are passed through directly; primitives and
+    // collections are wrapped in a generated #StructNameArgs to keep RPC payloads JSON-named.
     let single_custom_args_type: Option<&Type> = if arg_params.len() == 1 {
         if let FnArg::Typed(pat_type) = &arg_params[0] {
             if crate::utils::is_primitive_arg_type(&pat_type.ty) {
@@ -547,9 +520,6 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
         None
     };
 
-    // Generate handler struct definitions and execute call for the hidden module.
-    // The struct and its args live in a private per-handler module; the original function
-    // stays at the parent level and is called via super::.
     let (module_struct_defs, args_type, execute_call) = if args_fields.is_empty() {
         (
             quote! { pub struct #struct_name; },
@@ -577,9 +547,7 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
         )
     };
 
-    // Generate the inner function - always take context by reference
     let inner_fn = if is_ref {
-        // User already uses reference, keep the type as-is
         if arg_names.is_empty() {
             quote! {
                 #(#fn_attrs)*
@@ -591,18 +559,15 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
                 #vis async fn #fn_name(#ctx_name: #ctx_type, #(#arg_params),*) -> forge::forge_core::Result<#output_type> #fn_block
             }
         }
+    } else if arg_names.is_empty() {
+        quote! {
+            #(#fn_attrs)*
+            #vis async fn #fn_name(#ctx_name: &#ctx_type) -> forge::forge_core::Result<#output_type> #fn_block
+        }
     } else {
-        // User uses value, convert to reference in the generated function
-        if arg_names.is_empty() {
-            quote! {
-                #(#fn_attrs)*
-                #vis async fn #fn_name(#ctx_name: &#ctx_type) -> forge::forge_core::Result<#output_type> #fn_block
-            }
-        } else {
-            quote! {
-                #(#fn_attrs)*
-                #vis async fn #fn_name(#ctx_name: &#ctx_type, #(#arg_params),*) -> forge::forge_core::Result<#output_type> #fn_block
-            }
+        quote! {
+            #(#fn_attrs)*
+            #vis async fn #fn_name(#ctx_name: &#ctx_type, #(#arg_params),*) -> forge::forge_core::Result<#output_type> #fn_block
         }
     };
 
@@ -670,5 +635,3 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
         }
     })
 }
-
-// Tests for to_pascal_case and parse_duration are in utils.rs (single source of truth).

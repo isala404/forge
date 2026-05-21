@@ -217,7 +217,6 @@ fn days_to_date(days: u64) -> (u64, u64, u64) {
 
 static CORRELATION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Generate a correlation ID (counter + random suffix).
 fn generate_correlation_id() -> String {
     let counter = CORRELATION_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("dx-{counter}-{:08x}", rand_u32())
@@ -505,7 +504,7 @@ impl ForgeSignals {
         }
     }
 
-    /// Send a Web Vitals-style measurement. Batches with track events.
+    /// Send a Web Vitals-style measurement; batches with track events.
     pub fn vital(&self, name: &str, value: f64, rating: Option<&str>) {
         let mut props = serde_json::Map::new();
         props.insert(
@@ -568,7 +567,6 @@ impl ForgeSignals {
         }
     }
 
-    /// Identify the current user (links session to user).
     pub fn identify(&self, user_id: &str, traits: Value) {
         self.track_with_properties(
             "identify",
@@ -576,7 +574,6 @@ impl ForgeSignals {
         );
     }
 
-    /// Track a page view.
     pub async fn page(&self, url_path: &str) {
         let (base_url, session_id, utm) = {
             let mut inner = self.inner.borrow_mut();
@@ -602,7 +599,6 @@ impl ForgeSignals {
         }
     }
 
-    /// Capture a frontend error with optional context.
     pub fn capture_error(&self, error: impl Into<SignalError>, context: Option<Value>) {
         let error = error.into();
         let this = self.clone();
@@ -664,7 +660,6 @@ impl ForgeSignals {
         }
     }
 
-    /// Generate a correlation ID for the next RPC call.
     pub fn next_correlation_id(&self) -> String {
         let id = generate_correlation_id();
         self.inner.borrow_mut().last_correlation_id = Some(id.clone());
@@ -676,7 +671,6 @@ impl ForgeSignals {
         self.inner.borrow().session_id.clone()
     }
 
-    /// Flush queued events to the server.
     pub async fn flush(&self) {
         let (url, mut events, session_id) = {
             let mut inner = self.inner.borrow_mut();
@@ -728,7 +722,6 @@ impl ForgeSignals {
         }
     }
 
-    /// Clean up timers and flush remaining events.
     pub fn destroy(&self) {
         self.inner.borrow_mut().destroyed = true;
         flush_beacon(self);
@@ -762,7 +755,6 @@ impl ForgeSignals {
     }
 }
 
-/// Send remaining events via beacon API on page unload (WASM only).
 fn flush_beacon(signals: &ForgeSignals) {
     let (url, events, session_id) = {
         let mut inner = signals.inner.borrow_mut();
@@ -805,7 +797,6 @@ fn flush_beacon(signals: &ForgeSignals) {
     }
 }
 
-/// Get current page URL if in browser.
 fn current_page_url() -> Option<String> {
     #[cfg(target_arch = "wasm32")]
     {
@@ -818,7 +809,6 @@ fn current_page_url() -> Option<String> {
     }
 }
 
-/// Extract UTM parameters from query string.
 fn extract_utm() -> Option<Value> {
     #[cfg(target_arch = "wasm32")]
     {
@@ -867,7 +857,6 @@ pub(crate) fn platform_tag() -> &'static str {
     }
 }
 
-/// POST to a signal endpoint and return the JSON response.
 async fn post_signal(
     base_url: &str,
     path: &str,
@@ -901,13 +890,10 @@ async fn post_signal(
     }
 }
 
-/// Hook to access the signals instance from within a ForgeProvider.
 pub fn use_signals() -> ForgeSignals {
     use_context::<ForgeSignals>()
 }
 
-/// Setup auto-capture features (page views, errors, periodic flush, unload flush).
-/// Called from ForgeProvider after signals are provided as context.
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn setup_auto_capture(signals: ForgeSignals) {
     use wasm_bindgen::closure::Closure;
@@ -918,7 +904,6 @@ pub(crate) fn setup_auto_capture(signals: ForgeSignals) {
 
     let flush_interval = signals.flush_interval();
 
-    // Periodic flush timer
     {
         let signals = signals.clone();
         spawn_local(async move {
@@ -942,13 +927,11 @@ pub(crate) fn setup_auto_capture(signals: ForgeSignals) {
                 None => return,
             };
 
-            // Auto page views: track initial + monkey-patch history for SPA navigation
             if signals.auto_page_views() {
                 let path = window.location().pathname().unwrap_or_else(|_| "/".to_string());
                 let signals_page = signals.clone();
                 spawn_local(async move { signals_page.page(&path).await; });
 
-                // Listen for navigation events (pushState, replaceState, popstate)
                 {
                     let signals = signals.clone();
                     let closure = Closure::<dyn Fn()>::new(move || {
@@ -970,14 +953,10 @@ pub(crate) fn setup_auto_capture(signals: ForgeSignals) {
                     closure.forget();
                 }
 
-                // Monkey-patch pushState/replaceState to dispatch custom events
-                // Only fires when the URL actually changes to avoid redundant page views
                 forge_patch_history();
             }
 
-            // Auto error capture
             if signals.auto_capture_errors() {
-                // window.onerror
                 {
                     let signals = signals.clone();
                     let closure = Closure::<dyn Fn(web_sys::ErrorEvent)>::new(move |e: web_sys::ErrorEvent| {
@@ -1044,7 +1023,6 @@ pub(crate) fn setup_auto_capture(signals: ForgeSignals) {
                 closure.forget();
             }
 
-            // Network status events
             if signals.auto_network_events() {
                 let online_signals = signals.clone();
                 let online = Closure::<dyn Fn()>::new(move || {
@@ -1099,7 +1077,6 @@ pub(crate) fn setup_auto_capture(signals: ForgeSignals) {
 
     let flush_interval = signals.flush_interval();
 
-    // Periodic flush timer using tokio
     {
         let signals = signals.clone();
         spawn(async move {

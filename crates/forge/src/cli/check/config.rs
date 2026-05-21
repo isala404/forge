@@ -31,7 +31,6 @@ impl CheckCommand {
             }
         };
 
-        // Check [project] section
         if let Some(project) = config.get("project") {
             if project.get("name").is_some() {
                 result.pass("[project] section configured");
@@ -48,7 +47,6 @@ impl CheckCommand {
             );
         }
 
-        // Check [database] section
         if let Some(db) = config.get("database") {
             if let Some(url) = db.get("url").and_then(|v| v.as_str()) {
                 if url.starts_with("${") || url.starts_with("postgres://") {
@@ -72,7 +70,6 @@ impl CheckCommand {
             );
         }
 
-        // Check [gateway] section
         if let Some(gateway) = config.get("gateway")
             && let Some(port) = gateway.get("port")
             && let Some(p) = port.as_integer()
@@ -87,15 +84,10 @@ impl CheckCommand {
             }
         }
 
-        // Strict-shape parse: catches half-set TLS, OAuth-without-secret,
-        // file-size-exceeds-body-size, and other cross-field invariants that
-        // the loose `toml::Value` walk above doesn't see. Without this,
-        // `forge check` would silently accept configs that startup later
-        // rejects.
-        //
-        // When env vars are unresolved (e.g. ${JWT_SECRET} not set in CI),
-        // validation may reject placeholder values. Downgrade to a warning
-        // so `forge check` remains useful in environments without secrets.
+        // Strict parse catches cross-field invariants the loose toml::Value walk
+        // misses (half-set TLS, file-size > body-size, etc.). Downgrade to a
+        // warning when env vars are unresolved so `forge check` stays useful in
+        // environments without secrets.
         let has_unresolved_vars = content.contains("${");
         match forge_core::config::ForgeConfig::parse_toml(&content) {
             Ok(_) => result.pass("forge.toml passed strict validation"),
@@ -109,7 +101,6 @@ impl CheckCommand {
             ),
         }
 
-        // Check [observability] section: warn on full sampling.
         if let Some(obs) = config.get("observability")
             && let Some(ratio) = obs.get("sampling_ratio").and_then(|v| v.as_float())
             && ratio >= 1.0
@@ -148,7 +139,6 @@ impl CheckCommand {
             }
         };
 
-        // Check for forge/forgex dependency
         let has_forge_dep = cargo
             .get("dependencies")
             .and_then(|deps| deps.get("forge").or_else(|| deps.get("forgex")))

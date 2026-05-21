@@ -13,12 +13,10 @@ use serde::{Deserialize, Serialize};
 pub struct Cursor(String);
 
 impl Cursor {
-    /// Create a new cursor from an opaque string.
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
 
-    /// Get the raw cursor string.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -28,14 +26,11 @@ impl Cursor {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Page<T> {
-    /// Items in this page.
     pub items: Vec<T>,
-    /// Pagination metadata.
     pub page_info: PageInfo,
 }
 
 impl<T> Page<T> {
-    /// Create a new page of results.
     pub fn new(items: Vec<T>, page_info: PageInfo) -> Self {
         Self { items, page_info }
     }
@@ -45,18 +40,14 @@ impl<T> Page<T> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct PageInfo {
-    /// Whether more items exist after this page.
     pub has_next_page: bool,
-    /// Cursor pointing to the last item in this page.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_cursor: Option<Cursor>,
-    /// Total number of items across all pages, if available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_count: Option<i64>,
 }
 
 impl PageInfo {
-    /// Create a PageInfo indicating no more pages.
     pub fn last_page() -> Self {
         Self {
             has_next_page: false,

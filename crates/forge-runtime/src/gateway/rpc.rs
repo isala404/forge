@@ -279,8 +279,6 @@ mod tests {
         assert_eq!(response.error.as_ref().unwrap().code, "NOT_FOUND");
     }
 
-    // ── is_valid_function_name ──────────────────────────────────────────
-
     #[test]
     fn function_name_accepts_typical_identifiers() {
         assert!(is_valid_function_name("get_user"));
@@ -316,8 +314,6 @@ mod tests {
         assert!(!is_valid_function_name("question?"));
     }
 
-    // ── extract_user_agent ──────────────────────────────────────────────
-
     #[test]
     fn user_agent_returns_value_when_header_present() {
         let mut headers = HeaderMap::new();
@@ -330,8 +326,6 @@ mod tests {
         let headers = HeaderMap::new();
         assert_eq!(extract_user_agent(&headers), None);
     }
-
-    // ── extract_correlation_id ──────────────────────────────────────────
 
     #[test]
     fn correlation_id_round_trips_typical_value() {
@@ -368,8 +362,6 @@ mod tests {
         let headers = HeaderMap::new();
         assert_eq!(extract_correlation_id(&headers), None);
     }
-
-    // ── build_metadata ──────────────────────────────────────────────────
 
     #[test]
     fn build_metadata_preserves_uuid_request_id_when_parseable() {

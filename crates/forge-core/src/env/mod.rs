@@ -1,48 +1,8 @@
-//! Typesafe environment variable access for FORGE functions.
+//! Typesafe environment variable access for handler contexts.
 //!
-//! This module provides a centralized, testable abstraction for reading environment
-//! variables. Instead of scattering `std::env::var()` calls throughout your functions,
-//! use `ctx.env()` methods which:
-//!
-//! - Provide type-safe parsing with clear error messages
-//! - Are easily mockable in tests via test context builders
-//! - Record which variables were accessed (for debugging)
-//!
-//! # Example
-//!
-//! ```ignore
-//! #[forge::mutation]
-//! async fn call_stripe(ctx: &MutationContext, input: ChargeInput) -> Result<Charge> {
-//!     // Get required env var (returns error if missing)
-//!     let api_key = ctx.env_require("STRIPE_API_KEY")?;
-//!
-//!     // Get optional env var with default
-//!     let timeout = ctx.env_or("STRIPE_TIMEOUT", "30");
-//!
-//!     // Get and parse to specific type
-//!     let max_retries: u32 = ctx.env_parse("STRIPE_MAX_RETRIES")?;
-//!
-//!     // Make HTTP call
-//!     let response = ctx.http().post("https://api.stripe.com/...").send().await?;
-//!
-//!     // ...
-//! }
-//! ```
-//!
-//! # Testing
-//!
-//! ```ignore
-//! #[test]
-//! fn test_stripe_mutation() {
-//!     let ctx = TestMutationContext::builder()
-//!         .with_env("STRIPE_API_KEY", "sk_test_xxx")
-//!         .with_env("STRIPE_TIMEOUT", "60")
-//!         .mock_http_json("https://api.stripe.com/*", json!({"id": "ch_123"}))
-//!         .build();
-//!
-//!     // Function will use mocked env vars and HTTP responses
-//! }
-//! ```
+//! Use `ctx.env_require()` / `ctx.env_or()` / `ctx.env_parse()` instead of
+//! `std::env::var()`. Test contexts inject mock values via `.with_env()` and
+//! track which keys were accessed for test assertions.
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -51,14 +11,9 @@ use std::sync::{Arc, RwLock};
 use crate::{ForgeError, Result};
 
 /// Trait for environment variable access.
-///
-/// This abstraction allows production code to use real environment variables
-/// while tests can inject mock values.
 pub trait EnvProvider: Send + Sync {
-    /// Get an environment variable by name.
     fn get(&self, key: &str) -> Option<String>;
 
-    /// Check if an environment variable is set.
     fn contains(&self, key: &str) -> bool {
         self.get(key).is_some()
     }
@@ -69,12 +24,11 @@ pub trait EnvProvider: Send + Sync {
 pub struct RealEnvProvider;
 
 impl RealEnvProvider {
-    /// Create a new real environment provider.
     pub fn new() -> Self {
         Self
     }
 
-    /// Return a shared `Arc` to the singleton instance.
+    /// Returns a shared `Arc` to the singleton instance.
     pub fn shared() -> Arc<dyn EnvProvider> {
         static INSTANCE: std::sync::OnceLock<Arc<dyn EnvProvider>> = std::sync::OnceLock::new();
         Arc::clone(INSTANCE.get_or_init(|| Arc::new(Self)))
@@ -89,18 +43,15 @@ impl EnvProvider for RealEnvProvider {
 
 /// Mock environment provider for testing.
 ///
-/// Records which variables were accessed, useful for verifying that
-/// functions read the expected environment variables.
+/// Tracks which keys were accessed, so tests can assert on that with
+/// `assert_accessed` / `assert_not_accessed`.
 #[derive(Debug, Clone, Default)]
 pub struct MockEnvProvider {
-    /// Configured environment variables.
     vars: HashMap<String, String>,
-    /// Keys that were accessed (for verification).
     accessed: Arc<RwLock<Vec<String>>>,
 }
 
 impl MockEnvProvider {
-    /// Create a new mock provider with no variables.
     pub fn new() -> Self {
         Self {
             vars: HashMap::new(),
@@ -108,7 +59,6 @@ impl MockEnvProvider {
         }
     }
 
-    /// Create a mock provider with the given variables.
     pub fn with_vars(vars: HashMap<String, String>) -> Self {
         Self {
             vars,
@@ -116,22 +66,18 @@ impl MockEnvProvider {
         }
     }
 
-    /// Set an environment variable.
     pub fn set(&mut self, key: impl Into<String>, value: impl Into<String>) {
         self.vars.insert(key.into(), value.into());
     }
 
-    /// Remove an environment variable.
     pub fn remove(&mut self, key: &str) {
         self.vars.remove(key);
     }
 
-    /// Get all configured variables.
     pub fn all(&self) -> &HashMap<String, String> {
         &self.vars
     }
 
-    /// Get list of accessed variable names.
     pub fn accessed_keys(&self) -> Vec<String> {
         self.accessed
             .read()
@@ -139,7 +85,6 @@ impl MockEnvProvider {
             .clone()
     }
 
-    /// Check if a specific key was accessed.
     pub fn was_accessed(&self, key: &str) -> bool {
         self.accessed
             .read()
@@ -147,7 +92,6 @@ impl MockEnvProvider {
             .contains(&key.to_string())
     }
 
-    /// Clear the accessed keys list.
     pub fn clear_accessed(&self) {
         self.accessed
             .write()
@@ -155,7 +99,6 @@ impl MockEnvProvider {
             .clear();
     }
 
-    /// Assert that a specific key was accessed.
     pub fn assert_accessed(&self, key: &str) {
         assert!(
             self.was_accessed(key),
@@ -165,7 +108,6 @@ impl MockEnvProvider {
         );
     }
 
-    /// Assert that a specific key was NOT accessed.
     pub fn assert_not_accessed(&self, key: &str) {
         assert!(
             !self.was_accessed(key),
@@ -177,7 +119,6 @@ impl MockEnvProvider {
 
 impl EnvProvider for MockEnvProvider {
     fn get(&self, key: &str) -> Option<String> {
-        // Record access
         self.accessed
             .write()
             .expect("env accessed lock poisoned")
@@ -187,43 +128,25 @@ impl EnvProvider for MockEnvProvider {
 }
 
 /// Extension methods for environment variable access on contexts.
-///
-/// This is implemented as a separate trait to avoid code duplication
-/// across different context types.
 pub trait EnvAccess {
-    /// Get the environment provider.
     fn env_provider(&self) -> &dyn EnvProvider;
 
-    /// Get an environment variable.
-    ///
-    /// Returns `None` if the variable is not set.
     fn env(&self, key: &str) -> Option<String> {
         self.env_provider().get(key)
     }
 
-    /// Get an environment variable with a default value.
-    ///
-    /// Returns the default if the variable is not set.
     fn env_or(&self, key: &str, default: &str) -> String {
         self.env_provider()
             .get(key)
             .unwrap_or_else(|| default.to_string())
     }
 
-    /// Get a required environment variable.
-    ///
-    /// Returns an error if the variable is not set.
     fn env_require(&self, key: &str) -> Result<String> {
         self.env_provider().get(key).ok_or_else(|| {
             ForgeError::config(format!("Required environment variable '{}' not set", key))
         })
     }
 
-    /// Get an environment variable and parse it to the specified type.
-    ///
-    /// Returns an error if:
-    /// - The variable is not set
-    /// - The value cannot be parsed to the target type
     fn env_parse<T: FromStr>(&self, key: &str) -> Result<T>
     where
         T::Err: std::fmt::Display,
@@ -237,10 +160,7 @@ pub trait EnvAccess {
         })
     }
 
-    /// Get an environment variable and parse it, with a default.
-    ///
-    /// Returns the default if the variable is not set.
-    /// Returns an error only if the variable IS set but cannot be parsed.
+    /// Returns the default when unset; errors only if the variable is set but unparseable.
     fn env_parse_or<T: FromStr>(&self, key: &str, default: T) -> Result<T>
     where
         T::Err: std::fmt::Display,
@@ -256,7 +176,6 @@ pub trait EnvAccess {
         }
     }
 
-    /// Check if an environment variable is set.
     fn env_contains(&self, key: &str) -> bool {
         self.env_provider().contains(key)
     }
@@ -274,7 +193,6 @@ mod tests {
 
     #[test]
     fn test_real_env_provider() {
-        // Set a test env var
         unsafe {
             std::env::set_var("FORGE_TEST_VAR", "test_value");
         }
@@ -287,7 +205,6 @@ mod tests {
         assert!(provider.contains("FORGE_TEST_VAR"));
         assert!(provider.get("FORGE_NONEXISTENT_VAR").is_none());
 
-        // Cleanup
         unsafe {
             std::env::remove_var("FORGE_TEST_VAR");
         }
@@ -303,10 +220,9 @@ mod tests {
         assert_eq!(provider.get("TIMEOUT"), Some("30".to_string()));
         assert!(provider.get("MISSING").is_none());
 
-        // Check access tracking
         assert!(provider.was_accessed("API_KEY"));
         assert!(provider.was_accessed("TIMEOUT"));
-        assert!(provider.was_accessed("MISSING")); // Even failed lookups are tracked
+        assert!(provider.was_accessed("MISSING"));
 
         provider.assert_accessed("API_KEY");
     }
@@ -335,7 +251,6 @@ mod tests {
         assert!(provider.accessed_keys().is_empty());
     }
 
-    // Test EnvAccess trait methods using a simple wrapper
     struct TestEnvContext {
         provider: MockEnvProvider,
     }
@@ -355,34 +270,27 @@ mod tests {
 
         let ctx = TestEnvContext { provider };
 
-        // env()
         assert_eq!(ctx.env("PORT"), Some("8080".to_string()));
         assert!(ctx.env("MISSING").is_none());
 
-        // env_or()
         assert_eq!(ctx.env_or("PORT", "3000"), "8080");
         assert_eq!(ctx.env_or("MISSING", "default"), "default");
 
-        // env_require()
         assert_eq!(ctx.env_require("PORT").unwrap(), "8080");
         assert!(ctx.env_require("MISSING").is_err());
 
-        // env_parse()
         let port: u16 = ctx.env_parse("PORT").unwrap();
         assert_eq!(port, 8080);
 
         let debug: bool = ctx.env_parse("DEBUG").unwrap();
         assert!(debug);
 
-        // Parse error
         let bad: Result<u32> = ctx.env_parse("BAD_NUMBER");
         assert!(bad.is_err());
 
-        // env_parse_or()
         let port: u16 = ctx.env_parse_or("MISSING", 3000).unwrap();
         assert_eq!(port, 3000);
 
-        // env_contains()
         assert!(ctx.env_contains("PORT"));
         assert!(!ctx.env_contains("MISSING"));
     }
@@ -433,7 +341,6 @@ mod tests {
     #[test]
     fn mock_assert_not_accessed_passes_when_untouched() {
         let provider = MockEnvProvider::new();
-        // Must not panic — this is the happy path of assert_not_accessed.
         provider.assert_not_accessed("NEVER_READ");
     }
 

@@ -54,7 +54,6 @@ pub struct WorkflowExecutor {
 }
 
 impl WorkflowExecutor {
-    /// Create a new workflow executor.
     pub fn new(
         registry: Arc<WorkflowRegistry>,
         pool: sqlx::PgPool,
@@ -71,7 +70,6 @@ impl WorkflowExecutor {
         }
     }
 
-    /// Attach a KV store handle so workflow handlers can call `ctx.kv()`.
     pub fn with_kv(mut self, kv: Arc<dyn KvHandle>) -> Self {
         self.kv = Some(kv);
         self
@@ -142,7 +140,6 @@ impl WorkflowExecutor {
         Ok(run_id)
     }
 
-    /// Execute a workflow, optionally resuming from persisted state.
     async fn execute_workflow(
         &self,
         run_id: Uuid,
@@ -290,17 +287,14 @@ impl WorkflowExecutor {
         }
     }
 
-    /// Resume a workflow from where it left off.
     pub async fn resume(&self, run_id: Uuid) -> forge_core::Result<WorkflowResult> {
         self.resume_internal(run_id, false).await
     }
 
-    /// Resume a workflow after a sleep timer expired.
     pub async fn resume_from_sleep(&self, run_id: Uuid) -> forge_core::Result<WorkflowResult> {
         self.resume_internal(run_id, true).await
     }
 
-    /// Internal resume logic with version+signature validation.
     async fn resume_internal(
         &self,
         run_id: Uuid,
@@ -319,9 +313,7 @@ impl WorkflowExecutor {
             | WorkflowStatus::Waiting
             | WorkflowStatus::BlockedMissingVersion
             | WorkflowStatus::BlockedSignatureMismatch
-            | WorkflowStatus::BlockedMissingHandler => {
-                // Can attempt resume (blocked runs will be re-validated)
-            }
+            | WorkflowStatus::BlockedMissingHandler => {}
             status if status.is_terminal() => {
                 return Err(forge_core::ForgeError::Validation(format!(
                     "Cannot resume workflow in {} state",
@@ -331,7 +323,6 @@ impl WorkflowExecutor {
             _ => {}
         }
 
-        // Validate version+signature against registry
         match self.registry.validate_resume(
             &record.workflow_name,
             &record.workflow_version,
@@ -372,7 +363,6 @@ impl WorkflowExecutor {
         }
     }
 
-    /// Get workflow status.
     pub async fn status(&self, run_id: Uuid) -> forge_core::Result<WorkflowRecord> {
         self.get_workflow(run_id).await
     }
@@ -441,7 +431,6 @@ impl WorkflowExecutor {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Run compensation handlers in reverse completion order.
     async fn run_compensation(
         &self,
         run_id: Uuid,
@@ -484,7 +473,6 @@ impl WorkflowExecutor {
         Ok(())
     }
 
-    /// Get workflow steps from database.
     async fn get_workflow_steps(
         &self,
         workflow_run_id: Uuid,
@@ -524,7 +512,6 @@ impl WorkflowExecutor {
             .collect()
     }
 
-    /// Update step status.
     async fn update_step_status(
         &self,
         workflow_run_id: Uuid,
@@ -548,7 +535,6 @@ impl WorkflowExecutor {
         Ok(())
     }
 
-    /// Persist user-defined saved_state to the database on suspension.
     // forge_workflow_runs is a runtime-owned system table; offline .sqlx cache
     // doesn't always include it.
     #[allow(clippy::disallowed_methods)]
@@ -575,7 +561,6 @@ impl WorkflowExecutor {
         Ok(())
     }
 
-    /// Load user-defined saved_state from the database on resume.
     #[allow(clippy::disallowed_methods)]
     async fn load_saved_state(
         &self,
@@ -595,7 +580,6 @@ impl WorkflowExecutor {
         }
     }
 
-    /// Insert a workflow run row on the supplied connection.
     async fn insert_workflow_record(
         conn: &mut sqlx::PgConnection,
         record: &WorkflowRecord,
@@ -626,7 +610,6 @@ impl WorkflowExecutor {
         Ok(())
     }
 
-    /// Get workflow record from database.
     async fn get_workflow(&self, run_id: Uuid) -> forge_core::Result<WorkflowRecord> {
         let row = sqlx::query!(
             r#"
@@ -703,7 +686,6 @@ impl WorkflowExecutor {
         Ok(())
     }
 
-    /// Mark workflow as completed (only from 'running' state).
     async fn complete_workflow(
         &self,
         run_id: Uuid,
@@ -728,7 +710,6 @@ impl WorkflowExecutor {
         Ok(())
     }
 
-    /// Mark workflow as failed (only from valid states).
     async fn fail_workflow(&self, run_id: Uuid, error: &str) -> forge_core::Result<()> {
         let result = sqlx::query!(
             "UPDATE forge_workflow_runs SET status = 'failed', error = $1, completed_at = NOW() WHERE id = $2 AND status IN ('running', 'sleeping', 'waiting', 'pending')",
@@ -749,8 +730,6 @@ impl WorkflowExecutor {
         Ok(())
     }
 
-    /// Mark a workflow as blocked (non-terminal). The run stays resumable
-    /// and will be retried when a matching handler is deployed.
     async fn block_workflow(
         &self,
         run_id: Uuid,
@@ -773,7 +752,6 @@ impl WorkflowExecutor {
         Ok(())
     }
 
-    /// Save step record.
     pub async fn save_step(&self, step: &WorkflowStepRecord) -> forge_core::Result<()> {
         sqlx::query!(
             r#"

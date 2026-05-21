@@ -62,7 +62,6 @@ pub fn cron_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         Err(e) => return TokenStream::from(e.into_compile_error()),
     };
 
-    // Extract the positional schedule string (first literal argument)
     let mut positional_schedule: Option<String> = None;
     let mut remaining_args: Vec<NestedMeta> = Vec::new();
 
@@ -81,14 +80,10 @@ pub fn cron_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         Err(e) => return TokenStream::from(e.write_errors()),
     };
 
-    // Resolve the schedule from the three sources: positional literal,
-    // `schedule = "..."`, `every = "..."`, and `daily_at = "..."`.
-    // Only one may be active at a time.
     let named_schedule = darling_attrs.schedule;
     let every = darling_attrs.every;
     let daily_at = darling_attrs.daily_at;
 
-    // Count how many schedule sources were provided.
     let source_count = [
         positional_schedule.is_some(),
         named_schedule.is_some(),
@@ -108,7 +103,6 @@ pub fn cron_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         .into();
     }
 
-    // Convert sugar forms to raw cron expressions.
     let resolved_schedule: Option<String> = if let Some(ref e) = every {
         match every_to_cron(e) {
             Ok(expr) => Some(expr),
@@ -153,7 +147,6 @@ pub fn cron_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let schedule = attrs.schedule.unwrap_or_else(|| "* * * * *".to_string());
 
-    // Validate cron expression at compile time to prevent runtime panics.
     // Normalize 5-part to 6-part (prepend seconds) to match what CronSchedule::new does.
     {
         let parts: Vec<&str> = schedule.split_whitespace().collect();
@@ -240,5 +233,3 @@ pub fn cron_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     TokenStream::from(expanded)
 }
-
-// Tests for to_pascal_case and parse_duration are in utils.rs (single source of truth).

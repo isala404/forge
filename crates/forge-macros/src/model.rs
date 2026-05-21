@@ -150,8 +150,6 @@ use crate::utils::{pluralize, to_snake_case};
 mod tests {
     use super::*;
 
-    // --- to_snake_case ---
-
     #[test]
     fn snake_case_simple() {
         assert_eq!(to_snake_case("User"), "user");
@@ -165,8 +163,6 @@ mod tests {
         assert_eq!(to_snake_case("item"), "item");
     }
 
-    // --- pluralize ---
-
     #[test]
     fn pluralize_regular_nouns() {
         assert_eq!(pluralize("user"), "users");
@@ -178,7 +174,6 @@ mod tests {
 
     #[test]
     fn pluralize_sibilant_endings() {
-        // Words ending in s, sh, ch, x, z get "es"
         assert_eq!(pluralize("address"), "addresses");
         assert_eq!(pluralize("crash"), "crashes");
         assert_eq!(pluralize("match"), "matches");
@@ -188,7 +183,6 @@ mod tests {
 
     #[test]
     fn pluralize_consonant_y() {
-        // Consonant + y -> ies
         assert_eq!(pluralize("category"), "categories");
         assert_eq!(pluralize("company"), "companies");
         assert_eq!(pluralize("policy"), "policies");
@@ -197,14 +191,11 @@ mod tests {
 
     #[test]
     fn pluralize_vowel_y() {
-        // Vowel + y -> ys
         assert_eq!(pluralize("key"), "keys");
         assert_eq!(pluralize("day"), "days");
         assert_eq!(pluralize("boy"), "boys");
         assert_eq!(pluralize("buy"), "buys");
     }
-
-    // --- extract_string_value ---
 
     #[test]
     fn extract_string_value_valid() {

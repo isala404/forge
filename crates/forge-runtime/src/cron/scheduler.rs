@@ -26,7 +26,6 @@ pub enum CronStatus {
 }
 
 impl CronStatus {
-    /// Convert to string for database storage.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Pending => "pending",
@@ -64,34 +63,23 @@ impl FromStr for CronStatus {
     }
 }
 
-/// A cron run record from the database.
+/// A cron run record in the database.
 #[derive(Debug, Clone)]
 pub struct CronRecord {
-    /// Run ID.
     pub id: Uuid,
-    /// Cron name.
     pub cron_name: String,
-    /// Scheduled time.
     pub scheduled_time: DateTime<Utc>,
-    /// Timezone.
     pub timezone: String,
-    /// Current status.
     pub status: CronStatus,
-    /// Node that executed the cron.
     pub node_id: Option<Uuid>,
-    /// When execution started.
     pub started_at: Option<DateTime<Utc>>,
-    /// When execution completed.
     pub completed_at: Option<DateTime<Utc>>,
-    /// Error message if failed.
     pub error: Option<String>,
-    /// Subject (user/service) that triggered this run, for per-tenant audit.
-    /// Mirrors `forge_jobs.owner_subject`. NULL for system-scheduled runs.
+    /// Mirrors `forge_jobs.owner_subject`; NULL for system-scheduled runs.
     pub owner_subject: Option<String>,
 }
 
 impl CronRecord {
-    /// Create a new pending cron record.
     pub fn new(
         cron_name: impl Into<String>,
         scheduled_time: DateTime<Utc>,
@@ -112,26 +100,16 @@ impl CronRecord {
     }
 }
 
-/// Configuration for the cron runner.
 #[derive(Clone)]
 pub struct CronRunnerConfig {
-    /// How often to check for due crons.
     pub poll_interval: Duration,
-    /// Node ID for this runner.
     pub node_id: Uuid,
     /// Static leadership fallback when no election handle is configured.
     pub is_leader: bool,
-    /// Dynamic leader election handle.
     pub leader_election: Option<Arc<LeaderElection>>,
-    /// Threshold after which a running cron slot is considered stale.
     pub run_stale_threshold: Duration,
-    /// Maximum catch-up runs enqueued per cron per tick.
-    ///
-    /// After a node restart, every catch-up-enabled cron may have a large
-    /// backlog of missed executions. Without this limit, the scheduler would
-    /// attempt to enqueue all of them in a single tick, creating a job storm.
-    /// Setting a per-tick cap lets the worker pool absorb catch-up work
-    /// incrementally across consecutive ticks instead of all at once.
+    /// Per-tick cap on catch-up enqueues. Prevents a job storm on node restart when the
+    /// backlog is large; remaining slots drain across subsequent ticks.
     pub max_catch_up_per_tick: u32,
 }
 
@@ -148,12 +126,8 @@ impl Default for CronRunnerConfig {
     }
 }
 
-/// Cron scheduler and executor.
-///
-/// The scheduler calculates run times and claims execution slots via
-/// `forge_cron_runs`. Actual execution is dispatched as a `$cron:{name}`
-/// job through the shared worker pool, giving crons retry, timeout,
-/// and distributed execution for free.
+/// Schedules cron runs by claiming slots in `forge_cron_runs` and dispatching
+/// `$cron:{name}` jobs through the shared worker pool.
 pub struct CronRunner {
     registry: Arc<CronRegistry>,
     pool: sqlx::PgPool,
@@ -163,7 +137,6 @@ pub struct CronRunner {
 }
 
 impl CronRunner {
-    /// Create a new cron runner.
     pub fn new(
         registry: Arc<CronRegistry>,
         pool: sqlx::PgPool,
@@ -179,7 +152,6 @@ impl CronRunner {
         }
     }
 
-    /// Start the cron runner loop.
     pub async fn run(&self) -> forge_core::Result<()> {
         {
             let mut running = self.is_running.write().await;
@@ -209,7 +181,6 @@ impl CronRunner {
         Ok(())
     }
 
-    /// Stop the cron runner.
     pub async fn stop(&self) {
         let mut running = self.is_running.write().await;
         *running = false;
@@ -242,7 +213,6 @@ impl CronRunner {
         }
     }
 
-    /// Execute one tick of the scheduler.
     async fn tick(&self) -> forge_core::Result<()> {
         let tick_span = tracing::info_span!(
             "cron.tick",
@@ -253,7 +223,6 @@ impl CronRunner {
 
         async {
             let now = Utc::now();
-            // Look back 2x poll interval to catch any scheduled times we might have missed
             let window_start = now
                 - chrono::Duration::from_std(self.config.poll_interval * 2)
                     .unwrap_or(chrono::Duration::seconds(2));
@@ -280,7 +249,6 @@ impl CronRunner {
                     .schedule
                     .between_in_tz(window_start, now, info.timezone);
 
-                // Record missed runs that we found
                 if scheduled_times.len() > 1 {
                     tracing::info!(
                         cron.name = info.name,
@@ -300,7 +268,6 @@ impl CronRunner {
                 }
 
                 for scheduled in scheduled_times {
-                    // Atomically claim and enqueue in a single transaction.
                     if let Ok(Some(_run_id)) =
                         self.try_claim_and_enqueue(entry, scheduled, false).await
                     {
@@ -308,7 +275,6 @@ impl CronRunner {
                     }
                 }
 
-                // Handle catch-up if enabled
                 if info.catch_up
                     && let Err(e) = self.handle_catch_up(entry).await
                 {
@@ -354,8 +320,7 @@ impl CronRunner {
             .await
             .map_err(forge_core::ForgeError::Database)?;
 
-        // Fetch the stale row's ID before overwriting it so we can cancel the
-        // orphaned job it spawned. NULL if no stale row exists for this slot.
+        // Fetch the stale row ID before overwriting so the orphaned job can be cancelled.
         let stale_run_id = sqlx::query_scalar!(
             r#"
             SELECT id FROM forge_cron_runs
@@ -372,7 +337,6 @@ impl CronRunner {
         .await
         .map_err(forge_core::ForgeError::Database)?;
 
-        // Insert new run, or reclaim stale running row if previous node crashed.
         let result = sqlx::query!(
             r#"
             INSERT INTO forge_cron_runs (id, cron_name, scheduled_time, status, node_id, started_at)
@@ -399,13 +363,12 @@ impl CronRunner {
         .map_err(forge_core::ForgeError::Database)?;
 
         if result.rows_affected() == 0 {
-            // Already claimed by another node (or completed); implicit rollback
+            // Already claimed or completed; implicit rollback on drop.
             return Ok(None);
         }
 
-        // If we reclaimed a stale slot, cancel the orphaned job the previous
-        // executor spawned. Without this, that job keeps running (or retrying)
-        // alongside the new one, producing duplicate side effects.
+        // Cancel the orphaned job from the previous executor; without this it keeps
+        // running alongside the new one, producing duplicate side effects.
         if let Some(old_run_id) = stale_run_id {
             let job_type_cancel = format!("$cron:{}", info.name);
             let old_run_id_str = old_run_id.to_string();
@@ -436,7 +399,6 @@ impl CronRunner {
             );
         }
 
-        // Enqueue the cron job in the same transaction
         let job_type = format!("$cron:{}", info.name);
         let input = serde_json::json!({
             "run_id": claim_id,
@@ -467,7 +429,6 @@ impl CronRunner {
         Ok(Some(claim_id))
     }
 
-    /// Handle catch-up for missed runs.
     async fn handle_catch_up(&self, entry: &super::registry::CronEntry) -> forge_core::Result<()> {
         let info = &entry.info;
         let now = Utc::now();
@@ -480,7 +441,6 @@ impl CronRunner {
         );
 
         async {
-            // Find the last completed run
             let last_run = sqlx::query_scalar!(
                 r#"
                 SELECT scheduled_time
@@ -497,15 +457,10 @@ impl CronRunner {
 
             let start_time = last_run.unwrap_or(now - chrono::Duration::days(1));
 
-            // Get all scheduled times between last run and now
             let missed_times = info.schedule.between_in_tz(start_time, now, info.timezone);
 
-            // Apply two caps:
-            //  1. catch_up_limit — total missed runs this cron will ever backfill
-            //     (controlled by the handler author via #[cron(catch_up_limit = N)]).
-            //  2. max_catch_up_per_tick — hard per-tick ceiling regardless of
-            //     catch_up_limit, preventing a job storm on node restart when the
-            //     backlog is large. Remaining slots are deferred to the next tick.
+            // min(catch_up_limit, max_catch_up_per_tick): the tighter of the handler-defined
+            // total cap and the per-tick ceiling that prevents job storms on restart.
             let tick_limit = info.catch_up_limit.min(self.config.max_catch_up_per_tick) as usize;
             let to_catch_up: Vec<_> = missed_times.into_iter().take(tick_limit).collect();
 
@@ -523,7 +478,6 @@ impl CronRunner {
 
             let mut executed_count = 0u32;
             for scheduled in to_catch_up {
-                // Atomically claim and enqueue in a single transaction.
                 if self
                     .try_claim_and_enqueue(entry, scheduled, true)
                     .await?
@@ -613,8 +567,6 @@ mod integration_tests {
                 schedule: CronSchedule::new(expr).expect("valid expression"),
                 ..Default::default()
             },
-            // Never invoked by the scheduler under test — the job is dispatched
-            // through the worker pool by name. A no-op handler is sufficient.
             handler: Arc::new(|_ctx| Box::pin(async { Ok(()) })),
         }
     }

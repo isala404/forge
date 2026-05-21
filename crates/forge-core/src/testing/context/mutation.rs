@@ -20,38 +20,14 @@ use crate::function::{
 };
 use crate::http::CircuitBreakerClient;
 
-/// Test context for mutation functions.
-///
-/// Provides an isolated testing environment for mutations with configurable
-/// authentication, optional database access, and mock job/workflow dispatch.
-///
-/// # Example
-///
-/// ```ignore
-/// let ctx = TestMutationContext::builder()
-///     .as_user(Uuid::new_v4())
-///     .build();
-///
-/// // Dispatch a job
-/// ctx.dispatch_job("send_email", json!({"to": "test@example.com"})).await?;
-///
-/// // Verify job was dispatched
-/// ctx.job_dispatch().assert_dispatched("send_email");
-/// ```
+/// Test context for mutation functions with mock dispatch and optional DB access.
 pub struct TestMutationContext {
-    /// Authentication context.
     pub auth: AuthContext,
-    /// Request metadata.
     pub request: RequestMetadata,
-    /// Optional database pool.
     pool: Option<PgPool>,
-    /// Mock HTTP client.
     http: Arc<MockHttp>,
-    /// Mock job dispatch for verification.
     job_dispatch: Arc<MockJobDispatch>,
-    /// Mock workflow dispatch for verification.
     workflow_dispatch: Arc<MockWorkflowDispatch>,
-    /// Mock environment provider.
     env_provider: Arc<MockEnvProvider>,
 }
 

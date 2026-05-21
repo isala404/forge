@@ -12,9 +12,8 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-/// Normalize args for deserialization.
-/// - Converts `null` to `{}` so both unit `()` and empty structs deserialize correctly.
-/// - Unwraps `{"args": ...}` or `{"input": ...}` wrapper if present (callers may use either format).
+// Converts null to {} so unit () and empty structs deserialize correctly.
+// Unwraps one-level "args"/"input" envelopes (callers may use either format).
 fn normalize_args(args: Value) -> Value {
     let unwrapped = match &args {
         Value::Object(map) if map.len() == 1 => {
@@ -35,7 +34,6 @@ fn normalize_args(args: Value) -> Value {
     }
 }
 
-/// Type alias for boxed workflow handler function.
 pub type BoxedWorkflowHandler = Arc<
     dyn Fn(
             &WorkflowContext,
@@ -46,16 +44,12 @@ pub type BoxedWorkflowHandler = Arc<
         + Sync,
 >;
 
-/// A registered workflow entry.
 pub struct WorkflowEntry {
-    /// Workflow metadata.
     pub info: WorkflowInfo,
-    /// Execution handler (takes serialized input, returns serialized output).
     pub handler: BoxedWorkflowHandler,
 }
 
 impl WorkflowEntry {
-    /// Create a new workflow entry from a ForgeWorkflow implementor.
     pub fn new<W: ForgeWorkflow>() -> Self
     where
         W::Input: serde::de::DeserializeOwned,
@@ -84,11 +78,8 @@ pub struct WorkflowVersionKey {
 
 /// Registry of all workflows, supporting multiple versions per workflow name.
 pub struct WorkflowRegistry {
-    /// All entries keyed by (name, version).
     entries: HashMap<WorkflowVersionKey, WorkflowEntry>,
-    /// Maps workflow name to its active version string.
     active_versions: HashMap<String, String>,
-    /// Controls how strictly signatures are validated on resume.
     pub signature_check: SignatureCheckMode,
 }
 
@@ -99,7 +90,6 @@ impl Default for WorkflowRegistry {
 }
 
 impl WorkflowRegistry {
-    /// Create a new empty registry.
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
@@ -108,7 +98,6 @@ impl WorkflowRegistry {
         }
     }
 
-    /// Register a workflow handler.
     pub fn register<W: ForgeWorkflow>(&mut self)
     where
         W::Input: serde::de::DeserializeOwned,
@@ -129,8 +118,7 @@ impl WorkflowRegistry {
         self.entries.insert(key, entry);
     }
 
-    /// Get the active version entry for a workflow by name.
-    /// Used when starting new runs.
+    /// Returns the active version entry for a workflow; used when starting new runs.
     pub fn get_active(&self, name: &str) -> Option<&WorkflowEntry> {
         let version = self.active_versions.get(name)?;
         let key = WorkflowVersionKey {
@@ -140,8 +128,7 @@ impl WorkflowRegistry {
         self.entries.get(&key)
     }
 
-    /// Get a specific workflow version.
-    /// Used when resuming runs pinned to a specific version.
+    /// Returns a specific workflow version; used when resuming runs pinned to a version.
     pub fn get_version(&self, name: &str, version: &str) -> Option<&WorkflowEntry> {
         let key = WorkflowVersionKey {
             name: name.to_string(),
@@ -150,7 +137,6 @@ impl WorkflowRegistry {
         self.entries.get(&key)
     }
 
-    /// Check if a specific version+signature combination is available.
     pub fn has_version_with_signature(&self, name: &str, version: &str, signature: &str) -> bool {
         self.get_version(name, version)
             .is_some_and(|entry| entry.info.signature == signature)
@@ -189,27 +175,22 @@ impl WorkflowRegistry {
         Ok(entry)
     }
 
-    /// List all registered workflow entries.
     pub fn list(&self) -> impl Iterator<Item = &WorkflowEntry> {
         self.entries.values()
     }
 
-    /// Get the number of registered workflow entries (all versions).
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// Check if the registry is empty.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    /// Get all workflow names (deduplicated).
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.active_versions.keys().map(|s| s.as_str())
     }
 
-    /// Get all registered definitions for startup persistence.
     pub fn definitions(&self) -> Vec<&WorkflowInfo> {
         self.entries.values().map(|e| &e.info).collect()
     }
@@ -226,7 +207,6 @@ impl WorkflowRegistry {
             .map(|k| (k.name.clone(), k.version.clone()))
             .collect();
 
-        // Pull aggregate stats for every non-terminal (name, version) tuple.
         let rows = sqlx::query!(
             r#"
             SELECT
@@ -267,31 +247,22 @@ impl WorkflowRegistry {
 /// [`WorkflowRegistry::drain_check`].
 #[derive(Debug, Clone)]
 pub struct DrainEntry {
-    /// Workflow name as persisted on the run.
     pub workflow_name: String,
-    /// Version as persisted on the run.
     pub workflow_version: String,
-    /// How many non-terminal runs reference this `(name, version)`.
     pub in_flight_count: u64,
-    /// Start time of the oldest non-terminal run in this group.
     pub oldest_started_at: DateTime<Utc>,
-    /// Up to 10 representative run IDs for operators to inspect.
     pub sample_run_ids: Vec<Uuid>,
 }
 
 /// Reason a workflow run cannot be resumed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResumeBlockReason {
-    /// No handler registered for this workflow name at all.
     MissingHandler,
-    /// The specific version is not present in the current binary.
     MissingVersion,
-    /// The version exists but its signature does not match.
     SignatureMismatch { expected: String, actual: String },
 }
 
 impl ResumeBlockReason {
-    /// Human-readable description for the error column.
     pub fn description(&self) -> String {
         match self {
             Self::MissingHandler => "No handler registered for this workflow".to_string(),
@@ -302,7 +273,6 @@ impl ResumeBlockReason {
         }
     }
 
-    /// Map to the corresponding blocked workflow status.
     pub fn to_blocked_status(&self) -> forge_core::workflow::WorkflowStatus {
         match self {
             Self::MissingHandler => forge_core::workflow::WorkflowStatus::BlockedMissingHandler,
@@ -387,11 +357,8 @@ mod tests {
         assert_eq!(normalize_args(json!(true)), json!(true));
     }
 
-    // --- registry construction + lookup ---
-    //
-    // ForgeWorkflow is sealed, so tests can't implement it. Instead we build
-    // entries directly through the in-module pub fields and noop handlers,
-    // exercising the same insertion shape that `register::<W>` produces.
+    // ForgeWorkflow is sealed, so tests build entries directly through pub fields
+    // with noop handlers — same insertion shape as register::<W>.
 
     fn noop_handler() -> BoxedWorkflowHandler {
         Arc::new(|_ctx, _input| Box::pin(async { Ok(Value::Null) }))
@@ -605,8 +572,6 @@ mod tests {
         assert_eq!(clone.get_active("wf").expect("active").info.version, "v2");
     }
 
-    // --- relaxed signature check mode ---
-
     #[test]
     fn validate_resume_relaxed_mode_accepts_signature_mismatch() {
         // In relaxed mode a run whose stored signature differs from the binary's
@@ -635,8 +600,6 @@ mod tests {
             other => panic!("expected MissingVersion, got {:?}", other.err()),
         }
     }
-
-    // --- ResumeBlockReason::description ---
 
     #[test]
     fn resume_block_reason_descriptions_are_human_readable() {

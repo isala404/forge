@@ -646,7 +646,6 @@ impl FunctionRouter {
         auth: &AuthContext,
         request: &RequestMetadata,
     ) -> Result<()> {
-        // Skip if no rate limit configured
         let (requests, per_secs) = match (info.rate_limit_requests, info.rate_limit_per_secs) {
             (Some(r), Some(p)) => (r, p),
             _ => return Ok(()),
@@ -657,12 +656,10 @@ impl FunctionRouter {
         let config = RateLimitConfig::new(requests, Duration::from_secs(per_secs))
             .with_key(key_type.clone());
 
-        // Build bucket key
         let bucket_key = self
             .rate_limiter
             .build_key(key_type, function_name, auth, request);
 
-        // Enforce rate limit
         self.rate_limiter.enforce(&bucket_key, &config).await?;
 
         Ok(())

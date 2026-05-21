@@ -19,57 +19,26 @@ use crate::function::AuthContext;
 /// Step state stored during testing.
 #[derive(Debug, Clone)]
 pub struct TestStepState {
-    /// Whether the step is completed.
     pub completed: bool,
-    /// Step result (if completed).
     pub result: Option<serde_json::Value>,
 }
 
 /// Test context for workflow functions.
-///
-/// Provides an isolated testing environment for workflows with step tracking,
-/// resume simulation, and durable sleep verification.
-///
-/// # Example
-///
-/// ```ignore
-/// let ctx = TestWorkflowContext::builder("account_verification")
-///     .with_run_id(Uuid::new_v4())
-///     .build();
-///
-/// ctx.record_step_start("validate_email");
-/// ctx.record_step_complete("validate_email", json!({"valid": true}));
-///
-/// assert!(ctx.is_step_completed("validate_email"));
-/// ```
 pub struct TestWorkflowContext {
-    /// Workflow run ID.
     pub run_id: Uuid,
-    /// Workflow name.
     pub workflow_name: String,
-    /// When the workflow started.
     pub started_at: DateTime<Utc>,
-    /// Deterministic workflow time.
     workflow_time: DateTime<Utc>,
-    /// Whether this is a resumed execution.
     is_resumed: bool,
-    /// Tenant ID (for multi-tenancy).
     tenant_id: Option<Uuid>,
-    /// Authentication context.
     pub auth: AuthContext,
-    /// Optional database pool.
     pool: Option<PgPool>,
-    /// Mock HTTP client.
     http: Arc<MockHttp>,
-    /// Step states.
     step_states: Arc<RwLock<HashMap<String, TestStepState>>>,
-    /// Completed step names in order.
+    /// Ordered for compensation.
     completed_steps: Arc<RwLock<Vec<String>>>,
-    /// Whether sleep was called.
     sleep_called: Arc<RwLock<bool>>,
-    /// Mock environment provider.
     env_provider: Arc<MockEnvProvider>,
-    /// User-defined saved state for persistence testing.
     saved_state: Arc<RwLock<HashMap<String, serde_json::Value>>>,
 }
 

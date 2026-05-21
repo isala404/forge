@@ -152,15 +152,12 @@ pub fn spawn_session_reaper(pool: Arc<PgPool>, timeout_mins: u32) {
 
 /// Extract the domain from a URL string (e.g. "https://google.com/search" -> "google.com").
 fn extract_domain(url: &str) -> Option<String> {
-    // Strip scheme
     let without_scheme = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
         .unwrap_or(url);
 
-    // Take everything before the first /
     let domain = without_scheme.split('/').next()?;
-    // Strip port
     let domain = domain.split(':').next()?;
 
     if domain.is_empty() {

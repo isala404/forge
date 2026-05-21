@@ -42,7 +42,6 @@ struct DarlingMcpToolAttrs {
     register: bool,
 }
 
-/// Expand the #[forge::mcp_tool] attribute.
 pub fn expand_mcp_tool(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
 
@@ -218,7 +217,6 @@ fn expand_mcp_tool_impl(input: ItemFn, attrs: McpToolAttrs) -> syn::Result<Token
 
     let arg_params: Vec<_> = params.iter().skip(1).cloned().collect();
 
-    // Reject argument types that codegen cannot emit bindings for.
     for p in &arg_params {
         if let FnArg::Typed(pat_type) = p
             && let Some((reason, span)) = crate::utils::check_arg_wire_type(&pat_type.ty)

@@ -50,16 +50,12 @@ impl FromStr for TrackingMode {
 /// Read set tracking tables read during query execution.
 #[derive(Debug, Clone, Default)]
 pub struct ReadSet {
-    /// Tables accessed (stack-allocated for common case of 1-4 tables).
     pub tables: Vec<String>,
-    /// Columns used in filters.
     pub filter_columns: HashMap<String, HashSet<String>>,
-    /// Tracking mode used.
     pub mode: TrackingMode,
 }
 
 impl ReadSet {
-    /// Create a new empty read set.
     pub fn new() -> Self {
         Self::default()
     }
@@ -72,7 +68,6 @@ impl ReadSet {
         }
     }
 
-    /// Add a table to the read set.
     pub fn add_table(&mut self, table: impl Into<String>) {
         let table = table.into();
         if !self.tables.contains(&table) {
@@ -80,7 +75,6 @@ impl ReadSet {
         }
     }
 
-    /// Add a filter column.
     pub fn add_filter_column(&mut self, table: impl Into<String>, column: impl Into<String>) {
         self.filter_columns
             .entry(table.into())
@@ -88,12 +82,10 @@ impl ReadSet {
             .insert(column.into());
     }
 
-    /// Check if this read set includes a specific table.
     pub fn includes_table(&self, table: &str) -> bool {
         self.tables.iter().any(|t| t == table)
     }
 
-    /// Estimate memory usage in bytes.
     pub fn memory_bytes(&self) -> usize {
         let table_bytes = self.tables.iter().map(|s| s.len() + 24).sum::<usize>();
         let col_bytes = self
@@ -105,7 +97,6 @@ impl ReadSet {
         table_bytes + col_bytes + 64
     }
 
-    /// Merge another read set into this one.
     pub fn merge(&mut self, other: &ReadSet) {
         for table in &other.tables {
             if !self.tables.contains(table) {
@@ -126,16 +117,12 @@ impl ReadSet {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ChangeOperation {
-    /// Row inserted.
     Insert,
-    /// Row updated.
     Update,
-    /// Row deleted.
     Delete,
 }
 
 impl ChangeOperation {
-    /// Convert to string.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Insert => "INSERT",
@@ -172,18 +159,14 @@ impl FromStr for ChangeOperation {
 /// A database change event.
 #[derive(Debug, Clone)]
 pub struct Change {
-    /// Table that changed.
     pub table: String,
-    /// Type of operation.
     pub operation: ChangeOperation,
-    /// Row ID that changed.
     pub row_id: Option<Uuid>,
     /// Columns that changed (for updates).
     pub changed_columns: Vec<String>,
 }
 
 impl Change {
-    /// Create a new change event.
     pub fn new(table: impl Into<String>, operation: ChangeOperation) -> Self {
         Self {
             table: table.into(),
@@ -193,13 +176,11 @@ impl Change {
         }
     }
 
-    /// Set the row ID.
     pub fn with_row_id(mut self, row_id: Uuid) -> Self {
         self.row_id = Some(row_id);
         self
     }
 
-    /// Set the changed columns.
     pub fn with_columns(mut self, columns: Vec<String>) -> Self {
         self.changed_columns = columns;
         self
@@ -267,19 +248,13 @@ mod tests {
         let change = Change::new("users", ChangeOperation::Update)
             .with_columns(vec!["name".to_string(), "email".to_string()]);
 
-        // Overlapping columns should invalidate
         assert!(change.invalidates_columns(&["name", "age"]));
-
-        // Non-overlapping columns should not
         assert!(!change.invalidates_columns(&["age", "phone"]));
-
-        // Empty selected columns means unknown, invalidate conservatively
         assert!(change.invalidates_columns(&[]));
     }
 
     #[test]
     fn test_column_invalidation_non_update() {
-        // Inserts and deletes always invalidate regardless of columns
         let change =
             Change::new("users", ChangeOperation::Insert).with_columns(vec!["name".to_string()]);
         assert!(change.invalidates_columns(&["age"]));
@@ -341,7 +316,7 @@ mod tests {
         let mut rs = ReadSet::new();
         rs.add_filter_column("users", "id");
         rs.add_filter_column("users", "email");
-        rs.add_filter_column("users", "id"); // dedup via HashSet
+        rs.add_filter_column("users", "id");
         rs.add_filter_column("projects", "owner_id");
 
         let users = rs.filter_columns.get("users").unwrap();
@@ -381,7 +356,7 @@ mod tests {
         a.add_filter_column("users", "id");
 
         let mut b = ReadSet::new();
-        b.add_table("users"); // duplicate, should not appear twice
+        b.add_table("users");
         b.add_table("projects");
         b.add_filter_column("users", "email");
         b.add_filter_column("projects", "owner_id");

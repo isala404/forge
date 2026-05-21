@@ -21,27 +21,23 @@ enum UploadSource {
 }
 
 impl ForgeUpload {
-    /// Override the uploaded file name.
     #[must_use]
     pub fn with_file_name(mut self, file_name: impl Into<String>) -> Self {
         self.file_name = Some(file_name.into());
         self
     }
 
-    /// Override the uploaded content type.
     #[must_use]
     pub fn with_content_type(mut self, content_type: impl Into<String>) -> Self {
         self.content_type = Some(content_type.into());
         self
     }
 
-    /// Return the configured upload file name.
     #[must_use]
     pub fn file_name(&self) -> Option<&str> {
         self.file_name.as_deref()
     }
 
-    /// Return the configured upload content type.
     #[must_use]
     pub fn content_type(&self) -> Option<&str> {
         self.content_type.as_deref()
@@ -50,7 +46,6 @@ impl ForgeUpload {
 
 #[cfg(target_arch = "wasm32")]
 impl ForgeUpload {
-    /// Create an upload from a browser `File`.
     pub fn from_file(file: web_sys::File) -> Self {
         let file_name = Some(file.name());
         Self {
@@ -60,7 +55,6 @@ impl ForgeUpload {
         }
     }
 
-    /// Create an upload from a browser `Blob`.
     pub fn from_blob(blob: web_sys::Blob) -> Self {
         Self {
             source: UploadSource::Blob(blob),
@@ -69,7 +63,6 @@ impl ForgeUpload {
         }
     }
 
-    /// Create a named upload from a browser `Blob`.
     pub fn from_blob_with_name(blob: web_sys::Blob, file_name: impl Into<String>) -> Self {
         Self::from_blob(blob).with_file_name(file_name)
     }
@@ -115,7 +108,6 @@ impl From<web_sys::Blob> for ForgeUpload {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl ForgeUpload {
-    /// Create an upload from raw bytes.
     pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> Self {
         Self {
             source: UploadSource::Bytes(bytes.into()),
@@ -124,7 +116,6 @@ impl ForgeUpload {
         }
     }
 
-    /// Create a named upload from raw bytes.
     pub fn from_bytes_with_name(
         bytes: impl Into<Vec<u8>>,
         file_name: impl Into<String>,

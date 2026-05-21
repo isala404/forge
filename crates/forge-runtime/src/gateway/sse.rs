@@ -646,7 +646,6 @@ pub async fn sse_handler(
             .into_response();
     }
 
-    // Insert session and update counters.
     if let Some(user_id) = auth_context.user_id() {
         state.increment_user_sessions(user_id);
     }
@@ -663,15 +662,11 @@ pub async fn sse_handler(
         },
     );
 
-    // Register session with reactor
     let reactor = state.reactor.clone();
     let cancel = cancel_token.clone();
-
-    // Create a bridge channel for the reactor's message format
     let (rt_tx, mut rt_rx) = mpsc::channel(buffer_size);
     reactor.register_session(session_id, rt_tx, token_exp);
 
-    // Create cleanup guard - will clean up on drop if stream ends unexpectedly
     let state_for_cleanup = Arc::new((*state).clone());
     let cleanup_guard =
         SessionCleanupGuard::new(session_id, reactor.clone(), state_for_cleanup.clone());
@@ -685,7 +680,6 @@ pub async fn sse_handler(
     tokio::spawn(async move {
         let mut _guard = cleanup_guard;
 
-        // Send connected event
         let connected = SsePayload::Connected {
             session_id: session_id.to_string(),
             session_secret: session_secret.clone(),
@@ -739,7 +733,6 @@ pub async fn sse_handler(
             }
         }
 
-        // Clean shutdown: decrement counter and clean up session state
         _guard.mark_closed();
         crate::observability::set_active_connections("sse", -1);
         reactor.remove_session(session_id).await;
@@ -845,7 +838,6 @@ pub async fn sse_subscribe_handler(
         );
     };
 
-    // Get session data (auth context) via DashMap — O(1) lookups.
     let session_data = match state.sessions.get(&session_id) {
         Some(data) => {
             if data.subscriptions.len() >= state.config.max_subscriptions_per_session {
@@ -884,7 +876,6 @@ pub async fn sse_subscribe_handler(
         }
     };
 
-    // Subscribe via reactor
     let result = state
         .reactor
         .subscribe(
@@ -984,7 +975,6 @@ pub async fn sse_unsubscribe_handler(
         );
     };
 
-    // Look up internal subscription ID and validate session ownership
     let (subscription_id, user_id) = {
         match state.sessions.get(&session_id) {
             Some(session) => {
@@ -1017,10 +1007,8 @@ pub async fn sse_unsubscribe_handler(
         );
     };
 
-    // Unsubscribe via reactor
     state.reactor.unsubscribe(subscription_id);
 
-    // Remove from session tracking
     if let Some(mut session) = state.sessions.get_mut(&session_id) {
         session.subscriptions.remove(&request.id);
     }
@@ -1065,7 +1053,6 @@ pub async fn sse_job_subscribe_handler(
         Err(resp) => return resp,
     };
 
-    // Parse job ID
     let job_uuid = match uuid::Uuid::parse_str(&request.job_id) {
         Ok(uuid) => uuid,
         Err(_) => {
@@ -1077,7 +1064,6 @@ pub async fn sse_job_subscribe_handler(
         }
     };
 
-    // Subscribe to job updates via reactor
     match state
         .reactor
         .subscribe_job(session_id, request.id.clone(), job_uuid, &session_auth)
@@ -1151,7 +1137,6 @@ pub async fn sse_workflow_subscribe_handler(
         Err(resp) => return resp,
     };
 
-    // Parse workflow ID
     let workflow_uuid = match uuid::Uuid::parse_str(&request.workflow_id) {
         Ok(uuid) => uuid,
         Err(_) => {
@@ -1163,7 +1148,6 @@ pub async fn sse_workflow_subscribe_handler(
         }
     };
 
-    // Subscribe to workflow updates via reactor
     match state
         .reactor
         .subscribe_workflow(session_id, request.id.clone(), workflow_uuid, &session_auth)

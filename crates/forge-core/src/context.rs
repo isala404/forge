@@ -72,8 +72,6 @@ pub trait AuthenticatedContext: HandlerContext {
     fn tenant_id(&self) -> Option<Uuid>;
 }
 
-// ── HandlerContext impls ──────────────────────────────────────────────────────
-
 impl HandlerContext for crate::function::QueryContext {
     fn db(&self) -> ForgeDb {
         self.db()
@@ -157,8 +155,6 @@ impl HandlerContext for crate::mcp::McpToolContext {
     }
 }
 
-// ── AuthenticatedContext impls ────────────────────────────────────────────────
-
 impl AuthenticatedContext for crate::function::QueryContext {
     fn user_id(&self) -> crate::error::Result<Uuid> {
         self.user_id()
@@ -188,8 +184,6 @@ impl AuthenticatedContext for crate::mcp::McpToolContext {
         self.tenant_id()
     }
 }
-
-// ── Sealed impls ──────────────────────────────────────────────────────────────
 
 impl Sealed for crate::function::QueryContext {}
 impl Sealed for crate::function::MutationContext {}

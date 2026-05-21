@@ -12,32 +12,19 @@ use crate::http::CircuitBreakerClient;
 /// Context available to cron handlers.
 #[non_exhaustive]
 pub struct CronContext {
-    /// Cron run ID.
     pub run_id: Uuid,
-    /// Cron name.
     pub cron_name: String,
-    /// Scheduled time (when the cron was supposed to run).
     pub scheduled_time: DateTime<Utc>,
-    /// Actual execution time.
     pub execution_time: DateTime<Utc>,
-    /// Timezone of the cron.
     pub timezone: String,
-    /// Whether this is a catch-up run.
     pub is_catch_up: bool,
-    /// Authentication context.
     pub auth: AuthContext,
-    /// Database pool.
     db_pool: sqlx::PgPool,
-    /// HTTP client.
     http_client: CircuitBreakerClient,
-    /// Default timeout for outbound HTTP requests made through the
-    /// circuit-breaker client. `None` means unlimited.
+    /// `None` means unlimited.
     http_timeout: Option<Duration>,
-    /// Environment variable provider.
     env_provider: Arc<dyn EnvProvider>,
-    /// Parent span for trace propagation.
     span: Span,
-    /// KV store handle. `None` until threaded in by the runtime.
     kv: Option<Arc<dyn KvHandle>>,
 }
 

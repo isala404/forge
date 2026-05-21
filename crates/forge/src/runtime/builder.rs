@@ -60,7 +60,6 @@ pub struct ForgeBuilder {
 }
 
 impl ForgeBuilder {
-    /// Create a new builder.
     pub fn new() -> Self {
         Self {
             config: None,
@@ -221,61 +220,51 @@ impl ForgeBuilder {
         self
     }
 
-    /// Set the configuration.
     pub fn config(mut self, config: ForgeConfig) -> Self {
         self.config = Some(config);
         self
     }
 
-    /// Get mutable access to the function registry.
     pub fn function_registry_mut(&mut self) -> &mut FunctionRegistry {
         &mut self.function_registry
     }
 
-    /// Get mutable access to the job registry.
     #[cfg(feature = "jobs")]
     pub fn job_registry_mut(&mut self) -> &mut JobRegistry {
         &mut self.job_registry
     }
 
-    /// Get mutable access to the MCP tool registry.
     #[cfg(feature = "gateway")]
     pub fn mcp_registry_mut(&mut self) -> &mut McpToolRegistry {
         &mut self.mcp_registry
     }
 
-    /// Register an MCP tool without manually accessing the registry.
     #[cfg(feature = "gateway")]
     pub fn register_mcp_tool<T: ForgeMcpTool>(mut self) -> Self {
         self.mcp_registry.register::<T>();
         self
     }
 
-    /// Get mutable access to the cron registry.
     #[cfg(feature = "cron")]
     pub fn cron_registry_mut(&mut self) -> &mut CronRegistry {
         &mut self.cron_registry
     }
 
-    /// Get mutable access to the workflow registry.
     #[cfg(feature = "workflows")]
     pub fn workflow_registry_mut(&mut self) -> &mut WorkflowRegistry {
         &mut self.workflow_registry
     }
 
-    /// Get mutable access to the daemon registry.
     #[cfg(feature = "daemons")]
     pub fn daemon_registry_mut(&mut self) -> &mut DaemonRegistry {
         &mut self.daemon_registry
     }
 
-    /// Get mutable access to the webhook registry.
     #[cfg(feature = "gateway")]
     pub fn webhook_registry_mut(&mut self) -> &mut WebhookRegistry {
         &mut self.webhook_registry
     }
 
-    /// Register a query function.
     pub fn register_query<Q: ForgeQuery>(mut self) -> Self
     where
         Q::Args: serde::de::DeserializeOwned + Send + 'static,
@@ -285,7 +274,6 @@ impl ForgeBuilder {
         self
     }
 
-    /// Register a mutation function.
     pub fn register_mutation<M: ForgeMutation>(mut self) -> Self
     where
         M::Args: serde::de::DeserializeOwned + Send + 'static,
@@ -295,7 +283,6 @@ impl ForgeBuilder {
         self
     }
 
-    /// Register a background job.
     #[cfg(feature = "jobs")]
     pub fn register_job<J: forge_core::ForgeJob>(mut self) -> Self
     where
@@ -306,14 +293,12 @@ impl ForgeBuilder {
         self
     }
 
-    /// Register a cron handler.
     #[cfg(feature = "cron")]
     pub fn register_cron<C: forge_core::ForgeCron>(mut self) -> Self {
         self.cron_registry.register::<C>();
         self
     }
 
-    /// Register a workflow.
     #[cfg(feature = "workflows")]
     pub fn register_workflow<W: forge_core::ForgeWorkflow>(mut self) -> Self
     where
@@ -324,21 +309,18 @@ impl ForgeBuilder {
         self
     }
 
-    /// Register a daemon.
     #[cfg(feature = "daemons")]
     pub fn register_daemon<D: forge_core::ForgeDaemon>(mut self) -> Self {
         self.daemon_registry.register::<D>();
         self
     }
 
-    /// Register a webhook.
     #[cfg(feature = "gateway")]
     pub fn register_webhook<W: forge_core::ForgeWebhook>(mut self) -> Self {
         self.webhook_registry.register::<W>();
         self
     }
 
-    /// Build the FORGE runtime.
     pub fn build(self) -> Result<Forge> {
         let config = self
             .config
@@ -405,7 +387,6 @@ pub(super) fn get_hostname() -> String {
         .unwrap_or_else(|_| "unknown".to_string())
 }
 
-/// Convert config NodeRole to cluster NodeRole.
 pub(super) fn config_role_to_node_role(role: &ConfigNodeRole) -> NodeRole {
     match role {
         ConfigNodeRole::Gateway => NodeRole::Gateway,

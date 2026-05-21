@@ -115,17 +115,12 @@ pub async fn trim_change_log(pool: &PgPool, before: DateTime<Utc>) -> Result<u64
         return Ok(0);
     }
 
-    // Enforce a minimum row count floor: don't trim at all when the log is
-    // small, even if the entries are past the retention window. This prevents
-    // total log erasure on quiet systems where consumers still need recent
-    // history for gap-recovery.
     let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM forge_change_log")
         .fetch_one(&mut *tx)
         .await
         .map_err(ForgeError::Database)?;
 
     if total <= CHANGE_LOG_MIN_ROWS {
-        // Log is small enough; leave it intact regardless of age.
         return Ok(0);
     }
 

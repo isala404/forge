@@ -133,8 +133,7 @@ fn binding_arg_type(b: &FunctionBinding) -> Option<String> {
     Some(params_struct_name(b))
 }
 
-/// Build function parameter list for Dioxus.
-/// When `with_client` is true, includes `client: &ForgeClient` prefix with leading comma.
+/// When `with_client` is true, prepends `, args: T`; otherwise returns `args: T`.
 fn dioxus_params(b: &FunctionBinding, with_client: bool) -> Option<String> {
     let arg_type = binding_arg_type(b)?;
     let params = format!("args: {arg_type}");
@@ -146,7 +145,6 @@ fn dioxus_params(b: &FunctionBinding, with_client: bool) -> Option<String> {
     }
 }
 
-/// Build the args expression for `client.call()` or hook invocations.
 fn dioxus_call_args(b: &FunctionBinding) -> String {
     if b.args.is_empty() {
         return "()".into();

@@ -18,23 +18,17 @@ pub struct MockEmailSender {
 /// A recorded email send.
 #[derive(Debug, Clone)]
 pub struct SentEmail {
-    /// Recipients.
     pub to: Vec<String>,
-    /// Subject line.
     pub subject: String,
-    /// Text body.
     pub text: Option<String>,
-    /// HTML body.
     pub html: Option<String>,
 }
 
 impl MockEmailSender {
-    /// Create a new mock email sender.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Get all sent emails.
     pub async fn sent(&self) -> Vec<SentEmail> {
         self.sent.lock().await.clone()
     }

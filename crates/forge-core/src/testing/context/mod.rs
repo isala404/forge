@@ -1,12 +1,6 @@
 // TODO(pre-1.0): Collapse to 4 generic contexts per 07-DELETION-LIST.md
 
-//! Test context builders for all FORGE function types.
-//!
-//! Each test context provides:
-//! - Authentication configuration (user ID, roles, claims)
-//! - Optional database pool for integration tests
-//! - Mocking capabilities (HTTP, job dispatch, workflow dispatch)
-//! - Context-specific fields (job_id, attempt, cron schedule, etc.)
+//! Test context builders for all Forge function types.
 
 use crate::function::AuthContext;
 use std::collections::HashMap;
@@ -30,8 +24,7 @@ pub use query::{TestQueryContext, TestQueryContextBuilder};
 pub use webhook::{TestWebhookContext, TestWebhookContextBuilder};
 pub use workflow::{TestWorkflowContext, TestWorkflowContextBuilder};
 
-/// Build an AuthContext from test builder fields.
-/// Handles UUID-based users, subject-based auth (Firebase/Clerk), and unauthenticated.
+/// Build an `AuthContext` from test builder fields.
 pub(crate) fn build_test_auth(
     user_id: Option<Uuid>,
     roles: Vec<String>,

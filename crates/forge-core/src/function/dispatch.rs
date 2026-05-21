@@ -10,21 +10,11 @@ use crate::job::JobInfo;
 use crate::workflow::WorkflowInfo;
 
 /// Trait for dispatching jobs from function contexts.
-///
-/// This trait allows mutation and action contexts to dispatch background jobs
-/// without directly depending on the runtime's JobDispatcher.
 pub trait JobDispatch: Send + Sync {
     /// Get job info by name for auth checking.
     fn get_info(&self, job_type: &str) -> Option<JobInfo>;
 
     /// Dispatch a job by its registered name.
-    ///
-    /// # Arguments
-    /// * `job_type` - The registered name of the job type
-    /// * `args` - JSON-serialized arguments for the job
-    ///
-    /// # Returns
-    /// The UUID of the dispatched job
     fn dispatch_by_name(
         &self,
         job_type: &str,
@@ -153,20 +143,13 @@ pub trait KvHandle: Send + Sync + 'static {
 }
 
 /// Trait for starting workflows from function contexts.
-///
-/// This trait allows mutation and action contexts to start workflows
-/// without directly depending on the runtime's WorkflowExecutor.
 pub trait WorkflowDispatch: Send + Sync {
     /// Get workflow info by name for auth checking.
     fn get_info(&self, workflow_name: &str) -> Option<WorkflowInfo>;
 
     /// Start a workflow by its registered name.
     ///
-    /// # Arguments
-    /// * `workflow_name` - The registered name of the workflow
-    /// * `input` - JSON-serialized input for the workflow
-    /// * `trace_id` - Trace identifier from the caller's request, propagated
-    ///   onto the run row so observability links request → workflow.
+    /// `trace_id` is propagated onto the run row so observability links request → workflow.
     fn start_by_name(
         &self,
         workflow_name: &str,

@@ -90,7 +90,6 @@ export function toReactiveMutation<TArgs, TResult>(
 /// Options for TypeScript code generation.
 #[derive(Debug, Clone, Default)]
 pub struct GenerateOptions {
-    /// Generate auth.svelte.ts when auth is configured.
     pub generate_auth_store: bool,
 }
 
@@ -100,7 +99,6 @@ pub struct TypeScriptGenerator {
 }
 
 impl TypeScriptGenerator {
-    /// Create a new TypeScript generator.
     pub fn new(output_dir: impl Into<PathBuf>) -> Self {
         Self {
             output_dir: output_dir.into(),
@@ -108,7 +106,6 @@ impl TypeScriptGenerator {
         }
     }
 
-    /// Create a new TypeScript generator with options.
     pub fn with_options(output_dir: impl Into<PathBuf>, options: GenerateOptions) -> Self {
         Self {
             output_dir: output_dir.into(),
@@ -116,14 +113,12 @@ impl TypeScriptGenerator {
         }
     }
 
-    /// Generate all TypeScript artifacts and write them to disk.
     pub fn generate(&self, registry: &SchemaRegistry) -> Result<(), Error> {
         std::fs::create_dir_all(&self.output_dir)?;
 
         let bindings = BindingSet::from_registry(registry);
 
-        // Collect type names referenced by API bindings so types.ts
-        // can emit built-in types that aren't in the user's schema.
+        // Collect referenced types so types.ts can emit built-ins not in the schema.
         let mut referenced_types = Vec::new();
         for binding in bindings.all() {
             for arg in &binding.args {
@@ -349,13 +344,11 @@ export function getToken(): string | null {
         output
     }
 
-    /// Get the output directory.
     pub fn output_dir(&self) -> &PathBuf {
         &self.output_dir
     }
 }
 
-/// Code generation error.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("IO error: {0}")]
@@ -373,12 +366,6 @@ pub enum Error {
 mod tests {
     use super::*;
     use forge_core::schema::{FunctionDef, RustType};
-
-    #[test]
-    fn test_generator_creation() {
-        let generator = TypeScriptGenerator::new("/tmp/forge");
-        assert_eq!(generator.output_dir(), &PathBuf::from("/tmp/forge"));
-    }
 
     #[test]
     fn with_options_stores_auth_flag() {
@@ -451,8 +438,7 @@ mod tests {
 
     #[test]
     fn runes_content_is_the_published_constant() {
-        // The static method must return the same bytes as the public constant,
-        // so external consumers and internal generation stay in lockstep.
+        // The static method must return the same bytes as the public constant.
         assert_eq!(TypeScriptGenerator::runes_content(), RUNES_SVELTE_TS);
     }
 

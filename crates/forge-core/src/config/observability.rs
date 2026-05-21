@@ -11,26 +11,20 @@ use super::types::DurationStr;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ObservabilityConfig {
-    /// Enable observability (traces, metrics, logs).
     #[serde(default)]
     pub enabled: bool,
 
-    /// OTLP endpoint for telemetry export.
     #[serde(default = "default_otlp_endpoint")]
     pub otlp_endpoint: String,
 
-    /// Service name for telemetry identification.
     pub service_name: Option<String>,
 
-    /// Enable distributed tracing.
     #[serde(default = "default_true")]
     pub enable_traces: bool,
 
-    /// Enable metrics collection.
     #[serde(default = "default_true")]
     pub enable_metrics: bool,
 
-    /// Enable log export via OTLP.
     #[serde(default = "default_true")]
     pub enable_logs: bool,
 
@@ -42,7 +36,6 @@ pub struct ObservabilityConfig {
     #[serde(default = "default_metrics_interval")]
     pub metrics_interval: DurationStr,
 
-    /// Log level for the tracing subscriber (e.g., "debug", "info", "warn").
     #[serde(default = "default_log_level")]
     pub log_level: String,
 }

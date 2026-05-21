@@ -166,12 +166,11 @@ pub struct HealthResponse {
     pub version: String,
 }
 
-/// Public readiness probe payload.
+/// Readiness probe payload.
 ///
 /// Intentionally minimal: load-balancer probes can call this without
 /// authentication and we don't want to leak internal deployment signals (queue
-/// depths, blocked-run counts, version skew) to anonymous callers. The
-/// Readiness probe response. Covers DB connectivity and reactor health.
+/// depths, blocked-run counts, version skew) to anonymous callers.
 #[derive(Debug, Serialize)]
 #[non_exhaustive]
 pub struct ReadinessResponse {
@@ -499,7 +498,6 @@ impl GatewayServer {
             CorsLayer::new()
         };
 
-        // SSE state for Server-Sent Events
         let sse_state = Arc::new(SseState::with_config(
             self.reactor.clone(),
             auth_middleware_state.clone(),
@@ -517,7 +515,6 @@ impl GatewayServer {
             },
         ));
 
-        // Readiness state for DB + reactor health check
         let expected_system_migrations = crate::pg::migration::get_system_migrations().len() as i64;
         let readiness_state = Arc::new(ReadinessState {
             db_pool: self.db.primary().clone(),
@@ -526,19 +523,14 @@ impl GatewayServer {
             expected_system_migrations,
         });
 
-        // Build the main router with middleware
         let json_depth_config = JsonDepthConfig {
             max_depth: self.config.max_json_depth,
             max_body_bytes: self.config.max_json_body_bytes,
         };
         let mut main_router = Router::new()
-            // Health check endpoint (liveness)
             .route("/health", get(health_handler))
-            // Readiness check endpoint (checks DB)
             .route("/ready", get(readiness_handler).with_state(readiness_state))
-            // RPC endpoint
             .route("/rpc", post(rpc_handler))
-            // REST-style function endpoint (JSON)
             .route("/rpc/{function}", post(rpc_function_handler))
             // Prevent oversized JSON payloads from exhausting memory.
             .layer(DefaultBodyLimit::max(self.config.max_json_body_bytes))
@@ -548,7 +540,6 @@ impl GatewayServer {
                 json_depth_config,
                 json_depth_check_middleware,
             ))
-            // Add state
             .with_state(rpc_handler_state.clone());
 
         // Multipart RPC router. The Axum layer limit is set to the highest
@@ -575,7 +566,6 @@ impl GatewayServer {
             .layer(ConcurrencyLimitLayer::new(MAX_MULTIPART_CONCURRENCY))
             .with_state(rpc_handler_state.clone());
 
-        // SSE router
         let sse_router = Router::new()
             .route("/events", get(sse_handler))
             .route("/subscribe", post(sse_subscribe_handler))
@@ -607,7 +597,6 @@ impl GatewayServer {
             );
         }
 
-        // Signal ingestion endpoints (product analytics + diagnostics)
         let mut signals_router = Router::new();
         if let Some(collector) = &self.signals_collector {
             let signals_state = Arc::new(crate::signals::endpoints::SignalsState {
@@ -627,7 +616,6 @@ impl GatewayServer {
             db_pool: self.db.primary().clone(),
         });
 
-        // RPC-class routes get concurrency + timeout limits.
         main_router = main_router
             .merge(multipart_router)
             .merge(mcp_router)
@@ -651,16 +639,13 @@ impl GatewayServer {
         // SSE connections are long-lived, health probes must never be blocked.
         let full_router = bounded_router.merge(sse_router);
 
-        // Security headers config
         let security_config = Arc::new(SecurityHeadersConfig {
             enabled: self.config.security_headers,
             hsts: self.config.hsts,
         });
 
-        // Trusted proxies for client IP resolution
         let trusted_proxies = TrustedProxies(Arc::new(self.config.trusted_proxies.clone()));
 
-        // Common middleware applied to all routes.
         let service_builder = ServiceBuilder::new()
             .layer(cors.clone())
             .layer(middleware::from_fn_with_state(
@@ -933,7 +918,6 @@ async fn api_version_middleware(
     let is_rpc = req.uri().path().starts_with("/rpc");
     if is_rpc && let Some(accept) = req.headers().get(axum::http::header::ACCEPT) {
         let accept_str = accept.to_str().unwrap_or("");
-        // Allow wildcard and explicit v1; reject anything else.
         if accept_str != "*/*" && !accept_str.is_empty() && !accept_str.contains(FORGE_API_V1) {
             return RpcResponse::error(RpcError::new(
                 "UNSUPPORTED_API_VERSION",
@@ -1173,7 +1157,6 @@ async fn json_depth_check_middleware(
         .into_response();
     }
 
-    // Re-assemble the request with the buffered body.
     let req = axum::extract::Request::from_parts(parts, Body::from(bytes));
     next.run(req).await
 }

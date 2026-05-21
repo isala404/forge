@@ -28,7 +28,6 @@ impl Default for HeartbeatConfig {
 }
 
 impl HeartbeatConfig {
-    /// Create a HeartbeatConfig from the user-facing ClusterConfig.
     pub fn from_cluster_config(cluster: &ClusterConfig) -> Self {
         use forge_core::config::cluster::DiscoveryMethod;
 
@@ -81,7 +80,7 @@ pub struct HeartbeatLoop {
 }
 
 impl HeartbeatLoop {
-    /// Create a new heartbeat loop, acquiring a dedicated connection.
+    /// Acquire a dedicated connection outside the shared pool.
     pub async fn new(
         pool: sqlx::PgPool,
         node_id: NodeId,
@@ -107,18 +106,15 @@ impl HeartbeatLoop {
         })
     }
 
-    /// Check if the loop is running.
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
     }
 
-    /// Stop the heartbeat loop.
     pub fn stop(&self) {
         let _ = self.shutdown_tx.send(true);
         self.running.store(false, Ordering::SeqCst);
     }
 
-    /// Run the heartbeat loop.
     pub async fn run(&self) {
         self.running.store(true, Ordering::SeqCst);
         let mut shutdown_rx = self.shutdown_rx.clone();
@@ -127,17 +123,14 @@ impl HeartbeatLoop {
             let interval = self.current_interval();
             tokio::select! {
                 _ = tokio::time::sleep(interval) => {
-                    // Update our heartbeat
                     let hb_start = std::time::Instant::now();
                     if let Err(e) = self.send_heartbeat().await {
                         tracing::debug!(error = %e, "Failed to send heartbeat");
                     }
                     super::metrics::record_heartbeat_latency(hb_start.elapsed().as_secs_f64());
 
-                    // Adjust interval based on cluster stability
                     self.adjust_interval().await;
 
-                    // Mark dead nodes if enabled
                     if self.config.mark_dead_nodes
                         && let Err(e) = self.mark_dead_nodes().await
                     {
@@ -156,12 +149,10 @@ impl HeartbeatLoop {
         self.running.store(false, Ordering::SeqCst);
     }
 
-    /// Current adaptive interval.
     fn current_interval(&self) -> Duration {
         Duration::from_millis(self.current_interval_ms.load(Ordering::Relaxed))
     }
 
-    /// Query the number of active nodes in the cluster.
     async fn active_node_count(&self) -> forge_core::Result<u32> {
         let row = sqlx::query_scalar!("SELECT COUNT(*) FROM forge_nodes WHERE status = 'active'")
             .fetch_one(&self.pool)
@@ -171,7 +162,6 @@ impl HeartbeatLoop {
         Ok(row.unwrap_or(0) as u32)
     }
 
-    /// Adjust heartbeat interval based on cluster stability.
     async fn adjust_interval(&self) {
         let count = match self.active_node_count().await {
             Ok(c) => c,
@@ -196,7 +186,6 @@ impl HeartbeatLoop {
         self.last_active_count.store(count, Ordering::Relaxed);
     }
 
-    /// Obtain the dedicated heartbeat connection, reconnecting if broken.
     async fn heartbeat_conn(
         &self,
     ) -> forge_core::Result<tokio::sync::MutexGuard<'_, sqlx::pool::PoolConnection<sqlx::Postgres>>>
@@ -215,7 +204,6 @@ impl HeartbeatLoop {
         Ok(guard)
     }
 
-    /// Send a heartbeat update on the dedicated connection.
     async fn send_heartbeat(&self) -> forge_core::Result<()> {
         let mut conn = self.heartbeat_conn().await?;
         sqlx::query!(
@@ -233,7 +221,6 @@ impl HeartbeatLoop {
         Ok(())
     }
 
-    /// Mark stale nodes as dead using the adaptive threshold.
     async fn mark_dead_nodes(&self) -> forge_core::Result<u64> {
         let threshold_secs =
             dead_node_threshold(self.current_interval(), self.config.dead_threshold).as_secs_f64();
@@ -254,7 +241,6 @@ impl HeartbeatLoop {
         let count = result.rows_affected();
         if count > 0 {
             tracing::warn!(count, "Marked nodes as dead");
-            // Update dead node count in metrics (we know `count` nodes just became dead)
             super::metrics::set_node_counts(
                 self.last_active_count.load(Ordering::Relaxed) as i64,
                 count as i64,
@@ -264,7 +250,6 @@ impl HeartbeatLoop {
         Ok(count)
     }
 
-    /// Update load metrics on the dedicated connection.
     pub async fn update_load(
         &self,
         current_connections: u32,
@@ -351,8 +336,6 @@ mod tests {
         assert_eq!(config.max_interval, Duration::from_secs(120));
     }
 
-    // --- next_adaptive_interval: pure policy under controlled inputs ---
-
     #[test]
     fn adaptive_interval_first_observation_seeds_base() {
         // last == 0 means "no prior observation". Always reset.
@@ -409,8 +392,6 @@ mod tests {
         let (next, _) = next_adaptive_interval(5, 5, 5, u64::MAX - 1, 5_000, 60_000);
         assert_eq!(next, 60_000);
     }
-
-    // --- dead_node_threshold: max of adaptive and configured ---
 
     #[test]
     fn dead_threshold_uses_adaptive_when_larger() {

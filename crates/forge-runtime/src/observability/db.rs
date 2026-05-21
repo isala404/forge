@@ -89,13 +89,11 @@ pub fn record_query_duration(operation: &str, duration: Duration) {
     );
 }
 
-/// Extract the table name from a simple SQL query.
-/// Returns None for complex queries or when table cannot be determined.
+/// Extract the table name from a simple SQL query, or `None` for complex ones.
 pub fn extract_table_name(sql: &str) -> Option<&str> {
     let sql = sql.trim();
     let upper = sql.to_uppercase();
 
-    // Handle common patterns
     if upper.starts_with("SELECT") {
         // SELECT ... FROM table_name ...
         if let Some(from_pos) = upper.find(" FROM ") {
@@ -131,8 +129,7 @@ fn extract_first_identifier(s: &str) -> Option<&str> {
     if end > 0 { Some(&s[..end]) } else { None }
 }
 
-/// Execute a database operation with tracing instrumentation.
-/// This creates a span and records the duration as a metric.
+/// Execute a database operation with tracing and duration recording.
 pub async fn instrumented_query<F, T, E>(operation: &str, table: Option<&str>, f: F) -> Result<T, E>
 where
     F: std::future::Future<Output = Result<T, E>>,

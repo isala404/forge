@@ -258,7 +258,6 @@ impl CheckCommand {
         println!();
 
         if target == FrontendTarget::Dioxus {
-            // Use rustfmt directly to avoid cargo fmt dependency resolution issues
             let mut rs_files = Vec::new();
             if let Ok(entries) = std::fs::read_dir(frontend_dir.join("src")) {
                 collect_rs_files(entries, &mut rs_files);

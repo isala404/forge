@@ -148,7 +148,6 @@ impl SubscriptionManager {
             id
         });
 
-        // Populate the inverted table index for new groups
         if is_new {
             for table in table_deps {
                 self.table_index
@@ -158,7 +157,6 @@ impl SubscriptionManager {
             }
         }
 
-        // Create subscriber in the store
         let subscription_id = SubscriptionId::new();
         let key = self.next_subscriber_key.fetch_add(1, Ordering::Relaxed);
         let subscriber_id = SubscriberId(key as u32);
@@ -174,12 +172,10 @@ impl SubscriptionManager {
         );
         self.subscription_to_key.insert(subscription_id, key);
 
-        // Add subscriber to group
         if let Some(mut group) = self.groups.get_mut(&group_id) {
             group.subscribers.push(subscriber_id);
         }
 
-        // Track session -> subscriber mapping
         self.session_subscribers
             .entry(session_id)
             .or_default()

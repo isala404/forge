@@ -24,7 +24,6 @@ pub struct JobExecutor {
 impl JobExecutor {
     const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
-    /// Create a new job executor.
     pub fn new(queue: JobQueue, registry: JobRegistry, db_pool: sqlx::PgPool) -> Self {
         Self {
             queue,
@@ -43,21 +42,14 @@ impl JobExecutor {
         self
     }
 
-    /// Attach a KV store handle (mutable reference version for `Worker::with_kv`).
     pub fn set_kv(&mut self, kv: Arc<dyn KvHandle>) {
         self.kv = Some(kv);
     }
 
-    /// Attach a job dispatcher so `ctx.dispatch_job(...)` calls inside
-    /// handlers route through the `JobDispatch` trait. Mutable-reference
-    /// variant for `Worker::with_dispatchers`.
     pub fn set_job_dispatch(&mut self, dispatcher: Arc<dyn JobDispatch>) {
         self.job_dispatch = Some(dispatcher);
     }
 
-    /// Attach a workflow dispatcher so `ctx.start_workflow(...)` calls inside
-    /// handlers route through the `WorkflowDispatch` trait (which writes the
-    /// active version + signature onto the run row).
     pub fn set_workflow_dispatch(&mut self, dispatcher: Arc<dyn WorkflowDispatch>) {
         self.workflow_dispatch = Some(dispatcher);
     }
@@ -126,11 +118,9 @@ impl JobExecutor {
             };
         }
 
-        // Set up progress channel
         let (progress_tx, progress_rx) = std::sync::mpsc::channel::<ProgressUpdate>();
 
-        // Spawn task to consume progress updates and save to database
-        // Use try_recv() with async sleep to avoid blocking the tokio runtime
+        // try_recv() + async sleep avoids blocking the tokio runtime on a sync channel
         let progress_queue = self.queue.clone();
         let progress_job_id = job.id;
         tokio::spawn(async move {
@@ -149,18 +139,15 @@ impl JobExecutor {
                         }
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => {
-                        // No message yet, sleep briefly and check again
                         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     }
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        // Sender dropped (job finished), exit loop
                         break;
                     }
                 }
             }
         });
 
-        // Create job context with progress channel
         let mut ctx = {
             let mut c = JobContext::new(
                 job.id,
@@ -233,7 +220,6 @@ impl JobExecutor {
 
         ctx.set_http_timeout(entry.info.http_timeout);
 
-        // Keepalive heartbeat prevents stale cleanup from reclaiming healthy long jobs.
         let heartbeat_queue = self.queue.clone();
         let heartbeat_job_id = job.id;
         let (heartbeat_stop_tx, mut heartbeat_stop_rx) = tokio::sync::watch::channel(false);
@@ -254,7 +240,6 @@ impl JobExecutor {
             }
         });
 
-        // Execute with timeout
         let job_timeout = entry.info.timeout;
         let exec_start = std::time::Instant::now();
         let result = timeout(job_timeout, self.run_handler(&entry, &ctx, &job.input)).await;
@@ -267,7 +252,6 @@ impl JobExecutor {
 
         match result {
             Ok(Ok(output)) => {
-                // Complete the job (sub-dispatches are now direct, not buffered)
                 if let Err(e) = self.queue.complete(job.id, output.clone(), ttl).await {
                     tracing::error!(job_id = %job.id, error = %e, "Failed to complete job");
                 }
@@ -281,9 +265,7 @@ impl JobExecutor {
                 ExecutionResult::Completed { output }
             }
             Ok(Err(e)) => {
-                // Job failed
                 let error_msg = e.to_string();
-                // Accepts either an explicit cancellation error or a late cancellation request.
                 let cancel_requested = match ctx.is_cancel_requested().await {
                     Ok(value) => value,
                     Err(err) => {
@@ -341,7 +323,6 @@ impl JobExecutor {
                 }
             }
             Err(_) => {
-                // Timeout
                 let error_msg = format!("Job timed out after {:?}", job_timeout);
                 let should_retry = job.attempts < job.max_attempts;
 
@@ -370,7 +351,6 @@ impl JobExecutor {
         }
     }
 
-    /// Run the job handler.
     async fn run_handler(
         &self,
         entry: &Arc<JobEntry>,
@@ -397,26 +377,19 @@ impl JobExecutor {
     }
 }
 
-/// Result of job execution.
 #[derive(Debug)]
 pub enum ExecutionResult {
-    /// Job completed successfully.
     Completed { output: serde_json::Value },
-    /// Job failed.
     Failed { error: String, retryable: bool },
-    /// Job timed out.
     TimedOut { retryable: bool },
-    /// Job cancelled.
     Cancelled { reason: String },
 }
 
 impl ExecutionResult {
-    /// Check if execution was successful.
     pub fn is_success(&self) -> bool {
         matches!(self, Self::Completed { .. })
     }
 
-    /// Check if the job should be retried.
     pub fn should_retry(&self) -> bool {
         match self {
             Self::Failed { retryable, .. } => *retryable,

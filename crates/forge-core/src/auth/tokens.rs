@@ -339,7 +339,6 @@ mod tests {
 
     #[test]
     fn test_extract_family_returns_none_for_legacy_format() {
-        // Old format: two UUIDs concatenated without separator
         let legacy = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         assert_eq!(extract_family(&legacy), None);
     }
@@ -385,7 +384,6 @@ mod tests {
         let family = Uuid::new_v4();
         let a = generate_refresh_token_for_family(family);
         let b = generate_refresh_token_for_family(family);
-        // Same family ⇒ same prefix, different random suffix.
         assert_ne!(a, b);
         assert_eq!(extract_family(&a), Some(family));
         assert_eq!(extract_family(&b), Some(family));
@@ -397,7 +395,6 @@ mod tests {
         let token = generate_refresh_token_for_family(family);
         let parts: Vec<&str> = token.split('.').collect();
         assert_eq!(parts.len(), 2, "exactly one dot separator");
-        // simple-format UUID is 32 hex chars (no dashes).
         assert_eq!(parts[0].len(), 32);
         assert_eq!(parts[1].len(), 32);
         assert!(parts[0].chars().all(|c| c.is_ascii_hexdigit()));

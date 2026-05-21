@@ -139,7 +139,6 @@ impl CheckCommand {
             .filter(|e| e.file_name().to_string_lossy().starts_with("query-"))
             .collect();
 
-        // Warn if migrations are newer than cache
         let migrations_dir = Path::new("migrations");
         if migrations_dir.exists() {
             let cache_mtime = query_files
@@ -165,7 +164,6 @@ impl CheckCommand {
             }
         }
 
-        // Check sqlx.toml
         let sqlx_toml = Path::new("sqlx.toml");
         if sqlx_toml.exists() {
             let content = std::fs::read_to_string(sqlx_toml)?;
@@ -190,7 +188,6 @@ impl CheckCommand {
     pub(super) async fn check_rust_linting(&self, result: &mut CheckResult) {
         println!();
 
-        // Check cargo fmt
         let fmt_result = TokioCommand::new("cargo")
             .args(["fmt", "--check"])
             .stdout(Stdio::null())
@@ -216,7 +213,6 @@ impl CheckCommand {
             }
         }
 
-        // Check cargo clippy
         let clippy_output = TokioCommand::new("cargo")
             .args(["clippy", "--", "-D", "warnings"])
             .stdout(Stdio::piped())

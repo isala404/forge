@@ -423,16 +423,11 @@ impl<'c> sqlx::Executor<'c> for &'c mut ForgeConn<'_> {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct AuthContext {
-    /// The authenticated user ID (if any).
     user_id: Option<Uuid>,
-    /// User roles.
     roles: Vec<String>,
-    /// Custom claims from JWT.
     claims: HashMap<String, serde_json::Value>,
-    /// Whether the request is authenticated.
     authenticated: bool,
-    /// JWT expiry as Unix timestamp (`exp` claim). `None` for unauthenticated
-    /// sessions or when no JWT was presented.
+    /// `None` for unauthenticated sessions or when no JWT was presented.
     token_exp: Option<i64>,
 }
 
@@ -600,24 +595,15 @@ impl AuthContext {
 }
 
 /// Request metadata available to all functions.
-///
-/// Fields are crate-private; use the accessor methods. Construct via
-/// [`RequestMetadata::new`] / [`RequestMetadata::with_trace_id`] and
-/// populate optional fields with the fluent setters.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct RequestMetadata {
-    /// Unique request ID for tracing.
     pub(crate) request_id: Uuid,
-    /// Trace ID for distributed tracing.
     pub(crate) trace_id: String,
-    /// Client IP address.
     pub(crate) client_ip: Option<String>,
-    /// User agent string.
     pub(crate) user_agent: Option<String>,
-    /// Correlation ID linking frontend events to this backend call.
+    /// Links frontend events to this backend call via `x-correlation-id`.
     pub(crate) correlation_id: Option<String>,
-    /// Request timestamp.
     pub(crate) timestamp: chrono::DateTime<chrono::Utc>,
 }
 
@@ -725,15 +711,10 @@ impl Default for RequestMetadata {
 /// Context for query functions (read-only database access).
 #[non_exhaustive]
 pub struct QueryContext {
-    /// Authentication context.
     pub auth: AuthContext,
-    /// Request metadata.
     pub request: RequestMetadata,
-    /// Database pool for read operations.
     db_pool: sqlx::PgPool,
-    /// Environment variable provider.
     env_provider: Arc<dyn EnvProvider>,
-    /// KV store handle. `None` until threaded in by the runtime.
     kv: Option<Arc<dyn KvHandle>>,
 }
 
@@ -868,39 +849,24 @@ impl Default for AuthTokenTtl {
 /// Context for mutation functions (transactional database access).
 #[non_exhaustive]
 pub struct MutationContext {
-    /// Authentication context.
     pub auth: AuthContext,
-    /// Request metadata.
     pub request: RequestMetadata,
-    /// Database pool for transactional operations.
     db_pool: sqlx::PgPool,
-    /// HTTP client with circuit breaker for external requests.
     http_client: CircuitBreakerClient,
-    /// Default timeout for outbound HTTP requests made through the
-    /// circuit-breaker client. `None` means unlimited.
+    /// `None` means unlimited.
     http_timeout: Option<Duration>,
-    /// Optional job dispatcher for dispatching background jobs.
     job_dispatch: Option<Arc<dyn JobDispatch>>,
-    /// Optional workflow dispatcher for starting workflows.
     workflow_dispatch: Option<Arc<dyn WorkflowDispatch>>,
-    /// Environment variable provider.
     env_provider: Arc<dyn EnvProvider>,
-    /// Transaction handle for transactional mutations.
-    ///
     /// Wrapped in `Option` so the executor can `take()` the transaction back
     /// after the handler returns without ever needing `Arc::try_unwrap`.
     tx: Option<Arc<AsyncMutex<Option<Transaction<'static, Postgres>>>>>,
-    /// Optional token issuer for signing JWTs (available when HMAC auth is configured).
     token_issuer: Option<Arc<dyn TokenIssuer>>,
-    /// Token TTL config from forge.toml.
     token_ttl: AuthTokenTtl,
-    /// Running count of background jobs dispatched by this mutation.
     dispatched_job_count: Arc<AtomicUsize>,
-    /// Maximum number of jobs a single mutation may dispatch. 0 = unlimited.
+    /// 0 = unlimited.
     max_jobs_per_request: usize,
-    /// KV store handle. `None` until threaded in by the runtime.
     kv: Option<Arc<dyn KvHandle>>,
-    /// Email sender. `None` until threaded in by the runtime.
     email_sender: Option<Arc<dyn crate::email::EmailSender>>,
 }
 
@@ -1609,7 +1575,6 @@ mod tests {
         let mut claims = HashMap::new();
         claims.insert("sub".to_string(), serde_json::json!("string-sub"));
         let ctx = AuthContext::authenticated(user_id, vec![], claims);
-        // sub takes precedence over uuid.
         assert_eq!(ctx.principal_id(), Some("string-sub".to_string()));
     }
 
@@ -1633,7 +1598,6 @@ mod tests {
         let admin =
             AuthContext::authenticated(Uuid::new_v4(), vec!["admin".into()], HashMap::new());
         assert!(admin.is_admin());
-        // Unauthenticated never admin.
         assert!(!AuthContext::unauthenticated().is_admin());
     }
 
@@ -1651,17 +1615,14 @@ mod tests {
 
     #[test]
     fn tenant_id_returns_none_for_missing_or_invalid_claim() {
-        // Missing.
         let ctx = AuthContext::authenticated(Uuid::new_v4(), vec![], HashMap::new());
         assert!(ctx.tenant_id().is_none());
 
-        // Non-string.
         let mut claims = HashMap::new();
         claims.insert("tenant_id".to_string(), serde_json::json!(123));
         let ctx = AuthContext::authenticated(Uuid::new_v4(), vec![], claims);
         assert!(ctx.tenant_id().is_none());
 
-        // Garbage string.
         let mut claims = HashMap::new();
         claims.insert("tenant_id".to_string(), serde_json::json!("not-a-uuid"));
         let ctx = AuthContext::authenticated(Uuid::new_v4(), vec![], claims);
@@ -1671,16 +1632,13 @@ mod tests {
     #[test]
     fn token_exp_round_trips_and_drives_expiry_check() {
         let ctx = AuthContext::authenticated(Uuid::new_v4(), vec![], HashMap::new());
-        // No token exp by default ⇒ never expired.
         assert!(!ctx.token_is_expired());
         assert!(ctx.token_exp().is_none());
 
-        // Past timestamp ⇒ expired.
         let expired = ctx.clone().with_token_exp(1);
         assert_eq!(expired.token_exp(), Some(1));
         assert!(expired.token_is_expired());
 
-        // Far-future timestamp ⇒ not expired.
         let live = ctx.with_token_exp(chrono::Utc::now().timestamp() + 3600);
         assert!(!live.token_is_expired());
     }
@@ -1741,7 +1699,6 @@ mod tests {
     fn request_metadata_default_matches_new() {
         let a = RequestMetadata::default();
         let b = RequestMetadata::new();
-        // Trace IDs differ (random), but field shape should match.
         assert!(a.client_ip().is_none());
         assert!(b.user_agent().is_none());
     }

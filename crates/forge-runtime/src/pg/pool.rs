@@ -112,7 +112,6 @@ pub struct Database {
 }
 
 impl Database {
-    /// Create a new database connection from configuration.
     pub async fn from_config(config: &DatabaseConfig) -> Result<Self> {
         Self::from_config_with_service(config, "forge").await
     }
@@ -190,7 +189,6 @@ impl Database {
             .log_statements(LevelFilter::Off)
             .log_slow_statements(LevelFilter::Warn, Duration::from_millis(500));
         if statement_timeout_secs > 0 {
-            // Set PostgreSQL statement_timeout to prevent unbounded query execution
             opts = opts.options([("statement_timeout", &format!("{}s", statement_timeout_secs))]);
         }
         Ok(opts)
@@ -248,7 +246,6 @@ impl Database {
             .await
     }
 
-    /// Get the primary pool for writes.
     pub fn primary(&self) -> &PgPool {
         &self.primary
     }
@@ -262,7 +259,6 @@ impl Database {
         let len = self.replicas.len();
         let start = self.replica_counter.fetch_add(1, Ordering::Relaxed) % len;
 
-        // Try each replica starting from round-robin position
         for offset in 0..len {
             let idx = (start + offset) % len;
             if let Some(entry) = self.replicas.get(idx)
@@ -272,7 +268,6 @@ impl Database {
             }
         }
 
-        // All replicas unhealthy, fall back to primary
         &self.primary
     }
 
@@ -331,7 +326,6 @@ impl Database {
         }
     }
 
-    /// Check database connectivity.
     pub async fn health_check(&self) -> Result<()> {
         sqlx::query_scalar!("SELECT 1 as \"v!\"")
             .fetch_one(self.primary.as_ref())
@@ -340,7 +334,6 @@ impl Database {
         Ok(())
     }
 
-    /// Close all connections gracefully.
     pub async fn close(&self) {
         self.primary.close().await;
         for entry in self.replicas.iter() {

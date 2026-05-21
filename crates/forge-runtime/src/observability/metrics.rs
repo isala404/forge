@@ -407,19 +407,15 @@ pub fn set_active_connections(connection_type: &'static str, delta: i64) {
     connections_gauge().set(connection_type, delta);
 }
 
-/// Record the size of a NOTIFY payload before it is sent.
 pub fn record_notify_payload_bytes(channel: &str, bytes: usize) {
     notify_metrics().record(channel, bytes);
 }
 
-/// Update subscription cardinality gauges. Call periodically (e.g. on the
-/// cleanup interval) rather than on every subscribe/unsubscribe to avoid
-/// per-event overhead.
+/// Call periodically rather than on every subscribe/unsubscribe to avoid per-event overhead.
 pub fn record_subscription_counts(subscribers: usize, groups: usize, tables: usize) {
     subscription_metrics().record(subscribers, groups, tables);
 }
 
-/// Record the wall-clock duration of one workflow scheduler processing cycle.
 pub fn record_workflow_scheduler_duration(duration_secs: f64) {
     workflow_scheduler_metrics().record_processing_duration(duration_secs);
 }

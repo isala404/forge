@@ -25,7 +25,6 @@ pub struct WorkflowRecord {
 }
 
 impl WorkflowRecord {
-    /// Create a new workflow record pinned to a specific version and signature.
     pub fn new(
         workflow_name: impl Into<String>,
         workflow_version: impl Into<String>,
@@ -54,7 +53,6 @@ impl WorkflowRecord {
         }
     }
 
-    /// Set trace ID.
     pub fn with_trace_id(mut self, trace_id: impl Into<String>) -> Self {
         self.trace_id = Some(trace_id.into());
         self
@@ -75,7 +73,6 @@ pub struct WorkflowStepRecord {
 }
 
 impl WorkflowStepRecord {
-    /// Create a new step record.
     pub fn new(workflow_run_id: Uuid, step_name: impl Into<String>) -> Self {
         Self {
             id: Uuid::new_v4(),

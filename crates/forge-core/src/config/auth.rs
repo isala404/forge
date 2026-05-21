@@ -44,34 +44,25 @@ pub struct LegacySecret {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct AuthConfig {
-    /// JWT secret for HMAC algorithms (HS256).
-    /// Required when using HMAC algorithms.
+    /// Required for HS256.
     pub jwt_secret: Option<String>,
 
-    /// JWT signing algorithm.
-    /// HS256 (default) requires jwt_secret.
-    /// RS256 requires jwks_url.
     #[serde(default)]
     pub jwt_algorithm: JwtAlgorithm,
 
-    /// Expected token issuer (iss claim).
     /// If set, tokens with a different issuer are rejected.
     pub jwt_issuer: Option<String>,
 
-    /// Expected audience (aud claim).
     /// If set, tokens with a different audience are rejected.
     pub jwt_audience: Option<String>,
 
-    /// Access token lifetime (e.g., "15m", "1h").
-    /// Used by `ctx.issue_token_pair()`. Defaults to "1h".
+    /// Access token lifetime (e.g., "15m", "1h"). Used by `ctx.issue_token_pair()`.
     pub access_token_ttl: Option<DurationStr>,
 
-    /// Refresh token lifetime (e.g., "7d", "30d").
-    /// Used by `ctx.issue_token_pair()`. Defaults to "30d".
+    /// Refresh token lifetime (e.g., "7d", "30d"). Used by `ctx.issue_token_pair()`.
     pub refresh_token_ttl: Option<DurationStr>,
 
-    /// JWKS URL for RSA algorithms (RS256).
-    /// Keys are fetched and cached automatically.
+    /// Required for RS256; keys are fetched and cached automatically.
     pub jwks_url: Option<String>,
 
     /// JWKS cache TTL duration (e.g. "1h", "30m").
@@ -89,18 +80,16 @@ pub struct AuthConfig {
     pub jwt_leeway: DurationStr,
 
     /// When `true` (default), `jwt_audience` must be set when auth is enabled.
-    /// Set to `false` only during migration. Enforce it again once all clients
-    /// send an `aud` claim.
+    /// Set to `false` only during migration.
     #[serde(default = "default_audience_required")]
     pub audience_required: bool,
 
     /// JWT spec claims that must be present in every token.
-    /// Defaults to `["exp", "sub"]`. Add `"aud"` here if you want claim-level
+    /// Defaults to `["exp", "sub"]`. Add `"aud"` here for claim-level
     /// enforcement in addition to the `jwt_audience` equality check.
     #[serde(default = "default_required_claims")]
     pub required_claims: Vec<String>,
 
-    /// Session cookie lifetime (e.g., "1h", "24h").
     /// Used for OAuth consent flow cookies. Defaults to the access token TTL.
     pub session_cookie_ttl: Option<DurationStr>,
 
@@ -142,17 +131,14 @@ impl Default for AuthConfig {
 }
 
 impl AuthConfig {
-    /// Resolved access token TTL in seconds.
-    /// Parses `access_token_ttl`, default 3600s (1h).
-    /// Minimum 1 second to prevent zero-lifetime tokens.
+    /// Resolved access token TTL in seconds. Minimum 1 to prevent zero-lifetime tokens.
     pub fn access_token_ttl_secs(&self) -> i64 {
         self.access_token_ttl
             .map(|d| (d.as_secs() as i64).max(1))
             .unwrap_or(3600)
     }
 
-    /// Resolved refresh token TTL in days.
-    /// Parses `refresh_token_ttl`, default 30 days.
+    /// Resolved refresh token TTL in days. Default 30; sub-day values floor to 1.
     pub fn refresh_token_ttl_days(&self) -> i64 {
         self.refresh_token_ttl
             .map(|d| {
@@ -162,15 +148,14 @@ impl AuthConfig {
             .unwrap_or(30)
     }
 
-    /// Resolved session cookie TTL in seconds.
-    /// Falls back to `access_token_ttl_secs()` when not explicitly set.
+    /// Resolved session cookie TTL in seconds. Falls back to `access_token_ttl_secs()`.
     pub fn session_cookie_ttl_secs(&self) -> i64 {
         self.session_cookie_ttl
             .map(|d| (d.as_secs() as i64).max(1))
             .unwrap_or_else(|| self.access_token_ttl_secs())
     }
 
-    /// Check if auth is configured (any credential or claim validation is set).
+    /// Returns `true` when any credential or claim validation field is set.
     pub fn is_configured(&self) -> bool {
         self.jwt_secret.is_some()
             || self.jwks_url.is_some()
@@ -178,8 +163,7 @@ impl AuthConfig {
             || self.jwt_audience.is_some()
     }
 
-    /// Validate that the configuration is complete for the chosen algorithm.
-    /// Skips validation if no auth settings are configured (auth disabled).
+    /// Validate that the config is complete for the chosen algorithm.
     pub fn validate(&self) -> Result<()> {
         if !self.is_configured() {
             return Ok(());
@@ -305,7 +289,6 @@ mod tests {
 
     #[test]
     fn is_configured_true_when_only_jwt_issuer_set() {
-        // Issuer-only is enough to flip is_configured even without a secret.
         let cfg = AuthConfig {
             jwt_issuer: Some("https://issuer".into()),
             ..AuthConfig::default()
@@ -324,14 +307,12 @@ mod tests {
 
     #[test]
     fn validate_passes_when_auth_disabled() {
-        // Empty config means auth is off; validation must not complain.
         let cfg = AuthConfig::default();
         cfg.validate().unwrap();
     }
 
     #[test]
     fn validate_hs256_rejects_missing_secret() {
-        // Issuer alone trips is_configured but HS256 still needs a secret.
         let cfg = AuthConfig {
             jwt_algorithm: JwtAlgorithm::HS256,
             jwt_issuer: Some("https://issuer".into()),
@@ -429,8 +410,6 @@ mod tests {
 
     #[test]
     fn access_token_ttl_clamps_to_at_least_one_second() {
-        // Zero-duration TTLs would mint already-expired tokens; the floor of 1
-        // keeps them at least nominally valid so client retry logic doesn't loop.
         let cfg = AuthConfig {
             access_token_ttl: Some(DurationStr::new(Duration::from_secs(0))),
             ..AuthConfig::default()
@@ -446,7 +425,6 @@ mod tests {
 
     #[test]
     fn refresh_token_ttl_sub_day_rounds_to_one() {
-        // Anything less than a day still grants one full day so tokens are usable.
         let cfg = AuthConfig {
             refresh_token_ttl: Some(DurationStr::new(Duration::from_secs(60))),
             ..AuthConfig::default()
@@ -506,7 +484,6 @@ mod tests {
         let rs: JwtAlgorithm = serde_json::from_str(r#""RS256""#).unwrap();
         assert_eq!(hs, JwtAlgorithm::HS256);
         assert_eq!(rs, JwtAlgorithm::RS256);
-        // Unknown values must fail loudly so a typo in forge.toml is caught at boot.
         assert!(serde_json::from_str::<JwtAlgorithm>(r#""ES256""#).is_err());
     }
 

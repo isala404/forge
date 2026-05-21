@@ -244,8 +244,6 @@ mod tests {
         for k in ["user", "ip", "tenant", "global"] {
             assert!(validate_rate_limit_key(k).is_ok(), "should accept {k}");
         }
-        // custom(...) prefix is the documented escape hatch — the inner
-        // contents aren't inspected here, so just ensure the prefix passes.
         assert!(validate_rate_limit_key("custom(user_plus_tenant)").is_ok());
     }
 
@@ -265,7 +263,6 @@ mod tests {
 
     #[test]
     fn rate_limit_validator_no_op_when_no_fields_present() {
-        // Empty meta — nothing to validate, must not error or require fields.
         let rl = RateLimitMeta::default();
         assert!(validate_rate_limit(&rl).is_ok());
     }
@@ -342,8 +339,6 @@ mod tests {
 
     #[test]
     fn parse_rate_limit_per_errors_on_bare_integer() {
-        // Bare integers are rejected at the utils layer; the error message
-        // must point the user toward a suffixed example.
         let rl = RateLimitMeta {
             requests: Some(1),
             per: Some("60".to_string()),
@@ -357,14 +352,12 @@ mod tests {
 
     #[test]
     fn require_role_parses_string_form() {
-        // require_role = "admin" — handled by from_string.
         let role = RequireRole::from_string("admin").unwrap();
         assert_eq!(role.0, "admin");
     }
 
     #[test]
     fn require_role_rejects_non_string_literal_in_list() {
-        // require_role(123) — not a string literal, must fail.
         let meta = parse_meta("require_role(123)");
         let err = RequireRole::from_meta(&meta).expect_err("integer literal rejected");
         assert!(err.to_string().contains("string literal"));
@@ -372,12 +365,10 @@ mod tests {
 
     #[test]
     fn require_role_rejects_zero_or_multiple_args_in_list() {
-        // Zero args: require_role() — caught by len() != 1.
         let meta = parse_meta("require_role()");
         let err = RequireRole::from_meta(&meta).expect_err("empty args rejected");
         assert!(err.to_string().contains("exactly one"));
 
-        // Multiple args: require_role("a", "b") — same path.
         let meta = parse_meta("require_role(\"a\", \"b\")");
         let err = RequireRole::from_meta(&meta).expect_err("multiple args rejected");
         assert!(err.to_string().contains("exactly one"));
@@ -406,8 +397,6 @@ mod tests {
 
     #[test]
     fn tables_list_rejects_empty_parenthesized_form() {
-        // tables() — would otherwise produce a vacuous list; reject so the
-        // attribute is meaningful when present.
         let meta = parse_meta("tables()");
         let err = TablesList::from_meta(&meta).expect_err("empty list rejected");
         assert!(err.to_string().contains("must not be empty"));
@@ -422,7 +411,6 @@ mod tests {
 
     #[test]
     fn tables_list_rejects_bare_path_attribute() {
-        // Bare `tables` with no list form falls through to the catch-all.
         let meta = parse_meta("tables");
         let err = TablesList::from_meta(&meta).expect_err("bare path rejected");
         assert!(err.to_string().contains("parenthesized list"));
@@ -445,7 +433,6 @@ mod tests {
 
     #[test]
     fn reject_reserved_passes_when_no_reserved_keys_present() {
-        // Caller asserts `cache` is not present — must succeed silently.
         let res = reject_reserved(&["cache"], &[("cache", false)], "query");
         assert!(res.is_ok());
     }
@@ -464,7 +451,6 @@ mod tests {
 
     #[test]
     fn reject_reserved_ignores_non_reserved_keys_even_when_present() {
-        // `other` is present but not in the reserved set — must pass.
         let res = reject_reserved(&["cache"], &[("other", true)], "query");
         assert!(res.is_ok());
     }

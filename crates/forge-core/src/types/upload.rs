@@ -7,18 +7,8 @@ use serde::{Deserialize, Serialize};
 
 /// A file upload from a multipart form.
 ///
-/// This type is used for receiving file uploads in mutations. It cannot be
-/// stored directly in the database (attempting to convert to SQL type will panic).
-///
-/// # Examples
-///
-/// ```
-/// use forge_core::types::Upload;
-/// use bytes::Bytes;
-///
-/// let upload = Upload::new("document.pdf", "application/pdf", Bytes::from("content"));
-/// println!("Received: {} ({} bytes)", upload.name(), upload.len());
-/// ```
+/// Cannot be stored directly in the database — attempting to convert to a SQL
+/// type will panic. Save the bytes to object storage and store only the URL.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Upload {
     name: String,
@@ -28,7 +18,6 @@ pub struct Upload {
 }
 
 impl Upload {
-    /// Create a new upload from parts.
     pub fn new(name: impl Into<String>, content_type: impl Into<String>, bytes: Bytes) -> Self {
         Self {
             name: name.into(),
@@ -37,7 +26,6 @@ impl Upload {
         }
     }
 
-    /// Create an upload from raw bytes with a default content type.
     pub fn from_bytes(name: impl Into<String>, bytes: Bytes) -> Self {
         Self {
             name: name.into(),
@@ -46,32 +34,26 @@ impl Upload {
         }
     }
 
-    /// Get the original filename.
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Get the content type (MIME type).
     pub fn content_type(&self) -> &str {
         &self.content_type
     }
 
-    /// Get a reference to the file bytes.
     pub fn bytes(&self) -> &Bytes {
         &self.bytes
     }
 
-    /// Consume the upload and return the bytes.
     pub fn into_bytes(self) -> Bytes {
         self.bytes
     }
 
-    /// Get the file size in bytes.
     pub fn len(&self) -> usize {
         self.bytes.len()
     }
 
-    /// Check if the upload is empty.
     pub fn is_empty(&self) -> bool {
         self.bytes.is_empty()
     }

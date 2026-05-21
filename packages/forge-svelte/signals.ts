@@ -41,7 +41,6 @@ const MAX_BREADCRUMBS = 20;
 const MAX_QUEUE_SIZE = 1000;
 const PERSIST_KEY = "forge_signals_queue_v1";
 
-/** Generate a short unique ID for correlation (nanoid-style) */
 function generateId(): string {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
   let id = "";
@@ -52,7 +51,6 @@ function generateId(): string {
   return id;
 }
 
-/** Detect if the user/browser has opted out of tracking. */
 function hasOptedOut(): boolean {
   if (typeof navigator === "undefined") return false;
   const nav = navigator as Navigator & {
@@ -139,7 +137,7 @@ export class ForgeSignals {
     });
   }
 
-  /** Track a page view. Called automatically on navigation when autoPageViews is enabled. */
+  /** Track a page view. Called automatically on navigation when `autoPageViews` is enabled. */
   async page(properties?: Record<string, unknown>): Promise<void> {
     if (!this.config.enabled) return;
     try {
@@ -161,7 +159,6 @@ export class ForgeSignals {
       if (result.session_id && !this.sessionId) {
         this.sessionId = result.session_id;
       }
-      // UTM only matters on first page view
       this.utmParams = null;
     } catch {
       // Silent
@@ -184,7 +181,7 @@ export class ForgeSignals {
     }]);
   }
 
-  /** Add a breadcrumb for error reproduction context. */
+  /** Add a breadcrumb for error context. */
   breadcrumb(message: string, data?: Record<string, unknown>): void {
     if (!this.config.enabled) return;
     this.breadcrumbs.push({
@@ -197,18 +194,15 @@ export class ForgeSignals {
     }
   }
 
-  /** Generate a correlation ID for the next RPC call. */
   nextCorrelationId(): string {
     this.lastCorrelationId = generateId();
     return this.lastCorrelationId;
   }
 
-  /** Get the current session ID (null until first server response). */
   getSessionId(): string | null {
     return this.sessionId;
   }
 
-  /** Send a single Web Vitals measurement. Enqueued as a track event. */
   vital(name: string, value: number, extra?: { rating?: string; attribution?: Record<string, unknown> }): void {
     if (!this.config.enabled) return;
     this.enqueue({
@@ -223,15 +217,12 @@ export class ForgeSignals {
     });
   }
 
-  /** Clean up timers and event listeners. */
   destroy(): void {
     this.destroyed = true;
     if (this.flushTimer) clearInterval(this.flushTimer);
     this.flushBeacon();
     this.teardownAutoCapture();
   }
-
-  // -- Internal --
 
   private signalFetchOptions(): { headers: Record<string, string>; credentials: RequestCredentials; keepalive: boolean } {
     return {
@@ -400,14 +391,12 @@ export class ForgeSignals {
   }
 
   private teardownAutoCapture(): void {
-    // Restore monkey-patched history methods
     if (this.originalPushState) {
       history.pushState = this.originalPushState;
     }
     if (this.originalReplaceState) {
       history.replaceState = this.originalReplaceState;
     }
-    // Remove all event listeners
     for (const [target, event, handler] of this.boundListeners) {
       target.removeEventListener(event, handler);
     }
@@ -435,10 +424,8 @@ export class ForgeSignals {
   private setupWebVitals(): void {
     if (typeof window === "undefined" || typeof PerformanceObserver === "undefined") return;
 
-    // Best-effort Web Vitals via PerformanceObserver. Uses the browser's
-    // standard entry types so we don't pull in an external library. Values
-    // match the Core Web Vitals spec: LCP in ms, CLS unitless, INP in ms,
-    // FCP in ms, TTFB in ms from Navigation Timing.
+    // Best-effort via PerformanceObserver; no external library. Values match
+    // Core Web Vitals spec: LCP/INP/FCP/TTFB in ms, CLS unitless.
     const observe = (type: string, cb: (entry: PerformanceEntry) => void) => {
       try {
         const observer = new PerformanceObserver((list) => {
@@ -450,21 +437,18 @@ export class ForgeSignals {
       }
     };
 
-    // LCP — last largest-contentful-paint entry wins
     let lcpValue = 0;
     observe("largest-contentful-paint", (entry) => {
       const e = entry as PerformanceEntry & { renderTime?: number; loadTime?: number };
       lcpValue = e.renderTime ?? e.loadTime ?? entry.startTime;
     });
 
-    // CLS — sum session-window layout shifts
     let clsValue = 0;
     observe("layout-shift", (entry) => {
       const e = entry as PerformanceEntry & { value: number; hadRecentInput: boolean };
       if (!e.hadRecentInput) clsValue += e.value;
     });
 
-    // INP / FID — report interaction latency per event
     observe("event", (entry) => {
       const e = entry as PerformanceEntry & { interactionId?: number; duration: number };
       if (e.interactionId && e.duration > 40) {
@@ -475,7 +459,6 @@ export class ForgeSignals {
       }
     });
 
-    // FCP
     observe("paint", (entry) => {
       if (entry.name === "first-contentful-paint") {
         this.vital("fcp", entry.startTime, {
@@ -484,14 +467,12 @@ export class ForgeSignals {
       }
     });
 
-    // Long tasks — surface jank sources
     observe("longtask", (entry) => {
       this.vital("long_task", entry.duration, {
         attribution: { name: entry.name, startTime: entry.startTime },
       });
     });
 
-    // Navigation Timing — TTFB + full page timings on load
     const onLoad = () => {
       try {
         const nav = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
@@ -514,7 +495,6 @@ export class ForgeSignals {
       } catch {
         // ignore
       }
-      // Flush terminal CLS/LCP on visibility change (below). Nothing to do here.
     };
     if (document.readyState === "complete") {
       onLoad();
@@ -522,7 +502,6 @@ export class ForgeSignals {
       this.addEventListener(window, "load", onLoad as EventListener);
     }
 
-    // Report final LCP + CLS when the page hides (user leaves / tab switch).
     this.addEventListener(document, "visibilitychange", () => {
       if (document.visibilityState === "hidden") {
         if (lcpValue > 0) {
@@ -545,7 +524,6 @@ export class ForgeSignals {
     if (typeof window === "undefined") return;
     this.addEventListener(window, "online", () => {
       this.track("network.online");
-      // A recovered connection is the ideal time to drain the offline queue.
       this.flush();
     });
     this.addEventListener(window, "offline", () => {
@@ -564,7 +542,6 @@ export class ForgeSignals {
     return Object.keys(utm).length > 0 ? utm : null;
   }
 
-  /** Restore any events stashed in localStorage from a prior page session. */
   private restoreQueue(): void {
     if (!this.config.persistQueue || typeof localStorage === "undefined") return;
     try {
@@ -579,7 +556,6 @@ export class ForgeSignals {
     }
   }
 
-  /** Persist the pending queue so events survive a reload. */
   private persistQueue(): void {
     if (!this.config.persistQueue || typeof localStorage === "undefined") return;
     try {

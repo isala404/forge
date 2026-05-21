@@ -47,7 +47,6 @@ impl CheckCommand {
                 };
                 let filename = file_name.to_string_lossy();
 
-                // Check naming convention: NNNN_name.sql
                 let name_valid = filename
                     .split('_')
                     .next()
@@ -130,7 +129,6 @@ impl CheckCommand {
                 function_count += 1;
                 let content = std::fs::read_to_string(&path)?;
 
-                // Check for any forge macro
                 if content.contains("#[forge::query")
                     || content.contains("#[forge::mutation")
                     || content.contains("#[forge::webhook")
@@ -162,7 +160,6 @@ impl CheckCommand {
             );
         }
 
-        // Duplicate handler name check
         match find_duplicate_handlers(functions_dir) {
             Ok(dupes) if dupes.is_empty() => {}
             Ok(dupes) => {
@@ -236,7 +233,6 @@ impl CheckCommand {
         }
 
         let recognized = forge_model_count + derive_count;
-
         if model_count == 0 {
             result.warn(
                 "No schema files found",

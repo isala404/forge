@@ -98,7 +98,6 @@ impl std::fmt::Debug for LeaderElection {
 }
 
 impl LeaderElection {
-    /// Create a new leader election instance.
     pub fn new(
         pool: sqlx::PgPool,
         node_id: NodeId,
@@ -129,7 +128,6 @@ impl LeaderElection {
         self
     }
 
-    /// Check if this node is the leader.
     pub fn is_leader(&self) -> bool {
         self.is_leader.load(Ordering::SeqCst)
     }
@@ -148,7 +146,6 @@ impl LeaderElection {
         self.config.check_interval
     }
 
-    /// Stop the leader election.
     pub fn stop(&self) {
         let _ = self.shutdown_tx.send(true);
     }
@@ -189,10 +186,6 @@ impl LeaderElection {
         .await
         .map_err(forge_core::ForgeError::Database)?;
 
-        // If the lock was not acquired, check whether the current leader is a
-        // zombie: its lease is expired (application dead) but its PG backend
-        // is still alive (kept by a connection pooler). If so, forcibly evict
-        // the backend and retry once.
         if !acquired {
             match self.try_preempt_zombie_leader(&mut conn).await {
                 Ok(true) => {
@@ -261,8 +254,6 @@ impl LeaderElection {
         &self,
         conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
     ) -> forge_core::Result<bool> {
-        // 1. Check for a stale lease. We consider it stale when lease_until is
-        //    in the past — the leader failed to refresh before its own deadline.
         let lease_expired = sqlx::query_scalar!(
             r#"
             SELECT EXISTS(
@@ -281,10 +272,8 @@ impl LeaderElection {
             return Ok(false);
         }
 
-        // 2. Find the PID of the backend holding the advisory lock.
-        //    pg_locks splits a single-int8 lock ID into classid (upper 32 bits)
-        //    and objid (lower 32 bits); we use the same signed cast as
-        //    validate_lock_held to match what PostgreSQL stores internally.
+        // pg_locks splits a single-int8 lock ID into classid (upper 32 bits)
+        // and objid (lower 32 bits); signed cast matches what PostgreSQL stores internally.
         let lock_id = self.role.lock_id();
         let classid = (lock_id >> 32) as i32;
         let objid = (lock_id & 0xFFFF_FFFF) as i32;
@@ -309,8 +298,6 @@ impl LeaderElection {
         let pid = match zombie_pid {
             Some(p) => p,
             None => {
-                // Lock was released between our check and now — no zombie to
-                // evict. Return false; the caller will retry next tick.
                 tracing::debug!(
                     role = self.role.as_str(),
                     "Stale lease detected but no lock-holding backend found; \
@@ -320,10 +307,7 @@ impl LeaderElection {
             }
         };
 
-        // 3. Terminate the zombie backend. pg_terminate_backend returns true if
-        //    the signal was sent, false if permission was denied or the backend
-        //    was already gone. We warn rather than error on false so the caller
-        //    can degrade gracefully.
+        // pg_terminate_backend returns false when permission is denied or the backend is already gone.
         let terminated =
             sqlx::query_scalar!(r#"SELECT pg_terminate_backend($1) AS "terminated!""#, pid,)
                 .fetch_one(&mut **conn)
@@ -348,8 +332,7 @@ impl LeaderElection {
             "Terminated zombie leader backend with expired lease; retrying lock acquisition"
         );
 
-        // 4. Retry the lock acquisition on the same connection. A small yield
-        //    lets PG process the termination before we attempt the lock.
+        // Yield to let PG process the termination before retrying the lock.
         tokio::task::yield_now().await;
 
         let acquired = sqlx::query_scalar!(
@@ -497,9 +480,9 @@ impl LeaderElection {
             }
         };
 
-        // Probe pg_locks on the held connection. Same query as
-        // `validate_lock_held`, but inlined so the Mutex stays locked across
-        // both the probe and the UPDATE below.
+        // Probe pg_locks on the held connection; Mutex stays locked across both
+        // the probe and the UPDATE below to prevent a concurrent try_become_leader
+        // from repopulating the slot with a different backend's connection.
         let lock_id = self.role.lock_id();
         let classid = (lock_id >> 32) as i32;
         let objid = (lock_id & 0xFFFF_FFFF) as i32;
@@ -553,17 +536,12 @@ impl LeaderElection {
         .await
         .map_err(forge_core::ForgeError::Database)?;
 
-        // Refresh the validate cache: we just confirmed the lock is held on
-        // this connection, so the next `validate_lock_held` tick can skip
-        // the pg_locks probe within `lock_validate_interval`.
         drop(lock_connection);
         *self.last_lock_validated.lock().await = Some(std::time::Instant::now());
 
         Ok(())
     }
 
-    /// Clear the cached `pg_locks` probe result so the next `validate_lock_held`
-    /// actually queries the database.
     async fn invalidate_lock_cache(&self) {
         *self.last_lock_validated.lock().await = None;
     }
@@ -573,7 +551,6 @@ impl LeaderElection {
         crate::cluster::metrics::set_is_leader(self.role.as_str(), false);
     }
 
-    /// Release leadership.
     pub async fn release_leadership(&self) -> forge_core::Result<()> {
         if !self.is_leader() {
             return Ok(());
@@ -590,13 +567,9 @@ impl LeaderElection {
         // resolved by the lock being gone).
         let mut lock_connection = self.lock_connection.lock().await;
         if let Some(mut conn) = lock_connection.take() {
-            // Emit the released-notification on the same backend that still
-            // holds the lock. Doing this before the unlock guarantees standbys
-            // see the wake-up only when the lock is genuinely about to be
-            // available; doing it on the lock-owning connection means PG flushes
-            // the NOTIFY at commit on this very session. A failure here is
-            // logged but not fatal: the worst case is that standbys fall back
-            // to their normal `check_interval` timer.
+            // Emit NOTIFY before unlock so standbys wake only when the lock is
+            // genuinely about to be free. Failure is non-fatal: standbys fall
+            // back to their normal check_interval timer.
             if let Err(e) = sqlx::query!(
                 "SELECT pg_notify($1, $2)",
                 LEADER_RELEASED_CHANNEL,
@@ -628,14 +601,10 @@ impl LeaderElection {
                 );
             }
 
-            // Clear leadership record on the same connection that held the
-            // advisory lock. Using the shared pool here would risk issuing the
-            // DELETE on a different backend, which is fine for correctness but
-            // would leave a window where the lock is gone but the row still
-            // names us as leader. Running it on the same connection closes that
-            // window entirely. WHERE node_id = $2 makes this safe even when the
-            // lock was lost out-of-band and another node has already overwritten
-            // the row via ON CONFLICT — that node's row stays put.
+            // DELETE on the lock-owning connection so the row is gone the moment
+            // the lock is released, with no window where the lock is absent but
+            // the row still names us. WHERE node_id = $2 is safe when another node
+            // has already overwritten the row — that row is left untouched.
             sqlx::query!(
                 r#"
             DELETE FROM forge_leaders
@@ -648,9 +617,6 @@ impl LeaderElection {
             .await
             .map_err(forge_core::ForgeError::Database)?;
         } else {
-            // Reachable when try_become_leader failed mid-way after setting
-            // is_leader=true (shouldn't happen with current code) or after a
-            // refresh_lease detected loss and cleared the slot.
             tracing::warn!(
                 role = self.role.as_str(),
                 "Leader lock connection missing during release"
@@ -665,7 +631,6 @@ impl LeaderElection {
         Ok(())
     }
 
-    /// Check if the current leader is healthy.
     pub async fn check_leader_health(&self) -> forge_core::Result<bool> {
         let result = sqlx::query_scalar!(
             "SELECT lease_until FROM forge_leaders WHERE role = $1",
@@ -677,11 +642,10 @@ impl LeaderElection {
 
         match result {
             Some(lease_until) => Ok(lease_until > Utc::now()),
-            None => Ok(false), // No leader
+            None => Ok(false),
         }
     }
 
-    /// Get current leader info.
     pub async fn get_leader(&self) -> forge_core::Result<Option<LeaderInfo>> {
         let row = sqlx::query!(
             r#"
@@ -697,9 +661,6 @@ impl LeaderElection {
 
         match row {
             Some(row) => {
-                // The query filters by `self.role`, so any row returned must
-                // belong to this role. If the stored string doesn't parse, the
-                // table is corrupt — surface it instead of silently coercing.
                 let role = row.role.parse::<LeaderRole>().map_err(|_| {
                     forge_core::ForgeError::internal(format!(
                         "forge_leaders row has unrecognised role string: {:?}",
@@ -738,12 +699,8 @@ impl LeaderElection {
         let mut keepalive_timer = tokio::time::interval(self.config.keepalive_interval);
         keepalive_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        // Fast-failover wakeup: when an outgoing leader emits NOTIFY on
-        // `forge_leader_released`, standbys for the same role attempt
-        // acquisition immediately instead of waiting for the next
-        // `check_interval` tick. The forwarder collapses any number of
-        // notifications into a single `Notify::notify_one` so a backlog
-        // doesn't queue up multiple acquisition attempts.
+        // Collapses any number of NOTIFY messages into a single notify_one so
+        // a backlog doesn't queue up multiple acquisition attempts.
         let release_wakeup = Arc::new(tokio::sync::Notify::new());
         let release_forwarder = if let Some(bus) = self.notify_bus.as_ref()
             && let Some(mut rx) = bus.subscribe(LEADER_RELEASED_CHANNEL)
@@ -786,8 +743,6 @@ impl LeaderElection {
         loop {
             tokio::select! {
                 _ = validate_timer.tick() => {
-                    // validate_lock_held is a no-op for standbys, so we don't
-                    // need an outer is_leader() guard here.
                     if let Err(e) = self.validate_lock_held().await {
                         tracing::debug!(error = %e, "Lock validation failed");
                     }
@@ -795,10 +750,6 @@ impl LeaderElection {
                 _ = keepalive_timer.tick() => {
                     if let Err(e) = self.keepalive().await {
                         tracing::warn!(error = %e, "Leader connection keepalive failed; validating lock");
-                        // A keepalive failure means the lock-owning connection
-                        // may be dead. Invalidate the cache and validate
-                        // immediately rather than waiting for the next
-                        // lock_validate_interval tick.
                         self.invalidate_lock_cache().await;
                         if let Err(ve) = self.validate_lock_held().await {
                             tracing::warn!(error = %ve, "Lock validation after keepalive failure dropped leadership");
@@ -825,10 +776,6 @@ impl LeaderElection {
                     }
                 }
                 _ = release_wakeup.notified() => {
-                    // Outgoing leader announced release; jump straight to an
-                    // acquisition attempt. `try_become_leader` is a no-op when
-                    // we already hold the lock, so it's safe even if we
-                    // happened to win between the NOTIFY and now.
                     if !self.is_leader()
                         && let Err(e) = self.try_become_leader().await
                     {

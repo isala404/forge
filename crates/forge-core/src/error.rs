@@ -201,8 +201,6 @@ mod tests {
 
     use super::*;
 
-    // --- Display / error messages ---
-
     #[test]
     fn display_preserves_inner_message() {
         let cases: Vec<(ForgeError, &str)> = vec![
@@ -273,8 +271,6 @@ mod tests {
         assert!(msg.contains("30"), "Expected retry_after in message: {msg}");
     }
 
-    // --- From implementations ---
-
     #[test]
     fn from_serde_json_error_maps_to_serialization() {
         let bad_json = serde_json::from_str::<serde_json::Value>("not json").unwrap_err();
@@ -313,8 +309,6 @@ mod tests {
         }
     }
 
-    // --- Variant matching (critical for downstream error handling) ---
-
     #[test]
     fn variants_are_distinguishable_via_pattern_match() {
         let errors: Vec<ForgeError> = vec![
@@ -327,7 +321,6 @@ mod tests {
             ForgeError::internal("x"),
         ];
 
-        // Each variant must match only its own pattern
         for (i, err) in errors.iter().enumerate() {
             let matched = match err {
                 ForgeError::NotFound(_) => 0,
@@ -369,7 +362,6 @@ mod tests {
     fn error_is_send_and_sync() {
         fn assert_send<T: Send>() {}
         fn assert_sync<T: Sync>() {}
-        // ForgeError must be Send+Sync for use across async task boundaries
         assert_send::<ForgeError>();
         assert_sync::<ForgeError>();
     }
@@ -393,7 +385,6 @@ mod tests {
             .http_status(),
             429
         );
-        // Internal variants all map to 500
         for err in [
             ForgeError::internal("x"),
             ForgeError::Database(sqlx::Error::RowNotFound),

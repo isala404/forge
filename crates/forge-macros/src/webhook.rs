@@ -169,9 +169,6 @@ fn parse_signature_from_meta(attr_args: &[NestedMeta]) -> Result<WebhookSignatur
 pub fn webhook_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
 
-    // Parse the attribute meta list once. `signature = <Rust expr>` is not a
-    // darling-friendly meta value, so we pull it out via syn before the
-    // remaining items go to darling.
     let attr_args = match NestedMeta::parse_meta_list(attr.into()) {
         Ok(v) => v,
         Err(e) => return TokenStream::from(e.into_compile_error()),
@@ -182,7 +179,6 @@ pub fn webhook_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         Err(e) => return TokenStream::from(e.into_compile_error()),
     };
 
-    // Filter out `signature = <expr>` since it's a Rust expression darling can't handle
     let filtered_args: Vec<NestedMeta> = attr_args
         .into_iter()
         .filter(|meta| {
@@ -213,7 +209,6 @@ pub fn webhook_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         register: darling_attrs.register,
     };
 
-    // Validate path
     match &attrs.path {
         None => {
             return syn::Error::new(
@@ -394,5 +389,3 @@ pub fn webhook_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     TokenStream::from(expanded)
 }
-
-// Tests for to_pascal_case and parse_duration are in utils.rs (single source of truth).

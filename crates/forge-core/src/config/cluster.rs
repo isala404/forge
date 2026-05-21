@@ -8,11 +8,9 @@ use super::types::DurationStr;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ClusterConfig {
-    /// Cluster name.
     #[serde(default = "default_cluster_name")]
     pub name: String,
 
-    /// Discovery method.
     #[serde(default)]
     pub discovery: DiscoveryMethod,
 

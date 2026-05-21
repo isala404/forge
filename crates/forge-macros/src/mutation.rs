@@ -151,13 +151,6 @@ impl Default for MutationAttrs {
     }
 }
 
-/// Expand the #[forge::mutation] attribute.
-///
-/// This transforms an async function into a mutation handler that:
-/// - Takes a MutationContext as the first parameter
-/// - Returns a Result<T>
-/// - Runs within a database transaction
-/// - Generates a struct implementing ForgeMutation trait
 pub fn expand_mutation(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
 
@@ -247,16 +240,15 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
     // The visitor only fires when the call's receiver chain bottoms out on the
     // mutation context binding (usually `ctx`). A name-only match would treat
     // any third-party `.dispatch_job()` on an unrelated type as a violation.
-    let mutation_ctx_ident: Option<syn::Ident> =
-        input.sig.inputs.iter().next().and_then(|arg| {
-            if let FnArg::Typed(pat_type) = arg
-                && let Pat::Ident(pat_ident) = pat_type.pat.as_ref()
-            {
-                Some(pat_ident.ident.clone())
-            } else {
-                None
-            }
-        });
+    let mutation_ctx_ident: Option<syn::Ident> = input.sig.inputs.iter().next().and_then(|arg| {
+        if let FnArg::Typed(pat_type) = arg
+            && let Pat::Ident(pat_ident) = pat_type.pat.as_ref()
+        {
+            Some(pat_ident.ident.clone())
+        } else {
+            None
+        }
+    });
 
     let has_dispatch = {
         struct DispatchCallVisitor {
@@ -361,7 +353,6 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         }
     }
 
-    // Validate async
     if asyncness.is_none() {
         return Err(syn::Error::new_spanned(
             &input.sig,
@@ -369,7 +360,6 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         ));
     }
 
-    // Extract parameters (skip first which should be &MutationContext)
     let params: Vec<_> = input.sig.inputs.iter().collect();
     if params.is_empty() {
         return Err(syn::Error::new_spanned(
@@ -378,7 +368,6 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         ));
     }
 
-    // Get context param - extract name and ensure it uses reference
     let (ctx_name, ctx_type) = match &params[0] {
         FnArg::Typed(pat_type) => {
             let name = if let Pat::Ident(pat_ident) = &*pat_type.pat {
@@ -399,14 +388,11 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         }
     };
 
-    // Determine the context type string (e.g., MutationContext)
     let type_str = quote! { #ctx_type }.to_string();
     let is_ref = type_str.starts_with('&');
 
-    // Get remaining params for args struct
     let arg_params: Vec<_> = params.iter().skip(1).cloned().collect();
 
-    // Reject argument types that codegen cannot emit bindings for.
     for p in &arg_params {
         if let FnArg::Typed(pat_type) = p
             && let Some((reason, span)) = crate::utils::check_arg_wire_type(&pat_type.ty)
@@ -415,7 +401,6 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         }
     }
 
-    // Build args struct fields
     let args_fields: Vec<TokenStream2> = arg_params
         .iter()
         .filter_map(|p| {
@@ -430,7 +415,6 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         })
         .collect();
 
-    // Build destructuring for function call
     let arg_names: Vec<TokenStream2> = arg_params
         .iter()
         .filter_map(|p| {
@@ -444,7 +428,6 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         })
         .collect();
 
-    // Get return type
     let output_type = match &input.sig.output {
         ReturnType::Default => quote! { () },
         ReturnType::Type(_, ty) => {
@@ -472,7 +455,6 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         }
     };
 
-    // Generate timeout option as Duration so all handler Info structs agree.
     let timeout = match attrs.timeout {
         Some(t) => quote! { Some(::std::time::Duration::from_secs(#t)) },
         None => quote! { None },
@@ -534,7 +516,6 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         None => quote! { None },
     };
 
-    // Extract SQL strings once and reuse for table deps, changed columns, and scope.
     let mut extractor = SqlStringExtractor::new();
     extractor.visit_block(fn_block);
 
@@ -568,7 +549,6 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         quote! { &[#(#deps),*] }
     };
 
-    // Extract written columns from INSERT/UPDATE statements in the body.
     let changed_columns_tokens: TokenStream2 = {
         let mut cols: Vec<String> = extract_changed_columns_from_sql(&extractor.sql_strings)
             .into_iter()
@@ -581,7 +561,6 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         }
     };
 
-    // Detect DB delegation in mutations with no inline SQL.
     if !attrs.is_public
         && !attrs.is_unscoped
         && table_dependencies.is_empty()
@@ -602,7 +581,6 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         }
     }
 
-    // Scope check: private mutations that touch tables must filter by user identity.
     if !attrs.is_public && !attrs.is_unscoped && !table_dependencies.is_empty() {
         let mut scope_extractor = SqlStringExtractor::new();
         scope_extractor.visit_block(fn_block);
@@ -635,7 +613,6 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         }
     }
 
-    // Detect tenant_id scope for runtime enforcement.
     let requires_tenant_scope = if !attrs.is_public && !attrs.is_unscoped {
         let mut tenant_extractor = SqlStringExtractor::new();
         tenant_extractor.visit_block(fn_block);
@@ -647,9 +624,8 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
     let transactional = attrs.transactional;
     let is_public = attrs.is_public;
 
-    // A single non-primitive struct argument is passed through to the handler
-    // as the args type directly. Primitives and collections get wrapped in a
-    // generated #StructNameArgs struct so RPC payloads stay JSON-named.
+    // Single non-primitive struct args are passed through directly; primitives and
+    // collections are wrapped in a generated #StructNameArgs to keep RPC payloads JSON-named.
     let single_custom_args_type: Option<&Type> = if arg_params.len() == 1 {
         if let FnArg::Typed(pat_type) = &arg_params[0] {
             if crate::utils::is_primitive_arg_type(&pat_type.ty) {
@@ -691,9 +667,7 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         )
     };
 
-    // Generate the inner function - always take context by reference
     let inner_fn = if is_ref {
-        // User already uses reference, keep the type as-is
         if arg_names.is_empty() {
             quote! {
                 #(#fn_attrs)*
@@ -705,18 +679,15 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
                 #vis async fn #fn_name(#ctx_name: #ctx_type, #(#arg_params),*) -> forge::forge_core::Result<#output_type> #fn_block
             }
         }
+    } else if arg_names.is_empty() {
+        quote! {
+            #(#fn_attrs)*
+            #vis async fn #fn_name(#ctx_name: &#ctx_type) -> forge::forge_core::Result<#output_type> #fn_block
+        }
     } else {
-        // User uses value, convert to reference in the generated function
-        if arg_names.is_empty() {
-            quote! {
-                #(#fn_attrs)*
-                #vis async fn #fn_name(#ctx_name: &#ctx_type) -> forge::forge_core::Result<#output_type> #fn_block
-            }
-        } else {
-            quote! {
-                #(#fn_attrs)*
-                #vis async fn #fn_name(#ctx_name: &#ctx_type, #(#arg_params),*) -> forge::forge_core::Result<#output_type> #fn_block
-            }
+        quote! {
+            #(#fn_attrs)*
+            #vis async fn #fn_name(#ctx_name: &#ctx_type, #(#arg_params),*) -> forge::forge_core::Result<#output_type> #fn_block
         }
     };
 
@@ -790,12 +761,6 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
 mod tests {
     use super::*;
 
-    // Note: proc_macro::TokenStream cannot be created outside the compiler bridge,
-    // so we test parse_mutation_attrs indirectly and test expand_mutation_impl directly
-    // with syn::ItemFn + MutationAttrs.
-
-    // --- MutationAttrs default ---
-
     #[test]
     fn default_attrs_transactional_is_true() {
         let attrs = MutationAttrs::default();
@@ -810,8 +775,6 @@ mod tests {
         assert!(attrs.max_upload_size_bytes.is_none());
         assert!(attrs.tables.is_none());
     }
-
-    // --- Validation: transactional requirement ---
 
     #[test]
     fn rejects_dispatch_job_with_transactional_false() {
@@ -872,7 +835,6 @@ mod tests {
         )
         .unwrap();
 
-        // Default is transactional = true, so dispatch_job is fine.
         let attrs = MutationAttrs::default();
         let result = expand_mutation_impl(input, attrs);
         assert!(
@@ -923,8 +885,6 @@ mod tests {
         );
     }
 
-    // --- Validation: async requirement ---
-
     #[test]
     fn rejects_non_async_mutation() {
         let input: ItemFn = syn::parse_str(
@@ -946,8 +906,6 @@ mod tests {
         );
     }
 
-    // --- Validation: context parameter ---
-
     #[test]
     fn rejects_mutation_without_parameters() {
         let input: ItemFn = syn::parse_str(
@@ -968,8 +926,6 @@ mod tests {
             "Error should mention context param: {err_msg}"
         );
     }
-
-    // --- Generated output structure ---
 
     #[test]
     fn generates_struct_for_no_arg_mutation() {
@@ -1069,8 +1025,6 @@ mod tests {
         );
     }
 
-    // --- Validation: http() inside transactional mutation ---
-
     #[test]
     fn rejects_http_call_inside_transactional_mutation() {
         let input: ItemFn = syn::parse_str(
@@ -1083,7 +1037,6 @@ mod tests {
         )
         .unwrap();
 
-        // Default is transactional = true, so ctx.http() should be rejected.
         let attrs = MutationAttrs::default();
         let result = expand_mutation_impl(input, attrs);
         assert!(

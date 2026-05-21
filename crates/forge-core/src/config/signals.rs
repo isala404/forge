@@ -11,15 +11,6 @@ use super::types::DurationStr;
 ///
 /// Captures user behavior, acquisition channels, feature usage, and frontend
 /// errors without cookies or persistent client-side state (GDPR-compliant).
-///
-/// ```toml
-/// [signals]
-/// enabled = true
-/// auto_capture = true
-/// diagnostics = true
-/// session_timeout = "30m"
-/// retention_days = 90
-/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct SignalsConfig {

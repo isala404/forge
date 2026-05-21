@@ -48,7 +48,6 @@ impl MigrateCommand {
             style(root.display()).cyan()
         );
 
-        // Load configuration
         let config_path = Path::new(&self.config);
         if !config_path.exists() {
             anyhow::bail!(
@@ -59,12 +58,10 @@ impl MigrateCommand {
 
         let config = ForgeConfig::from_file(&self.config)?;
 
-        // Connect to database
         let db = Database::from_config_with_service(&config.database, &config.project.name).await?;
         let pool = db.primary().clone();
         let runner = MigrationRunner::new(pool);
 
-        // Load available migrations
         let migrations_dir = Path::new(&self.migrations_dir);
         let available = load_migrations_from_dir(migrations_dir)?;
 
@@ -90,7 +87,6 @@ impl MigrateCommand {
             MigrateAction::Prepare => {
                 ui::section("FORGE Prepare");
 
-                // Run pending migrations first
                 if !available.is_empty() {
                     println!("  {} Running pending migrations...", ui::step());
                     runner.run(available).await?;
@@ -135,9 +131,6 @@ impl MigrateCommand {
                     return Ok(());
                 }
 
-                // Show applied migrations, calling out drift (edited file) and
-                // missing-source (deleted file) so operators see the issue
-                // without re-running migrate.
                 let mut drifted = 0usize;
                 let mut missing = 0usize;
                 if !status.applied.is_empty() {
@@ -165,7 +158,6 @@ impl MigrateCommand {
                     }
                 }
 
-                // Show pending migrations
                 if !status.pending.is_empty() {
                     if !status.applied.is_empty() {
                         println!();
