@@ -298,7 +298,7 @@ export function createWorkflowStore<TArgs, TOutput>(
   let unsubscribeFn: (() => void) | null = null;
   let state: WorkflowState<TOutput> & { loading: boolean } = {
     workflowId: "",
-    status: "created",
+    status: "pending",
     step: null,
     waitingFor: null,
     steps: [],

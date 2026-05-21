@@ -2,158 +2,77 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-/// Core error type for Forge operations.
-///
-/// Each variant maps to an HTTP status code and error code for consistent client handling.
-///
-/// Marked `#[non_exhaustive]` so new variants can be added in minor releases without
-/// breaking exhaustive `match` arms in user code. Always include a `_ =>` catch-all
-/// when matching on this enum.
-///
-/// # Examples
-///
-/// Returning typed errors from a handler:
-///
-/// ```
-/// use forge_core::ForgeError;
-///
-/// fn find_user(id: u64) -> Result<String, ForgeError> {
-///     if id == 0 {
-///         return Err(ForgeError::not_found("user not found"));
-///     }
-///     Ok("alice".to_string())
-/// }
-///
-/// assert_eq!(find_user(0).unwrap_err().http_status(), 404);
-/// assert_eq!(find_user(1).unwrap(), "alice");
-/// ```
-///
-/// Matching on variants with a catch-all (required because the enum is `#[non_exhaustive]`):
-///
-/// ```
-/// use forge_core::ForgeError;
-///
-/// fn classify(err: &ForgeError) -> &'static str {
-///     match err {
-///         ForgeError::NotFound(_)    => "not_found",
-///         ForgeError::Unauthorized(_) => "unauthorized",
-///         ForgeError::Validation(_)  => "validation",
-///         _ => "other",
-///     }
-/// }
-///
-/// assert_eq!(classify(&ForgeError::not_found("x")), "not_found");
-/// assert_eq!(classify(&ForgeError::internal("oops")), "other");
-/// ```
+/// Core error type mapping variants to HTTP status codes.
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum ForgeError {
-    /// Configuration file parsing or validation failed.
     #[error("Configuration error: {context}")]
     Config {
-        /// What went wrong.
         context: String,
-        /// The underlying error, if any.
         #[source]
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
 
-    /// Database operation failed.
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
 
-    /// Job was cancelled before completion.
     #[error("Job cancelled: {0}")]
     JobCancelled(String),
 
-    /// Failed to serialize data to JSON.
     #[error("Serialization error: {0}")]
     Serialization(String),
 
-    /// Failed to deserialize JSON input.
     #[error("Deserialization error: {0}")]
     Deserialization(String),
 
-    /// File system operation failed.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// Invalid argument provided (400).
     #[error("Invalid argument: {0}")]
     InvalidArgument(String),
 
-    /// Requested resource not found (404).
     #[error("Not found: {0}")]
     NotFound(String),
 
-    /// Authentication required or failed (401).
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
 
-    /// Permission denied (403).
     #[error("Forbidden: {0}")]
     Forbidden(String),
 
-    /// Input validation failed (400).
     #[error("Validation error: {0}")]
     Validation(String),
 
-    /// Operation timed out (504).
     #[error("Timeout: {0}")]
     Timeout(String),
 
-    /// Unexpected internal error (500).
     #[error("Internal error: {context}")]
     Internal {
-        /// What went wrong.
         context: String,
-        /// The underlying error, if any.
         #[source]
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
 
-    /// Invalid state transition attempted.
     #[error("Invalid state: {0}")]
     InvalidState(String),
 
-    /// Rate limit exceeded (429).
     #[error("Rate limit exceeded: retry after {retry_after:?}")]
     RateLimitExceeded {
-        /// How long to wait before retrying.
         retry_after: Duration,
-        /// The configured request limit.
         limit: u32,
-        /// Remaining requests (always 0 when exceeded).
         remaining: u32,
     },
 
-    /// Conflict (409). Use for concurrent modification errors.
-    #[error("Conflict: {0}")]
-    Conflict(String),
-
-    /// Unprocessable entity (422). Use when input is syntactically valid but
-    /// semantically wrong.
-    #[error("Unprocessable entity: {0}")]
-    UnprocessableEntity(String),
-
-    /// Service unavailable (503). Use for temporary outages.
+    /// Service unavailable (503).
     #[error("Service unavailable: {0}")]
     ServiceUnavailable(String),
 }
 
 impl ForgeError {
-    /// Build a 404 [`ForgeError::NotFound`] from any displayable message.
-    ///
-    /// ```
-    /// # use forge_core::ForgeError;
-    /// let e = ForgeError::not_found("user 42");
-    /// assert_eq!(e.to_string(), "Not found: user 42");
-    /// ```
     pub fn not_found(msg: impl Into<String>) -> Self {
         ForgeError::NotFound(msg.into())
     }
 
-    /// Build a [`ForgeError::Config`] without a source error.
     pub fn config(msg: impl Into<String>) -> Self {
         ForgeError::Config {
             context: msg.into(),
@@ -161,33 +80,22 @@ impl ForgeError {
         }
     }
 
-    /// Build a 401 [`ForgeError::Unauthorized`].
     pub fn unauthorized(msg: impl Into<String>) -> Self {
         ForgeError::Unauthorized(msg.into())
     }
 
-    /// Build a 403 [`ForgeError::Forbidden`].
     pub fn forbidden(msg: impl Into<String>) -> Self {
         ForgeError::Forbidden(msg.into())
     }
 
-    /// Build a 400 [`ForgeError::Validation`].
     pub fn validation(msg: impl Into<String>) -> Self {
         ForgeError::Validation(msg.into())
     }
 
-    /// Build a 400 [`ForgeError::InvalidArgument`].
-    pub fn invalid_argument(msg: impl Into<String>) -> Self {
-        ForgeError::InvalidArgument(msg.into())
-    }
-
-    /// Build a 504 [`ForgeError::Timeout`].
     pub fn timeout(msg: impl Into<String>) -> Self {
         ForgeError::Timeout(msg.into())
     }
 
-    /// Build a 500 [`ForgeError::Internal`]. Use sparingly — prefer one of
-    /// the typed variants when the cause is known.
     pub fn internal(msg: impl Into<String>) -> Self {
         ForgeError::Internal {
             context: msg.into(),
@@ -195,7 +103,6 @@ impl ForgeError {
         }
     }
 
-    /// Build a 500 [`ForgeError::Internal`] that preserves the source error chain.
     pub fn internal_with(
         msg: impl Into<String>,
         source: impl std::error::Error + Send + Sync + 'static,
@@ -206,7 +113,6 @@ impl ForgeError {
         }
     }
 
-    /// Build a [`ForgeError::Config`] that preserves the source error chain.
     pub fn config_with(
         msg: impl Into<String>,
         source: impl std::error::Error + Send + Sync + 'static,
@@ -217,31 +123,7 @@ impl ForgeError {
         }
     }
 
-    /// Build a [`ForgeError::InvalidState`] (also surfaces as 500).
-    pub fn invalid_state(msg: impl Into<String>) -> Self {
-        ForgeError::InvalidState(msg.into())
-    }
-
-    /// Returns the HTTP status code for this error.
-    ///
-    /// This is the canonical variant → status mapping. The gateway layer uses it
-    /// when converting errors to HTTP responses so downstream consumers don't need
-    /// to depend on `forge-runtime` just to know what status a variant maps to.
-    ///
-    /// | Variant | Status |
-    /// |---|---|
-    /// | `NotFound` | 404 |
-    /// | `Unauthorized` | 401 |
-    /// | `Forbidden` | 403 |
-    /// | `Validation` | 400 |
-    /// | `InvalidArgument` | 400 |
-    /// | `Deserialization` | 400 |
-    /// | `Timeout` | 504 |
-    /// | `RateLimitExceeded` | 429 |
-    /// | `JobCancelled`, `Conflict` | 409 |
-    /// | `UnprocessableEntity` | 422 |
-    /// | `ServiceUnavailable` | 503 |
-    /// | All others | 500 |
+    /// Canonical variant-to-HTTP-status mapping.
     pub fn http_status(&self) -> u16 {
         match self {
             Self::NotFound(_) => 404,
@@ -252,25 +134,21 @@ impl ForgeError {
             Self::Deserialization(_) => 400,
             Self::Timeout(_) => 504,
             Self::RateLimitExceeded { .. } => 429,
-            Self::JobCancelled(_) | Self::Conflict(_) => 409,
-            Self::UnprocessableEntity(_) => 422,
+            Self::JobCancelled(_) => 409,
             Self::ServiceUnavailable(_) => 503,
             _ => 500,
         }
     }
 
-    /// Returns `true` for client errors (4xx status codes).
     pub fn is_client_error(&self) -> bool {
         let status = self.http_status();
         (400..500).contains(&status)
     }
 
-    /// Returns `true` for server errors (5xx status codes).
     pub fn is_server_error(&self) -> bool {
         self.http_status() >= 500
     }
 
-    /// Returns `true` for errors that are safe to retry.
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,

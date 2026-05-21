@@ -4,61 +4,26 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use crate::error::Result;
-use crate::metadata::HandlerMetadata;
 
 use super::context::DaemonContext;
 
-/// Trait for FORGE daemon handlers.
-///
-/// Daemons are long-running singleton tasks that run continuously in the background.
-/// They support leader election (only one instance in cluster), automatic restart
-/// on panic, and graceful shutdown.
+/// Trait for long-running daemon handlers.
 pub trait ForgeDaemon: crate::__sealed::Sealed + Send + Sync + 'static {
-    /// Get daemon metadata.
     fn info() -> DaemonInfo;
 
-    /// Unified metadata for uniform consumers (observability, admin, codegen).
-    fn metadata() -> HandlerMetadata {
-        HandlerMetadata::from(&Self::info())
-    }
-
-    /// Execute the daemon.
-    ///
-    /// The daemon should run in a loop and check `ctx.shutdown_signal()` to handle
-    /// graceful shutdown. Example:
-    ///
-    /// ```ignore
-    /// loop {
-    ///     // Do work
-    ///     tokio::select! {
-    ///         _ = tokio::time::sleep(Duration::from_secs(60)) => {}
-    ///         _ = ctx.shutdown_signal() => break,
-    ///     }
-    /// }
-    /// ```
     fn execute(ctx: &DaemonContext) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>;
 }
 
-/// Daemon metadata.
-///
-/// Constructed by the `#[daemon]` macro. Adding a field is a breaking change
-/// for hand-written `ForgeDaemon` impls; stage extensions through a builder or
-/// major bump.
+/// Metadata for a registered daemon handler.
 #[derive(Debug, Clone)]
 pub struct DaemonInfo {
-    /// Daemon name (used for identification and leader election).
     pub name: &'static str,
-    /// Whether only one instance should run across the cluster.
     pub leader_elected: bool,
-    /// Whether to restart the daemon if it panics.
     pub restart_on_panic: bool,
-    /// Delay before restarting after a failure.
     pub restart_delay: Duration,
-    /// Delay before first execution after startup.
     pub startup_delay: Duration,
-    /// Default timeout for outbound HTTP requests made by the daemon.
     pub http_timeout: Option<Duration>,
-    /// Maximum number of restarts (None = unlimited).
+    /// `None` means unlimited.
     pub max_restarts: Option<u32>,
 }
 
@@ -76,26 +41,18 @@ impl Default for DaemonInfo {
     }
 }
 
-/// Daemon status in the cluster.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DaemonStatus {
-    /// Waiting to start (startup delay).
     Pending,
-    /// Acquiring leader lock.
     Acquiring,
-    /// Currently running.
     Running,
-    /// Stopped gracefully.
     Stopped,
-    /// Stopped due to failure.
     Failed,
-    /// Waiting to restart after failure.
     Restarting,
 }
 
 impl DaemonStatus {
-    /// Convert to database string.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Pending => "pending",
@@ -108,7 +65,6 @@ impl DaemonStatus {
     }
 }
 
-/// Error returned when parsing an unknown daemon status string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseDaemonStatusError(pub String);
 

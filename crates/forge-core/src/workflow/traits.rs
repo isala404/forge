@@ -7,24 +7,14 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use super::context::WorkflowContext;
 use crate::Result;
-use crate::metadata::HandlerMetadata;
 
-/// Trait for workflow handlers.
+/// Trait for durable workflow handlers.
 pub trait ForgeWorkflow: crate::__sealed::Sealed + Send + Sync + 'static {
-    /// Input type for the workflow.
     type Input: DeserializeOwned + Serialize + Send + Sync;
-    /// Output type for the workflow.
     type Output: Serialize + Send;
 
-    /// Get workflow metadata.
     fn info() -> WorkflowInfo;
 
-    /// Unified metadata for uniform consumers (observability, admin, codegen).
-    fn metadata() -> HandlerMetadata {
-        HandlerMetadata::from(&Self::info())
-    }
-
-    /// Execute the workflow.
     fn execute(
         ctx: &WorkflowContext,
         input: Self::Input,
@@ -32,24 +22,16 @@ pub trait ForgeWorkflow: crate::__sealed::Sealed + Send + Sync + 'static {
 }
 
 /// Lifecycle state of a workflow definition version.
-///
-/// A workflow name can have at most one `Active` version at a time.
-/// `Deprecated` versions are kept alive only to drain in-flight runs.
-/// `Staging` versions accept no new runs and are skipped during drain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum WorkflowDefStatus {
-    /// This version accepts new runs (at most one per workflow name).
     #[default]
     Active,
-    /// Old version kept alive to drain in-flight runs; accepts no new runs.
     Deprecated,
-    /// Pre-release version: not yet promoted, not visible to new runs.
     Staging,
 }
 
 impl WorkflowDefStatus {
-    /// Convert to the string written to `forge_workflow_definitions.status`.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Active => "active",
@@ -58,63 +40,34 @@ impl WorkflowDefStatus {
         }
     }
 
-    /// True if this version should accept new workflow runs.
     pub fn is_active(self) -> bool {
         matches!(self, Self::Active)
     }
 
-    /// True if this version is deprecated.
     pub fn is_deprecated(self) -> bool {
         matches!(self, Self::Deprecated)
     }
 }
 
-/// Workflow metadata.
-///
-/// Constructed by the `#[workflow]` macro. Adding a field is a breaking change
-/// for hand-written `ForgeWorkflow` impls; stage extensions through a builder
-/// or major bump.
+/// Metadata for a registered workflow handler.
 #[derive(Debug, Clone)]
 pub struct WorkflowInfo {
-    /// Workflow logical name (stable across versions).
     pub name: &'static str,
-    /// User-facing version identifier (e.g. "2026-03", "v2", "signup-fix-1").
     pub version: &'static str,
-    /// Derived signature from the persisted contract. Used as the hard runtime safety gate.
-    ///
-    /// Computed at compile time by the `#[workflow]` macro as a blake3 hash (truncated to
-    /// 128 bits) of: workflow name, version, step keys, wait-for-event keys, timeout, and
-    /// input/output type names.
-    ///
-    /// **Renaming a step or wait key is a breaking change.** When a resumed run finds that
-    /// the current binary's signature differs from the one stored at run creation, the run
-    /// is blocked with `WorkflowStatus::BlockedSignatureMismatch`. The generated struct
-    /// produced by the macro carries a `// forge:contract` comment listing every key that
-    /// contributes to the signature, so `cargo expand` shows what is tracked.
-    ///
-    /// To evolve a workflow safely:
-    /// 1. Keep the old function (mark it `deprecated`) so in-flight runs can drain.
-    /// 2. Create a new function under a new version string with the renamed steps.
+    /// Blake3 hash of the persisted contract (name, version, step/wait keys, types).
     pub signature: &'static str,
-    /// Lifecycle status of this version.
     pub status: WorkflowDefStatus,
-    /// Default timeout for the entire workflow.
     pub timeout: Duration,
-    /// Default timeout for outbound HTTP requests made by the workflow.
     pub http_timeout: Option<Duration>,
-    /// Whether the workflow is public (no auth required).
     pub is_public: bool,
-    /// Required role for authorization (implies auth required).
     pub required_role: Option<&'static str>,
 }
 
 impl WorkflowInfo {
-    /// Convenience accessor so existing call sites compile without changes.
     pub fn is_active(&self) -> bool {
         self.status.is_active()
     }
 
-    /// Convenience accessor so existing call sites compile without changes.
     pub fn is_deprecated(&self) -> bool {
         self.status.is_deprecated()
     }
@@ -135,34 +88,21 @@ impl Default for WorkflowInfo {
     }
 }
 
-/// Workflow execution status.
-///
-/// Workflow lifecycle states. Blocked variants are non-terminal: a deploy
-/// with the matching handler/version/signature unblocks the run automatically.
+/// Workflow execution status. Blocked variants are non-terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkflowStatus {
-    /// Workflow created but not yet started.
     Pending,
-    /// Workflow is actively running.
     Running,
-    /// Workflow is suspended on a durable sleep timer.
     Sleeping,
-    /// Workflow is waiting for an external event.
     Waiting,
-    /// Workflow completed successfully.
     Completed,
-    /// Workflow failed (includes cancelled and compensated runs).
     Failed,
-    /// No registered handler for the workflow's pinned version.
     BlockedMissingVersion,
-    /// Handler exists but signature doesn't match the run's pinned signature.
     BlockedSignatureMismatch,
-    /// Workflow name not found in the registry at all.
     BlockedMissingHandler,
 }
 
 impl WorkflowStatus {
-    /// Convert to string for database storage.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Pending => "pending",
@@ -177,12 +117,10 @@ impl WorkflowStatus {
         }
     }
 
-    /// Check if the workflow is terminal (no longer running).
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::Completed | Self::Failed)
     }
 
-    /// Check if the workflow is blocked and waiting for a matching deploy.
     pub fn is_blocked(&self) -> bool {
         matches!(
             self,

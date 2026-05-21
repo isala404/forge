@@ -4,21 +4,16 @@ use uuid::Uuid;
 
 use crate::ForgeError;
 
-/// Tenant isolation mode.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TenantIsolationMode {
-    /// No tenant isolation - global access.
     #[default]
     None,
-    /// Strict isolation - only see own tenant's data.
     Strict,
-    /// Read shared - can read global data, writes are tenant-scoped.
     ReadShared,
 }
 
 impl TenantIsolationMode {
-    /// Convert to string.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::None => "none",
@@ -52,18 +47,14 @@ impl FromStr for TenantIsolationMode {
     }
 }
 
-/// Tenant context for multi-tenancy support.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct TenantContext {
-    /// Current tenant ID.
     pub tenant_id: Option<Uuid>,
-    /// Isolation mode.
     pub isolation_mode: TenantIsolationMode,
 }
 
 impl TenantContext {
-    /// Create an empty tenant context (no tenant).
     pub fn none() -> Self {
         Self {
             tenant_id: None,
@@ -71,7 +62,6 @@ impl TenantContext {
         }
     }
 
-    /// Create a tenant context with a specific tenant.
     pub fn new(tenant_id: Uuid, isolation_mode: TenantIsolationMode) -> Self {
         Self {
             tenant_id: Some(tenant_id),
@@ -79,32 +69,24 @@ impl TenantContext {
         }
     }
 
-    /// Create a strict tenant context.
     pub fn strict(tenant_id: Uuid) -> Self {
         Self::new(tenant_id, TenantIsolationMode::Strict)
     }
 
-    /// Check if tenant context is set.
     pub fn has_tenant(&self) -> bool {
         self.tenant_id.is_some()
     }
 
-    /// Require a tenant ID, returning an error if not set.
     pub fn require_tenant(&self) -> crate::Result<Uuid> {
         self.tenant_id
             .ok_or_else(|| ForgeError::Unauthorized("Tenant context required".into()))
     }
 
-    /// Check if isolation mode requires filtering.
     pub fn requires_filtering(&self) -> bool {
         self.tenant_id.is_some() && self.isolation_mode != TenantIsolationMode::None
     }
 
-    /// Generate a SQL WHERE clause for tenant filtering with parameterized query.
-    /// Returns a tuple of (SQL clause, parameter value) for safe parameterized queries.
-    ///
-    /// The column name is validated to contain only safe SQL identifier characters
-    /// (alphanumeric and underscores) to prevent SQL injection.
+    /// Returns (SQL clause, param value) for tenant-scoped WHERE filtering.
     pub fn sql_filter(&self, column: &str, param_index: u32) -> Option<(String, Uuid)> {
         // Validate column name to prevent SQL injection via dynamic column names
         if column.is_empty()
@@ -116,22 +98,6 @@ impl TenantContext {
         }
         self.tenant_id
             .map(|id| (format!("\"{}\" = ${}", column, param_index), id))
-    }
-}
-
-/// Trait for contexts that have tenant information.
-pub trait HasTenant {
-    /// Get the tenant context.
-    fn tenant(&self) -> &TenantContext;
-
-    /// Get the tenant ID if set.
-    fn tenant_id(&self) -> Option<Uuid> {
-        self.tenant().tenant_id
-    }
-
-    /// Require a tenant ID.
-    fn require_tenant(&self) -> crate::Result<Uuid> {
-        self.tenant().require_tenant()
     }
 }
 

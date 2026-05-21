@@ -134,11 +134,6 @@ impl LeaderElection {
         self.is_leader.load(Ordering::SeqCst)
     }
 
-    /// Get a shutdown receiver.
-    pub fn shutdown_receiver(&self) -> watch::Receiver<bool> {
-        self.shutdown_rx.clone()
-    }
-
     /// How often the leader validates the advisory lock is still held.
     pub fn lock_validate_interval(&self) -> Duration {
         self.config.lock_validate_interval

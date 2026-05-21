@@ -11,8 +11,7 @@
     "./context": "./context.ts",
     "./signals": "./signals.ts",
     "./signals-context": "./signals-context.ts",
-    "./types": "./types.ts",
-    "./datetime": "./datetime.ts"
+    "./types": "./types.ts"
   },
   "peerDependencies": {
     "svelte": "^5.0.0"

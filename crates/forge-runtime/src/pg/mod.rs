@@ -1,9 +1,4 @@
-//! PostgreSQL primitives module.
-//!
-//! Centralises all direct Postgres interactions (connection pooling, leader
-//! election, schema migrations) into a single public surface. No other
-//! subsystem should call `pg_advisory_lock`, `pg_notify`, or build pools
-//! directly; they go through this module.
+//! PostgreSQL primitives: pooling, leader election, migrations, NOTIFY.
 
 mod change_log;
 mod leader;
@@ -20,4 +15,4 @@ pub use migration::{
 };
 pub use notify::{MAX_PAYLOAD_BYTES, NotifyChannel};
 pub use notify_bus::PgNotifyBus;
-pub use pool::{Database, DatabasePool};
+pub use pool::Database;

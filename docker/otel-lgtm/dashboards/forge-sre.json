@@ -276,35 +276,23 @@
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 }, "panels": []
     },
     {
-      "id": 19, "type": "stat", "title": "Active Subscriptions",
-      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 24 },
+      "id": 19, "type": "stat", "title": "Changes/sec",
+      "gridPos": { "h": 4, "w": 12, "x": 0, "y": 24 },
       "datasource": { "type": "grafana-postgresql-datasource", "uid": "forge_pg" },
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
       "targets": [{
-        "rawSql": "SELECT COUNT(*) FROM forge_subscriptions",
+        "rawSql": "SELECT COUNT(*) / GREATEST(EXTRACT(EPOCH FROM ($__timeTo()::timestamptz - $__timeFrom()::timestamptz)), 1) AS changes_per_sec FROM forge_change_log WHERE $__timeFilter(created_at)",
         "format": "table",
         "datasource": { "type": "grafana-postgresql-datasource", "uid": "forge_pg" },
         "refId": "A"
       }]
     },
     {
-      "id": 20, "type": "stat", "title": "Invalidations/sec",
-      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 24 },
-      "datasource": { "type": "grafana-postgresql-datasource", "uid": "forge_pg" },
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
-      "targets": [{
-        "rawSql": "SELECT COUNT(*) / GREATEST(EXTRACT(EPOCH FROM ($__timeTo()::timestamptz - $__timeFrom()::timestamptz)), 1) AS inv_per_sec FROM forge_invalidations WHERE $__timeFilter(created_at)",
-        "format": "table",
-        "datasource": { "type": "grafana-postgresql-datasource", "uid": "forge_pg" },
-        "refId": "A"
-      }]
-    },
-    {
-      "id": 21, "type": "barchart", "title": "Invalidations by Table",
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 24 },
+      "id": 21, "type": "barchart", "title": "Changes by Table",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
       "datasource": { "type": "grafana-postgresql-datasource", "uid": "forge_pg" },
       "targets": [{
-        "rawSql": "SELECT table_name, COUNT(*) AS count FROM forge_invalidations WHERE $__timeFilter(created_at) GROUP BY table_name ORDER BY count DESC LIMIT 10",
+        "rawSql": "SELECT table_name, COUNT(*) AS count FROM forge_change_log WHERE $__timeFilter(created_at) GROUP BY table_name ORDER BY count DESC LIMIT 10",
         "format": "table",
         "datasource": { "type": "grafana-postgresql-datasource", "uid": "forge_pg" },
         "refId": "A"

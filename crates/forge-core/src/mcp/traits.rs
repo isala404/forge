@@ -6,13 +6,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::context::McpToolContext;
 use crate::error::{ForgeError, Result};
-use crate::metadata::HandlerMetadata;
 
-/// Icon metadata exposed for an MCP tool.
-///
-/// Constructed by the `#[mcp_tool]` macro (or by the runtime when emitting
-/// `tools/list`). Adding a field is breaking for hand-written `ForgeMcpTool`
-/// impls; stage extensions through a major bump.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct McpToolIcon {
     pub src: &'static str,
@@ -24,10 +18,6 @@ pub struct McpToolIcon {
     pub theme: Option<&'static str>,
 }
 
-/// Tool behavior annotations exposed to clients.
-///
-/// Constructed by the `#[mcp_tool]` macro. Adding a field is breaking for
-/// hand-written `ForgeMcpTool` impls; stage extensions through a major bump.
 #[derive(Debug, Clone, Copy, Serialize, Default)]
 pub struct McpToolAnnotations {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -42,11 +32,6 @@ pub struct McpToolAnnotations {
     pub open_world_hint: Option<bool>,
 }
 
-/// Metadata describing an MCP tool.
-///
-/// Constructed by the `#[mcp_tool]` macro. Adding a field is a breaking change
-/// for hand-written `ForgeMcpTool` impls; stage extensions through a builder
-/// or major bump.
 #[derive(Debug, Clone, Copy)]
 pub struct McpToolInfo {
     pub name: &'static str,
@@ -71,7 +56,6 @@ impl McpToolInfo {
     }
 }
 
-/// Content block for MCP tool call results.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -80,7 +64,6 @@ pub enum McpContentBlock {
     ResourceLink(McpContent),
 }
 
-/// Resource link content for MCP tool results.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct McpContent {
     pub uri: String,
@@ -91,7 +74,6 @@ pub struct McpContent {
     pub mime_type: Option<String>,
 }
 
-/// Tool execution payload returned by MCP tool handlers.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct McpToolResult {
     pub content: Vec<McpContentBlock>,
@@ -138,17 +120,12 @@ impl McpToolResult {
     }
 }
 
-/// Trait implemented by all FORGE MCP tools.
+/// Trait implemented by all MCP tools.
 pub trait ForgeMcpTool: crate::__sealed::Sealed + Send + Sync + 'static {
     type Args: DeserializeOwned + JsonSchema + Send + Sync;
     type Output: Serialize + JsonSchema + Send;
 
     fn info() -> McpToolInfo;
-
-    /// Unified metadata for uniform consumers (observability, admin, codegen).
-    fn metadata() -> HandlerMetadata {
-        HandlerMetadata::from(&Self::info())
-    }
 
     fn execute(
         ctx: &McpToolContext,

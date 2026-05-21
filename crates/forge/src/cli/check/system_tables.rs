@@ -7,7 +7,6 @@ pub(super) const RESERVED_SYSTEM_TABLES: &[&str] = &[
     "forge_workflow_definitions",
     "forge_cron_runs",
     "forge_system_migrations",
-    "forge_sessions",
     "forge_refresh_tokens",
     "forge_signals_events",
 ];

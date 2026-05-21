@@ -30,7 +30,6 @@ export {
 } from "./stores.js";
 export { ForgeSignals, type SignalsConfig } from "./signals.js";
 export { getForgeSignals, setForgeSignals } from "./signals-context.js";
-export { dt } from "./datetime.js";
 export type {
   ForgeError,
   QueryResult,

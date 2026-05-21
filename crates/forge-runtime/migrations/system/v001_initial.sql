@@ -411,38 +411,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_forge_rate_limits_bucket
     ON forge_rate_limits(bucket_key);
 
 -- ---------------------------------------------------------------------------
--- Realtime: sessions, subscriptions, change tracking
+-- Realtime: change tracking
 -- ---------------------------------------------------------------------------
-
-CREATE TABLE IF NOT EXISTS forge_sessions (
-    id UUID PRIMARY KEY,
-    node_id UUID NOT NULL,
-    user_id VARCHAR(255),
-    connected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    last_activity TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    status VARCHAR(32) NOT NULL DEFAULT 'connected'
-);
-
-CREATE INDEX IF NOT EXISTS idx_forge_sessions_node
-    ON forge_sessions(node_id);
-
-CREATE TABLE IF NOT EXISTS forge_subscriptions (
-    id UUID PRIMARY KEY,
-    session_id UUID NOT NULL REFERENCES forge_sessions(id) ON DELETE CASCADE,
-    query_name VARCHAR(255) NOT NULL,
-    query_hash VARCHAR(64) NOT NULL,
-    args JSONB DEFAULT '{}',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_forge_subscriptions_session
-    ON forge_subscriptions(session_id);
-
-CREATE INDEX IF NOT EXISTS idx_forge_subscriptions_query_hash
-    ON forge_subscriptions(query_hash);
-
-CREATE INDEX IF NOT EXISTS idx_forge_subscriptions_args_gin
-    ON forge_subscriptions USING GIN (args);
 
 -- Durable log for NOTIFY gap recovery. Nodes track their last-seen seq and
 -- replay missed rows on reconnect instead of full re-execution.

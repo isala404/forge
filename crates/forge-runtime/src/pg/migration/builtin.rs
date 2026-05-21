@@ -128,8 +128,6 @@ mod tests {
             "forge_admin_audit",
             "forge_paused_queues",
             "forge_rate_limits",
-            "forge_sessions",
-            "forge_subscriptions",
             "forge_change_log",
             "forge_daemons",
             "forge_webhook_events",

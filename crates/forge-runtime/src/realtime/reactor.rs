@@ -24,29 +24,15 @@ pub struct ReactorConfig {
     pub invalidation: InvalidationConfig,
     pub realtime: RealtimeConfig,
     pub max_listener_restarts: u32,
-    /// Doubles with each attempt for exponential backoff
     pub listener_restart_delay_ms: u64,
-    /// Maximum concurrent re-executions during flush.
     pub max_concurrent_reexecutions: usize,
-    /// Per-group query timeout during re-execution. A group whose query exceeds
-    /// this deadline is aborted and its permit released so slow groups do not
-    /// block faster ones. The group is treated as unchanged for that cycle.
-    /// Defaults to 5 seconds.
+    /// Per-group query timeout; slow groups are skipped for the cycle.
     pub reexecution_timeout: std::time::Duration,
-    /// Session cleanup interval in seconds.
     pub session_cleanup_interval_secs: u64,
-    /// Periodic resync sweep interval in seconds. PG silently drops
-    /// `LISTEN/NOTIFY` payloads when listeners are slow, leaving subscribers
-    /// stale. Re-evaluating every active group on this cadence recovers from
-    /// dropped notifications. `0` disables the sweep.
+    /// Periodic resync sweep interval. `0` disables.
     pub resync_interval_secs: u64,
-    /// Number of DashMap shards for the subscription manager.
     pub shard_count: usize,
-    /// Per-query cached-result memory ceiling in bytes.
-    ///
-    /// Results larger than this are not cached in `QueryGroup::last_result`.
-    /// New subscribers joining the group before the next invalidation will
-    /// trigger a fresh query execution rather than receiving a stale large blob.
+    /// Results larger than this are not cached in QueryGroup::last_result.
     pub max_cached_result_bytes: usize,
 }
 
@@ -68,40 +54,27 @@ impl Default for ReactorConfig {
     }
 }
 
-/// Job subscription tracking.
-/// The job_id is the HashMap key, not stored here.
+/// Job subscription tracking (keyed by job_id externally).
 #[derive(Debug, Clone)]
 pub struct JobSubscription {
     pub session_id: SessionId,
     pub client_sub_id: String,
     pub auth_context: forge_core::function::AuthContext,
-    /// JWT expiry (Unix timestamp). Subscriptions with expired tokens are skipped.
     pub token_exp: Option<i64>,
 }
 
-/// Workflow subscription tracking.
-/// The workflow_id is the HashMap key, not stored here.
+/// Workflow subscription tracking (keyed by workflow_id externally).
 #[derive(Debug, Clone)]
 pub struct WorkflowSubscription {
     pub session_id: SessionId,
     pub client_sub_id: String,
     pub auth_context: forge_core::function::AuthContext,
-    /// JWT expiry (Unix timestamp). Subscriptions with expired tokens are skipped.
     pub token_exp: Option<i64>,
 }
 
-/// ChangeListener -> InvalidationEngine -> Group Re-execution -> SSE Fan-out
+/// Drives change-listener -> invalidation -> re-execution -> SSE fan-out.
 pub struct Reactor {
     node_id: NodeId,
-    /// Database handle for read operations (query re-execution, job/workflow
-    /// fetches). Calls `database.read_pool()` on each use so replica
-    /// health-check routing stays live. The ChangeListener uses the primary
-    /// pool (LISTEN requires it), passed at construction time.
-    ///
-    /// Replication lag tradeoff: a NOTIFY may arrive before the replica has
-    /// the committed data. The debounce window (50ms+) and periodic resync
-    /// sweep (60s) compensate. For deployments with high replication lag,
-    /// disable read-from-replica in config to route all reads to primary.
     database: Arc<Database>,
     registry: FunctionRegistry,
     subscription_manager: Arc<SubscriptionManager>,
@@ -113,19 +86,15 @@ pub struct Reactor {
     job_subscriptions: Arc<RwLock<HashMap<Uuid, Vec<JobSubscription>>>>,
     /// Workflow subscriptions: workflow_id -> list of subscribers.
     workflow_subscriptions: Arc<RwLock<HashMap<Uuid, Vec<WorkflowSubscription>>>>,
-    /// Reverse index: session_id -> set of job_ids the session is subscribed to.
-    /// Enables O(1) cleanup in `remove_session` instead of scanning all entries.
+    /// Reverse index for O(1) session cleanup.
     session_job_ids: Arc<RwLock<HashMap<SessionId, HashSet<Uuid>>>>,
-    /// Reverse index: session_id -> set of workflow_ids the session is subscribed to.
-    /// Enables O(1) cleanup in `remove_session` instead of scanning all entries.
+    /// Reverse index for O(1) session cleanup.
     session_workflow_ids: Arc<RwLock<HashMap<SessionId, HashSet<Uuid>>>>,
     shutdown_tx: broadcast::Sender<()>,
     bus_shutdown_tx: tokio::sync::watch::Sender<bool>,
     max_listener_restarts: u32,
     listener_restart_delay_ms: u64,
     max_concurrent_reexecutions: usize,
-    /// Per-group query timeout during re-execution. Slow groups are aborted
-    /// and skipped for the cycle so they cannot block faster groups.
     reexecution_timeout: std::time::Duration,
     session_cleanup_interval_secs: u64,
     resync_interval_secs: u64,
@@ -193,26 +162,12 @@ impl Reactor {
         self.subscription_manager.clone()
     }
 
-    pub fn shutdown_receiver(&self) -> broadcast::Receiver<()> {
-        self.shutdown_tx.subscribe()
-    }
-
-    /// Subscribe to the cluster-wide change stream so other components (e.g.
-    /// the function-router cache) can react to peer-node mutations.
+    /// Subscribe to the cluster-wide change stream.
     pub fn change_subscriber(&self) -> broadcast::Receiver<Change> {
         self.change_listener.subscribe()
     }
 
-    /// Register a new session.
-    ///
-    /// `token_exp` is the JWT `exp` claim (Unix timestamp) from the session's
-    /// authentication token. Pass `None` for unauthenticated sessions.
-    ///
-    /// # Panics (debug only)
-    ///
-    /// Debug-asserts that authenticated sessions carry an expiry. In release
-    /// builds a missing exp on an authenticated session is treated as
-    /// "expires in 1 hour" to prevent indefinite streaming.
+    /// Register a new SSE session with optional JWT expiry.
     pub fn register_session(
         &self,
         session_id: SessionId,
@@ -517,12 +472,7 @@ impl Reactor {
         .await
     }
 
-    /// Compute a content hash of a JSON value for change detection.
-    ///
-    /// Returns `(hash, serialized_byte_count)` so callers can reuse the size
-    /// for max-result-size checks without a second serialization pass.
-    /// Falls back to a sentinel hash on serialization failure so two failed
-    /// serializations don't falsely compare as equal.
+    /// Content hash for change detection; returns `(hash, byte_count)`.
     fn compute_hash(data: &serde_json::Value) -> (String, usize) {
         match serde_json::to_vec(data) {
             Ok(bytes) => {
@@ -533,7 +483,7 @@ impl Reactor {
         }
     }
 
-    /// Parallel group re-execution with bounded concurrency.
+    /// Flush pending invalidations with bounded concurrent re-execution.
     async fn flush_invalidations(
         invalidation_engine: &Arc<InvalidationEngine>,
         subscription_manager: &Arc<SubscriptionManager>,
@@ -565,8 +515,7 @@ impl Reactor {
         .await;
     }
 
-    /// Trim old entries from the durable change log. Runs on the cleanup
-    /// interval (default 60s). Silently skips if the table doesn't exist yet.
+    /// Trim old entries from the durable change log.
     async fn trim_change_log(db_pool: &sqlx::PgPool) {
         let cutoff = chrono::Utc::now() - chrono::Duration::hours(1);
         match crate::pg::trim_change_log(db_pool, cutoff).await {
@@ -580,10 +529,7 @@ impl Reactor {
         }
     }
 
-    /// Resync sweep: re-evaluate every active subscription group. Recovers
-    /// from `LISTEN/NOTIFY` payload drops where invalidation never fired.
-    /// Hash comparison inside `reexecute_groups` ensures we only push when
-    /// the result actually changed, so an idle resync is a no-op on the wire.
+    /// Resync sweep: re-evaluate every active group to recover from dropped notifications.
     async fn resync_all_groups(
         subscription_manager: &Arc<SubscriptionManager>,
         session_server: &Arc<SessionServer>,
@@ -611,13 +557,7 @@ impl Reactor {
         .await;
     }
 
-    /// Re-run the queries for `group_ids`, push to subscribers when the result
-    /// hash changes. Shared by invalidation flush and the periodic resync.
-    ///
-    /// Each group executes on its own spawned task so a slow query cannot
-    /// head-of-line block faster groups. The semaphore caps total concurrency.
-    /// Groups that exceed `reexecution_timeout` are aborted and skipped for
-    /// that cycle — their permit is released so other groups can proceed.
+    /// Re-run queries for groups, pushing to subscribers on hash change.
     async fn reexecute_groups(
         group_ids: &[forge_core::realtime::QueryGroupId],
         subscription_manager: &Arc<SubscriptionManager>,
@@ -1398,12 +1338,7 @@ impl Reactor {
         query_name.to_string()
     }
 
-    /// Auth check for reactor re-execution. Only verifies authentication, not
-    /// roles. Role authorization happened at subscribe time via the full
-    /// FunctionRouter path (which uses SharedRoleResolver). Re-checking roles
-    /// here against the cached AuthContext would bypass the resolver and use
-    /// potentially stale role data. Token expiry is checked separately in
-    /// `reexecute_groups` before we reach this point.
+    /// Auth check for re-execution (authentication only, roles checked at subscribe time).
     fn check_query_auth(
         info: &forge_core::function::FunctionInfo,
         auth: &forge_core::function::AuthContext,

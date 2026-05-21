@@ -1,5 +1,3 @@
-//! Stores re-export generator (static content).
-
 use crate::Error;
 
 pub fn generate() -> Result<String, Error> {
@@ -11,7 +9,6 @@ export {
   createSubscriptionStore,
   createJobStore,
   createWorkflowStore,
-  dt,
 } from '@forge-rs/svelte';
 export type {
   Readable,
@@ -37,6 +34,5 @@ mod tests {
         assert!(content.contains("createQueryStore"));
         assert!(content.contains("createJobStore"));
         assert!(content.contains("createWorkflowStore"));
-        assert!(content.contains("dt"));
     }
 }

@@ -1,8 +1,4 @@
-//! Signals: built-in product analytics and frontend diagnostics.
-//!
-//! Zero-config, GDPR-compliant (no cookies, no persistent client IDs).
-//! Auto-captures RPC calls, sessions, page views, and frontend errors.
-//! Visualization via Grafana dashboards over PostgreSQL.
+//! Built-in product analytics and frontend diagnostics.
 
 pub mod bot;
 pub mod collector;
@@ -13,7 +9,6 @@ pub mod geoip;
 pub mod partition;
 pub mod rate_limit;
 pub mod session;
-pub mod views;
 pub mod visitor;
 
 pub use collector::SignalsCollector;

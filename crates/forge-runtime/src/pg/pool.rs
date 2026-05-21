@@ -461,9 +461,6 @@ async fn detect_pgbouncer(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
-/// Type alias for the pool type.
-pub type DatabasePool = PgPool;
-
 #[cfg(test)]
 mod tests {
     use super::*;

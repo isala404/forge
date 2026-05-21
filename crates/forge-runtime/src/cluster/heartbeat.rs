@@ -9,13 +9,10 @@ use tokio::sync::{Mutex, watch};
 /// Heartbeat loop configuration.
 #[derive(Debug, Clone)]
 pub struct HeartbeatConfig {
-    /// Interval between heartbeats.
     pub interval: Duration,
-    /// Threshold for marking nodes as dead.
     pub dead_threshold: Duration,
-    /// Whether to mark dead nodes.
     pub mark_dead_nodes: bool,
-    /// Maximum heartbeat interval when cluster is stable.
+    /// Max interval when cluster is stable (adaptive backoff ceiling).
     pub max_interval: Duration,
 }
 
@@ -68,17 +65,7 @@ impl HeartbeatConfig {
     }
 }
 
-/// Heartbeat loop for cluster health.
-///
-/// The node's own heartbeat writes (`send_heartbeat`, `update_load`) run on a
-/// dedicated connection that is acquired once at construction and held for the
-/// lifetime of the loop. This ensures liveness updates are never blocked by
-/// shared pool exhaustion: if all pool connections are busy serving queries,
-/// the node's `last_heartbeat` still advances on its private backend.
-///
-/// Observational queries (`active_node_count`, `mark_dead_nodes`) use the
-/// shared pool — they are not on the critical path for the local node's
-/// apparent liveness and tolerate brief delays.
+/// Heartbeat loop using a dedicated connection for pool-exhaustion safety.
 pub struct HeartbeatLoop {
     pool: sqlx::PgPool,
     node_id: NodeId,
@@ -89,18 +76,12 @@ pub struct HeartbeatLoop {
     current_interval_ms: AtomicU64,
     stable_count: AtomicU32,
     last_active_count: AtomicU32,
-    /// Dedicated connection for heartbeat writes. Held outside the shared pool
-    /// so that pool exhaustion cannot prevent the node from updating its own
-    /// `last_heartbeat`. Protected by a Mutex because
-    /// `sqlx::pool::PoolConnection` is not `Sync`; the lock is only contended
-    /// on the rare reconnect path.
+    /// Dedicated connection held outside the shared pool for liveness safety.
     heartbeat_conn: Mutex<sqlx::pool::PoolConnection<sqlx::Postgres>>,
 }
 
 impl HeartbeatLoop {
-    /// Create a new heartbeat loop, acquiring a dedicated heartbeat connection.
-    ///
-    /// Returns an error if the initial connection cannot be established.
+    /// Create a new heartbeat loop, acquiring a dedicated connection.
     pub async fn new(
         pool: sqlx::PgPool,
         node_id: NodeId,
@@ -129,11 +110,6 @@ impl HeartbeatLoop {
     /// Check if the loop is running.
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
-    }
-
-    /// Get a shutdown receiver.
-    pub fn shutdown_receiver(&self) -> watch::Receiver<bool> {
-        self.shutdown_rx.clone()
     }
 
     /// Stop the heartbeat loop.
@@ -220,8 +196,7 @@ impl HeartbeatLoop {
         self.last_active_count.store(count, Ordering::Relaxed);
     }
 
-    /// Obtain the dedicated heartbeat connection, reconnecting if the backend
-    /// was terminated or the connection became broken.
+    /// Obtain the dedicated heartbeat connection, reconnecting if broken.
     async fn heartbeat_conn(
         &self,
     ) -> forge_core::Result<tokio::sync::MutexGuard<'_, sqlx::pool::PoolConnection<sqlx::Postgres>>>
@@ -240,8 +215,7 @@ impl HeartbeatLoop {
         Ok(guard)
     }
 
-    /// Send a heartbeat update on the dedicated connection so pool exhaustion
-    /// cannot block the node's own liveness signal.
+    /// Send a heartbeat update on the dedicated connection.
     async fn send_heartbeat(&self) -> forge_core::Result<()> {
         let mut conn = self.heartbeat_conn().await?;
         sqlx::query!(
@@ -259,8 +233,7 @@ impl HeartbeatLoop {
         Ok(())
     }
 
-    /// Mark stale nodes as dead. Threshold is the greater of the configured
-    /// dead_threshold and 3x the current adaptive interval.
+    /// Mark stale nodes as dead using the adaptive threshold.
     async fn mark_dead_nodes(&self) -> forge_core::Result<u64> {
         let threshold_secs =
             dead_node_threshold(self.current_interval(), self.config.dead_threshold).as_secs_f64();
@@ -291,8 +264,7 @@ impl HeartbeatLoop {
         Ok(count)
     }
 
-    /// Update load metrics on the dedicated connection so the heartbeat refresh
-    /// it performs is also pool-exhaustion-safe.
+    /// Update load metrics on the dedicated connection.
     pub async fn update_load(
         &self,
         current_connections: u32,
@@ -325,13 +297,7 @@ impl HeartbeatLoop {
     }
 }
 
-/// Adaptive heartbeat policy. Given the current observation and prior state,
-/// returns the new `(interval_ms, stable_count)`.
-///
-/// When membership stays unchanged for at least 3 consecutive observations the
-/// interval doubles, clamped into `[base_ms, max_ms]`. Any change — including a
-/// first observation, signalled by `last == 0` — resets the stable counter and
-/// returns to `base_ms`.
+/// Returns `(next_interval_ms, stable_count)` for the adaptive heartbeat policy.
 fn next_adaptive_interval(
     observed: u32,
     last: u32,
@@ -352,9 +318,7 @@ fn next_adaptive_interval(
     }
 }
 
-/// Compute the dead-node threshold: the greater of 3× the current adaptive
-/// interval and the configured `dead_threshold`. Returned as a `Duration` so
-/// callers can convert to whatever the SQL layer needs.
+/// Dead-node threshold: max of 3x adaptive interval and configured threshold.
 fn dead_node_threshold(current_interval: Duration, configured: Duration) -> Duration {
     let adaptive = current_interval.saturating_mul(3);
     adaptive.max(configured)
