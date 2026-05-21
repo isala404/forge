@@ -660,16 +660,15 @@ impl WorkflowExecutor {
 
     /// Atomically claim a workflow for execution (transition to Running).
     ///
-    /// The WHERE clause deliberately excludes `'running'`. Admitting it would
-    /// let two resume attempts (e.g., a duplicate `$workflow_resume` job, or a
-    /// scheduler tick racing the bridge handler) both win the UPDATE and
-    /// execute the same run concurrently. The price for excluding it is that
-    /// a stale `'running'` row left behind by a crashed worker must first be
-    /// reclaimed (status reset by the scheduler's stale-run sweep) before
-    /// resume can proceed — but that's the only safe direction.
+    /// `'running'` is included so resume picks up a run that the scheduler has
+    /// already flipped to running as part of its claim-and-enqueue transaction.
+    /// Duplicate concurrent execution is prevented at higher layers: the job
+    /// queue's `FOR UPDATE SKIP LOCKED` ensures only one worker can hold a
+    /// given resume job, and the scheduler's row-locking UPDATE (or event
+    /// consume) ensures only one resume job is enqueued per wake event.
     async fn claim_for_execution(&self, run_id: Uuid) -> forge_core::Result<()> {
         let result = sqlx::query!(
-            "UPDATE forge_workflow_runs SET status = 'running' WHERE id = $1 AND status IN ('pending', 'sleeping', 'waiting')",
+            "UPDATE forge_workflow_runs SET status = 'running' WHERE id = $1 AND status IN ('pending', 'sleeping', 'waiting', 'running')",
             run_id,
         )
         .execute(&self.pool)
