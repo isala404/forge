@@ -15,7 +15,10 @@ use super::super::mock_http::{MockHttp, MockRequest, MockResponse};
 use super::build_test_auth;
 use crate::Result;
 use crate::env::{EnvAccess, EnvProvider, MockEnvProvider};
-use crate::function::{AuthContext, RequestMetadata};
+use crate::function::{
+    AuthContext, JobDispatch, MutationContext, RequestMetadata, WorkflowDispatch,
+};
+use crate::http::CircuitBreakerClient;
 
 /// Test context for mutation functions.
 ///
@@ -169,6 +172,32 @@ impl TestMutationContext {
     /// Get the mock env provider for verification.
     pub fn env_mock(&self) -> &MockEnvProvider {
         &self.env_provider
+    }
+
+    /// Bridge to a real [`MutationContext`] wired with the test mocks.
+    ///
+    /// Handlers are written against `&MutationContext`. Pass the bridged
+    /// context to invoke real handler bodies from tests. The mock job and
+    /// workflow dispatchers remain accessible on the [`TestMutationContext`]
+    /// for assertions (the same `Arc<Mock*>` is shared with the bridge).
+    ///
+    /// A `sqlx::PgPool` is required because [`MutationContext`] performs
+    /// pool-backed operations (`tx()`, `conn()`); a real pool is the only
+    /// safe way to support those paths. Tests that don't touch the database
+    /// can pass a pool created in a test fixture and never call those
+    /// methods.
+    pub fn into_mutation_context(self, pool: sqlx::PgPool) -> MutationContext {
+        let job_dispatch: Option<Arc<dyn JobDispatch>> = Some(self.job_dispatch);
+        let workflow_dispatch: Option<Arc<dyn WorkflowDispatch>> = Some(self.workflow_dispatch);
+        MutationContext::with_env(
+            pool,
+            self.auth,
+            self.request,
+            CircuitBreakerClient::with_defaults(reqwest::Client::new()),
+            job_dispatch,
+            workflow_dispatch,
+            self.env_provider,
+        )
     }
 }
 
@@ -456,6 +485,34 @@ mod tests {
             .await
             .unwrap();
         shared.assert_started("ext_wf");
+    }
+
+    #[cfg(feature = "testcontainers")]
+    #[tokio::test]
+    async fn bridge_to_mutation_context_preserves_mocks() {
+        // A handler written against the production `MutationContext` should
+        // run unchanged when invoked through the bridged test context, with
+        // dispatches landing on the same `MockJobDispatch` exposed by the
+        // builder.
+        use crate::function::MutationContext;
+        use crate::testing::db::TestDatabase;
+
+        let db = TestDatabase::from_env().await.expect("test DB");
+        let shared_jobs = Arc::new(super::super::super::mock_dispatch::MockJobDispatch::new());
+        let uid = Uuid::new_v4();
+
+        let test_ctx = TestMutationContext::builder()
+            .as_user(uid)
+            .with_job_dispatch(shared_jobs.clone())
+            .build();
+        let ctx: MutationContext = test_ctx.into_mutation_context(db.pool().clone());
+
+        // Simulate what a handler would do.
+        ctx.dispatch_job("welcome_email", serde_json::json!({"to": "a@b"}))
+            .await
+            .expect("dispatch through bridged context");
+
+        shared_jobs.assert_dispatched("welcome_email");
     }
 
     #[tokio::test]

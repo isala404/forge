@@ -17,7 +17,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dioxus::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::ForgeClient;
@@ -28,6 +28,23 @@ const MAX_BREADCRUMBS: usize = 20;
 const MAX_QUEUE_SIZE: usize = 1000;
 #[cfg(target_arch = "wasm32")]
 const AUTO_CAPTURE_DELAY_MS: u64 = 2000;
+
+// Matches the Svelte client's localStorage key so events queued on one
+// runtime can be reclaimed by the other across page reloads.
+#[cfg(target_arch = "wasm32")]
+const PERSIST_KEY: &str = "forge_signals_queue_v1";
+
+fn warn_serialize_failed(label: &str, err: &serde_json::Error) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let msg = format!("[forge-signals] dropped {label}: {err}");
+        web_sys::console::warn_1(&wasm_bindgen::JsValue::from_str(&msg));
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        eprintln!("[forge-signals] dropped {label}: {err}");
+    }
+}
 
 // Inline JS shims compiled by wasm-bindgen at build time. Avoids runtime
 // `eval()` so the tracker keeps working under strict CSP (`script-src 'self'`).
@@ -153,28 +170,36 @@ extern "C" {
 fn now_iso() -> String {
     #[cfg(target_arch = "wasm32")]
     {
-        js_sys::Date::new_0().to_iso_string().as_string().unwrap_or_default()
+        if let Some(s) = js_sys::Date::new_0().to_iso_string().as_string() {
+            return s;
+        }
+        // toISOString unexpectedly returned a non-string. Fall through to the
+        // portable formatter so analytics never carry an empty timestamp.
+        let secs = (js_sys::Date::now() / 1000.0) as u64;
+        return format_iso(secs);
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        // ISO 8601 without chrono: "2024-03-28T12:34:56Z"
-        let dur = std::time::SystemTime::now()
+        let secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        let secs = dur.as_secs();
-        // Days since epoch
-        let days = secs / 86400;
-        let time_of_day = secs % 86400;
-        let hours = time_of_day / 3600;
-        let minutes = (time_of_day % 3600) / 60;
-        let seconds = time_of_day % 60;
-        // Convert days since 1970-01-01 to y/m/d
-        let (year, month, day) = days_to_date(days);
-        format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        format_iso(secs)
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+/// ISO 8601 second-precision formatter ("2024-03-28T12:34:56Z") without
+/// pulling in chrono. Shared across wasm and native code paths.
+fn format_iso(secs: u64) -> String {
+    let days = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+    let (year, month, day) = days_to_date(days);
+    format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
+}
+
 fn days_to_date(days: u64) -> (u64, u64, u64) {
     // Civil date from days since Unix epoch (Euclidean affine algorithm)
     let z = days + 719468;
@@ -205,9 +230,15 @@ fn rand_u32() -> u32 {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        use std::collections::hash_map::RandomState;
-        use std::hash::{BuildHasher, Hasher};
-        RandomState::new().build_hasher().finish() as u32
+        // Correlation IDs only need to be unique within a process, not
+        // cryptographically random. Mix nanos with the global counter so
+        // rapid successive calls (which would land in the same nanosecond)
+        // still diverge.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        nanos ^ CORRELATION_COUNTER.load(Ordering::Relaxed) as u32
     }
 }
 
@@ -230,6 +261,9 @@ pub struct SignalsConfig {
     pub flush_interval: u32,
     /// Max events per batch (default: 20).
     pub max_batch_size: usize,
+    /// Persist the outbound queue to localStorage so events queued before
+    /// a reload survive (WASM only; ignored on native). Default: true.
+    pub persist_queue: bool,
 }
 
 impl Default for SignalsConfig {
@@ -243,6 +277,7 @@ impl Default for SignalsConfig {
             respect_dnt: true,
             flush_interval: DEFAULT_FLUSH_INTERVAL_MS,
             max_batch_size: DEFAULT_MAX_BATCH,
+            persist_queue: true,
         }
     }
 }
@@ -273,14 +308,14 @@ fn has_opted_out() -> bool {
     false
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct SignalEventPayload {
     event: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     properties: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     correlation_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     timestamp: Option<String>,
 }
 
@@ -396,7 +431,7 @@ impl ForgeSignals {
             config.enabled = false;
         }
         let utm_params = if config.enabled { extract_utm() } else { None };
-        Self {
+        let signals = Self {
             inner: Rc::new(RefCell::new(SignalsInner {
                 client,
                 config,
@@ -407,6 +442,66 @@ impl ForgeSignals {
                 utm_params,
                 destroyed: false,
             })),
+        };
+        signals.restore_queue();
+        signals
+    }
+
+    /// Restore any events stashed in localStorage from a prior page session.
+    /// No-op on native (no localStorage) and when `persist_queue` is disabled.
+    fn restore_queue(&self) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let inner = self.inner.borrow();
+            if !inner.config.enabled || !inner.config.persist_queue { return; }
+            drop(inner);
+            let Some(storage) = web_sys::window()
+                .and_then(|w| w.local_storage().ok().flatten())
+            else {
+                return;
+            };
+            let raw = match storage.get_item(PERSIST_KEY) {
+                Ok(Some(v)) => v,
+                _ => return,
+            };
+            match serde_json::from_str::<Vec<SignalEventPayload>>(&raw) {
+                Ok(mut restored) => {
+                    if restored.is_empty() { return; }
+                    restored.truncate(MAX_QUEUE_SIZE);
+                    self.inner.borrow_mut().queue.extend(restored);
+                }
+                Err(_) => {
+                    // Corrupt entry — drop it so we don't try again next reload.
+                    let _ = storage.remove_item(PERSIST_KEY);
+                }
+            }
+        }
+    }
+
+    /// Persist the pending queue so events survive a reload.
+    /// No-op on native and when `persist_queue` is disabled.
+    fn persist_queue(&self) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let inner = self.inner.borrow();
+            if !inner.config.persist_queue { return; }
+            let Some(storage) = web_sys::window()
+                .and_then(|w| w.local_storage().ok().flatten())
+            else {
+                return;
+            };
+            if inner.queue.is_empty() {
+                let _ = storage.remove_item(PERSIST_KEY);
+                return;
+            }
+            match serde_json::to_string(&inner.queue) {
+                Ok(s) => {
+                    // Quota / private mode failures are silent by design — the
+                    // queue stays in memory and the next flush will drain it.
+                    let _ = storage.set_item(PERSIST_KEY, &s);
+                }
+                Err(e) => warn_serialize_failed("persisted queue", &e),
+            }
         }
     }
 
@@ -463,6 +558,7 @@ impl ForgeSignals {
         inner.queue.push(payload);
         let should_flush = inner.queue.len() >= inner.config.max_batch_size;
         drop(inner);
+        self.persist_queue();
         if should_flush {
             let this = self.clone();
             #[cfg(target_arch = "wasm32")]
@@ -543,7 +639,14 @@ impl ForgeSignals {
                 page_url,
             }],
         };
-        let wrapped = json!({ "type": "report", "payload": serde_json::to_value(&body).unwrap_or_default() });
+        let payload = match serde_json::to_value(&body) {
+            Ok(v) => v,
+            Err(e) => {
+                warn_serialize_failed("error report", &e);
+                return;
+            }
+        };
+        let wrapped = json!({ "type": "report", "payload": payload });
         let _ = post_signal(&url, "signal", &wrapped, session_id.as_deref()).await;
     }
 
@@ -592,19 +695,35 @@ impl ForgeSignals {
             }),
         };
 
-        let wrapped = json!({ "type": "event", "payload": serde_json::to_value(&batch).unwrap_or_default() });
+        let payload = match serde_json::to_value(&batch) {
+            Ok(v) => v,
+            Err(e) => {
+                warn_serialize_failed("event batch", &e);
+                let mut inner = self.inner.borrow_mut();
+                events.append(&mut inner.queue);
+                events.truncate(MAX_QUEUE_SIZE);
+                inner.queue = events;
+                drop(inner);
+                self.persist_queue();
+                return;
+            }
+        };
+        let wrapped = json!({ "type": "event", "payload": payload });
         match post_signal(&url, "signal", &wrapped, session_id.as_deref()).await
         {
             Ok(resp) => {
                 if let Some(sid) = resp.get("session_id").and_then(|v| v.as_str()) {
                     self.inner.borrow_mut().session_id = Some(sid.to_string());
                 }
+                self.persist_queue();
             }
             Err(()) => {
                 let mut inner = self.inner.borrow_mut();
                 events.extend(inner.queue.drain(..));
                 events.truncate(MAX_QUEUE_SIZE);
                 inner.queue = events;
+                drop(inner);
+                self.persist_queue();
             }
         }
     }
@@ -651,6 +770,9 @@ fn flush_beacon(signals: &ForgeSignals) {
         let events = std::mem::take(&mut inner.queue);
         (inner.client.get_url().to_string(), events, inner.session_id.clone())
     };
+    // Beacon is best-effort; clear the persisted copy so a reload after
+    // unload doesn't double-send.
+    signals.persist_queue();
 
     let batch = EventBatch {
         events,
@@ -661,7 +783,13 @@ fn flush_beacon(signals: &ForgeSignals) {
     };
 
     let wrapped = json!({ "type": "event", "payload": &batch });
-    let body = serde_json::to_string(&wrapped).unwrap_or_default();
+    let body = match serde_json::to_string(&wrapped) {
+        Ok(s) => s,
+        Err(e) => {
+            warn_serialize_failed("beacon event batch", &e);
+            return;
+        }
+    };
 
     #[cfg(target_arch = "wasm32")]
     {

@@ -340,9 +340,12 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
                 return Err(syn::Error::new_spanned(
                     &input.sig.ident,
                     format!(
-                        "Private query `{fn_name_str}` references table(s) [{tables_str}] but SQL \
-                         does not filter by user_id or owner_id. Add a WHERE clause scoped to the \
-                         authenticated user, or use #[query(scope = \"global\")] if this is intentional."
+                        "Private query `{fn_name_str}` does not filter by user_id, owner_id, or \
+                         tenant_id on table(s) [{tables_str}] (structural lint, not a security \
+                         boundary — a column literally named user_id will pass; real isolation \
+                         belongs in Postgres RLS). Add a WHERE clause scoped to the authenticated \
+                         user, or use #[query(scope = \"global\")] (alias for `unscoped`) if this \
+                         is intentional."
                     ),
                 ));
             }
@@ -352,8 +355,9 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
                     &input.sig.ident,
                     format!(
                         "Private query `{fn_name_str}` references table(s) [{tables_str}] but SQL \
-                         could not be parsed to verify scope. Add #[query(scope = \"global\")] to opt out of \
-                         scope checking, or add #[query(tables(\"...\"))] to skip automatic extraction."
+                         could not be parsed for the structural scope lint (this is a lint, not a \
+                         security boundary). Add #[query(scope = \"global\")] to opt out, or add \
+                         #[query(tables(\"...\"))] to skip automatic extraction."
                     ),
                 ));
             }

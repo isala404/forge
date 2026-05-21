@@ -266,15 +266,24 @@ fn convert_workflow_attrs(darling: DarlingWorkflowAttrs) -> WorkflowAttrs {
 
 /// Extract step and wait keys from the workflow function body for signature derivation.
 /// Looks for patterns like `ctx.step("key", ...)` and `ctx.wait_for_event::<T>("event", ...)`.
+///
+/// To avoid third-party iterator/helper methods named `step` polluting the
+/// signature, the receiver chain of every candidate call is walked back to its
+/// root. Only calls whose chain bottoms out on the tracked workflow context
+/// binding (e.g. `ctx`, picked up from the fn signature) are collected. This
+/// admits builder chains like `ctx.parallel().step("k")` while excluding
+/// `some_iterator.step()` from an unrelated type.
 struct ContractExtractor {
+    ctx_ident: Option<syn::Ident>,
     step_keys: BTreeSet<String>,
     wait_keys: BTreeSet<String>,
     errors: Vec<syn::Error>,
 }
 
 impl ContractExtractor {
-    fn new() -> Self {
+    fn new(ctx_ident: Option<syn::Ident>) -> Self {
         Self {
+            ctx_ident,
             step_keys: BTreeSet::new(),
             wait_keys: BTreeSet::new(),
             errors: Vec::new(),
@@ -289,6 +298,51 @@ impl ContractExtractor {
         }
         None
     }
+
+    /// Walk the receiver chain of a method call back to its root and return
+    /// the root identifier if the chain is a simple ident-rooted path of
+    /// method calls (with optional `?` or `.await` along the way). Returns
+    /// None if the chain bottoms out on anything else (a free function call,
+    /// a literal, `self`, etc.).
+    fn receiver_root_ident(mut expr: &syn::Expr) -> Option<&syn::Ident> {
+        loop {
+            match expr {
+                syn::Expr::MethodCall(inner) => {
+                    expr = &inner.receiver;
+                }
+                syn::Expr::Try(inner) => {
+                    expr = &inner.expr;
+                }
+                syn::Expr::Await(inner) => {
+                    expr = &inner.base;
+                }
+                syn::Expr::Paren(inner) => {
+                    expr = &inner.expr;
+                }
+                syn::Expr::Reference(inner) => {
+                    expr = &inner.expr;
+                }
+                syn::Expr::Path(path) => {
+                    if path.qself.is_none() && path.path.segments.len() == 1 {
+                        return path.path.segments.first().map(|s| &s.ident);
+                    }
+                    return None;
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    /// True if the call's receiver chain is rooted at the tracked ctx ident.
+    /// If no ctx ident was tracked (unusual — workflow always has a context
+    /// param), fall back to the previous string-only behavior so we don't
+    /// silently drop keys.
+    fn receiver_is_ctx(&self, receiver: &syn::Expr) -> bool {
+        let Some(ref ctx) = self.ctx_ident else {
+            return true;
+        };
+        Self::receiver_root_ident(receiver).is_some_and(|root| root == ctx)
+    }
 }
 
 impl<'ast> Visit<'ast> for ContractExtractor {
@@ -296,8 +350,8 @@ impl<'ast> Visit<'ast> for ContractExtractor {
         let method_name = node.method.to_string();
 
         match method_name.as_str() {
-            // ctx.step("key", ...) or builder.step("key", ...)
-            "step" => {
+            // ctx.step("key", ...) or ctx.parallel().step("key", ...)
+            "step" if self.receiver_is_ctx(&node.receiver) => {
                 if let Some(first_arg) = node.args.first() {
                     if let Some(key) = Self::extract_string_lit(first_arg) {
                         self.step_keys.insert(key);
@@ -310,7 +364,7 @@ impl<'ast> Visit<'ast> for ContractExtractor {
                 }
             }
             // ctx.wait_for_event::<T>("event_name", ...)
-            "wait_for_event" => {
+            "wait_for_event" if self.receiver_is_ctx(&node.receiver) => {
                 if let Some(first_arg) = node.args.first() {
                     if let Some(key) = Self::extract_string_lit(first_arg) {
                         self.wait_keys.insert(key);
@@ -434,8 +488,22 @@ pub fn workflow_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         .into();
     }
 
+    // Pull the workflow context binding (usually `ctx`) from the first fn
+    // argument so the ContractExtractor can scope its `.step()`/`.wait_for_event()`
+    // matches to that binding's call chain. Falling back to None keeps the
+    // previous behavior if the signature is unusual.
+    let ctx_ident: Option<syn::Ident> = input.sig.inputs.iter().next().and_then(|arg| {
+        if let syn::FnArg::Typed(pat_type) = arg
+            && let syn::Pat::Ident(pat_ident) = pat_type.pat.as_ref()
+        {
+            Some(pat_ident.ident.clone())
+        } else {
+            None
+        }
+    });
+
     // Extract step/wait keys from function body for signature derivation
-    let mut contract_extractor = ContractExtractor::new();
+    let mut contract_extractor = ContractExtractor::new(ctx_ident);
     contract_extractor.visit_block(block);
 
     if let Some(first_err) = contract_extractor.errors.into_iter().reduce(|mut acc, e| {

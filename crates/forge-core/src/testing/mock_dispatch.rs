@@ -454,6 +454,34 @@ impl Default for MockWorkflowDispatch {
     }
 }
 
+impl crate::function::WorkflowDispatch for MockWorkflowDispatch {
+    fn get_info(&self, _workflow_name: &str) -> Option<crate::workflow::WorkflowInfo> {
+        None
+    }
+
+    fn start_by_name(
+        &self,
+        workflow_name: &str,
+        input: serde_json::Value,
+        _owner_subject: Option<String>,
+        _trace_id: Option<String>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Uuid>> + Send + '_>> {
+        let name = workflow_name.to_string();
+        Box::pin(async move { self.start(&name, input).await })
+    }
+
+    fn start_in_conn<'a>(
+        &'a self,
+        _conn: &'a mut sqlx::PgConnection,
+        workflow_name: &'a str,
+        input: serde_json::Value,
+        _owner_subject: Option<String>,
+        _trace_id: Option<String>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Uuid>> + Send + 'a>> {
+        Box::pin(async move { self.start(workflow_name, input).await })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

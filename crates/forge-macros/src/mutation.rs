@@ -243,20 +243,68 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
     // dispatch_job / start_workflow require a transaction so the outbox flush is
     // atomic with the database write. Explicitly opting out of transactions with
     // `transactional = false` while calling these is always a bug.
+    //
+    // The visitor only fires when the call's receiver chain bottoms out on the
+    // mutation context binding (usually `ctx`). A name-only match would treat
+    // any third-party `.dispatch_job()` on an unrelated type as a violation.
+    let mutation_ctx_ident: Option<syn::Ident> =
+        input.sig.inputs.iter().next().and_then(|arg| {
+            if let FnArg::Typed(pat_type) = arg
+                && let Pat::Ident(pat_ident) = pat_type.pat.as_ref()
+            {
+                Some(pat_ident.ident.clone())
+            } else {
+                None
+            }
+        });
+
     let has_dispatch = {
         struct DispatchCallVisitor {
+            ctx_ident: Option<syn::Ident>,
             found: bool,
+        }
+        impl DispatchCallVisitor {
+            fn receiver_root_ident(mut expr: &syn::Expr) -> Option<&syn::Ident> {
+                loop {
+                    match expr {
+                        syn::Expr::MethodCall(inner) => expr = &inner.receiver,
+                        syn::Expr::Try(inner) => expr = &inner.expr,
+                        syn::Expr::Await(inner) => expr = &inner.base,
+                        syn::Expr::Paren(inner) => expr = &inner.expr,
+                        syn::Expr::Reference(inner) => expr = &inner.expr,
+                        syn::Expr::Path(path) => {
+                            if path.qself.is_none() && path.path.segments.len() == 1 {
+                                return path.path.segments.first().map(|s| &s.ident);
+                            }
+                            return None;
+                        }
+                        _ => return None,
+                    }
+                }
+            }
+
+            fn receiver_is_ctx(&self, receiver: &syn::Expr) -> bool {
+                let Some(ref ctx) = self.ctx_ident else {
+                    return true;
+                };
+                Self::receiver_root_ident(receiver).is_some_and(|root| root == ctx)
+            }
         }
         impl<'ast> syn::visit::Visit<'ast> for DispatchCallVisitor {
             fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
                 let method = node.method.to_string();
-                if method == "dispatch_job" || method == "start_workflow" {
+                if (method == "dispatch_job" || method == "start_workflow")
+                    && self.receiver_is_ctx(&node.receiver)
+                {
                     self.found = true;
                 }
                 syn::visit::visit_expr_method_call(self, node);
             }
         }
-        let mut visitor = DispatchCallVisitor { found: false };
+        let mut visitor = DispatchCallVisitor {
+            ctx_ident: mutation_ctx_ident.clone(),
+            found: false,
+        };
         syn::visit::visit_block(&mut visitor, fn_block);
         visitor.found
     };
