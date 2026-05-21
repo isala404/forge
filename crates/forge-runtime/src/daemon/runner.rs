@@ -381,6 +381,12 @@ async fn run_daemon_loop(
                 daemon.status = field::Empty,
             );
 
+            // Hold handles for every background task this iteration spawns so
+            // we can abort them when the iteration ends (clean handler return,
+            // panic, error, max-restart, etc.). Without this the validate/refresh
+            // loops below outlive the iteration and pile up on every restart.
+            let mut iteration_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
             let result = async {
                 tracing::info!(instance_id = %instance_id, "Daemon instance starting");
 
@@ -390,7 +396,7 @@ async fn run_daemon_loop(
                 // Forward shutdown signal
                 let shutdown_rx_clone = shutdown_rx.clone();
                 let shutdown_tx_clone = daemon_shutdown_tx.clone();
-                tokio::spawn(async move {
+                iteration_handles.push(tokio::spawn(async move {
                     let mut rx = shutdown_rx_clone;
                     while rx.changed().await.is_ok() {
                         if *rx.borrow() {
@@ -398,7 +404,7 @@ async fn run_daemon_loop(
                             break;
                         }
                     }
-                });
+                }));
 
                 // For leader-elected daemons, two background tasks run for
                 // the lifetime of this daemon iteration:
@@ -423,7 +429,7 @@ async fn run_daemon_loop(
                     let election_clone = Arc::clone(election);
                     let shutdown_tx_clone = daemon_shutdown_tx.clone();
                     let validate_interval = election_clone.lock_validate_interval();
-                    tokio::spawn(async move {
+                    iteration_handles.push(tokio::spawn(async move {
                         loop {
                             tokio::time::sleep(validate_interval).await;
                             if *shutdown_tx_clone.borrow() {
@@ -447,7 +453,7 @@ async fn run_daemon_loop(
                                 break;
                             }
                         }
-                    });
+                    }));
 
                     // Task 2: lease refresh + heartbeat.
                     let election_clone = Arc::clone(election);
@@ -455,7 +461,7 @@ async fn run_daemon_loop(
                     let pool_clone = pool.clone();
                     let name_clone = name.clone();
                     let refresh_interval = election_clone.check_interval();
-                    tokio::spawn(async move {
+                    iteration_handles.push(tokio::spawn(async move {
                         loop {
                             tokio::time::sleep(refresh_interval).await;
                             if *shutdown_tx_clone.borrow() {
@@ -482,7 +488,7 @@ async fn run_daemon_loop(
                                 );
                             }
                         }
-                    });
+                    }));
                 }
 
                 let mut ctx = DaemonContext::new(
@@ -515,6 +521,13 @@ async fn run_daemon_loop(
             }
             .instrument(exec_span)
             .await;
+
+            // Stop the per-iteration background tasks (shutdown forwarder,
+            // lock validator, lease refresher). Without this they keep
+            // sleeping forever and accumulate across restarts.
+            for handle in iteration_handles.drain(..) {
+                handle.abort();
+            }
 
             match result {
                 Ok(Ok(())) => {

@@ -88,7 +88,7 @@ fn ts_custom(name: &str, pos: Position) -> String {
         }
 
         _ if name.starts_with("HashMap<") || name.starts_with("std::collections::HashMap<") => {
-            ts_hashmap(name)
+            ts_hashmap(name, pos)
         }
 
         "Cursor" => "string".into(),
@@ -108,7 +108,7 @@ fn ts_custom(name: &str, pos: Position) -> String {
     }
 }
 
-fn ts_hashmap(name: &str) -> String {
+fn ts_hashmap(name: &str, pos: Position) -> String {
     let inner = name
         .strip_prefix("HashMap<")
         .or_else(|| name.strip_prefix("std::collections::HashMap<"))
@@ -122,12 +122,7 @@ fn ts_hashmap(name: &str) -> String {
         return "Record<string, unknown>".into();
     };
 
-    let value_type = match value {
-        "String" | "&str" | "str" => "string",
-        "i32" | "i64" | "u32" | "u64" | "f32" | "f64" => "number",
-        "bool" => "boolean",
-        other => other,
-    };
+    let value_type = ts_type(&RustType::Custom(value.to_string()), pos);
     format!("Record<string, {}>", value_type)
 }
 
@@ -186,6 +181,19 @@ fn dioxus_custom(name: &str) -> String {
         "Upload" => "ForgeUpload".into(),
         "Cursor" => "String".into(),
         "PageInfo" => "forge_core::PageInfo".into(),
+
+        _ if name.starts_with("Vec<") => {
+            let inner = name
+                .strip_prefix("Vec<")
+                .and_then(|s| s.strip_suffix('>'))
+                .unwrap_or("JsonValue");
+            format!("Vec<{}>", dioxus_type(&RustType::Custom(inner.to_string())))
+        }
+
+        _ if name.starts_with("HashMap<") || name.starts_with("std::collections::HashMap<") => {
+            dioxus_hashmap(name)
+        }
+
         _ if name.starts_with("Page<") => {
             let inner = name
                 .strip_prefix("Page<")
@@ -198,6 +206,24 @@ fn dioxus_custom(name: &str) -> String {
         }
         other => other.to_string(),
     }
+}
+
+fn dioxus_hashmap(name: &str) -> String {
+    let inner = name
+        .strip_prefix("HashMap<")
+        .or_else(|| name.strip_prefix("std::collections::HashMap<"))
+        .and_then(|s| s.strip_suffix('>'));
+
+    let Some(inner) = inner else {
+        return "std::collections::HashMap<String, JsonValue>".into();
+    };
+
+    let Some((_key, value)) = split_top_level_comma(inner) else {
+        return "std::collections::HashMap<String, JsonValue>".into();
+    };
+
+    let value_type = dioxus_type(&RustType::Custom(value.to_string()));
+    format!("std::collections::HashMap<String, {}>", value_type)
 }
 
 // ---------------------------------------------------------------------------
@@ -334,7 +360,7 @@ mod tests {
                 &RustType::Custom("HashMap<String, HashMap<String, i32>>".into()),
                 Position::Arg
             ),
-            "Record<string, HashMap<String, i32>>"
+            "Record<string, Record<string, number>>"
         );
         assert_eq!(
             ts_type(
@@ -364,6 +390,31 @@ mod tests {
         assert_eq!(
             dioxus_type(&RustType::Custom("Upload".into())),
             "ForgeUpload"
+        );
+    }
+
+    #[test]
+    fn dioxus_hashmap() {
+        // Custom-string primitives go through dioxus_custom which widens
+        // `i32`/`u32`/etc. to `i64`. The HashMap value follows the same path.
+        assert_eq!(
+            dioxus_type(&RustType::Custom("HashMap<String, i32>".into())),
+            "std::collections::HashMap<String, i64>"
+        );
+        assert_eq!(
+            dioxus_type(&RustType::Custom("HashMap<String, User>".into())),
+            "std::collections::HashMap<String, User>"
+        );
+        assert_eq!(
+            dioxus_type(&RustType::Custom(
+                "std::collections::HashMap<String, bool>".into()
+            )),
+            "std::collections::HashMap<String, bool>"
+        );
+        // Value type is mapped recursively so wrapper aliases like Uuid map to String.
+        assert_eq!(
+            dioxus_type(&RustType::Custom("HashMap<String, Uuid>".into())),
+            "std::collections::HashMap<String, String>"
         );
     }
 

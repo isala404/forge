@@ -42,9 +42,21 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// Outcome of [`parse_project`]: the schema registry plus any file-level
+/// parse failures collected along the way.
+///
+/// Individual files that fail `syn::parse_file` are recorded here instead of
+/// being silently dropped — callers should surface them to the user so a
+/// broken handler source doesn't disappear from the generated bindings.
+pub struct ParseOutcome {
+    pub registry: SchemaRegistry,
+    pub parse_failures: Vec<(PathBuf, String)>,
+}
+
 /// Parse all Rust source files in a directory and extract schema definitions.
-pub fn parse_project(src_dir: &Path) -> Result<SchemaRegistry, Error> {
+pub fn parse_project(src_dir: &Path) -> Result<ParseOutcome, Error> {
     let registry = SchemaRegistry::new();
+    let mut parse_failures = Vec::new();
 
     let mut files = Vec::new();
     collect_rs_files(src_dir, &mut files);
@@ -53,11 +65,15 @@ pub fn parse_project(src_dir: &Path) -> Result<SchemaRegistry, Error> {
     for path in &files {
         let content = std::fs::read_to_string(path)?;
         if let Err(e) = parse_file(&content, &registry) {
-            tracing::debug!(file = ?path, error = %e, "Failed to parse file");
+            tracing::warn!(file = ?path, error = %e, "failed to parse file; handlers in this file will be missing from generated bindings");
+            parse_failures.push((path.clone(), e.to_string()));
         }
     }
 
-    Ok(registry)
+    Ok(ParseOutcome {
+        registry,
+        parse_failures,
+    })
 }
 
 /// Validate every function in the registry uses types the binding emitters

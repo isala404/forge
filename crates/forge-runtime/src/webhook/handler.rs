@@ -291,15 +291,46 @@ pub async fn webhook_handler(
         })
         .collect();
 
-    // TODO(pre-1.0): Replace WebhookContext with MutationContext for dispatch atomicity
-    let mut ctx = WebhookContext::new(
+    // Open a transaction so the handler's dispatches commit atomically with
+    // its DB writes. The idempotency claim was already committed (it must
+    // outlive a rollback so a retry can see the claim), but anything the
+    // handler does — `dispatch_job`, `start_workflow`, or queries via
+    // `ctx.conn()` — lands on this connection and rolls back together on
+    // error or timeout.
+    let tx = match state.pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            error!(webhook = info.name, error = %e, "Failed to begin webhook transaction");
+            if idempotency_claimed
+                && let Some(ref key) = idempotency_key
+                && let Err(release_err) = release_idempotency(&state.pool, info.name, key).await
+            {
+                warn!(
+                    webhook = info.name,
+                    error = %release_err,
+                    "Failed to release idempotency key after transaction begin failure"
+                );
+            }
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(RpcError::new(
+                    "SERVICE_UNAVAILABLE",
+                    "Service temporarily unavailable",
+                )),
+            )
+                .into_response();
+        }
+    };
+
+    let (mut ctx, tx_handle) = WebhookContext::with_transaction(
         info.name.to_string(),
         request_id.clone(),
         header_map,
         state.pool.clone(),
+        tx,
         state.http_client.clone(),
-    )
-    .with_idempotency_key(idempotency_key.clone());
+    );
+    ctx = ctx.with_idempotency_key(idempotency_key.clone());
     ctx.set_http_timeout(info.http_timeout);
 
     if let Some(ref dispatcher) = state.job_dispatcher {
@@ -316,21 +347,89 @@ pub async fn webhook_handler(
     let exec_start = std::time::Instant::now();
     let result = tokio::time::timeout(info.timeout, (entry.handler)(&ctx, payload)).await;
     let exec_duration_ms = exec_start.elapsed().as_millis().min(i32::MAX as u128) as i32;
+    drop(ctx);
+
+    let take_tx = || async {
+        let mut guard = tx_handle.lock().await;
+        guard.take()
+    };
 
     match result {
         Ok(Ok(webhook_result)) => {
-            if idempotency_claimed
-                && let Some(ref key) = idempotency_key
-                && let Err(complete_err) = complete_idempotency(&state.pool, info.name, key).await
-            {
-                warn!(
-                    webhook = info.name,
-                    error = %complete_err,
-                    "Failed to mark idempotency key as completed"
-                );
-            }
             let status =
                 StatusCode::from_u16(webhook_result.status_code()).unwrap_or(StatusCode::OK);
+            if status.is_success() {
+                if let Some(tx) = take_tx().await
+                    && let Err(commit_err) = tx.commit().await
+                {
+                    error!(
+                        webhook = info.name,
+                        error = %commit_err,
+                        "Failed to commit webhook transaction"
+                    );
+                    if idempotency_claimed
+                        && let Some(ref key) = idempotency_key
+                        && let Err(release_err) =
+                            release_idempotency(&state.pool, info.name, key).await
+                    {
+                        warn!(
+                            webhook = info.name,
+                            error = %release_err,
+                            "Failed to release idempotency key after commit failure"
+                        );
+                    }
+                    crate::signals::emit_server_execution(
+                        info.name,
+                        "webhook",
+                        exec_duration_ms,
+                        false,
+                        Some(commit_err.to_string()),
+                    );
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(RpcError::with_details(
+                            "INTERNAL_ERROR",
+                            "Internal server error",
+                            json!({ "request_id": request_id }),
+                        )),
+                    )
+                        .into_response();
+                }
+                if idempotency_claimed
+                    && let Some(ref key) = idempotency_key
+                    && let Err(complete_err) =
+                        complete_idempotency(&state.pool, info.name, key).await
+                {
+                    warn!(
+                        webhook = info.name,
+                        error = %complete_err,
+                        "Failed to mark idempotency key as completed"
+                    );
+                }
+            } else {
+                // Handler returned a non-2xx but didn't error. Treat as a
+                // soft failure: roll back the handler's writes, release the
+                // claim, and surface the status.
+                if let Some(tx) = take_tx().await
+                    && let Err(rollback_err) = tx.rollback().await
+                {
+                    warn!(
+                        webhook = info.name,
+                        error = %rollback_err,
+                        "Failed to roll back webhook transaction on non-success status"
+                    );
+                }
+                if idempotency_claimed
+                    && let Some(ref key) = idempotency_key
+                    && let Err(release_err) = release_idempotency(&state.pool, info.name, key).await
+                {
+                    warn!(
+                        webhook = info.name,
+                        error = %release_err,
+                        "Failed to release idempotency key after non-success response"
+                    );
+                }
+            }
             crate::signals::emit_server_execution(
                 info.name,
                 "webhook",
@@ -341,6 +440,15 @@ pub async fn webhook_handler(
             (status, Json(webhook_result.body())).into_response()
         }
         Ok(Err(e)) => {
+            if let Some(tx) = take_tx().await
+                && let Err(rollback_err) = tx.rollback().await
+            {
+                warn!(
+                    webhook = info.name,
+                    error = %rollback_err,
+                    "Failed to roll back webhook transaction after handler error"
+                );
+            }
             if idempotency_claimed
                 && let Some(ref key) = idempotency_key
                 && let Err(release_err) = release_idempotency(&state.pool, info.name, key).await
@@ -371,6 +479,15 @@ pub async fn webhook_handler(
                 .into_response()
         }
         Err(_) => {
+            if let Some(tx) = take_tx().await
+                && let Err(rollback_err) = tx.rollback().await
+            {
+                warn!(
+                    webhook = info.name,
+                    error = %rollback_err,
+                    "Failed to roll back webhook transaction after timeout"
+                );
+            }
             if idempotency_claimed
                 && let Some(ref key) = idempotency_key
                 && let Err(release_err) = release_idempotency(&state.pool, info.name, key).await

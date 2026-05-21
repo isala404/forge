@@ -6,6 +6,12 @@ use chrono::Utc;
 use forge_core::cluster::{LeaderInfo, LeaderRole, NodeId};
 use tokio::sync::{Mutex, watch};
 
+use crate::pg::notify_bus::PgNotifyBus;
+
+/// PG NOTIFY channel pinged when a leader voluntarily releases its slot.
+/// Payload is the role string; subscribers filter by their own role.
+pub const LEADER_RELEASED_CHANNEL: &str = "forge_leader_released";
+
 /// Leader election configuration.
 #[derive(Debug, Clone)]
 pub struct LeaderConfig {
@@ -71,6 +77,12 @@ pub struct LeaderElection {
     /// when a keepalive failure invalidates the cache, forcing the next
     /// `validate_lock_held` to actually query `pg_locks`.
     last_lock_validated: Mutex<Option<std::time::Instant>>,
+    /// Optional notify bus used to (a) emit a NOTIFY on
+    /// `forge_leader_released` from the outgoing leader during voluntary
+    /// shutdown so standbys take over immediately instead of waiting for
+    /// `check_interval`, and (b) subscribe on standbys to wake the election
+    /// loop without polling the lease table.
+    notify_bus: Option<Arc<PgNotifyBus>>,
 }
 
 impl std::fmt::Debug for LeaderElection {
@@ -104,7 +116,17 @@ impl LeaderElection {
             shutdown_tx,
             shutdown_rx,
             last_lock_validated: Mutex::new(None),
+            notify_bus: None,
         }
+    }
+
+    /// Attach a [`PgNotifyBus`] so this election emits NOTIFY on
+    /// `forge_leader_released` during voluntary release and subscribes to
+    /// the same channel to wake standbys without waiting for the next
+    /// `check_interval` tick.
+    pub fn with_notify_bus(mut self, bus: Arc<PgNotifyBus>) -> Self {
+        self.notify_bus = Some(bus);
+        self
     }
 
     /// Check if this node is the leader.
@@ -529,6 +551,28 @@ impl LeaderElection {
         // resolved by the lock being gone).
         let mut lock_connection = self.lock_connection.lock().await;
         if let Some(mut conn) = lock_connection.take() {
+            // Emit the released-notification on the same backend that still
+            // holds the lock. Doing this before the unlock guarantees standbys
+            // see the wake-up only when the lock is genuinely about to be
+            // available; doing it on the lock-owning connection means PG flushes
+            // the NOTIFY at commit on this very session. A failure here is
+            // logged but not fatal: the worst case is that standbys fall back
+            // to their normal `check_interval` timer.
+            if let Err(e) = sqlx::query!(
+                "SELECT pg_notify($1, $2)",
+                LEADER_RELEASED_CHANNEL,
+                self.role.as_str(),
+            )
+            .execute(&mut *conn)
+            .await
+            {
+                tracing::warn!(
+                    role = self.role.as_str(),
+                    error = %e,
+                    "Failed to emit leader-released NOTIFY; standbys will wait for next check tick",
+                );
+            }
+
             let released = sqlx::query_scalar!(
                 "SELECT pg_advisory_unlock($1) as \"released!\"",
                 self.role.lock_id()
@@ -614,10 +658,15 @@ impl LeaderElection {
 
         match row {
             Some(row) => {
-                let role = row.role.parse().unwrap_or_else(|_| {
-                    tracing::warn!(role = %row.role, "Unknown leader role, defaulting to Scheduler");
-                    LeaderRole::Scheduler
-                });
+                // The query filters by `self.role`, so any row returned must
+                // belong to this role. If the stored string doesn't parse, the
+                // table is corrupt — surface it instead of silently coercing.
+                let role = row.role.parse::<LeaderRole>().map_err(|_| {
+                    forge_core::ForgeError::internal(format!(
+                        "forge_leaders row has unrecognised role string: {:?}",
+                        row.role
+                    ))
+                })?;
 
                 Ok(Some(LeaderInfo {
                     role,
@@ -649,6 +698,51 @@ impl LeaderElection {
         check_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut keepalive_timer = tokio::time::interval(self.config.keepalive_interval);
         keepalive_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        // Fast-failover wakeup: when an outgoing leader emits NOTIFY on
+        // `forge_leader_released`, standbys for the same role attempt
+        // acquisition immediately instead of waiting for the next
+        // `check_interval` tick. The forwarder collapses any number of
+        // notifications into a single `Notify::notify_one` so a backlog
+        // doesn't queue up multiple acquisition attempts.
+        let release_wakeup = Arc::new(tokio::sync::Notify::new());
+        let release_forwarder = if let Some(bus) = self.notify_bus.as_ref()
+            && let Some(mut rx) = bus.subscribe(LEADER_RELEASED_CHANNEL)
+        {
+            let wakeup = release_wakeup.clone();
+            let role = self.role.as_str().to_string();
+            let mut forwarder_shutdown = self.shutdown_rx.clone();
+            Some(tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = forwarder_shutdown.changed() => {
+                            if *forwarder_shutdown.borrow() {
+                                return;
+                            }
+                        }
+                        result = rx.recv() => {
+                            match result {
+                                Ok(payload) => {
+                                    if payload == role {
+                                        wakeup.notify_one();
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                    tracing::debug!(
+                                        missed = n,
+                                        "Leader-released wakeup receiver lagged"
+                                    );
+                                    wakeup.notify_one();
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                            }
+                        }
+                    }
+                }
+            }))
+        } else {
+            None
+        };
 
         loop {
             tokio::select! {
@@ -691,6 +785,17 @@ impl LeaderElection {
                         }
                     }
                 }
+                _ = release_wakeup.notified() => {
+                    // Outgoing leader announced release; jump straight to an
+                    // acquisition attempt. `try_become_leader` is a no-op when
+                    // we already hold the lock, so it's safe even if we
+                    // happened to win between the NOTIFY and now.
+                    if !self.is_leader()
+                        && let Err(e) = self.try_become_leader().await
+                    {
+                        tracing::debug!(error = %e, "Failed to acquire leadership after release NOTIFY");
+                    }
+                }
                 _ = shutdown_rx.changed() => {
                     if *shutdown_rx.borrow() {
                         tracing::debug!("Leader election shutting down");
@@ -701,6 +806,10 @@ impl LeaderElection {
                     }
                 }
             }
+        }
+
+        if let Some(handle) = release_forwarder {
+            handle.abort();
         }
     }
 }

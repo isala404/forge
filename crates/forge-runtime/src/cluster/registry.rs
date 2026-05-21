@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use forge_core::cluster::{NodeInfo, NodeStatus};
 use forge_core::{ForgeError, Result};
 
@@ -90,25 +88,5 @@ impl NodeRegistry {
         .map_err(ForgeError::Database)?;
 
         Ok(())
-    }
-
-    /// Mark stale nodes as dead.
-    pub async fn mark_dead_nodes(&self, threshold: Duration) -> Result<u64> {
-        let threshold_secs = threshold.as_secs() as i64;
-
-        let result = sqlx::query!(
-            r#"
-            UPDATE forge_nodes
-            SET status = 'dead'
-            WHERE status = 'active'
-              AND last_heartbeat < NOW() - make_interval(secs => $1)
-            "#,
-            threshold_secs as f64,
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(ForgeError::Database)?;
-
-        Ok(result.rows_affected())
     }
 }

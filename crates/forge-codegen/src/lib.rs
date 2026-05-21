@@ -22,6 +22,6 @@ pub mod schema_json;
 pub mod typescript;
 
 pub use dioxus::DioxusGenerator;
-pub use parser::{find_duplicate_handlers, parse_project, validate_registry};
+pub use parser::{ParseOutcome, find_duplicate_handlers, parse_project, validate_registry};
 pub use schema_json::{emit as emit_schema, emit_string as emit_schema_json};
 pub use typescript::{Error, GenerateOptions, RUNES_SVELTE_TS, TypeScriptGenerator};

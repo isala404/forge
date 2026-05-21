@@ -448,14 +448,32 @@ impl Forge {
             tracing::debug!("Failed to set node status: {}", e);
         }
 
+        // Construct the shared PG NOTIFY bus up front so the leader election
+        // can subscribe to `forge_leader_released` and react instantly to a
+        // sibling's voluntary release instead of waiting for the next
+        // `check_interval` tick. The bus is only an in-memory map until
+        // `run()` is spawned further down.
+        let notify_bus = Arc::new(PgNotifyBus::new(
+            pool.clone(),
+            &[
+                "forge_changes",
+                "forge_jobs_available",
+                "forge_workflow_wakeup",
+                forge_runtime::pg::LEADER_RELEASED_CHANNEL,
+            ],
+        ));
+
         // Create leader election for scheduler role
         let leader_election = if roles.contains(&NodeRole::Scheduler) {
-            let election = Arc::new(LeaderElection::new(
-                pool.clone(),
-                node_id,
-                LeaderRole::Scheduler,
-                LeaderConfig::default(),
-            ));
+            let election = Arc::new(
+                LeaderElection::new(
+                    pool.clone(),
+                    node_id,
+                    LeaderRole::Scheduler,
+                    LeaderConfig::default(),
+                )
+                .with_notify_bus(notify_bus.clone()),
+            );
 
             // Try to become leader
             if let Err(e) = election.try_become_leader().await {
@@ -517,14 +535,6 @@ impl Forge {
         #[cfg(feature = "jobs")]
         let job_queue = JobQueue::new(pool.clone());
 
-        let notify_bus = Arc::new(PgNotifyBus::new(
-            pool.clone(),
-            &[
-                "forge_changes",
-                "forge_jobs_available",
-                "forge_workflow_wakeup",
-            ],
-        ));
         // Spawn the bus run loop. The gateway role re-uses this same bus via
         // the reactor (which also spawns it), so we gate the direct spawn on
         // the absence of a gateway role to avoid running two run() tasks on
@@ -1054,6 +1064,10 @@ impl Forge {
                                 forge_runtime::signals::partition::drop_old_partitions(
                                     &partition_pool,
                                     retention_days,
+                                )
+                                .await;
+                                forge_runtime::signals::partition::check_default_partition(
+                                    &partition_pool,
                                 )
                                 .await;
                             }

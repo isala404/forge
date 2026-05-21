@@ -57,11 +57,24 @@ impl GenerateCommand {
         // Parse source files
         eprint!("  Scanning Rust source files...");
         let registry = if src_path.exists() {
-            forge_codegen::parse_project(src_path)?
+            let outcome = forge_codegen::parse_project(src_path)?;
+            eprintln!(" done");
+            if !outcome.parse_failures.is_empty() {
+                eprintln!();
+                eprintln!(
+                    "  {} {} source file(s) failed to parse; handlers in those files will be missing from bindings:",
+                    ui::warn(),
+                    outcome.parse_failures.len()
+                );
+                for (path, msg) in &outcome.parse_failures {
+                    eprintln!("    - {}: {}", path.display(), msg);
+                }
+            }
+            outcome.registry
         } else {
+            eprintln!(" done");
             forge_core::schema::SchemaRegistry::new()
         };
-        eprintln!(" done");
 
         if let Err(errors) = forge_codegen::validate_registry(&registry) {
             eprintln!();

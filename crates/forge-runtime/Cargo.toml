@@ -106,11 +106,13 @@ gateway = [
 # Background job queue and worker (PG-backed, SKIP LOCKED).
 jobs = []
 
-# Durable workflow executor with versioned signatures.
-workflows = []
+# Durable workflow executor with versioned signatures. Workflows resume by
+# enqueueing jobs onto the queue, so the `jobs` subsystem is required.
+workflows = ["jobs"]
 
-# Cron scheduler with leader-only execution.
-cron = []
+# Cron scheduler with leader-only execution. Each tick enqueues a job for
+# the worker pool to execute, so the `jobs` subsystem is required.
+cron = ["jobs"]
 
 # Long-running daemon runner (singletons, leader-elected).
 daemons = []

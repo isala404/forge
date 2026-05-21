@@ -152,7 +152,7 @@ TypeScript output: `types.ts` (interfaces + type unions), `api.ts` (RPC function
 
 Dioxus output: `types.rs` (structs + builders), `api.rs` (async fns + use_* hooks + use_*_live subscriptions), `mod.rs`.
 
-Context parameter detection: structural check for types ending with "Context". Not string-based.
+Context parameter detection: the first argument is skipped iff its final path segment matches the fixed allowlist of 8 framework context types (`QueryContext`, `MutationContext`, `JobContext`, `CronContext`, `WorkflowContext`, `DaemonContext`, `WebhookContext`, `McpToolContext`). User-defined types like `AppContext` are NOT skipped — they appear as the first RPC argument.
 
 ### forge (CLI): Commands
 

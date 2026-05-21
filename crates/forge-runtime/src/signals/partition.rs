@@ -62,3 +62,26 @@ pub async fn drop_old_partitions(pool: &PgPool, retention_days: u32) {
         Err(e) => error!(error = %e, "failed to drop old signal partitions"),
     }
 }
+
+/// Warn if any rows have landed in the catch-all partition.
+///
+/// `forge_signals_events_default` catches rows whose timestamp doesn't match
+/// any month partition. The retention sweep explicitly skips it, so anything
+/// that lands here accumulates forever. A non-zero count means either a
+/// `forge_signals_ensure_partition` failure left a gap, or clients are
+/// inserting events with timestamps outside the rolling +3-month window.
+pub async fn check_default_partition(pool: &PgPool) {
+    let result = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM forge_signals_events_default")
+        .fetch_one(pool)
+        .await;
+
+    match result {
+        Ok(0) => debug!("signals default partition empty"),
+        Ok(count) => error!(
+            misrouted_rows = count,
+            "signals: rows landed in forge_signals_events_default — a partition is missing for some range. \
+             These rows are excluded from retention drops; investigate the partition coverage."
+        ),
+        Err(e) => error!(error = %e, "failed to inspect signals default partition"),
+    }
+}

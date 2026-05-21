@@ -115,7 +115,15 @@ impl CheckCommand {
         let src_path = Path::new("src");
         let registry = if src_path.exists() {
             match forge_codegen::parse_project(src_path) {
-                Ok(r) => r,
+                Ok(outcome) => {
+                    for (path, msg) in &outcome.parse_failures {
+                        result.warn(
+                            &format!("Failed to parse {}: {}", path.display(), msg),
+                            "Handlers in this file will be missing from generated bindings",
+                        );
+                    }
+                    outcome.registry
+                }
                 Err(e) => {
                     result.warn(
                         &format!("Could not parse source: {}", e),

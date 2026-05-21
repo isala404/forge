@@ -904,17 +904,20 @@ fn coarsen_ip(ip: &str) -> String {
     }
 }
 
-/// Hash a user-agent string for cookie binding (truncated hex).
+/// Hash a user-agent string for cookie binding.
+///
+/// SHA-256 truncated to 64 bits — the HMAC carries forgery resistance, so the
+/// hash only needs to fingerprint the UA well enough that a stolen cookie
+/// can't be silently rebound to a different browser. 64 bits leaves rotation
+/// attacks no useful margin to brute-force at request time.
 fn hash_ua(ua: &str) -> String {
     let hash = Sha256::digest(ua.as_bytes());
-    let bytes = hash.as_slice();
-    let (a, b, c, d) = (
-        bytes.first().copied().unwrap_or(0),
-        bytes.get(1).copied().unwrap_or(0),
-        bytes.get(2).copied().unwrap_or(0),
-        bytes.get(3).copied().unwrap_or(0),
-    );
-    format!("{a:x}{b:x}{c:x}{d:x}")
+    let mut out = String::with_capacity(16);
+    for byte in hash.as_slice().iter().take(8) {
+        use std::fmt::Write;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 /// OAuth session cookie format: `base64(subject):expiry_unix.hmac_signature`

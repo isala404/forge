@@ -69,6 +69,12 @@ impl WorkflowScheduler {
     }
 
     /// Returns true if this node is the leader (or no election is configured).
+    ///
+    /// Advisory only — used to suppress polling on followers. Correctness of
+    /// claim+resume does NOT depend on this; `claim_and_resume` and
+    /// `try_claim_waiting` use `UPDATE … WHERE status IN ('sleeping','waiting')`
+    /// which is atomic, so even if leadership flips between this check and the
+    /// claim the workflow is still claimed exactly once.
     fn is_leader(&self) -> bool {
         self.config
             .leader_election

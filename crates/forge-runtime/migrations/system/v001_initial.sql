@@ -331,6 +331,11 @@ CREATE INDEX IF NOT EXISTS idx_forge_workflow_events_payload_gin
     ON forge_workflow_events USING GIN (payload)
     WHERE payload IS NOT NULL;
 
+-- Supports ON DELETE on forge_workflow_runs without a child seq-scan.
+CREATE INDEX IF NOT EXISTS idx_forge_workflow_events_consumed_by
+    ON forge_workflow_events(consumed_by)
+    WHERE consumed_by IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS forge_workflow_steps (
     id UUID PRIMARY KEY,
     workflow_run_id UUID NOT NULL REFERENCES forge_workflow_runs(id) ON DELETE CASCADE,
@@ -452,19 +457,6 @@ CREATE TABLE IF NOT EXISTS forge_change_log (
 
 CREATE INDEX IF NOT EXISTS idx_forge_change_log_created
     ON forge_change_log (created_at);
-
-CREATE TABLE IF NOT EXISTS forge_invalidations (
-    id              BIGSERIAL PRIMARY KEY,
-    table_name      TEXT NOT NULL,
-    row_id          TEXT,
-    operation       TEXT NOT NULL CHECK (operation IN ('INSERT', 'UPDATE', 'DELETE')),
-    changed_columns TEXT[],
-    node_id         UUID,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_forge_invalidations_created
-    ON forge_invalidations (created_at);
 
 -- ---------------------------------------------------------------------------
 -- Reactivity helpers
@@ -784,6 +776,10 @@ CREATE TABLE IF NOT EXISTS forge_oauth_codes (
 CREATE INDEX IF NOT EXISTS idx_forge_oauth_codes_expires
     ON forge_oauth_codes(expires_at);
 
+-- Supports ON DELETE CASCADE from forge_oauth_clients without a child seq-scan.
+CREATE INDEX IF NOT EXISTS idx_forge_oauth_codes_client_id
+    ON forge_oauth_codes(client_id);
+
 -- ---------------------------------------------------------------------------
 -- Signals: events, sessions, users, rollups
 -- ---------------------------------------------------------------------------
@@ -1086,14 +1082,6 @@ CREATE OR REPLACE FUNCTION forge_purge_expired_oauth_codes()
 RETURNS void LANGUAGE sql AS $$
     DELETE FROM forge_oauth_codes
     WHERE expires_at < now() - interval '1 hour';
-$$;
-
--- Nodes that need older invalidation entries should subscribe via NOTIFY
--- rather than poll this table.
-CREATE OR REPLACE FUNCTION forge_purge_expired_invalidations()
-RETURNS void LANGUAGE sql AS $$
-    DELETE FROM forge_invalidations
-    WHERE created_at < now() - interval '1 hour';
 $$;
 
 -- Nodes that lag past the retention window fall back to full resync.
