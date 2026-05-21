@@ -61,10 +61,13 @@ const sidebars: SidebarsConfig = {
       collapsed: true,
       items: [
         'ship/configuration',
+        'ship/production-architecture',
         'ship/signals',
         'ship/mcp-security',
         'ship/testing',
+        'ship/security',
         'ship/deploy',
+        'ship/migrations',
       ],
     },
     {
@@ -76,7 +79,17 @@ const sidebars: SidebarsConfig = {
         'scale/binary-size',
         'scale/multiple-nodes',
         'scale/worker-pools',
+        'scale/reactivity',
         'scale/global-deploy',
+        'scale/overnight-success',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Agents',
+      collapsed: true,
+      items: [
+        'agents/dev-loop',
       ],
     },
     {
@@ -88,6 +101,8 @@ const sidebars: SidebarsConfig = {
         'reference/contexts',
         'reference/attributes',
         'reference/errors',
+        'reference/pitfalls',
+        'reference/wire-protocol',
         'reference/observability-catalog',
       ],
     },

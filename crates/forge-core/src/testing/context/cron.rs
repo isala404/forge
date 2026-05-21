@@ -17,11 +17,8 @@ use crate::function::AuthContext;
 /// Log entry recorded during testing.
 #[derive(Debug, Clone)]
 pub struct TestLogEntry {
-    /// Log level.
     pub level: String,
-    /// Log message.
     pub message: String,
-    /// Associated data.
     pub data: serde_json::Value,
 }
 
@@ -33,7 +30,6 @@ pub struct TestCronLog {
 }
 
 impl TestCronLog {
-    /// Create a new test cron log.
     pub fn new(cron_name: impl Into<String>) -> Self {
         Self {
             cron_name: cron_name.into(),
@@ -41,37 +37,30 @@ impl TestCronLog {
         }
     }
 
-    /// Log an info message.
     pub fn info(&self, message: &str) {
         self.log("info", message, serde_json::Value::Null);
     }
 
-    /// Log an info message with data.
     pub fn info_with(&self, message: &str, data: serde_json::Value) {
         self.log("info", message, data);
     }
 
-    /// Log a warning message.
     pub fn warn(&self, message: &str) {
         self.log("warn", message, serde_json::Value::Null);
     }
 
-    /// Log a warning message with data.
     pub fn warn_with(&self, message: &str, data: serde_json::Value) {
         self.log("warn", message, data);
     }
 
-    /// Log an error message.
     pub fn error(&self, message: &str) {
         self.log("error", message, serde_json::Value::Null);
     }
 
-    /// Log an error message with data.
     pub fn error_with(&self, message: &str, data: serde_json::Value) {
         self.log("error", message, data);
     }
 
-    /// Log a debug message.
     pub fn debug(&self, message: &str) {
         self.log("debug", message, serde_json::Value::Null);
     }
@@ -85,86 +74,52 @@ impl TestCronLog {
         self.entries.write().unwrap().push(entry);
     }
 
-    /// Get all log entries.
     pub fn entries(&self) -> Vec<TestLogEntry> {
         self.entries.read().unwrap().clone()
     }
 
-    /// Get the cron name.
     pub fn cron_name(&self) -> &str {
         &self.cron_name
     }
 }
 
 /// Test context for cron functions.
-///
-/// Provides an isolated testing environment for crons with delay detection,
-/// catch-up simulation, and structured logging.
-///
-/// # Example
-///
-/// ```ignore
-/// let ctx = TestCronContext::builder("daily_cleanup")
-///     .scheduled_at(Utc::now() - Duration::minutes(5))
-///     .build();
-///
-/// assert!(ctx.is_late());
-///
-/// ctx.log.info("Starting cleanup");
-/// assert_eq!(ctx.log.entries().len(), 1);
-/// ```
 pub struct TestCronContext {
-    /// Cron run ID.
     pub run_id: Uuid,
-    /// Cron name.
     pub cron_name: String,
-    /// Scheduled time.
     pub scheduled_time: DateTime<Utc>,
-    /// Execution time.
     pub execution_time: DateTime<Utc>,
-    /// Timezone.
     pub timezone: String,
-    /// Whether this is a catch-up run.
     pub is_catch_up: bool,
-    /// Authentication context.
     pub auth: AuthContext,
-    /// Structured logger.
     pub log: TestCronLog,
-    /// Optional database pool.
     pool: Option<PgPool>,
-    /// Mock HTTP client.
     http: Arc<MockHttp>,
-    /// Mock environment provider.
     env_provider: Arc<MockEnvProvider>,
 }
 
 impl TestCronContext {
-    /// Create a new builder.
     pub fn builder(cron_name: impl Into<String>) -> TestCronContextBuilder {
         TestCronContextBuilder::new(cron_name)
     }
 
-    /// Get the database pool (if available).
     pub fn db(&self) -> Option<&PgPool> {
         self.pool.as_ref()
     }
 
-    /// Get the mock HTTP client.
     pub fn http(&self) -> &MockHttp {
         &self.http
     }
 
-    /// Get the delay between scheduled and actual execution time.
     pub fn delay(&self) -> Duration {
         self.execution_time - self.scheduled_time
     }
 
-    /// Check if the cron is running late (more than 1 minute delay).
+    /// More than 1 minute behind schedule.
     pub fn is_late(&self) -> bool {
         self.delay() > Duration::minutes(1)
     }
 
-    /// Get the mock env provider for verification.
     pub fn env_mock(&self) -> &MockEnvProvider {
         &self.env_provider
     }
@@ -176,7 +131,6 @@ impl EnvAccess for TestCronContext {
     }
 }
 
-/// Builder for TestCronContext.
 pub struct TestCronContextBuilder {
     run_id: Option<Uuid>,
     cron_name: String,
@@ -193,7 +147,6 @@ pub struct TestCronContextBuilder {
 }
 
 impl TestCronContextBuilder {
-    /// Create a new builder.
     pub fn new(cron_name: impl Into<String>) -> Self {
         let now = Utc::now();
         Self {
@@ -212,37 +165,31 @@ impl TestCronContextBuilder {
         }
     }
 
-    /// Set a specific run ID.
     pub fn with_run_id(mut self, id: Uuid) -> Self {
         self.run_id = Some(id);
         self
     }
 
-    /// Set the scheduled time.
     pub fn scheduled_at(mut self, time: DateTime<Utc>) -> Self {
         self.scheduled_time = time;
         self
     }
 
-    /// Set the execution time.
     pub fn executed_at(mut self, time: DateTime<Utc>) -> Self {
         self.execution_time = time;
         self
     }
 
-    /// Set the timezone.
     pub fn with_timezone(mut self, tz: impl Into<String>) -> Self {
         self.timezone = tz.into();
         self
     }
 
-    /// Mark as a catch-up run.
     pub fn as_catch_up(mut self) -> Self {
         self.is_catch_up = true;
         self
     }
 
-    /// Set the authenticated user with a UUID.
     pub fn as_user(mut self, id: Uuid) -> Self {
         self.user_id = Some(id);
         self
@@ -255,19 +202,26 @@ impl TestCronContextBuilder {
         self
     }
 
-    /// Add a role.
     pub fn with_role(mut self, role: impl Into<String>) -> Self {
         self.roles.push(role.into());
         self
     }
 
-    /// Set the database pool.
+    pub fn with_roles(mut self, roles: Vec<String>) -> Self {
+        self.roles.extend(roles);
+        self
+    }
+
+    pub fn with_claim(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
+        self.claims.insert(key.into(), value);
+        self
+    }
+
     pub fn with_pool(mut self, pool: PgPool) -> Self {
         self.pool = Some(pool);
         self
     }
 
-    /// Add an HTTP mock.
     pub fn mock_http<F>(self, pattern: &str, handler: F) -> Self
     where
         F: Fn(&MockRequest) -> MockResponse + Send + Sync + 'static,
@@ -276,25 +230,21 @@ impl TestCronContextBuilder {
         self
     }
 
-    /// Add an HTTP mock that returns a JSON response.
     pub fn mock_http_json<T: serde::Serialize>(self, pattern: &str, response: T) -> Self {
         let json = serde_json::to_value(response).unwrap_or(serde_json::Value::Null);
         self.mock_http(pattern, move |_| MockResponse::json(json.clone()))
     }
 
-    /// Set a single environment variable.
     pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.env_vars.insert(key.into(), value.into());
         self
     }
 
-    /// Set multiple environment variables.
     pub fn with_envs(mut self, vars: HashMap<String, String>) -> Self {
         self.env_vars.extend(vars);
         self
     }
 
-    /// Build the test context.
     pub fn build(self) -> TestCronContext {
         TestCronContext {
             run_id: self.run_id.unwrap_or_else(Uuid::new_v4),

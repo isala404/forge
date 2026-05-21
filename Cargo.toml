@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
     "crates/forge",
     "crates/forge-core",
@@ -38,7 +38,7 @@ forge-runtime = { path = "crates/forge-runtime" }
 forge-codegen = { path = "crates/forge-codegen" }
 
 # Async runtime
-tokio = { version = "1.48", features = ["full"] }
+tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "process", "io-util", "fs"] }
 
 # Database
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "chrono", "json", "macros"] }
@@ -47,7 +47,8 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.9"
-schemars = { version = "0.8", features = ["chrono", "uuid1"] }
+# Pinned: schemars 1.x is a breaking rewrite; stay on 0.8.x until we can migrate JsonSchema derives.
+schemars = { version = "=0.8.22", features = ["chrono", "uuid1"] }
 jsonschema = "0.28"
 
 # HTTP/WebSocket
@@ -64,12 +65,15 @@ bytes = "1.10"
 futures-core = "0.3"
 cron = "0.15"
 thiserror = "2.0"
+# CLI-only; do not use in library crates
 anyhow = "1.0"
+subtle = "2"
+ahash = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 tracing-opentelemetry = "0.28"
 
-# OpenTelemetry
+# Pinned: OTel 0.27 is the latest stable release as of Rust edition 2024.
 opentelemetry = { version = "0.27", features = ["trace", "metrics", "logs"] }
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio", "trace", "metrics", "logs"] }
 opentelemetry-otlp = { version = "0.27", default-features = false, features = ["http-json", "reqwest-rustls", "trace", "metrics", "logs", "internal-logs"] }
@@ -77,11 +81,17 @@ opentelemetry-semantic-conventions = "0.27"
 opentelemetry-appender-tracing = "0.27"
 
 # Proc macros
-syn = { version = "2.0", features = ["full", "extra-traits", "visit"] }
+syn = { version = "2.0", features = ["full", "visit"] }
+darling = { version = "0.20" }
 quote = "1.0"
 inventory = "0.3"
 sha2 = "0.10"
+blake3 = "1"
 proc-macro2 = "1.0"
+base64 = "0.22"
+futures-util = "0.3"
+tokio-util = "0.7"
+tempfile = "3"
 
 # SQL parsing
 sqlparser = "0.54"
@@ -99,8 +109,9 @@ testcontainers-modules = { version = "0.15", features = ["postgres"] }
 
 # Example dependencies
 dotenvy = "0.15"
-bcrypt = "0.17"
-jsonwebtoken = "9"
+argon2 = "0.5"
+password-hash = "0.5"
+jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto", "use_pem"] }
 rust-embed = "8"
 mime_guess = "2"
 which = "7"
@@ -112,8 +123,10 @@ dead_code = "deny"
 [workspace.lints.clippy]
 panic = "deny"
 unimplemented = "deny"
+todo = "deny"
 unwrap_used = "deny"
 indexing_slicing = "deny"
+disallowed_methods = "deny"
 
 [profile.dev]
 # Smaller debug info keeps incremental builds and target/ size in check.
@@ -136,7 +149,7 @@ codegen-units = 256
 [profile.release]
 lto = true
 codegen-units = 1
-strip = true
+strip = "debuginfo"
 
 # Ad-hoc release builds (smoke tests, local benchmarks) don't need full LTO.
 # Use with `cargo build --profile release-fast` to skip the LTO link stall.

@@ -54,6 +54,53 @@ Forge persists workflow state to PostgreSQL after each step. When the process re
 
 The macro validates your code at compile time. Using `tokio::sleep()` with durations over 100 seconds produces a compile error, guiding you toward `ctx.sleep()`.
 
+## Run Status Lifecycle
+
+Every workflow run moves through a set of statuses stored in `forge_workflow_runs.status`. Understanding them helps when querying run history or debugging stuck workflows.
+
+| Status | Terminal | Description |
+|--------|----------|-------------|
+| `Pending` | No | Created but not yet picked up by the executor. |
+| `Running` | No | Actively executing a step. |
+| `Sleeping` | No | Suspended on a durable `ctx.sleep()` timer. Resumes automatically when the timer fires. |
+| `Waiting` | No | Parked on `ctx.wait_for_event()`. Resumes when the named event is inserted into `forge_workflow_events`. |
+| `Completed` | Yes | Finished successfully. |
+| `Failed` | Yes | Ended with an unhandled error, operator cancellation, saga compensation, or operator retirement. |
+| `BlockedMissingVersion` | No | No handler registered for the run's pinned `(name, version)`. Deploy the matching handler to unblock. |
+| `BlockedSignatureMismatch` | No | A handler for the version exists, but its signature differs from the one recorded at start time (step keys, types, or timeout changed). Deploy a compatible version to unblock. |
+| `BlockedMissingHandler` | No | The workflow name is not in the registry at all. |
+
+**Blocked variants are non-terminal.** A deploy that provides a matching handler with the correct signature automatically unblocks the run — no data loss, no manual intervention. The `/_api/ready` endpoint returns `503` while any blocked runs exist.
+
+### Typical transitions
+
+```
+Pending → Running → Completed
+                  → Failed
+
+Running → Sleeping → Running   (durable sleep)
+Running → Waiting  → Running   (wait_for_event)
+
+Running → BlockedMissingVersion    ┐
+Running → BlockedSignatureMismatch ├─ deploy fix → Running
+Running → BlockedMissingHandler    ┘
+```
+
+### Querying run status
+
+```sql
+-- In-flight runs for a workflow
+SELECT id, status, created_at
+FROM forge_workflow_runs
+WHERE workflow_name = 'onboard_user'
+  AND status NOT IN ('completed', 'failed');
+
+-- All blocked runs (any cause)
+SELECT id, workflow_name, workflow_version, status
+FROM forge_workflow_runs
+WHERE status LIKE 'blocked_%';
+```
+
 ## Attributes
 
 | Attribute | Type | Default | Description |
@@ -69,7 +116,7 @@ Duration formats: `30s`, `5m`, `1h`, `7d`, `30d`
 
 ## Signature Stability
 
-Forge derives a 64-bit FNV-1a signature from each workflow definition's persisted contract: the name, version, step keys, wait keys, timeout, and input/output types. This signature is recorded when a workflow run starts and checked on every resume.
+Forge derives a blake3 (128-bit, truncated) signature from each workflow definition's persisted contract: the name, version, step keys, wait keys, timeout, and input/output types. This signature is recorded when a workflow run starts and checked on every resume.
 
 If the signature changes between deploys, in-flight runs are blocked rather than resumed with potentially incompatible logic. The `/_api/ready` health endpoint reports unhealthy when blocked runs exist, which prevents rolling deploys from completing until the issue is resolved.
 
@@ -376,17 +423,14 @@ To unblock the runtime, an operator clears the stuck rows directly in Postgres:
 
 ```sql
 UPDATE forge_workflow_runs
-SET status = 'retired_unresumable',
+SET status = 'failed',
     resolution_reason = 'drained for v1 removal'
 WHERE workflow_name = 'user_signup'
   AND workflow_version = 'v1'
-  AND status NOT IN (
-    'completed', 'compensated', 'failed',
-    'retired_unresumable', 'cancelled_by_operator'
-  );
+  AND status NOT IN ('completed', 'failed');
 ```
 
-Use `cancelled_by_operator` if you want the row to read as a cancellation rather than a retirement. Within five seconds, the next `/_api/ready` probe re-runs the drain check and flips back to `200`. There is no admin HTTP route for this; the database is the operator interface.
+Within five seconds, the next `/_api/ready` probe re-runs the drain check and flips back to `200`. To mark a run as an operator-initiated cancellation rather than a plain failure, use the force-abort admin endpoint instead. There is no admin HTTP route for bulk drain; the database is the operator interface.
 
 ## Context Methods
 

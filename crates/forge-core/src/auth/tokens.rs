@@ -149,7 +149,7 @@ async fn issue_token_in_family(
     )
     .execute(pool)
     .await
-    .map_err(|e| ForgeError::Internal(format!("Failed to store refresh token: {e}")))?;
+    .map_err(|e| ForgeError::internal_with("Failed to store refresh token", e))?;
 
     Ok(TokenPair {
         access_token,
@@ -249,7 +249,7 @@ pub async fn rotate_refresh_token_with_client(
             })
         })
     }
-    .map_err(|e| ForgeError::Internal(format!("Failed to rotate refresh token: {e}")))?;
+    .map_err(|e| ForgeError::internal_with("Failed to rotate refresh token", e))?;
 
     match row {
         Some(token) => {
@@ -306,7 +306,7 @@ pub async fn revoke_refresh_token(pool: &sqlx::PgPool, refresh_token: &str) -> R
     )
     .execute(pool)
     .await
-    .map_err(|e| ForgeError::Internal(format!("Failed to revoke refresh token: {e}")))?;
+    .map_err(|e| ForgeError::internal_with("Failed to revoke refresh token", e))?;
     Ok(())
 }
 
@@ -318,11 +318,12 @@ pub async fn revoke_all_refresh_tokens(pool: &sqlx::PgPool, user_id: Uuid) -> Re
     )
     .execute(pool)
     .await
-    .map_err(|e| ForgeError::Internal(format!("Failed to revoke refresh tokens: {e}")))?;
+    .map_err(|e| ForgeError::internal_with("Failed to revoke refresh tokens", e))?;
     Ok(())
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
@@ -338,7 +339,6 @@ mod tests {
 
     #[test]
     fn test_extract_family_returns_none_for_legacy_format() {
-        // Old format: two UUIDs concatenated without separator
         let legacy = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         assert_eq!(extract_family(&legacy), None);
     }
@@ -358,5 +358,82 @@ mod tests {
     #[test]
     fn test_hash_token_differs_for_different_inputs() {
         assert_ne!(hash_token("token-a"), hash_token("token-b"));
+    }
+
+    #[test]
+    fn hash_token_returns_64_char_lowercase_hex() {
+        let hash = hash_token("anything");
+        assert_eq!(hash.len(), 64, "SHA-256 hex is exactly 64 chars");
+        assert!(
+            hash.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "expected lowercase hex digits, got {hash}"
+        );
+    }
+
+    #[test]
+    fn hash_token_matches_known_sha256_for_empty_string() {
+        // Pinning the hash for "" guards against accidental algorithm change
+        // (would break every refresh token after the swap).
+        let expected = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        assert_eq!(hash_token(""), expected);
+    }
+
+    #[test]
+    fn generate_refresh_token_for_family_returns_unique_random_part() {
+        let family = Uuid::new_v4();
+        let a = generate_refresh_token_for_family(family);
+        let b = generate_refresh_token_for_family(family);
+        assert_ne!(a, b);
+        assert_eq!(extract_family(&a), Some(family));
+        assert_eq!(extract_family(&b), Some(family));
+    }
+
+    #[test]
+    fn generate_refresh_token_for_family_has_expected_shape() {
+        let family = Uuid::new_v4();
+        let token = generate_refresh_token_for_family(family);
+        let parts: Vec<&str> = token.split('.').collect();
+        assert_eq!(parts.len(), 2, "exactly one dot separator");
+        assert_eq!(parts[0].len(), 32);
+        assert_eq!(parts[1].len(), 32);
+        assert!(parts[0].chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(parts[1].chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn extract_family_returns_none_when_prefix_is_not_a_uuid() {
+        // Has a dot but the prefix isn't a valid UUID — should not falsely
+        // identify it as a family-format token.
+        assert_eq!(extract_family("notauuid.suffix"), None);
+    }
+
+    #[test]
+    fn extract_family_returns_first_segment_uuid_for_multi_dot_tokens() {
+        // `split_once('.')` only splits on the first dot. As long as the first
+        // segment parses as a UUID, additional dots after it don't matter.
+        let family = Uuid::new_v4();
+        let weird = format!("{}.a.b.c", family.simple());
+        assert_eq!(extract_family(&weird), Some(family));
+    }
+
+    #[test]
+    fn token_pair_round_trips_through_json() {
+        let pair = TokenPair {
+            access_token: "header.payload.sig".into(),
+            refresh_token: "fam.rand".into(),
+        };
+        let s = serde_json::to_string(&pair).unwrap();
+        let back: TokenPair = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.access_token, pair.access_token);
+        assert_eq!(back.refresh_token, pair.refresh_token);
+    }
+
+    #[test]
+    fn hash_token_is_independent_of_token_length() {
+        // Tiny and very long inputs both yield 64-char hashes — bounded output.
+        let huge = "x".repeat(10_000);
+        assert_eq!(hash_token(&huge).len(), 64);
+        assert_eq!(hash_token("a").len(), 64);
     }
 }

@@ -1,32 +1,38 @@
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ForgeError, Result};
 
-fn parse_duration_secs(s: &str, default_secs: u64) -> u64 {
-    crate::util::parse_duration(s)
-        .map(|d| d.as_secs())
-        .unwrap_or(default_secs)
-}
+use super::default_true;
+use super::types::DurationStr;
 
-/// Database configuration.
+/// Database configuration. One pool, no per-workload isolation: workload
+/// separation belongs at the worker level, not the connection level. The
+/// single-pool contention model and sizing formula are documented at the
+/// runtime side in `forge_runtime::pg::pool` module docs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct DatabaseConfig {
     /// PostgreSQL connection URL.
     #[serde(default)]
     pub url: String,
 
-    /// Connection pool size.
+    /// Connection pool size. Should be sized as
+    /// `worker.max_concurrent + reactor cap + expected gateway concurrency
+    /// + ~6 for persistent listeners, leader holds, and headroom`. See
+    /// `forge_runtime::pg::pool` module docs.
     #[serde(default = "default_pool_size")]
     pub pool_size: u32,
 
     /// Pool checkout timeout duration (e.g. "30s", "1m").
     #[serde(default = "default_pool_timeout")]
-    pub pool_timeout: String,
+    pub pool_timeout: DurationStr,
 
     /// Statement timeout duration (e.g. "30s", "5m").
     #[serde(default = "default_statement_timeout")]
-    pub statement_timeout: String,
+    pub statement_timeout: DurationStr,
 
     /// Read replica URLs for scaling reads.
     #[serde(default)]
@@ -48,10 +54,6 @@ pub struct DatabaseConfig {
     /// Disabling this halves round-trips for read queries.
     #[serde(default = "default_true")]
     pub test_before_acquire: bool,
-
-    /// Connection pool isolation configuration.
-    #[serde(default)]
-    pub pools: PoolsConfig,
 }
 
 impl Default for DatabaseConfig {
@@ -66,7 +68,6 @@ impl Default for DatabaseConfig {
             replica_pool_size: None,
             min_pool_size: 0,
             test_before_acquire: true,
-            pools: PoolsConfig::default(),
         }
     }
 }
@@ -85,24 +86,13 @@ impl DatabaseConfig {
         &self.url
     }
 
-    /// Pool checkout timeout in seconds, parsed from the `pool_timeout` string.
-    pub fn pool_timeout_secs(&self) -> u64 {
-        parse_duration_secs(&self.pool_timeout, 30)
-    }
-
-    /// Statement timeout in seconds, parsed from the `statement_timeout` string.
-    pub fn statement_timeout_secs(&self) -> u64 {
-        parse_duration_secs(&self.statement_timeout, 30)
-    }
-
     /// Validate the database configuration.
     pub fn validate(&self) -> Result<()> {
         if self.url.is_empty() {
-            return Err(ForgeError::Config(
+            return Err(ForgeError::config(
                 "database.url is required. \
                  Set database.url to a PostgreSQL connection string \
-                 (e.g., \"postgres://user:pass@localhost/mydb\")."
-                    .into(),
+                 (e.g., \"postgres://user:pass@localhost/mydb\").",
             ));
         }
         Ok(())
@@ -110,75 +100,24 @@ impl DatabaseConfig {
 }
 
 fn default_pool_size() -> u32 {
-    50
+    // Internal baseline with all defaults:
+    //   14 worker slots (8 default + 4 workflows + 2 cron)
+    //  +64 reactor max-concurrent re-executions
+    //  + 6 persistent listeners, leader holds, health check, migration
+    // = 84 connections consumed before any gateway traffic arrives.
+    // 16 added on top as headroom for light gateway traffic, landing at 100.
+    // Users running at scale should set pool_size explicitly based on their
+    // expected concurrent gateway load; see the sizing formula in
+    // `forge_runtime::pg::pool`.
+    100
 }
 
-fn default_pool_timeout() -> String {
-    "30s".to_string()
+fn default_pool_timeout() -> DurationStr {
+    DurationStr::new(Duration::from_secs(30))
 }
 
-fn default_statement_timeout() -> String {
-    "30s".to_string()
-}
-
-use super::default_true;
-
-/// Pool isolation configuration for different workloads.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[non_exhaustive]
-pub struct PoolsConfig {
-    /// Default pool for queries/mutations.
-    #[serde(default)]
-    pub default: Option<PoolConfig>,
-
-    /// Pool for background jobs.
-    #[serde(default)]
-    pub jobs: Option<PoolConfig>,
-
-    /// Pool for observability writes.
-    #[serde(default)]
-    pub observability: Option<PoolConfig>,
-
-    /// Pool for long-running analytics.
-    #[serde(default)]
-    pub analytics: Option<PoolConfig>,
-}
-
-/// Individual pool configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct PoolConfig {
-    /// Pool size.
-    pub size: u32,
-
-    /// Checkout timeout duration (e.g. "30s", "1m").
-    #[serde(default = "default_pool_timeout")]
-    pub timeout: String,
-
-    /// Statement timeout duration override (e.g. "30s", "5m").
-    pub statement_timeout: Option<String>,
-
-    /// Minimum connections to keep alive.
-    #[serde(default)]
-    pub min_size: u32,
-
-    /// Run a health check query before handing out connections.
-    #[serde(default = "default_true")]
-    pub test_before_acquire: bool,
-}
-
-impl PoolConfig {
-    /// Checkout timeout in seconds, parsed from the `timeout` string.
-    pub fn timeout_secs(&self) -> u64 {
-        parse_duration_secs(&self.timeout, 30)
-    }
-
-    /// Statement timeout in seconds, parsed from the `statement_timeout` string.
-    pub fn statement_timeout_secs(&self) -> Option<u64> {
-        self.statement_timeout
-            .as_deref()
-            .map(|s| parse_duration_secs(s, 30))
-    }
+fn default_statement_timeout() -> DurationStr {
+    DurationStr::new(Duration::from_secs(30))
 }
 
 #[cfg(test)]
@@ -189,8 +128,8 @@ mod tests {
     #[test]
     fn test_default_database_config() {
         let config = DatabaseConfig::default();
-        assert_eq!(config.pool_size, 50);
-        assert_eq!(config.pool_timeout_secs(), 30);
+        assert_eq!(config.pool_size, 100);
+        assert_eq!(config.pool_timeout.as_secs(), 30);
         assert!(config.url.is_empty());
     }
 
@@ -229,5 +168,20 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("database.url is required"));
+    }
+
+    #[test]
+    fn test_rejects_legacy_pools_blocks() {
+        let toml = r#"
+            url = "postgres://localhost/test"
+            [pools.jobs]
+            size = 10
+        "#;
+        let err = toml::from_str::<DatabaseConfig>(toml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown field"),
+            "expected unknown-field error, got: {msg}"
+        );
     }
 }

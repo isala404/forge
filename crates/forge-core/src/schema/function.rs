@@ -120,27 +120,8 @@ impl FunctionDef {
 
     /// Get the camelCase name for TypeScript.
     pub fn ts_name(&self) -> String {
-        to_camel_case(&self.name)
+        crate::util::to_camel_case(&self.name)
     }
-}
-
-/// Convert snake_case to camelCase.
-fn to_camel_case(s: &str) -> String {
-    let mut result = String::new();
-    let mut capitalize_next = false;
-
-    for c in s.chars() {
-        if c == '_' {
-            capitalize_next = true;
-        } else if capitalize_next {
-            result.push(c.to_uppercase().next().unwrap_or(c));
-            capitalize_next = false;
-        } else {
-            result.push(c);
-        }
-    }
-
-    result
 }
 
 #[cfg(test)]
@@ -168,6 +149,7 @@ mod tests {
 
     #[test]
     fn test_to_camel_case() {
+        use crate::util::to_camel_case;
         assert_eq!(to_camel_case("get_user"), "getUser");
         assert_eq!(to_camel_case("create_project_task"), "createProjectTask");
         assert_eq!(to_camel_case("getUser"), "getUser");

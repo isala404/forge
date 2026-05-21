@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE forge_workflow_runs\n            SET cancel_requested_at = NOW(),\n                cancel_reason = $2\n            WHERE id = $1\n              AND status IN ('pending', 'running', 'sleeping', 'waiting')\n              AND cancel_requested_at IS NULL\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8a6d744259a838bf1967d84007dd830892161b34d71fec6a4edac26c370c0b25"
+}

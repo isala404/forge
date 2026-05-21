@@ -12,18 +12,14 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Claims {
-    /// Subject (user ID). Use [`Claims::sub`] / [`Claims::user_id`].
     pub(crate) sub: String,
-    /// Issued at (Unix timestamp). Use [`Claims::iat`].
     pub(crate) iat: i64,
-    /// Expiration time (Unix timestamp). Use [`Claims::exp`] /
-    /// [`Claims::is_expired`].
     pub(crate) exp: i64,
-    /// User roles. Use [`Claims::roles`] / [`Claims::has_role`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) aud: Option<String>,
     #[serde(default)]
     pub(crate) roles: Vec<String>,
-    /// Custom claims, with reserved JWT claims filtered out on read.
-    /// Use [`Claims::get_claim`] / [`Claims::sanitized_custom`].
+    /// Reserved JWT claims are filtered out on read; use [`Claims::get_claim`] / [`Claims::sanitized_custom`].
     #[serde(flatten)]
     pub(crate) custom: HashMap<String, serde_json::Value>,
 }
@@ -42,6 +38,11 @@ impl Claims {
     /// Get the expiration Unix timestamp.
     pub fn exp(&self) -> i64 {
         self.exp
+    }
+
+    /// Get the audience (`aud` claim), if set.
+    pub fn audience(&self) -> Option<&str> {
+        self.aud.as_deref()
     }
 
     /// Get the user roles.
@@ -120,6 +121,7 @@ impl Claims {
 #[derive(Debug, Default)]
 pub struct ClaimsBuilder {
     sub: Option<String>,
+    aud: Option<String>,
     roles: Vec<String>,
     custom: HashMap<String, serde_json::Value>,
     duration_secs: i64,
@@ -130,9 +132,10 @@ impl ClaimsBuilder {
     pub fn new() -> Self {
         Self {
             sub: None,
+            aud: None,
             roles: Vec::new(),
             custom: HashMap::new(),
-            duration_secs: 3600, // 1 hour default
+            duration_secs: 3600,
         }
     }
 
@@ -187,12 +190,8 @@ impl ClaimsBuilder {
     }
 
     /// Set the token audience (`aud` claim).
-    ///
-    /// Bypasses the reserved-name check because `aud` has no structural field in `Claims`
-    /// but still needs to appear in the serialized JWT for external validators.
     pub fn audience(mut self, aud: impl Into<String>) -> Self {
-        self.custom
-            .insert("aud".to_string(), serde_json::json!(aud.into()));
+        self.aud = Some(aud.into());
         self
     }
 
@@ -218,6 +217,7 @@ impl ClaimsBuilder {
             sub,
             iat: now,
             exp: now + self.duration_secs,
+            aud: self.aud,
             roles: self.roles,
             custom: self.custom,
         })
@@ -275,22 +275,12 @@ mod tests {
     }
 
     #[test]
-    fn audience_sets_aud_without_error() {
-        let claims = Claims::builder()
-            .subject("user-1")
-            .audience("my-service")
-            .build()
-            .unwrap();
-        // aud ends up in the flattened custom map
-        assert!(claims.custom.contains_key("aud"));
-    }
-
-    #[test]
     fn test_claims_expiration() {
         let claims = Claims {
             sub: "user-1".to_string(),
             iat: 0,
-            exp: 1, // Expired timestamp
+            exp: 1,
+            aud: None,
             roles: vec![],
             custom: HashMap::new(),
         };
@@ -311,5 +301,214 @@ mod tests {
 
         assert_eq!(deserialized.sub, claims.sub);
         assert_eq!(deserialized.roles, claims.roles);
+    }
+
+    #[test]
+    fn build_errors_when_subject_missing() {
+        let result = Claims::builder().role("user").build();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Subject is required"));
+    }
+
+    #[test]
+    fn duration_secs_sets_exp_offset_from_iat() {
+        let claims = Claims::builder()
+            .subject("u")
+            .duration_secs(120)
+            .build()
+            .unwrap();
+        assert_eq!(claims.exp() - claims.iat(), 120);
+    }
+
+    #[test]
+    fn default_duration_secs_is_one_hour() {
+        let claims = Claims::builder().subject("u").build().unwrap();
+        assert_eq!(claims.exp() - claims.iat(), 3600);
+    }
+
+    #[test]
+    fn is_expired_false_for_future_exp() {
+        let now = chrono::Utc::now().timestamp();
+        let claims = Claims {
+            sub: "u".into(),
+            iat: now,
+            exp: now + 3600,
+            aud: None,
+            roles: vec![],
+            custom: HashMap::new(),
+        };
+        assert!(!claims.is_expired());
+    }
+
+    #[test]
+    fn user_id_returns_none_for_non_uuid_subject() {
+        let claims = Claims::builder().subject("not-a-uuid").build().unwrap();
+        assert!(claims.user_id().is_none());
+        assert_eq!(claims.sub(), "not-a-uuid");
+    }
+
+    #[test]
+    fn user_id_set_via_builder_round_trips_through_sub() {
+        let id = Uuid::new_v4();
+        let claims = Claims::builder().user_id(id).build().unwrap();
+        assert_eq!(claims.user_id(), Some(id));
+        assert_eq!(claims.sub(), id.to_string());
+    }
+
+    #[test]
+    fn into_methods_consume_owned_values() {
+        let claims = Claims::builder()
+            .subject("user-x")
+            .role("a")
+            .role("b")
+            .build()
+            .unwrap();
+        let roles = claims.clone().into_roles();
+        assert_eq!(roles, vec!["a".to_string(), "b".to_string()]);
+        let sub = claims.into_sub();
+        assert_eq!(sub, "user-x");
+    }
+
+    #[test]
+    fn roles_setter_replaces_prior_calls() {
+        let claims = Claims::builder()
+            .subject("u")
+            .role("first")
+            .roles(vec!["one".into(), "two".into()])
+            .build()
+            .unwrap();
+        assert_eq!(claims.roles(), &["one".to_string(), "two".to_string()]);
+    }
+
+    #[test]
+    fn get_claim_returns_none_for_reserved_names_even_if_present() {
+        // Reserved names can leak in via deserialization (#[serde(flatten)] +
+        // duplicate keys). Construct directly to bypass the builder guard.
+        let mut custom = HashMap::new();
+        custom.insert("iss".to_string(), serde_json::json!("evil"));
+        custom.insert("jti".to_string(), serde_json::json!("evil"));
+        custom.insert("safe".to_string(), serde_json::json!("ok"));
+        let claims = Claims {
+            sub: "u".into(),
+            iat: 0,
+            exp: i64::MAX,
+            aud: None,
+            roles: vec![],
+            custom,
+        };
+        assert!(claims.get_claim("iss").is_none());
+        assert!(claims.get_claim("jti").is_none());
+        assert_eq!(claims.get_claim("safe"), Some(&serde_json::json!("ok")));
+    }
+
+    #[test]
+    fn get_claim_returns_none_for_missing_custom_key() {
+        let claims = Claims::builder().subject("u").build().unwrap();
+        assert!(claims.get_claim("nope").is_none());
+    }
+
+    #[test]
+    fn sanitized_custom_filters_reserved_names() {
+        let mut custom = HashMap::new();
+        for reserved in Claims::RESERVED_CLAIMS {
+            custom.insert((*reserved).to_string(), serde_json::json!("smuggled"));
+        }
+        custom.insert("org_id".into(), serde_json::json!("o1"));
+        let claims = Claims {
+            sub: "u".into(),
+            iat: 0,
+            exp: i64::MAX,
+            aud: None,
+            roles: vec![],
+            custom,
+        };
+        let safe = claims.sanitized_custom();
+        assert_eq!(safe.len(), 1);
+        assert_eq!(safe.get("org_id"), Some(&serde_json::json!("o1")));
+        for reserved in Claims::RESERVED_CLAIMS {
+            assert!(
+                !safe.contains_key(*reserved),
+                "{reserved} should be filtered out"
+            );
+        }
+    }
+
+    #[test]
+    fn tenant_id_round_trips_via_builder() {
+        let tenant = Uuid::new_v4();
+        let claims = Claims::builder()
+            .subject("u")
+            .tenant_id(tenant)
+            .build()
+            .unwrap();
+        assert_eq!(claims.tenant_id(), Some(tenant));
+    }
+
+    #[test]
+    fn tenant_id_returns_none_when_value_is_not_string_or_uuid() {
+        // Not a string: numeric.
+        let mut custom = HashMap::new();
+        custom.insert("tenant_id".to_string(), serde_json::json!(42));
+        let claims = Claims {
+            sub: "u".into(),
+            iat: 0,
+            exp: i64::MAX,
+            aud: None,
+            roles: vec![],
+            custom,
+        };
+        assert!(claims.tenant_id().is_none());
+
+        // String but not UUID.
+        let mut custom = HashMap::new();
+        custom.insert("tenant_id".to_string(), serde_json::json!("garbage"));
+        let claims = Claims {
+            sub: "u".into(),
+            iat: 0,
+            exp: i64::MAX,
+            aud: None,
+            roles: vec![],
+            custom,
+        };
+        assert!(claims.tenant_id().is_none());
+    }
+
+    #[test]
+    fn audience_round_trips_through_typed_field() {
+        let claims = Claims::builder()
+            .subject("u")
+            .audience("my-service")
+            .build()
+            .unwrap();
+        assert_eq!(claims.audience(), Some("my-service"));
+        // Serializes into the JWT as "aud"
+        let json = serde_json::to_value(&claims).unwrap();
+        assert_eq!(json.get("aud"), Some(&serde_json::json!("my-service")));
+        // Does not leak into the custom map
+        assert!(!claims.custom.contains_key("aud"));
+    }
+
+    #[test]
+    fn audience_deserializes_from_jwt() {
+        let claims = Claims::builder()
+            .subject("u")
+            .audience("svc-1")
+            .build()
+            .unwrap();
+        let json = serde_json::to_string(&claims).unwrap();
+        let restored: Claims = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.audience(), Some("svc-1"));
+    }
+
+    #[test]
+    fn reserved_claims_set_matches_documented_list() {
+        // Lock the reserved list so future additions are intentional code review.
+        let expected: std::collections::HashSet<&str> =
+            ["iss", "aud", "nbf", "jti", "sub", "iat", "exp", "roles"]
+                .into_iter()
+                .collect();
+        let actual: std::collections::HashSet<&str> =
+            Claims::RESERVED_CLAIMS.iter().copied().collect();
+        assert_eq!(actual, expected);
     }
 }

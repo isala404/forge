@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT wr.id, wr.waiting_for_event\n            FROM forge_workflow_runs wr\n            WHERE wr.status = 'waiting'\n                AND wr.waiting_for_event IS NOT NULL\n                AND EXISTS (\n                    SELECT 1 FROM forge_workflow_events we\n                    WHERE we.correlation_id = wr.id::text\n                    AND we.event_name = wr.waiting_for_event\n                    AND we.consumed_at IS NULL\n                )\n            LIMIT $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "waiting_for_event",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "cd83edf79ccd58554893414f8054545bf151cb02cf50f3a6343a16bba08fb59f"
+}

@@ -5,19 +5,19 @@ use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use super::bridge::WORKFLOW_RESUME_JOB;
 use super::event_store::EventStore;
-use super::executor::WorkflowExecutor;
+use crate::jobs::JobQueue;
+use crate::pg::{LeaderElection, PgNotifyBus};
 use forge_core::Result;
 
 /// Configuration for the workflow scheduler.
 #[derive(Debug, Clone)]
 pub struct WorkflowSchedulerConfig {
-    /// How often to poll for ready workflows.
     pub poll_interval: Duration,
-    /// Maximum workflows to process per poll.
     pub batch_size: i32,
-    /// Whether to process event-based wakeups.
     pub process_events: bool,
+    pub leader_election: Option<Arc<LeaderElection>>,
 }
 
 impl Default for WorkflowSchedulerConfig {
@@ -26,6 +26,7 @@ impl Default for WorkflowSchedulerConfig {
             poll_interval: Duration::from_secs(1),
             batch_size: 100,
             process_events: true,
+            leader_election: None,
         }
     }
 }
@@ -33,30 +34,48 @@ impl Default for WorkflowSchedulerConfig {
 /// Scheduler for durable workflows.
 ///
 /// Polls the database for suspended workflows that are ready to resume
-/// (timer expired or event received) and triggers their execution.
-/// Also listens for NOTIFY events on the `forge_workflow_wakeup` channel
-/// for immediate wakeup when a workflow event is inserted.
+/// (timer expired or event received) and enqueues `$workflow_resume` jobs
+/// for the worker pool. Also listens for NOTIFY events on the
+/// `forge_workflow_wakeup` channel for immediate wakeup when a workflow
+/// event is inserted.
 pub struct WorkflowScheduler {
     pool: PgPool,
-    executor: Arc<WorkflowExecutor>,
+    job_queue: JobQueue,
     event_store: Arc<EventStore>,
     config: WorkflowSchedulerConfig,
+    notify_bus: Arc<PgNotifyBus>,
 }
 
 impl WorkflowScheduler {
-    /// Create a new workflow scheduler.
     pub fn new(
         pool: PgPool,
-        executor: Arc<WorkflowExecutor>,
+        job_queue: JobQueue,
         event_store: Arc<EventStore>,
         config: WorkflowSchedulerConfig,
+        notify_bus: Arc<PgNotifyBus>,
     ) -> Self {
         Self {
             pool,
-            executor,
+            job_queue,
             event_store,
             config,
+            notify_bus,
         }
+    }
+
+    /// Returns true if this node is the leader (or no election is configured).
+    ///
+    /// Advisory only — used to suppress polling on followers. Correctness of
+    /// claim+resume does NOT depend on this; `claim_and_resume` and
+    /// `try_claim_waiting` use `UPDATE … WHERE status IN ('sleeping','waiting')`
+    /// which is atomic, so even if leadership flips between this check and the
+    /// claim the workflow is still claimed exactly once.
+    fn is_leader(&self) -> bool {
+        self.config
+            .leader_election
+            .as_ref()
+            .map(|e| e.is_leader())
+            .unwrap_or(true)
     }
 
     /// Run the scheduler until shutdown.
@@ -64,69 +83,80 @@ impl WorkflowScheduler {
     /// Combines polling with NOTIFY-driven wakeup. When a workflow event is
     /// inserted, the `forge_workflow_event_notify` trigger fires a NOTIFY on
     /// the `forge_workflow_wakeup` channel, and we process immediately instead
-    /// of waiting for the next poll cycle. Polling remains as a fallback at a
-    /// longer interval (10x the base) to catch anything missed.
+    /// of waiting for the next poll cycle. Polling remains the wakeup path for
+    /// durable sleeps (no NOTIFY fires when `wake_at` expires), so the timer
+    /// runs at `poll_interval` directly.
     pub async fn run(&self, shutdown: CancellationToken) {
-        let fallback_interval = self.config.poll_interval * 10;
-        let mut interval = tokio::time::interval(fallback_interval);
+        let mut interval = tokio::time::interval(self.config.poll_interval);
         let mut cleanup_interval = tokio::time::interval(Duration::from_secs(3600));
 
-        // Set up NOTIFY listener for immediate wakeup
-        let mut listener = match sqlx::postgres::PgListener::connect_with(&self.pool).await {
-            Ok(mut l) => {
-                if let Err(e) = l.listen("forge_workflow_wakeup").await {
-                    tracing::warn!(error = %e, "Failed to listen on workflow wakeup channel, using poll-only mode");
+        // NOTIFY wakeup via the shared PgNotifyBus (no dedicated connection).
+        let wakeup = Arc::new(tokio::sync::Notify::new());
+        let wakeup_trigger = wakeup.clone();
+        if let Some(mut rx) = self.notify_bus.subscribe("forge_workflow_wakeup") {
+            let wakeup_shutdown = shutdown.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = wakeup_shutdown.cancelled() => return,
+                        result = rx.recv() => {
+                            match result {
+                                Ok(_) => wakeup_trigger.notify_one(),
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                    tracing::debug!(missed = n, "Workflow wakeup receiver lagged");
+                                    wakeup_trigger.notify_one();
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                            }
+                        }
+                    }
                 }
-                Some(l)
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to create workflow wakeup listener, using poll-only mode");
-                None
-            }
-        };
+            });
+        }
 
         tracing::debug!(
-            poll_interval = ?fallback_interval,
+            poll_interval = ?self.config.poll_interval,
             batch_size = self.config.batch_size,
-            notify_enabled = listener.is_some(),
             "Workflow scheduler started"
         );
 
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    if let Err(e) = self.process_ready_workflows().await {
-                        tracing::warn!(error = %e, "Failed to process ready workflows");
+                    if self.is_leader() {
+                        let t = std::time::Instant::now();
+                        if let Err(e) = self.process_ready_workflows().await {
+                            tracing::warn!(error = %e, "Failed to process ready workflows");
+                        }
+                        crate::observability::record_workflow_scheduler_duration(
+                            t.elapsed().as_secs_f64(),
+                        );
                     }
                 }
-                notification = async {
-                    match listener.as_mut() {
-                        Some(l) => l.recv().await,
-                        None => std::future::pending().await,
-                    }
-                } => {
-                    match notification {
-                        Ok(_) => {
-                            if let Err(e) = self.process_ready_workflows().await {
-                                tracing::warn!(error = %e, "Failed to process workflows after wakeup");
-                            }
+                _ = wakeup.notified() => {
+                    if self.is_leader() {
+                        let t = std::time::Instant::now();
+                        if let Err(e) = self.process_ready_workflows().await {
+                            tracing::warn!(error = %e, "Failed to process workflows after wakeup");
                         }
-                        Err(e) => {
-                            tracing::debug!(error = %e, "Workflow wakeup listener error, will retry on next poll");
-                        }
+                        crate::observability::record_workflow_scheduler_duration(
+                            t.elapsed().as_secs_f64(),
+                        );
                     }
                 }
                 _ = cleanup_interval.tick() => {
-                    // Periodically clean up consumed events older than 24 hours
-                    let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
-                    match self.event_store.cleanup_consumed_events(cutoff).await {
-                        Ok(count) if count > 0 => {
-                            tracing::debug!(count, "Cleaned up consumed workflow events");
+                    // Only the leader runs cleanup to avoid thundering herd on DELETE.
+                    if self.is_leader() {
+                        let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
+                        match self.event_store.cleanup_consumed_events(cutoff).await {
+                            Ok(count) if count > 0 => {
+                                tracing::debug!(count, "Cleaned up consumed workflow events");
+                            }
+                            Err(e) => {
+                                tracing::debug!(error = %e, "Failed to clean up consumed events");
+                            }
+                            _ => {}
                         }
-                        Err(e) => {
-                            tracing::debug!(error = %e, "Failed to clean up consumed events");
-                        }
-                        _ => {}
                     }
                 }
                 _ = shutdown.cancelled() => {
@@ -137,26 +167,29 @@ impl WorkflowScheduler {
         }
     }
 
-    /// Process workflows that are ready to resume.
     async fn process_ready_workflows(&self) -> Result<()> {
-        // Query for workflows ready to wake (timer or event timeout)
+        // Cancellations take priority over timer/event wakeups: if an operator
+        // requested cancel, we run the cancel job first and skip any pending
+        // resume work for the same run.
+        self.process_cancel_requests().await?;
+
         let workflows = sqlx::query!(
             r#"
             SELECT id, workflow_name, workflow_version, workflow_signature, waiting_for_event
             FROM forge_workflow_runs
-            WHERE status = 'waiting' AND (
-                (wake_at IS NOT NULL AND wake_at <= NOW())
-                OR (event_timeout_at IS NOT NULL AND event_timeout_at <= NOW())
-            )
+            WHERE cancel_requested_at IS NULL
+              AND (
+                (status = 'sleeping' AND wake_at IS NOT NULL AND wake_at <= NOW())
+                OR (status = 'waiting' AND event_timeout_at IS NOT NULL AND event_timeout_at <= NOW())
+              )
             ORDER BY COALESCE(wake_at, event_timeout_at) ASC
             LIMIT $1
-            FOR UPDATE SKIP LOCKED
             "#,
             self.config.batch_size as i64
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         let count = workflows.len();
         if count > 0 {
@@ -165,15 +198,13 @@ impl WorkflowScheduler {
 
         for workflow in workflows {
             if workflow.waiting_for_event.is_some() {
-                // Event timeout - resume with timeout error
-                self.resume_with_timeout(workflow.id).await;
+                self.claim_and_resume(workflow.id, false, "event_timeout")
+                    .await;
             } else {
-                // Timer expired - normal resume
-                self.resume_workflow(workflow.id).await;
+                self.claim_and_resume(workflow.id, true, "timer").await;
             }
         }
 
-        // Also check for workflows waiting for events that now have events
         if self.config.process_events {
             self.process_event_wakeups().await?;
         }
@@ -181,10 +212,71 @@ impl WorkflowScheduler {
         Ok(())
     }
 
-    /// Process workflows that have pending events.
+    /// Rows are surfaced by the `forge_workflow_runs_cancel_notify` trigger on
+    /// `forge_workflow_wakeup`, so this normally completes within one poll cycle.
+    async fn process_cancel_requests(&self) -> Result<()> {
+        let workflows = sqlx::query!(
+            r#"
+            SELECT id, cancel_reason
+            FROM forge_workflow_runs
+            WHERE cancel_requested_at IS NOT NULL
+              AND status IN ('pending', 'running', 'sleeping', 'waiting')
+            ORDER BY cancel_requested_at ASC
+            LIMIT $1
+            "#,
+            self.config.batch_size as i64
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(forge_core::ForgeError::Database)?;
+
+        for row in workflows {
+            if !self.try_claim_waiting(row.id).await {
+                continue;
+            }
+            let reason = row
+                .cancel_reason
+                .unwrap_or_else(|| "operator cancel".to_string());
+            self.enqueue_cancel(row.id, &reason).await;
+        }
+
+        Ok(())
+    }
+
+    async fn enqueue_cancel(&self, workflow_run_id: Uuid, reason: &str) {
+        let input = serde_json::json!({
+            "run_id": workflow_run_id.to_string(),
+            "from_sleep": false,
+            "cancel": true,
+            "reason": reason,
+        });
+        let job = crate::jobs::JobRecord::new(
+            WORKFLOW_RESUME_JOB.to_string(),
+            input,
+            forge_core::job::JobPriority::High,
+            3,
+        )
+        .with_capability(forge_core::config::WORKFLOWS_QUEUE);
+        match self.job_queue.enqueue(job).await {
+            Ok(job_id) => {
+                tracing::debug!(
+                    workflow_run_id = %workflow_run_id,
+                    job_id = %job_id,
+                    trigger = "cancel",
+                    "Enqueued workflow cancel job"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    workflow_run_id = %workflow_run_id,
+                    error = %e,
+                    "Failed to enqueue workflow cancel job"
+                );
+            }
+        }
+    }
+
     async fn process_event_wakeups(&self) -> Result<()> {
-        // Find workflows waiting for events that have matching events
-        // Use a subquery to avoid DISTINCT with FOR UPDATE
         let workflows = sqlx::query!(
             r#"
             SELECT wr.id, wr.waiting_for_event
@@ -198,123 +290,195 @@ impl WorkflowScheduler {
                     AND we.consumed_at IS NULL
                 )
             LIMIT $1
-            FOR UPDATE OF wr SKIP LOCKED
             "#,
             self.config.batch_size as i64
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         for workflow in workflows {
             let workflow_id = workflow.id;
             let Some(event_name) = workflow.waiting_for_event else {
                 continue;
             };
-            // Consume the event via event_store so it's marked as processed
-            match self
-                .event_store
-                .consume_event(&event_name, &workflow_id.to_string(), workflow_id)
-                .await
-            {
-                Ok(Some(_event)) => {
-                    self.resume_with_event(workflow_id).await;
-                }
-                Ok(None) => {
-                    tracing::debug!(
-                        workflow_run_id = %workflow_id,
-                        event_name = %event_name,
-                        "Event already consumed, skipping wakeup"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        workflow_run_id = %workflow_id,
-                        error = %e,
-                        "Failed to consume workflow event"
-                    );
-                }
-            }
+            // Consume event, claim run, and enqueue resume job in a single
+            // transaction. Previously these were three separate round-trips;
+            // merging them removes per-event latency and ensures atomicity:
+            // a crash between consume and claim can no longer leave an event
+            // consumed without a corresponding resume job.
+            self.consume_claim_and_resume(workflow_id, &event_name)
+                .await;
         }
 
         Ok(())
     }
 
-    /// Resume a workflow after timer expiry.
-    async fn resume_workflow(&self, workflow_run_id: Uuid) {
-        // Clear wake state
-        if let Err(e) = sqlx::query!(
-            r#"
-            UPDATE forge_workflow_runs
-            SET wake_at = NULL, suspended_at = NULL, status = 'running'
-            WHERE id = $1
-            "#,
-            workflow_run_id,
-        )
-        .execute(&self.pool)
-        .await
-        {
-            tracing::warn!(workflow_run_id = %workflow_run_id, error = %e, "Failed to clear wake state");
-            return;
-        }
+    /// Atomically consume a pending event, claim the workflow run, and enqueue
+    /// a resume job — all in a single transaction.
+    ///
+    /// If the event was already consumed by another scheduler node, or the run
+    /// was already claimed, the transaction rolls back and nothing is enqueued.
+    async fn consume_claim_and_resume(&self, workflow_run_id: Uuid, event_name: &str) {
+        let result: std::result::Result<(), sqlx::Error> = async {
+            let mut tx = self.pool.begin().await?;
 
-        // Resume execution - use resume_from_sleep so ctx.sleep() returns immediately
-        if let Err(e) = self.executor.resume_from_sleep(workflow_run_id).await {
-            tracing::warn!(workflow_run_id = %workflow_run_id, error = %e, "Failed to resume workflow");
-        } else {
-            tracing::debug!(workflow_run_id = %workflow_run_id, "Workflow resumed after timer");
+            // Consume the event inside the transaction.
+            let consumed = super::event_store::EventStore::consume_event_in_conn(
+                &mut tx,
+                event_name,
+                &workflow_run_id.to_string(),
+                workflow_run_id,
+            )
+            .await
+            .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+
+            if consumed.is_none() {
+                // Event already consumed by another scheduler node; nothing to do.
+                tracing::debug!(
+                    workflow_run_id = %workflow_run_id,
+                    event_name = %event_name,
+                    "Event already consumed, skipping wakeup"
+                );
+                return Ok(());
+            }
+
+            #[allow(clippy::disallowed_methods)]
+            let claimed = sqlx::query(
+                r#"
+                UPDATE forge_workflow_runs
+                SET wake_at = NULL, waiting_for_event = NULL, event_timeout_at = NULL,
+                    suspended_at = NULL, status = 'running'
+                WHERE id = $1 AND status IN ('sleeping', 'waiting')
+                "#,
+            )
+            .bind(workflow_run_id)
+            .execute(&mut *tx)
+            .await?;
+
+            if claimed.rows_affected() == 0 {
+                // Run already claimed; let the transaction roll back so the
+                // event consume is also undone.
+                return Ok(());
+            }
+
+            let input = serde_json::json!({
+                "run_id": workflow_run_id.to_string(),
+                "from_sleep": false,
+            });
+            let job = crate::jobs::JobRecord::new(
+                WORKFLOW_RESUME_JOB.to_string(),
+                input,
+                forge_core::job::JobPriority::High,
+                3,
+            )
+            .with_capability(forge_core::config::WORKFLOWS_QUEUE);
+            self.job_queue.enqueue_in_conn(&mut tx, job).await?;
+
+            tx.commit().await?;
+
+            tracing::debug!(
+                workflow_run_id = %workflow_run_id,
+                event_name = %event_name,
+                "Consumed event, claimed workflow, and enqueued resume job"
+            );
+            Ok(())
+        }
+        .await;
+
+        if let Err(e) = result {
+            tracing::warn!(
+                workflow_run_id = %workflow_run_id,
+                event_name = %event_name,
+                error = %e,
+                "Failed to consume event and resume workflow"
+            );
         }
     }
 
-    /// Resume a workflow after event timeout.
-    async fn resume_with_timeout(&self, workflow_run_id: Uuid) {
-        // Clear waiting state
-        if let Err(e) = sqlx::query!(
-            r#"
-            UPDATE forge_workflow_runs
-            SET waiting_for_event = NULL, event_timeout_at = NULL, suspended_at = NULL, status = 'running'
-            WHERE id = $1
-            "#,
-            workflow_run_id,
-        )
-        .execute(&self.pool)
-        .await
-        {
-            tracing::warn!(workflow_run_id = %workflow_run_id, error = %e, "Failed to clear waiting state");
-            return;
-        }
+    /// Atomically claim a workflow and enqueue a resume job in a single transaction.
+    /// If the claim fails (row already claimed), the transaction is rolled back
+    /// and no resume job is enqueued.
+    async fn claim_and_resume(&self, workflow_run_id: Uuid, from_sleep: bool, trigger: &str) {
+        let result: std::result::Result<(), sqlx::Error> = async {
+            let mut tx = self.pool.begin().await?;
 
-        // Resume execution - the workflow will get a timeout error
-        if let Err(e) = self.executor.resume(workflow_run_id).await {
-            tracing::warn!(workflow_run_id = %workflow_run_id, error = %e, "Failed to resume workflow after timeout");
-        } else {
-            tracing::debug!(workflow_run_id = %workflow_run_id, "Workflow resumed after event timeout");
+            // Runtime query: rewritten for single-transaction claim+resume;
+            // convert to query!() after next `cargo sqlx prepare`.
+            #[allow(clippy::disallowed_methods)]
+            let claimed = sqlx::query(
+                r#"
+                UPDATE forge_workflow_runs
+                SET wake_at = NULL, waiting_for_event = NULL, event_timeout_at = NULL,
+                    suspended_at = NULL, status = 'running'
+                WHERE id = $1 AND status IN ('sleeping', 'waiting')
+                "#,
+            )
+            .bind(workflow_run_id)
+            .execute(&mut *tx)
+            .await?;
+
+            if claimed.rows_affected() == 0 {
+                // Already claimed by another scheduler; rollback is implicit on drop
+                return Ok(());
+            }
+
+            let input = serde_json::json!({
+                "run_id": workflow_run_id.to_string(),
+                "from_sleep": from_sleep,
+            });
+            let job = crate::jobs::JobRecord::new(
+                WORKFLOW_RESUME_JOB.to_string(),
+                input,
+                forge_core::job::JobPriority::High,
+                3,
+            )
+            .with_capability(forge_core::config::WORKFLOWS_QUEUE);
+            self.job_queue.enqueue_in_conn(&mut tx, job).await?;
+
+            tx.commit().await?;
+
+            tracing::debug!(
+                workflow_run_id = %workflow_run_id,
+                trigger,
+                "Claimed workflow and enqueued resume job"
+            );
+            Ok(())
+        }
+        .await;
+
+        if let Err(e) = result {
+            tracing::warn!(
+                workflow_run_id = %workflow_run_id,
+                error = %e,
+                trigger,
+                "Failed to claim and resume workflow"
+            );
         }
     }
 
-    /// Resume a workflow that received an event.
-    async fn resume_with_event(&self, workflow_run_id: Uuid) {
-        // Clear waiting state
-        if let Err(e) = sqlx::query!(
+    /// Atomically transition a workflow from `sleeping`/`waiting` to `running`.
+    /// Returns `false` if the row was already claimed by another scheduler.
+    /// Used by cancel path which has its own enqueue logic.
+    async fn try_claim_waiting(&self, workflow_run_id: Uuid) -> bool {
+        match sqlx::query!(
             r#"
             UPDATE forge_workflow_runs
-            SET waiting_for_event = NULL, event_timeout_at = NULL, suspended_at = NULL, status = 'running'
-            WHERE id = $1
+            SET wake_at = NULL, waiting_for_event = NULL, event_timeout_at = NULL,
+                suspended_at = NULL, status = 'running'
+            WHERE id = $1 AND status IN ('sleeping', 'waiting')
             "#,
             workflow_run_id,
         )
         .execute(&self.pool)
         .await
+        .map(|r| r.rows_affected())
         {
-            tracing::warn!(workflow_run_id = %workflow_run_id, error = %e, "Failed to clear waiting state for event");
-            return;
-        }
-
-        // Resume execution
-        if let Err(e) = self.executor.resume(workflow_run_id).await {
-            tracing::warn!(workflow_run_id = %workflow_run_id, error = %e, "Failed to resume workflow after event");
-        } else {
-            tracing::debug!(workflow_run_id = %workflow_run_id, "Workflow resumed after event");
+            Ok(n) => n > 0,
+            Err(e) => {
+                tracing::warn!(workflow_run_id = %workflow_run_id, error = %e, "Failed to claim workflow for resume");
+                false
+            }
         }
     }
 }

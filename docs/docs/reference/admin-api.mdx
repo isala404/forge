@@ -1,0 +1,357 @@
+---
+title: Admin API
+description: Operator endpoints under /_api/admin/* for managing jobs, workflows, queues, and cluster nodes.
+sidebar_position: 7
+---
+
+# Admin API
+
+All endpoints are under `/_api/admin/` and require a JWT with the `admin` role. Unauthenticated requests get 401; authenticated requests without the `admin` role get 403.
+
+Every state-changing action appends a row to `forge_admin_audit`. Read-only list/inspect endpoints do not audit.
+
+## Authentication
+
+```
+Authorization: Bearer <jwt-with-admin-role>
+```
+
+## Error shape
+
+Errors from admin endpoints use a flat envelope, not the RPC envelope:
+
+```json
+{ "error": "not_found", "message": "Job not found" }
+```
+
+## Endpoint reference
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/_api/admin/jobs` | List jobs |
+| `GET` | `/_api/admin/jobs/{id}` | Get job detail |
+| `POST` | `/_api/admin/jobs/{id}/cancel` | Cancel a job |
+| `POST` | `/_api/admin/jobs/{id}/retry` | Retry a failed/cancelled job |
+| `POST` | `/_api/admin/jobs/{id}/force-abort` | Force-abort any non-completed job |
+| `GET` | `/_api/admin/workflows` | List workflow runs |
+| `GET` | `/_api/admin/workflows/{id}` | Get workflow run detail |
+| `POST` | `/_api/admin/workflows/{id}/cancel` | Cancel a workflow run |
+| `POST` | `/_api/admin/workflows/{id}/retry` | Retry a failed/blocked workflow |
+| `POST` | `/_api/admin/workflows/{id}/force-abort` | Force-abort any non-completed workflow |
+| `GET` | `/_api/admin/queues` | List job queues with stats |
+| `POST` | `/_api/admin/queues/{name}/pause` | Pause a queue |
+| `POST` | `/_api/admin/queues/{name}/resume` | Resume a paused queue |
+| `GET` | `/_api/admin/nodes` | List cluster nodes |
+| `GET` | `/_api/admin/leaders` | List current leader elections |
+
+---
+
+## Jobs
+
+### List jobs
+
+```http
+GET /_api/admin/jobs?status=failed&job_type=send_email&limit=50
+Authorization: Bearer <jwt>
+```
+
+Query parameters (all optional):
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `status` | `string` | Filter by status (`pending`, `running`, `failed`, `dead_letter`, `cancelled`, `completed`) |
+| `job_type` | `string` | Filter by job type name |
+| `limit` | `integer` | Max results, 1–1000. Default 100. |
+
+Response:
+
+```json
+{
+  "items": [
+    {
+      "id": "550e8400-...",
+      "job_type": "send_email",
+      "status": "failed",
+      "priority": 0,
+      "attempts": 3,
+      "max_attempts": 3,
+      "worker_capability": null,
+      "owner_subject": "user-uuid",
+      "scheduled_at": "2026-05-18T10:00:00Z",
+      "created_at": "2026-05-18T09:59:00Z",
+      "claimed_at": "2026-05-18T10:00:01Z",
+      "started_at": "2026-05-18T10:00:02Z",
+      "completed_at": null,
+      "failed_at": "2026-05-18T10:00:05Z",
+      "cancelled_at": null,
+      "cancel_reason": null,
+      "last_error": "SMTP timeout"
+    }
+  ]
+}
+```
+
+### Get job
+
+```http
+GET /_api/admin/jobs/{id}
+Authorization: Bearer <jwt>
+```
+
+Returns the full job record, including `input`, `output`, `progress_percent`, `progress_message`, `worker_id`, `idempotency_key`, `last_heartbeat`, `expires_at`, and `metadata` fields not present in the list response. Returns 404 if not found.
+
+### Cancel job
+
+```http
+POST /_api/admin/jobs/{id}/cancel
+Content-Type: application/json
+Authorization: Bearer <jwt>
+
+{ "reason": "duplicate submission" }
+```
+
+The body is optional. Running jobs transition to `cancel_requested`; the worker finalizes them. Non-running, non-terminal jobs go straight to `cancelled`.
+
+Response:
+
+```json
+{
+  "action": "cancel",
+  "target_type": "job",
+  "target_id": "550e8400-...",
+  "accepted": true
+}
+```
+
+`accepted: false` means the job was already in a terminal state.
+
+### Retry job
+
+```http
+POST /_api/admin/jobs/{id}/retry
+Content-Type: application/json
+Authorization: Bearer <jwt>
+
+{ "reason": "transient infra failure" }
+```
+
+Resets the job to `pending` with `attempts = 0`. Only valid for jobs in `failed`, `dead_letter`, or `cancelled` status. Wakes the job worker immediately.
+
+### Force-abort job
+
+```http
+POST /_api/admin/jobs/{id}/force-abort
+Content-Type: application/json
+Authorization: Bearer <jwt>
+
+{ "reason": "runaway job" }
+```
+
+Forces any non-`completed`, non-`cancelled` job — including `running` — to `cancelled`. Use when cancel is too slow. The running worker task may still be alive until it checks the cancellation flag.
+
+---
+
+## Workflows
+
+### List workflow runs
+
+```http
+GET /_api/admin/workflows?status=blocked_signature_mismatch&workflow_name=onboard_user&limit=25
+Authorization: Bearer <jwt>
+```
+
+Query parameters (all optional):
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `status` | `string` | Filter by status (see workflow statuses below) |
+| `workflow_name` | `string` | Filter by workflow name |
+| `limit` | `integer` | Max results, 1–1000. Default 100. |
+
+Workflow statuses: `pending`, `running`, `sleeping`, `waiting`, `completed`, `failed`, `blocked_missing_version`, `blocked_signature_mismatch`, `blocked_missing_handler`. The DB may also contain legacy strings `cancelled_by_operator` and `compensated`, which resolve to `failed` at the Rust level.
+
+Response:
+
+```json
+{
+  "items": [
+    {
+      "id": "550e8400-...",
+      "workflow_name": "onboard_user",
+      "workflow_version": "1",
+      "status": "failed",
+      "owner_subject": "user-uuid",
+      "started_at": "2026-05-18T09:00:00Z",
+      "completed_at": null,
+      "wake_at": null,
+      "waiting_for_event": null,
+      "cancel_requested_at": null,
+      "cancel_reason": null,
+      "error": "step send_email: SMTP timeout"
+    }
+  ]
+}
+```
+
+### Get workflow run
+
+```http
+GET /_api/admin/workflows/{id}
+Authorization: Bearer <jwt>
+```
+
+Returns the full run record including `input`, `output`, `workflow_signature`, `blocking_reason`, `resolution_reason`, `current_step`, `trace_id`, `suspended_at`, `event_timeout_at`, `tenant_id`, and `metadata`. Returns 404 if not found.
+
+### Cancel workflow
+
+```http
+POST /_api/admin/workflows/{id}/cancel
+Content-Type: application/json
+Authorization: Bearer <jwt>
+
+{ "reason": "user requested deletion" }
+```
+
+Sets `cancel_requested_at`; a DB trigger fires `NOTIFY forge_workflow_wakeup` so the scheduler picks it up within ~50 ms. Valid for runs in `pending`, `running`, `sleeping`, or `waiting` status.
+
+### Retry workflow
+
+```http
+POST /_api/admin/workflows/{id}/retry
+Content-Type: application/json
+Authorization: Bearer <jwt>
+
+{ "reason": "handler redeployed" }
+```
+
+Resets the run to `pending`. Valid for terminal or blocked statuses: `failed`, `blocked_missing_version`, `blocked_signature_mismatch`, `blocked_missing_handler`. This also covers legacy DB strings `cancelled_by_operator` and `compensated`, which are treated as `failed`. Already-completed steps are preserved and skipped on resume.
+
+### Force-abort workflow
+
+```http
+POST /_api/admin/workflows/{id}/force-abort
+Content-Type: application/json
+Authorization: Bearer <jwt>
+
+{ "reason": "stuck run" }
+```
+
+Immediately marks the run `cancelled_by_operator` regardless of current status (except already-`completed` and already-`cancelled_by_operator`). Does not wait for in-progress steps to finish.
+
+---
+
+## Queues
+
+### List queues
+
+```http
+GET /_api/admin/queues
+Authorization: Bearer <jwt>
+```
+
+Returns stats for all job queues, including the canonical `default`, `workflows`, and `cron` queues even when empty.
+
+```json
+{
+  "items": [
+    {
+      "name": "default",
+      "pending": 12,
+      "running": 3,
+      "paused": false,
+      "paused_at": null,
+      "paused_by": null,
+      "reason": null
+    },
+    {
+      "name": "emails",
+      "pending": 0,
+      "running": 0,
+      "paused": true,
+      "paused_at": "2026-05-18T08:00:00Z",
+      "paused_by": "admin-user-uuid",
+      "reason": "SMTP outage"
+    }
+  ]
+}
+```
+
+### Pause queue
+
+```http
+POST /_api/admin/queues/{name}/pause
+Content-Type: application/json
+Authorization: Bearer <jwt>
+
+{ "reason": "SMTP outage" }
+```
+
+Workers stop picking up new jobs from the named queue. In-progress jobs continue to completion. Pausing an already-paused queue updates the `paused_by` and `reason` fields.
+
+### Resume queue
+
+```http
+POST /_api/admin/queues/{name}/resume
+Authorization: Bearer <jwt>
+```
+
+No body. Removes the queue from `forge_paused_queues` and sends a `NOTIFY forge_jobs_available` to wake workers immediately.
+
+`accepted: false` means the queue was not paused.
+
+---
+
+## Cluster
+
+### List nodes
+
+```http
+GET /_api/admin/nodes
+Authorization: Bearer <jwt>
+```
+
+```json
+{
+  "items": [
+    {
+      "id": "550e8400-...",
+      "hostname": "forge-1",
+      "ip_address": "10.0.0.1",
+      "http_port": 8080,
+      "grpc_port": null,
+      "roles": ["gateway", "worker"],
+      "worker_capabilities": ["default", "emails"],
+      "status": "healthy",
+      "version": "0.9.0",
+      "current_connections": 42,
+      "current_jobs": 3,
+      "cpu_usage": 0.23,
+      "memory_usage": 0.41,
+      "started_at": "2026-05-18T00:00:00Z",
+      "last_heartbeat": "2026-05-18T10:05:00Z"
+    }
+  ]
+}
+```
+
+### List leaders
+
+```http
+GET /_api/admin/leaders
+Authorization: Bearer <jwt>
+```
+
+Shows the current advisory-lock leader for each leadership role (cron, cluster coordinator, etc.).
+
+```json
+{
+  "items": [
+    {
+      "role": "cron",
+      "node_id": "550e8400-...",
+      "acquired_at": "2026-05-18T09:00:00Z",
+      "lease_until": "2026-05-18T09:01:00Z"
+    }
+  ]
+}
+```

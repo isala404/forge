@@ -19,7 +19,7 @@ forge new [project-name] --template <id> [options]
 | `--template <id>`    | Required template id copied from the embedded example catalog    |
 | `--output, -o <dir>` | Output directory (defaults to project name)                      |
 | `--no-lock`          | Skip generating `Cargo.lock` before the initial commit           |
-| `--include-skill`    | Run the skill installer non-interactively after project creation |
+| `--yes, -y`          | Accept all prompts non-interactively (skips confirmations during project creation) |
 
 ### 2. Scaffold a handler in an existing project
 
@@ -61,11 +61,14 @@ forge new my-app --template with-svelte/demo --output /path/to/projects/my-app
 
 After scaffolding the project directory, `forge new` automatically:
 
-1. Runs `git init` and creates an initial commit
-2. Runs `forge generate -y` to produce frontend bindings
+1. Installs frontend dependencies (`bun install`)
+2. Runs `forge generate` to produce frontend bindings
 3. Runs `cargo fmt` and `bun run format` to normalize code style
+4. Generates `Cargo.lock` (optional, skipped with `--no-lock`)
+5. Runs the skill installer if applicable
+6. Runs `git init` and creates an initial commit
 
-If a formatter binary is not installed (e.g., `bun` is missing), the command prints a warning and continues. The project is still fully usable.
+If a step's binary is not installed (e.g., `bun` is missing), the command prints a warning and continues. The project is still fully usable.
 
 ---
 
@@ -229,6 +232,8 @@ forge check --config ./config/forge.toml
 
 Generate frontend/runtime bindings from backend source code.
 
+`forge generate` is a **manual step** — it is not wired into `cargo build`. Run it after any change to handler signatures, argument types, return types, models, or enums. `forge check` reports staleness if you forget.
+
 ```bash
 forge generate [options]
 ```
@@ -299,12 +304,13 @@ forge migrate [action] [options]
 
 ### Actions
 
-| Action         | Description                                                     |
-| -------------- | --------------------------------------------------------------- |
-| `up`           | Run all pending migrations                                      |
-| `down [count]` | Rollback the last N migrations (default: 1)                     |
-| `status`       | Show migration status                                           |
-| `prepare`      | Run pending migrations, then refresh the `.sqlx/` offline cache. Requires `cargo-sqlx` (`cargo install sqlx-cli --locked`); prints install instructions if missing |
+| Action    | Description                                                     |
+| --------- | --------------------------------------------------------------- |
+| `up`      | Run all pending migrations                                      |
+| `status`  | Show migration status                                           |
+| `prepare` | Run pending migrations, then refresh the `.sqlx/` offline cache. Requires `cargo-sqlx` (`cargo install sqlx-cli --locked`); prints install instructions if missing |
+
+Forward-only — migrations don't have a rollback path. To undo something, write a new migration that reverses it.
 
 ### Automatic migrations
 
@@ -315,8 +321,8 @@ During development, migrations run automatically when the backend starts. Pendin
 Since PostgreSQL is only accessible inside the Docker network, use `docker compose exec` to run migration commands or interact with the database directly:
 
 ```bash
-docker compose exec db psql -U postgres -d my-app -c "SELECT * FROM forge_migrations ORDER BY id"
-docker compose exec backend forge migrate down
+docker compose exec db psql -U postgres -d my-app -c "SELECT * FROM forge_system_migrations ORDER BY applied_at"
+docker compose exec backend forge migrate status
 docker compose exec backend forge migrate prepare
 docker compose exec db psql -U postgres -d my-app
 ```
@@ -325,24 +331,20 @@ For production or CI, `forge migrate` connects via `DATABASE_URL` directly:
 
 ```bash
 forge migrate up
-forge migrate down
+forge migrate status
 forge migrate up --config ./config/forge.toml --migrations-dir ./db/migrations
 ```
 
 ### Migration File Format
 
-Migration files must be named `NNNN_name.sql` (e.g., `0001_initial.sql`) and contain `-- @up` marker.
+Migration files must be named `NNNN_name.sql` (e.g., `0001_initial.sql`). The optional `-- @up` marker is stripped if present, otherwise the entire file is treated as the upgrade SQL.
 
 ```sql
--- @up
 CREATE TABLE users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     email TEXT UNIQUE NOT NULL,
     created_at TIMESTAMPTZ DEFAULT now()
 );
-
--- @down
-DROP TABLE users;
 ```
 
 ---
@@ -383,7 +385,7 @@ Checks performed:
 - `bun` is available when `frontend/package.json` exists; `dx` (dioxus-cli) when `frontend/Cargo.toml` exists
 - `forge.toml` parses cleanly (when run inside a project)
 - `.sqlx/` cache is fresher than the newest `src/**/*.rs` file
-- The most recent migration has both `-- @up` and `-- @down` markers
+- The most recent migration file is non-empty
 
 Each result is one line, prefixed with `[OK]`, `[!]`, `[X]`, or `[i]`. The command exits non-zero if any check fails.
 
@@ -397,6 +399,46 @@ Each result is one line, prefixed with `[OK]`, `[!]`, `[X]`, or `[i]`. The comma
 | `RUST_LOG`     | Log level (e.g., info, debug, trace)                                          | docker compose, runtime |
 | `HOST`         | Backend host (default: 0.0.0.0)                                               | docker compose, runtime |
 | `PORT`         | Backend port (default: 9081)                                                  | docker compose, runtime |
+
+---
+
+## Cargo Features
+
+`forgex` defaults to `full`, which enables everything. Use `default-features = false` plus one of the presets (or individual subsystem flags) to produce a smaller binary.
+
+```toml
+# Cargo.toml — slim worker binary, no HTTP stack
+forgex = { version = "...", default-features = false, features = ["worker"] }
+```
+
+### Preset bundles
+
+| Feature | Includes | Description |
+| ------- | -------- | ----------- |
+| `full` | all subsystems | Default. Equivalent to today's behavior; existing apps need no changes. |
+| `worker` | `jobs`, `workflows`, `cron`, `daemons`, `otel` | Background workers without an HTTP surface. Use for binaries that consume jobs/workflows but serve no traffic. |
+| `api` | `gateway`, `otel` | HTTP gateway with observability, no background workers. Use for read-heavy API nodes. |
+| `minimal` | `gateway` | Smallest possible HTTP binary. Structured logs go to stderr only; no OTel exporters. |
+
+### Subsystem features
+
+| Feature | Default | Description |
+| ------- | ------- | ----------- |
+| `gateway` | yes | Axum HTTP server: RPC, SSE realtime, OAuth, MCP, webhooks, signals, TLS termination. Pulls the full axum/tower stack. Disable for worker-only binaries. |
+| `jobs` | yes | PostgreSQL-backed job queue with `SKIP LOCKED` worker. |
+| `workflows` | yes | Versioned durable workflow executor with signature guards and compensation. |
+| `cron` | yes | Cron scheduler with leader-only execution and exactly-once guarantees. |
+| `daemons` | yes | Long-running daemon runner (leader-elected or per-node). |
+| `mcp-oauth` | yes | OAuth 2.1 + PKCE authentication for MCP tools. Requires `gateway`. Without it, MCP uses JWT bearer auth only. |
+| `geoip` | yes | Bundles a ~10 MB IP-to-country database for signals enrichment. Requires a network fetch at compile time. Omit for offline builds or when you don't use signals. Requires `gateway`. |
+| `otel` | yes | OpenTelemetry trace, metric, and log exporters via OTLP HTTP. Pulls ~5 OTel crates plus protobuf stubs. Disable to skip those deps entirely. |
+
+### Other features
+
+| Feature | Default | Description |
+| ------- | ------- | ----------- |
+| `testcontainers` | no | Enables `TestQueryContext`, `TestMutationContext`, and friends that spin up a real PostgreSQL container. Enable in dev/CI integration test binaries only — not in production. |
+| `embedded-frontend` | no | Embeds the compiled frontend bundle into the binary at build time (`rust-embed`). Used by `forge test` to produce a self-contained test binary. Enable explicitly when you want a single-binary deployment. |
 
 ---
 

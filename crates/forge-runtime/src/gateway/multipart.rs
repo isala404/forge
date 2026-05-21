@@ -116,7 +116,6 @@ pub async fn rpc_multipart_handler(
     let mut uploads: HashMap<String, Upload> = HashMap::new();
     let mut total_read: usize = 0;
 
-    // Parse multipart fields
     loop {
         let field = match multipart.next_field().await {
             Ok(Some(f)) => f,
@@ -137,7 +136,6 @@ pub async fn rpc_multipart_handler(
             }
         };
 
-        // Validate field name length
         if name.len() > MAX_FIELD_NAME_LENGTH {
             return multipart_error(
                 StatusCode::BAD_REQUEST,

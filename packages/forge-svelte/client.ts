@@ -4,12 +4,7 @@ import type { ForgeError, ConnectionState } from "./types.js";
 export interface ForgeClientConfig {
   url: string;
   getToken?: () => string | null | Promise<string | null>;
-  /**
-   * Optional callback invoked when an RPC call returns 401. Should refresh the
-   * access token (typically via a refresh token) and return the new token. If
-   * it returns a new token, the original call is retried once. If it returns
-   * null or throws, the call fails with UNAUTHORIZED and onAuthError is fired.
-   */
+  /** Called on 401; return a new token to retry once, or null/throw to fail with UNAUTHORIZED. */
   refreshToken?: () => Promise<string | null>;
   onAuthError?: (error: ForgeError) => void;
   onMutationError?: (error: ForgeClientError) => void;
@@ -103,7 +98,6 @@ export class ForgeClient {
     return this.config.url;
   }
 
-  /** Notify the registered mutation error handler, if any. Called by fireMutation(). */
   notifyMutationError(error: ForgeClientError): void {
     this.config.onMutationError?.(error);
   }
@@ -420,7 +414,6 @@ export class ForgeClient {
       return response.data;
     }
 
-    // No SSE session yet, fall back to one-shot RPC
     return this.call(functionName, args);
   }
 
@@ -625,9 +618,8 @@ export class ForgeClient {
     if (this.reconnectAttempts >= this.maxReconnectAttempts) return;
 
     // Exponential backoff with jitter to prevent synchronized retry storms
-    // Formula: base * 2^attempts * (0.5 to 1.5 random multiplier)
     const exponentialDelay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts);
-    const jitter = 0.5 + Math.random(); // 0.5 to 1.5
+    const jitter = 0.5 + Math.random();
     const delay = Math.min(exponentialDelay * jitter, 30000);
     this.reconnectAttempts++;
 

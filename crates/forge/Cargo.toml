@@ -35,7 +35,7 @@ forge-codegen = { version = "0.9.0", path = "../forge-codegen" }
 forge-macros = { version = "0.9.0", path = "../forge-macros" }
 
 tokio = { workspace = true }
-tokio-util = "0.7"
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
@@ -86,14 +86,18 @@ gateway = [
 # Background job queue and worker.
 jobs = ["forge-runtime/jobs"]
 
-# Durable workflow executor.
-workflows = ["forge-runtime/workflows"]
+# Durable workflow executor. Depends on `jobs` because workflow steps
+# resume via job dispatch.
+workflows = ["jobs", "forge-runtime/workflows"]
 
-# Cron scheduler.
-cron = ["forge-runtime/cron"]
+# Cron scheduler. Depends on `jobs` because scheduled runs dispatch as jobs.
+cron = ["jobs", "forge-runtime/cron"]
 
 # Long-running daemon runner.
 daemons = ["forge-runtime/daemons"]
+
+# OAuth 2.1 + PKCE for MCP authentication.
+mcp-oauth = ["gateway", "forge-runtime/mcp-oauth"]
 
 # GeoIP enrichment for signals (heavy build-time download).
 geoip = ["gateway", "forge-runtime/geoip"]
@@ -109,14 +113,17 @@ otel = [
 
 # --- Bundle presets ---
 
-# Everything. Mirrors today's behavior; no opt-out needed for existing apps.
+# Everything except geoip. `geoip` requires a build-time network fetch for the
+# bundled IP-to-country DB and is excluded from the default preset so that
+# `cargo build` succeeds in offline/CI environments. Enable it explicitly with
+# `--features forgex/geoip` when needed.
 full = [
     "gateway",
+    "mcp-oauth",
     "jobs",
     "workflows",
     "cron",
     "daemons",
-    "geoip",
     "otel",
 ]
 
@@ -141,7 +148,7 @@ embedded-frontend = ["dep:rust-embed", "dep:mime_guess"]
 nix = { version = "0.29", features = ["signal", "hostname"] }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }
 
 [build-dependencies]
 tar = "0.4"

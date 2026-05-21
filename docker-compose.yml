@@ -1,13 +1,31 @@
 services:
-  build:
-    image: rust:1.92-bookworm
-    working_dir: /app
-    command: >
-      sh -c "cargo build --workspace && cargo test --workspace"
+  db:
+    image: postgres:18
+    restart: unless-stopped
+    shm_size: 1gb
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: forge
+      POSTGRES_DB: forge_dev
+    ports:
+      - "127.0.0.1:5432:5432"
     volumes:
-      - .:/app
-      - cargo_cache:/usr/local/cargo/registry
-      - ./target:/app/target
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d forge_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  otel-lgtm:
+    image: grafana/otel-lgtm:latest
+    profiles:
+      - observability
+    ports:
+      - "127.0.0.1:3000:3000"   # Grafana UI
+      - "127.0.0.1:4317:4317"   # OTLP gRPC
+      - "127.0.0.1:4318:4318"   # OTLP HTTP
+    restart: unless-stopped
 
 volumes:
-  cargo_cache:
+  postgres_data:

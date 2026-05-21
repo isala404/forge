@@ -3,25 +3,19 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
-/// RPC response for function calls.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct RpcResponse {
-    /// Whether the call succeeded.
     pub success: bool,
-    /// Result data (if successful).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
-    /// Error information (if failed).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<RpcError>,
-    /// Request ID for tracing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
 }
 
 impl RpcResponse {
-    /// Create a successful response.
     pub fn success(data: serde_json::Value) -> Self {
         Self {
             success: true,
@@ -31,7 +25,6 @@ impl RpcResponse {
         }
     }
 
-    /// Create an error response.
     pub fn error(error: RpcError) -> Self {
         Self {
             success: false,
@@ -41,7 +34,6 @@ impl RpcResponse {
         }
     }
 
-    /// Add request ID to the response.
     pub fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
         self.request_id = Some(request_id.into());
         self
@@ -71,32 +63,22 @@ impl IntoResponse for RpcResponse {
     }
 }
 
-/// RPC error information.
-///
 /// Wire shape: `{ code, message, retry_after_secs?, details? }`.
-/// All frontend clients (SvelteKit, Dioxus) deserialize into this same shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct RpcError {
-    /// Error code (e.g. `"NOT_FOUND"`, `"RATE_LIMITED"`).
     pub code: String,
-    /// Human-readable error message.
     pub message: String,
-    /// Seconds to wait before retrying. Set for `RATE_LIMITED` errors.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_after_secs: Option<u64>,
-    /// Additional error details.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
-    // Not sent to clients; drives IntoResponse status selection.
+    // Drives IntoResponse status selection, not sent to clients.
     #[serde(skip)]
     http_status: u16,
 }
 
 impl RpcError {
-    /// Create a new error. HTTP status is inferred from `code` via the standard mapping;
-    /// prefer the typed constructors (`not_found`, `unauthorized`, etc.) or
-    /// `From<ForgeError>` when the status must be exact.
     pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
         let code = code.into();
         let http_status = code_to_status(&code);
@@ -109,7 +91,6 @@ impl RpcError {
         }
     }
 
-    /// Create an error with details.
     pub fn with_details(
         code: impl Into<String>,
         message: impl Into<String>,
@@ -120,7 +101,6 @@ impl RpcError {
         e
     }
 
-    /// Create a rate-limit error with the retry delay promoted to the top level.
     pub fn rate_limited(retry_after_secs: u64) -> Self {
         Self {
             code: "RATE_LIMITED".into(),
@@ -131,39 +111,32 @@ impl RpcError {
         }
     }
 
-    /// Returns the HTTP status code for this error.
     pub fn status_code(&self) -> StatusCode {
         StatusCode::from_u16(self.http_status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
     }
 
-    /// Create a not found error.
     pub fn not_found(message: impl Into<String>) -> Self {
         Self::new("NOT_FOUND", message)
     }
 
-    /// Create an unauthorized error.
     pub fn unauthorized(message: impl Into<String>) -> Self {
         Self::new("UNAUTHORIZED", message)
     }
 
-    /// Create a forbidden error.
     pub fn forbidden(message: impl Into<String>) -> Self {
         Self::new("FORBIDDEN", message)
     }
 
-    /// Create a validation error.
     pub fn validation(message: impl Into<String>) -> Self {
         Self::new("VALIDATION_ERROR", message)
     }
 
-    /// Create an internal error.
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new("INTERNAL_ERROR", message)
     }
 }
 
-// Fallback for manually-constructed RpcError values (e.g. RpcError::new("NOT_FOUND", ...))
-// that don't go through From<ForgeError>. Must stay in sync with ForgeError::http_status().
+// Must stay in sync with ForgeError::http_status().
 fn code_to_status(code: &str) -> u16 {
     match code {
         "NOT_FOUND" => 404,
@@ -203,31 +176,19 @@ impl From<forge_core::error::ForgeError> for RpcError {
                 tracing::warn!(error = %msg, "Deserialization error in RPC handler");
                 Self::new("INVALID_ARGUMENT", "Invalid input format")
             }
-            ref e @ E::Database(_) | ref e @ E::Sql(_) => {
+            ref e @ E::Database(_) => {
                 tracing::error!(error = %e, "Database error in RPC handler");
                 Self::internal("Internal server error")
             }
-            ref e @ (E::Internal(_)
+            ref e @ (E::Internal { .. }
             | E::Serialization(_)
-            | E::Function(_)
-            | E::Config(_)
+            | E::Config { .. }
             | E::Io(_)
-            | E::Cluster(_)
-            | E::InvalidState(_)
-            | E::WorkflowSuspended) => {
+            | E::InvalidState(_)) => {
                 tracing::error!(error = %e, "Internal error in RPC handler");
                 Self::internal("Internal server error")
             }
-            E::Job(ref msg) => {
-                tracing::error!(error = %msg, "Job error");
-                Self::internal("Internal server error")
-            }
-            E::Conflict(msg) => Self::new("CONFLICT", msg),
-            E::UnprocessableEntity(msg) => Self::new("UNPROCESSABLE_ENTITY", msg),
             E::ServiceUnavailable(msg) => Self::new("SERVICE_UNAVAILABLE", msg),
-            E::PayloadTooLarge(msg) => Self::new("PAYLOAD_TOO_LARGE", msg),
-            E::ResultTooLarge(msg) => Self::new("RESULT_TOO_LARGE", msg),
-            E::SubscriptionGapped(msg) => Self::new("SUBSCRIPTION_GAPPED", msg),
             E::RateLimitExceeded { retry_after, .. } => Self::rate_limited(retry_after.as_secs()),
             ref e => {
                 tracing::error!(error = %e, "Unmapped ForgeError variant");
@@ -244,6 +205,7 @@ impl From<forge_core::error::ForgeError> for RpcError {
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
     use super::*;
+    use sqlx;
 
     #[test]
     fn test_success_response() {
@@ -285,8 +247,6 @@ mod tests {
         let resp = RpcResponse::success(serde_json::json!(null)).with_request_id("req-123");
         assert_eq!(resp.request_id, Some("req-123".to_string()));
     }
-
-    // --- ForgeError -> RpcError conversion (HTTP boundary contract) ---
 
     #[test]
     fn forge_not_found_maps_to_not_found_404() {
@@ -363,8 +323,7 @@ mod tests {
 
     #[test]
     fn forge_database_error_hides_internals() {
-        let rpc: RpcError =
-            forge_core::ForgeError::Database("relation foo does not exist".into()).into();
+        let rpc: RpcError = forge_core::ForgeError::Database(sqlx::Error::RowNotFound).into();
         assert_eq!(rpc.code, "INTERNAL_ERROR");
         assert_eq!(rpc.message, "Internal server error");
         assert_eq!(rpc.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -373,14 +332,10 @@ mod tests {
     #[test]
     fn forge_internal_variants_all_map_to_500() {
         let internals: Vec<forge_core::ForgeError> = vec![
-            forge_core::ForgeError::Internal("oops".into()),
+            forge_core::ForgeError::internal("oops"),
             forge_core::ForgeError::Serialization("bad".into()),
-            forge_core::ForgeError::Function("handler".into()),
-            forge_core::ForgeError::Config("bad toml".into()),
-            forge_core::ForgeError::Cluster("split".into()),
+            forge_core::ForgeError::config("bad toml"),
             forge_core::ForgeError::InvalidState("done".into()),
-            forge_core::ForgeError::Job("failed".into()),
-            forge_core::ForgeError::WorkflowSuspended,
         ];
 
         for err in internals {

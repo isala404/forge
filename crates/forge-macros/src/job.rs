@@ -2,37 +2,112 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{ItemFn, parse_macro_input};
 
-use crate::utils::{
-    has_attr_flag, parse_attr_value, parse_duration_tokens, reject_reserved_keys, to_pascal_case,
-    validate_attr_keys,
-};
+use darling::FromMeta;
+use darling::ast::NestedMeta;
 
-const ALLOWED_JOB_KEYS: &[&str] = &[
-    "public",
-    "name",
-    "description",
-    "timeout",
-    "priority",
-    "max_attempts",
-    "backoff",
-    "max_backoff",
-    "worker_capability",
-    "idempotent",
-    "compensate",
-    "require_role",
-    "ttl",
-    "retry",
-    // Reserved for future Forge releases. Parsed here so apps fail loudly
-    // (via `reject_reserved_keys` below) until the underlying behavior lands.
-    "unique_key",
-    "concurrency_key",
-    "concurrency_limit",
-];
+use crate::attrs::{IdempotentMeta, RequireRole, RetryMeta, default_true, reject_reserved};
+use crate::utils::{parse_duration_tokens, to_pascal_case};
 
 /// Attribute keys whose names are reserved for upcoming job-deduplication and
 /// per-key concurrency support. Using one today is a hard compile error so
 /// apps don't think a feature works that doesn't.
 const RESERVED_JOB_KEYS: &[&str] = &["unique_key", "concurrency_key", "concurrency_limit"];
+
+const VALID_PRIORITIES: &[&str] = &["background", "low", "normal", "high", "critical"];
+const VALID_BACKOFFS: &[&str] = &["fixed", "linear", "exponential"];
+
+/// Darling-parsed job attributes.
+#[derive(Debug, FromMeta)]
+#[darling(and_then = DarlingJobAttrs::validate)]
+struct DarlingJobAttrs {
+    #[darling(default)]
+    name: Option<String>,
+    #[darling(default)]
+    description: Option<String>,
+    #[darling(default)]
+    timeout: Option<String>,
+    #[darling(default)]
+    priority: Option<String>,
+    #[darling(default)]
+    max_attempts: Option<u32>,
+    #[darling(default)]
+    backoff: Option<String>,
+    #[darling(default)]
+    max_backoff: Option<String>,
+    #[darling(default)]
+    worker_capability: Option<String>,
+    #[darling(default)]
+    idempotent: Option<IdempotentMeta>,
+    #[darling(default)]
+    compensate: Option<String>,
+    #[darling(default)]
+    public: bool,
+    /// New-style alias for `public`. Accepted values: "none", "required".
+    #[darling(default)]
+    auth: Option<String>,
+    #[darling(default)]
+    require_role: Option<RequireRole>,
+    #[darling(default)]
+    ttl: Option<String>,
+    #[darling(default)]
+    retry: Option<RetryMeta>,
+    /// Set `register = false` to skip `inventory::submit!` auto-registration.
+    #[darling(default = "default_true")]
+    register: bool,
+    // Reserved keys
+    #[darling(default)]
+    unique_key: Option<String>,
+    #[darling(default)]
+    concurrency_key: Option<String>,
+    #[darling(default)]
+    concurrency_limit: Option<u32>,
+}
+
+impl DarlingJobAttrs {
+    fn validate(self) -> darling::Result<Self> {
+        reject_reserved(
+            RESERVED_JOB_KEYS,
+            &[
+                ("unique_key", self.unique_key.is_some()),
+                ("concurrency_key", self.concurrency_key.is_some()),
+                ("concurrency_limit", self.concurrency_limit.is_some()),
+            ],
+            "job",
+        )
+        .map_err(|e| darling::Error::custom(e.to_string()))?;
+
+        if let Some(ref p) = self.priority {
+            let p_lower = p.to_lowercase();
+            if !VALID_PRIORITIES.contains(&p_lower.as_str()) {
+                return Err(darling::Error::custom(format!(
+                    "Invalid job priority '{}'. Valid values: {}",
+                    p,
+                    VALID_PRIORITIES.join(", ")
+                )));
+            }
+        }
+
+        if let Some(ref b) = self.backoff
+            && !VALID_BACKOFFS.contains(&b.as_str())
+        {
+            return Err(darling::Error::custom(format!(
+                "Invalid backoff strategy '{}'. Valid values: {}",
+                b,
+                VALID_BACKOFFS.join(", ")
+            )));
+        }
+
+        if let Some(ref a) = self.auth
+            && !["none", "required"].contains(&a.as_str())
+        {
+            return Err(darling::Error::custom(format!(
+                "invalid auth value \"{a}\": expected \"none\" or \"required\""
+            )));
+        }
+
+        Ok(self)
+    }
+}
 
 #[derive(Debug, Default)]
 struct JobAttrs {
@@ -50,287 +125,45 @@ struct JobAttrs {
     is_public: bool,
     required_role: Option<String>,
     ttl: Option<String>,
-}
-
-const VALID_PRIORITIES: &[&str] = &["background", "low", "normal", "high", "critical"];
-const VALID_BACKOFFS: &[&str] = &["fixed", "linear", "exponential"];
-
-fn parse_job_attrs(attr: TokenStream) -> syn::Result<JobAttrs> {
-    let mut result = JobAttrs::default();
-    let attr_str = attr.to_string();
-
-    if has_attr_flag(&attr_str, "public") {
-        result.is_public = true;
-    }
-
-    if let Some(description) = parse_attr_value(&attr_str, "description") {
-        result.description = Some(description);
-    }
-
-    if let Some(idem_start) = attr_str.find("idempotent") {
-        // Set idempotent only after we've finished key extraction
-        // to avoid half-configured state.
-        if let Some(paren_start) = attr_str[idem_start..].find('(') {
-            let remaining = &attr_str[idem_start + paren_start + 1..];
-            if let Some(paren_end) = remaining.find(')') {
-                let content = &remaining[..paren_end];
-                if let Some(key_start) = content.find("key")
-                    && let Some(quote_start) = content[key_start..].find('"')
-                {
-                    let after_quote = &content[key_start + quote_start + 1..];
-                    if let Some(quote_end) = after_quote.find('"') {
-                        let key = after_quote[..quote_end].to_string();
-                        if !key.trim().is_empty() {
-                            result.idempotency_key = Some(key);
-                        }
-                    }
-                }
-            }
-        }
-        result.idempotent = true;
-    }
-
-    if let Some(role_start) = attr_str.find("require_role")
-        && let Some(paren_start) = attr_str[role_start..].find('(')
-    {
-        let remaining = &attr_str[role_start + paren_start + 1..];
-        if let Some(paren_end) = remaining.find(')') {
-            let role = remaining[..paren_end].trim().trim_matches('"');
-            result.required_role = Some(role.to_string());
-        }
-    }
-
-    if let Some(comp_start) = attr_str.find("compensate")
-        && let Some(eq_pos) = attr_str[comp_start..].find('=')
-    {
-        let after_eq = &attr_str[comp_start + eq_pos + 1..];
-        if let Some(quote_start) = after_eq.find('"') {
-            let after_quote = &after_eq[quote_start + 1..];
-            if let Some(quote_end) = after_quote.find('"') {
-                result.compensate = Some(after_quote[..quote_end].to_string());
-            }
-        }
-    }
-
-    if let Some(name_start) = attr_str.find("name") {
-        // Ensure it's not part of another word
-        let before = if name_start > 0 {
-            attr_str.chars().nth(name_start - 1)
-        } else {
-            None
-        };
-        if (before.is_none() || !before.unwrap().is_alphanumeric())
-            && let Some(eq_pos) = attr_str[name_start..].find('=')
-        {
-            let after_eq = &attr_str[name_start + eq_pos + 1..];
-            if let Some(quote_start) = after_eq.find('"') {
-                let after_quote = &after_eq[quote_start + 1..];
-                if let Some(quote_end) = after_quote.find('"') {
-                    result.name = Some(after_quote[..quote_end].to_string());
-                }
-            }
-        }
-    }
-
-    if let Some(timeout) = parse_attr_value(&attr_str, "timeout") {
-        result.timeout = Some(timeout);
-    }
-
-    if let Some(priority_start) = attr_str.find("priority")
-        && let Some(eq_pos) = attr_str[priority_start..].find('=')
-    {
-        let after_eq = &attr_str[priority_start + eq_pos + 1..];
-        if let Some(quote_start) = after_eq.find('"') {
-            let after_quote = &after_eq[quote_start + 1..];
-            if let Some(quote_end) = after_quote.find('"') {
-                let priority = after_quote[..quote_end].to_string();
-                let priority_lower = priority.to_lowercase();
-                if !VALID_PRIORITIES.contains(&priority_lower.as_str()) {
-                    return Err(syn::Error::new(
-                        proc_macro2::Span::call_site(),
-                        format!(
-                            "Invalid job priority '{}'. Valid values: {}",
-                            priority,
-                            VALID_PRIORITIES.join(", ")
-                        ),
-                    ));
-                }
-                result.priority = Some(priority);
-            }
-        }
-    }
-
-    if let Some(cap_start) = attr_str.find("worker_capability")
-        && let Some(eq_pos) = attr_str[cap_start..].find('=')
-    {
-        let after_eq = &attr_str[cap_start + eq_pos + 1..];
-        if let Some(quote_start) = after_eq.find('"') {
-            let after_quote = &after_eq[quote_start + 1..];
-            if let Some(quote_end) = after_quote.find('"') {
-                result.worker_capability = Some(after_quote[..quote_end].to_string());
-            }
-        }
-    }
-
-    if let Some(ma_start) = attr_str.find("max_attempts")
-        && let Some(eq_pos) = attr_str[ma_start..].find('=')
-    {
-        let after_eq = &attr_str[ma_start + eq_pos + 1..];
-        if let Ok(n) = after_eq
-            .split(&[',', ')'])
-            .next()
-            .unwrap_or("")
-            .trim()
-            .parse::<u32>()
-        {
-            result.max_attempts = Some(n);
-        }
-    }
-
-    if let Some(backoff_start) = attr_str.find("backoff") {
-        // Ensure it's not max_backoff
-        let before = if backoff_start > 0 {
-            attr_str.chars().nth(backoff_start - 1)
-        } else {
-            None
-        };
-        if (before.is_none() || before.unwrap() != '_')
-            && let Some(eq_pos) = attr_str[backoff_start..].find('=')
-        {
-            let after_eq = &attr_str[backoff_start + eq_pos + 1..];
-            if let Some(quote_start) = after_eq.find('"') {
-                let after_quote = &after_eq[quote_start + 1..];
-                if let Some(quote_end) = after_quote.find('"') {
-                    let backoff = after_quote[..quote_end].to_string();
-                    if !VALID_BACKOFFS.contains(&backoff.as_str()) {
-                        return Err(syn::Error::new(
-                            proc_macro2::Span::call_site(),
-                            format!(
-                                "Invalid backoff strategy '{}'. Valid values: {}",
-                                backoff,
-                                VALID_BACKOFFS.join(", ")
-                            ),
-                        ));
-                    }
-                    result.backoff = Some(backoff);
-                }
-            }
-        }
-    }
-
-    if let Some(mb_start) = attr_str.find("max_backoff")
-        && let Some(eq_pos) = attr_str[mb_start..].find('=')
-    {
-        let after_eq = &attr_str[mb_start + eq_pos + 1..];
-        if let Some(quote_start) = after_eq.find('"') {
-            let after_quote = &after_eq[quote_start + 1..];
-            if let Some(quote_end) = after_quote.find('"') {
-                result.max_backoff = Some(after_quote[..quote_end].to_string());
-            }
-        }
-    }
-
-    if let Some(retry_start) = attr_str.find("retry")
-        && let Some(paren_start) = attr_str[retry_start..].find('(')
-    {
-        let remaining = &attr_str[retry_start + paren_start + 1..];
-        if let Some(paren_end) = remaining.find(')') {
-            let content = &remaining[..paren_end];
-
-            if let Some(ma_start) = content.find("max_attempts")
-                && let Some(eq_pos) = content[ma_start..].find('=')
-            {
-                let after_eq = &content[ma_start + eq_pos + 1..];
-                if let Ok(n) = after_eq
-                    .split(',')
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .parse::<u32>()
-                {
-                    result.max_attempts = Some(n);
-                }
-            }
-
-            if let Some(backoff_start) = content.find("backoff") {
-                let before = if backoff_start > 0 {
-                    content.chars().nth(backoff_start - 1)
-                } else {
-                    None
-                };
-                if (before.is_none() || before.unwrap() != '_')
-                    && let Some(quote_start) = content[backoff_start..].find('"')
-                {
-                    let after_quote = &content[backoff_start + quote_start + 1..];
-                    if let Some(quote_end) = after_quote.find('"') {
-                        let backoff = after_quote[..quote_end].to_string();
-                        if !VALID_BACKOFFS.contains(&backoff.as_str()) {
-                            return Err(syn::Error::new(
-                                proc_macro2::Span::call_site(),
-                                format!(
-                                    "Invalid backoff strategy '{}'. Valid values: {}",
-                                    backoff,
-                                    VALID_BACKOFFS.join(", ")
-                                ),
-                            ));
-                        }
-                        result.backoff = Some(backoff);
-                    }
-                }
-            }
-
-            if let Some(mb_start) = content.find("max_backoff")
-                && let Some(quote_start) = content[mb_start..].find('"')
-            {
-                let after_quote = &content[mb_start + quote_start + 1..];
-                if let Some(quote_end) = after_quote.find('"') {
-                    result.max_backoff = Some(after_quote[..quote_end].to_string());
-                }
-            }
-        }
-    }
-
-    if let Some(ttl_start) = attr_str.find("ttl")
-        && let Some(eq_pos) = attr_str[ttl_start..].find('=')
-    {
-        let after_eq = &attr_str[ttl_start + eq_pos + 1..];
-        if let Some(quote_start) = after_eq.find('"') {
-            let after_quote = &after_eq[quote_start + 1..];
-            if let Some(quote_end) = after_quote.find('"') {
-                result.ttl = Some(after_quote[..quote_end].to_string());
-            }
-        }
-    }
-
-    Ok(result)
+    register: bool,
 }
 
 pub fn job_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
-    let attr_str = attr.to_string();
 
-    if let Err(e) = reject_reserved_keys(&attr_str, RESERVED_JOB_KEYS, "job") {
-        return e.to_compile_error().into();
-    }
-
-    if let Err(e) = validate_attr_keys(&attr_str, ALLOWED_JOB_KEYS, "job") {
-        return e.to_compile_error().into();
-    }
-
-    let attrs = match parse_job_attrs(attr) {
-        Ok(attrs) => attrs,
-        Err(e) => return e.to_compile_error().into(),
+    let attr_args = match NestedMeta::parse_meta_list(attr.into()) {
+        Ok(v) => v,
+        Err(e) => return TokenStream::from(e.into_compile_error()),
     };
+
+    let darling_attrs = match DarlingJobAttrs::from_list(&attr_args) {
+        Ok(v) => v,
+        Err(e) => return TokenStream::from(e.write_errors()),
+    };
+
+    let attrs = convert_job_attrs(darling_attrs);
 
     let fn_name = &input.sig.ident;
     let fn_name_str = attrs.name.unwrap_or_else(|| fn_name.to_string());
+
+    // Reject job names starting with '$' — these are reserved for system jobs
+    // ($cron:*, $workflow_resume, etc.) registered via `register_system`.
+    if fn_name_str.starts_with('$') {
+        return TokenStream::from(
+            syn::Error::new(
+                fn_name.span(),
+                "job names starting with '$' are reserved for system jobs (e.g. $cron:*, $workflow_resume)",
+            )
+            .into_compile_error(),
+        );
+    }
+
     let module_name = format_ident!("__forge_handler_{}", fn_name);
     let struct_name = format_ident!("{}Job", to_pascal_case(&fn_name.to_string()));
 
     let _vis = &input.vis;
     let block = &input.block;
 
-    // Parse context and args types from function signature
     let mut args_type = quote! { () };
     let mut args_ident = format_ident!("_args");
 
@@ -344,7 +177,6 @@ pub fn job_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
 
-    // Parse return type
     let output_type = match &input.sig.output {
         syn::ReturnType::Default => quote! { () },
         syn::ReturnType::Type(_, ty) => {
@@ -466,6 +298,16 @@ pub fn job_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let other_attrs = &input.attrs;
 
+    let registration = if attrs.register {
+        quote! {
+            forge::inventory::submit!(forge::AutoHandler(|registries| {
+                registries.jobs.register::<#struct_name>();
+            }));
+        }
+    } else {
+        quote! {}
+    };
+
     let expanded = quote! {
         #[doc(hidden)]
         #[allow(non_snake_case)]
@@ -513,20 +355,59 @@ pub fn job_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 #compensate
             }
 
-            forge::inventory::submit!(forge::AutoJob(|registry| {
-                registry.register::<#struct_name>();
-            }));
+            #registration
         }
     };
 
     TokenStream::from(expanded)
 }
 
+fn convert_job_attrs(darling: DarlingJobAttrs) -> JobAttrs {
+    let (idempotent, idempotency_key) = match darling.idempotent {
+        Some(idem) => (idem.enabled, idem.key),
+        None => (false, None),
+    };
+
+    let mut max_attempts = darling.max_attempts;
+    let mut backoff = darling.backoff;
+    let mut max_backoff = darling.max_backoff;
+
+    if let Some(retry) = darling.retry {
+        if let Some(ma) = retry.max_attempts {
+            max_attempts = Some(ma);
+        }
+        if let Some(b) = retry.backoff
+            && VALID_BACKOFFS.contains(&b.as_str())
+        {
+            backoff = Some(b);
+        }
+        if let Some(mb) = retry.max_backoff {
+            max_backoff = Some(mb);
+        }
+    }
+
+    JobAttrs {
+        name: darling.name,
+        description: darling.description,
+        timeout: darling.timeout,
+        priority: darling.priority,
+        max_attempts,
+        backoff,
+        max_backoff,
+        worker_capability: darling.worker_capability,
+        idempotent,
+        idempotency_key,
+        compensate: darling.compensate,
+        is_public: darling.public || darling.auth.as_deref() == Some("none"),
+        required_role: darling.require_role.map(|r| r.0),
+        ttl: darling.ttl,
+        register: darling.register,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // Tests for to_pascal_case and parse_duration are in utils.rs (single source of truth).
 
     #[test]
     fn test_valid_priorities() {

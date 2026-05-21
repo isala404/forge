@@ -22,10 +22,9 @@ pub struct ClusterMetrics {
     nodes_dead: Gauge<i64>,
     leader_election_attempts: Counter<u64>,
     is_leader: Gauge<i64>,
-    // Reactor metrics — only consumed when gateway/realtime is on.
-    #[allow(dead_code)]
+    #[cfg(feature = "gateway")]
     notifications_processed: Counter<u64>,
-    #[allow(dead_code)]
+    #[cfg(feature = "gateway")]
     notification_latency: Histogram<f64>,
 }
 
@@ -60,11 +59,13 @@ impl ClusterMetrics {
             .with_description("Whether this node is the leader (1) or not (0)")
             .build();
 
+        #[cfg(feature = "gateway")]
         let notifications_processed = meter
             .u64_counter("cluster.reactor.notifications_processed")
             .with_description("Total change notifications processed")
             .build();
 
+        #[cfg(feature = "gateway")]
         let notification_latency = meter
             .f64_histogram("cluster.reactor.notification_latency")
             .with_description("Change notification processing latency in seconds")
@@ -77,7 +78,9 @@ impl ClusterMetrics {
             nodes_dead,
             leader_election_attempts,
             is_leader,
+            #[cfg(feature = "gateway")]
             notifications_processed,
+            #[cfg(feature = "gateway")]
             notification_latency,
         }
     }
@@ -118,22 +121,17 @@ pub fn set_is_leader(role: &str, is_leader: bool) {
     );
 }
 
-// Reactor metrics — only called from `realtime` (gateway-side).
-#[cfg(feature = "otel")]
-#[allow(dead_code)]
+#[cfg(all(feature = "otel", feature = "gateway"))]
 pub fn record_notification_processed(table: &str) {
     metrics()
         .notifications_processed
         .add(1, &[KeyValue::new("table", table.to_string())]);
 }
 
-#[cfg(feature = "otel")]
-#[allow(dead_code)]
+#[cfg(all(feature = "otel", feature = "gateway"))]
 pub fn record_notification_latency(latency_secs: f64) {
     metrics().notification_latency.record(latency_secs, &[]);
 }
-
-// --- No-op stubs when otel is disabled ---
 
 #[cfg(not(feature = "otel"))]
 #[inline]
@@ -151,12 +149,10 @@ pub fn record_leader_election_attempt(_role: &str, _acquired: bool) {}
 #[inline]
 pub fn set_is_leader(_role: &str, _is_leader: bool) {}
 
-#[cfg(not(feature = "otel"))]
+#[cfg(all(not(feature = "otel"), feature = "gateway"))]
 #[inline]
-#[allow(dead_code)]
 pub fn record_notification_processed(_table: &str) {}
 
-#[cfg(not(feature = "otel"))]
+#[cfg(all(not(feature = "otel"), feature = "gateway"))]
 #[inline]
-#[allow(dead_code)]
 pub fn record_notification_latency(_latency_secs: f64) {}

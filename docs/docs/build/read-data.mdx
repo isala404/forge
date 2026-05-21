@@ -36,7 +36,7 @@ Cache keys are content-addressable: function name + argument hash. Same query wi
 | `timeout` | `u64` | none | Statement timeout in seconds |
 | `require_role("name")` | `string` | none | Require specific role (returns 403 if missing) |
 | `rate_limit(...)` | config | none | Rate limiting configuration |
-| `tables` | `["t1", "t2"]` | auto | Explicit table dependencies (for dynamic SQL) |
+| `tables("t1", "t2")` | list | auto | Explicit table dependencies (for dynamic SQL) |
 | `log` | `"level"` | none | Log level (`trace`, `debug`, `info`, `warn`, `error`, `off`) |
 
 ### Rate Limit Configuration
@@ -150,7 +150,7 @@ pub async fn list_products(ctx: &QueryContext) -> Result<Vec<Product>> { ... }
 When SQL is constructed dynamically, the macro cannot extract table dependencies. Specify them explicitly for real-time subscriptions.
 
 ```rust
-#[forge::query(tables = ["users", "orders"])]
+#[forge::query(tables("users", "orders"))]
 pub async fn search(ctx: &QueryContext, table: String, term: String) -> Result<Vec<Row>> {
     let sql = format!("SELECT * FROM {} WHERE name ILIKE $1", table);
     sqlx::query_as(&sql)

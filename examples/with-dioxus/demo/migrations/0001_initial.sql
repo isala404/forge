@@ -1,5 +1,3 @@
--- @up
-
 CREATE TYPE user_role AS ENUM ('admin', 'member', 'guest');
 
 CREATE TABLE users (
@@ -65,21 +63,7 @@ VALUES (
     'demo@example.com',
     'Demo User',
     'member',
-    '$2b$10$wsSHkdSbkLT7f5nFtH5Wt.JJrrM8IoANoX0sd7SdGRRmL217/LxZm',
+    '$argon2id$v=19$m=19456,t=2,p=1$AjozmE60AjazLA3S4LXuvw$v+Jo+M5NZ+Q1K4ro1pDS4Hx0/cnHJ3uvmJC7RiNJkUg',
     NOW(),
     NOW()
 );
-
--- @down
-
-SELECT forge_disable_reactivity('webhook_events');
-SELECT forge_disable_reactivity('trades');
-SELECT forge_disable_reactivity('iss_location');
-SELECT forge_disable_reactivity('users');
-DROP TABLE IF EXISTS demo_stats;
-DROP TABLE IF EXISTS webhook_events;
-DROP TABLE IF EXISTS trades;
-DROP TABLE IF EXISTS iss_location;
-DROP INDEX IF EXISTS idx_users_email;
-DROP TABLE IF EXISTS users;
-DROP TYPE IF EXISTS user_role;

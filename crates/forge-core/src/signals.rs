@@ -17,8 +17,6 @@ pub enum SignalEventType {
     RpcCall,
     /// Custom event from user code.
     Track,
-    /// User identification (links anonymous activity to a user).
-    Identify,
     /// Session started.
     SessionStart,
     /// Session ended (timeout or explicit close).
@@ -27,8 +25,6 @@ pub enum SignalEventType {
     Error,
     /// Diagnostic breadcrumb for error reproduction.
     Breadcrumb,
-    /// Web Vitals performance metric (LCP, CLS, INP, FCP, TTFB, etc.).
-    WebVital,
     /// Background execution (job, cron, workflow step, webhook, daemon tick).
     ServerExecution,
 }
@@ -39,12 +35,10 @@ impl std::fmt::Display for SignalEventType {
             Self::PageView => write!(f, "page_view"),
             Self::RpcCall => write!(f, "rpc_call"),
             Self::Track => write!(f, "track"),
-            Self::Identify => write!(f, "identify"),
             Self::SessionStart => write!(f, "session_start"),
             Self::SessionEnd => write!(f, "session_end"),
             Self::Error => write!(f, "error"),
             Self::Breadcrumb => write!(f, "breadcrumb"),
-            Self::WebVital => write!(f, "web_vital"),
             Self::ServerExecution => write!(f, "server_execution"),
         }
     }
@@ -240,6 +234,26 @@ pub struct UtmParams {
     pub content: Option<String>,
 }
 
+/// Unified signal ingestion payload. Discriminated by `type` field.
+///
+/// Clients send a single `POST /_api/signal` with one of three subtypes:
+/// - `event`: batch of custom/tracked events
+/// - `view`: page view with UTM and referrer context
+/// - `report`: diagnostic error report (bypasses DNT)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload")]
+pub enum SignalPayload {
+    /// Batch of custom events from the client tracker.
+    #[serde(rename = "event")]
+    Event(SignalEventBatch),
+    /// Page view event with URL, referrer, and UTM parameters.
+    #[serde(rename = "view")]
+    View(PageViewPayload),
+    /// Diagnostic error report. Bypasses DNT/Sec-GPC checks.
+    #[serde(rename = "report")]
+    Report(DiagnosticReport),
+}
+
 /// Batch of events sent from client trackers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignalEventBatch {
@@ -269,14 +283,6 @@ pub struct PageViewPayload {
     pub utm_term: Option<String>,
     pub utm_content: Option<String>,
     pub correlation_id: Option<String>,
-}
-
-/// User identification payload.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IdentifyPayload {
-    pub user_id: String,
-    #[serde(default)]
-    pub traits: serde_json::Value,
 }
 
 /// Diagnostic error report from client.
@@ -313,35 +319,6 @@ pub struct ClientContext {
     pub session_id: Option<String>,
 }
 
-/// Batch of Web Vitals / navigation metrics from a client tracker.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WebVitalBatch {
-    pub vitals: Vec<WebVitalEntry>,
-    pub context: Option<ClientContext>,
-}
-
-/// A single Web Vitals sample (LCP, CLS, INP, FCP, TTFB, navigation, etc.).
-///
-/// `name` is the metric name (e.g. "lcp", "cls", "inp", "fcp", "ttfb",
-/// "navigation", "long_task"). `value` is the numeric measurement (ms for
-/// timings, unitless for CLS, etc.). Optional fields carry diagnostic
-/// detail (rating, navigation type, attribution).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WebVitalEntry {
-    pub name: String,
-    pub value: f64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rating: Option<String>,
-    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
-    pub attribution: serde_json::Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub correlation_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub page_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
-}
-
 /// Response from signal ingestion endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignalResponse {
@@ -360,12 +337,10 @@ mod tests {
         assert_eq!(SignalEventType::PageView.to_string(), "page_view");
         assert_eq!(SignalEventType::RpcCall.to_string(), "rpc_call");
         assert_eq!(SignalEventType::Track.to_string(), "track");
-        assert_eq!(SignalEventType::Identify.to_string(), "identify");
         assert_eq!(SignalEventType::SessionStart.to_string(), "session_start");
         assert_eq!(SignalEventType::SessionEnd.to_string(), "session_end");
         assert_eq!(SignalEventType::Error.to_string(), "error");
         assert_eq!(SignalEventType::Breadcrumb.to_string(), "breadcrumb");
-        assert_eq!(SignalEventType::WebVital.to_string(), "web_vital");
         assert_eq!(
             SignalEventType::ServerExecution.to_string(),
             "server_execution"
@@ -378,12 +353,10 @@ mod tests {
             SignalEventType::PageView,
             SignalEventType::RpcCall,
             SignalEventType::Track,
-            SignalEventType::Identify,
             SignalEventType::SessionStart,
             SignalEventType::SessionEnd,
             SignalEventType::Error,
             SignalEventType::Breadcrumb,
-            SignalEventType::WebVital,
             SignalEventType::ServerExecution,
         ];
 
@@ -576,28 +549,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn identify_payload_deserializes_with_traits() {
-        let json = r#"{
-            "user_id": "user-42",
-            "traits": {"plan": "pro", "team_size": 5}
-        }"#;
-
-        let payload: IdentifyPayload = serde_json::from_str(json).unwrap();
-        assert_eq!(payload.user_id, "user-42");
-        assert_eq!(payload.traits["plan"], "pro");
-        assert_eq!(payload.traits["team_size"], 5);
-    }
-
-    #[tokio::test]
-    async fn identify_payload_deserializes_without_traits() {
-        let json = r#"{"user_id": "user-99"}"#;
-
-        let payload: IdentifyPayload = serde_json::from_str(json).unwrap();
-        assert_eq!(payload.user_id, "user-99");
-        assert_eq!(payload.traits, serde_json::Value::Null);
-    }
-
-    #[tokio::test]
     async fn client_context_deserializes_with_all_fields_none() {
         let json = r#"{
             "page_url": null,
@@ -609,5 +560,238 @@ mod tests {
         assert!(ctx.page_url.is_none());
         assert!(ctx.referrer.is_none());
         assert!(ctx.session_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn signal_payload_deserializes_event_variant() {
+        let json = r#"{
+            "type": "event",
+            "payload": {
+                "events": [{"event": "click"}],
+                "context": null
+            }
+        }"#;
+
+        let payload: SignalPayload = serde_json::from_str(json).unwrap();
+        assert!(matches!(payload, SignalPayload::Event(_)));
+    }
+
+    #[tokio::test]
+    async fn signal_payload_deserializes_view_variant() {
+        let json = r#"{
+            "type": "view",
+            "payload": {
+                "url": "https://example.com/page"
+            }
+        }"#;
+
+        let payload: SignalPayload = serde_json::from_str(json).unwrap();
+        assert!(matches!(payload, SignalPayload::View(_)));
+    }
+
+    #[tokio::test]
+    async fn signal_payload_deserializes_report_variant() {
+        let json = r#"{
+            "type": "report",
+            "payload": {
+                "errors": [{"message": "boom"}]
+            }
+        }"#;
+
+        let payload: SignalPayload = serde_json::from_str(json).unwrap();
+        assert!(matches!(payload, SignalPayload::Report(_)));
+    }
+
+    #[tokio::test]
+    async fn server_execution_marks_status_and_clears_client_context() {
+        // Server-initiated runs have no visitor/UA/IP/session — confirm the
+        // constructor leaves those slots empty so the events table doesn't
+        // accidentally attribute background work to a request.
+        let event = SignalEvent::server_execution("send_email", "job", 1500, true, None);
+
+        assert_eq!(event.event_type, SignalEventType::ServerExecution);
+        assert_eq!(event.event_name.as_deref(), Some("send_email"));
+        assert_eq!(event.function_name.as_deref(), Some("send_email"));
+        assert_eq!(event.function_kind.as_deref(), Some("job"));
+        assert_eq!(event.duration_ms, Some(1500));
+        assert_eq!(event.status.as_deref(), Some("success"));
+        assert!(event.error_message.is_none());
+
+        // Must NOT carry any client/session attribution.
+        assert!(event.client_ip.is_none());
+        assert!(event.user_agent.is_none());
+        assert!(event.visitor_id.is_none());
+        assert!(event.session_id.is_none());
+        assert!(event.user_id.is_none());
+        assert!(event.tenant_id.is_none());
+        assert!(event.correlation_id.is_none());
+        assert!(!event.is_bot, "background runs are never flagged as bots");
+        assert_eq!(
+            event.properties,
+            serde_json::Value::Object(serde_json::Map::new())
+        );
+    }
+
+    #[tokio::test]
+    async fn server_execution_records_error_message_and_failure_status() {
+        let event = SignalEvent::server_execution(
+            "process_payment",
+            "workflow",
+            8000,
+            false,
+            Some("connection refused".to_string()),
+        );
+
+        assert_eq!(event.status.as_deref(), Some("error"));
+        assert_eq!(event.error_message.as_deref(), Some("connection refused"));
+        // error_stack/context are reserved for frontend reports — server
+        // executions only get a message.
+        assert!(event.error_stack.is_none());
+        assert!(event.error_context.is_none());
+    }
+
+    #[tokio::test]
+    async fn diagnostic_event_uses_track_type_and_threads_request_context() {
+        // Diagnostics (auth failure, rate limit hit, etc.) ride the Track
+        // event_type so the analytics table doesn't gain another partition;
+        // they MUST carry the request attribution the caller provides.
+        let user_id = Uuid::new_v4();
+        let props = serde_json::json!({"reason": "invalid_token"});
+
+        let event = SignalEvent::diagnostic(
+            "auth_failure",
+            props.clone(),
+            Some("10.0.0.5".to_string()),
+            Some("curl/8".to_string()),
+            Some("visitor-xyz".to_string()),
+            Some(user_id),
+            true,
+        );
+
+        assert_eq!(event.event_type, SignalEventType::Track);
+        assert_eq!(event.event_name.as_deref(), Some("auth_failure"));
+        assert_eq!(event.properties, props);
+        assert_eq!(event.client_ip.as_deref(), Some("10.0.0.5"));
+        assert_eq!(event.user_agent.as_deref(), Some("curl/8"));
+        assert_eq!(event.visitor_id.as_deref(), Some("visitor-xyz"));
+        assert_eq!(event.user_id, Some(user_id));
+        assert!(event.is_bot, "bot flag must round-trip");
+
+        // Diagnostics aren't RPC calls — function fields stay empty.
+        assert!(event.function_name.is_none());
+        assert!(event.function_kind.is_none());
+        assert!(event.duration_ms.is_none());
+        assert!(event.status.is_none());
+    }
+
+    #[tokio::test]
+    async fn diagnostic_event_tolerates_all_optional_context_missing() {
+        // Anonymous diagnostic (no IP/UA/visitor/user) must still produce a
+        // valid event — the worker paths that emit these often run in
+        // contexts with no request at all.
+        let event = SignalEvent::diagnostic(
+            "rate_limit_exceeded",
+            serde_json::Value::Null,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+
+        assert_eq!(event.event_type, SignalEventType::Track);
+        assert_eq!(event.event_name.as_deref(), Some("rate_limit_exceeded"));
+        assert_eq!(event.properties, serde_json::Value::Null);
+        assert!(event.client_ip.is_none());
+        assert!(event.user_agent.is_none());
+        assert!(!event.is_bot);
+    }
+
+    #[tokio::test]
+    async fn breadcrumb_data_defaults_to_null_when_absent() {
+        // Frontend trackers commonly omit `data` for trivial breadcrumbs;
+        // the #[serde(default)] must turn that into Value::Null rather than
+        // failing deserialization.
+        let json = r#"{"message": "form submitted"}"#;
+        let bc: Breadcrumb = serde_json::from_str(json).unwrap();
+        assert_eq!(bc.message, "form submitted");
+        assert_eq!(bc.data, serde_json::Value::Null);
+        assert!(bc.timestamp.is_none());
+    }
+
+    #[tokio::test]
+    async fn utm_params_default_is_all_none() {
+        // The Default impl is load-bearing — RPC handlers construct
+        // UtmParams::default() when the URL has no utm_* keys.
+        let u = UtmParams::default();
+        assert!(u.source.is_none());
+        assert!(u.medium.is_none());
+        assert!(u.campaign.is_none());
+        assert!(u.term.is_none());
+        assert!(u.content.is_none());
+    }
+
+    #[tokio::test]
+    async fn signal_payload_unknown_type_fails_deserialization() {
+        // Pin the discriminator behavior: an unknown `type` MUST be rejected
+        // so the ingestion handler doesn't silently drop misrouted payloads.
+        let json = r#"{"type": "bogus", "payload": {}}"#;
+        let err = serde_json::from_str::<SignalPayload>(json).unwrap_err();
+        // serde_json's wording around unknown variants includes the bad tag.
+        assert!(err.to_string().contains("bogus"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn signal_event_type_serializes_to_snake_case_json_string() {
+        // Display covers the human format; this pins the wire format.
+        let j = serde_json::to_string(&SignalEventType::ServerExecution).unwrap();
+        assert_eq!(j, "\"server_execution\"");
+        let j = serde_json::to_string(&SignalEventType::PageView).unwrap();
+        assert_eq!(j, "\"page_view\"");
+    }
+
+    #[tokio::test]
+    async fn signal_payload_round_trips_all_variants() {
+        let event_payload = SignalPayload::Event(SignalEventBatch {
+            events: vec![ClientEvent {
+                event: "test".to_string(),
+                properties: serde_json::Value::Null,
+                correlation_id: None,
+                timestamp: None,
+            }],
+            context: None,
+        });
+        let json = serde_json::to_string(&event_payload).unwrap();
+        let deserialized: SignalPayload = serde_json::from_str(&json).unwrap();
+        assert!(matches!(deserialized, SignalPayload::Event(_)));
+
+        let view_payload = SignalPayload::View(PageViewPayload {
+            url: "https://example.com".to_string(),
+            referrer: None,
+            title: None,
+            utm_source: None,
+            utm_medium: None,
+            utm_campaign: None,
+            utm_term: None,
+            utm_content: None,
+            correlation_id: None,
+        });
+        let json = serde_json::to_string(&view_payload).unwrap();
+        let deserialized: SignalPayload = serde_json::from_str(&json).unwrap();
+        assert!(matches!(deserialized, SignalPayload::View(_)));
+
+        let report_payload = SignalPayload::Report(DiagnosticReport {
+            errors: vec![DiagnosticError {
+                message: "test error".to_string(),
+                stack: None,
+                context: None,
+                correlation_id: None,
+                breadcrumbs: None,
+                page_url: None,
+            }],
+        });
+        let json = serde_json::to_string(&report_payload).unwrap();
+        let deserialized: SignalPayload = serde_json::from_str(&json).unwrap();
+        assert!(matches!(deserialized, SignalPayload::Report(_)));
     }
 }

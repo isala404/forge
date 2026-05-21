@@ -235,6 +235,46 @@ worker_capabilities = ["general"]
 
 The runtime binary does not provide a built-in `--config` flag. Kubernetes can scale deployments per capability using separate node pools or taints/tolerations with different `forge.toml` configs mounted via ConfigMaps.
 
+## Pool Sizing
+
+Every concurrent job holds one database connection for the duration of its execution. Size your pool to cover peak worker demand plus system overhead, or workers will stall waiting for a connection.
+
+**Formula:**
+
+```
+database.pool_size >= sum(workers per queue) + 6
+```
+
+The `+6` accounts for persistent system connections: the PostgreSQL change listener (reactivity), the leader advisory lock, the heartbeat loop, the health monitor, the migration lock, and a small headroom buffer. Gateway RPC handlers draw from the same pool but hold connections briefly; they can queue behind workers if the pool is tight.
+
+**Example** — default queue configuration (`default=8`, `workflows=4`, `cron=2`):
+
+```
+8 + 4 + 2 + 6 = 20 connections minimum
+```
+
+The default `database.pool_size` is 50, which comfortably covers the default queues. Increase it when you raise worker counts or add custom queues.
+
+```toml
+[worker.queues.default]
+workers = 16
+
+[worker.queues.workflows]
+workers = 8
+
+[worker.queues.cron]
+workers = 4
+
+[worker.queues.media]
+workers = 8
+
+# sum = 36, +6 overhead = 42 — round up for RPC headroom
+[database]
+pool_size = 50
+```
+
+Forge logs a warning at startup when `pool_size` is below the recommended minimum.
+
 ## Testing
 
 Test jobs execute without capability routing by default.

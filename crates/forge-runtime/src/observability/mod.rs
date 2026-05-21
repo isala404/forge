@@ -19,8 +19,10 @@ mod telemetry;
 pub use db::{extract_table_name, instrumented_query, record_pool_metrics, record_query_duration};
 #[cfg(feature = "otel")]
 pub use metrics::{
-    ActiveConnectionsGauge, FnMetrics, HttpMetrics, JobMetrics, record_fn_execution,
-    record_http_request, record_job_execution, set_active_connections,
+    ActiveConnectionsGauge, FnCacheMetrics, FnMetrics, HttpMetrics, JobMetrics, NotifyMetrics,
+    SubscriptionMetrics, WorkflowSchedulerMetrics, record_fn_cache, record_fn_execution,
+    record_http_request, record_job_execution, record_lost_claim, record_notify_payload_bytes,
+    record_subscription_counts, record_workflow_scheduler_duration, set_active_connections,
 };
 #[cfg(feature = "otel")]
 pub use telemetry::{
@@ -93,8 +95,6 @@ mod stub {
         tracing_subscriber::EnvFilter::new("info")
     }
 
-    // --- Recording stubs (compile to nothing) ---
-
     #[inline]
     pub fn record_pool_metrics(_pool: &PgPool) {}
 
@@ -102,16 +102,38 @@ mod stub {
     pub fn record_query_duration(_operation: &str, _duration: Duration) {}
 
     #[inline]
-    pub fn record_fn_execution(_function: &str, _kind: &str, _success: bool, _duration_secs: f64) {}
+    pub fn record_fn_execution(
+        _function: &str,
+        _kind: &str,
+        _success: bool,
+        _cached: bool,
+        _duration_secs: f64,
+    ) {
+    }
+
+    #[inline]
+    pub fn record_fn_cache(_function: &str, _hit: bool) {}
 
     #[inline]
     pub fn record_http_request(_method: &str, _path: &str, _status: u16, _duration_secs: f64) {}
 
     #[inline]
-    pub fn record_job_execution(_job_type: &str, _status: &str, _duration_secs: f64) {}
+    pub fn record_job_execution(_job_type: &str, _status: &'static str, _duration_secs: f64) {}
 
     #[inline]
-    pub fn set_active_connections(_connection_type: &str, _delta: i64) {}
+    pub fn record_lost_claim(_job_type: &str) {}
+
+    #[inline]
+    pub fn set_active_connections(_connection_type: &'static str, _delta: i64) {}
+
+    #[inline]
+    pub fn record_notify_payload_bytes(_channel: &str, _bytes: usize) {}
+
+    #[inline]
+    pub fn record_subscription_counts(_subscribers: usize, _groups: usize, _tables: usize) {}
+
+    #[inline]
+    pub fn record_workflow_scheduler_duration(_duration_secs: f64) {}
 
     pub fn extract_table_name(_sql: &str) -> Option<&str> {
         None
@@ -133,6 +155,8 @@ mod stub {
 #[cfg(not(feature = "otel"))]
 pub use stub::{
     TelemetryConfig, TelemetryError, build_env_filter, extract_table_name, init_telemetry,
-    instrumented_query, record_fn_execution, record_http_request, record_job_execution,
-    record_pool_metrics, record_query_duration, set_active_connections, shutdown_telemetry,
+    instrumented_query, record_fn_cache, record_fn_execution, record_http_request,
+    record_job_execution, record_lost_claim, record_notify_payload_bytes, record_pool_metrics,
+    record_query_duration, record_subscription_counts, record_workflow_scheduler_duration,
+    set_active_connections, shutdown_telemetry,
 };

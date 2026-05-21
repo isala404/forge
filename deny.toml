@@ -1,0 +1,55 @@
+[graph]
+all-features = true
+
+[advisories]
+yanked = "warn"
+# `workspace` only flags unmaintained crates that are direct workspace deps,
+# which keeps cargo-deny focused on issues we can act on. The deeper transitive
+# coverage is handled by cargo-audit (see `.cargo/audit.toml`).
+unmaintained = "workspace"
+ignore = [
+    # RUSTSEC-2023-0071 — Marvin Attack on `rsa` 0.x. No fixed upstream version
+    # exists. Reaches us only via `sqlx-mysql` (transitive of sqlx-macros; the
+    # mysql feature is not enabled) and `jsonwebtoken`. Neither path performs
+    # RSA decryption with a remotely-supplied ciphertext, so the timing
+    # sidechannel is not exploitable in our stack. Drop when `rsa` ships a
+    # constant-time fix.
+    "RUSTSEC-2023-0071",
+]
+
+[licenses]
+# Workspace-internal crates (examples, benchmarks) are unpublished and do not
+# need a license expression.
+private = { ignore = true }
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+[[licenses.clarify]]
+name = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# `forge = { workspace = true }` resolves to a path dep with no version, which
+# cargo-deny treats as `*`. That is fine for in-tree path deps.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

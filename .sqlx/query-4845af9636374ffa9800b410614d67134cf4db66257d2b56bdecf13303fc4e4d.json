@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE forge_jobs\n        SET status = 'cancel_requested',\n            cancel_requested_at = NOW(),\n            cancel_reason = COALESCE($2, cancel_reason)\n        WHERE id = $1 AND status = 'running'\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4845af9636374ffa9800b410614d67134cf4db66257d2b56bdecf13303fc4e4d"
+}

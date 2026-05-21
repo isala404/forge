@@ -3,75 +3,88 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use super::bridge::WORKFLOW_RESUME_JOB;
 use super::registry::WorkflowRegistry;
 use super::state::{WorkflowRecord, WorkflowStepRecord};
+use crate::jobs::{JobQueue, JobRecord};
 use forge_core::CircuitBreakerClient;
-use forge_core::function::WorkflowDispatch;
+use forge_core::function::{KvHandle, WorkflowDispatch};
+use forge_core::job::JobPriority;
 use forge_core::workflow::{CompensationHandler, StepStatus, WorkflowContext, WorkflowStatus};
 
 /// Workflow execution result.
 #[derive(Debug)]
 pub enum WorkflowResult {
-    /// Workflow completed successfully.
     Completed(serde_json::Value),
-    /// Workflow is waiting for an external event.
-    Waiting { event_type: String },
-    /// Workflow failed.
-    Failed { error: String },
-    /// Workflow was compensated.
-    Compensated,
+    Suspended {
+        reason: String,
+    },
+    Failed {
+        error: String,
+    },
+    Blocked {
+        status: forge_core::workflow::WorkflowStatus,
+        reason: String,
+    },
 }
 
-/// Compensation state for a running workflow.
+/// In-memory compensation state for a running workflow.
 struct CompensationState {
     handlers: HashMap<String, CompensationHandler>,
     completed_steps: Vec<String>,
 }
 
-/// Persisted compensation metadata. Survives process restarts.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CompensationMetadata {
-    /// Step names that registered compensation handlers, in completion order.
-    compensatable_steps: Vec<String>,
-    /// All completed steps in completion order.
-    completed_steps: Vec<String>,
+/// State needed when resuming a workflow from sleep/wait.
+struct ResumeState {
+    started_at: chrono::DateTime<chrono::Utc>,
+    from_sleep: bool,
 }
 
 /// Executes workflows.
 pub struct WorkflowExecutor {
     registry: Arc<WorkflowRegistry>,
     pool: sqlx::PgPool,
+    job_queue: JobQueue,
     http_client: CircuitBreakerClient,
-    /// Compensation state for active workflows (run_id -> state).
     compensation_state: Arc<RwLock<HashMap<Uuid, CompensationState>>>,
+    kv: Option<Arc<dyn KvHandle>>,
 }
 
 impl WorkflowExecutor {
-    /// Create a new workflow executor.
     pub fn new(
         registry: Arc<WorkflowRegistry>,
         pool: sqlx::PgPool,
+        job_queue: JobQueue,
         http_client: CircuitBreakerClient,
     ) -> Self {
         Self {
             registry,
             pool,
+            job_queue,
             http_client,
             compensation_state: Arc::new(RwLock::new(HashMap::new())),
+            kv: None,
         }
     }
 
+    pub fn with_kv(mut self, kv: Arc<dyn KvHandle>) -> Self {
+        self.kv = Some(kv);
+        self
+    }
+
     /// Start a new workflow on the active version.
-    /// Returns immediately with the run_id; workflow executes in the background.
+    /// Inserts the workflow row and enqueues a `$workflow_resume` job atomically
+    /// in a single transaction so a crash between the two cannot leave an
+    /// orphaned workflow row without a corresponding resume job.
     pub async fn start<I: serde::Serialize>(
         &self,
         workflow_name: &str,
         input: I,
         owner_subject: Option<String>,
+        trace_id: Option<String>,
     ) -> forge_core::Result<Uuid> {
         let entry = self.registry.get_active(workflow_name).ok_or_else(|| {
             forge_core::ForgeError::NotFound(format!(
@@ -82,98 +95,146 @@ impl WorkflowExecutor {
 
         let input_value = serde_json::to_value(input)?;
 
-        let record = WorkflowRecord::new(
+        let mut record = WorkflowRecord::new(
             workflow_name,
             entry.info.version,
             entry.info.signature,
-            input_value.clone(),
+            input_value,
             owner_subject,
         );
+        if let Some(tid) = trace_id {
+            record = record.with_trace_id(tid);
+        }
         let run_id = record.id;
 
-        // Clone entry data for background execution
-        let entry_info = entry.info.clone();
-        let entry_handler = entry.handler.clone();
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(forge_core::ForgeError::Database)?;
 
-        // Persist workflow record
-        self.save_workflow(&record).await?;
+        Self::insert_workflow_record(&mut tx, &record).await?;
 
-        // Execute workflow in background
-        let registry = self.registry.clone();
-        let pool = self.pool.clone();
-        let http_client = self.http_client.clone();
-        let compensation_state = self.compensation_state.clone();
-
-        tokio::spawn(async move {
-            let executor = WorkflowExecutor {
-                registry,
-                pool,
-                http_client,
-                compensation_state,
-            };
-            let entry = super::registry::WorkflowEntry {
-                info: entry_info,
-                handler: entry_handler,
-            };
-            if let Err(e) = executor.execute_workflow(run_id, &entry, input_value).await {
-                tracing::error!(
-                    workflow_run_id = %run_id,
-                    error = %e,
-                    "Workflow execution failed"
-                );
-            }
+        // Enqueue a resume job in the same transaction so the worker only sees
+        // it once the workflow row is committed.
+        let resume_input = serde_json::json!({
+            "run_id": run_id.to_string(),
+            "from_sleep": false,
         });
+        let job = JobRecord::new(
+            WORKFLOW_RESUME_JOB.to_string(),
+            resume_input,
+            JobPriority::High,
+            3,
+        )
+        .with_capability(forge_core::config::WORKFLOWS_QUEUE);
+        self.job_queue
+            .enqueue_in_conn(&mut tx, job)
+            .await
+            .map_err(forge_core::ForgeError::Database)?;
+
+        tx.commit()
+            .await
+            .map_err(forge_core::ForgeError::Database)?;
 
         Ok(run_id)
     }
 
-    /// Execute a workflow.
     async fn execute_workflow(
         &self,
         run_id: Uuid,
         entry: &super::registry::WorkflowEntry,
         input: serde_json::Value,
+        resume: Option<ResumeState>,
+        owner_subject: Option<String>,
     ) -> forge_core::Result<WorkflowResult> {
-        // Update status to running
-        self.update_workflow_status(run_id, WorkflowStatus::Running)
-            .await?;
+        self.claim_for_execution(run_id).await?;
 
-        // Create workflow context
-        let mut ctx = WorkflowContext::new(
-            run_id,
-            entry.info.name.to_string(),
-            self.pool.clone(),
-            self.http_client.clone(),
-        );
+        let signal_label = if resume.is_some() {
+            "workflow_resume"
+        } else {
+            "workflow"
+        };
+
+        let mut ctx = match resume {
+            Some(rs) => {
+                let step_records = self.get_workflow_steps(run_id).await?;
+                let mut step_states = HashMap::new();
+                for step in step_records {
+                    step_states.insert(
+                        step.step_name.clone(),
+                        forge_core::workflow::StepState {
+                            name: step.step_name,
+                            status: step.status,
+                            result: step.result,
+                            error: step.error,
+                            started_at: step.started_at,
+                            completed_at: step.completed_at,
+                        },
+                    );
+                }
+                let saved_state = self.load_saved_state(run_id).await?;
+                let mut c = WorkflowContext::resumed(
+                    run_id,
+                    entry.info.name.to_string(),
+                    rs.started_at,
+                    self.pool.clone(),
+                    self.http_client.clone(),
+                )
+                .with_step_states(step_states)
+                .with_saved_state(saved_state);
+                if rs.from_sleep {
+                    c = c.with_resumed_from_sleep();
+                }
+                c
+            }
+            None => WorkflowContext::new(
+                run_id,
+                entry.info.name.to_string(),
+                self.pool.clone(),
+                self.http_client.clone(),
+            ),
+        };
+        if let Some(ref kv) = self.kv {
+            ctx = ctx.with_kv(Arc::clone(kv));
+        }
+        if let Some(ref subject) = owner_subject {
+            let auth = if let Ok(uuid) = uuid::Uuid::parse_str(subject) {
+                forge_core::AuthContext::authenticated(
+                    uuid,
+                    Vec::new(),
+                    std::collections::HashMap::new(),
+                )
+            } else {
+                let mut claims = std::collections::HashMap::new();
+                claims.insert(
+                    "sub".to_string(),
+                    serde_json::Value::String(subject.clone()),
+                );
+                forge_core::AuthContext::authenticated_without_uuid(Vec::new(), claims)
+            };
+            ctx = ctx.with_auth(auth);
+        }
         ctx.set_http_timeout(entry.info.http_timeout);
 
-        // Execute workflow with timeout
         let handler = entry.handler.clone();
         let exec_start = std::time::Instant::now();
         let result = tokio::time::timeout(entry.info.timeout, handler(&ctx, input)).await;
         let exec_duration_ms = exec_start.elapsed().as_millis().min(i32::MAX as u128) as i32;
 
-        // Capture compensation state after execution
-        let compensation_state = CompensationState {
+        let comp = CompensationState {
             handlers: ctx.compensation_handlers(),
             completed_steps: ctx.completed_steps_reversed().into_iter().rev().collect(),
         };
-        self.persist_compensation_metadata(run_id, &compensation_state)
-            .await?;
-        self.compensation_state
-            .write()
-            .await
-            .insert(run_id, compensation_state);
+        self.compensation_state.write().await.insert(run_id, comp);
 
         match result {
             Ok(Ok(output)) => {
-                // Mark as completed, clean up compensation state
                 self.complete_workflow(run_id, output.clone()).await?;
-                self.clear_compensation_metadata(run_id).await?;
                 self.compensation_state.write().await.remove(&run_id);
                 crate::signals::emit_server_execution(
                     entry.info.name,
-                    "workflow",
+                    signal_label,
                     exec_duration_ms,
                     true,
                     None,
@@ -181,20 +242,29 @@ impl WorkflowExecutor {
                 Ok(WorkflowResult::Completed(output))
             }
             Ok(Err(e)) => {
-                // Check if this is a suspension (not a real failure)
-                if matches!(e, forge_core::ForgeError::WorkflowSuspended) {
+                // Suspension is signaled via a typed error variant. Match on
+                // the variant directly — never inspect message text — and
+                // handle it before any failure-mapping path so it never
+                // surfaces as an internal error to callers.
+                if matches!(e, forge_core::ForgeError::WorkflowSuspended(_)) {
+                    let suspend_reason = ctx.take_suspend_reason();
                     self.persist_saved_state(run_id, &ctx.take_saved_state())
                         .await?;
-                    return Ok(WorkflowResult::Waiting {
-                        event_type: "timer".to_string(),
-                    });
+                    let reason = match suspend_reason {
+                        Some(r) if r.is_sleep() => "sleep".to_string(),
+                        Some(r) => r
+                            .event_name()
+                            .map(|n| format!("waiting_event:{n}"))
+                            .unwrap_or_else(|| "suspended".to_string()),
+                        None => "suspended".to_string(),
+                    };
+                    return Ok(WorkflowResult::Suspended { reason });
                 }
-                // Mark as failed - compensation can be triggered via cancel
                 let err_str = e.to_string();
                 self.fail_workflow(run_id, &err_str).await?;
                 crate::signals::emit_server_execution(
                     entry.info.name,
-                    "workflow",
+                    signal_label,
                     exec_duration_ms,
                     false,
                     Some(err_str.clone()),
@@ -202,11 +272,10 @@ impl WorkflowExecutor {
                 Ok(WorkflowResult::Failed { error: err_str })
             }
             Err(_) => {
-                // Timeout
                 self.fail_workflow(run_id, "Workflow timed out").await?;
                 crate::signals::emit_server_execution(
                     entry.info.name,
-                    "workflow",
+                    signal_label,
                     exec_duration_ms,
                     false,
                     Some("Workflow timed out".to_string()),
@@ -218,139 +287,14 @@ impl WorkflowExecutor {
         }
     }
 
-    /// Execute a resumed workflow with step states loaded from the database.
-    async fn execute_workflow_resumed(
-        &self,
-        run_id: Uuid,
-        entry: &super::registry::WorkflowEntry,
-        input: serde_json::Value,
-        started_at: chrono::DateTime<chrono::Utc>,
-        from_sleep: bool,
-    ) -> forge_core::Result<WorkflowResult> {
-        // Update status to running
-        self.update_workflow_status(run_id, WorkflowStatus::Running)
-            .await?;
-
-        // Load step states from database
-        let step_records = self.get_workflow_steps(run_id).await?;
-        let mut step_states = std::collections::HashMap::new();
-        for step in step_records {
-            let status = step.status;
-            step_states.insert(
-                step.step_name.clone(),
-                forge_core::workflow::StepState {
-                    name: step.step_name,
-                    status,
-                    result: step.result,
-                    error: step.error,
-                    started_at: step.started_at,
-                    completed_at: step.completed_at,
-                },
-            );
-        }
-
-        // Load user-defined saved state
-        let saved_state = self.load_saved_state(run_id).await?;
-
-        // Create resumed workflow context with step states and saved state
-        let mut ctx = WorkflowContext::resumed(
-            run_id,
-            entry.info.name.to_string(),
-            started_at,
-            self.pool.clone(),
-            self.http_client.clone(),
-        )
-        .with_step_states(step_states)
-        .with_saved_state(saved_state);
-        ctx.set_http_timeout(entry.info.http_timeout);
-
-        // If resuming from a sleep timer, mark the context so sleep() returns immediately
-        if from_sleep {
-            ctx = ctx.with_resumed_from_sleep();
-        }
-
-        // Execute workflow with timeout
-        let handler = entry.handler.clone();
-        let exec_start = std::time::Instant::now();
-        let result = tokio::time::timeout(entry.info.timeout, handler(&ctx, input)).await;
-        let exec_duration_ms = exec_start.elapsed().as_millis().min(i32::MAX as u128) as i32;
-
-        // Capture compensation state after execution
-        let compensation_state = CompensationState {
-            handlers: ctx.compensation_handlers(),
-            completed_steps: ctx.completed_steps_reversed().into_iter().rev().collect(),
-        };
-        self.persist_compensation_metadata(run_id, &compensation_state)
-            .await?;
-        self.compensation_state
-            .write()
-            .await
-            .insert(run_id, compensation_state);
-
-        match result {
-            Ok(Ok(output)) => {
-                // Mark as completed, clean up compensation state
-                self.complete_workflow(run_id, output.clone()).await?;
-                self.clear_compensation_metadata(run_id).await?;
-                self.compensation_state.write().await.remove(&run_id);
-                crate::signals::emit_server_execution(
-                    entry.info.name,
-                    "workflow_resume",
-                    exec_duration_ms,
-                    true,
-                    None,
-                );
-                Ok(WorkflowResult::Completed(output))
-            }
-            Ok(Err(e)) => {
-                // Check if this is a suspension (not a real failure)
-                if matches!(e, forge_core::ForgeError::WorkflowSuspended) {
-                    self.persist_saved_state(run_id, &ctx.take_saved_state())
-                        .await?;
-                    return Ok(WorkflowResult::Waiting {
-                        event_type: "timer".to_string(),
-                    });
-                }
-                // Mark as failed - compensation can be triggered via cancel
-                let err_str = e.to_string();
-                self.fail_workflow(run_id, &err_str).await?;
-                crate::signals::emit_server_execution(
-                    entry.info.name,
-                    "workflow_resume",
-                    exec_duration_ms,
-                    false,
-                    Some(err_str.clone()),
-                );
-                Ok(WorkflowResult::Failed { error: err_str })
-            }
-            Err(_) => {
-                // Timeout
-                self.fail_workflow(run_id, "Workflow timed out").await?;
-                crate::signals::emit_server_execution(
-                    entry.info.name,
-                    "workflow_resume",
-                    exec_duration_ms,
-                    false,
-                    Some("Workflow timed out".to_string()),
-                );
-                Ok(WorkflowResult::Failed {
-                    error: "Workflow timed out".to_string(),
-                })
-            }
-        }
-    }
-
-    /// Resume a workflow from where it left off.
     pub async fn resume(&self, run_id: Uuid) -> forge_core::Result<WorkflowResult> {
         self.resume_internal(run_id, false).await
     }
 
-    /// Resume a workflow after a sleep timer expired.
     pub async fn resume_from_sleep(&self, run_id: Uuid) -> forge_core::Result<WorkflowResult> {
         self.resume_internal(run_id, true).await
     }
 
-    /// Internal resume logic with version+signature validation.
     async fn resume_internal(
         &self,
         run_id: Uuid,
@@ -358,12 +302,19 @@ impl WorkflowExecutor {
     ) -> forge_core::Result<WorkflowResult> {
         let record = self.get_workflow(run_id).await?;
 
-        // Check if workflow is resumable
+        // Check if workflow is resumable. `Pending` is included so that runs
+        // started inside a transactional mutation — which only INSERT the row
+        // and enqueue a `$workflow_resume` job — pick up cleanly when the
+        // worker fires the bridge handler post-commit.
         match record.status {
-            WorkflowStatus::Running | WorkflowStatus::Waiting => {
-                // Can resume
-            }
-            status if status.is_terminal() || status.is_blocked() => {
+            WorkflowStatus::Pending
+            | WorkflowStatus::Running
+            | WorkflowStatus::Sleeping
+            | WorkflowStatus::Waiting
+            | WorkflowStatus::BlockedMissingVersion
+            | WorkflowStatus::BlockedSignatureMismatch
+            | WorkflowStatus::BlockedMissingHandler => {}
+            status if status.is_terminal() => {
                 return Err(forge_core::ForgeError::Validation(format!(
                     "Cannot resume workflow in {} state",
                     status.as_str()
@@ -372,40 +323,46 @@ impl WorkflowExecutor {
             _ => {}
         }
 
-        // Validate version+signature against registry
         match self.registry.validate_resume(
             &record.workflow_name,
             &record.workflow_version,
             &record.workflow_signature,
         ) {
             Ok(entry) => {
-                self.execute_workflow_resumed(
+                let resume = ResumeState {
+                    started_at: record.started_at,
+                    from_sleep,
+                };
+                self.execute_workflow(
                     run_id,
                     entry,
                     record.input,
-                    record.started_at,
-                    from_sleep,
+                    Some(resume),
+                    record.owner_subject,
                 )
                 .await
             }
             Err(reason) => {
-                // Mark run as blocked
-                let status = reason.to_status();
+                let blocked_status = reason.to_blocked_status();
                 let description = reason.description();
-                self.block_workflow(run_id, status, &description).await?;
+                self.block_workflow(run_id, blocked_status, &description)
+                    .await?;
                 tracing::warn!(
                     workflow_run_id = %run_id,
                     workflow_name = %record.workflow_name,
                     workflow_version = %record.workflow_version,
+                    status = %blocked_status.as_str(),
                     reason = %description,
-                    "Workflow run blocked"
+                    "Workflow run blocked (will retry on next deploy)"
                 );
-                Ok(WorkflowResult::Failed { error: description })
+                Ok(WorkflowResult::Blocked {
+                    status: blocked_status,
+                    reason: description,
+                })
             }
         }
     }
 
-    /// Get workflow status.
     pub async fn status(&self, run_id: Uuid) -> forge_core::Result<WorkflowRecord> {
         self.get_workflow(run_id).await
     }
@@ -413,57 +370,67 @@ impl WorkflowExecutor {
     /// Cancel a workflow and run compensation.
     ///
     /// Compensation follows the saga pattern: steps are undone in reverse order
-    /// of their completion. This ensures that dependencies are respected. For
-    /// example, if step A created a resource that step B modified, we must
-    /// undo B's modification before deleting A's resource.
+    /// of their completion. The run ends in Failed with error = "cancelled".
     ///
-    /// Compensation handlers receive the original step result, allowing them
-    /// to know exactly what to undo (e.g., refund the specific payment ID).
-    pub async fn cancel(&self, run_id: Uuid) -> forge_core::Result<()> {
-        self.update_workflow_status(run_id, WorkflowStatus::Compensating)
-            .await?;
-
-        // Get compensation state from memory, falling back to persisted metadata
-        let state = self.compensation_state.write().await.remove(&run_id);
-
-        if let Some(state) = state {
+    /// If compensation handlers are not in memory (e.g. after a process restart),
+    /// compensation cannot run. The workflow is failed with a clear reason so
+    /// operators know manual remediation is required. This is an honest limitation:
+    /// in-memory closures cannot survive restarts.
+    pub async fn cancel(&self, run_id: Uuid, reason: &str) -> forge_core::Result<()> {
+        if let Some(state) = self.compensation_state.write().await.remove(&run_id) {
             self.run_compensation(run_id, &state).await?;
+            let error = format!("cancelled: {reason}");
+            self.fail_workflow(run_id, &error).await?;
         } else {
-            // No in-memory state. Check persisted metadata for crash recovery.
-            let metadata = self.load_compensation_metadata(run_id).await?;
-            if let Some(metadata) = metadata {
-                // We have the step order from before the crash, but handlers
-                // are closures that can't survive a restart. Fail closed with
-                // enough context for operators to investigate.
-                let steps_needing_compensation = metadata
-                    .compensatable_steps
-                    .iter()
-                    .rev()
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let msg = format!(
-                    "Compensation handlers lost after restart. Steps requiring compensation (reverse order): [{}]",
-                    steps_needing_compensation.join(", ")
-                );
-                tracing::error!(workflow_run_id = %run_id, "{msg}");
-                self.fail_workflow(run_id, &msg).await?;
-                return Err(forge_core::ForgeError::InvalidState(msg));
-            } else {
-                let msg = "Compensation handlers unavailable and no persisted metadata found";
-                tracing::error!(workflow_run_id = %run_id, "{msg}");
-                self.fail_workflow(run_id, msg).await?;
-                return Err(forge_core::ForgeError::InvalidState(msg.to_string()));
-            }
+            tracing::error!(
+                workflow_run_id = %run_id,
+                "Compensation handlers lost (process restarted since workflow began); \
+                 manual remediation required for any side effects from completed steps"
+            );
+            let error = format!(
+                "cancelled: {reason} (compensation skipped: handlers lost on restart, manual remediation required)"
+            );
+            self.fail_workflow(run_id, &error).await?;
         }
-
-        self.clear_compensation_metadata(run_id).await?;
-        self.update_workflow_status(run_id, WorkflowStatus::Compensated)
-            .await?;
 
         Ok(())
     }
 
-    /// Run compensation handlers in reverse completion order.
+    /// Request asynchronous cancellation of a workflow run.
+    ///
+    /// Sets `cancel_requested_at` on the row, which fires a NOTIFY on
+    /// `forge_workflow_wakeup`. The scheduler picks the row up immediately,
+    /// claims it, and dispatches a `$workflow_resume` job that runs
+    /// compensation and ends the workflow in `failed` (with `error =
+    /// "cancelled: {reason}"`).
+    ///
+    /// For runs suspended on a long durable sleep this is the only way to
+    /// stop them before `wake_at` fires; latency from request to terminal
+    /// state is bounded by the NOTIFY round-trip plus one resume-job
+    /// dispatch, typically well under 50 ms in steady state.
+    ///
+    /// Returns `false` if the run is already in a terminal state or no row
+    /// matched.
+    pub async fn request_cancel(&self, run_id: Uuid, reason: &str) -> forge_core::Result<bool> {
+        let result = sqlx::query!(
+            r#"
+            UPDATE forge_workflow_runs
+            SET cancel_requested_at = NOW(),
+                cancel_reason = $2
+            WHERE id = $1
+              AND status IN ('pending', 'running', 'sleeping', 'waiting')
+              AND cancel_requested_at IS NULL
+            "#,
+            run_id,
+            reason,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(forge_core::ForgeError::Database)?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
     async fn run_compensation(
         &self,
         run_id: Uuid,
@@ -506,7 +473,6 @@ impl WorkflowExecutor {
         Ok(())
     }
 
-    /// Get workflow steps from database.
     async fn get_workflow_steps(
         &self,
         workflow_run_id: Uuid,
@@ -522,12 +488,12 @@ impl WorkflowExecutor {
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         rows.into_iter()
             .map(|row| {
                 let status = row.status.parse().map_err(|e| {
-                    forge_core::ForgeError::Database(format!(
+                    forge_core::ForgeError::internal(format!(
                         "Invalid step status '{}': {}",
                         row.status, e
                     ))
@@ -546,7 +512,6 @@ impl WorkflowExecutor {
             .collect()
     }
 
-    /// Update step status.
     async fn update_step_status(
         &self,
         workflow_run_id: Uuid,
@@ -565,71 +530,14 @@ impl WorkflowExecutor {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         Ok(())
     }
 
-    /// Persist compensation metadata to the database so it survives restarts.
-    async fn persist_compensation_metadata(
-        &self,
-        run_id: Uuid,
-        state: &CompensationState,
-    ) -> forge_core::Result<()> {
-        let metadata = CompensationMetadata {
-            compensatable_steps: state
-                .completed_steps
-                .iter()
-                .filter(|s| state.handlers.contains_key(*s))
-                .cloned()
-                .collect(),
-            completed_steps: state.completed_steps.clone(),
-        };
-        let json = serde_json::to_value(&metadata)
-            .map_err(|e| forge_core::ForgeError::Serialization(e.to_string()))?;
-        sqlx::query!(
-            r#"
-            UPDATE forge_workflow_runs
-            SET compensation_state = $1
-            WHERE id = $2
-            "#,
-            json,
-            run_id,
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
-        Ok(())
-    }
-
-    /// Load persisted compensation metadata from the database.
-    async fn load_compensation_metadata(
-        &self,
-        run_id: Uuid,
-    ) -> forge_core::Result<Option<CompensationMetadata>> {
-        let row = sqlx::query!(
-            r#"
-            SELECT compensation_state as "compensation_state?"
-            FROM forge_workflow_runs
-            WHERE id = $1
-            "#,
-            run_id,
-        )
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
-
-        match row.and_then(|r| r.compensation_state) {
-            Some(json) => {
-                let metadata: CompensationMetadata = serde_json::from_value(json)
-                    .map_err(|e| forge_core::ForgeError::Deserialization(e.to_string()))?;
-                Ok(Some(metadata))
-            }
-            None => Ok(None),
-        }
-    }
-
-    /// Persist user-defined saved_state to the database on suspension.
+    // forge_workflow_runs is a runtime-owned system table; offline .sqlx cache
+    // doesn't always include it.
+    #[allow(clippy::disallowed_methods)]
     async fn persist_saved_state(
         &self,
         run_id: Uuid,
@@ -640,26 +548,30 @@ impl WorkflowExecutor {
         }
         let json = serde_json::to_value(state)
             .map_err(|e| forge_core::ForgeError::Serialization(e.to_string()))?;
-        sqlx::query("UPDATE forge_workflow_runs SET saved_state = $1 WHERE id = $2")
-            .bind(json)
-            .bind(run_id)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        sqlx::query(
+            "INSERT INTO forge_workflow_state (run_id, saved_state, updated_at) \
+             VALUES ($1, $2, NOW()) \
+             ON CONFLICT (run_id) DO UPDATE SET saved_state = $2, updated_at = NOW()",
+        )
+        .bind(run_id)
+        .bind(json)
+        .execute(&self.pool)
+        .await
+        .map_err(forge_core::ForgeError::Database)?;
         Ok(())
     }
 
-    /// Load user-defined saved_state from the database on resume.
+    #[allow(clippy::disallowed_methods)]
     async fn load_saved_state(
         &self,
         run_id: Uuid,
     ) -> forge_core::Result<std::collections::HashMap<String, serde_json::Value>> {
         let row: Option<(serde_json::Value,)> =
-            sqlx::query_as("SELECT saved_state FROM forge_workflow_runs WHERE id = $1")
+            sqlx::query_as("SELECT saved_state FROM forge_workflow_state WHERE run_id = $1")
                 .bind(run_id)
                 .fetch_optional(&self.pool)
                 .await
-                .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+                .map_err(forge_core::ForgeError::Database)?;
 
         match row {
             Some((json,)) => serde_json::from_value(json)
@@ -668,31 +580,17 @@ impl WorkflowExecutor {
         }
     }
 
-    /// Clear compensation metadata after workflow completes or compensation finishes.
-    async fn clear_compensation_metadata(&self, run_id: Uuid) -> forge_core::Result<()> {
-        sqlx::query!(
-            r#"
-            UPDATE forge_workflow_runs
-            SET compensation_state = NULL
-            WHERE id = $1
-            "#,
-            run_id,
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
-        Ok(())
-    }
-
-    /// Save workflow record to database.
-    async fn save_workflow(&self, record: &WorkflowRecord) -> forge_core::Result<()> {
+    async fn insert_workflow_record(
+        conn: &mut sqlx::PgConnection,
+        record: &WorkflowRecord,
+    ) -> forge_core::Result<()> {
         sqlx::query!(
             r#"
             INSERT INTO forge_workflow_runs (
                 id, workflow_name, workflow_version, workflow_signature,
                 owner_subject, input, status, current_step,
-                step_results, started_at, trace_id
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                started_at, trace_id
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
             record.id,
             &record.workflow_name,
@@ -702,25 +600,24 @@ impl WorkflowExecutor {
             record.input as _,
             record.status.as_str(),
             record.current_step as _,
-            record.step_results as _,
             record.started_at,
             record.trace_id.as_deref(),
         )
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         Ok(())
     }
 
-    /// Get workflow record from database.
     async fn get_workflow(&self, run_id: Uuid) -> forge_core::Result<WorkflowRecord> {
         let row = sqlx::query!(
             r#"
             SELECT id, workflow_name, workflow_version, workflow_signature,
                    owner_subject, input, output, status, blocking_reason,
-                   resolution_reason, current_step, step_results, started_at,
-                   completed_at, error, trace_id
+                   resolution_reason, current_step, started_at,
+                   completed_at, error, trace_id,
+                   cancel_requested_at, cancel_reason
             FROM forge_workflow_runs
             WHERE id = $1
             "#,
@@ -728,14 +625,14 @@ impl WorkflowExecutor {
         )
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         let row = row.ok_or_else(|| {
             forge_core::ForgeError::NotFound(format!("Workflow run {} not found", run_id))
         })?;
 
         let status = row.status.parse().map_err(|e| {
-            forge_core::ForgeError::Database(format!(
+            forge_core::ForgeError::internal(format!(
                 "Invalid workflow status '{}': {}",
                 row.status, e
             ))
@@ -752,116 +649,42 @@ impl WorkflowExecutor {
             blocking_reason: row.blocking_reason,
             resolution_reason: row.resolution_reason,
             current_step: row.current_step,
-            step_results: row.step_results.unwrap_or_default(),
             started_at: row.started_at,
             completed_at: row.completed_at,
             error: row.error,
             trace_id: row.trace_id,
+            cancel_requested_at: row.cancel_requested_at,
+            cancel_reason: row.cancel_reason,
         })
     }
 
-    /// Get valid source states for a given target workflow status.
-    /// Enforces a state machine to prevent invalid transitions.
-    fn valid_source_states(target: &WorkflowStatus) -> &'static [&'static str] {
-        match target {
-            WorkflowStatus::Running => &["created", "waiting", "running"],
-            WorkflowStatus::Waiting => &["running"],
-            WorkflowStatus::Completed => &["running"],
-            WorkflowStatus::Compensating => &["running", "waiting", "failed"],
-            WorkflowStatus::Compensated => &["compensating"],
-            WorkflowStatus::Failed => &["running", "waiting", "compensating"],
-            WorkflowStatus::BlockedMissingVersion
-            | WorkflowStatus::BlockedSignatureMismatch
-            | WorkflowStatus::BlockedMissingHandler => &["waiting", "running", "created"],
-            WorkflowStatus::RetiredUnresumable | WorkflowStatus::CancelledByOperator => &[
-                "created",
-                "running",
-                "waiting",
-                "failed",
-                "blocked_missing_version",
-                "blocked_signature_mismatch",
-                "blocked_missing_handler",
-            ],
-            WorkflowStatus::Created => &[], // entry state only
-            // WorkflowStatus is #[non_exhaustive]; reject transitions to
-            // unrecognized future states until the runtime adds support.
-            _ => &[],
-        }
-    }
-
-    /// Update workflow status with state transition validation.
+    /// Atomically claim a workflow for execution (transition to Running).
     ///
-    /// Validates the transition in Rust before issuing the update to keep
-    /// SQL queries compile-time checked while still enforcing the state machine.
-    async fn update_workflow_status(
-        &self,
-        run_id: Uuid,
-        status: WorkflowStatus,
-    ) -> forge_core::Result<()> {
-        let valid_from = Self::valid_source_states(&status);
+    /// `'running'` is included so resume picks up a run that the scheduler has
+    /// already flipped to running as part of its claim-and-enqueue transaction.
+    /// Duplicate concurrent execution is prevented at higher layers: the job
+    /// queue's `FOR UPDATE SKIP LOCKED` ensures only one worker can hold a
+    /// given resume job, and the scheduler's row-locking UPDATE (or event
+    /// consume) ensures only one resume job is enqueued per wake event.
+    async fn claim_for_execution(&self, run_id: Uuid) -> forge_core::Result<()> {
+        let result = sqlx::query!(
+            "UPDATE forge_workflow_runs SET status = 'running' WHERE id = $1 AND status IN ('pending', 'sleeping', 'waiting', 'running')",
+            run_id,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(forge_core::ForgeError::Database)?;
 
-        if valid_from.is_empty() {
-            // Entry-only state (Created) – unconditional update.
-            sqlx::query!(
-                "UPDATE forge_workflow_runs SET status = $1 WHERE id = $2",
-                status.as_str(),
-                run_id,
-            )
-            .execute(&self.pool)
-            .await
-            .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
-        } else {
-            // Fetch current status, then atomically update only if the row
-            // still has the expected status, closing the TOCTOU window.
-            let current = sqlx::query_scalar!(
-                "SELECT status FROM forge_workflow_runs WHERE id = $1",
-                run_id,
-            )
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
-
-            let current_status = match current {
-                Some(ref s) if valid_from.contains(&s.as_str()) => s.clone(),
-                Some(_) => {
-                    return Err(forge_core::ForgeError::InvalidState(format!(
-                        "Cannot transition workflow {} to {:?}: invalid current state",
-                        run_id, status
-                    )));
-                }
-                None => {
-                    return Err(forge_core::ForgeError::NotFound(format!(
-                        "Workflow run {} not found",
-                        run_id
-                    )));
-                }
-            };
-
-            // Atomic check-and-set: WHERE includes the expected current status
-            // so a concurrent change causes 0 rows affected instead of a silent
-            // state machine violation.
-            let result = sqlx::query!(
-                "UPDATE forge_workflow_runs SET status = $1 WHERE id = $2 AND status = $3",
-                status.as_str(),
-                run_id,
-                current_status,
-            )
-            .execute(&self.pool)
-            .await
-            .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
-
-            if result.rows_affected() == 0 {
-                return Err(forge_core::ForgeError::InvalidState(format!(
-                    "Cannot transition workflow {} to {:?}: state changed concurrently",
-                    run_id, status
-                )));
-            }
+        if result.rows_affected() == 0 {
+            return Err(forge_core::ForgeError::InvalidState(format!(
+                "Cannot claim workflow {} for execution: invalid state or not found",
+                run_id
+            )));
         }
 
         Ok(())
     }
 
-    /// Mark workflow as completed (only from 'running' state).
     async fn complete_workflow(
         &self,
         run_id: Uuid,
@@ -874,7 +697,7 @@ impl WorkflowExecutor {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         if result.rows_affected() == 0 {
             return Err(forge_core::ForgeError::InvalidState(format!(
@@ -886,16 +709,15 @@ impl WorkflowExecutor {
         Ok(())
     }
 
-    /// Mark workflow as failed (only from valid states).
     async fn fail_workflow(&self, run_id: Uuid, error: &str) -> forge_core::Result<()> {
         let result = sqlx::query!(
-            "UPDATE forge_workflow_runs SET status = 'failed', error = $1, completed_at = NOW() WHERE id = $2 AND status IN ('running', 'waiting', 'compensating')",
+            "UPDATE forge_workflow_runs SET status = 'failed', error = $1, completed_at = NOW() WHERE id = $2 AND status IN ('running', 'sleeping', 'waiting', 'pending')",
             error,
             run_id,
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         if result.rows_affected() == 0 {
             return Err(forge_core::ForgeError::InvalidState(format!(
@@ -907,69 +729,28 @@ impl WorkflowExecutor {
         Ok(())
     }
 
-    /// Block a workflow run due to version/signature incompatibility.
     async fn block_workflow(
         &self,
         run_id: Uuid,
-        status: WorkflowStatus,
+        status: forge_core::workflow::WorkflowStatus,
         reason: &str,
     ) -> forge_core::Result<()> {
-        sqlx::query!(
-            "UPDATE forge_workflow_runs SET status = $1, blocking_reason = $2 WHERE id = $3 AND status IN ('waiting', 'running', 'created')",
-            status.as_str(),
-            reason,
-            run_id,
+        // Uses runtime query because the status value is dynamic and the
+        // sqlx offline cache doesn't have an entry for this parameterized form.
+        #[allow(clippy::disallowed_methods)]
+        sqlx::query(
+            "UPDATE forge_workflow_runs SET status = $1, error = $2 WHERE id = $3 AND status IN ('running', 'sleeping', 'waiting', 'pending')",
         )
+        .bind(status.as_str())
+        .bind(reason)
+        .bind(run_id)
         .execute(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         Ok(())
     }
 
-    /// Cancel a workflow run by operator decision. Terminal action that preserves audit trail.
-    pub async fn cancel_by_operator(&self, run_id: Uuid, reason: &str) -> forge_core::Result<()> {
-        let result = sqlx::query!(
-            "UPDATE forge_workflow_runs SET status = 'cancelled_by_operator', resolution_reason = $1, completed_at = NOW() WHERE id = $2 AND status NOT IN ('completed', 'compensated', 'cancelled_by_operator', 'retired_unresumable')",
-            reason,
-            run_id,
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
-
-        if result.rows_affected() == 0 {
-            return Err(forge_core::ForgeError::InvalidState(format!(
-                "Cannot cancel workflow {}: already in a terminal state",
-                run_id
-            )));
-        }
-
-        Ok(())
-    }
-
-    /// Retire a workflow run as unresumable. Terminal action for blocked runs.
-    pub async fn retire_unresumable(&self, run_id: Uuid, reason: &str) -> forge_core::Result<()> {
-        let result = sqlx::query!(
-            "UPDATE forge_workflow_runs SET status = 'retired_unresumable', resolution_reason = $1, completed_at = NOW() WHERE id = $2 AND status NOT IN ('completed', 'compensated', 'cancelled_by_operator', 'retired_unresumable')",
-            reason,
-            run_id,
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
-
-        if result.rows_affected() == 0 {
-            return Err(forge_core::ForgeError::InvalidState(format!(
-                "Cannot retire workflow {}: already in a terminal state",
-                run_id
-            )));
-        }
-
-        Ok(())
-    }
-
-    /// Save step record.
     pub async fn save_step(&self, step: &WorkflowStepRecord) -> forge_core::Result<()> {
         sqlx::query!(
             r#"
@@ -994,19 +775,9 @@ impl WorkflowExecutor {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| forge_core::ForgeError::Database(e.to_string()))?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         Ok(())
-    }
-
-    /// Start a workflow by its registered name with JSON input.
-    pub async fn start_by_name(
-        &self,
-        workflow_name: &str,
-        input: serde_json::Value,
-        owner_subject: Option<String>,
-    ) -> forge_core::Result<Uuid> {
-        self.start(workflow_name, input, owner_subject).await
     }
 }
 
@@ -1022,11 +793,64 @@ impl WorkflowDispatch for WorkflowExecutor {
         workflow_name: &str,
         input: serde_json::Value,
         owner_subject: Option<String>,
+        trace_id: Option<String>,
     ) -> Pin<Box<dyn Future<Output = forge_core::Result<Uuid>> + Send + '_>> {
         let workflow_name = workflow_name.to_string();
         Box::pin(async move {
-            self.start_by_name(&workflow_name, input, owner_subject)
+            self.start(&workflow_name, input, owner_subject, trace_id)
                 .await
+        })
+    }
+
+    fn start_in_conn<'a>(
+        &'a self,
+        conn: &'a mut sqlx::PgConnection,
+        workflow_name: &'a str,
+        input: serde_json::Value,
+        owner_subject: Option<String>,
+        trace_id: Option<String>,
+    ) -> Pin<Box<dyn Future<Output = forge_core::Result<Uuid>> + Send + 'a>> {
+        Box::pin(async move {
+            let entry = self.registry.get_active(workflow_name).ok_or_else(|| {
+                forge_core::ForgeError::NotFound(format!(
+                    "No active version of workflow '{}'",
+                    workflow_name
+                ))
+            })?;
+
+            let mut record = WorkflowRecord::new(
+                workflow_name,
+                entry.info.version,
+                entry.info.signature,
+                input,
+                owner_subject,
+            );
+            if let Some(tid) = trace_id {
+                record = record.with_trace_id(tid);
+            }
+            let run_id = record.id;
+
+            Self::insert_workflow_record(conn, &record).await?;
+
+            // Enqueue the resume job in the same transaction so the worker
+            // only sees it once the mutation commits.
+            let resume_input = serde_json::json!({
+                "run_id": run_id.to_string(),
+                "from_sleep": false,
+            });
+            let job = JobRecord::new(
+                WORKFLOW_RESUME_JOB.to_string(),
+                resume_input,
+                JobPriority::High,
+                3,
+            )
+            .with_capability(forge_core::config::WORKFLOWS_QUEUE);
+            self.job_queue
+                .enqueue_in_conn(conn, job)
+                .await
+                .map_err(forge_core::ForgeError::Database)?;
+
+            Ok(run_id)
         })
     }
 }
@@ -1039,15 +863,13 @@ mod tests {
     #[test]
     fn test_workflow_result_types() {
         let completed = WorkflowResult::Completed(serde_json::json!({}));
-        let _waiting = WorkflowResult::Waiting {
-            event_type: "approval".to_string(),
+        let _suspended = WorkflowResult::Suspended {
+            reason: "timer".to_string(),
         };
         let _failed = WorkflowResult::Failed {
             error: "test".to_string(),
         };
-        let _compensated = WorkflowResult::Compensated;
 
-        // Just ensure they can be created
         match completed {
             WorkflowResult::Completed(_) => {}
             _ => panic!("Expected Completed"),

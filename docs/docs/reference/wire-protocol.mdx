@@ -1,0 +1,370 @@
+# Wire Protocol
+
+Forge exposes a small HTTP+SSE protocol. Every endpoint lives under `/_api/` and speaks JSON. Clients connect once over SSE for live data, then use POST requests to manage subscriptions and call functions.
+
+## Endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/_api/rpc/{function}` | Call a query or mutation |
+| `POST` | `/_api/rpc/{function}/upload` | Call a mutation with multipart upload |
+| `GET` | `/_api/events` | Open an SSE stream |
+| `POST` | `/_api/subscribe` | Subscribe to a query |
+| `POST` | `/_api/unsubscribe` | Unsubscribe from a query |
+| `POST` | `/_api/subscribe-job` | Subscribe to job status |
+| `POST` | `/_api/subscribe-workflow` | Subscribe to workflow status |
+| `POST` | `/_api/signal` | Send analytics signal |
+| `GET` | `/_api/health` | Liveness check |
+| `GET` | `/_api/ready` | Readiness check |
+
+## Authentication
+
+All endpoints accept a Bearer token in the `Authorization` header. The token is a JWT (HS256 or RS256) issued by your auth flow. SSE connections are authenticated at connect time; the session retains auth context for subsequent subscribe calls.
+
+```
+Authorization: Bearer <jwt>
+```
+
+## RPC
+
+### Single Call
+
+```http
+POST /_api/rpc/get_users
+Content-Type: application/json
+Authorization: Bearer <jwt>
+
+{
+  "args": { "team_id": "abc" }
+}
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": [{ "id": "u1", "name": "Alice" }],
+  "error": null,
+  "request_id": "trace-id-here"
+}
+```
+
+### Error Shape
+
+All errors follow the same envelope, whether from RPC or SSE:
+
+```json
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "NOT_FOUND",
+    "message": "Function not found",
+    "retry_after_secs": null,
+    "details": null
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `code` | `string` | Machine-readable error code |
+| `message` | `string` | Human-readable description |
+| `retry_after_secs` | `number?` | Present on 429 rate-limit responses |
+| `details` | `object?` | Structured context (validation errors, etc.) |
+
+### Error Codes
+
+| Code | HTTP | When |
+|------|------|------|
+| `NOT_FOUND` | 404 | Function or resource doesn't exist |
+| `UNAUTHORIZED` | 401 | Missing or invalid JWT |
+| `FORBIDDEN` | 403 | Valid JWT but insufficient role |
+| `VALIDATION_ERROR` | 400 | Input fails validation |
+| `INVALID_ARGUMENT` | 400 | Malformed arguments |
+| `RATE_LIMITED` | 429 | Rate limit exceeded |
+| `TIMEOUT` | 504 | Handler exceeded time limit |
+| `INTERNAL_ERROR` | 500 | Server error |
+
+## SSE (Server-Sent Events)
+
+### Opening a Connection
+
+```http
+GET /_api/events
+Authorization: Bearer <jwt>
+Accept: text/event-stream
+```
+
+The server responds with a `text/event-stream`. The first event is always `connected`:
+
+```json
+{
+  "type": "connected",
+  "session_id": "550e8400-...",
+  "session_secret": "random-secret"
+}
+```
+
+Save `session_id` and `session_secret`. You need both for every subscribe/unsubscribe call. The secret prevents CSRF-style subscription hijacking.
+
+Keep-alive pings are sent every 30 seconds.
+
+### Subscribing to a Query
+
+```http
+POST /_api/subscribe
+Content-Type: application/json
+
+{
+  "session_id": "550e8400-...",
+  "session_secret": "random-secret",
+  "id": "my-users-sub",
+  "function": "get_users",
+  "args": { "team_id": "abc" }
+}
+```
+
+The `id` field is your client-side subscription identifier. You choose it. The response contains the initial query result:
+
+```json
+{
+  "success": true,
+  "data": [{ "id": "u1", "name": "Alice" }]
+}
+```
+
+### Receiving Updates
+
+When underlying data changes, the server re-executes your query and pushes the new result if it differs:
+
+```json
+{
+  "type": "update",
+  "target": "my-users-sub",
+  "payload": [{ "id": "u1", "name": "Alice" }, { "id": "u2", "name": "Bob" }]
+}
+```
+
+### Subscribing to Job Status
+
+```http
+POST /_api/subscribe-job
+Content-Type: application/json
+
+{
+  "session_id": "...",
+  "session_secret": "...",
+  "id": "my-job-sub",
+  "job_id": "550e8400-..."
+}
+```
+
+Job updates arrive as:
+
+```json
+{
+  "type": "update",
+  "target": "my-job-sub",
+  "payload": {
+    "job_id": "550e8400-...",
+    "status": "running",
+    "progress": 42,
+    "message": "Processing row 42/100",
+    "output": null,
+    "error": null
+  }
+}
+```
+
+### Subscribing to Workflow Status
+
+```http
+POST /_api/subscribe-workflow
+Content-Type: application/json
+
+{
+  "session_id": "...",
+  "session_secret": "...",
+  "id": "my-workflow-sub",
+  "workflow_id": "550e8400-..."
+}
+```
+
+Workflow updates:
+
+```json
+{
+  "type": "update",
+  "target": "my-workflow-sub",
+  "payload": {
+    "workflow_id": "550e8400-...",
+    "status": "running",
+    "step": "send_email",
+    "waiting_for": null,
+    "steps": [
+      { "name": "validate", "status": "completed", "error": null },
+      { "name": "send_email", "status": "running", "error": null }
+    ],
+    "output": null,
+    "error": null
+  }
+}
+```
+
+### Unsubscribing
+
+```http
+POST /_api/unsubscribe
+Content-Type: application/json
+
+{
+  "session_id": "...",
+  "session_secret": "...",
+  "id": "my-users-sub"
+}
+```
+
+### SSE Event Types
+
+| Type | Description |
+|------|-------------|
+| `connected` | Session established, contains `session_id` and `session_secret` |
+| `update` | Data changed for a subscription (`target` = your subscription `id`) |
+| `error` | Error on a specific subscription |
+| `gap` | Server detected a dropped delivery. Client should re-fetch. |
+| `channel` | Ephemeral pub-sub message (reserved, not yet active) |
+
+### Gap Recovery
+
+If the server detects it may have missed pushing an update (internal buffer overflow, reconnect), it sends a `gap` event:
+
+```json
+{
+  "type": "gap",
+  "target": "my-users-sub",
+  "last_event_id": null
+}
+```
+
+On receiving a `gap`, the client should re-subscribe or re-fetch the query to get fresh data. The generated client libraries handle this automatically.
+
+## Signals
+
+Analytics signals are sent to a single endpoint with a discriminated type:
+
+```http
+POST /_api/signal
+Content-Type: application/json
+
+{
+  "type": "event",
+  "payload": {
+    "name": "button_click",
+    "properties": { "button": "signup" },
+    "timestamp": "2026-05-09T12:00:00Z"
+  }
+}
+```
+
+Signal types: `event`, `view`, `report`.
+
+## Health Checks
+
+### `GET /_api/health` — liveness probe
+
+Returns `200 OK` as long as the process is running. No database call is made. Use this as a Kubernetes `livenessProbe` or Docker `HEALTHCHECK` — if it fails, the container is dead and should be replaced.
+
+```json
+{
+  "status": "healthy",
+  "version": "0.5.0"
+}
+```
+
+### `GET /_api/ready` — readiness probe
+
+Returns `200 OK` when the server is ready to accept traffic, or `503 Service Unavailable` when it is not. No authentication is required.
+
+```json
+{
+  "ready": true,
+  "database": true,
+  "reactor": true,
+  "notify_queue_ok": true,
+  "migrations_ok": true,
+  "cluster_registered": true,
+  "version": "0.5.0"
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ready` | `boolean` | `true` only when every other field is passing |
+| `database` | `boolean` | Primary pool can serve `SELECT 1` |
+| `reactor` | `boolean` | Change listener (LISTEN/NOTIFY) is connected |
+| `notify_queue_ok` | `boolean` | PostgreSQL notification queue usage is below 75% |
+| `migrations_ok` | `boolean` | All embedded system migrations have been applied |
+| `cluster_registered` | `boolean \| null` | This node has an `active` row in `forge_nodes`; `null` when cluster registration is disabled |
+
+The probe returns `503` if any of the checks fails. `ready: false` on a `503` response still includes the individual flags so you can tell which check failed.
+
+**Why `notify_queue_ok` matters.** PostgreSQL's shared notification queue is finite. Once it reaches 75% capacity, LISTEN/NOTIFY messages start dropping, which means live-data updates stop reaching clients. The probe fails at this threshold so the load balancer can drain the node before the queue saturates.
+
+**Why `migrations_ok` matters.** The binary embeds the expected number of system migrations. If the count in `forge_system_migrations` is lower, the database schema is behind the binary and the node is not safe to serve traffic.
+
+**Using the probes for container orchestration.** A typical Kubernetes configuration:
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /_api/health
+    port: 3000
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+readinessProbe:
+  httpGet:
+    path: /_api/ready
+    port: 3000
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  failureThreshold: 3
+```
+
+Keep `/_api/health` as the liveness probe and `/_api/ready` as the readiness probe. Do not swap them — removing a pod that temporarily can't reach the database is almost always wrong.
+
+## File Uploads
+
+Mutations that accept `Upload` parameters use multipart form data:
+
+```http
+POST /_api/rpc/upload_avatar/upload
+Content-Type: multipart/form-data
+
+--boundary
+Content-Disposition: form-data; name="args"
+Content-Type: application/json
+
+{ "user_id": "u1" }
+--boundary
+Content-Disposition: form-data; name="file"; filename="avatar.png"
+Content-Type: image/png
+
+<binary data>
+--boundary--
+```
+
+The response follows the standard RPC envelope.
+
+## Capacity Limits
+
+| Limit | Default | Response |
+|-------|---------|----------|
+| Max sessions per user | 8 | 429 Too Many Requests |
+| Max sessions per IP | 32 | 429 Too Many Requests |
+| Max subscriptions per user | 500 | 429 Too Many Requests |
+| Max cached result bytes | 1 MB | Error event on subscription |
+
+All limits are configurable in `forge.toml` under `[realtime]`.

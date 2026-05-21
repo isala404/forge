@@ -75,6 +75,7 @@ Role specialization is optional. Most deployments run all roles on every node.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
+| `discovery` | string | `"postgres"` | Node discovery backend (only `"postgres"` is supported) |
 | `heartbeat_interval` | string | `"5s"` | Heartbeat frequency |
 | `dead_threshold` | string | `"15s"` | Time until node marked dead |
 
@@ -106,8 +107,11 @@ The lock ID is a hash of the leader role. One node acquires the lock. Others ret
 | `scheduler` | `0x464F52470001` | Cron triggering, job assignment |
 | `metrics_aggregator` | `0x464F52470002` | Metrics collection (planned, not yet active) |
 | `log_compactor` | `0x464F52470003` | Log compaction (planned, not yet active) |
+| `<daemon name>` | FNV-1a hash | Leader-elected daemon instances |
 
 Each role has an independent lock. Different nodes can lead different roles.
+
+Leader-elected daemons get their own lock derived from the daemon's name via FNV-1a hash in the `FORGE` namespace (`0x464F52474000` offset). Two daemons with different names cannot collide. The lock ID is stable across restarts — same name always maps to the same lock.
 
 The `forge_leaders` table records which node currently holds each leader role. Query it to see the active scheduler without inspecting `pg_locks` directly.
 
@@ -327,10 +331,9 @@ Operators clear stuck runs directly in Postgres (no admin HTTP surface):
 
 ```sql
 UPDATE forge_workflow_runs
-SET status = 'retired_unresumable', resolution_reason = '...'
+SET status = 'failed', resolution_reason = '...'
 WHERE workflow_name = '...' AND workflow_version = '...'
-  AND status NOT IN ('completed','compensated','failed',
-                     'retired_unresumable','cancelled_by_operator');
+  AND status NOT IN ('completed', 'failed');
 ```
 
 Within five seconds the next readiness probe re-runs the check and flips back to `200`. See the [workflow migration guide](../build/long-processes.mdx#migrating-a-workflow-safely) for the full deprecate→drain→remove flow.

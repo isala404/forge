@@ -8,63 +8,41 @@ use serde::{Deserialize, Serialize};
 
 /// A UTC instant in time.
 ///
-/// This type intentionally does NOT implement `From<NaiveDateTime>` to prevent
-/// accidental timezone confusion. If you have a naive datetime, you must
-/// explicitly specify how to interpret it.
-///
-/// # Examples
-///
-/// ```
-/// use forge_core::types::Instant;
-/// use chrono::Utc;
-///
-/// // From UTC datetime
-/// let now = Instant::now();
-///
-/// // From chrono DateTime<Utc>
-/// let instant: Instant = Utc::now().into();
-/// ```
+/// Does not implement `From<NaiveDateTime>` to prevent accidental timezone
+/// confusion — callers must explicitly specify how to interpret naive datetimes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Instant(DateTime<Utc>);
 
 impl Instant {
-    /// Create an instant representing the current time.
     pub fn now() -> Self {
         Self(Utc::now())
     }
 
-    /// Create an instant from a Unix timestamp (seconds since epoch).
     pub fn from_timestamp(secs: i64) -> Option<Self> {
         DateTime::from_timestamp(secs, 0).map(Self)
     }
 
-    /// Create an instant from a Unix timestamp with nanoseconds.
     pub fn from_timestamp_nanos(nanos: i64) -> Self {
         Self(DateTime::from_timestamp_nanos(nanos))
     }
 
-    /// Get the Unix timestamp (seconds since epoch).
     pub fn timestamp(&self) -> i64 {
         self.0.timestamp()
     }
 
-    /// Get the Unix timestamp with millisecond precision.
     pub fn timestamp_millis(&self) -> i64 {
         self.0.timestamp_millis()
     }
 
-    /// Get the inner `DateTime<Utc>`.
     pub fn into_inner(self) -> DateTime<Utc> {
         self.0
     }
 
-    /// Format to ISO 8601 string.
     pub fn to_iso8601(&self) -> String {
         self.0.to_rfc3339()
     }
 
-    /// Parse from ISO 8601 string.
     pub fn parse_iso8601(s: &str) -> Result<Self, chrono::ParseError> {
         DateTime::parse_from_rfc3339(s).map(|dt| Self(dt.with_timezone(&Utc)))
     }

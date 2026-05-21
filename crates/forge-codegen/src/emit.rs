@@ -6,8 +6,7 @@
 
 use forge_core::schema::RustType;
 
-/// Position context for type mapping.
-/// Some types map differently depending on usage context.
+/// Position context for type mapping. Some types map differently by position.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Position {
     /// Function argument or struct field.
@@ -15,10 +14,6 @@ pub enum Position {
     /// Function return type.
     Return,
 }
-
-// ---------------------------------------------------------------------------
-// TypeScript type mapping
-// ---------------------------------------------------------------------------
 
 /// Convert a RustType to its TypeScript representation.
 pub fn ts_type(rust_type: &RustType, pos: Position) -> String {
@@ -48,9 +43,8 @@ pub fn ts_type(rust_type: &RustType, pos: Position) -> String {
         },
 
         RustType::Option(inner) => format!("{} | null", ts_type(inner, pos)),
-        // `Option<T>` renders with " | null", which without parens would parse
-        // as `T | (null[])` inside an array. Use `Array<...>` to keep the union
-        // unambiguous on the element type.
+        // `Option<T>` inside an array renders as `Array<T | null>` not `(T | null)[]`
+        // to keep the union bound to the element type, not the whole array.
         RustType::Vec(inner) => match inner.as_ref() {
             RustType::Option(_) => format!("Array<{}>", ts_type(inner, pos)),
             _ => format!("{}[]", ts_type(inner, pos)),
@@ -78,7 +72,6 @@ fn ts_custom(name: &str, pos: Position) -> String {
 
         "Value" | "serde_json::Value" => "unknown".into(),
 
-        // Unparsed generic types that leaked through as Custom.
         _ if name.starts_with("Vec<") => {
             let inner = name
                 .strip_prefix("Vec<")
@@ -88,7 +81,7 @@ fn ts_custom(name: &str, pos: Position) -> String {
         }
 
         _ if name.starts_with("HashMap<") || name.starts_with("std::collections::HashMap<") => {
-            ts_hashmap(name)
+            ts_hashmap(name, pos)
         }
 
         "Cursor" => "string".into(),
@@ -108,7 +101,7 @@ fn ts_custom(name: &str, pos: Position) -> String {
     }
 }
 
-fn ts_hashmap(name: &str) -> String {
+fn ts_hashmap(name: &str, pos: Position) -> String {
     let inner = name
         .strip_prefix("HashMap<")
         .or_else(|| name.strip_prefix("std::collections::HashMap<"))
@@ -118,26 +111,32 @@ fn ts_hashmap(name: &str) -> String {
         return "Record<string, unknown>".into();
     };
 
-    let mut parts = inner.splitn(2, ',').map(|s| s.trim());
-    let _key_type = parts.next();
-    if let Some(value) = parts.next() {
-        let value_type = match value {
-            "String" | "&str" | "str" => "string",
-            "i32" | "i64" | "u32" | "u64" | "f32" | "f64" => "number",
-            "bool" => "boolean",
-            other => other,
-        };
-        format!("Record<string, {}>", value_type)
-    } else {
-        "Record<string, unknown>".into()
-    }
+    let Some((_key, value)) = split_top_level_comma(inner) else {
+        return "Record<string, unknown>".into();
+    };
+
+    let value_type = ts_type(&RustType::Custom(value.to_string()), pos);
+    format!("Record<string, {}>", value_type)
 }
 
-// ---------------------------------------------------------------------------
-// Dioxus (Rust frontend) type mapping
-// ---------------------------------------------------------------------------
+/// Split a generic parameter list at the first top-level comma,
+/// respecting nested `<>`, `()`, and `[]` brackets.
+fn split_top_level_comma(s: &str) -> Option<(&str, &str)> {
+    let mut depth = 0usize;
+    for (i, c) in s.char_indices() {
+        match c {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                return Some((s.get(..i)?.trim(), s.get(i + 1..)?.trim()));
+            }
+            _ => {}
+        }
+    }
+    None
+}
 
-/// Convert a RustType to its Dioxus/Rust representation for generated frontend code.
+/// Convert a RustType to its Dioxus/Rust representation.
 pub fn dioxus_type(rust_type: &RustType) -> String {
     match rust_type {
         RustType::String | RustType::Uuid => "String".into(),
@@ -171,6 +170,19 @@ fn dioxus_custom(name: &str) -> String {
         "Upload" => "ForgeUpload".into(),
         "Cursor" => "String".into(),
         "PageInfo" => "forge_core::PageInfo".into(),
+
+        _ if name.starts_with("Vec<") => {
+            let inner = name
+                .strip_prefix("Vec<")
+                .and_then(|s| s.strip_suffix('>'))
+                .unwrap_or("JsonValue");
+            format!("Vec<{}>", dioxus_type(&RustType::Custom(inner.to_string())))
+        }
+
+        _ if name.starts_with("HashMap<") || name.starts_with("std::collections::HashMap<") => {
+            dioxus_hashmap(name)
+        }
+
         _ if name.starts_with("Page<") => {
             let inner = name
                 .strip_prefix("Page<")
@@ -185,11 +197,24 @@ fn dioxus_custom(name: &str) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Recursive type tree queries
-// ---------------------------------------------------------------------------
+fn dioxus_hashmap(name: &str) -> String {
+    let inner = name
+        .strip_prefix("HashMap<")
+        .or_else(|| name.strip_prefix("std::collections::HashMap<"))
+        .and_then(|s| s.strip_suffix('>'));
 
-/// Recursively walk a RustType tree, returning true if the predicate matches any node.
+    let Some(inner) = inner else {
+        return "std::collections::HashMap<String, JsonValue>".into();
+    };
+
+    let Some((_key, value)) = split_top_level_comma(inner) else {
+        return "std::collections::HashMap<String, JsonValue>".into();
+    };
+
+    let value_type = dioxus_type(&RustType::Custom(value.to_string()));
+    format!("std::collections::HashMap<String, {}>", value_type)
+}
+
 fn walk_type(rust_type: &RustType, predicate: &dyn Fn(&RustType) -> bool) -> bool {
     if predicate(rust_type) {
         return true;
@@ -200,14 +225,12 @@ fn walk_type(rust_type: &RustType, predicate: &dyn Fn(&RustType) -> bool) -> boo
     }
 }
 
-/// Check if a RustType tree contains an Upload type anywhere.
 pub fn contains_upload(rust_type: &RustType) -> bool {
     walk_type(rust_type, &|t| {
         matches!(t, RustType::Upload) || matches!(t, RustType::Custom(n) if n == "Upload")
     })
 }
 
-/// Check if a RustType tree contains a Json type anywhere.
 pub fn contains_json(rust_type: &RustType) -> bool {
     walk_type(rust_type, &|t| {
         matches!(t, RustType::Json)
@@ -215,7 +238,7 @@ pub fn contains_json(rust_type: &RustType) -> bool {
     })
 }
 
-/// Collect custom type names that need to be imported in TypeScript.
+/// Collect custom type names that need importing in TypeScript.
 pub fn collect_type_imports(rust_type: &RustType, imports: &mut Vec<String>) {
     match rust_type {
         RustType::Custom(name) if is_importable_type(name) => {
@@ -226,8 +249,6 @@ pub fn collect_type_imports(rust_type: &RustType, imports: &mut Vec<String>) {
     }
 }
 
-/// A custom type name is importable if it represents a user-defined type
-/// (not a built-in, container, or type that maps to a primitive).
 fn is_importable_type(name: &str) -> bool {
     !matches!(
         name,
@@ -241,8 +262,6 @@ fn is_importable_type(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // -- TypeScript mapping --
 
     #[test]
     fn ts_primitives() {
@@ -312,7 +331,23 @@ mod tests {
         );
     }
 
-    // -- Dioxus mapping --
+    #[test]
+    fn ts_hashmap_nested_generics() {
+        assert_eq!(
+            ts_type(
+                &RustType::Custom("HashMap<String, HashMap<String, i32>>".into()),
+                Position::Arg
+            ),
+            "Record<string, Record<string, number>>"
+        );
+        assert_eq!(
+            ts_type(
+                &RustType::Custom("HashMap<(K1, K2), V>".into()),
+                Position::Arg
+            ),
+            "Record<string, V>"
+        );
+    }
 
     #[test]
     fn dioxus_primitives() {
@@ -334,7 +369,30 @@ mod tests {
         );
     }
 
-    // -- Type tree queries --
+    #[test]
+    fn dioxus_hashmap() {
+        // Custom-string primitives go through dioxus_custom which widens
+        // `i32`/`u32`/etc. to `i64`. The HashMap value follows the same path.
+        assert_eq!(
+            dioxus_type(&RustType::Custom("HashMap<String, i32>".into())),
+            "std::collections::HashMap<String, i64>"
+        );
+        assert_eq!(
+            dioxus_type(&RustType::Custom("HashMap<String, User>".into())),
+            "std::collections::HashMap<String, User>"
+        );
+        assert_eq!(
+            dioxus_type(&RustType::Custom(
+                "std::collections::HashMap<String, bool>".into()
+            )),
+            "std::collections::HashMap<String, bool>"
+        );
+        // Value type is mapped recursively so wrapper aliases like Uuid map to String.
+        assert_eq!(
+            dioxus_type(&RustType::Custom("HashMap<String, Uuid>".into())),
+            "std::collections::HashMap<String, String>"
+        );
+    }
 
     #[test]
     fn upload_detection() {
@@ -403,31 +461,15 @@ mod tests {
         );
     }
 
-    // --- Cross-target consistency ---
-
-    /// Ensure every RustType variant maps to a non-empty string in both targets.
-    /// This catches missing arms in match statements when new types are added.
+    /// Adding a new RustType variant without updating both emitters fails this test.
+    /// The exhaustive `match` in the emitters themselves also produces a compile error.
     #[test]
     fn all_types_map_to_nonempty_in_both_targets() {
-        let types = vec![
-            RustType::String,
-            RustType::I32,
-            RustType::I64,
-            RustType::F32,
-            RustType::F64,
-            RustType::Bool,
-            RustType::Uuid,
-            RustType::Instant,
-            RustType::LocalDate,
-            RustType::LocalTime,
-            RustType::Json,
-            RustType::Bytes,
-            RustType::Upload,
-            RustType::Option(Box::new(RustType::String)),
-            RustType::Vec(Box::new(RustType::I32)),
-            RustType::Custom("User".into()),
-            RustType::Custom("()".into()),
-        ];
+        let mut types = RustType::leaf_variants();
+        types.push(RustType::Option(Box::new(RustType::String)));
+        types.push(RustType::Vec(Box::new(RustType::I32)));
+        types.push(RustType::Custom("User".into()));
+        types.push(RustType::Custom("()".into()));
 
         for ty in &types {
             let ts = ts_type(ty, Position::Arg);
@@ -442,27 +484,27 @@ mod tests {
             let dx = dioxus_type(ty);
             assert!(!dx.is_empty(), "dioxus_type returned empty for {ty:?}");
         }
+
+        assert!(
+            RustType::leaf_variants().len() >= 13,
+            "leaf_variants() must cover all non-recursive RustType variants"
+        );
     }
 
-    /// Nested generics should produce valid type strings without panicking.
     #[test]
     fn nested_option_vec_maps_correctly() {
-        // Option<Vec<String>> => TS: "string[] | null"
         let ty = RustType::Option(Box::new(RustType::Vec(Box::new(RustType::String))));
         assert_eq!(ts_type(&ty, Position::Arg), "string[] | null");
         assert_eq!(dioxus_type(&ty), "Option<Vec<String>>");
 
-        // Vec<Option<i32>> emits Array<...> form so the union binds to the
-        // element type (avoids the `number | (null[])` precedence trap).
+        // Vec<Option<i32>> uses Array<...> to avoid the `T | (null[])` precedence trap.
         let ty2 = RustType::Vec(Box::new(RustType::Option(Box::new(RustType::I32))));
         assert_eq!(ts_type(&ty2, Position::Arg), "Array<number | null>");
         assert_eq!(dioxus_type(&ty2), "Vec<Option<i32>>");
     }
 
-    /// Position-dependent types should produce different results for Arg vs Return.
     #[test]
     fn position_sensitive_types_differ() {
-        // Bytes: Uint8Array (arg) vs Blob (return)
         assert_ne!(
             ts_type(&RustType::Bytes, Position::Arg),
             ts_type(&RustType::Bytes, Position::Return)

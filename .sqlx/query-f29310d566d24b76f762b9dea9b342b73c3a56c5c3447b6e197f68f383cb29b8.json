@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO forge_paused_queues (queue_name, paused_at, paused_by, reason)\n        VALUES ($1, NOW(), $2, $3)\n        ON CONFLICT (queue_name) DO UPDATE SET\n            paused_at = EXCLUDED.paused_at,\n            paused_by = EXCLUDED.paused_by,\n            reason = EXCLUDED.reason\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f29310d566d24b76f762b9dea9b342b73c3a56c5c3447b6e197f68f383cb29b8"
+}

@@ -1,0 +1,5 @@
+disallowed-methods = [
+    { path = "sqlx::query", reason = "Use sqlx::query!() macro for compile-time SQL checking. Add #[allow(clippy::disallowed_methods)] with a comment explaining why a runtime call is needed." },
+    { path = "sqlx::query_as", reason = "Use sqlx::query_as!() macro for compile-time SQL checking. Add #[allow(clippy::disallowed_methods)] with a comment explaining why a runtime call is needed." },
+    { path = "sqlx::query_scalar", reason = "Use sqlx::query_scalar!() macro for compile-time SQL checking. Add #[allow(clippy::disallowed_methods)] with a comment explaining why a runtime call is needed." },
+]

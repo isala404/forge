@@ -3,8 +3,10 @@
 #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -13,43 +15,20 @@ use super::super::mock_http::{MockHttp, MockRequest, MockResponse};
 use super::build_test_auth;
 use crate::Result;
 use crate::env::{EnvAccess, EnvProvider, MockEnvProvider};
-use crate::function::{AuthContext, OutboxBuffer, PendingJob, PendingWorkflow, RequestMetadata};
+use crate::function::{
+    AuthContext, JobDispatch, MutationContext, RequestMetadata, WorkflowDispatch,
+};
+use crate::http::CircuitBreakerClient;
 
-/// Test context for mutation functions.
-///
-/// Provides an isolated testing environment for mutations with configurable
-/// authentication, optional database access, and mock job/workflow dispatch.
-///
-/// # Example
-///
-/// ```ignore
-/// let ctx = TestMutationContext::builder()
-///     .as_user(Uuid::new_v4())
-///     .build();
-///
-/// // Dispatch a job
-/// ctx.dispatch_job("send_email", json!({"to": "test@example.com"})).await?;
-///
-/// // Verify job was dispatched
-/// ctx.job_dispatch().assert_dispatched("send_email");
-/// ```
+/// Test context for mutation functions with mock dispatch and optional DB access.
 pub struct TestMutationContext {
-    /// Authentication context.
     pub auth: AuthContext,
-    /// Request metadata.
     pub request: RequestMetadata,
-    /// Optional database pool.
     pool: Option<PgPool>,
-    /// Mock HTTP client.
     http: Arc<MockHttp>,
-    /// Mock job dispatch for verification.
     job_dispatch: Arc<MockJobDispatch>,
-    /// Mock workflow dispatch for verification.
     workflow_dispatch: Arc<MockWorkflowDispatch>,
-    /// Mock environment provider.
     env_provider: Arc<MockEnvProvider>,
-    /// Outbox buffer for transactional mode simulation.
-    outbox: Arc<Mutex<OutboxBuffer>>,
 }
 
 impl TestMutationContext {
@@ -98,6 +77,58 @@ impl TestMutationContext {
         self.job_dispatch.dispatch(job_type, args).await
     }
 
+    /// Dispatch a job at a specific time (records for later verification).
+    pub async fn dispatch_job_at<T: serde::Serialize>(
+        &self,
+        job_type: &str,
+        args: T,
+        scheduled_at: DateTime<Utc>,
+    ) -> Result<Uuid> {
+        self.job_dispatch
+            .dispatch_at(job_type, args, scheduled_at)
+            .await
+    }
+
+    /// Dispatch a job after a delay (records for later verification).
+    pub async fn dispatch_job_after<T: serde::Serialize>(
+        &self,
+        job_type: &str,
+        args: T,
+        delay: Duration,
+    ) -> Result<Uuid> {
+        let scheduled_at = Utc::now()
+            + chrono::Duration::from_std(delay)
+                .map_err(|_| crate::error::ForgeError::InvalidArgument("delay too large".into()))?;
+        self.job_dispatch
+            .dispatch_at(job_type, args, scheduled_at)
+            .await
+    }
+
+    /// Type-safe dispatch: resolves the job name from the type's `ForgeJob`
+    /// impl and serializes the args at the call site.
+    pub async fn dispatch<J: crate::ForgeJob>(&self, args: J::Args) -> Result<Uuid> {
+        self.dispatch_job(J::info().name, args).await
+    }
+
+    /// Type-safe dispatch at a specific time.
+    pub async fn dispatch_at<J: crate::ForgeJob>(
+        &self,
+        args: J::Args,
+        scheduled_at: DateTime<Utc>,
+    ) -> Result<Uuid> {
+        self.dispatch_job_at(J::info().name, args, scheduled_at)
+            .await
+    }
+
+    /// Type-safe dispatch after a delay.
+    pub async fn dispatch_after<J: crate::ForgeJob>(
+        &self,
+        args: J::Args,
+        delay: Duration,
+    ) -> Result<Uuid> {
+        self.dispatch_job_after(J::info().name, args, delay).await
+    }
+
     /// Cancel a job (records for later verification).
     pub async fn cancel_job(&self, job_id: Uuid, reason: Option<String>) -> Result<bool> {
         self.job_dispatch.cancel_job(job_id, reason);
@@ -109,44 +140,40 @@ impl TestMutationContext {
         self.workflow_dispatch.start(name, input).await
     }
 
+    /// Type-safe workflow start.
+    pub async fn start<W: crate::ForgeWorkflow>(&self, input: W::Input) -> Result<Uuid> {
+        self.start_workflow(W::info().name, input).await
+    }
+
     /// Get the mock env provider for verification.
     pub fn env_mock(&self) -> &MockEnvProvider {
         &self.env_provider
     }
 
-    /// Get pending jobs from the outbox buffer.
-    pub fn pending_jobs(&self) -> Vec<PendingJob> {
-        self.outbox.lock().unwrap().jobs.clone()
-    }
-
-    /// Get pending workflows from the outbox buffer.
-    pub fn pending_workflows(&self) -> Vec<PendingWorkflow> {
-        self.outbox.lock().unwrap().workflows.clone()
-    }
-
-    /// Assert that a job was buffered in the outbox.
-    pub fn assert_job_buffered(&self, job_type: &str) {
-        let jobs = self.pending_jobs();
-        assert!(
-            jobs.iter().any(|j| j.job_type == job_type),
-            "Expected job '{}' to be buffered, but it was not. Buffered jobs: {:?}",
-            job_type,
-            jobs.iter().map(|j| &j.job_type).collect::<Vec<_>>()
-        );
-    }
-
-    /// Assert that a workflow was buffered in the outbox.
-    pub fn assert_workflow_buffered(&self, workflow_name: &str) {
-        let workflows = self.pending_workflows();
-        assert!(
-            workflows.iter().any(|w| w.workflow_name == workflow_name),
-            "Expected workflow '{}' to be buffered, but it was not. Buffered workflows: {:?}",
-            workflow_name,
-            workflows
-                .iter()
-                .map(|w| &w.workflow_name)
-                .collect::<Vec<_>>()
-        );
+    /// Bridge to a real [`MutationContext`] wired with the test mocks.
+    ///
+    /// Handlers are written against `&MutationContext`. Pass the bridged
+    /// context to invoke real handler bodies from tests. The mock job and
+    /// workflow dispatchers remain accessible on the [`TestMutationContext`]
+    /// for assertions (the same `Arc<Mock*>` is shared with the bridge).
+    ///
+    /// A `sqlx::PgPool` is required because [`MutationContext`] performs
+    /// pool-backed operations (`tx()`, `conn()`); a real pool is the only
+    /// safe way to support those paths. Tests that don't touch the database
+    /// can pass a pool created in a test fixture and never call those
+    /// methods.
+    pub fn into_mutation_context(self, pool: sqlx::PgPool) -> MutationContext {
+        let job_dispatch: Option<Arc<dyn JobDispatch>> = Some(self.job_dispatch);
+        let workflow_dispatch: Option<Arc<dyn WorkflowDispatch>> = Some(self.workflow_dispatch);
+        MutationContext::with_env(
+            pool,
+            self.auth,
+            self.request,
+            CircuitBreakerClient::with_defaults(reqwest::Client::new()),
+            job_dispatch,
+            workflow_dispatch,
+            self.env_provider,
+        )
     }
 }
 
@@ -270,7 +297,6 @@ impl TestMutationContextBuilder {
             job_dispatch: self.job_dispatch,
             workflow_dispatch: self.workflow_dispatch,
             env_provider: Arc::new(MockEnvProvider::with_vars(self.env_vars)),
-            outbox: Arc::new(Mutex::new(OutboxBuffer::default())),
         }
     }
 }
@@ -278,6 +304,7 @@ impl TestMutationContextBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ForgeError;
 
     #[tokio::test]
     async fn test_dispatch_job() {
@@ -330,5 +357,155 @@ mod tests {
         let ctx = TestMutationContext::authenticated(Uuid::new_v4());
 
         ctx.job_dispatch().assert_not_dispatched("send_email");
+    }
+
+    #[tokio::test]
+    async fn minimal_is_unauthenticated_and_user_id_errors() {
+        let ctx = TestMutationContext::minimal();
+        assert!(!ctx.auth.is_authenticated());
+        let err = ctx.user_id().unwrap_err();
+        assert!(
+            matches!(err, ForgeError::Unauthorized(_)),
+            "expected Unauthorized, got {err:?}"
+        );
+        assert!(ctx.db().is_none());
+    }
+
+    #[tokio::test]
+    async fn authenticated_helper_exposes_user_id() {
+        let uid = Uuid::new_v4();
+        let ctx = TestMutationContext::authenticated(uid);
+        assert_eq!(ctx.user_id().unwrap(), uid);
+        assert!(ctx.auth.is_authenticated());
+    }
+
+    #[tokio::test]
+    async fn as_subject_authenticates_without_uuid() {
+        let ctx = TestMutationContext::builder()
+            .as_subject("firebase|abc123")
+            .build();
+        // Subject-only auth: authenticated but no UUID.
+        assert!(ctx.auth.is_authenticated());
+        assert!(ctx.user_id().is_err(), "no UUID -> require_user_id fails");
+        assert_eq!(
+            ctx.auth.claim("sub"),
+            Some(&serde_json::json!("firebase|abc123"))
+        );
+    }
+
+    #[tokio::test]
+    async fn builder_with_role_and_with_roles_compose() {
+        let ctx = TestMutationContext::builder()
+            .as_user(Uuid::new_v4())
+            .with_role("editor")
+            .with_roles(vec!["admin".to_string(), "billing".to_string()])
+            .build();
+        assert!(ctx.auth.has_role("editor"));
+        assert!(ctx.auth.has_role("admin"));
+        assert!(ctx.auth.has_role("billing"));
+        assert!(!ctx.auth.has_role("ghost"));
+    }
+
+    #[tokio::test]
+    async fn with_claim_round_trips_through_auth_context() {
+        let ctx = TestMutationContext::builder()
+            .as_user(Uuid::new_v4())
+            .with_claim("tenant", serde_json::json!("acme"))
+            .build();
+        assert_eq!(ctx.auth.claim("tenant"), Some(&serde_json::json!("acme")));
+    }
+
+    #[tokio::test]
+    async fn with_envs_bulk_loads_provider() {
+        let mut vars = HashMap::new();
+        vars.insert("K1".to_string(), "v1".to_string());
+        vars.insert("K2".to_string(), "v2".to_string());
+        let ctx = TestMutationContext::builder().with_envs(vars).build();
+        assert_eq!(ctx.env("K1"), Some("v1".to_string()));
+        assert_eq!(ctx.env("K2"), Some("v2".to_string()));
+        assert!(ctx.env_mock().was_accessed("K1"));
+    }
+
+    #[tokio::test]
+    async fn with_env_single_and_with_envs_compose() {
+        let mut bulk = HashMap::new();
+        bulk.insert("BULK".to_string(), "b".to_string());
+        let ctx = TestMutationContext::builder()
+            .with_env("ONE", "1")
+            .with_envs(bulk)
+            .build();
+        assert_eq!(ctx.env("ONE"), Some("1".to_string()));
+        assert_eq!(ctx.env("BULK"), Some("b".to_string()));
+    }
+
+    #[tokio::test]
+    async fn with_job_dispatch_shares_state() {
+        let shared = Arc::new(MockJobDispatch::new());
+        let ctx = TestMutationContext::builder()
+            .with_job_dispatch(shared.clone())
+            .build();
+        ctx.dispatch_job("ext", serde_json::json!({}))
+            .await
+            .unwrap();
+        // Outside handle sees the dispatch.
+        shared.assert_dispatched("ext");
+    }
+
+    #[tokio::test]
+    async fn with_workflow_dispatch_shares_state() {
+        let shared = Arc::new(MockWorkflowDispatch::new());
+        let ctx = TestMutationContext::builder()
+            .with_workflow_dispatch(shared.clone())
+            .build();
+        ctx.start_workflow("ext_wf", serde_json::json!({}))
+            .await
+            .unwrap();
+        shared.assert_started("ext_wf");
+    }
+
+    #[cfg(feature = "testcontainers")]
+    #[tokio::test]
+    async fn bridge_to_mutation_context_preserves_mocks() {
+        // A handler written against the production `MutationContext` should
+        // run unchanged when invoked through the bridged test context, with
+        // dispatches landing on the same `MockJobDispatch` exposed by the
+        // builder.
+        use crate::function::MutationContext;
+        use crate::testing::db::TestDatabase;
+
+        let db = TestDatabase::from_env().await.expect("test DB");
+        let shared_jobs = Arc::new(super::super::super::mock_dispatch::MockJobDispatch::new());
+        let uid = Uuid::new_v4();
+
+        let test_ctx = TestMutationContext::builder()
+            .as_user(uid)
+            .with_job_dispatch(shared_jobs.clone())
+            .build();
+        let ctx: MutationContext = test_ctx.into_mutation_context(db.pool().clone());
+
+        // Simulate what a handler would do.
+        ctx.dispatch_job("welcome_email", serde_json::json!({"to": "a@b"}))
+            .await
+            .expect("dispatch through bridged context");
+
+        shared_jobs.assert_dispatched("welcome_email");
+    }
+
+    #[tokio::test]
+    async fn mock_http_json_executes_via_pattern() {
+        let ctx = TestMutationContext::builder()
+            .mock_http_json("https://api.test/echo", serde_json::json!({"ok": true}))
+            .build();
+        let req = MockRequest {
+            method: "GET".to_string(),
+            path: "/echo".to_string(),
+            url: "https://api.test/echo".to_string(),
+            headers: HashMap::new(),
+            body: serde_json::Value::Null,
+        };
+        let resp = ctx.http().execute(req).await;
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, serde_json::json!({"ok": true}));
+        ctx.http().assert_called("https://api.test/echo");
     }
 }

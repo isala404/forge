@@ -69,8 +69,9 @@ impl McpToolRegistry {
                 let parsed_args: T::Args = serde_json::from_value(normalize_args(args))
                     .map_err(|e| forge_core::ForgeError::Validation(e.to_string()))?;
                 let result = T::execute(ctx, parsed_args).await?;
-                serde_json::to_value(result)
-                    .map_err(|e| forge_core::ForgeError::Internal(e.to_string()))
+                serde_json::to_value(result).map_err(|e| {
+                    forge_core::ForgeError::internal_with("Failed to serialize MCP tool result", e)
+                })
             })
         });
 

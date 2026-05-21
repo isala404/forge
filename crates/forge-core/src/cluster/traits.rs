@@ -19,7 +19,6 @@ pub struct ClusterInfo {
 }
 
 impl ClusterInfo {
-    /// Create empty cluster info.
     pub fn empty(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -35,18 +34,13 @@ impl ClusterInfo {
 /// Leadership information for a role.
 #[derive(Debug, Clone)]
 pub struct LeaderInfo {
-    /// The leader role.
     pub role: LeaderRole,
-    /// Node ID of the leader.
     pub node_id: NodeId,
-    /// When leadership was acquired.
     pub acquired_at: chrono::DateTime<chrono::Utc>,
-    /// When the lease expires.
     pub lease_until: chrono::DateTime<chrono::Utc>,
 }
 
 impl LeaderInfo {
-    /// Check if the lease is still valid.
     pub fn is_valid(&self) -> bool {
         self.lease_until > chrono::Utc::now()
     }

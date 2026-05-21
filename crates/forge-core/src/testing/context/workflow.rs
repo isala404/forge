@@ -19,57 +19,26 @@ use crate::function::AuthContext;
 /// Step state stored during testing.
 #[derive(Debug, Clone)]
 pub struct TestStepState {
-    /// Whether the step is completed.
     pub completed: bool,
-    /// Step result (if completed).
     pub result: Option<serde_json::Value>,
 }
 
 /// Test context for workflow functions.
-///
-/// Provides an isolated testing environment for workflows with step tracking,
-/// resume simulation, and durable sleep verification.
-///
-/// # Example
-///
-/// ```ignore
-/// let ctx = TestWorkflowContext::builder("account_verification")
-///     .with_run_id(Uuid::new_v4())
-///     .build();
-///
-/// ctx.record_step_start("validate_email");
-/// ctx.record_step_complete("validate_email", json!({"valid": true}));
-///
-/// assert!(ctx.is_step_completed("validate_email"));
-/// ```
 pub struct TestWorkflowContext {
-    /// Workflow run ID.
     pub run_id: Uuid,
-    /// Workflow name.
     pub workflow_name: String,
-    /// When the workflow started.
     pub started_at: DateTime<Utc>,
-    /// Deterministic workflow time.
     workflow_time: DateTime<Utc>,
-    /// Whether this is a resumed execution.
     is_resumed: bool,
-    /// Tenant ID (for multi-tenancy).
     tenant_id: Option<Uuid>,
-    /// Authentication context.
     pub auth: AuthContext,
-    /// Optional database pool.
     pool: Option<PgPool>,
-    /// Mock HTTP client.
     http: Arc<MockHttp>,
-    /// Step states.
     step_states: Arc<RwLock<HashMap<String, TestStepState>>>,
-    /// Completed step names in order.
+    /// Ordered for compensation.
     completed_steps: Arc<RwLock<Vec<String>>>,
-    /// Whether sleep was called.
     sleep_called: Arc<RwLock<bool>>,
-    /// Mock environment provider.
     env_provider: Arc<MockEnvProvider>,
-    /// User-defined saved state for persistence testing.
     saved_state: Arc<RwLock<HashMap<String, serde_json::Value>>>,
 }
 
@@ -130,7 +99,11 @@ impl TestWorkflowContext {
     }
 
     /// Record step start.
-    pub fn record_step_start(&self, name: &str) {
+    ///
+    /// Mirrors `WorkflowContext::record_step_start` so workflow code that
+    /// uses `?` on the call compiles unchanged in tests. The in-memory test
+    /// implementation can never fail, but the signature must match.
+    pub async fn record_step_start(&self, name: &str) -> Result<()> {
         let mut states = self.step_states.write().unwrap();
         states
             .entry(name.to_string())
@@ -138,10 +111,11 @@ impl TestWorkflowContext {
                 completed: false,
                 result: None,
             });
+        Ok(())
     }
 
     /// Record step completion.
-    pub fn record_step_complete(&self, name: &str, result: serde_json::Value) {
+    pub async fn record_step_complete(&self, name: &str, result: serde_json::Value) -> Result<()> {
         let mut states = self.step_states.write().unwrap();
         let state = states
             .entry(name.to_string())
@@ -157,11 +131,19 @@ impl TestWorkflowContext {
         if !completed.contains(&name.to_string()) {
             completed.push(name.to_string());
         }
+        Ok(())
     }
 
-    /// Record step completion (async version for API compatibility).
-    pub async fn record_step_complete_async(&self, name: &str, result: serde_json::Value) {
-        self.record_step_complete(name, result);
+    /// Record step failure.
+    pub async fn record_step_failure(&self, name: &str, _error: impl Into<String>) -> Result<()> {
+        let mut states = self.step_states.write().unwrap();
+        states
+            .entry(name.to_string())
+            .or_insert_with(|| TestStepState {
+                completed: false,
+                result: None,
+            });
+        Ok(())
     }
 
     /// Get completed step names in order.
@@ -317,6 +299,18 @@ impl TestWorkflowContextBuilder {
         self
     }
 
+    /// Add multiple roles.
+    pub fn with_roles(mut self, roles: Vec<String>) -> Self {
+        self.roles.extend(roles);
+        self
+    }
+
+    /// Add a custom claim.
+    pub fn with_claim(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
+        self.claims.insert(key.into(), value);
+        self
+    }
+
     /// Set the database pool.
     pub fn with_pool(mut self, pool: PgPool) -> Self {
         self.pool = Some(pool);
@@ -399,14 +393,16 @@ mod tests {
         assert!(!ctx.is_resumed());
     }
 
-    #[test]
-    fn test_step_tracking() {
+    #[tokio::test]
+    async fn test_step_tracking() {
         let ctx = TestWorkflowContext::builder("test").build();
 
         assert!(!ctx.is_step_completed("step1"));
 
-        ctx.record_step_start("step1");
-        ctx.record_step_complete("step1", serde_json::json!({"result": "ok"}));
+        ctx.record_step_start("step1").await.unwrap();
+        ctx.record_step_complete("step1", serde_json::json!({"result": "ok"}))
+            .await
+            .unwrap();
 
         assert!(ctx.is_step_completed("step1"));
 
@@ -428,13 +424,19 @@ mod tests {
         assert!(!ctx.is_step_completed("step3"));
     }
 
-    #[test]
-    fn test_step_order() {
+    #[tokio::test]
+    async fn test_step_order() {
         let ctx = TestWorkflowContext::builder("test").build();
 
-        ctx.record_step_complete("step1", serde_json::json!({}));
-        ctx.record_step_complete("step2", serde_json::json!({}));
-        ctx.record_step_complete("step3", serde_json::json!({}));
+        ctx.record_step_complete("step1", serde_json::json!({}))
+            .await
+            .unwrap();
+        ctx.record_step_complete("step2", serde_json::json!({}))
+            .await
+            .unwrap();
+        ctx.record_step_complete("step3", serde_json::json!({}))
+            .await
+            .unwrap();
 
         let completed = ctx.completed_step_names();
         assert_eq!(completed, vec!["step1", "step2", "step3"]);

@@ -1,164 +1,46 @@
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use dashmap::DashMap;
 
-use forge_core::cluster::NodeId;
 use forge_core::function::AuthContext;
 use forge_core::realtime::{
-    AuthScope, Change, QueryGroup, QueryGroupId, ReadSet, SessionId, SessionInfo, SessionStatus,
-    Subscriber, SubscriberId, SubscriptionId, SubscriptionKey,
+    AuthScope, Change, QueryGroup, QueryGroupId, ReadSet, SessionId, Subscriber, SubscriberId,
+    SubscriptionId, SubscriptionKey,
 };
-
-/// Session manager for tracking WebSocket connections.
-pub struct SessionManager {
-    sessions: DashMap<SessionId, SessionInfo>,
-    node_id: NodeId,
-}
-
-impl SessionManager {
-    /// Create a new session manager.
-    pub fn new(node_id: NodeId) -> Self {
-        Self {
-            sessions: DashMap::new(),
-            node_id,
-        }
-    }
-
-    /// Create a new session.
-    pub fn create_session(&self) -> SessionInfo {
-        let mut session = SessionInfo::new(self.node_id);
-        session.connect();
-        self.sessions.insert(session.id, session.clone());
-        session
-    }
-
-    /// Get a session by ID.
-    pub fn get_session(&self, session_id: SessionId) -> Option<SessionInfo> {
-        self.sessions.get(&session_id).map(|r| r.clone())
-    }
-
-    /// Update a session.
-    pub fn update_session(&self, session: SessionInfo) {
-        self.sessions.insert(session.id, session);
-    }
-
-    /// Remove a session.
-    pub fn remove_session(&self, session_id: SessionId) {
-        self.sessions.remove(&session_id);
-    }
-
-    /// Mark a session as disconnected.
-    pub fn disconnect_session(&self, session_id: SessionId) {
-        if let Some(mut session) = self.sessions.get_mut(&session_id) {
-            session.disconnect();
-        }
-    }
-
-    /// Get all connected sessions.
-    pub fn get_connected_sessions(&self) -> Vec<SessionInfo> {
-        self.sessions
-            .iter()
-            .filter(|r| r.is_connected())
-            .map(|r| r.clone())
-            .collect()
-    }
-
-    /// Count sessions by status.
-    pub fn count_by_status(&self) -> SessionCounts {
-        let mut counts = SessionCounts::default();
-
-        for entry in self.sessions.iter() {
-            match entry.status {
-                SessionStatus::Connecting => counts.connecting += 1,
-                SessionStatus::Connected => counts.connected += 1,
-                SessionStatus::Reconnecting => counts.reconnecting += 1,
-                SessionStatus::Disconnected => counts.disconnected += 1,
-                // SessionStatus is #[non_exhaustive]; future variants are
-                // counted in `total` only.
-                _ => {}
-            }
-            counts.total += 1;
-        }
-
-        counts
-    }
-
-    /// Clean up disconnected sessions older than the given duration.
-    pub fn cleanup_old_sessions(&self, max_age: std::time::Duration) {
-        let cutoff = chrono::Utc::now()
-            - chrono::Duration::from_std(max_age).unwrap_or(chrono::TimeDelta::MAX);
-
-        self.sessions.retain(|_, session| {
-            session.status != SessionStatus::Disconnected || session.last_active_at > cutoff
-        });
-    }
-}
-
-/// Session count statistics.
-#[derive(Debug, Clone, Default)]
-pub struct SessionCounts {
-    pub connecting: usize,
-    pub connected: usize,
-    pub reconnecting: usize,
-    pub disconnected: usize,
-    pub total: usize,
-}
 
 /// Group-based subscription manager using sharded concurrent data structures.
 ///
 /// Primary index: groups by QueryGroupId (DashMap, 64 shards).
 /// Secondary: lookup key -> QueryGroupId for dedup.
-/// Subscribers stored in a HashMap for O(1) insert/remove by key.
+/// Subscribers stored in a DashMap for concurrent O(1) insert/remove.
 /// Session -> subscribers mapping for cleanup.
 pub struct SubscriptionManager {
     /// Query groups indexed by ID. Sharded for concurrent access.
     groups: DashMap<QueryGroupId, QueryGroup>,
     /// Lookup: hash(query_name+args+auth_scope) -> QueryGroupId for dedup.
     group_lookup: DashMap<SubscriptionKey, QueryGroupId>,
-    /// Subscribers indexed by auto-incrementing key.
-    subscribers: Arc<Mutex<SubscriberStore>>,
+    /// Inverted index: table name -> set of group IDs that depend on that table.
+    /// Maintained on subscribe/unsubscribe for O(1) affected-group lookups.
+    table_index: DashMap<String, HashSet<QueryGroupId>>,
+    /// Subscribers indexed by auto-incrementing key. DashMap for lock-free access.
+    subscribers: DashMap<usize, Subscriber>,
+    /// Reverse index from public `SubscriptionId` to the internal subscriber key.
+    /// Lets `unsubscribe` skip an O(n) scan of `subscribers`.
+    subscription_to_key: DashMap<SubscriptionId, usize>,
+    /// Monotonic counter for subscriber keys.
+    next_subscriber_key: AtomicUsize,
     /// Session -> subscriber IDs for fast cleanup on disconnect.
     session_subscribers: DashMap<SessionId, Vec<SubscriberId>>,
     /// Monotonic counter for group IDs.
     next_group_id: AtomicU32,
     /// Maximum subscriptions per session.
     max_per_session: usize,
-}
-
-/// Simple indexed store replacing the `slab` crate.
-struct SubscriberStore {
-    entries: HashMap<usize, Subscriber>,
-    next_key: usize,
-}
-
-impl SubscriberStore {
-    fn new() -> Self {
-        Self {
-            entries: HashMap::new(),
-            next_key: 0,
-        }
-    }
-
-    fn insert(&mut self, value: Subscriber) -> usize {
-        let key = self.next_key;
-        self.next_key += 1;
-        self.entries.insert(key, value);
-        key
-    }
-
-    fn get(&self, key: usize) -> Option<&Subscriber> {
-        self.entries.get(&key)
-    }
-
-    fn remove(&mut self, key: usize) -> Option<Subscriber> {
-        self.entries.remove(&key)
-    }
-
-    fn iter(&self) -> impl Iterator<Item = (usize, &Subscriber)> {
-        self.entries.iter().map(|(&k, v)| (k, v))
-    }
+    /// Maximum serialized-result bytes to cache in `QueryGroup::last_result`.
+    /// Results larger than this are not cached; new group members will
+    /// re-execute the query instead of receiving a pre-cached value.
+    max_cached_result_bytes: usize,
 }
 
 impl SubscriptionManager {
@@ -169,13 +51,50 @@ impl SubscriptionManager {
 
     /// Create a new subscription manager with a custom shard count.
     pub fn with_shard_count(max_per_session: usize, shard_count: usize) -> Self {
+        Self::with_config(max_per_session, shard_count, 10_485_760)
+    }
+
+    /// Create a new subscription manager with full configuration.
+    ///
+    /// `max_cached_result_bytes` caps the serialized size of results stored in
+    /// `QueryGroup::last_result`. Results that exceed this limit are not cached;
+    /// new subscribers joining the group re-execute the query instead.
+    pub fn with_config(
+        max_per_session: usize,
+        shard_count: usize,
+        max_cached_result_bytes: usize,
+    ) -> Self {
         Self {
             groups: DashMap::with_shard_amount(shard_count),
             group_lookup: DashMap::with_shard_amount(shard_count),
-            subscribers: Arc::new(Mutex::new(SubscriberStore::new())),
+            table_index: DashMap::with_shard_amount(shard_count),
+            subscribers: DashMap::with_shard_amount(shard_count),
+            subscription_to_key: DashMap::with_shard_amount(shard_count),
+            next_subscriber_key: AtomicUsize::new(0),
             session_subscribers: DashMap::with_shard_amount(shard_count),
             next_group_id: AtomicU32::new(0),
             max_per_session,
+            max_cached_result_bytes,
+        }
+    }
+
+    /// Remove a group from the inverted table index using pre-extracted data.
+    /// Called after releasing the group guard to avoid cross-shard deadlocks.
+    fn remove_group_from_table_index(
+        &self,
+        group_id: QueryGroupId,
+        table_deps: &[&str],
+        runtime_tables: &[String],
+    ) {
+        let runtime_iter = runtime_tables.iter().map(String::as_str);
+        for table in table_deps.iter().copied().chain(runtime_iter) {
+            if let Some(mut set) = self.table_index.get_mut(table) {
+                set.remove(&group_id);
+                if set.is_empty() {
+                    drop(set);
+                    self.table_index.remove(table);
+                }
+            }
         }
     }
 
@@ -220,6 +139,7 @@ impl SubscriptionManager {
                 selected_cols,
                 read_set: ReadSet::new(),
                 last_result_hash: None,
+                last_result: None,
                 subscribers: Vec::new(),
                 created_at: chrono::Utc::now(),
                 execution_count: 0,
@@ -228,31 +148,34 @@ impl SubscriptionManager {
             id
         });
 
-        // Create subscriber in the store
+        if is_new {
+            for table in table_deps {
+                self.table_index
+                    .entry((*table).to_string())
+                    .or_default()
+                    .insert(group_id);
+            }
+        }
+
         let subscription_id = SubscriptionId::new();
-        let subscriber_id = {
-            let mut store = self.subscribers.lock().unwrap_or_else(|e| {
-                tracing::error!("Subscriber store lock was poisoned, recovering");
-                e.into_inner()
-            });
-            let key = store.next_key;
-            let sid = SubscriberId(key as u32);
-            store.insert(Subscriber {
-                id: sid,
+        let key = self.next_subscriber_key.fetch_add(1, Ordering::Relaxed);
+        let subscriber_id = SubscriberId(key as u32);
+        self.subscribers.insert(
+            key,
+            Subscriber {
+                id: subscriber_id,
                 session_id,
                 client_sub_id,
                 group_id,
                 subscription_id,
-            });
-            sid
-        };
+            },
+        );
+        self.subscription_to_key.insert(subscription_id, key);
 
-        // Add subscriber to group
         if let Some(mut group) = self.groups.get_mut(&group_id) {
             group.subscribers.push(subscriber_id);
         }
 
-        // Track session -> subscriber mapping
         self.session_subscribers
             .entry(session_id)
             .or_default()
@@ -263,43 +186,47 @@ impl SubscriptionManager {
 
     /// Remove a subscriber by its subscription ID.
     pub fn unsubscribe(&self, subscription_id: SubscriptionId) {
-        let mut store = self.subscribers.lock().unwrap_or_else(|e| {
-            tracing::error!("Subscriber store lock was poisoned, recovering");
-            e.into_inner()
-        });
+        let Some((_, key)) = self.subscription_to_key.remove(&subscription_id) else {
+            return;
+        };
+        let Some((_, sub)) = self.subscribers.remove(&key) else {
+            return;
+        };
+        let subscriber_id = sub.id;
+        let group_id = sub.group_id;
+        let session_id = sub.session_id;
 
-        // Find the subscriber by subscription_id
-        let sub_key = store
-            .iter()
-            .find(|(_, s)| s.subscription_id == subscription_id)
-            .map(|(key, s)| (key, s.group_id, s.session_id));
+        // Collect eviction data while holding the group guard, then release
+        // before touching table_index to avoid cross-shard deadlocks.
+        let eviction_data = if let Some(mut group) = self.groups.get_mut(&group_id) {
+            group.subscribers.retain(|s| *s != subscriber_id);
 
-        if let Some((key, group_id, session_id)) = sub_key {
-            let subscriber_id = SubscriberId(key as u32);
-            store.remove(key);
-
-            // Remove from group
-            drop(store); // Release lock before accessing DashMap
-            if let Some(mut group) = self.groups.get_mut(&group_id) {
-                group.subscribers.retain(|s| *s != subscriber_id);
-
-                // If group is empty, remove it
-                if group.subscribers.is_empty() {
-                    let lookup_key = QueryGroup::compute_lookup_key(
-                        &group.query_name,
-                        &group.args,
-                        &group.auth_scope,
-                    );
-                    drop(group);
-                    self.groups.remove(&group_id);
-                    self.group_lookup.remove(&lookup_key);
-                }
+            if group.subscribers.is_empty() {
+                let lookup_key = QueryGroup::compute_lookup_key(
+                    &group.query_name,
+                    &group.args,
+                    &group.auth_scope,
+                );
+                let table_deps: Vec<&'static str> = group.table_deps.to_vec();
+                let runtime_tables: Vec<String> = group.read_set.tables.to_vec();
+                let gid = group.id;
+                drop(group);
+                Some((lookup_key, table_deps, runtime_tables, gid))
+            } else {
+                None
             }
+        } else {
+            None
+        };
 
-            // Remove from session mapping
-            if let Some(mut session_subs) = self.session_subscribers.get_mut(&session_id) {
-                session_subs.retain(|s| *s != subscriber_id);
-            }
+        if let Some((lookup_key, table_deps, runtime_tables, gid)) = eviction_data {
+            self.remove_group_from_table_index(gid, &table_deps, &runtime_tables);
+            self.groups.remove(&gid);
+            self.group_lookup.remove(&lookup_key);
+        }
+
+        if let Some(mut session_subs) = self.session_subscribers.get_mut(&session_id) {
+            session_subs.retain(|s| *s != subscriber_id);
         }
     }
 
@@ -312,18 +239,16 @@ impl SubscriptionManager {
             .unwrap_or_default();
 
         let mut removed_sub_ids = Vec::new();
-        let mut store = self.subscribers.lock().unwrap_or_else(|e| {
-            tracing::error!("Subscriber store lock was poisoned, recovering");
-            e.into_inner()
-        });
 
         for sid in subscriber_ids {
             let key = sid.0 as usize;
-            if let Some(sub) = store.remove(key) {
+            if let Some((_, sub)) = self.subscribers.remove(&key) {
+                self.subscription_to_key.remove(&sub.subscription_id);
                 removed_sub_ids.push(sub.subscription_id);
 
-                // Remove from group
-                if let Some(mut group) = self.groups.get_mut(&sub.group_id) {
+                // Collect eviction data while holding the group guard, then release
+                // before touching table_index to avoid cross-shard deadlocks.
+                let eviction_data = if let Some(mut group) = self.groups.get_mut(&sub.group_id) {
                     group.subscribers.retain(|s| *s != sid);
 
                     if group.subscribers.is_empty() {
@@ -332,10 +257,22 @@ impl SubscriptionManager {
                             &group.args,
                             &group.auth_scope,
                         );
+                        let table_deps: Vec<&'static str> = group.table_deps.to_vec();
+                        let runtime_tables: Vec<String> = group.read_set.tables.to_vec();
+                        let gid = group.id;
                         drop(group);
-                        self.groups.remove(&sub.group_id);
-                        self.group_lookup.remove(&lookup_key);
+                        Some((lookup_key, table_deps, runtime_tables, gid))
+                    } else {
+                        None
                     }
+                } else {
+                    None
+                };
+
+                if let Some((lookup_key, table_deps, runtime_tables, gid)) = eviction_data {
+                    self.remove_group_from_table_index(gid, &table_deps, &runtime_tables);
+                    self.groups.remove(&gid);
+                    self.group_lookup.remove(&lookup_key);
                 }
             }
         }
@@ -343,13 +280,24 @@ impl SubscriptionManager {
         removed_sub_ids
     }
 
-    /// Find all groups affected by a change. Returns group IDs (not subscription IDs).
-    /// This is O(groups_for_table), not O(all_subscriptions).
+    /// Find all groups affected by a change via the inverted table index.
+    /// O(groups_for_table) with column-level filtering, not O(all_groups).
     pub fn find_affected_groups(&self, change: &Change) -> Vec<QueryGroupId> {
-        self.groups
-            .iter()
-            .filter(|entry| entry.should_invalidate(change))
-            .map(|entry| entry.id)
+        let Some(set) = self.table_index.get(&change.table) else {
+            return Vec::new();
+        };
+
+        // Iterate the table index under its read guard and filter directly.
+        // `self.groups.get(gid)` acquires a shard lock on a different DashMap,
+        // so there is no deadlock risk. This avoids materialising an
+        // intermediate Vec of all candidate IDs before filtering.
+        set.iter()
+            .copied()
+            .filter(|gid| {
+                self.groups
+                    .get(gid)
+                    .is_some_and(|g| g.should_invalidate(change))
+            })
             .collect()
     }
 
@@ -377,24 +325,71 @@ impl SubscriptionManager {
             .map(|g| g.subscribers.clone())
             .unwrap_or_default();
 
-        let store = self.subscribers.lock().unwrap_or_else(|e| {
-            tracing::error!("Subscriber store lock was poisoned, recovering");
-            e.into_inner()
-        });
         subscriber_ids
             .iter()
             .filter_map(|sid| {
-                store
-                    .get(sid.0 as usize)
+                self.subscribers
+                    .get(&(sid.0 as usize))
                     .map(|s| (s.session_id, s.client_sub_id.clone()))
             })
             .collect()
     }
 
-    /// Update a group after re-execution.
+    /// Update a group after re-execution. Extends the table index with any
+    /// runtime-discovered tables from the read set that weren't in the
+    /// compile-time `table_deps`.
     pub fn update_group(&self, group_id: QueryGroupId, read_set: ReadSet, result_hash: String) {
         if let Some(mut group) = self.groups.get_mut(&group_id) {
+            for table in &read_set.tables {
+                let already_indexed = group.table_deps.iter().any(|t| *t == table);
+                if !already_indexed {
+                    self.table_index
+                        .entry(table.clone())
+                        .or_default()
+                        .insert(group_id);
+                }
+            }
             group.record_execution(read_set, result_hash);
+        }
+    }
+
+    /// Update a group after re-execution, caching the result data for new
+    /// subscribers that join the group before the next invalidation.
+    ///
+    /// If the serialized result exceeds `max_cached_result_bytes`, the data is
+    /// not stored in `last_result`. The hash is still recorded so delta
+    /// detection works correctly; new subscribers joining the group will
+    /// re-execute the query rather than receiving a cached value.
+    pub fn update_group_with_data(
+        &self,
+        group_id: QueryGroupId,
+        read_set: ReadSet,
+        result_hash: String,
+        data: std::sync::Arc<serde_json::Value>,
+        serialized_len: usize,
+    ) {
+        if let Some(mut group) = self.groups.get_mut(&group_id) {
+            for table in &read_set.tables {
+                let already_indexed = group.table_deps.iter().any(|t| *t == table);
+                if !already_indexed {
+                    self.table_index
+                        .entry(table.clone())
+                        .or_default()
+                        .insert(group_id);
+                }
+            }
+
+            if serialized_len > self.max_cached_result_bytes {
+                tracing::debug!(
+                    query = %group.query_name,
+                    result_bytes = serialized_len,
+                    limit_bytes = self.max_cached_result_bytes,
+                    "Result too large to cache; new subscribers will re-execute"
+                );
+                group.record_execution(read_set, result_hash);
+            } else {
+                group.record_execution_with_data(read_set, result_hash, data);
+            }
         }
     }
 
@@ -403,18 +398,23 @@ impl SubscriptionManager {
         let total_subscribers: usize = self.groups.iter().map(|g| g.subscribers.len()).sum();
         let groups_count = self.groups.len();
         let sessions_count = self.session_subscribers.len();
+        let indexed_tables = self.table_index.len();
 
         // Estimate memory usage:
         // - Each QueryGroup: ~256 bytes (name, args, auth, read_set, subscribers vec)
         // - Each subscriber entry in the store: ~128 bytes
         // - Each session mapping entry: ~64 bytes + subscriber ID vec
-        let estimated_bytes =
-            (groups_count * 256) + (total_subscribers * 128) + (sessions_count * 64);
+        // - Each table index entry: ~64 bytes + HashSet overhead
+        let estimated_bytes = (groups_count * 256)
+            + (total_subscribers * 128)
+            + (sessions_count * 64)
+            + (indexed_tables * 96);
 
         SubscriptionCounts {
             total: total_subscribers,
             unique_queries: groups_count,
             sessions: sessions_count,
+            indexed_tables,
             memory_bytes: estimated_bytes,
         }
     }
@@ -438,6 +438,7 @@ pub struct SubscriptionCounts {
     pub total: usize,
     pub unique_queries: usize,
     pub sessions: usize,
+    pub indexed_tables: usize,
     pub memory_bytes: usize,
 }
 
@@ -446,30 +447,7 @@ pub struct SubscriptionCounts {
 mod tests {
     use super::*;
     use forge_core::function::AuthContext;
-
-    #[test]
-    fn test_session_manager_create() {
-        let node_id = NodeId::new();
-        let manager = SessionManager::new(node_id);
-
-        let session = manager.create_session();
-        assert!(session.is_connected());
-
-        let retrieved = manager.get_session(session.id);
-        assert!(retrieved.is_some());
-    }
-
-    #[test]
-    fn test_session_manager_disconnect() {
-        let node_id = NodeId::new();
-        let manager = SessionManager::new(node_id);
-
-        let session = manager.create_session();
-        manager.disconnect_session(session.id);
-
-        let retrieved = manager.get_session(session.id).unwrap();
-        assert!(!retrieved.is_connected());
-    }
+    use uuid::Uuid;
 
     #[test]
     fn test_subscription_manager_create() {
@@ -610,5 +588,547 @@ mod tests {
         let counts = manager.counts();
         assert_eq!(counts.total, 0);
         assert_eq!(counts.unique_queries, 0);
+    }
+
+    #[test]
+    fn test_table_index_lookup() {
+        let manager = SubscriptionManager::new(50);
+        let s1 = SessionId::new();
+        let s2 = SessionId::new();
+        let auth = AuthContext::unauthenticated();
+
+        // Two queries reading different tables
+        static PROJECTS: &[&str] = &["projects"];
+        static USERS: &[&str] = &["users"];
+
+        let (g1, _, _) = manager
+            .subscribe(
+                s1,
+                "a".into(),
+                "get_projects",
+                &serde_json::json!({}),
+                &auth,
+                PROJECTS,
+                &[],
+            )
+            .unwrap();
+        let (g2, _, _) = manager
+            .subscribe(
+                s2,
+                "b".into(),
+                "get_users",
+                &serde_json::json!({}),
+                &auth,
+                USERS,
+                &[],
+            )
+            .unwrap();
+
+        // Change on projects should only find g1
+        let change = Change::new("projects", forge_core::realtime::ChangeOperation::Insert);
+        let affected = manager.find_affected_groups(&change);
+        assert_eq!(affected, vec![g1]);
+
+        // Change on users should only find g2
+        let change = Change::new("users", forge_core::realtime::ChangeOperation::Update);
+        let affected = manager.find_affected_groups(&change);
+        assert_eq!(affected, vec![g2]);
+
+        // Change on unrelated table should find nothing
+        let change = Change::new("orders", forge_core::realtime::ChangeOperation::Delete);
+        let affected = manager.find_affected_groups(&change);
+        assert!(affected.is_empty());
+
+        assert_eq!(manager.counts().indexed_tables, 2);
+    }
+
+    #[test]
+    fn test_table_index_cleanup_on_unsubscribe() {
+        let manager = SubscriptionManager::new(50);
+        let session = SessionId::new();
+        let auth = AuthContext::unauthenticated();
+        static PROJECTS: &[&str] = &["projects"];
+
+        let (_, sub_id, _) = manager
+            .subscribe(
+                session,
+                "a".into(),
+                "get_projects",
+                &serde_json::json!({}),
+                &auth,
+                PROJECTS,
+                &[],
+            )
+            .unwrap();
+
+        assert_eq!(manager.counts().indexed_tables, 1);
+
+        manager.unsubscribe(sub_id);
+
+        // Table index should be cleaned up when the last group for that table is removed
+        assert_eq!(manager.counts().indexed_tables, 0);
+
+        let change = Change::new("projects", forge_core::realtime::ChangeOperation::Insert);
+        assert!(manager.find_affected_groups(&change).is_empty());
+    }
+
+    // --- Additional coverage: tenant isolation, args isolation, ref-counted
+    // group eviction, update_group runtime-table indexing, cache size limit,
+    // get_group_subscribers fan-out, all_group_ids snapshot, column-filtered
+    // invalidation, and session-removal return value.
+
+    fn authed(user_id: Uuid, roles: Vec<&str>) -> AuthContext {
+        AuthContext::authenticated(
+            user_id,
+            roles.into_iter().map(String::from).collect(),
+            std::collections::HashMap::new(),
+        )
+    }
+
+    #[test]
+    fn subscribe_does_not_coalesce_across_different_users() {
+        // Same query + args, different principal → different groups. This is
+        // the row-level security invariant: alice and bob must not share a
+        // cached result, even when they ran the same query.
+        let manager = SubscriptionManager::new(50);
+        let alice = authed(Uuid::new_v4(), vec![]);
+        let bob = authed(Uuid::new_v4(), vec![]);
+        let s1 = SessionId::new();
+        let s2 = SessionId::new();
+
+        let (g_alice, _, is_new_alice) = manager
+            .subscribe(
+                s1,
+                "a".into(),
+                "list_orders",
+                &serde_json::json!({}),
+                &alice,
+                &[],
+                &[],
+            )
+            .unwrap();
+        let (g_bob, _, is_new_bob) = manager
+            .subscribe(
+                s2,
+                "b".into(),
+                "list_orders",
+                &serde_json::json!({}),
+                &bob,
+                &[],
+                &[],
+            )
+            .unwrap();
+
+        assert!(is_new_alice);
+        assert!(is_new_bob);
+        assert_ne!(g_alice, g_bob);
+    }
+
+    #[test]
+    fn subscribe_does_not_coalesce_when_roles_differ() {
+        // Same principal, different role set → different group. Roles can
+        // affect what rows the query returns, so they're part of the dedup key.
+        let manager = SubscriptionManager::new(50);
+        let uid = Uuid::new_v4();
+        let viewer = authed(uid, vec!["viewer"]);
+        let admin = authed(uid, vec!["admin", "viewer"]);
+        let s1 = SessionId::new();
+        let s2 = SessionId::new();
+
+        let (g_viewer, _, _) = manager
+            .subscribe(
+                s1,
+                "a".into(),
+                "list_orders",
+                &serde_json::json!({}),
+                &viewer,
+                &[],
+                &[],
+            )
+            .unwrap();
+        let (g_admin, _, _) = manager
+            .subscribe(
+                s2,
+                "b".into(),
+                "list_orders",
+                &serde_json::json!({}),
+                &admin,
+                &[],
+                &[],
+            )
+            .unwrap();
+        assert_ne!(g_viewer, g_admin);
+    }
+
+    #[test]
+    fn subscribe_does_not_coalesce_with_different_args() {
+        // Args are part of the dedup key — `{"status": "open"}` and
+        // `{"status": "closed"}` are two distinct subscriptions.
+        let manager = SubscriptionManager::new(50);
+        let auth = AuthContext::unauthenticated();
+        let (g_open, _, _) = manager
+            .subscribe(
+                SessionId::new(),
+                "a".into(),
+                "list_orders",
+                &serde_json::json!({"status": "open"}),
+                &auth,
+                &[],
+                &[],
+            )
+            .unwrap();
+        let (g_closed, _, _) = manager
+            .subscribe(
+                SessionId::new(),
+                "b".into(),
+                "list_orders",
+                &serde_json::json!({"status": "closed"}),
+                &auth,
+                &[],
+                &[],
+            )
+            .unwrap();
+        assert_ne!(g_open, g_closed);
+    }
+
+    #[test]
+    fn unsubscribe_keeps_group_alive_while_other_subscribers_remain() {
+        // Group eviction is ref-counted by subscriber count, not by name —
+        // two subscribers, removing one must not delete the group or its
+        // table index entry.
+        let manager = SubscriptionManager::new(50);
+        let auth = AuthContext::unauthenticated();
+        static T: &[&str] = &["t"];
+
+        let (g1, sub1, _) = manager
+            .subscribe(
+                SessionId::new(),
+                "a".into(),
+                "q",
+                &serde_json::json!({}),
+                &auth,
+                T,
+                &[],
+            )
+            .unwrap();
+        let (g2, _sub2, _) = manager
+            .subscribe(
+                SessionId::new(),
+                "b".into(),
+                "q",
+                &serde_json::json!({}),
+                &auth,
+                T,
+                &[],
+            )
+            .unwrap();
+        assert_eq!(g1, g2);
+
+        manager.unsubscribe(sub1);
+
+        // Group must still be present; table_index too.
+        assert!(manager.get_group(g1).is_some());
+        assert_eq!(manager.counts().indexed_tables, 1);
+        assert_eq!(manager.get_group_subscribers(g1).len(), 1);
+    }
+
+    #[test]
+    fn unsubscribe_is_noop_for_unknown_subscription_id() {
+        // Calling unsubscribe on a SubscriptionId we never inserted must not
+        // panic or corrupt state.
+        let manager = SubscriptionManager::new(50);
+        let phantom = forge_core::realtime::SubscriptionId::new();
+        manager.unsubscribe(phantom);
+        assert_eq!(manager.counts().total, 0);
+    }
+
+    #[test]
+    fn get_group_subscribers_returns_session_and_client_sub_id_tuples() {
+        // Used by the fan-out path. The mapping must round-trip exactly the
+        // `(SessionId, client_sub_id)` pair we subscribed with.
+        let manager = SubscriptionManager::new(50);
+        let auth = AuthContext::unauthenticated();
+        let session = SessionId::new();
+        let (group_id, _, _) = manager
+            .subscribe(
+                session,
+                "my-client-sub".into(),
+                "q",
+                &serde_json::json!({}),
+                &auth,
+                &[],
+                &[],
+            )
+            .unwrap();
+
+        let subs = manager.get_group_subscribers(group_id);
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].0, session);
+        assert_eq!(subs[0].1, "my-client-sub");
+    }
+
+    #[test]
+    fn all_group_ids_returns_every_active_group() {
+        let manager = SubscriptionManager::new(50);
+        let auth = AuthContext::unauthenticated();
+        let (g1, _, _) = manager
+            .subscribe(
+                SessionId::new(),
+                "a".into(),
+                "q1",
+                &serde_json::json!({}),
+                &auth,
+                &[],
+                &[],
+            )
+            .unwrap();
+        let (g2, _, _) = manager
+            .subscribe(
+                SessionId::new(),
+                "b".into(),
+                "q2",
+                &serde_json::json!({}),
+                &auth,
+                &[],
+                &[],
+            )
+            .unwrap();
+
+        let mut ids = manager.all_group_ids();
+        ids.sort_by_key(|g| g.0);
+        let mut want = vec![g1, g2];
+        want.sort_by_key(|g| g.0);
+        assert_eq!(ids, want);
+    }
+
+    #[test]
+    fn update_group_extends_table_index_with_runtime_discovered_tables() {
+        // The compile-time `table_deps` list might miss tables reached via
+        // dynamic SQL or sub-functions. `update_group` is the bridge: after
+        // the first execution the runtime read_set has to merge into the
+        // table index so subsequent changes to those tables also invalidate.
+        let manager = SubscriptionManager::new(50);
+        let auth = AuthContext::unauthenticated();
+        static PROJECTS: &[&str] = &["projects"];
+
+        let (group_id, _, _) = manager
+            .subscribe(
+                SessionId::new(),
+                "a".into(),
+                "q",
+                &serde_json::json!({}),
+                &auth,
+                PROJECTS,
+                &[],
+            )
+            .unwrap();
+
+        // Runtime discovers that the query also touched `tasks`.
+        let mut rs = ReadSet::new();
+        rs.tables.push("tasks".to_string());
+        manager.update_group(group_id, rs, "hash1".to_string());
+
+        let change = Change::new("tasks", forge_core::realtime::ChangeOperation::Update);
+        assert_eq!(manager.find_affected_groups(&change), vec![group_id]);
+    }
+
+    #[test]
+    fn update_group_with_data_skips_cache_when_result_exceeds_limit() {
+        // With a 64-byte cache cap, a large payload must record the hash
+        // for delta detection but leave `last_result` empty so new joiners
+        // re-execute instead of receiving stale data from the cache.
+        let manager = SubscriptionManager::with_config(50, 64, 64);
+        let auth = AuthContext::unauthenticated();
+        let (group_id, _, _) = manager
+            .subscribe(
+                SessionId::new(),
+                "a".into(),
+                "q",
+                &serde_json::json!({}),
+                &auth,
+                &[],
+                &[],
+            )
+            .unwrap();
+
+        // Payload comfortably > 64 bytes when serialised.
+        let big = std::sync::Arc::new(serde_json::json!({
+            "items": vec!["row-with-padding-to-blow-past-the-cache-limit"; 8]
+        }));
+        let serialized_len = serde_json::to_vec(&*big).unwrap().len();
+        manager.update_group_with_data(
+            group_id,
+            ReadSet::new(),
+            "hash-big".to_string(),
+            big.clone(),
+            serialized_len,
+        );
+
+        let group = manager.get_group(group_id).expect("group");
+        assert_eq!(group.last_result_hash.as_deref(), Some("hash-big"));
+        assert!(
+            group.last_result.is_none(),
+            "oversize results must not be cached"
+        );
+    }
+
+    #[test]
+    fn update_group_with_data_caches_when_result_fits_under_limit() {
+        let manager = SubscriptionManager::with_config(50, 64, 10_485_760);
+        let auth = AuthContext::unauthenticated();
+        let (group_id, _, _) = manager
+            .subscribe(
+                SessionId::new(),
+                "a".into(),
+                "q",
+                &serde_json::json!({}),
+                &auth,
+                &[],
+                &[],
+            )
+            .unwrap();
+
+        let small = std::sync::Arc::new(serde_json::json!({"ok": true}));
+        let serialized_len = serde_json::to_vec(&*small).unwrap().len();
+        manager.update_group_with_data(
+            group_id,
+            ReadSet::new(),
+            "hash-small".to_string(),
+            small.clone(),
+            serialized_len,
+        );
+
+        let group = manager.get_group(group_id).expect("group");
+        assert_eq!(group.last_result_hash.as_deref(), Some("hash-small"));
+        assert!(group.last_result.is_some());
+    }
+
+    #[test]
+    fn find_affected_groups_filters_by_selected_columns_for_updates() {
+        // `selected_cols = ["name"]` means an UPDATE that only touched
+        // `email` shouldn't invalidate the group. INSERTs always do, since
+        // they change row presence regardless of columns.
+        let manager = SubscriptionManager::new(50);
+        let auth = AuthContext::unauthenticated();
+        static USERS: &[&str] = &["users"];
+        static COLS: &[&str] = &["name"];
+
+        let (group_id, _, _) = manager
+            .subscribe(
+                SessionId::new(),
+                "a".into(),
+                "q",
+                &serde_json::json!({}),
+                &auth,
+                USERS,
+                COLS,
+            )
+            .unwrap();
+
+        let unrelated = Change::new("users", forge_core::realtime::ChangeOperation::Update)
+            .with_columns(vec!["email".to_string()]);
+        assert!(manager.find_affected_groups(&unrelated).is_empty());
+
+        let relevant = Change::new("users", forge_core::realtime::ChangeOperation::Update)
+            .with_columns(vec!["name".to_string()]);
+        assert_eq!(manager.find_affected_groups(&relevant), vec![group_id]);
+
+        // Inserts always invalidate (row presence changes).
+        let insert = Change::new("users", forge_core::realtime::ChangeOperation::Insert)
+            .with_columns(vec!["email".to_string()]);
+        assert_eq!(manager.find_affected_groups(&insert), vec![group_id]);
+    }
+
+    #[test]
+    fn remove_session_subscriptions_returns_subscription_ids_for_cleanup() {
+        // The session server uses the returned IDs to tell other components
+        // (channels, presence, etc.) which subscriptions just went away.
+        let manager = SubscriptionManager::new(50);
+        let auth = AuthContext::unauthenticated();
+        let session = SessionId::new();
+        let (_, sub1, _) = manager
+            .subscribe(
+                session,
+                "a".into(),
+                "q1",
+                &serde_json::json!({}),
+                &auth,
+                &[],
+                &[],
+            )
+            .unwrap();
+        let (_, sub2, _) = manager
+            .subscribe(
+                session,
+                "b".into(),
+                "q2",
+                &serde_json::json!({}),
+                &auth,
+                &[],
+                &[],
+            )
+            .unwrap();
+
+        let mut removed = manager.remove_session_subscriptions(session);
+        removed.sort_by_key(|s| s.0);
+        let mut want = vec![sub1, sub2];
+        want.sort_by_key(|s| s.0);
+        assert_eq!(removed, want);
+
+        // And a follow-up call returns nothing — the session is gone.
+        assert!(manager.remove_session_subscriptions(session).is_empty());
+    }
+
+    #[test]
+    fn counts_reflects_groups_sessions_subscribers_and_tables() {
+        let manager = SubscriptionManager::new(50);
+        let auth = AuthContext::unauthenticated();
+        static USERS: &[&str] = &["users"];
+        static ORDERS: &[&str] = &["orders"];
+
+        let session_a = SessionId::new();
+        let session_b = SessionId::new();
+        // Two subscribers in session_a sharing one group (coalesced)
+        manager
+            .subscribe(
+                session_a,
+                "1".into(),
+                "list_users",
+                &serde_json::json!({}),
+                &auth,
+                USERS,
+                &[],
+            )
+            .unwrap();
+        manager
+            .subscribe(
+                session_a,
+                "2".into(),
+                "list_orders",
+                &serde_json::json!({}),
+                &auth,
+                ORDERS,
+                &[],
+            )
+            .unwrap();
+        // session_b shares the list_users group with session_a → same group, +1 subscriber
+        manager
+            .subscribe(
+                session_b,
+                "3".into(),
+                "list_users",
+                &serde_json::json!({}),
+                &auth,
+                USERS,
+                &[],
+            )
+            .unwrap();
+
+        let counts = manager.counts();
+        assert_eq!(counts.total, 3);
+        assert_eq!(counts.unique_queries, 2);
+        assert_eq!(counts.sessions, 2);
+        assert_eq!(counts.indexed_tables, 2);
+        assert!(counts.memory_bytes > 0);
     }
 }

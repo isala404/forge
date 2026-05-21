@@ -19,7 +19,7 @@
 //!     sqlx::query_scalar!("SELECT COUNT(*) FROM items")
 //!         .fetch_one(ctx.db())
 //!         .await
-//!         .map_err(|e| forge_core::ForgeError::Database(e.to_string()))
+//!         .map_err(forge_core::ForgeError::Database)
 //! }
 //! ```
 
@@ -72,8 +72,6 @@ pub trait AuthenticatedContext: HandlerContext {
     fn tenant_id(&self) -> Option<Uuid>;
 }
 
-// ── HandlerContext impls ──────────────────────────────────────────────────────
-
 impl HandlerContext for crate::function::QueryContext {
     fn db(&self) -> ForgeDb {
         self.db()
@@ -86,7 +84,7 @@ impl HandlerContext for crate::function::QueryContext {
 
 impl HandlerContext for crate::function::MutationContext {
     fn db(&self) -> ForgeDb {
-        // MutationContext::db() returns DbConn, not ForgeDb.
+        // MutationContext::tx() returns DbConn, not ForgeDb.
         // For HandlerContext we expose the pool-backed ForgeDb view, which
         // intentionally bypasses the active transaction.
         crate::function::ForgeDb::from_pool(self.bypass_pool())
@@ -157,8 +155,6 @@ impl HandlerContext for crate::mcp::McpToolContext {
     }
 }
 
-// ── AuthenticatedContext impls ────────────────────────────────────────────────
-
 impl AuthenticatedContext for crate::function::QueryContext {
     fn user_id(&self) -> crate::error::Result<Uuid> {
         self.user_id()
@@ -188,8 +184,6 @@ impl AuthenticatedContext for crate::mcp::McpToolContext {
         self.tenant_id()
     }
 }
-
-// ── Sealed impls ──────────────────────────────────────────────────────────────
 
 impl Sealed for crate::function::QueryContext {}
 impl Sealed for crate::function::MutationContext {}

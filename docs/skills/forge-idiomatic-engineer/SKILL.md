@@ -15,7 +15,7 @@ These cause hours of wasted debugging if missed. Internalize before writing code
 - **`forge check` auto-prepares the offline cache.** It detects when `src/` is newer than `.sqlx/` and runs `cargo sqlx prepare --workspace` before the rest of the pipeline, so you don't need to think about prepare ordering. (For raw `cargo check`, you still need to run `forge migrate prepare` after editing any `sqlx::query!()`.) Pass `--no-prepare` in CI where the cache should already be correct.
 - **`forge migrate prepare` hard-fails if `cargo-sqlx` is missing.** Install with `cargo install sqlx-cli --no-default-features --features postgres` and re-run.
 - **All `forge` commands walk up to find `forge.toml`.** Run them from any subdirectory; the resolved root is printed at start. No need to `cd` first.
-- **If anything in the compile loop feels off, run `forge doctor` first.** It checks rustc, `cargo-sqlx`, `SQLX_OFFLINE`, `DATABASE_URL` reachability, Docker, frontend tooling, `forge.toml` syntax, `.sqlx/` freshness, and the latest migration's `@up`/`@down` markers in one shot.
+- **If anything in the compile loop feels off, run `forge doctor` first.** It checks rustc, `cargo-sqlx`, `SQLX_OFFLINE`, `DATABASE_URL` reachability, Docker, frontend tooling, `forge.toml` syntax, `.sqlx/` freshness, and that the latest migration file isn't empty in one shot.
 - **A passing `cargo sqlx prepare` is a passing compile.** Don't run `forge check` purely to "confirm" what prepare just proved — prepare invokes a full `cargo check` internally. Run `forge check` only when you have new edits since the last prepare, or to exercise the rest of the validation suite (registration, schema, clippy).
 
 ## Session Start: Read Once, Trust Memory
@@ -108,7 +108,7 @@ When the user says "fix it" / "can you fix it" after you've diagnosed a problem,
 - **Scope enforcement** (compile-time enforced by the macro): private queries must filter by `user_id` / `owner_id`. `ctx.user_id()` for the principal. Opt out with `#[query(unscoped)]` only for shared/admin data.
 - **Transactional dispatch** (compile-time enforced): `dispatch_job` and `start_workflow` require a transactional mutation. Since transactions are on by default, just don't set `transactional = false` on mutations that dispatch.
 - **System tables are off-limits** (`forge check` enforced): never `INSERT/UPDATE/DELETE` on `forge_*` tables. Use `dispatch_job`, `start_workflow`, `record_signal`.
-- **Migrations**: `-- @up` / `-- @down` markers. Enable reactivity with `SELECT forge_enable_reactivity('table_name');`. No `IF NOT EXISTS`.
+- **Migrations**: forward-only — no `-- @down`. Optional `-- @up` marker is stripped. Enable reactivity with `SELECT forge_enable_reactivity('table_name');`. No `IF NOT EXISTS`.
 - **Not-found handling**: `fetch_optional().await?.ok_or_else(|| ForgeError::NotFound(format!(...)))`.
 
 ## Output Contract

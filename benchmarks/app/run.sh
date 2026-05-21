@@ -164,14 +164,10 @@ roles = ["gateway", "function"]
 [database]
 url = "$DB_URL"
 pool_size = $POOL_SIZE
+pool_timeout = "10s"
 test_before_acquire = false
 read_from_replica = true
 replica_urls = $(quote_toml_array "${REPLICA_URLS[@]}")
-
-[database.pools.default]
-size = $POOL_SIZE
-timeout_secs = 10
-test_before_acquire = false
 
 [gateway]
 port = $port

@@ -1,5 +1,3 @@
--- @up
-
 -- Users for auth tokens
 CREATE TABLE users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -19,8 +17,3 @@ CREATE TABLE counters (
 CREATE INDEX idx_counters_name ON counters(name);
 
 SELECT forge_enable_reactivity('counters');
-
--- @down
-SELECT forge_disable_reactivity('counters');
-DROP TABLE IF EXISTS counters;
-DROP TABLE IF EXISTS users;

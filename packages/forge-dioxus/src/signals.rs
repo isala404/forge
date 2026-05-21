@@ -17,7 +17,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dioxus::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::ForgeClient;
@@ -29,31 +29,177 @@ const MAX_QUEUE_SIZE: usize = 1000;
 #[cfg(target_arch = "wasm32")]
 const AUTO_CAPTURE_DELAY_MS: u64 = 2000;
 
-fn now_iso() -> String {
+// Matches the Svelte client's localStorage key so events queued on one
+// runtime can be reclaimed by the other across page reloads.
+#[cfg(target_arch = "wasm32")]
+const PERSIST_KEY: &str = "forge_signals_queue_v1";
+
+fn warn_serialize_failed(label: &str, err: &serde_json::Error) {
     #[cfg(target_arch = "wasm32")]
     {
-        js_sys::Date::new_0().to_iso_string().as_string().unwrap_or_default()
+        let msg = format!("[forge-signals] dropped {label}: {err}");
+        web_sys::console::warn_1(&wasm_bindgen::JsValue::from_str(&msg));
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        // ISO 8601 without chrono: "2024-03-28T12:34:56Z"
-        let dur = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        let secs = dur.as_secs();
-        // Days since epoch
-        let days = secs / 86400;
-        let time_of_day = secs % 86400;
-        let hours = time_of_day / 3600;
-        let minutes = (time_of_day % 3600) / 60;
-        let seconds = time_of_day % 60;
-        // Convert days since 1970-01-01 to y/m/d
-        let (year, month, day) = days_to_date(days);
-        format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
+        eprintln!("[forge-signals] dropped {label}: {err}");
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+// Inline JS shims compiled by wasm-bindgen at build time. Avoids runtime
+// `eval()` so the tracker keeps working under strict CSP (`script-src 'self'`).
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(inline_js = r#"
+export function forge_patch_history() {
+    var origPush = history.pushState;
+    var origReplace = history.replaceState;
+    history.pushState = function() {
+        var before = location.href;
+        origPush.apply(this, arguments);
+        if (location.href !== before) {
+            window.dispatchEvent(new Event('forge-pushstate'));
+        }
+    };
+    history.replaceState = function() {
+        var before = location.href;
+        origReplace.apply(this, arguments);
+        if (location.href !== before) {
+            window.dispatchEvent(new Event('forge-pushstate'));
+        }
+    };
+}
+
+export function forge_install_web_vitals(baseUrl, getSessionId) {
+    try {
+        function send(name, value, rating, attribution) {
+            try {
+                const body = JSON.stringify({
+                    type: 'event',
+                    payload: {
+                        events: [{
+                            event: 'webvital.' + name,
+                            properties: {
+                                value: value,
+                                rating: rating || null,
+                                attribution: attribution || {},
+                            },
+                            timestamp: new Date().toISOString(),
+                        }],
+                        context: {
+                            page_url: location.href,
+                            session_id: getSessionId() || null,
+                        }
+                    }
+                });
+                const url = baseUrl + '/_api/signal';
+                const headers = { 'Content-Type': 'application/json', 'x-forge-platform': 'web' };
+                if (navigator.sendBeacon) {
+                    navigator.sendBeacon(url, body);
+                } else {
+                    fetch(url, { method: 'POST', headers: headers, body: body, keepalive: true });
+                }
+            } catch (_) {}
+        }
+        function obs(type, cb) {
+            try {
+                new PerformanceObserver(function(list) {
+                    list.getEntries().forEach(cb);
+                }).observe({ type: type, buffered: true });
+            } catch (_) {}
+        }
+        var lcp = 0;
+        obs('largest-contentful-paint', function(e) { lcp = e.renderTime || e.loadTime || e.startTime; });
+        var cls = 0;
+        obs('layout-shift', function(e) { if (!e.hadRecentInput) cls += e.value; });
+        obs('paint', function(e) {
+            if (e.name === 'first-contentful-paint') {
+                var r = e.startTime < 1800 ? 'good' : e.startTime < 3000 ? 'needs-improvement' : 'poor';
+                send('fcp', e.startTime, r);
+            }
+        });
+        obs('event', function(e) {
+            if (e.interactionId && e.duration > 40) {
+                var r = e.duration < 200 ? 'good' : e.duration < 500 ? 'needs-improvement' : 'poor';
+                send('inp', e.duration, r, { name: e.name });
+            }
+        });
+        obs('longtask', function(e) {
+            send('long_task', e.duration, null, { name: e.name, startTime: e.startTime });
+        });
+        function onLoad() {
+            try {
+                var nav = performance.getEntriesByType('navigation')[0];
+                if (nav) {
+                    if (nav.responseStart > 0) {
+                        var r = nav.responseStart < 800 ? 'good' : nav.responseStart < 1800 ? 'needs-improvement' : 'poor';
+                        send('ttfb', nav.responseStart, r);
+                    }
+                    send('navigation', nav.loadEventEnd - nav.startTime, null, {
+                        dom_content_loaded: nav.domContentLoadedEventEnd - nav.startTime,
+                        dom_interactive: nav.domInteractive - nav.startTime,
+                        transfer_size: nav.transferSize,
+                        type: nav.type,
+                    });
+                }
+            } catch (_) {}
+        }
+        if (document.readyState === 'complete') onLoad();
+        else window.addEventListener('load', onLoad);
+        document.addEventListener('visibilitychange', function() {
+            if (document.visibilityState === 'hidden') {
+                if (lcp > 0) {
+                    var r = lcp < 2500 ? 'good' : lcp < 4000 ? 'needs-improvement' : 'poor';
+                    send('lcp', lcp, r);
+                    lcp = 0;
+                }
+                if (cls > 0) {
+                    var r = cls < 0.1 ? 'good' : cls < 0.25 ? 'needs-improvement' : 'poor';
+                    send('cls', cls, r);
+                    cls = 0;
+                }
+            }
+        });
+    } catch (_) {}
+}
+"#)]
+extern "C" {
+    fn forge_patch_history();
+    fn forge_install_web_vitals(base_url: &str, get_session: &js_sys::Function);
+}
+
+fn now_iso() -> String {
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some(s) = js_sys::Date::new_0().to_iso_string().as_string() {
+            return s;
+        }
+        // toISOString unexpectedly returned a non-string. Fall through to the
+        // portable formatter so analytics never carry an empty timestamp.
+        let secs = (js_sys::Date::now() / 1000.0) as u64;
+        return format_iso(secs);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        format_iso(secs)
+    }
+}
+
+/// ISO 8601 second-precision formatter ("2024-03-28T12:34:56Z") without
+/// pulling in chrono. Shared across wasm and native code paths.
+fn format_iso(secs: u64) -> String {
+    let days = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+    let (year, month, day) = days_to_date(days);
+    format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
+}
+
 fn days_to_date(days: u64) -> (u64, u64, u64) {
     // Civil date from days since Unix epoch (Euclidean affine algorithm)
     let z = days + 719468;
@@ -71,7 +217,6 @@ fn days_to_date(days: u64) -> (u64, u64, u64) {
 
 static CORRELATION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Generate a correlation ID (counter + random suffix).
 fn generate_correlation_id() -> String {
     let counter = CORRELATION_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("dx-{counter}-{:08x}", rand_u32())
@@ -84,9 +229,15 @@ fn rand_u32() -> u32 {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        use std::collections::hash_map::RandomState;
-        use std::hash::{BuildHasher, Hasher};
-        RandomState::new().build_hasher().finish() as u32
+        // Correlation IDs only need to be unique within a process, not
+        // cryptographically random. Mix nanos with the global counter so
+        // rapid successive calls (which would land in the same nanosecond)
+        // still diverge.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        nanos ^ CORRELATION_COUNTER.load(Ordering::Relaxed) as u32
     }
 }
 
@@ -109,6 +260,9 @@ pub struct SignalsConfig {
     pub flush_interval: u32,
     /// Max events per batch (default: 20).
     pub max_batch_size: usize,
+    /// Persist the outbound queue to localStorage so events queued before
+    /// a reload survive (WASM only; ignored on native). Default: true.
+    pub persist_queue: bool,
 }
 
 impl Default for SignalsConfig {
@@ -122,6 +276,7 @@ impl Default for SignalsConfig {
             respect_dnt: true,
             flush_interval: DEFAULT_FLUSH_INTERVAL_MS,
             max_batch_size: DEFAULT_MAX_BATCH,
+            persist_queue: true,
         }
     }
 }
@@ -152,14 +307,14 @@ fn has_opted_out() -> bool {
     false
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct SignalEventPayload {
     event: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     properties: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     correlation_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     timestamp: Option<String>,
 }
 
@@ -275,7 +430,7 @@ impl ForgeSignals {
             config.enabled = false;
         }
         let utm_params = if config.enabled { extract_utm() } else { None };
-        Self {
+        let signals = Self {
             inner: Rc::new(RefCell::new(SignalsInner {
                 client,
                 config,
@@ -286,10 +441,70 @@ impl ForgeSignals {
                 utm_params,
                 destroyed: false,
             })),
+        };
+        signals.restore_queue();
+        signals
+    }
+
+    /// Restore any events stashed in localStorage from a prior page session.
+    /// No-op on native (no localStorage) and when `persist_queue` is disabled.
+    fn restore_queue(&self) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let inner = self.inner.borrow();
+            if !inner.config.enabled || !inner.config.persist_queue { return; }
+            drop(inner);
+            let Some(storage) = web_sys::window()
+                .and_then(|w| w.local_storage().ok().flatten())
+            else {
+                return;
+            };
+            let raw = match storage.get_item(PERSIST_KEY) {
+                Ok(Some(v)) => v,
+                _ => return,
+            };
+            match serde_json::from_str::<Vec<SignalEventPayload>>(&raw) {
+                Ok(mut restored) => {
+                    if restored.is_empty() { return; }
+                    restored.truncate(MAX_QUEUE_SIZE);
+                    self.inner.borrow_mut().queue.extend(restored);
+                }
+                Err(_) => {
+                    // Corrupt entry — drop it so we don't try again next reload.
+                    let _ = storage.remove_item(PERSIST_KEY);
+                }
+            }
         }
     }
 
-    /// Send a Web Vitals-style measurement. Batches with track events.
+    /// Persist the pending queue so events survive a reload.
+    /// No-op on native and when `persist_queue` is disabled.
+    fn persist_queue(&self) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let inner = self.inner.borrow();
+            if !inner.config.persist_queue { return; }
+            let Some(storage) = web_sys::window()
+                .and_then(|w| w.local_storage().ok().flatten())
+            else {
+                return;
+            };
+            if inner.queue.is_empty() {
+                let _ = storage.remove_item(PERSIST_KEY);
+                return;
+            }
+            match serde_json::to_string(&inner.queue) {
+                Ok(s) => {
+                    // Quota / private mode failures are silent by design — the
+                    // queue stays in memory and the next flush will drain it.
+                    let _ = storage.set_item(PERSIST_KEY, &s);
+                }
+                Err(e) => warn_serialize_failed("persisted queue", &e),
+            }
+        }
+    }
+
+    /// Send a Web Vitals-style measurement; batches with track events.
     pub fn vital(&self, name: &str, value: f64, rating: Option<&str>) {
         let mut props = serde_json::Map::new();
         props.insert(
@@ -342,6 +557,7 @@ impl ForgeSignals {
         inner.queue.push(payload);
         let should_flush = inner.queue.len() >= inner.config.max_batch_size;
         drop(inner);
+        self.persist_queue();
         if should_flush {
             let this = self.clone();
             #[cfg(target_arch = "wasm32")]
@@ -351,19 +567,13 @@ impl ForgeSignals {
         }
     }
 
-    /// Identify the current user (links session to user).
-    pub async fn identify(&self, user_id: &str, traits: Value) {
-        let (url, session_id) = {
-            let inner = self.inner.borrow();
-            if !inner.config.enabled { return; }
-            (inner.client.get_url().to_string(), inner.session_id.clone())
-        };
-
-        let body = json!({ "user_id": user_id, "traits": traits });
-        let _ = post_signal(&url, "signal/user", &body, session_id.as_deref()).await;
+    pub fn identify(&self, user_id: &str, traits: Value) {
+        self.track_with_properties(
+            "identify",
+            json!({ "user_id": user_id, "traits": traits }),
+        );
     }
 
-    /// Track a page view.
     pub async fn page(&self, url_path: &str) {
         let (base_url, session_id, utm) = {
             let mut inner = self.inner.borrow_mut();
@@ -381,14 +591,14 @@ impl ForgeSignals {
             }
         }
 
-        if let Ok(resp) = post_signal(&base_url, "signal/view", &payload, session_id.as_deref()).await
+        let wrapped = json!({ "type": "view", "payload": payload });
+        if let Ok(resp) = post_signal(&base_url, "signal", &wrapped, session_id.as_deref()).await
             && let Some(sid) = resp.get("session_id").and_then(|v| v.as_str())
         {
             self.inner.borrow_mut().session_id = Some(sid.to_string());
         }
     }
 
-    /// Capture a frontend error with optional context.
     pub fn capture_error(&self, error: impl Into<SignalError>, context: Option<Value>) {
         let error = error.into();
         let this = self.clone();
@@ -425,13 +635,15 @@ impl ForgeSignals {
                 page_url,
             }],
         };
-        let _ = post_signal(
-            &url,
-            "signal/report",
-            &serde_json::to_value(&body).unwrap_or_default(),
-            session_id.as_deref(),
-        )
-        .await;
+        let payload = match serde_json::to_value(&body) {
+            Ok(v) => v,
+            Err(e) => {
+                warn_serialize_failed("error report", &e);
+                return;
+            }
+        };
+        let wrapped = json!({ "type": "report", "payload": payload });
+        let _ = post_signal(&url, "signal", &wrapped, session_id.as_deref()).await;
     }
 
     /// Add a breadcrumb for error reproduction context.
@@ -448,7 +660,6 @@ impl ForgeSignals {
         }
     }
 
-    /// Generate a correlation ID for the next RPC call.
     pub fn next_correlation_id(&self) -> String {
         let id = generate_correlation_id();
         self.inner.borrow_mut().last_correlation_id = Some(id.clone());
@@ -460,7 +671,6 @@ impl ForgeSignals {
         self.inner.borrow().session_id.clone()
     }
 
-    /// Flush queued events to the server.
     pub async fn flush(&self) {
         let (url, mut events, session_id) = {
             let mut inner = self.inner.borrow_mut();
@@ -479,29 +689,39 @@ impl ForgeSignals {
             }),
         };
 
-        match post_signal(
-            &url,
-            "signal/event",
-            &serde_json::to_value(&batch).unwrap_or_default(),
-            session_id.as_deref(),
-        )
-        .await
+        let payload = match serde_json::to_value(&batch) {
+            Ok(v) => v,
+            Err(e) => {
+                warn_serialize_failed("event batch", &e);
+                let mut inner = self.inner.borrow_mut();
+                events.append(&mut inner.queue);
+                events.truncate(MAX_QUEUE_SIZE);
+                inner.queue = events;
+                drop(inner);
+                self.persist_queue();
+                return;
+            }
+        };
+        let wrapped = json!({ "type": "event", "payload": payload });
+        match post_signal(&url, "signal", &wrapped, session_id.as_deref()).await
         {
             Ok(resp) => {
                 if let Some(sid) = resp.get("session_id").and_then(|v| v.as_str()) {
                     self.inner.borrow_mut().session_id = Some(sid.to_string());
                 }
+                self.persist_queue();
             }
             Err(()) => {
                 let mut inner = self.inner.borrow_mut();
                 events.extend(inner.queue.drain(..));
                 events.truncate(MAX_QUEUE_SIZE);
                 inner.queue = events;
+                drop(inner);
+                self.persist_queue();
             }
         }
     }
 
-    /// Clean up timers and flush remaining events.
     pub fn destroy(&self) {
         self.inner.borrow_mut().destroyed = true;
         flush_beacon(self);
@@ -535,7 +755,6 @@ impl ForgeSignals {
     }
 }
 
-/// Send remaining events via beacon API on page unload (WASM only).
 fn flush_beacon(signals: &ForgeSignals) {
     let (url, events, session_id) = {
         let mut inner = signals.inner.borrow_mut();
@@ -543,6 +762,9 @@ fn flush_beacon(signals: &ForgeSignals) {
         let events = std::mem::take(&mut inner.queue);
         (inner.client.get_url().to_string(), events, inner.session_id.clone())
     };
+    // Beacon is best-effort; clear the persisted copy so a reload after
+    // unload doesn't double-send.
+    signals.persist_queue();
 
     let batch = EventBatch {
         events,
@@ -552,11 +774,18 @@ fn flush_beacon(signals: &ForgeSignals) {
         }),
     };
 
-    let body = serde_json::to_string(&batch).unwrap_or_default();
+    let wrapped = json!({ "type": "event", "payload": &batch });
+    let body = match serde_json::to_string(&wrapped) {
+        Ok(s) => s,
+        Err(e) => {
+            warn_serialize_failed("beacon event batch", &e);
+            return;
+        }
+    };
 
     #[cfg(target_arch = "wasm32")]
     {
-        let url = format!("{url}/_api/signal/event");
+        let url = format!("{url}/_api/signal");
         if let Some(navigator) = web_sys::window().map(|w| w.navigator()) {
             let _ = navigator.send_beacon_with_opt_str(&url, Some(&body));
         }
@@ -568,7 +797,6 @@ fn flush_beacon(signals: &ForgeSignals) {
     }
 }
 
-/// Get current page URL if in browser.
 fn current_page_url() -> Option<String> {
     #[cfg(target_arch = "wasm32")]
     {
@@ -581,7 +809,6 @@ fn current_page_url() -> Option<String> {
     }
 }
 
-/// Extract UTM parameters from query string.
 fn extract_utm() -> Option<Value> {
     #[cfg(target_arch = "wasm32")]
     {
@@ -630,7 +857,6 @@ pub(crate) fn platform_tag() -> &'static str {
     }
 }
 
-/// POST to a signal endpoint and return the JSON response.
 async fn post_signal(
     base_url: &str,
     path: &str,
@@ -664,13 +890,10 @@ async fn post_signal(
     }
 }
 
-/// Hook to access the signals instance from within a ForgeProvider.
 pub fn use_signals() -> ForgeSignals {
     use_context::<ForgeSignals>()
 }
 
-/// Setup auto-capture features (page views, errors, periodic flush, unload flush).
-/// Called from ForgeProvider after signals are provided as context.
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn setup_auto_capture(signals: ForgeSignals) {
     use wasm_bindgen::closure::Closure;
@@ -681,7 +904,6 @@ pub(crate) fn setup_auto_capture(signals: ForgeSignals) {
 
     let flush_interval = signals.flush_interval();
 
-    // Periodic flush timer
     {
         let signals = signals.clone();
         spawn_local(async move {
@@ -705,13 +927,11 @@ pub(crate) fn setup_auto_capture(signals: ForgeSignals) {
                 None => return,
             };
 
-            // Auto page views: track initial + monkey-patch history for SPA navigation
             if signals.auto_page_views() {
                 let path = window.location().pathname().unwrap_or_else(|_| "/".to_string());
                 let signals_page = signals.clone();
                 spawn_local(async move { signals_page.page(&path).await; });
 
-                // Listen for navigation events (pushState, replaceState, popstate)
                 {
                     let signals = signals.clone();
                     let closure = Closure::<dyn Fn()>::new(move || {
@@ -733,34 +953,10 @@ pub(crate) fn setup_auto_capture(signals: ForgeSignals) {
                     closure.forget();
                 }
 
-                // Monkey-patch pushState/replaceState to dispatch custom events
-                // Only fires when the URL actually changes to avoid redundant page views
-                let patch_js = r#"
-                    (function() {
-                        var origPush = history.pushState;
-                        var origReplace = history.replaceState;
-                        history.pushState = function() {
-                            var before = location.href;
-                            origPush.apply(this, arguments);
-                            if (location.href !== before) {
-                                window.dispatchEvent(new Event('forge-pushstate'));
-                            }
-                        };
-                        history.replaceState = function() {
-                            var before = location.href;
-                            origReplace.apply(this, arguments);
-                            if (location.href !== before) {
-                                window.dispatchEvent(new Event('forge-pushstate'));
-                            }
-                        };
-                    })()
-                "#;
-                let _ = js_sys::eval(patch_js);
+                forge_patch_history();
             }
 
-            // Auto error capture
             if signals.auto_capture_errors() {
-                // window.onerror
                 {
                     let signals = signals.clone();
                     let closure = Closure::<dyn Fn(web_sys::ErrorEvent)>::new(move |e: web_sys::ErrorEvent| {
@@ -827,7 +1023,6 @@ pub(crate) fn setup_auto_capture(signals: ForgeSignals) {
                 closure.forget();
             }
 
-            // Network status events
             if signals.auto_network_events() {
                 let online_signals = signals.clone();
                 let online = Closure::<dyn Fn()>::new(move || {
@@ -856,96 +1051,6 @@ pub(crate) fn setup_auto_capture(signals: ForgeSignals) {
             // so we don't hard-depend on any bindings that the caller might not
             // have enabled in web-sys features.
             if signals.auto_web_vitals() {
-                let js = r#"
-                    (function(baseUrl, getSessionId) {
-                        try {
-                            function send(name, value, rating, attribution) {
-                                try {
-                                    const body = JSON.stringify({
-                                        vitals: [{
-                                            name: name,
-                                            value: value,
-                                            rating: rating || null,
-                                            attribution: attribution || {},
-                                            page_url: location.href,
-                                            timestamp: new Date().toISOString(),
-                                        }],
-                                        context: {
-                                            page_url: location.href,
-                                            session_id: getSessionId() || null,
-                                        }
-                                    });
-                                    const url = baseUrl + '/_api/signal/vital';
-                                    const headers = { 'Content-Type': 'application/json', 'x-forge-platform': 'web' };
-                                    if (navigator.sendBeacon) {
-                                        navigator.sendBeacon(url, body);
-                                    } else {
-                                        fetch(url, { method: 'POST', headers: headers, body: body, keepalive: true });
-                                    }
-                                } catch (_) {}
-                            }
-                            function obs(type, cb) {
-                                try {
-                                    new PerformanceObserver(function(list) {
-                                        list.getEntries().forEach(cb);
-                                    }).observe({ type: type, buffered: true });
-                                } catch (_) {}
-                            }
-                            var lcp = 0;
-                            obs('largest-contentful-paint', function(e) { lcp = e.renderTime || e.loadTime || e.startTime; });
-                            var cls = 0;
-                            obs('layout-shift', function(e) { if (!e.hadRecentInput) cls += e.value; });
-                            obs('paint', function(e) {
-                                if (e.name === 'first-contentful-paint') {
-                                    var r = e.startTime < 1800 ? 'good' : e.startTime < 3000 ? 'needs-improvement' : 'poor';
-                                    send('fcp', e.startTime, r);
-                                }
-                            });
-                            obs('event', function(e) {
-                                if (e.interactionId && e.duration > 40) {
-                                    var r = e.duration < 200 ? 'good' : e.duration < 500 ? 'needs-improvement' : 'poor';
-                                    send('inp', e.duration, r, { name: e.name });
-                                }
-                            });
-                            obs('longtask', function(e) {
-                                send('long_task', e.duration, null, { name: e.name, startTime: e.startTime });
-                            });
-                            function onLoad() {
-                                try {
-                                    var nav = performance.getEntriesByType('navigation')[0];
-                                    if (nav) {
-                                        if (nav.responseStart > 0) {
-                                            var r = nav.responseStart < 800 ? 'good' : nav.responseStart < 1800 ? 'needs-improvement' : 'poor';
-                                            send('ttfb', nav.responseStart, r);
-                                        }
-                                        send('navigation', nav.loadEventEnd - nav.startTime, null, {
-                                            dom_content_loaded: nav.domContentLoadedEventEnd - nav.startTime,
-                                            dom_interactive: nav.domInteractive - nav.startTime,
-                                            transfer_size: nav.transferSize,
-                                            type: nav.type,
-                                        });
-                                    }
-                                } catch (_) {}
-                            }
-                            if (document.readyState === 'complete') onLoad();
-                            else window.addEventListener('load', onLoad);
-                            document.addEventListener('visibilitychange', function() {
-                                if (document.visibilityState === 'hidden') {
-                                    if (lcp > 0) {
-                                        var r = lcp < 2500 ? 'good' : lcp < 4000 ? 'needs-improvement' : 'poor';
-                                        send('lcp', lcp, r);
-                                        lcp = 0;
-                                    }
-                                    if (cls > 0) {
-                                        var r = cls < 0.1 ? 'good' : cls < 0.25 ? 'needs-improvement' : 'poor';
-                                        send('cls', cls, r);
-                                        cls = 0;
-                                    }
-                                }
-                            });
-                        } catch (_) {}
-                    })
-                "#;
                 let base_url = {
                     let inner = signals.inner.borrow();
                     inner.client.get_url().to_string()
@@ -959,15 +1064,7 @@ pub(crate) fn setup_auto_capture(signals: ForgeSignals) {
                         }
                     })
                 };
-                if let Ok(factory) = js_sys::eval(js)
-                    && let Ok(function) = factory.dyn_into::<js_sys::Function>()
-                {
-                    let _ = function.call2(
-                        &wasm_bindgen::JsValue::NULL,
-                        &wasm_bindgen::JsValue::from_str(&base_url),
-                        get_session.as_ref().unchecked_ref(),
-                    );
-                }
+                forge_install_web_vitals(&base_url, get_session.as_ref().unchecked_ref());
                 get_session.forget();
             }
         });
@@ -980,7 +1077,6 @@ pub(crate) fn setup_auto_capture(signals: ForgeSignals) {
 
     let flush_interval = signals.flush_interval();
 
-    // Periodic flush timer using tokio
     {
         let signals = signals.clone();
         spawn(async move {
@@ -1012,12 +1108,15 @@ pub(crate) fn setup_auto_capture(signals: ForgeSignals) {
                 .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
                 .unwrap_or("panic");
             let location = info.location().map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()));
-            let url = format!("{}/_api/signal/report", base_url);
+            let url = format!("{}/_api/signal", base_url);
             let body = serde_json::json!({
-                "errors": [{
-                    "message": msg,
-                    "context": { "location": location, "kind": "panic" },
-                }]
+                "type": "report",
+                "payload": {
+                    "errors": [{
+                        "message": msg,
+                        "context": { "location": location, "kind": "panic" },
+                    }]
+                }
             });
             // Fire-and-forget on a background thread since we can't use the
             // single-threaded Dioxus runtime from inside a panic hook.

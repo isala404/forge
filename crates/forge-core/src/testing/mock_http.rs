@@ -1,8 +1,4 @@
 //! HTTP mocking utilities for testing.
-//!
-//! Provides a mock HTTP client that intercepts requests and returns
-//! predefined responses. Supports pattern matching and request recording
-//! for verification.
 
 #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
 
@@ -13,27 +9,20 @@ use serde::Serialize;
 
 /// Mock HTTP client for testing.
 ///
-/// # Example
+/// Mocks are matched **first-registered-wins**: the first handler whose
+/// pattern matches the request URL (or path) is used. Register specific
+/// patterns before broad wildcards.
 ///
-/// ```ignore
-/// let mut mock = MockHttp::new();
-/// mock.add_mock_sync("https://api.example.com/*", |req| {
-///     MockResponse::json(json!({"status": "ok"}))
-/// });
-///
-/// let response = mock.execute(request).await;
-/// mock.assert_called("https://api.example.com/*");
-/// ```
+/// Patterns are matched against both the full URL and the path component,
+/// so `"/health"` matches a request to `https://internal:8080/health`.
 #[derive(Clone)]
 pub struct MockHttp {
     mocks: Arc<RwLock<Vec<MockHandler>>>,
     requests: Arc<RwLock<Vec<RecordedRequest>>>,
 }
 
-/// Type alias for mock handler closure.
 pub type BoxedHandler = Box<dyn Fn(&MockRequest) -> MockResponse + Send + Sync>;
 
-/// A mock handler.
 struct MockHandler {
     pattern: String,
     handler: Arc<dyn Fn(&MockRequest) -> MockResponse + Send + Sync>,
@@ -42,44 +31,31 @@ struct MockHandler {
 /// A recorded request for verification.
 #[derive(Debug, Clone)]
 pub struct RecordedRequest {
-    /// Request method.
     pub method: String,
-    /// Request URL.
     pub url: String,
-    /// Request headers.
     pub headers: HashMap<String, String>,
-    /// Request body.
     pub body: serde_json::Value,
 }
 
 /// Mock HTTP request.
 #[derive(Debug, Clone)]
 pub struct MockRequest {
-    /// Request method.
     pub method: String,
-    /// Request path.
     pub path: String,
-    /// Request URL.
     pub url: String,
-    /// Request headers.
     pub headers: HashMap<String, String>,
-    /// Request body.
     pub body: serde_json::Value,
 }
 
 /// Mock HTTP response.
 #[derive(Debug, Clone)]
 pub struct MockResponse {
-    /// Status code.
     pub status: u16,
-    /// Response headers.
     pub headers: HashMap<String, String>,
-    /// Response body.
     pub body: serde_json::Value,
 }
 
 impl MockResponse {
-    /// Create a successful JSON response.
     pub fn json<T: Serialize>(body: T) -> Self {
         Self {
             status: 200,
@@ -88,7 +64,6 @@ impl MockResponse {
         }
     }
 
-    /// Create an error response.
     pub fn error(status: u16, message: &str) -> Self {
         Self {
             status,
@@ -97,29 +72,24 @@ impl MockResponse {
         }
     }
 
-    /// Create a 500 internal error.
     pub fn internal_error(message: &str) -> Self {
         Self::error(500, message)
     }
 
-    /// Create a 404 not found.
     pub fn not_found(message: &str) -> Self {
         Self::error(404, message)
     }
 
-    /// Create a 401 unauthorized.
     pub fn unauthorized(message: &str) -> Self {
         Self::error(401, message)
     }
 
-    /// Create an empty 200 OK response.
     pub fn ok() -> Self {
         Self::json(serde_json::json!({}))
     }
 }
 
 impl MockHttp {
-    /// Create a new mock HTTP client.
     pub fn new() -> Self {
         Self {
             mocks: Arc::new(RwLock::new(Vec::new())),
@@ -127,12 +97,14 @@ impl MockHttp {
         }
     }
 
-    /// Create a builder.
     pub fn builder() -> MockHttpBuilder {
         MockHttpBuilder::new()
     }
 
     /// Add a mock handler (sync version for use in builders).
+    ///
+    /// The pattern supports `*` as a glob wildcard. Mocks are matched
+    /// first-registered-wins against both the full URL and the path.
     pub fn add_mock_sync<F>(&self, pattern: &str, handler: F)
     where
         F: Fn(&MockRequest) -> MockResponse + Send + Sync + 'static,
@@ -144,7 +116,24 @@ impl MockHttp {
         });
     }
 
-    /// Add a mock handler from a boxed closure.
+    /// No wildcards; use `mock_glob` for patterns.
+    pub fn mock_exact<F>(&self, url: &str, handler: F)
+    where
+        F: Fn(&MockRequest) -> MockResponse + Send + Sync + 'static,
+    {
+        self.add_mock_sync(url, handler);
+    }
+
+    /// Add a mock handler with glob pattern (`*` matches any substring).
+    ///
+    /// Register specific patterns before broad ones — first match wins.
+    pub fn mock_glob<F>(&self, pattern: &str, handler: F)
+    where
+        F: Fn(&MockRequest) -> MockResponse + Send + Sync + 'static,
+    {
+        self.add_mock_sync(pattern, handler);
+    }
+
     pub fn add_mock_boxed(&mut self, pattern: &str, handler: BoxedHandler) {
         let mut mocks = self.mocks.write().unwrap();
         mocks.push(MockHandler {
@@ -153,9 +142,7 @@ impl MockHttp {
         });
     }
 
-    /// Execute a mock request.
     pub async fn execute(&self, request: MockRequest) -> MockResponse {
-        // Record the request
         {
             let mut requests = self.requests.write().unwrap();
             requests.push(RecordedRequest {
@@ -166,7 +153,6 @@ impl MockHttp {
             });
         }
 
-        // Find matching mock
         let mocks = self.mocks.read().unwrap();
         for mock in mocks.iter() {
             if self.matches_pattern(&request.url, &mock.pattern)
@@ -176,16 +162,12 @@ impl MockHttp {
             }
         }
 
-        // No mock found
         MockResponse::error(500, &format!("No mock found for {}", request.url))
     }
 
-    /// Check if a URL matches a pattern.
     fn matches_pattern(&self, url: &str, pattern: &str) -> bool {
-        // Convert glob pattern to simple matching
         let pattern_parts: Vec<&str> = pattern.split('*').collect();
         if pattern_parts.len() == 1 {
-            // No wildcards - exact match
             return url == pattern;
         }
 
@@ -196,40 +178,32 @@ impl MockHttp {
             }
 
             if i == 0 {
-                // First part must match at start
                 if !remaining.starts_with(part) {
                     return false;
                 }
                 remaining = &remaining[part.len()..];
             } else if i == pattern_parts.len() - 1 {
-                // Last part must match at end
                 if !remaining.ends_with(part) {
                     return false;
                 }
+            } else if let Some(pos) = remaining.find(part) {
+                remaining = &remaining[pos + part.len()..];
             } else {
-                // Middle parts can match anywhere
-                if let Some(pos) = remaining.find(part) {
-                    remaining = &remaining[pos + part.len()..];
-                } else {
-                    return false;
-                }
+                return false;
             }
         }
 
         true
     }
 
-    /// Get recorded requests.
     pub fn requests(&self) -> Vec<RecordedRequest> {
         self.requests.read().unwrap().clone()
     }
 
-    /// Get recorded requests (blocking version for use in sync contexts).
     pub fn requests_blocking(&self) -> Vec<RecordedRequest> {
         self.requests.read().unwrap().clone()
     }
 
-    /// Get requests matching a pattern.
     pub fn requests_to(&self, pattern: &str) -> Vec<RecordedRequest> {
         self.requests
             .read()
@@ -240,12 +214,10 @@ impl MockHttp {
             .collect()
     }
 
-    /// Clear recorded requests.
     pub fn clear_requests(&self) {
         self.requests.write().unwrap().clear();
     }
 
-    /// Clear all mocks.
     pub fn clear_mocks(&self) {
         self.mocks.write().unwrap().clear();
     }
@@ -316,18 +288,15 @@ impl Default for MockHttp {
     }
 }
 
-/// Builder for MockHttp.
 pub struct MockHttpBuilder {
     mocks: Vec<(String, BoxedHandler)>,
 }
 
 impl MockHttpBuilder {
-    /// Create a new builder.
     pub fn new() -> Self {
         Self { mocks: Vec::new() }
     }
 
-    /// Add a mock with a custom handler.
     pub fn mock<F>(mut self, pattern: &str, handler: F) -> Self
     where
         F: Fn(&MockRequest) -> MockResponse + Send + Sync + 'static,
@@ -336,7 +305,6 @@ impl MockHttpBuilder {
         self
     }
 
-    /// Add a mock that returns a JSON response.
     pub fn mock_json<T: Serialize + Clone + Send + Sync + 'static>(
         self,
         pattern: &str,
@@ -345,7 +313,6 @@ impl MockHttpBuilder {
         self.mock(pattern, move |_| MockResponse::json(response.clone()))
     }
 
-    /// Build the MockHttp.
     pub fn build(self) -> MockHttp {
         let mut mock = MockHttp::new();
         for (pattern, handler) in self.mocks {
@@ -383,25 +350,21 @@ mod tests {
     fn test_pattern_matching() {
         let mock = MockHttp::new();
 
-        // Exact match
         assert!(mock.matches_pattern(
             "https://api.example.com/users",
             "https://api.example.com/users"
         ));
 
-        // Wildcard at end
         assert!(mock.matches_pattern(
             "https://api.example.com/users/123",
             "https://api.example.com/*"
         ));
 
-        // Wildcard in middle
         assert!(mock.matches_pattern(
             "https://api.example.com/v2/users",
             "https://api.example.com/*/users"
         ));
 
-        // No match
         assert!(!mock.matches_pattern("https://other.com/users", "https://api.example.com/*"));
     }
 
@@ -474,5 +437,171 @@ mod tests {
             .build();
 
         assert_eq!(mock.mocks.read().unwrap().len(), 2);
+    }
+
+    fn req(method: &str, url: &str, path: &str) -> MockRequest {
+        MockRequest {
+            method: method.to_string(),
+            path: path.to_string(),
+            url: url.to_string(),
+            headers: HashMap::new(),
+            body: serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn response_status_helpers_use_documented_codes() {
+        assert_eq!(MockResponse::internal_error("boom").status, 500);
+        assert_eq!(MockResponse::not_found("nope").status, 404);
+        assert_eq!(MockResponse::unauthorized("nope").status, 401);
+        assert_eq!(MockResponse::ok().status, 200);
+
+        // ok() returns an empty JSON object — handlers that key off body shape
+        // (e.g., serde to () or empty struct) rely on this.
+        assert_eq!(MockResponse::ok().body, serde_json::json!({}));
+    }
+
+    #[test]
+    fn response_json_sets_content_type_header() {
+        let r = MockResponse::json(serde_json::json!({"ok": true}));
+        assert_eq!(
+            r.headers.get("content-type"),
+            Some(&"application/json".to_string())
+        );
+    }
+
+    #[test]
+    fn pattern_matcher_handles_leading_and_double_wildcards() {
+        let m = MockHttp::new();
+        // Leading wildcard (pattern_parts[0] is empty).
+        assert!(m.matches_pattern("https://api.example.com/v1/users", "*/users"));
+        assert!(!m.matches_pattern("https://api.example.com/v1/posts", "*/users"));
+
+        // Bare `*` matches anything (both pattern parts are empty strings).
+        assert!(m.matches_pattern("anything", "*"));
+        assert!(m.matches_pattern("", "*"));
+    }
+
+    #[test]
+    fn pattern_matcher_rejects_exact_pattern_with_extra_suffix() {
+        let m = MockHttp::new();
+        assert!(!m.matches_pattern(
+            "https://api.example.com/users/extra",
+            "https://api.example.com/users"
+        ));
+    }
+
+    #[tokio::test]
+    async fn execute_falls_back_to_500_when_no_mock_matches() {
+        let mock = MockHttp::new();
+        let r = mock.execute(req("GET", "https://nowhere/", "/")).await;
+        assert_eq!(r.status, 500);
+        assert!(
+            r.body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("No mock found"),
+            "fallback should explain the failure, got {:?}",
+            r.body
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_records_request_even_when_no_mock_matches() {
+        // The recording happens before the lookup so failed-match calls still
+        // show up in requests() — important for diagnosing "why didn't my mock fire".
+        let mock = MockHttp::new();
+        let _ = mock.execute(req("DELETE", "https://nowhere/x", "/x")).await;
+        let recorded = mock.requests();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].method, "DELETE");
+        assert_eq!(recorded[0].url, "https://nowhere/x");
+    }
+
+    #[tokio::test]
+    async fn execute_matches_against_path_when_url_misses() {
+        // Pattern only matches the path, not the full URL.
+        let mock = MockHttp::new();
+        mock.add_mock_sync("/health", |_| MockResponse::ok());
+        let r = mock
+            .execute(req("GET", "https://internal.svc:8080/health", "/health"))
+            .await;
+        assert_eq!(r.status, 200);
+    }
+
+    #[tokio::test]
+    async fn execute_uses_first_registered_mock_on_overlapping_patterns() {
+        let mock = MockHttp::new();
+        mock.add_mock_sync("https://api.example.com/*", |_| {
+            MockResponse::json(serde_json::json!({"hit": "first"}))
+        });
+        mock.add_mock_sync("https://api.example.com/users", |_| {
+            MockResponse::json(serde_json::json!({"hit": "second"}))
+        });
+
+        let r = mock
+            .execute(req("GET", "https://api.example.com/users", "/users"))
+            .await;
+        assert_eq!(r.body["hit"], "first");
+    }
+
+    #[tokio::test]
+    async fn requests_to_filters_by_pattern() {
+        let mock = MockHttp::new();
+        mock.add_mock_sync("*", |_| MockResponse::ok());
+
+        let _ = mock
+            .execute(req("GET", "https://api.example.com/a", "/a"))
+            .await;
+        let _ = mock.execute(req("GET", "https://other.com/b", "/b")).await;
+        let _ = mock
+            .execute(req("GET", "https://api.example.com/c", "/c"))
+            .await;
+
+        let api_calls = mock.requests_to("https://api.example.com/*");
+        assert_eq!(api_calls.len(), 2);
+        assert!(api_calls.iter().all(|r| r.url.contains("api.example.com")));
+    }
+
+    #[tokio::test]
+    async fn clear_requests_and_clear_mocks_independently_reset_state() {
+        let mock = MockHttp::new();
+        mock.add_mock_sync("*", |_| MockResponse::ok());
+        let _ = mock.execute(req("GET", "https://x/", "/")).await;
+        assert_eq!(mock.requests().len(), 1);
+
+        mock.clear_requests();
+        assert!(mock.requests().is_empty());
+        // Mocks survive a requests-only clear; the next call should still match.
+        let r = mock.execute(req("GET", "https://x/", "/")).await;
+        assert_eq!(r.status, 200);
+
+        mock.clear_mocks();
+        let r = mock.execute(req("GET", "https://x/", "/")).await;
+        assert_eq!(r.status, 500, "after clear_mocks, fallback should hit");
+    }
+
+    #[tokio::test]
+    async fn assert_called_with_body_runs_predicate_against_recorded_body() {
+        let mock = MockHttp::new();
+        mock.add_mock_sync("*", |_| MockResponse::ok());
+
+        let mut request = req("POST", "https://api/upload", "/upload");
+        request.body = serde_json::json!({"size": 42});
+        let _ = mock.execute(request).await;
+
+        // Predicate matches — should not panic.
+        mock.assert_called_with_body("https://api/*", |body| body["size"] == 42);
+    }
+
+    #[test]
+    fn defaults_match_new() {
+        // Default impls are wrappers around new(); just exercise them so the
+        // Default path doesn't silently rot.
+        let m1 = MockHttp::default();
+        assert!(m1.requests().is_empty());
+        let b1 = MockHttpBuilder::default();
+        let m2 = b1.build();
+        assert!(m2.requests().is_empty());
     }
 }

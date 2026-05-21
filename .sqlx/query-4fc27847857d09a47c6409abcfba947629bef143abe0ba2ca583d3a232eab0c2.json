@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE forge_jobs\n            SET\n                status = 'completed',\n                output = $2,\n                completed_at = NOW(),\n                cancel_requested_at = NULL,\n                cancelled_at = NULL,\n                cancel_reason = NULL,\n                expires_at = $3\n            WHERE id = $1 AND status = 'running'\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Jsonb",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4fc27847857d09a47c6409abcfba947629bef143abe0ba2ca583d3a232eab0c2"
+}

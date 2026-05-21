@@ -1,62 +1,41 @@
 use chrono::{DateTime, Utc};
 use forge_core::job::{JobPriority, JobStatus};
+use sqlx::Row;
 use uuid::Uuid;
 
 /// A job record in the database.
 #[derive(Debug, Clone)]
 pub struct JobRecord {
-    /// Unique job ID.
     pub id: Uuid,
-    /// Job type/name.
     pub job_type: String,
-    /// Job input as JSON.
     pub input: serde_json::Value,
-    /// Job output as JSON (if completed).
     pub output: Option<serde_json::Value>,
-    /// Persisted context data.
     pub job_context: serde_json::Value,
-    /// Current status.
     pub status: JobStatus,
-    /// Priority level.
     pub priority: i32,
-    /// Number of attempts made.
     pub attempts: i32,
-    /// Maximum attempts allowed.
     pub max_attempts: i32,
-    /// Last error message.
     pub last_error: Option<String>,
-    /// Required worker capability.
     pub worker_capability: Option<String>,
-    /// Worker ID that claimed the job.
     pub worker_id: Option<Uuid>,
-    /// Idempotency key for deduplication.
     pub idempotency_key: Option<String>,
     /// Principal that created the job (for access control).
     pub owner_subject: Option<String>,
-    /// When the job is scheduled to run.
+    /// Tenant that owns this job (for multi-tenant isolation).
+    pub tenant_id: Option<Uuid>,
     pub scheduled_at: DateTime<Utc>,
-    /// When the job was created.
     pub created_at: DateTime<Utc>,
-    /// When the job was claimed.
     pub claimed_at: Option<DateTime<Utc>>,
-    /// When the job started running.
     pub started_at: Option<DateTime<Utc>>,
-    /// When the job completed.
     pub completed_at: Option<DateTime<Utc>>,
-    /// When the job failed.
     pub failed_at: Option<DateTime<Utc>>,
-    /// Last heartbeat time.
     pub last_heartbeat: Option<DateTime<Utc>>,
-    /// Cancellation requested at.
     pub cancel_requested_at: Option<DateTime<Utc>>,
-    /// Cancellation completed at.
     pub cancelled_at: Option<DateTime<Utc>>,
-    /// Cancellation reason.
     pub cancel_reason: Option<String>,
 }
 
 impl JobRecord {
-    /// Create a new job record.
     pub fn new(
         job_type: impl Into<String>,
         input: serde_json::Value,
@@ -78,6 +57,7 @@ impl JobRecord {
             worker_id: None,
             idempotency_key: None,
             owner_subject: None,
+            tenant_id: None,
             scheduled_at: Utc::now(),
             created_at: Utc::now(),
             claimed_at: None,
@@ -91,46 +71,72 @@ impl JobRecord {
         }
     }
 
-    /// Set worker capability requirement.
     pub fn with_capability(mut self, capability: impl Into<String>) -> Self {
         self.worker_capability = Some(capability.into());
         self
     }
 
-    /// Set scheduled time.
     pub fn with_scheduled_at(mut self, at: DateTime<Utc>) -> Self {
         self.scheduled_at = at;
         self
     }
 
-    /// Set idempotency key.
     pub fn with_idempotency_key(mut self, key: impl Into<String>) -> Self {
         self.idempotency_key = Some(key.into());
         self
     }
 
-    /// Set owner subject.
     pub fn with_owner_subject(mut self, owner_subject: Option<String>) -> Self {
         self.owner_subject = owner_subject;
         self
     }
+
+    pub fn with_tenant_id(mut self, tenant_id: Option<Uuid>) -> Self {
+        self.tenant_id = tenant_id;
+        self
+    }
 }
 
-/// Job queue operations.
 #[derive(Clone)]
 pub struct JobQueue {
     pool: sqlx::PgPool,
 }
 
 impl JobQueue {
-    /// Create a new job queue.
+    /// Default retention for terminal jobs (completed, failed, cancelled).
+    pub(crate) const DEFAULT_RETENTION: std::time::Duration =
+        std::time::Duration::from_secs(7 * 24 * 3600);
+
     pub fn new(pool: sqlx::PgPool) -> Self {
         Self { pool }
     }
 
-    /// Enqueue a new job.
+    /// Enqueue a new job. If the job has an idempotency key that matches
+    /// an existing non-terminal job, returns the existing job's ID.
     pub async fn enqueue(&self, job: JobRecord) -> Result<Uuid, sqlx::Error> {
-        // Check for duplicate if idempotency key is set
+        let mut conn = self.pool.acquire().await?;
+        Self::enqueue_inner(&mut conn, &job).await
+    }
+
+    /// Enqueue a job on an existing connection (typically a transaction).
+    ///
+    /// Use when the dispatch must be atomic with other writes — e.g. a
+    /// mutation handler buffering a job that should only become visible
+    /// to workers after the surrounding transaction commits.
+    pub async fn enqueue_in_conn(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        job: JobRecord,
+    ) -> Result<Uuid, sqlx::Error> {
+        Self::enqueue_inner(conn, &job).await
+    }
+
+    async fn enqueue_inner(
+        conn: &mut sqlx::PgConnection,
+        job: &JobRecord,
+    ) -> Result<Uuid, sqlx::Error> {
+        // Fast path: check for existing idempotent job before attempting INSERT.
+        // The UNIQUE partial index on idempotency_key guards against races.
         if let Some(ref key) = job.idempotency_key {
             let existing = sqlx::query_scalar!(
                 r#"
@@ -140,58 +146,104 @@ impl JobQueue {
                 "#,
                 key
             )
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *conn)
             .await?;
 
             if let Some(id) = existing {
-                return Ok(id); // Return existing job ID
+                return Ok(id);
             }
         }
 
-        sqlx::query!(
+        let queue = job.worker_capability.as_deref().unwrap_or("default");
+
+        #[allow(clippy::disallowed_methods)]
+        sqlx::query(
             r#"
             INSERT INTO forge_jobs (
-                id, job_type, input, job_context, status, priority, attempts, max_attempts,
-                worker_capability, idempotency_key, owner_subject, scheduled_at, created_at
+                id, job_type, queue, input, job_context, status, priority, attempts, max_attempts,
+                worker_capability, idempotency_key, owner_subject, tenant_id, scheduled_at, created_at
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
             )
+            ON CONFLICT DO NOTHING
             "#,
-            job.id,
-            &job.job_type,
-            job.input as _,
-            job.job_context as _,
-            job.status.as_str(),
-            job.priority,
-            job.attempts,
-            job.max_attempts,
-            job.worker_capability as _,
-            job.idempotency_key as _,
-            job.owner_subject as _,
-            job.scheduled_at,
-            job.created_at,
         )
-        .execute(&self.pool)
+        .bind(job.id)
+        .bind(&job.job_type)
+        .bind(queue)
+        .bind(&job.input)
+        .bind(&job.job_context)
+        .bind(job.status.as_str())
+        .bind(job.priority)
+        .bind(job.attempts)
+        .bind(job.max_attempts)
+        .bind(&job.worker_capability)
+        .bind(&job.idempotency_key)
+        .bind(&job.owner_subject)
+        .bind(job.tenant_id)
+        .bind(job.scheduled_at)
+        .bind(job.created_at)
+        .execute(&mut *conn)
         .await?;
+
+        // If ON CONFLICT fired (race with another enqueue), fetch the winner's ID.
+        if let Some(ref key) = job.idempotency_key {
+            let id = sqlx::query_scalar!(
+                r#"
+                SELECT id FROM forge_jobs
+                WHERE idempotency_key = $1
+                  AND status NOT IN ('completed', 'failed', 'dead_letter', 'cancelled')
+                "#,
+                key
+            )
+            .fetch_optional(&mut *conn)
+            .await?;
+
+            if let Some(winner) = id {
+                return Ok(winner);
+            }
+        }
 
         Ok(job.id)
     }
 
     /// Claim jobs using SKIP LOCKED pattern.
+    ///
+    /// `capabilities` is the set of queue/capability tags this worker serves.
+    /// If `claim_untagged` is true the worker also claims jobs whose
+    /// `worker_capability` is NULL — set on the `default` queue worker so it
+    /// drains untagged user jobs. Other queue workers must leave it false to
+    /// preserve queue isolation.
+    ///
+    /// Filters on both `worker_capability` (legacy routing) and `queue` column.
+    ///
+    /// Note: Daemon-type jobs (if introduced) would need a leader election
+    /// guard here. Currently daemons run outside the job queue via
+    /// `DaemonRunner` with their own advisory-lock-based leader election.
     pub async fn claim(
         &self,
         worker_id: Uuid,
         capabilities: &[String],
+        claim_untagged: bool,
         limit: i32,
     ) -> Result<Vec<JobRecord>, sqlx::Error> {
-        let rows = sqlx::query!(
+        #[allow(clippy::disallowed_methods)]
+        let rows = sqlx::query(
             r#"
             WITH claimable AS (
                 SELECT id
-                FROM forge_jobs
+                FROM forge_jobs j
                 WHERE status = 'pending'
                   AND scheduled_at <= NOW()
-                  AND (worker_capability = ANY($2) OR worker_capability IS NULL)
+                  AND (
+                      worker_capability = ANY($2)
+                      OR ($4 AND worker_capability IS NULL)
+                  )
+                  AND queue = ANY($2)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM forge_paused_queues p
+                      WHERE p.queue_name = COALESCE(j.worker_capability, 'default')
+                  )
                 ORDER BY priority DESC, scheduled_at ASC
                 LIMIT $3
                 FOR UPDATE SKIP LOCKED
@@ -206,54 +258,100 @@ impl JobQueue {
             RETURNING
                 id, job_type, input, output, job_context, status, priority,
                 attempts, max_attempts, last_error, worker_capability,
-                worker_id, idempotency_key, owner_subject, scheduled_at, created_at,
+                worker_id, idempotency_key, owner_subject, tenant_id,
+                scheduled_at, created_at,
                 claimed_at, started_at, completed_at, failed_at, last_heartbeat,
                 cancel_requested_at, cancelled_at, cancel_reason
             "#,
-            worker_id,
-            capabilities,
-            limit as i64,
         )
+        .bind(worker_id)
+        .bind(capabilities)
+        .bind(limit as i64)
+        .bind(claim_untagged)
         .fetch_all(&self.pool)
         .await?;
 
         let jobs = rows
             .into_iter()
-            .map(|row| JobRecord {
-                id: row.id,
-                job_type: row.job_type,
-                input: row.input,
-                output: row.output,
-                job_context: row.job_context,
-                status: row
-                    .status
-                    .parse()
-                    .unwrap_or(forge_core::job::JobStatus::Failed),
-                priority: row.priority,
-                attempts: row.attempts,
-                max_attempts: row.max_attempts,
-                last_error: row.last_error,
-                worker_capability: row.worker_capability,
-                worker_id: row.worker_id,
-                idempotency_key: row.idempotency_key,
-                owner_subject: row.owner_subject,
-                scheduled_at: row.scheduled_at,
-                created_at: row.created_at,
-                claimed_at: row.claimed_at,
-                started_at: row.started_at,
-                completed_at: row.completed_at,
-                failed_at: row.failed_at,
-                last_heartbeat: row.last_heartbeat,
-                cancel_requested_at: row.cancel_requested_at,
-                cancelled_at: row.cancelled_at,
-                cancel_reason: row.cancel_reason,
+            .map(|row| {
+                // Fail fast on unknown status strings instead of silently
+                // coercing to a terminal state. A schema drift that adds a
+                // new status must surface as a decode error so the worker
+                // refuses to act on the row, not get auto-marked as Failed.
+                let status_str: String = row.get("status");
+                let status = status_str
+                    .parse::<forge_core::job::JobStatus>()
+                    .map_err(|e| {
+                        sqlx::Error::Decode(
+                            format!("unknown job status '{}': {e}", status_str).into(),
+                        )
+                    })?;
+                Ok::<JobRecord, sqlx::Error>(JobRecord {
+                    id: row.get("id"),
+                    job_type: row.get("job_type"),
+                    input: row.get("input"),
+                    output: row.get("output"),
+                    job_context: row.get("job_context"),
+                    status,
+                    priority: row.get("priority"),
+                    attempts: row.get("attempts"),
+                    max_attempts: row.get("max_attempts"),
+                    last_error: row.get("last_error"),
+                    worker_capability: row.get("worker_capability"),
+                    worker_id: row.get("worker_id"),
+                    idempotency_key: row.get("idempotency_key"),
+                    owner_subject: row.get("owner_subject"),
+                    tenant_id: row.get("tenant_id"),
+                    scheduled_at: row.get("scheduled_at"),
+                    created_at: row.get("created_at"),
+                    claimed_at: row.get("claimed_at"),
+                    started_at: row.get("started_at"),
+                    completed_at: row.get("completed_at"),
+                    failed_at: row.get("failed_at"),
+                    last_heartbeat: row.get("last_heartbeat"),
+                    cancel_requested_at: row.get("cancel_requested_at"),
+                    cancelled_at: row.get("cancelled_at"),
+                    cancel_reason: row.get("cancel_reason"),
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(jobs)
     }
 
-    /// Mark job as running.
+    /// Release a claim back to `pending`, undoing the attempts increment.
+    ///
+    /// The claim path always bumps `attempts`, so a worker that can't actually
+    /// run the job (semaphore exhausted between claim and `try_acquire_owned`)
+    /// would otherwise burn an attempt and wait ~5min for stale-reclaim to
+    /// requeue it. Repeated permit thrash would silently exhaust `max_attempts`
+    /// and push live work to dead_letter. This inverts the claim immediately so
+    /// the row is available to other workers with attempts unchanged.
+    pub async fn release_claim(&self, job_id: Uuid, worker_id: Uuid) -> Result<(), sqlx::Error> {
+        // Runtime query: avoids touching `.sqlx/` cache for this small helper.
+        // The query is fully parameterized and the columns are stable.
+        #[allow(clippy::disallowed_methods)]
+        sqlx::query(
+            r#"
+            UPDATE forge_jobs
+            SET
+                status = 'pending',
+                worker_id = NULL,
+                claimed_at = NULL,
+                attempts = GREATEST(attempts - 1, 0)
+            WHERE id = $1
+              AND worker_id = $2
+              AND status = 'claimed'
+            "#,
+        )
+        .bind(job_id)
+        .bind(worker_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
     /// Mark a claimed job as running. The `(worker_id, attempts)` tuple
     /// fences the transition: stale-reclaim resets the row to `pending` and
     /// a new worker gets a fresh `attempts`, so the original claimant's
@@ -288,18 +386,18 @@ impl JobQueue {
         Ok(())
     }
 
-    /// Mark job as completed.
-    ///
-    /// If `ttl` is provided, sets `expires_at` for automatic cleanup.
+    /// Sets `expires_at` for automatic cleanup; defaults to 7 days.
     pub async fn complete(
         &self,
         job_id: Uuid,
         output: serde_json::Value,
         ttl: Option<std::time::Duration>,
     ) -> Result<(), sqlx::Error> {
-        let expires_at = ttl.map(|d| {
-            chrono::Utc::now() + chrono::Duration::from_std(d).unwrap_or(chrono::Duration::days(7))
-        });
+        let retention = ttl.unwrap_or(Self::DEFAULT_RETENTION);
+        let expires_at = Some(
+            chrono::Utc::now()
+                + chrono::Duration::from_std(retention).unwrap_or(chrono::Duration::days(7)),
+        );
 
         sqlx::query!(
             r#"
@@ -312,7 +410,7 @@ impl JobQueue {
                 cancelled_at = NULL,
                 cancel_reason = NULL,
                 expires_at = $3
-            WHERE id = $1
+            WHERE id = $1 AND status = 'running'
             "#,
             job_id,
             output as _,
@@ -324,9 +422,7 @@ impl JobQueue {
         Ok(())
     }
 
-    /// Mark job as failed, schedule retry or move to dead letter.
-    ///
-    /// If `ttl` is provided and job moves to dead_letter, sets `expires_at` for automatic cleanup.
+    /// Mark job as failed; retry if `retry_delay` is set, otherwise dead-letter.
     pub async fn fail(
         &self,
         job_id: Uuid,
@@ -335,7 +431,6 @@ impl JobQueue {
         ttl: Option<std::time::Duration>,
     ) -> Result<(), sqlx::Error> {
         if let Some(delay) = retry_delay {
-            // Schedule retry
             sqlx::query!(
                 r#"
                 UPDATE forge_jobs
@@ -349,7 +444,7 @@ impl JobQueue {
                     cancel_requested_at = NULL,
                     cancelled_at = NULL,
                     cancel_reason = NULL
-                WHERE id = $1
+                WHERE id = $1 AND status = 'running'
                 "#,
                 job_id,
                 error,
@@ -358,11 +453,11 @@ impl JobQueue {
             .execute(&self.pool)
             .await?;
         } else {
-            // Move to dead letter
-            let expires_at = ttl.map(|d| {
+            let retention = ttl.unwrap_or(Self::DEFAULT_RETENTION);
+            let expires_at = Some(
                 chrono::Utc::now()
-                    + chrono::Duration::from_std(d).unwrap_or(chrono::Duration::days(7))
-            });
+                    + chrono::Duration::from_std(retention).unwrap_or(chrono::Duration::days(7)),
+            );
 
             sqlx::query!(
                 r#"
@@ -375,7 +470,7 @@ impl JobQueue {
                     cancelled_at = NULL,
                     cancel_reason = NULL,
                     expires_at = $3
-                WHERE id = $1
+                WHERE id = $1 AND status = 'running'
                 "#,
                 job_id,
                 error,
@@ -388,7 +483,6 @@ impl JobQueue {
         Ok(())
     }
 
-    /// Update heartbeat for a running job.
     pub async fn heartbeat(&self, job_id: Uuid) -> Result<(), sqlx::Error> {
         sqlx::query!(
             r#"
@@ -404,7 +498,6 @@ impl JobQueue {
         Ok(())
     }
 
-    /// Update job progress.
     pub async fn update_progress(
         &self,
         job_id: Uuid,
@@ -427,7 +520,6 @@ impl JobQueue {
         Ok(())
     }
 
-    /// Replace persisted job context.
     pub async fn set_context(
         &self,
         job_id: Uuid,
@@ -516,37 +608,41 @@ impl JobQueue {
             return Ok(false);
         }
 
-        let updated = sqlx::query!(
+        let retention_secs = Self::DEFAULT_RETENTION.as_secs() as f64;
+        #[allow(clippy::disallowed_methods)]
+        let updated = sqlx::query(
             r#"
             UPDATE forge_jobs
             SET
                 status = 'cancelled',
                 cancelled_at = NOW(),
-                cancel_reason = COALESCE($2, cancel_reason)
+                cancel_reason = COALESCE($2, cancel_reason),
+                expires_at = NOW() + make_interval(secs => $3)
             WHERE id = $1
               AND status NOT IN ('completed', 'failed', 'dead_letter', 'cancelled')
             "#,
-            job_id,
-            reason,
         )
+        .bind(job_id)
+        .bind(reason)
+        .bind(retention_secs)
         .execute(&self.pool)
         .await?;
 
         Ok(updated.rows_affected() > 0)
     }
 
-    /// Mark job as cancelled.
-    ///
-    /// If `ttl` is provided, sets `expires_at` for automatic cleanup.
+    /// Mark job as cancelled. Sets `expires_at`; defaults to 7 days.
     pub async fn cancel(
         &self,
         job_id: Uuid,
         reason: Option<&str>,
         ttl: Option<std::time::Duration>,
     ) -> Result<(), sqlx::Error> {
-        let expires_at = ttl.map(|d| {
-            chrono::Utc::now() + chrono::Duration::from_std(d).unwrap_or(chrono::Duration::days(7))
-        });
+        let retention = ttl.unwrap_or(Self::DEFAULT_RETENTION);
+        let expires_at = Some(
+            chrono::Utc::now()
+                + chrono::Duration::from_std(retention).unwrap_or(chrono::Duration::days(7)),
+        );
 
         sqlx::query!(
             r#"
@@ -556,7 +652,7 @@ impl JobQueue {
                 cancelled_at = NOW(),
                 cancel_reason = COALESCE($2, cancel_reason),
                 expires_at = $3
-            WHERE id = $1
+            WHERE id = $1 AND status NOT IN ('completed', 'failed', 'dead_letter', 'cancelled')
             "#,
             job_id,
             reason,
@@ -582,24 +678,29 @@ impl JobQueue {
     ) -> Result<u64, sqlx::Error> {
         let secs = stale_threshold.num_seconds() as f64;
 
-        let finalized = sqlx::query!(
+        let retention_secs = Self::DEFAULT_RETENTION.as_secs() as f64;
+        #[allow(clippy::disallowed_methods)]
+        let finalized = sqlx::query(
             r#"
             UPDATE forge_jobs
             SET
                 status = 'cancelled',
                 cancelled_at = NOW(),
-                cancel_reason = COALESCE(cancel_reason, 'worker died mid-cancel')
+                cancel_reason = COALESCE(cancel_reason, 'worker died mid-cancel'),
+                expires_at = NOW() + make_interval(secs => $2)
             WHERE
                 cancel_requested_at IS NOT NULL
                 AND status IN ('claimed', 'running', 'cancel_requested')
                 AND COALESCE(last_heartbeat, started_at, claimed_at) < NOW() - make_interval(secs => $1)
             "#,
-            secs,
         )
+        .bind(secs)
+        .bind(retention_secs)
         .execute(&self.pool)
         .await?;
 
-        let reset = sqlx::query!(
+        #[allow(clippy::disallowed_methods)]
+        let reset = sqlx::query(
             r#"
             UPDATE forge_jobs
             SET
@@ -621,18 +722,15 @@ impl JobQueue {
                     )
                 )
             "#,
-            secs,
         )
+        .bind(secs)
         .execute(&self.pool)
         .await?;
 
         Ok(finalized.rows_affected() + reset.rows_affected())
     }
 
-    /// Delete expired job records.
-    ///
-    /// Only deletes terminal jobs (completed, cancelled, failed, dead_letter)
-    /// that have passed their TTL.
+    /// Delete terminal jobs that have passed their TTL.
     pub async fn cleanup_expired(&self) -> Result<u64, sqlx::Error> {
         let result = sqlx::query!(
             r#"
@@ -648,7 +746,6 @@ impl JobQueue {
         Ok(result.rows_affected())
     }
 
-    /// Get queue statistics.
     pub async fn stats(&self) -> Result<QueueStats, sqlx::Error> {
         let row = sqlx::query!(
             r#"
@@ -678,7 +775,6 @@ impl JobQueue {
     }
 }
 
-/// Queue statistics.
 #[derive(Debug, Clone, Default)]
 pub struct QueueStats {
     pub pending: u64,
@@ -744,10 +840,15 @@ mod tests {
     }
 }
 
-/// Integration tests requiring a real PostgreSQL database.
-/// Run with: cargo test -p forge-runtime --features testcontainers
 #[cfg(all(test, feature = "testcontainers"))]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::disallowed_methods
+)]
+// Integration tests run ad-hoc verification queries that aren't part of the
+// .sqlx cache; runtime sqlx::query is fine here.
 mod integration_tests {
     use super::*;
     use forge_core::testing::{IsolatedTestDb, TestDatabase};
@@ -760,7 +861,7 @@ mod integration_tests {
             .isolated(test_name)
             .await
             .expect("Failed to create isolated db");
-        let system_sql = crate::migrations::get_all_system_sql();
+        let system_sql = crate::pg::migration::get_all_system_sql();
         db.run_sql(&system_sql)
             .await
             .expect("Failed to apply system schema");
@@ -773,7 +874,6 @@ mod integration_tests {
         let queue = JobQueue::new(db.pool().clone());
         let worker_id = Uuid::new_v4();
 
-        // Enqueue a job
         let job = JobRecord::new(
             "send_email",
             serde_json::json!({"to": "a@b.com"}),
@@ -782,9 +882,8 @@ mod integration_tests {
         );
         let job_id = queue.enqueue(job).await.expect("Failed to enqueue");
 
-        // Claim it
         let claimed = queue
-            .claim(worker_id, &[], 10)
+            .claim(worker_id, &[], true, 10)
             .await
             .expect("Failed to claim");
         assert_eq!(claimed.len(), 1);
@@ -802,7 +901,6 @@ mod integration_tests {
         let db = setup_db("claim_skip_locked").await;
         let queue = JobQueue::new(db.pool().clone());
 
-        // Enqueue 3 jobs
         for i in 0..3 {
             let job = JobRecord::new(
                 format!("job_{i}"),
@@ -813,17 +911,14 @@ mod integration_tests {
             queue.enqueue(job).await.expect("enqueue");
         }
 
-        // Worker 1 claims 2
         let worker1 = Uuid::new_v4();
-        let batch1 = queue.claim(worker1, &[], 2).await.expect("claim1");
+        let batch1 = queue.claim(worker1, &[], true, 2).await.expect("claim1");
         assert_eq!(batch1.len(), 2);
 
-        // Worker 2 claims remaining
         let worker2 = Uuid::new_v4();
-        let batch2 = queue.claim(worker2, &[], 2).await.expect("claim2");
+        let batch2 = queue.claim(worker2, &[], true, 2).await.expect("claim2");
         assert_eq!(batch2.len(), 1);
 
-        // No overlap
         let ids1: Vec<Uuid> = batch1.iter().map(|j| j.id).collect();
         let ids2: Vec<Uuid> = batch2.iter().map(|j| j.id).collect();
         for id in &ids2 {
@@ -842,15 +937,13 @@ mod integration_tests {
         let queue = JobQueue::new(db.pool().clone());
         let worker_id = Uuid::new_v4();
 
-        // Enqueue low then high priority
         let low = JobRecord::new("low_job", serde_json::json!({}), JobPriority::Low, 3);
         queue.enqueue(low).await.expect("enqueue low");
 
         let high = JobRecord::new("high_job", serde_json::json!({}), JobPriority::Critical, 3);
         queue.enqueue(high).await.expect("enqueue high");
 
-        // Claim 1 - should get the high-priority job first
-        let claimed = queue.claim(worker_id, &[], 1).await.expect("claim");
+        let claimed = queue.claim(worker_id, &[], true, 1).await.expect("claim");
         assert_eq!(claimed.len(), 1);
         assert_eq!(claimed[0].job_type, "high_job");
 
@@ -866,19 +959,13 @@ mod integration_tests {
         let job = JobRecord::new("process", serde_json::json!({}), JobPriority::Normal, 3);
         let job_id = queue.enqueue(job).await.expect("enqueue");
 
-        // Claim
-        queue.claim(worker_id, &[], 1).await.expect("claim");
-
-        // Start
+        queue.claim(worker_id, &[], true, 1).await.expect("claim");
         queue.start(job_id, worker_id, 1).await.expect("start");
-
-        // Complete
         queue
             .complete(job_id, serde_json::json!({"result": "done"}), None)
             .await
             .expect("complete");
 
-        // Verify via stats
         let stats = queue.stats().await.expect("stats");
         assert_eq!(stats.completed, 1);
         assert_eq!(stats.pending, 0);
@@ -895,10 +982,9 @@ mod integration_tests {
         let job = JobRecord::new("flaky", serde_json::json!({}), JobPriority::Normal, 3);
         let job_id = queue.enqueue(job).await.expect("enqueue");
 
-        queue.claim(worker_id, &[], 1).await.expect("claim");
+        queue.claim(worker_id, &[], true, 1).await.expect("claim");
         queue.start(job_id, worker_id, 1).await.expect("start");
 
-        // Fail with retry delay
         queue
             .fail(
                 job_id,
@@ -909,7 +995,6 @@ mod integration_tests {
             .await
             .expect("fail");
 
-        // Should be pending again (retryable)
         let stats = queue.stats().await.expect("stats");
         assert_eq!(stats.pending, 1);
         assert_eq!(stats.dead_letter, 0);
@@ -926,10 +1011,9 @@ mod integration_tests {
         let job = JobRecord::new("fatal", serde_json::json!({}), JobPriority::Normal, 1);
         let job_id = queue.enqueue(job).await.expect("enqueue");
 
-        queue.claim(worker_id, &[], 1).await.expect("claim");
+        queue.claim(worker_id, &[], true, 1).await.expect("claim");
         queue.start(job_id, worker_id, 1).await.expect("start");
 
-        // Fail without retry (None delay) -> dead letter
         queue
             .fail(job_id, "permanent error", None, None)
             .await
@@ -951,7 +1035,6 @@ mod integration_tests {
             .with_idempotency_key("pay-123");
         let id1 = queue.enqueue(job1).await.expect("enqueue1");
 
-        // Same key -> returns existing job ID
         let job2 = JobRecord::new(
             "pay",
             serde_json::json!({"amount": 200}),
@@ -963,7 +1046,6 @@ mod integration_tests {
 
         assert_eq!(id1, id2, "Idempotency key should return same job ID");
 
-        // Only one job should exist
         let stats = queue.stats().await.expect("stats");
         assert_eq!(stats.pending, 1);
 
@@ -1000,14 +1082,12 @@ mod integration_tests {
             .with_owner_subject(Some("user-alice".into()));
         let job_id = queue.enqueue(job).await.expect("enqueue");
 
-        // Wrong owner can't cancel
         let denied = queue
             .request_cancel(job_id, Some("reason"), Some("user-bob"))
             .await
             .expect("cancel attempt");
         assert!(!denied, "Should deny cancellation from non-owner");
 
-        // Right owner can cancel
         let allowed = queue
             .request_cancel(job_id, Some("reason"), Some("user-alice"))
             .await
@@ -1022,15 +1102,13 @@ mod integration_tests {
         let db = setup_db("claim_capability").await;
         let queue = JobQueue::new(db.pool().clone());
 
-        // Job requires "gpu" capability
         let job = JobRecord::new("render", serde_json::json!({}), JobPriority::Normal, 3)
             .with_capability("gpu");
         queue.enqueue(job).await.expect("enqueue");
 
-        // Worker without capability can't claim
         let worker_no_cap = Uuid::new_v4();
         let claimed = queue
-            .claim(worker_no_cap, &["cpu".into()], 10)
+            .claim(worker_no_cap, &["cpu".into()], false, 10)
             .await
             .expect("claim");
         assert!(
@@ -1038,13 +1116,67 @@ mod integration_tests {
             "Worker without gpu cap should not claim gpu job"
         );
 
-        // Worker with capability can claim
         let worker_with_cap = Uuid::new_v4();
         let claimed = queue
-            .claim(worker_with_cap, &["gpu".into()], 10)
+            .claim(worker_with_cap, &["gpu".into()], false, 10)
             .await
             .expect("claim");
         assert_eq!(claimed.len(), 1);
+
+        db.cleanup().await.expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn claim_untagged_isolation() {
+        let db = setup_db("claim_untagged_isolation").await;
+        let queue = JobQueue::new(db.pool().clone());
+
+        let untagged = JobRecord::new("any", serde_json::json!({}), JobPriority::Normal, 3);
+        queue.enqueue(untagged).await.expect("enqueue untagged");
+
+        let workflow_job = JobRecord::new("any", serde_json::json!({}), JobPriority::Normal, 3)
+            .with_capability("workflows");
+        queue.enqueue(workflow_job).await.expect("enqueue workflow");
+
+        let cron_job = JobRecord::new("any", serde_json::json!({}), JobPriority::Normal, 3)
+            .with_capability("cron");
+        queue.enqueue(cron_job).await.expect("enqueue cron");
+
+        // workflows-queue worker claim_untagged=false: only its own jobs.
+        let workflow_worker = Uuid::new_v4();
+        let claimed = queue
+            .claim(workflow_worker, &["workflows".into()], false, 10)
+            .await
+            .expect("claim workflows");
+        assert_eq!(
+            claimed.len(),
+            1,
+            "workflows worker must NOT pick up untagged jobs"
+        );
+        assert_eq!(claimed[0].worker_capability.as_deref(), Some("workflows"));
+
+        // cron-queue worker claim_untagged=false: only its own jobs.
+        let cron_worker = Uuid::new_v4();
+        let claimed = queue
+            .claim(cron_worker, &["cron".into()], false, 10)
+            .await
+            .expect("claim cron");
+        assert_eq!(
+            claimed.len(),
+            1,
+            "cron worker must NOT pick up untagged jobs"
+        );
+        assert_eq!(claimed[0].worker_capability.as_deref(), Some("cron"));
+
+        // default-queue worker claim_untagged=true picks up the untagged job
+        // even though "default" tag is not on it.
+        let default_worker = Uuid::new_v4();
+        let claimed = queue
+            .claim(default_worker, &["default".into()], true, 10)
+            .await
+            .expect("claim default");
+        assert_eq!(claimed.len(), 1, "default worker must claim untagged job");
+        assert!(claimed[0].worker_capability.is_none());
 
         db.cleanup().await.expect("cleanup");
     }
@@ -1057,10 +1189,9 @@ mod integration_tests {
 
         let job = JobRecord::new("long_task", serde_json::json!({}), JobPriority::Normal, 3);
         let job_id = queue.enqueue(job).await.expect("enqueue");
-        queue.claim(worker_id, &[], 1).await.expect("claim");
+        queue.claim(worker_id, &[], true, 1).await.expect("claim");
         queue.start(job_id, worker_id, 1).await.expect("start");
 
-        // Heartbeat should not error
         queue.heartbeat(job_id).await.expect("heartbeat");
 
         db.cleanup().await.expect("cleanup");
@@ -1074,7 +1205,7 @@ mod integration_tests {
 
         let job = JobRecord::new("export", serde_json::json!({}), JobPriority::Normal, 3);
         let job_id = queue.enqueue(job).await.expect("enqueue");
-        queue.claim(worker_id, &[], 1).await.expect("claim");
+        queue.claim(worker_id, &[], true, 1).await.expect("claim");
         queue.start(job_id, worker_id, 1).await.expect("start");
 
         queue
@@ -1105,11 +1236,9 @@ mod integration_tests {
         let db = setup_db("stats").await;
         let queue = JobQueue::new(db.pool().clone());
 
-        // Start empty
         let stats = queue.stats().await.expect("stats");
         assert_eq!(stats.pending, 0);
 
-        // Add 3 pending
         for _ in 0..3 {
             let job = JobRecord::new("task", serde_json::json!({}), JobPriority::Normal, 3);
             queue.enqueue(job).await.expect("enqueue");

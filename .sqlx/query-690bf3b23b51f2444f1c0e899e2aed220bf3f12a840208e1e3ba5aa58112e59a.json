@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO forge_webhook_events (idempotency_key, webhook_name, status, processed_at, expires_at)\n        VALUES ($1, $2, 'claimed', NOW(), $3)\n        ON CONFLICT (webhook_name, idempotency_key) DO UPDATE\n            SET status = 'claimed',\n                processed_at = NOW(),\n                expires_at = EXCLUDED.expires_at\n        WHERE forge_webhook_events.expires_at < NOW()\n           OR (forge_webhook_events.status = 'claimed'\n               AND forge_webhook_events.processed_at + make_interval(secs => $4) < NOW())\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Timestamptz",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "690bf3b23b51f2444f1c0e899e2aed220bf3f12a840208e1e3ba5aa58112e59a"
+}

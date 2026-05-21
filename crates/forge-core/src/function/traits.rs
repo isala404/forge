@@ -6,71 +6,47 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use super::context::{MutationContext, QueryContext};
 use crate::error::Result;
-use crate::metadata::HandlerMetadata;
 
-/// Information about a registered function.
-///
-/// Constructed by the `#[query]` / `#[mutation]` macros — adding a field here
-/// is technically a breaking change for hand-written `ForgeQuery` / `ForgeMutation`
-/// impls, so any extension must ship a major bump or be staged through a
-/// builder. Macro-emitted impls track the field set automatically.
+/// Metadata for a registered query or mutation function.
 #[derive(Debug, Clone)]
 pub struct FunctionInfo {
-    /// Function name (used for routing).
     pub name: &'static str,
-    /// Human-readable description.
     pub description: Option<&'static str>,
-    /// Kind of function.
     pub kind: FunctionKind,
-    /// Required role (if any, implies auth required).
     pub required_role: Option<&'static str>,
-    /// Whether this function is public (no auth).
     pub is_public: bool,
-    /// Cache TTL in seconds (for queries).
     pub cache_ttl: Option<u64>,
-    /// Execution timeout for the handler. `None` falls back to the runtime
-    /// default. Mirrors the `Duration`-typed timeout fields on Job/Cron/Workflow
-    /// info so consumers don't have to remember which kinds use seconds.
+    /// `None` falls back to the runtime default.
     pub timeout: Option<Duration>,
-    /// Default timeout for outbound HTTP requests made via the circuit-breaker
-    /// client. `None` means no request timeout is applied.
+    /// Default timeout for outbound HTTP requests via the circuit-breaker client.
     pub http_timeout: Option<Duration>,
-    /// Rate limit: requests per time window.
     pub rate_limit_requests: Option<u32>,
-    /// Rate limit: time window in seconds.
     pub rate_limit_per_secs: Option<u64>,
-    /// Rate limit: bucket key type.
     pub rate_limit_key: Option<crate::rate_limit::RateLimitKey>,
-    /// Log level for access logging. Defaults to "debug" for queries, "info" for mutations.
     pub log_level: Option<LogLevel>,
-    /// Table dependencies extracted at compile time for reactive subscriptions.
-    /// Empty slice means tables could not be determined (dynamic SQL).
+    /// Compile-time extracted tables for reactive subscriptions.
     pub table_dependencies: &'static [&'static str],
-    /// Columns referenced in SELECT clauses, extracted at compile time.
-    /// Used for fine-grained invalidation: skip re-execution when changed columns
-    /// don't intersect with selected columns. Empty means unknown (invalidate always).
+    /// Columns in SELECT clauses for fine-grained invalidation.
     pub selected_columns: &'static [&'static str],
-    /// Whether this mutation should be wrapped in a database transaction.
-    /// Only applies to mutations. When true, jobs are buffered and inserted
-    /// atomically with the mutation via the outbox pattern.
+    /// Columns written by INSERT/UPDATE for cache invalidation scoping.
+    pub changed_columns: &'static [&'static str],
+    /// Whether this mutation runs inside a database transaction.
     pub transactional: bool,
-    /// Force this query to read from the primary database instead of replicas.
-    /// Use for read-after-write consistency (e.g., post-mutation confirmation,
-    /// permission checks depending on just-written state).
+    /// Force reads from primary instead of replicas.
     pub consistent: bool,
-    /// Per-function maximum upload size in bytes. Overrides gateway max_body_size.
     pub max_upload_size_bytes: Option<usize>,
+    /// When true, runtime rejects dispatch if auth context has no tenant claim.
+    pub requires_tenant_scope: bool,
 }
 
-/// The kind of function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FunctionKind {
     Query,
     Mutation,
+    Webhook,
 }
 
-/// Log level for per-function access logging.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LogLevel {
@@ -83,7 +59,6 @@ pub enum LogLevel {
 }
 
 impl LogLevel {
-    /// Convert to the lowercase string representation.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Trace => "trace",
@@ -96,66 +71,42 @@ impl LogLevel {
     }
 }
 
-impl std::fmt::Display for FunctionKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl FunctionKind {
+    pub fn as_str(&self) -> &'static str {
         match self {
-            FunctionKind::Query => write!(f, "query"),
-            FunctionKind::Mutation => write!(f, "mutation"),
+            Self::Query => "query",
+            Self::Mutation => "mutation",
+            Self::Webhook => "webhook",
         }
     }
 }
 
-/// A query function (read-only, cacheable, subscribable).
-///
-/// Queries:
-/// - Can only read from the database
-/// - Are automatically cached based on arguments
-/// - Can be subscribed to for real-time updates
-/// - Should be deterministic (same inputs → same outputs)
-/// - Should not have side effects
+impl std::fmt::Display for FunctionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A read-only, cacheable, subscribable query function.
 pub trait ForgeQuery: crate::__sealed::Sealed + Send + Sync + 'static {
-    /// The input arguments type.
     type Args: DeserializeOwned + Serialize + Send + Sync;
-    /// The output type.
     type Output: Serialize + Send;
 
-    /// Function metadata.
     fn info() -> FunctionInfo;
 
-    /// Unified metadata for uniform consumers (observability, admin, codegen).
-    fn metadata() -> HandlerMetadata {
-        HandlerMetadata::from(&Self::info())
-    }
-
-    /// Execute the query.
     fn execute(
         ctx: &QueryContext,
         args: Self::Args,
     ) -> Pin<Box<dyn Future<Output = Result<Self::Output>> + Send + '_>>;
 }
 
-/// A mutation function (transactional write).
-///
-/// Mutations:
-/// - Run within a database transaction
-/// - Can read and write to the database
-/// - Should NOT call external APIs (use Actions)
-/// - Are atomic: all changes commit or none do
+/// A transactional write function.
 pub trait ForgeMutation: crate::__sealed::Sealed + Send + Sync + 'static {
-    /// The input arguments type.
     type Args: DeserializeOwned + Serialize + Send + Sync;
-    /// The output type.
     type Output: Serialize + Send;
 
-    /// Function metadata.
     fn info() -> FunctionInfo;
 
-    /// Unified metadata for uniform consumers (observability, admin, codegen).
-    fn metadata() -> HandlerMetadata {
-        HandlerMetadata::from(&Self::info())
-    }
-
-    /// Execute the mutation within a transaction.
     fn execute(
         ctx: &MutationContext,
         args: Self::Args,
@@ -171,6 +122,7 @@ mod tests {
     fn test_function_kind_display() {
         assert_eq!(format!("{}", FunctionKind::Query), "query");
         assert_eq!(format!("{}", FunctionKind::Mutation), "mutation");
+        assert_eq!(format!("{}", FunctionKind::Webhook), "webhook");
     }
 
     #[test]
@@ -190,9 +142,11 @@ mod tests {
             log_level: Some(LogLevel::Debug),
             table_dependencies: &["users"],
             selected_columns: &["id", "name", "email"],
+            changed_columns: &[],
             transactional: false,
             consistent: false,
             max_upload_size_bytes: None,
+            requires_tenant_scope: false,
         };
 
         assert_eq!(info.name, "get_user");

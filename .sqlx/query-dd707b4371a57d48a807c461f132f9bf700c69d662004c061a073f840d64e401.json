@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO forge_cron_runs (id, cron_name, scheduled_time, status, node_id, started_at)\n            VALUES ($1, $2, $3, 'running', $4, NOW())\n            ON CONFLICT (cron_name, scheduled_time) DO UPDATE\n            SET\n                id = EXCLUDED.id,\n                status = 'running',\n                node_id = EXCLUDED.node_id,\n                started_at = NOW(),\n                completed_at = NULL,\n                error = NULL\n            WHERE forge_cron_runs.status = 'running'\n              AND forge_cron_runs.started_at < NOW() - make_interval(secs => $5)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Varchar",
+        "Timestamptz",
+        "Uuid",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dd707b4371a57d48a807c461f132f9bf700c69d662004c061a073f840d64e401"
+}

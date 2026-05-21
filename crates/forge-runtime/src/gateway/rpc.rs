@@ -6,31 +6,28 @@ use axum::{
     http::{HeaderMap, header::USER_AGENT},
 };
 use forge_core::function::{
-    AuthContext, FunctionInfo, JobDispatch, RequestMetadata, WorkflowDispatch,
+    AuthContext, FunctionInfo, JobDispatch, KvHandle, RequestMetadata, WorkflowDispatch,
 };
 
-use super::request::{BatchRpcRequest, BatchRpcResponse, RpcRequest};
+use super::request::RpcRequest;
 use super::response::{RpcError, RpcResponse};
 use super::tracing::TracingState;
-use crate::db::Database;
-use crate::function::{FunctionExecutor, FunctionRegistry};
+use crate::function::{FunctionRegistry, FunctionRouter};
+use crate::pg::Database;
 
 /// RPC handler for function invocations.
 #[derive(Clone)]
 pub struct RpcHandler {
-    /// Function executor.
-    executor: Arc<FunctionExecutor>,
-    /// Maximum requests in a single batch call.
-    max_batch_size: usize,
+    /// Function router.
+    router: Arc<FunctionRouter>,
 }
 
 impl RpcHandler {
     /// Create a new RPC handler.
     pub fn new(registry: FunctionRegistry, db: Database) -> Self {
-        let executor = FunctionExecutor::new(Arc::new(registry), db);
+        let router = FunctionRouter::new(Arc::new(registry), db);
         Self {
-            executor: Arc::new(executor),
-            max_batch_size: 100,
+            router: Arc::new(router),
         }
     }
 
@@ -52,7 +49,7 @@ impl RpcHandler {
         workflow_dispatcher: Option<Arc<dyn WorkflowDispatch>>,
         token_issuer: Option<Arc<dyn forge_core::TokenIssuer>>,
     ) -> Self {
-        let executor = FunctionExecutor::with_dispatch_and_issuer(
+        let router = FunctionRouter::with_dispatch_and_issuer(
             Arc::new(registry),
             db,
             job_dispatcher,
@@ -60,20 +57,14 @@ impl RpcHandler {
             token_issuer,
         );
         Self {
-            executor: Arc::new(executor),
-            max_batch_size: 100,
+            router: Arc::new(router),
         }
-    }
-
-    /// Set the maximum batch size for RPC batch requests.
-    pub fn set_max_batch_size(&mut self, max: usize) {
-        self.max_batch_size = max;
     }
 
     /// Set the token TTL config. Must be called before any requests are handled.
     pub fn set_token_ttl(&mut self, ttl: forge_core::AuthTokenTtl) {
-        if let Some(executor) = Arc::get_mut(&mut self.executor) {
-            executor.set_token_ttl(ttl);
+        if let Some(router) = Arc::get_mut(&mut self.router) {
+            router.set_token_ttl(ttl);
         }
     }
 
@@ -82,21 +73,48 @@ impl RpcHandler {
         &mut self,
         rate_limiter: Arc<dyn forge_core::rate_limit::RateLimiterBackend>,
     ) {
-        if let Some(executor) = Arc::get_mut(&mut self.executor) {
-            executor.set_rate_limiter(rate_limiter);
+        if let Some(router) = Arc::get_mut(&mut self.router) {
+            router.set_rate_limiter(rate_limiter);
         }
     }
 
     /// Set a custom role resolver. Call before handling requests.
     pub fn set_role_resolver(&mut self, resolver: forge_core::SharedRoleResolver) {
-        if let Some(executor) = Arc::get_mut(&mut self.executor) {
-            executor.set_role_resolver(resolver);
+        if let Some(router) = Arc::get_mut(&mut self.router) {
+            router.set_role_resolver(resolver);
         }
+    }
+
+    /// Expose the underlying [`FunctionRouter`] so other components (e.g. MCP)
+    /// can delegate calls to all registered queries and mutations.
+    pub fn router(&self) -> Arc<FunctionRouter> {
+        Arc::clone(&self.router)
     }
 
     /// Look up function metadata by name.
     pub fn function_info(&self, name: &str) -> Option<FunctionInfo> {
-        self.executor.function_info(name)
+        self.router.function_info(name)
+    }
+
+    /// Set the maximum number of jobs a single mutation may dispatch.
+    pub fn set_max_jobs_per_request(&mut self, limit: usize) {
+        if let Some(router) = Arc::get_mut(&mut self.router) {
+            router.set_max_jobs_per_request(limit);
+        }
+    }
+
+    /// Set the maximum serialized response size in bytes.
+    pub fn set_max_result_size_bytes(&mut self, limit: usize) {
+        if let Some(router) = Arc::get_mut(&mut self.router) {
+            router.set_max_result_size_bytes(limit);
+        }
+    }
+
+    /// Attach a KV store handle so handlers can call `ctx.kv()`.
+    pub fn set_kv(&mut self, kv: Arc<dyn KvHandle>) {
+        if let Some(router) = Arc::get_mut(&mut self.router) {
+            router.set_kv(kv);
+        }
     }
 
     /// Set the signals collector for auto-capturing RPC events.
@@ -105,8 +123,8 @@ impl RpcHandler {
         collector: crate::signals::SignalsCollector,
         server_secret: String,
     ) {
-        if let Some(executor) = Arc::get_mut(&mut self.executor) {
-            executor.set_signals_collector(collector, server_secret);
+        if let Some(router) = Arc::get_mut(&mut self.router) {
+            router.set_signals_collector(collector, server_secret);
         }
     }
 
@@ -117,16 +135,14 @@ impl RpcHandler {
         auth: AuthContext,
         metadata: RequestMetadata,
     ) -> RpcResponse {
-        // Don't check has_function early - let executor try jobs/workflows too
+        let request_id = metadata.request_id().to_string();
         match self
-            .executor
-            .execute(&request.function, request.args, auth, metadata.clone())
+            .router
+            .execute(&request.function, request.args, auth, metadata)
             .await
         {
-            Ok(exec_result) => RpcResponse::success(exec_result.result)
-                .with_request_id(metadata.request_id().to_string()),
-            Err(e) => RpcResponse::error(RpcError::from(e))
-                .with_request_id(metadata.request_id().to_string()),
+            Ok(value) => RpcResponse::success(value).with_request_id(request_id),
+            Err(e) => RpcResponse::error(RpcError::from(e)).with_request_id(request_id),
         }
     }
 }
@@ -231,54 +247,6 @@ pub async fn rpc_function_handler(
         .await
 }
 
-/// Axum handler for POST /rpc/batch.
-pub async fn rpc_batch_handler(
-    State(handler): State<Arc<RpcHandler>>,
-    Extension(auth): Extension<AuthContext>,
-    Extension(tracing): Extension<TracingState>,
-    Extension(resolved_ip): Extension<ResolvedClientIp>,
-    headers: HeaderMap,
-    Json(batch): Json<BatchRpcRequest>,
-) -> BatchRpcResponse {
-    // Prevent DoS via unbounded batch size
-    if batch.requests.len() > handler.max_batch_size {
-        return BatchRpcResponse {
-            results: vec![RpcResponse::error(RpcError::validation(format!(
-                "Batch size {} exceeds maximum of {}",
-                batch.requests.len(),
-                handler.max_batch_size
-            )))],
-        };
-    }
-
-    let client_ip = resolved_ip.0;
-    let user_agent = extract_user_agent(&headers);
-    let correlation_id = extract_correlation_id(&headers);
-    let mut results = Vec::with_capacity(batch.requests.len());
-
-    for request in batch.requests {
-        // Validate function names in batch requests
-        if !is_valid_function_name(&request.function) {
-            results.push(RpcResponse::error(RpcError::validation(
-                "Invalid function name: must be 1-256 alphanumeric characters, underscores, dots, colons, or hyphens",
-            )));
-            continue;
-        }
-        let metadata = RequestMetadata::__build_internal(
-            uuid::Uuid::new_v4(),
-            tracing.trace_id.clone(),
-            client_ip.clone(),
-            user_agent.clone(),
-            correlation_id.clone(),
-        );
-
-        let response = handler.handle(request, auth.clone(), metadata).await;
-        results.push(response);
-    }
-
-    BatchRpcResponse { results }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
@@ -309,5 +277,127 @@ mod tests {
         assert!(!response.success);
         assert!(response.error.is_some());
         assert_eq!(response.error.as_ref().unwrap().code, "NOT_FOUND");
+    }
+
+    #[test]
+    fn function_name_accepts_typical_identifiers() {
+        assert!(is_valid_function_name("get_user"));
+        assert!(is_valid_function_name("module.fn"));
+        assert!(is_valid_function_name("ns:tool"));
+        assert!(is_valid_function_name("with-dashes"));
+        assert!(is_valid_function_name("alpha123"));
+    }
+
+    #[test]
+    fn function_name_rejects_empty() {
+        assert!(!is_valid_function_name(""));
+    }
+
+    #[test]
+    fn function_name_rejects_over_256_chars() {
+        let exactly_256 = "a".repeat(256);
+        let over_256 = "a".repeat(257);
+        assert!(is_valid_function_name(&exactly_256));
+        assert!(!is_valid_function_name(&over_256));
+    }
+
+    #[test]
+    fn function_name_rejects_special_chars() {
+        // The validator is the first line of defense against log injection and
+        // routing-table corruption; anything outside [alnum_.:-] must be
+        // refused.
+        assert!(!is_valid_function_name("with space"));
+        assert!(!is_valid_function_name("path/traversal"));
+        assert!(!is_valid_function_name("html<tag>"));
+        assert!(!is_valid_function_name("semi;colon"));
+        assert!(!is_valid_function_name("newline\nin"));
+        assert!(!is_valid_function_name("question?"));
+    }
+
+    #[test]
+    fn user_agent_returns_value_when_header_present() {
+        let mut headers = HeaderMap::new();
+        headers.insert(USER_AGENT, "Mozilla/5.0".parse().unwrap());
+        assert_eq!(extract_user_agent(&headers), Some("Mozilla/5.0".into()));
+    }
+
+    #[test]
+    fn user_agent_returns_none_when_header_absent() {
+        let headers = HeaderMap::new();
+        assert_eq!(extract_user_agent(&headers), None);
+    }
+
+    #[test]
+    fn correlation_id_round_trips_typical_value() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-correlation-id", "abc-123".parse().unwrap());
+        assert_eq!(extract_correlation_id(&headers), Some("abc-123".into()));
+    }
+
+    #[test]
+    fn correlation_id_rejects_empty_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-correlation-id", "".parse().unwrap());
+        // Empty header is treated the same as absent so we never thread an
+        // empty correlation ID into the request metadata.
+        assert_eq!(extract_correlation_id(&headers), None);
+    }
+
+    #[test]
+    fn correlation_id_rejects_value_over_64_chars() {
+        // Length cap protects log lines from being padded by untrusted clients.
+        let exactly_64 = "a".repeat(64);
+        let over_64 = "a".repeat(65);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-correlation-id", exactly_64.parse().unwrap());
+        assert_eq!(extract_correlation_id(&headers), Some(exactly_64));
+
+        headers.insert("x-correlation-id", over_64.parse().unwrap());
+        assert_eq!(extract_correlation_id(&headers), None);
+    }
+
+    #[test]
+    fn correlation_id_absent_returns_none() {
+        let headers = HeaderMap::new();
+        assert_eq!(extract_correlation_id(&headers), None);
+    }
+
+    #[test]
+    fn build_metadata_preserves_uuid_request_id_when_parseable() {
+        let id = uuid::Uuid::new_v4();
+        let mut tracing_state = TracingState::with_trace_id("trace-123".to_string());
+        tracing_state.request_id = id.to_string();
+        let headers = HeaderMap::new();
+        let meta = build_metadata(tracing_state, Some("10.0.0.1".into()), &headers);
+        assert_eq!(meta.request_id(), id);
+        assert_eq!(meta.trace_id(), "trace-123");
+        assert_eq!(meta.client_ip(), Some("10.0.0.1"));
+    }
+
+    #[test]
+    fn build_metadata_falls_back_to_new_uuid_when_request_id_unparseable() {
+        // Defensive: a malformed request_id (not a UUID) gets replaced with a
+        // fresh UUID rather than crashing the request.
+        let mut tracing_state = TracingState::with_trace_id("trace".to_string());
+        tracing_state.request_id = "not-a-uuid".to_string();
+        let meta = build_metadata(tracing_state, None, &HeaderMap::new());
+        // Generated UUIDs are v4; assert it isn't the nil UUID at minimum.
+        assert_ne!(meta.request_id(), uuid::Uuid::nil());
+    }
+
+    #[test]
+    fn build_metadata_propagates_headers_into_request_metadata() {
+        let mut tracing_state = TracingState::with_trace_id("trace".to_string());
+        tracing_state.request_id = uuid::Uuid::new_v4().to_string();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(USER_AGENT, "curl/8.0".parse().unwrap());
+        headers.insert("x-correlation-id", "corr-42".parse().unwrap());
+
+        let meta = build_metadata(tracing_state, None, &headers);
+        assert_eq!(meta.user_agent(), Some("curl/8.0"));
+        assert_eq!(meta.correlation_id(), Some("corr-42"));
+        assert_eq!(meta.client_ip(), None);
     }
 }

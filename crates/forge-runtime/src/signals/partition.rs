@@ -3,12 +3,20 @@
 //! Creates partitions for upcoming months and drops partitions
 //! older than the configured retention period.
 
+// Partition DDL constructs table names from runtime dates, so the query macros
+// can't validate them at compile time.
+#![allow(clippy::disallowed_methods)]
+
 use sqlx::PgPool;
 use tracing::{debug, error, info};
 
-/// Ensure partitions exist for the current month and next month.
+/// Ensure partitions exist for the current month and the next three months.
+///
+/// Pre-creating three months ahead prevents gaps when the maintenance loop
+/// (which sleeps a fixed interval from startup, not aligned to midnight)
+/// fires late on a month boundary.
 pub async fn ensure_partitions(pool: &PgPool) {
-    let (current, next) = tokio::join!(
+    let results = tokio::join!(
         sqlx::query(
             "SELECT forge_signals_ensure_partition(date_trunc('month', CURRENT_DATE)::date)",
         )
@@ -17,16 +25,26 @@ pub async fn ensure_partitions(pool: &PgPool) {
             "SELECT forge_signals_ensure_partition((date_trunc('month', CURRENT_DATE) + interval '1 month')::date)",
         )
         .execute(pool),
+        sqlx::query(
+            "SELECT forge_signals_ensure_partition((date_trunc('month', CURRENT_DATE) + interval '2 months')::date)",
+        )
+        .execute(pool),
+        sqlx::query(
+            "SELECT forge_signals_ensure_partition((date_trunc('month', CURRENT_DATE) + interval '3 months')::date)",
+        )
+        .execute(pool),
     );
 
-    if let Err(e) = current {
-        error!(error = %e, "failed to ensure current month partition");
+    let labels = ["current", "+1 month", "+2 months", "+3 months"];
+    for (result, label) in [results.0, results.1, results.2, results.3]
+        .into_iter()
+        .zip(labels)
+    {
+        if let Err(e) = result {
+            error!(error = %e, month = label, "failed to ensure signal partition");
+        }
     }
-    if let Err(e) = next {
-        error!(error = %e, "failed to ensure next month partition");
-    } else {
-        debug!("signal partitions verified");
-    }
+    debug!("signal partitions verified (current + 3 months ahead)");
 }
 
 /// Drop partitions older than the retention period.
@@ -42,5 +60,28 @@ pub async fn drop_old_partitions(pool: &PgPool, retention_days: u32) {
         }
         Ok(_) => debug!(retention_days, "no old signal partitions to drop"),
         Err(e) => error!(error = %e, "failed to drop old signal partitions"),
+    }
+}
+
+/// Warn if any rows have landed in the catch-all partition.
+///
+/// `forge_signals_events_default` catches rows whose timestamp doesn't match
+/// any month partition. The retention sweep explicitly skips it, so anything
+/// that lands here accumulates forever. A non-zero count means either a
+/// `forge_signals_ensure_partition` failure left a gap, or clients are
+/// inserting events with timestamps outside the rolling +3-month window.
+pub async fn check_default_partition(pool: &PgPool) {
+    let result = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM forge_signals_events_default")
+        .fetch_one(pool)
+        .await;
+
+    match result {
+        Ok(0) => debug!("signals default partition empty"),
+        Ok(count) => error!(
+            misrouted_rows = count,
+            "signals: rows landed in forge_signals_events_default — a partition is missing for some range. \
+             These rows are excluded from retention drops; investigate the partition coverage."
+        ),
+        Err(e) => error!(error = %e, "failed to inspect signals default partition"),
     }
 }

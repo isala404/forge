@@ -75,27 +75,25 @@ pub async fn onboarding_wf(ctx: &WorkflowContext, user_id: Uuid) -> Result<()> {
 ```
 
 - Steps cached by **name** — renaming breaks resume.
-- Version bump required when step keys, wait keys, or data types change. Signature mismatch blocks runs and flips `/_api/ready` to 503.
+- Version bump required when step keys, wait keys, or data types change. Signature mismatch blocks runs.
 - Step names: string literals only, max 64 chars, `[a-zA-Z0-9_-]`. No format strings or runtime values.
-- Signature derivation is frozen at GA — FNV-1a 64-bit over: name, version, step keys (sorted), wait keys (sorted), timeout_secs, input type, output type. Never add fields without bumping version.
+- Signature derivation is frozen at GA — blake3 hash (128-bit, truncated) over: name, version, step keys (sorted), wait keys (sorted), timeout_secs, input type, output type. Never add fields without bumping version.
 - `ctx.sleep()` / `ctx.wait_for_event()` survive restarts. Never use `tokio::sleep`.
 
 ### Migrating a workflow safely (deprecate → drain → remove)
 
 1. Bump `version`, mark old as `deprecated`, deploy. Both versions ship in the same binary; new dispatches go to the active version, in-flight runs of the old version keep going on the old code.
 2. Wait for in-flight runs of the old version to drain (query `forge_workflow_runs` filtering by name, version, and non-terminal status).
-3. Delete the old handler code and redeploy. If anything is still in-flight, the runtime detects it at boot, logs a warning, and flips `/_api/ready` to 503 with `workflows: false`. Boot succeeds; LB rotates traffic away. The drain count stays in logs (not in the public probe payload).
-4. Operator unblocks via direct PG (no admin HTTP route):
+3. Delete the old handler code and redeploy. If anything is still in-flight, the runtime detects it at boot and logs a warning. Boot succeeds.
+4. Operator unblocks via admin endpoints: `POST /_api/admin/workflows/{id}/cancel` (with compensation) or `POST /_api/admin/workflows/{id}/force-abort` (terminal `cancelled_by_operator`, no compensation).
 
 ```sql
+-- If you must use direct SQL (prefer admin endpoints):
 UPDATE forge_workflow_runs
-SET status = 'retired_unresumable', resolution_reason = '...'
+SET status = 'failed', resolution_reason = '...'
 WHERE workflow_name = '...' AND workflow_version = '...'
-  AND status NOT IN ('completed','compensated','failed',
-                     'retired_unresumable','cancelled_by_operator');
+  AND status NOT IN ('completed', 'failed');
 ```
-
-Use `cancelled_by_operator` instead of `retired_unresumable` if the run should read as a cancellation. Within 5s the next `/_api/ready` flips back to 200.
 
 ## 2. Authentication and Authorization
 
@@ -175,6 +173,7 @@ The restriction exists to prevent duplicate-keyed tokens where structural fields
 ### Webhooks
 - Always set a `signature` constructor. Never `allow_unsigned` in production. Full table: [API Reference](./api.md#forgewebhook).
 - Set `idempotency` — `"header:..."` for providers that send a delivery ID, `"body:$.id"` to extract from the payload.
+- Non-Stripe schemes require senders to ship `x-webhook-timestamp: <unix-seconds>`. Forge rejects (401) anything missing, malformed, future-dated, or older than `replay_window_secs` (default 300). Tighten the window via `replay_window_secs = N` for low-latency callers; set `0` only when integrating with a sender that cannot stamp the header.
 - Ack fast: return `WebhookResult::Accepted` and dispatch a job for any work over a few hundred ms. Webhook senders have short timeouts and retry on slow responses.
 - Decode into a typed struct, not `serde_json::Value` — the macro deserialises the parameter type automatically.
 - **Race condition**: webhooks and sync confirmation paths can arrive in any order. Use `COALESCE($1, column)` in updates so a slow webhook can't clobber data the faster path already set.
@@ -183,7 +182,6 @@ The restriction exists to prevent duplicate-keyed tokens where structural fields
 
 | Provider | Constructor | Idempotency |
 |---|---|---|
-| Polar / Svix / Clerk | `standard_webhooks("ENV")` | `"header:webhook-id"` |
 | Stripe | `stripe_webhooks("ENV")` | `"header:stripe-request-id"` |
 | Shopify | `shopify_webhooks("ENV")` | `"body:$.id"` |
 | GitHub | `hmac_sha256("X-Hub-Signature-256", "ENV")` | `"header:X-GitHub-Delivery"` |
@@ -219,12 +217,33 @@ Forge::builder()
 ## 4. Operations
 
 - **Consistent reads**: `#[query(consistent)]` forces the primary when eventual consistency is unacceptable.
-- **Pool isolation**: queries use `default`; jobs use `jobs`; OTLP uses `observability`; signals use `analytics`. Size in `[database.pools.<name>]`.
+- **Single pool**: queries, mutations, jobs, cron, daemons, workflows, observability, and signals all share `[database] pool_size`. Size for the union of expected concurrency. Use `statement_timeout` to bound runaway queries; isolate heavy workloads with dedicated worker nodes, not extra pools.
 - **Observability**: enable OTLP in `forge.toml`; `x-correlation-id` propagates across RPC boundaries. Full metric/span catalog: `docs/docs/reference/observability-catalog.mdx`.
-- **Workflow safety**: startup validates active versions against persisted signatures; run the binary before shipping or `/_api/ready` reports unhealthy.
+- **Workflow safety**: startup validates active versions against persisted signatures; run the binary before shipping. Signature mismatches are logged as warnings at boot.
 - **Cluster fencing**: leader-exclusive writes (cron scheduling, stale reclaim, workflow recovery) check `current_term` against the DB before executing. If a stale leader lost its election during a partition, the fencing check rejects the write. Custom leader-mode daemons should follow the same pattern.
 - **Webhook idempotency**: best-effort via `INSERT ... ON CONFLICT`. Narrow race window between claim and handler completion. For strict exactly-once (financial ops), add application-level dedup inside your handler's transaction.
 - **Signal analytics**: approximate by design. Unauthenticated endpoints, bounded channel that drops under pressure, UA-based bot detection, daily-rotating visitor IDs. Not suitable as a security audit log.
 - **System tables**: `forge_jobs`, `forge_workflow_runs`, `forge_signals_events`, etc. are framework-owned. Use `ctx.dispatch_job()`, `ctx.start_workflow()`, `ctx.record_signal()`. `forge check` fails the build on manual writes.
 - **DB primary failover**: the LISTEN/NOTIFY connection (`ChangeListener`) is not auto-reconnected after a primary failover. Restart the process. Pool connections reconnect automatically.
 - **`forge_*` namespace**: reserved for framework tables. Never create application tables with this prefix.
+
+### Admin endpoints and audit log
+
+The `/_api/admin/*` surface is operator-grade. Every state-changing call requires `AuthContext::has_role("admin")` and appends a row to `forge_admin_audit` (actor, roles, target type/id, reason, request_id, trace_id). Read-only list/inspect calls are dashboard hot paths and don't audit.
+
+- **Stop a runaway job**: `POST /_api/admin/jobs/{id}/cancel`. The worker checks `JobContext::is_cancelled()` between iterations. For unkillable jobs (no cancel check), `/force-abort` moves to `dead_letter`.
+- **Stop a runaway workflow**: `POST /_api/admin/workflows/{id}/cancel`. Sets `cancel_requested_at` and fires NOTIFY `forge_workflow_wakeup`. A run in `ctx.sleep("...", 24h)` wakes within 50 ms, runs its compensation chain, and lands in `cancelled_by_operator`. No process restart needed.
+- **Bleed off a hot queue**: `POST /_api/admin/queues/{name}/pause`. In-flight jobs finish, no new ones claim until `/resume`. The claim SQL uses `NOT EXISTS (SELECT 1 FROM forge_paused_queues ...)`.
+- **Recover a stranded workflow**: when blocked runs are detected (server logs a warning at boot), use `/cancel` (with compensation) or `/force-abort` (no compensation, terminal `cancelled_by_operator`). Don't edit `forge_workflow_runs` directly — the admin path captures the reason.
+- **Diagnostics**: `/_api/admin/nodes` returns `forge_nodes` with heartbeat + load; `/_api/admin/leaders` shows which node holds each advisory lock. Use these instead of `pg_locks` inspection.
+
+Pass `{"reason": "..."}` on every state-changing call. The audit log is searched after incidents — empty reasons make post-mortems harder.
+
+### Readiness as a deploy gate
+
+`/_api/ready` is the load-balancer contract. Don't ship a binary that doesn't return 200 against the target DB.
+
+- `migrations_ok=false` → `forge migrate up` before the new binary takes traffic. The check compares the embedded system migration count to `forge_system_migrations`.
+- `notify_queue_ok=false` → some LISTEN consumer is stuck. Find with `SELECT pid, query FROM pg_stat_activity WHERE wait_event='AsyncWait'` and `pg_terminate_backend()`. Threshold is `pg_notification_queue_usage() < 0.75`.
+- `cluster_registered=false` at boot is a race — wait one heartbeat (~5 s). If it persists, the node's row in `forge_nodes` was marked dead; check logs.
+- PG < 18 is a startup hard-fail, not a readiness flag — the process exits non-zero with a clear error so orchestrators restart instead of accepting traffic.

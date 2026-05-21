@@ -1,33 +1,15 @@
 //! Forge runtime engine.
-//!
-//! Implements the Axum gateway, job worker, workflow executor, cron scheduler,
-//! daemon runner, reactivity system, cluster coordination, rate limiting,
-//! observability, and product analytics (signals).
-//!
-//! Subsystems are feature-gated. Always-on infrastructure: `db`, `cluster`,
-//! `migrations`, `function` (dispatch core), `rate_limit`, `observability`
-//! (with no-op stubs when `otel` is off), `testing`.
-//!
-//! Opt-in features:
-//! - `gateway` bundles HTTP server + SSE realtime + MCP + OAuth + webhooks +
-//!   signals (they share the axum/tower stack and split poorly)
-//! - `jobs`, `workflows`, `cron`, `daemons` are independent of `gateway`
-//! - `geoip` adds bundled IP-to-country resolution (heavy build-time download)
-//! - `otel` adds OpenTelemetry exporters (heavy crate deps)
 
 pub use sqlx;
 
-// Always-on infrastructure
 pub mod cluster;
-pub mod db;
 pub mod function;
-pub mod migrations;
+pub mod kv;
 pub mod observability;
+pub mod pg;
 pub mod rate_limit;
 pub(crate) mod stable_hash;
-pub mod testing;
 
-// Optional subsystems
 #[cfg(feature = "cron")]
 pub mod cron;
 #[cfg(feature = "daemons")]
@@ -45,55 +27,86 @@ pub mod webhook;
 #[cfg(feature = "workflows")]
 pub mod workflow;
 
-// Signals: real implementation lives behind `gateway` (the only place signals
-// are actually ingested). When `gateway` is off, we expose a stub module so
-// always-on modules (rate_limit, jobs, daemon, function) can call
-// `crate::signals::emit_*` without cfg gates everywhere.
+// No-op stubs when `gateway` is off so callers don't need cfg gates.
 #[cfg(feature = "gateway")]
 pub mod signals;
 #[cfg(not(feature = "gateway"))]
-#[path = "signals_stub.rs"]
-pub mod signals;
+pub mod signals {
+    use forge_core::signals::SignalEvent;
 
-// --- Re-exports follow the same gating ---
+    #[inline]
+    pub fn emit_raw(_event: SignalEvent) {}
 
-pub use cluster::{
-    GracefulShutdown, HeartbeatConfig, HeartbeatLoop, InFlightGuard, LeaderConfig, LeaderElection,
-    LeaderGuard, NodeCounts, NodeRegistry, ShutdownConfig,
+    #[inline]
+    pub fn emit_server_execution(
+        _name: &str,
+        _kind: &str,
+        _duration_ms: i32,
+        _success: bool,
+        _error_message: Option<String>,
+    ) {
+    }
+
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    pub fn emit_diagnostic(
+        _event_name: &str,
+        _properties: serde_json::Value,
+        _client_ip: Option<String>,
+        _user_agent: Option<String>,
+        _visitor_id: Option<String>,
+        _user_id: Option<uuid::Uuid>,
+        _is_bot: bool,
+    ) {
+    }
+
+    #[inline]
+    pub fn install_global(_: Option<()>) {}
+
+    pub mod bot {
+        #[inline]
+        pub fn is_bot(_user_agent: Option<&str>) -> bool {
+            false
+        }
+    }
+
+    pub mod visitor {
+        pub fn generate_visitor_id(
+            _client_ip: Option<&str>,
+            _user_agent: Option<&str>,
+            _server_secret: &str,
+        ) -> String {
+            String::new()
+        }
+    }
+}
+
+pub use cluster::{GracefulShutdown, HeartbeatConfig, HeartbeatLoop, NodeRegistry, ShutdownConfig};
+pub use function::{FunctionRegistry, RouteOutcome};
+pub use kv::KvStore;
+pub use observability::{TelemetryConfig, init_telemetry, shutdown_telemetry};
+pub use pg::{
+    AppliedMigration, Database, DriftStatus, Migration, MigrationRunner, MigrationStatus,
+    load_migrations_from_dir,
 };
-pub use db::Database;
-pub use function::{FunctionExecutor, FunctionRegistry, FunctionRouter, RouteResult};
-pub use migrations::{MigrationGenerator, SchemaDiff};
-pub use observability::{
-    TelemetryConfig, TelemetryError, build_env_filter, init_telemetry, shutdown_telemetry,
-};
+pub use pg::{LeaderConfig, LeaderElection, PgNotifyBus};
 pub use rate_limit::{HybridRateLimiter, StrictRateLimiter};
 
 #[cfg(feature = "cron")]
-pub use cron::{CronEntry, CronRecord, CronRegistry, CronRunner, CronStatus};
+pub use cron::{CronRegistry, CronRunner};
 #[cfg(feature = "daemons")]
-pub use daemon::{DaemonEntry, DaemonRegistry, DaemonRunner, DaemonRunnerConfig};
+pub use daemon::{DaemonRegistry, DaemonRunner, DaemonRunnerConfig};
 #[cfg(feature = "gateway")]
-pub use gateway::{
-    AuthMiddleware, GatewayConfig, GatewayServer, RpcError, RpcHandler, RpcRequest, RpcResponse,
-    TracingMiddleware,
-};
+pub use gateway::{GatewayConfig, GatewayServer};
 #[cfg(feature = "jobs")]
-pub use jobs::{
-    JobDispatcher, JobExecutor, JobQueue, JobRecord, JobRegistry, Worker, WorkerConfig,
-};
+pub use jobs::{JobDispatcher, JobQueue, JobRegistry, Worker, WorkerConfig};
 #[cfg(feature = "gateway")]
-pub use mcp::{McpToolEntry, McpToolRegistry};
+pub use mcp::McpToolRegistry;
 #[cfg(feature = "gateway")]
-pub use realtime::{
-    AdaptiveTracker, AdaptiveTrackingConfig, AdaptiveTrackingStats, ChangeListener,
-    InvalidationEngine, RealtimeConfig, RealtimeMessage, SessionManager, SessionServer,
-    SubscriptionManager,
-};
+pub use realtime::RealtimeConfig;
 #[cfg(feature = "gateway")]
-pub use webhook::{WebhookEntry, WebhookRegistry, WebhookState, webhook_handler};
+pub use webhook::{WebhookRegistry, WebhookState, webhook_handler};
 #[cfg(feature = "workflows")]
 pub use workflow::{
-    DrainEntry, EventStore, WorkflowEntry, WorkflowExecutor, WorkflowReadiness, WorkflowRecord,
-    WorkflowRegistry, WorkflowScheduler, WorkflowSchedulerConfig, WorkflowStepRecord,
+    EventStore, WorkflowExecutor, WorkflowRegistry, WorkflowScheduler, WorkflowSchedulerConfig,
 };

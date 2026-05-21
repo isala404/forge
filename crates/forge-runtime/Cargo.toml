@@ -22,14 +22,15 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 thiserror = { workspace = true }
-anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 dashmap = { workspace = true }
-futures-util = "0.3"
-tokio-util = "0.7"
-base64 = "0.22"
-sha2 = "0.10"
+ahash = { workspace = true }
+futures-util = { workspace = true }
+tokio-util = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
 
 # --- Optional deps (gated by feature) ---
 
@@ -42,10 +43,13 @@ ipnet = { workspace = true, optional = true }
 tower = { workspace = true, optional = true }
 tower-http = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
-jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto", "use_pem"], optional = true }
-bcrypt = { workspace = true, optional = true }
-ed25519-dalek = { version = "2", optional = true }
+jsonwebtoken = { workspace = true, optional = true }
+argon2 = { workspace = true, optional = true }
+password-hash = { workspace = true, optional = true }
+ring = { version = "0.17", optional = true }
 serde_urlencoded = { version = "0.7", optional = true }
+percent-encoding = { version = "2", optional = true }
+aho-corasick = { version = "1", optional = true }
 hmac = { version = "0.12", optional = true }
 sha1 = { version = "0.10", optional = true }
 # Gateway TLS termination: rustls + tls-listener implement axum::serve::Listener.
@@ -53,14 +57,13 @@ sha1 = { version = "0.10", optional = true }
 # `[gateway.tls] cert_path + key_path` in forge.toml.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"], optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
-rustls-pemfile = { version = "2", optional = true }
 tls-listener = { version = "0.11", default-features = false, features = ["rustls-ring", "axum", "tokio-net"], optional = true }
 jsonschema = { workspace = true, optional = true }
 
 # `geoip` feature: bundled IP-to-country DB (~10MB) + MaxMind reader.
 # Network access is required at compile time to fetch the DB; opt-in only.
 db_ip = { version = "0.3", default-features = false, features = ["ipv4", "ipv6", "include-country-code-lite"], optional = true }
-maxminddb = { version = "0.24", optional = true }
+maxminddb = { version = "0.28", optional = true }
 
 # `otel` feature: OpenTelemetry exporters (heavy — ~5 OTel crates + protobuf).
 opentelemetry = { workspace = true, optional = true }
@@ -86,14 +89,16 @@ gateway = [
     "dep:bytes",
     "dep:ipnet",
     "dep:jsonwebtoken",
-    "dep:bcrypt",
-    "dep:ed25519-dalek",
+    "dep:argon2",
+    "dep:password-hash",
+    "dep:ring",
     "dep:serde_urlencoded",
+    "dep:percent-encoding",
+    "dep:aho-corasick",
     "dep:hmac",
     "dep:sha1",
     "dep:tokio-rustls",
     "dep:rustls",
-    "dep:rustls-pemfile",
     "dep:tls-listener",
     "dep:jsonschema",
 ]
@@ -101,14 +106,20 @@ gateway = [
 # Background job queue and worker (PG-backed, SKIP LOCKED).
 jobs = []
 
-# Durable workflow executor with versioned signatures.
-workflows = []
+# Durable workflow executor with versioned signatures. Workflows resume by
+# enqueueing jobs onto the queue, so the `jobs` subsystem is required.
+workflows = ["jobs"]
 
-# Cron scheduler with leader-only execution.
-cron = []
+# Cron scheduler with leader-only execution. Each tick enqueues a job for
+# the worker pool to execute, so the `jobs` subsystem is required.
+cron = ["jobs"]
 
 # Long-running daemon runner (singletons, leader-elected).
 daemons = []
+
+# OAuth 2.1 + PKCE for MCP authentication. Without this, MCP tools use
+# only JWT bearer auth (token passed directly in the request).
+mcp-oauth = ["gateway"]
 
 # GeoIP enrichment (sub-feature of `gateway` since signals lives there).
 # Bundles a ~10MB IP-to-country database; pulls a build-time download for
@@ -128,14 +139,18 @@ otel = [
 
 # --- Bundle features (composition shortcuts) ---
 
-# Everything except testcontainers. What `forgex` activates by default.
+# Everything except testcontainers and geoip. What `forgex` activates by default.
+# `geoip` is intentionally excluded: it requires a build-time network fetch to
+# download the bundled IP-to-country DB. Enable it explicitly with
+# `--features forge-runtime/geoip` when you need IP enrichment and have network
+# access at build time.
 full = [
     "gateway",
+    "mcp-oauth",
     "jobs",
     "workflows",
     "cron",
     "daemons",
-    "geoip",
     "otel",
 ]
 
@@ -144,7 +159,7 @@ testcontainers = ["forge-core/testcontainers"]
 
 [dev-dependencies]
 tokio-test = { workspace = true }
-tempfile = "3.14"
+tempfile = { workspace = true }
 # In-memory self-signed cert for the TLS handshake e2e test in gateway/tls.rs.
 # `reqwest` (with rustls-tls) is already a regular dep, so the test reuses it.
 rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }

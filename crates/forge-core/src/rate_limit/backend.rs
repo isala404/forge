@@ -33,22 +33,6 @@ pub trait RateLimiterBackend: Send + Sync + 'static {
         request: &RequestMetadata,
     ) -> String;
 
-    /// Reset a specific rate limit bucket. Returns true if the bucket existed.
-    fn reset_bucket<'a>(
-        &'a self,
-        _bucket_key: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
-        Box::pin(async { Ok(false) })
-    }
-
-    /// Get the current state of a rate limit bucket for debugging/admin use.
-    fn bucket_state<'a>(
-        &'a self,
-        _bucket_key: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<RateLimitResult>>> + Send + 'a>> {
-        Box::pin(async { Ok(None) })
-    }
-
     /// Check and convert a denial into a [`ForgeError::RateLimitExceeded`].
     fn enforce<'a>(
         &'a self,

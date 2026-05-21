@@ -136,7 +136,6 @@ impl TestCommand {
         println!();
         println!("  {} {}", ui::step(), style("Frontend Tests").bold());
 
-        // If FORGE_TEST_URL is already set (CI or manual), skip build/start
         if let Some(url) = std::env::var("FORGE_TEST_URL")
             .ok()
             .filter(|v| !v.trim().is_empty())
@@ -161,13 +160,11 @@ impl TestCommand {
 
         let frontend_type = FrontendTarget::detect(frontend_dir);
 
-        // Start PostgreSQL container
         let db_name = read_db_name();
         println!("  {} Starting PostgreSQL...", ui::step());
         let (pg_container, pg_port) = start_postgres(&db_name).await?;
         let db_url = format!("postgres://postgres:forge@localhost:{pg_port}/{db_name}");
 
-        // Build project with embedded frontend
         let binary = match build_project(frontend_type).await {
             Ok(bin) => bin,
             Err(e) => {
@@ -176,7 +173,6 @@ impl TestCommand {
             }
         };
 
-        // Pick random port and start the server
         let port = pick_random_port()?;
         let app_url = format!("http://localhost:{port}");
 
@@ -189,7 +185,6 @@ impl TestCommand {
             }
         };
 
-        // Wait for the server to become healthy
         print!("  {} Waiting for server...", ui::step());
         if !wait_for_health(&app_url, Duration::from_secs(120)).await {
             println!(" {}", style("timed out").red());
@@ -202,10 +197,8 @@ impl TestCommand {
         }
         println!(" {}", style("ready").green());
 
-        // Run tests
         let result = self.execute_frontend_tests(frontend_dir, &app_url).await;
 
-        // Cleanup
         println!();
         println!("  {} Stopping server...", ui::step());
         let _ = child.kill().await;
@@ -215,7 +208,6 @@ impl TestCommand {
     }
 
     async fn execute_frontend_tests(&self, frontend_dir: &Path, app_url: &str) -> Result<bool> {
-        // Install dependencies if needed
         if !frontend_dir.join("node_modules").exists() {
             println!("  {} Installing frontend dependencies...", ui::step());
             let status = Command::new("bun")
@@ -231,7 +223,6 @@ impl TestCommand {
             }
         }
 
-        // Check Playwright browsers are installed
         let pw_check = Command::new("bunx")
             .args(["playwright", "test", "--list"])
             .current_dir(frontend_dir)
@@ -260,7 +251,6 @@ impl TestCommand {
             }
         }
 
-        // Build Playwright command
         let mut pw_args = vec!["playwright", "test"];
 
         if self.ui {
@@ -370,7 +360,6 @@ async fn start_postgres(db_name: &str) -> Result<(String, u16)> {
         .output()
         .await?;
 
-    // Output is like "0.0.0.0:12345\n" or "[::]:12345\n"
     let port_str = String::from_utf8_lossy(&output.stdout);
     let port: u16 = port_str
         .trim()
@@ -425,8 +414,8 @@ async fn build_project(frontend_type: Option<FrontendTarget>) -> Result<std::pat
 
     let frontend_env = Path::new("frontend/.env");
 
-    // For Svelte: SvelteKit reads PUBLIC_API_URL from frontend/.env at build time.
-    // Patch it to empty so the frontend uses relative URLs (same-origin serving).
+    // SvelteKit reads PUBLIC_API_URL at build time; clear it so the frontend
+    // uses relative URLs for same-origin serving in the test binary.
     let original_frontend_env = std::fs::read_to_string(frontend_env).ok();
     if matches!(frontend_type, Some(FrontendTarget::SvelteKit))
         && let Some(ref content) = original_frontend_env
@@ -445,13 +434,15 @@ async fn build_project(frontend_type: Option<FrontendTarget>) -> Result<std::pat
         std::fs::write(frontend_env, patched)?;
     }
 
-    // For Dioxus: build WASM first so frontend/dist/ has real files before cargo build.
-    // build.rs only creates a placeholder in debug, and rust_embed needs the folder to exist.
+    // Build Dioxus WASM before cargo build: rust_embed requires real files in
+    // frontend/dist/. Release mode is required — debug WASM embeds a hot-reload
+    // WebSocket client that retries against the test backend, generating console
+    // errors that flake the Playwright suite.
     if matches!(frontend_type, Some(FrontendTarget::Dioxus)) {
         println!("  {} Building Dioxus WASM frontend...", ui::step());
         let frontend_dir = Path::new("frontend");
         let status = Command::new("dx")
-            .args(["build", "--platform", "web"])
+            .args(["build", "--platform", "web", "--release"])
             .current_dir(frontend_dir)
             .env("FORGE_API_URL", "")
             .stdin(Stdio::inherit())
@@ -467,11 +458,10 @@ async fn build_project(frontend_type: Option<FrontendTarget>) -> Result<std::pat
             );
         }
 
-        // dx outputs to target/dx/{name}/{profile}/web/public/; copy to frontend/dist/
         let dx_target = frontend_dir.join("target/dx");
         if let Ok(entries) = std::fs::read_dir(&dx_target) {
             for entry in entries.flatten() {
-                for profile in ["debug", "release"] {
+                for profile in ["release", "debug"] {
                     let public_dir = entry.path().join(profile).join("web/public");
                     if public_dir.exists() {
                         let dist_dir = frontend_dir.join("dist");
@@ -484,7 +474,6 @@ async fn build_project(frontend_type: Option<FrontendTarget>) -> Result<std::pat
         }
     }
 
-    // Build backend with embedded frontend
     let status = Command::new("cargo")
         .args(["build", "--features", "embedded-frontend"])
         .stdin(Stdio::inherit())
@@ -493,7 +482,7 @@ async fn build_project(frontend_type: Option<FrontendTarget>) -> Result<std::pat
         .status()
         .await;
 
-    // Restore before checking build result so a failed build doesn't leave a patched .env
+    // Restore before checking status so a failed build doesn't leave a patched .env
     if let Some(content) = original_frontend_env
         && let Err(e) = std::fs::write(frontend_env, content)
     {
@@ -508,7 +497,6 @@ async fn build_project(frontend_type: Option<FrontendTarget>) -> Result<std::pat
 }
 
 fn find_binary() -> Result<std::path::PathBuf> {
-    // Read package name from Cargo.toml (cargo preserves hyphens for bin names)
     let cargo_toml = std::fs::read_to_string("Cargo.toml")?;
     let name = cargo_toml
         .lines()
@@ -517,8 +505,7 @@ fn find_binary() -> Result<std::path::PathBuf> {
         .map(|v| v.trim().trim_matches('"').to_string())
         .ok_or_else(|| anyhow::anyhow!("Could not find package name in Cargo.toml"))?;
 
-    // Workspace members output to the workspace root target/debug/.
-    // Find the workspace root by looking for the Cargo.toml with [workspace].
+    // Walk up to find the workspace root Cargo.toml; output lands there.
     let mut search_dir = std::env::current_dir()?;
     loop {
         let ws_toml = search_dir.join("Cargo.toml");
@@ -536,7 +523,6 @@ fn find_binary() -> Result<std::path::PathBuf> {
         }
     }
 
-    // Fallback: check local target/debug/
     let local = std::path::PathBuf::from(format!("target/debug/{name}"));
     if local.exists() {
         return Ok(local);
@@ -548,7 +534,6 @@ fn find_binary() -> Result<std::path::PathBuf> {
     )
 }
 
-/// Parse all key=value pairs from a dotenv file.
 fn read_env_file(path: &Path) -> Vec<(String, String)> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -570,12 +555,10 @@ fn read_env_file(path: &Path) -> Vec<(String, String)> {
 async fn start_server(binary: &Path, port: u16, db_url: &str) -> Result<tokio::process::Child> {
     let mut cmd = Command::new(binary);
 
-    // Load all vars from .env so secrets, config, and custom vars carry through
     for (key, value) in read_env_file(Path::new(".env")) {
         cmd.env(&key, &value);
     }
 
-    // Override the vars we control for the test environment
     cmd.env("PORT", port.to_string())
         .env("HOST", "0.0.0.0")
         .env("DATABASE_URL", db_url)

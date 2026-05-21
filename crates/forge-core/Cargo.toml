@@ -21,15 +21,14 @@ bytes = { workspace = true }
 cron = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-tracing-opentelemetry = { workspace = true }
 futures-core = { workspace = true }
-opentelemetry = { workspace = true }
 sqlx = { workspace = true }
 reqwest = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync"] }
-base64 = "0.22"
+tokio = { workspace = true, features = ["rt", "sync", "net"] }
+base64 = { workspace = true }
 ipnet = { workspace = true }
 sha2 = { workspace = true }
+subtle = { workspace = true }
 testcontainers = { workspace = true, optional = true }
 testcontainers-modules = { workspace = true, optional = true }
 

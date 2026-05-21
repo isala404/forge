@@ -1,21 +1,25 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::Result;
 use crate::env::{EnvAccess, EnvProvider, RealEnvProvider};
-use crate::function::{AuthContext, JobDispatch, RequestMetadata, WorkflowDispatch};
+use crate::function::{AuthContext, JobDispatch, KvHandle, RequestMetadata, WorkflowDispatch};
+use crate::http::CircuitBreakerClient;
 use uuid::Uuid;
 
 /// Context for MCP tool execution.
 #[non_exhaustive]
 pub struct McpToolContext {
-    /// Authentication context.
     pub auth: AuthContext,
-    /// Request metadata.
     pub request: RequestMetadata,
     db_pool: sqlx::PgPool,
+    http_client: CircuitBreakerClient,
+    /// `None` means unlimited.
+    http_timeout: Option<Duration>,
     job_dispatch: Option<Arc<dyn JobDispatch>>,
     workflow_dispatch: Option<Arc<dyn WorkflowDispatch>>,
     env_provider: Arc<dyn EnvProvider>,
+    kv: Option<Arc<dyn KvHandle>>,
 }
 
 impl McpToolContext {
@@ -55,10 +59,32 @@ impl McpToolContext {
             auth,
             request,
             db_pool,
+            http_client: CircuitBreakerClient::with_ssrf_protection(),
+            http_timeout: None,
             job_dispatch,
             workflow_dispatch,
             env_provider,
+            kv: None,
         }
+    }
+
+    /// Set the HTTP client. Called by the runtime to inject the shared client.
+    pub fn with_http_client(mut self, client: CircuitBreakerClient) -> Self {
+        self.http_client = client;
+        self
+    }
+
+    /// Attach a KV store handle. Called by the runtime before handing the
+    /// context to the handler.
+    pub fn set_kv(&mut self, kv: Arc<dyn KvHandle>) {
+        self.kv = Some(kv);
+    }
+
+    /// Access the KV store.
+    pub fn kv(&self) -> crate::error::Result<&dyn KvHandle> {
+        self.kv
+            .as_deref()
+            .ok_or_else(|| crate::error::ForgeError::internal("KV store not available"))
     }
 
     pub fn db(&self) -> crate::function::ForgeDb {
@@ -77,6 +103,21 @@ impl McpToolContext {
         ))
     }
 
+    /// Get the HTTP client for external requests.
+    pub fn http(&self) -> crate::http::HttpClient {
+        self.http_client.with_timeout(self.http_timeout)
+    }
+
+    /// Get the raw reqwest client, bypassing circuit breaker execution.
+    pub fn raw_http(&self) -> &reqwest::Client {
+        self.http_client.inner()
+    }
+
+    /// Set the default timeout for outbound HTTP requests.
+    pub fn set_http_timeout(&mut self, timeout: Option<Duration>) {
+        self.http_timeout = timeout;
+    }
+
     /// Get the authenticated user's UUID. Returns 401 if not authenticated.
     pub fn user_id(&self) -> Result<Uuid> {
         self.auth.require_user_id()
@@ -89,14 +130,35 @@ impl McpToolContext {
 
     /// Dispatch a background job.
     pub async fn dispatch_job<T: serde::Serialize>(&self, job_type: &str, args: T) -> Result<Uuid> {
-        let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::Internal("Job dispatch not available".to_string())
-        })?;
+        let dispatcher = self
+            .job_dispatch
+            .as_ref()
+            .ok_or_else(|| crate::error::ForgeError::internal("Job dispatch not available"))?;
 
         let args_json = serde_json::to_value(args)?;
         dispatcher
-            .dispatch_by_name(job_type, args_json, self.auth.principal_id())
+            .dispatch_by_name(
+                job_type,
+                args_json,
+                self.auth.principal_id(),
+                self.auth.tenant_id(),
+            )
             .await
+    }
+
+    /// Type-safe dispatch: resolves the job name from the type's `ForgeJob`
+    /// impl and serializes the args at the call site.
+    pub async fn dispatch<J: crate::ForgeJob>(&self, args: J::Args) -> Result<Uuid> {
+        self.dispatch_job(J::info().name, args).await
+    }
+
+    /// Request cancellation for a job.
+    pub async fn cancel_job(&self, job_id: Uuid, reason: Option<String>) -> Result<bool> {
+        let dispatcher = self
+            .job_dispatch
+            .as_ref()
+            .ok_or_else(|| crate::error::ForgeError::internal("Job dispatch not available"))?;
+        dispatcher.cancel(job_id, reason).await
     }
 
     /// Start a workflow.
@@ -105,14 +167,25 @@ impl McpToolContext {
         workflow_name: &str,
         input: T,
     ) -> Result<Uuid> {
-        let dispatcher = self.workflow_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::Internal("Workflow dispatch not available".to_string())
-        })?;
+        let dispatcher = self
+            .workflow_dispatch
+            .as_ref()
+            .ok_or_else(|| crate::error::ForgeError::internal("Workflow dispatch not available"))?;
 
         let input_json = serde_json::to_value(input)?;
         dispatcher
-            .start_by_name(workflow_name, input_json, self.auth.principal_id())
+            .start_by_name(
+                workflow_name,
+                input_json,
+                self.auth.principal_id(),
+                Some(self.request.trace_id().to_string()),
+            )
             .await
+    }
+
+    /// Type-safe workflow start.
+    pub async fn start<W: crate::ForgeWorkflow>(&self, input: W::Input) -> Result<Uuid> {
+        self.start_workflow(W::info().name, input).await
     }
 }
 

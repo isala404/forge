@@ -75,10 +75,13 @@ pub fn to_pascal_case(s: &str) -> String {
 
 /// Convert a PascalCase or camelCase string to snake_case.
 pub fn to_snake_case(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
     let mut result = String::new();
-    for (i, c) in s.chars().enumerate() {
+    for (i, &c) in chars.iter().enumerate() {
         if c.is_uppercase() {
-            if i > 0 {
+            let prev_lower = i > 0 && chars.get(i - 1).is_some_and(|p| p.is_lowercase());
+            let next_lower = chars.get(i + 1).is_some_and(|n| n.is_lowercase());
+            if i > 0 && (prev_lower || next_lower) {
                 result.push('_');
             }
             result.extend(c.to_lowercase());
@@ -87,6 +90,30 @@ pub fn to_snake_case(s: &str) -> String {
         }
     }
     result
+}
+
+/// Simple English pluralization for table-name derivation.
+pub fn pluralize(s: &str) -> String {
+    if s.ends_with("ss")
+        || s.ends_with("sh")
+        || s.ends_with("ch")
+        || s.ends_with('x')
+        || s.ends_with("zz")
+    {
+        format!("{s}es")
+    } else if s.ends_with('z') {
+        format!("{s}zes")
+    } else if s.ends_with('s') {
+        format!("{s}es")
+    } else if let Some(stem) = s.strip_suffix('y') {
+        if !s.ends_with("ay") && !s.ends_with("ey") && !s.ends_with("oy") && !s.ends_with("uy") {
+            format!("{stem}ies")
+        } else {
+            format!("{s}s")
+        }
+    } else {
+        format!("{s}s")
+    }
 }
 
 /// Convert a snake_case string to camelCase.
@@ -206,6 +233,11 @@ mod tests {
         assert_eq!(to_snake_case("ListAllProjects"), "list_all_projects");
         assert_eq!(to_snake_case("Simple"), "simple");
         assert_eq!(to_snake_case("ProjectStatus"), "project_status");
+        assert_eq!(to_snake_case("HTTPServer"), "http_server");
+        assert_eq!(to_snake_case("XMLParser"), "xml_parser");
+        assert_eq!(to_snake_case("listInvoices"), "list_invoices");
+        assert_eq!(to_snake_case("foo2Bar"), "foo2_bar");
+        assert_eq!(to_snake_case("already_snake"), "already_snake");
     }
 
     #[test]
@@ -213,6 +245,22 @@ mod tests {
         assert_eq!(to_pascal_case("get_user"), "GetUser");
         assert_eq!(to_pascal_case("list_all_projects"), "ListAllProjects");
         assert_eq!(to_pascal_case("simple"), "Simple");
+    }
+
+    #[test]
+    fn test_pluralize() {
+        assert_eq!(pluralize("user"), "users");
+        assert_eq!(pluralize("bus"), "buses");
+        assert_eq!(pluralize("quiz"), "quizzes");
+        assert_eq!(pluralize("index"), "indexes");
+        assert_eq!(pluralize("match"), "matches");
+        assert_eq!(pluralize("wish"), "wishes");
+        assert_eq!(pluralize("box"), "boxes");
+        assert_eq!(pluralize("class"), "classes");
+        assert_eq!(pluralize("buzz"), "buzzes");
+        assert_eq!(pluralize("policy"), "policies");
+        assert_eq!(pluralize("key"), "keys");
+        assert_eq!(pluralize("day"), "days");
     }
 
     #[test]

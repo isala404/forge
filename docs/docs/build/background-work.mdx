@@ -332,6 +332,42 @@ pub async fn send_notification(ctx: &JobContext, args: NotifyArgs) -> Result<()>
 
 ## Under the Hood
 
+### Job Status Lifecycle
+
+Every job moves through a defined set of statuses stored in `forge_jobs.status`:
+
+```
+Pending
+  │
+  ▼ worker claims (SKIP LOCKED)
+Claimed
+  │
+  ▼ executor picks up
+Running ──────────────────── cancel requested ──► CancelRequested
+  │                                                      │
+  │                                                      ▼
+  ├── success ──────────────────────────────────► Completed
+  │
+  ├── error, attempts remaining ────────────────► Pending (rescheduled)
+  │
+  ├── error, attempts exhausted ────────────────► DeadLetter
+  │
+  └── cancelled ────────────────────────────────► Cancelled
+```
+
+| Status | Description |
+|--------|-------------|
+| `Pending` | Waiting to be claimed. Initial state, and state after a failed attempt with retries remaining. |
+| `Claimed` | A worker has locked the record but not yet started execution. Brief transitional state. |
+| `Running` | Handler is executing. Heartbeat timer active. |
+| `CancelRequested` | Cancellation was requested while the job is running. Handler can detect via `ctx.check_cancelled()`. |
+| `Completed` | Handler returned `Ok`. Final state. |
+| `Failed` | Handler returned `Err` and `max_attempts` was exhausted. Final state. |
+| `DeadLetter` | Alias for permanently failed jobs moved out of the active queue. Final state. |
+| `Cancelled` | Job was cancelled. Compensation handler runs if configured. Final state. |
+
+`Claimed` jobs that never transition to `Running` within 5 minutes are released back to `Pending` by stale recovery. This handles crashed workers between the claim and the spawn.
+
 ### SKIP LOCKED Pattern
 
 Workers claim jobs with PostgreSQL's `FOR UPDATE SKIP LOCKED`:
@@ -371,6 +407,8 @@ let jobs = queue.claim(worker_id, capabilities, batch_size).await?;
 ```
 
 Backpressure propagates naturally. Overloaded workers stop claiming. Jobs remain pending until capacity frees.
+
+A portion of permits (default: 4 of 8) is reserved for system jobs — internal workflow resumptions and cron dispatches. User job floods cannot exhaust those permits, so workflow and cron execution remains responsive under load.
 
 ### Stale Job Recovery
 

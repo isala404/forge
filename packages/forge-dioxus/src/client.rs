@@ -161,13 +161,11 @@ impl ForgeClient {
         *self.inner.signals.borrow_mut() = Some(signals);
     }
 
-    /// Get the base URL of this client.
     pub fn get_url(&self) -> &str {
         &self.inner.url
     }
 
-    /// Notify the registered mutation error handler, if any. Called by
-    /// [`Mutation::fire`] when a call fails and no per-call handler was provided.
+    /// Notify the registered mutation error handler, if any.
     pub fn notify_mutation_error(&self, error: ForgeClientError) {
         if let Some(handler) = &self.inner.on_mutation_error {
             handler(error);
@@ -788,8 +786,6 @@ impl Drop for SubscriptionHandle {
     }
 }
 
-// ── WASM platform ───────────────────────────────────────────────────────────
-
 #[cfg(target_arch = "wasm32")]
 mod platform {
     use dioxus::prelude::spawn;
@@ -946,7 +942,6 @@ mod platform {
             Err(_) => return false,
         };
 
-        // Wait for the connected event
         let connected_event = match connected_stream.next().await {
             Some(Ok((_kind, message))) => {
                 let Some(raw) = message_data_as_string(&message) else {
@@ -970,7 +965,6 @@ mod platform {
         let is_reconnect = client.mark_connected(session_id, session_secret);
         client.broadcast_connection(ConnectionState::Connected);
 
-        // Only re-register on reconnect; initial registrations are handled by each subscription task
         if is_reconnect {
             client.reregister_all().await;
         }
@@ -1012,8 +1006,6 @@ mod platform {
         ForgeClientError::new("REQUEST_FAILED", err.to_string(), None)
     }
 }
-
-// ── Native platform ─────────────────────────────────────────────────────────
 
 #[cfg(not(target_arch = "wasm32"))]
 mod platform {
@@ -1126,7 +1118,6 @@ mod platform {
             Err(_) => return false,
         };
 
-        // Wait for connected event
         let connected_event = loop {
             let Some(event) = event_source.next().await else {
                 return false;

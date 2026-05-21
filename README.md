@@ -264,8 +264,7 @@ forge generate                   # generate frontend bindings from backend code
 forge generate --target dioxus   # force a specific target when detection isn't enough
 forge check                      # validate config, migrations, project health
 forge migrate status             # check which migrations have run
-forge migrate up                 # apply pending migrations
-forge migrate down               # rollback the last migration
+forge migrate up                 # apply pending migrations (forward-only)
 forge migrate prepare            # refresh the .sqlx offline cache
 ```
 

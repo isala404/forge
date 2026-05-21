@@ -1,23 +1,25 @@
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
 use forge_core::{
     AuthContext, CircuitBreakerClient, ForgeError, FunctionInfo, FunctionKind, JobDispatch,
-    MutationContext, OutboxBuffer, PendingJob, PendingWorkflow, QueryContext, RequestMetadata,
-    Result, SharedRoleResolver, WorkflowDispatch, default_role_resolver,
-    job::JobStatus,
+    KvHandle, MutationContext, QueryContext, RequestMetadata, Result, SharedRoleResolver,
+    WorkflowDispatch, default_role_resolver,
     rate_limit::{RateLimitConfig, RateLimiterBackend},
-    workflow::WorkflowStatus,
 };
 use serde_json::Value;
+use tokio::time::timeout;
 use tracing::Instrument;
 
-use super::cache::QueryCache;
+use super::cache::QueryCacheCoordinator;
+use super::execution_log::{level_for as log_level_for, log_completion};
 use super::registry::{BoxedMutationFn, FunctionEntry, FunctionRegistry};
-use crate::db::Database;
+#[cfg(feature = "gateway")]
+use super::rpc_signals::{RpcSignalContext, RpcSignalsEmitter};
+use crate::pg::Database;
 use crate::rate_limit::HybridRateLimiter;
+#[cfg(feature = "gateway")]
+use crate::signals::SignalsCollector;
 
 /// Shared auth enforcement: checks public flag, authentication, and role.
 ///
@@ -47,8 +49,8 @@ fn require_auth(
 
 /// Result of routing a function call.
 pub enum RouteResult {
-    /// Query execution result.
-    Query(Value),
+    /// Query execution result (Arc to avoid cloning cached values).
+    Query(Arc<Value>),
     /// Mutation execution result.
     Mutation(Value),
     /// Job dispatch result (returns job_id).
@@ -57,37 +59,45 @@ pub enum RouteResult {
     Workflow(Value),
 }
 
-/// Routes function calls to the appropriate handler.
-pub struct FunctionRouter {
-    registry: Arc<FunctionRegistry>,
-    db: Database,
+/// Result of routing a function call paired with telemetry the executor
+/// wants to forward to spans/metrics. The cache flag is meaningful only for
+/// queries; every other variant returns `cache_hit = false`.
+pub struct RouteOutcome {
+    pub result: RouteResult,
+    pub cache_hit: bool,
+}
+
+/// Shared mutation dependencies cloned once per request instead of per-field.
+#[derive(Clone)]
+struct MutationDeps {
     http_client: CircuitBreakerClient,
     job_dispatcher: Option<Arc<dyn JobDispatch>>,
     workflow_dispatcher: Option<Arc<dyn WorkflowDispatch>>,
-    rate_limiter: Arc<dyn RateLimiterBackend>,
-    role_resolver: SharedRoleResolver,
-    query_cache: QueryCache,
     token_issuer: Option<Arc<dyn forge_core::TokenIssuer>>,
     token_ttl: forge_core::AuthTokenTtl,
+    max_jobs_per_request: usize,
+    kv: Option<Arc<dyn KvHandle>>,
+}
+
+/// Routes and executes function calls with timeout, rate limiting, and observability.
+pub struct FunctionRouter {
+    registry: Arc<FunctionRegistry>,
+    db: Database,
+    mutation_deps: Arc<MutationDeps>,
+    rate_limiter: Arc<dyn RateLimiterBackend>,
+    role_resolver: SharedRoleResolver,
+    cache: Arc<QueryCacheCoordinator>,
+    default_timeout: Duration,
+    /// Maximum serialized response size in bytes (0 = unlimited).
+    max_result_size_bytes: usize,
+    #[cfg(feature = "gateway")]
+    signals: Option<RpcSignalsEmitter>,
 }
 
 impl FunctionRouter {
     /// Create a new function router.
     pub fn new(registry: Arc<FunctionRegistry>, db: Database) -> Self {
-        let rate_limiter: Arc<dyn RateLimiterBackend> =
-            Arc::new(HybridRateLimiter::new(db.primary().clone()));
-        Self {
-            registry,
-            db,
-            http_client: CircuitBreakerClient::with_defaults(reqwest::Client::new()),
-            job_dispatcher: None,
-            workflow_dispatcher: None,
-            rate_limiter,
-            role_resolver: default_role_resolver(),
-            query_cache: QueryCache::new(),
-            token_issuer: None,
-            token_ttl: forge_core::AuthTokenTtl::default(),
-        }
+        Self::with_http_client(registry, db, CircuitBreakerClient::with_ssrf_protection())
     }
 
     /// Create a new function router with a custom HTTP client.
@@ -98,18 +108,58 @@ impl FunctionRouter {
     ) -> Self {
         let rate_limiter: Arc<dyn RateLimiterBackend> =
             Arc::new(HybridRateLimiter::new(db.primary().clone()));
+        let cache = Arc::new(QueryCacheCoordinator::new(&registry));
         Self {
             registry,
             db,
-            http_client,
-            job_dispatcher: None,
-            workflow_dispatcher: None,
+            mutation_deps: Arc::new(MutationDeps {
+                http_client,
+                job_dispatcher: None,
+                workflow_dispatcher: None,
+                token_issuer: None,
+                token_ttl: forge_core::AuthTokenTtl::default(),
+                max_jobs_per_request: 0,
+                kv: None,
+            }),
             rate_limiter,
             role_resolver: default_role_resolver(),
-            query_cache: QueryCache::new(),
-            token_issuer: None,
-            token_ttl: forge_core::AuthTokenTtl::default(),
+            cache,
+            default_timeout: Duration::from_secs(30),
+            max_result_size_bytes: 0,
+            #[cfg(feature = "gateway")]
+            signals: None,
         }
+    }
+
+    /// Create a router with dispatch capabilities.
+    pub fn with_dispatch(
+        registry: Arc<FunctionRegistry>,
+        db: Database,
+        job_dispatcher: Option<Arc<dyn JobDispatch>>,
+        workflow_dispatcher: Option<Arc<dyn WorkflowDispatch>>,
+    ) -> Self {
+        Self::with_dispatch_and_issuer(registry, db, job_dispatcher, workflow_dispatcher, None)
+    }
+
+    /// Create a router with dispatch and token issuer.
+    pub fn with_dispatch_and_issuer(
+        registry: Arc<FunctionRegistry>,
+        db: Database,
+        job_dispatcher: Option<Arc<dyn JobDispatch>>,
+        workflow_dispatcher: Option<Arc<dyn WorkflowDispatch>>,
+        token_issuer: Option<Arc<dyn forge_core::TokenIssuer>>,
+    ) -> Self {
+        let mut router = Self::new(Arc::clone(&registry), db);
+        if let Some(jd) = job_dispatcher {
+            router = router.with_job_dispatcher(jd);
+        }
+        if let Some(wd) = workflow_dispatcher {
+            router = router.with_workflow_dispatcher(wd);
+        }
+        if let Some(issuer) = token_issuer {
+            router = router.with_token_issuer(issuer);
+        }
+        router
     }
 
     /// Set a custom role resolver for RBAC extension.
@@ -135,33 +185,253 @@ impl FunctionRouter {
         self.rate_limiter = rate_limiter;
     }
 
+    /// Get a mutable reference to the inner mutation deps for builder methods.
+    fn deps_mut(&mut self) -> &mut MutationDeps {
+        Arc::make_mut(&mut self.mutation_deps)
+    }
+
     /// Set the token issuer for this router (enables `ctx.issue_token()` in mutations).
     pub fn with_token_issuer(mut self, issuer: Arc<dyn forge_core::TokenIssuer>) -> Self {
-        self.token_issuer = Some(issuer);
+        self.deps_mut().token_issuer = Some(issuer);
         self
     }
 
     /// Set the token TTL config for this router (configures `ctx.issue_token_pair()` durations).
     pub fn with_token_ttl(mut self, ttl: forge_core::AuthTokenTtl) -> Self {
-        self.token_ttl = ttl;
+        self.deps_mut().token_ttl = ttl;
         self
     }
 
     /// Set the token TTL config (mutable reference version).
     pub fn set_token_ttl(&mut self, ttl: forge_core::AuthTokenTtl) {
-        self.token_ttl = ttl;
+        self.deps_mut().token_ttl = ttl;
     }
 
     /// Set the job dispatcher for this router.
     pub fn with_job_dispatcher(mut self, dispatcher: Arc<dyn JobDispatch>) -> Self {
-        self.job_dispatcher = Some(dispatcher);
+        self.deps_mut().job_dispatcher = Some(dispatcher);
         self
     }
 
     /// Set the workflow dispatcher for this router.
     pub fn with_workflow_dispatcher(mut self, dispatcher: Arc<dyn WorkflowDispatch>) -> Self {
-        self.workflow_dispatcher = Some(dispatcher);
+        self.deps_mut().workflow_dispatcher = Some(dispatcher);
         self
+    }
+
+    /// Attach a KV store handle so handlers can call `ctx.kv()`.
+    pub fn with_kv(mut self, kv: Arc<dyn KvHandle>) -> Self {
+        self.deps_mut().kv = Some(kv);
+        self
+    }
+
+    /// Attach a KV store handle (mutable reference version).
+    pub fn set_kv(&mut self, kv: Arc<dyn KvHandle>) {
+        self.deps_mut().kv = Some(kv);
+    }
+
+    /// Set the default timeout applied to all function calls.
+    pub fn with_default_timeout(mut self, timeout: Duration) -> Self {
+        self.default_timeout = timeout;
+        self
+    }
+
+    /// Set the maximum number of jobs a single mutation may dispatch.
+    /// A value of 0 disables the limit.
+    pub fn set_max_jobs_per_request(&mut self, limit: usize) {
+        self.deps_mut().max_jobs_per_request = limit;
+    }
+
+    /// Set the maximum serialized response size in bytes.
+    /// A value of 0 disables the limit.
+    pub fn set_max_result_size_bytes(&mut self, limit: usize) {
+        self.max_result_size_bytes = limit;
+    }
+
+    /// Set the signals collector for auto-capturing RPC events.
+    #[cfg(feature = "gateway")]
+    pub fn set_signals_collector(&mut self, collector: SignalsCollector, server_secret: String) {
+        self.signals = Some(RpcSignalsEmitter::new(collector, server_secret));
+    }
+
+    /// Execute a function call with timeout, observability, and signals emission.
+    pub async fn execute(
+        &self,
+        function_name: &str,
+        args: Value,
+        auth: AuthContext,
+        request: RequestMetadata,
+    ) -> Result<Value> {
+        let start = std::time::Instant::now();
+        let info = self.registry.get(function_name).map(|e| e.info());
+        let fn_timeout = info.and_then(|i| i.timeout).unwrap_or(self.default_timeout);
+        let log_level = log_level_for(info);
+
+        let kind = info.map(|i| i.kind.as_str()).unwrap_or("unknown");
+
+        // Capture signal metadata before auth/request are consumed.
+        #[cfg(feature = "gateway")]
+        let mut signal_ctx = self
+            .signals
+            .as_ref()
+            .map(|_| RpcSignalContext::capture(&auth, &request));
+
+        // Declare cache.hit as Empty so the inner cache branch can fill it
+        // via Span::current().record(...). Latency p99 reported for this span
+        // is then attributable to either real handler work or a pure cache
+        // round-trip without ambiguity.
+        let span = tracing::info_span!(
+            "fn.execute",
+            function = function_name,
+            fn.kind = %kind,
+            cache.hit = tracing::field::Empty,
+        );
+
+        let result = match timeout(
+            fn_timeout,
+            self.route(function_name, args.clone(), auth, request)
+                .instrument(span),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                let duration = start.elapsed();
+                log_completion(
+                    log_level,
+                    function_name,
+                    "unknown",
+                    &args,
+                    duration,
+                    false,
+                    Some(&format!("Timeout after {:?}", fn_timeout)),
+                );
+                crate::observability::record_fn_execution(
+                    function_name,
+                    kind,
+                    false,
+                    false,
+                    duration.as_secs_f64(),
+                );
+                #[cfg(feature = "gateway")]
+                if let (Some(emitter), Some(ctx)) = (&self.signals, signal_ctx.take()) {
+                    emitter.emit(function_name, kind, duration, false, ctx);
+                }
+                return Err(ForgeError::Timeout(format!(
+                    "Function '{}' timed out after {:?}",
+                    function_name, fn_timeout
+                )));
+            }
+        };
+
+        let duration = start.elapsed();
+
+        match result {
+            Ok(outcome) => {
+                let RouteOutcome { result, cache_hit } = outcome;
+                let (result_kind, value) = match result {
+                    RouteResult::Query(arc) => {
+                        let v = Arc::try_unwrap(arc).unwrap_or_else(|a| Value::clone(&a));
+                        ("query", v)
+                    }
+                    RouteResult::Mutation(v) => ("mutation", v),
+                    RouteResult::Job(v) => ("job", v),
+                    RouteResult::Workflow(v) => ("workflow", v),
+                };
+
+                log_completion(
+                    log_level,
+                    function_name,
+                    result_kind,
+                    &args,
+                    duration,
+                    true,
+                    None,
+                );
+                crate::observability::record_fn_execution(
+                    function_name,
+                    result_kind,
+                    true,
+                    cache_hit,
+                    duration.as_secs_f64(),
+                );
+                #[cfg(feature = "gateway")]
+                if let (Some(emitter), Some(ctx)) = (&self.signals, signal_ctx.take()) {
+                    emitter.emit(function_name, result_kind, duration, true, ctx);
+                }
+
+                Ok(value)
+            }
+            Err(e) => {
+                log_completion(
+                    log_level,
+                    function_name,
+                    kind,
+                    &args,
+                    duration,
+                    false,
+                    Some(&e.to_string()),
+                );
+                crate::observability::record_fn_execution(
+                    function_name,
+                    kind,
+                    false,
+                    false,
+                    duration.as_secs_f64(),
+                );
+                #[cfg(feature = "gateway")]
+                if let (Some(emitter), Some(ctx)) = (&self.signals, signal_ctx.take()) {
+                    emitter.emit(function_name, kind, duration, false, ctx);
+                }
+
+                Err(e)
+            }
+        }
+    }
+
+    /// Look up function metadata by name.
+    pub fn function_info(&self, function_name: &str) -> Option<FunctionInfo> {
+        self.registry.get(function_name).map(|e| e.info().clone())
+    }
+
+    /// Check if a function exists.
+    pub fn has_function(&self, function_name: &str) -> bool {
+        self.registry.get(function_name).is_some()
+    }
+
+    /// Get the function kind by name.
+    pub fn get_function_kind(&self, function_name: &str) -> Option<FunctionKind> {
+        self.registry.get(function_name).map(|e| e.kind())
+    }
+
+    /// Return info for all registered query and mutation functions.
+    pub fn function_infos(&self) -> Vec<FunctionInfo> {
+        self.registry
+            .functions()
+            .map(|(_, entry)| entry.info().clone())
+            .collect()
+    }
+
+    /// Shared handle to the query cache coordinator (used to wire cluster invalidation).
+    pub fn cache(&self) -> Arc<QueryCacheCoordinator> {
+        Arc::clone(&self.cache)
+    }
+
+    /// Reject a result value when its serialized size exceeds `max_result_size_bytes`.
+    ///
+    /// A limit of 0 means unlimited.
+    fn check_result_size(&self, value: &Value) -> Result<()> {
+        if self.max_result_size_bytes == 0 {
+            return Ok(());
+        }
+        let serialized_len = json_byte_length(value);
+        if serialized_len > self.max_result_size_bytes {
+            return Err(ForgeError::internal(format!(
+                "Response size {} bytes exceeds max_result_size_bytes limit of {} bytes",
+                serialized_len, self.max_result_size_bytes
+            )));
+        }
+        Ok(())
     }
 
     pub async fn route(
@@ -170,13 +440,35 @@ impl FunctionRouter {
         args: Value,
         auth: AuthContext,
         request: RequestMetadata,
-    ) -> Result<RouteResult> {
+    ) -> Result<RouteOutcome> {
         if let Some(entry) = self.registry.get(function_name) {
-            self.check_auth(entry.info(), &auth)?;
-            self.check_rate_limit(entry.info(), function_name, &auth, &request)
+            let info = entry.info();
+            require_auth(
+                info.is_public,
+                info.required_role,
+                &auth,
+                &self.role_resolver,
+            )?;
+            if info.requires_tenant_scope && auth.tenant_id().is_none() {
+                return Err(ForgeError::Forbidden(
+                    "this function requires a tenant scope but the auth context has no tenant_id \
+                     claim"
+                        .to_string(),
+                ));
+            }
+            self.check_rate_limit(info, function_name, &auth, &request)
                 .await?;
 
             return match entry {
+                FunctionEntry::Webhook { info } => {
+                    // Webhooks are registered in the function registry for
+                    // metadata access only. They must be called via their
+                    // dedicated HTTP path which performs signature validation.
+                    return Err(ForgeError::InvalidArgument(format!(
+                        "Webhook '{}' cannot be called via RPC; use its dedicated HTTP endpoint",
+                        info.name
+                    )));
+                }
                 FunctionEntry::Query { handler, info, .. } => {
                     let pool = if info.consistent {
                         self.db.primary().clone()
@@ -184,87 +476,156 @@ impl FunctionRouter {
                         self.db.read_pool().clone()
                     };
 
-                    let auth_scope = Self::auth_cache_scope(&auth);
-                    if let Some(ttl) = info.cache_ttl {
+                    if !info.consistent
+                        && let Some(ttl) = info.cache_ttl
+                    {
+                        // Derive scope once, before auth is moved into ctx, so
+                        // get/set agree on the same cache key.
+                        let scope = QueryCacheCoordinator::auth_scope(&auth);
                         if let Some(cached) =
-                            self.query_cache
-                                .get(function_name, &args, auth_scope.as_deref())
+                            self.cache
+                                .get_by_scope(function_name, &args, scope.as_deref())
                         {
-                            return Ok(RouteResult::Query(Value::clone(&cached)));
+                            tracing::Span::current().record("cache.hit", true);
+                            crate::observability::record_fn_cache(function_name, true);
+                            return Ok(RouteOutcome {
+                                result: RouteResult::Query(cached),
+                                cache_hit: true,
+                            });
                         }
+                        tracing::Span::current().record("cache.hit", false);
+                        crate::observability::record_fn_cache(function_name, false);
 
-                        let ctx = QueryContext::new(pool, auth, request);
+                        let mut ctx = QueryContext::new(pool, auth, request);
+                        if let Some(ref kv) = self.mutation_deps.kv {
+                            ctx.set_kv(Arc::clone(kv));
+                        }
                         let result = handler(&ctx, args.clone()).await?;
+                        self.check_result_size(&result)?;
 
-                        self.query_cache.set(
+                        let arc = Arc::new(result);
+                        self.cache.set_arc_by_scope(
                             function_name,
                             &args,
-                            auth_scope.as_deref(),
-                            result.clone(),
+                            scope.as_deref(),
+                            Arc::clone(&arc),
                             Duration::from_secs(ttl),
                         );
 
-                        Ok(RouteResult::Query(result))
+                        Ok(RouteOutcome {
+                            result: RouteResult::Query(arc),
+                            cache_hit: false,
+                        })
                     } else {
-                        let ctx = QueryContext::new(pool, auth, request);
+                        let mut ctx = QueryContext::new(pool, auth, request);
+                        if let Some(ref kv) = self.mutation_deps.kv {
+                            ctx.set_kv(Arc::clone(kv));
+                        }
                         let result = handler(&ctx, args).await?;
-                        Ok(RouteResult::Query(result))
+                        self.check_result_size(&result)?;
+                        Ok(RouteOutcome {
+                            result: RouteResult::Query(Arc::new(result)),
+                            cache_hit: false,
+                        })
                     }
                 }
                 FunctionEntry::Mutation { handler, info } => {
-                    if info.transactional {
+                    let result = if info.transactional {
                         self.execute_transactional(info, handler, args, auth, request)
                             .await
                     } else {
-                        // Use primary for mutations
+                        let deps = Arc::clone(&self.mutation_deps);
                         let mut ctx = MutationContext::with_dispatch(
                             self.db.primary().clone(),
                             auth,
                             request,
-                            self.http_client.clone(),
-                            self.job_dispatcher.clone(),
-                            self.workflow_dispatcher.clone(),
+                            deps.http_client.clone(),
+                            deps.job_dispatcher.clone(),
+                            deps.workflow_dispatcher.clone(),
                         );
-                        if let Some(ref issuer) = self.token_issuer {
+                        if let Some(ref issuer) = deps.token_issuer {
                             ctx.set_token_issuer(issuer.clone());
                         }
-                        ctx.set_token_ttl(self.token_ttl.clone());
+                        ctx.set_token_ttl(deps.token_ttl.clone());
                         ctx.set_http_timeout(info.http_timeout);
-                        let result = handler(&ctx, args).await?;
-                        Ok(RouteResult::Mutation(result))
+                        if deps.max_jobs_per_request > 0 {
+                            ctx.set_max_jobs_per_request(deps.max_jobs_per_request);
+                        }
+                        if let Some(ref kv) = deps.kv {
+                            ctx.set_kv(Arc::clone(kv));
+                        }
+                        let value = handler(&ctx, args).await?;
+                        self.check_result_size(&value)?;
+                        Ok(RouteResult::Mutation(value))
+                    };
+                    // Invalidation runs here, AFTER commit (execute_transactional
+                    // commits before returning). The cluster-wide NOTIFY also fires
+                    // post-commit, ensuring peer nodes invalidate too.
+                    if result.is_ok() {
+                        self.cache.invalidate_for_mutation(info);
                     }
+                    result.map(|r| RouteOutcome {
+                        result: r,
+                        cache_hit: false,
+                    })
                 }
             };
         }
 
-        if let Some(ref job_dispatcher) = self.job_dispatcher
+        if let Some(ref job_dispatcher) = self.mutation_deps.job_dispatcher
             && let Some(job_info) = job_dispatcher.get_info(function_name)
         {
-            self.check_job_auth(&job_info, &auth)?;
+            require_auth(
+                job_info.is_public,
+                job_info.required_role,
+                &auth,
+                &self.role_resolver,
+            )?;
             match job_dispatcher
-                .dispatch_by_name(function_name, args.clone(), auth.principal_id())
+                .dispatch_by_name(
+                    function_name,
+                    args.clone(),
+                    auth.principal_id(),
+                    auth.tenant_id(),
+                )
                 .await
             {
                 Ok(job_id) => {
-                    return Ok(RouteResult::Job(serde_json::json!({ "job_id": job_id })));
+                    return Ok(RouteOutcome {
+                        result: RouteResult::Job(serde_json::json!({ "job_id": job_id })),
+                        cache_hit: false,
+                    });
                 }
                 Err(ForgeError::NotFound(_)) => {}
                 Err(e) => return Err(e),
             }
         }
 
-        if let Some(ref workflow_dispatcher) = self.workflow_dispatcher
+        if let Some(ref workflow_dispatcher) = self.mutation_deps.workflow_dispatcher
             && let Some(workflow_info) = workflow_dispatcher.get_info(function_name)
         {
-            self.check_workflow_auth(&workflow_info, &auth)?;
+            require_auth(
+                workflow_info.is_public,
+                workflow_info.required_role,
+                &auth,
+                &self.role_resolver,
+            )?;
             match workflow_dispatcher
-                .start_by_name(function_name, args.clone(), auth.principal_id())
+                .start_by_name(
+                    function_name,
+                    args,
+                    auth.principal_id(),
+                    Some(request.trace_id().to_string()),
+                )
                 .await
             {
                 Ok(workflow_id) => {
-                    return Ok(RouteResult::Workflow(
-                        serde_json::json!({ "workflow_id": workflow_id }),
-                    ));
+                    return Ok(RouteOutcome {
+                        result: RouteResult::Workflow(
+                            serde_json::json!({ "workflow_id": workflow_id }),
+                        ),
+                        cache_hit: false,
+                    });
                 }
                 Err(ForgeError::NotFound(_)) => {}
                 Err(e) => return Err(e),
@@ -277,37 +638,6 @@ impl FunctionRouter {
         )))
     }
 
-    fn check_auth(&self, info: &FunctionInfo, auth: &AuthContext) -> Result<()> {
-        require_auth(
-            info.is_public,
-            info.required_role,
-            auth,
-            &self.role_resolver,
-        )
-    }
-
-    fn check_job_auth(&self, info: &forge_core::job::JobInfo, auth: &AuthContext) -> Result<()> {
-        require_auth(
-            info.is_public,
-            info.required_role,
-            auth,
-            &self.role_resolver,
-        )
-    }
-
-    fn check_workflow_auth(
-        &self,
-        info: &forge_core::workflow::WorkflowInfo,
-        auth: &AuthContext,
-    ) -> Result<()> {
-        require_auth(
-            info.is_public,
-            info.required_role,
-            auth,
-            &self.role_resolver,
-        )
-    }
-
     /// Check rate limit for a function call.
     async fn check_rate_limit(
         &self,
@@ -316,7 +646,6 @@ impl FunctionRouter {
         auth: &AuthContext,
         request: &RequestMetadata,
     ) -> Result<()> {
-        // Skip if no rate limit configured
         let (requests, per_secs) = match (info.rate_limit_requests, info.rate_limit_per_secs) {
             (Some(r), Some(p)) => (r, p),
             _ => return Ok(()),
@@ -327,57 +656,13 @@ impl FunctionRouter {
         let config = RateLimitConfig::new(requests, Duration::from_secs(per_secs))
             .with_key(key_type.clone());
 
-        // Build bucket key
         let bucket_key = self
             .rate_limiter
             .build_key(key_type, function_name, auth, request);
 
-        // Enforce rate limit
         self.rate_limiter.enforce(&bucket_key, &config).await?;
 
         Ok(())
-    }
-
-    fn auth_cache_scope(auth: &AuthContext) -> Option<String> {
-        if !auth.is_authenticated() {
-            return Some("anon".to_string());
-        }
-
-        // Include role + claims fingerprint to avoid cross-scope cache bleed.
-        let mut roles = auth.roles().to_vec();
-        roles.sort();
-        roles.dedup();
-
-        let mut claims = BTreeMap::new();
-        for (k, v) in auth.claims() {
-            claims.insert(k.clone(), v.clone());
-        }
-
-        let claims_json = serde_json::to_string(&claims).unwrap_or_default();
-        let mut buf = String::with_capacity(64 + claims_json.len());
-        for role in &roles {
-            buf.push_str(role);
-            buf.push('\x1f');
-        }
-        buf.push('\x1e');
-        buf.push_str(&claims_json);
-        let scope = crate::stable_hash::stable_u64(buf.as_bytes());
-
-        let principal = auth
-            .principal_id()
-            .unwrap_or_else(|| "authenticated".to_string());
-
-        Some(format!("subject:{principal}:scope:{scope:016x}"))
-    }
-
-    /// Get the function kind by name.
-    pub fn get_function_kind(&self, function_name: &str) -> Option<FunctionKind> {
-        self.registry.get(function_name).map(|e| e.kind())
-    }
-
-    /// Check if a function exists.
-    pub fn has_function(&self, function_name: &str) -> bool {
-        self.registry.get(function_name).is_some()
     }
 
     async fn execute_transactional(
@@ -389,77 +674,83 @@ impl FunctionRouter {
         request: RequestMetadata,
     ) -> Result<RouteResult> {
         let span = tracing::info_span!("db.transaction", db.system = "postgresql",);
+        let fn_timeout = info.timeout.unwrap_or(self.default_timeout);
 
         async {
             let primary = self.db.primary();
-            let tx = primary
-                .begin()
+            let mut tx = primary.begin().await.map_err(ForgeError::Database)?;
+
+            // Bind the per-function deadline to PostgreSQL via SET LOCAL so
+            // PG cancels the in-flight query at the same instant the tokio
+            // timeout fires. Without this the connection sits busy until the
+            // pool-wide statement_timeout — wasting connections and producing
+            // misleading "still running" backends after a 504. SET LOCAL
+            // doesn't accept bind parameters, so the value is interpolated
+            // directly; it's an integer derived from a Duration so injection
+            // is impossible.
+            let timeout_ms = fn_timeout.as_millis().min(i64::MAX as u128) as i64;
+            #[allow(clippy::disallowed_methods)]
+            sqlx::query(&format!("SET LOCAL statement_timeout = {timeout_ms}"))
+                .execute(&mut *tx)
                 .await
-                .map_err(|e| ForgeError::Database(e.to_string()))?;
+                .map_err(ForgeError::Database)?;
 
-            let job_dispatcher = self.job_dispatcher.clone();
-            let job_lookup: forge_core::JobInfoLookup =
-                Arc::new(move |name: &str| job_dispatcher.as_ref().and_then(|d| d.get_info(name)));
-
-            let (mut ctx, tx_handle, outbox) = MutationContext::with_transaction(
+            let deps = Arc::clone(&self.mutation_deps);
+            let (mut ctx, tx_handle) = MutationContext::with_transaction(
                 primary.clone(),
                 tx,
                 auth,
                 request,
-                self.http_client.clone(),
-                job_lookup,
+                deps.http_client.clone(),
+                deps.job_dispatcher.clone(),
+                deps.workflow_dispatcher.clone(),
             );
-            if let Some(ref issuer) = self.token_issuer {
+            if let Some(ref issuer) = deps.token_issuer {
                 ctx.set_token_issuer(issuer.clone());
             }
-            ctx.set_token_ttl(self.token_ttl.clone());
+            ctx.set_token_ttl(deps.token_ttl.clone());
             ctx.set_http_timeout(info.http_timeout);
+            if deps.max_jobs_per_request > 0 {
+                ctx.set_max_jobs_per_request(deps.max_jobs_per_request);
+            }
+            if let Some(ref kv) = deps.kv {
+                ctx.set_kv(Arc::clone(kv));
+            }
 
-            match handler(&ctx, args).await {
+            let result = handler(&ctx, args).await;
+            drop(ctx);
+
+            // After dropping ctx, the executor holds the only Arc to the
+            // transaction. Take it out via `lock().await.take()` so we never
+            // depend on `Arc::try_unwrap` succeeding — even if a handler
+            // accidentally retained a clone of the Arc through a destructured
+            // DbConn, the take() leaves a None behind that prevents further
+            // misuse rather than leaking the transaction.
+            let tx = tx_handle
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| ForgeError::internal("Transaction already taken from handle"))?;
+
+            match result {
                 Ok(value) => {
-                    // Drop the context so its Arc<Transaction> clone is released
-                    // before we try_unwrap the transaction handle for commit.
-                    drop(ctx);
-
-                    let buffer = {
-                        let guard = outbox.lock().unwrap_or_else(|poisoned| {
-                            tracing::error!("Outbox mutex was poisoned, recovering");
-                            poisoned.into_inner()
-                        });
-                        OutboxBuffer::new(guard.jobs.clone(), guard.workflows.clone())
-                    };
-
-                    let mut tx = Arc::try_unwrap(tx_handle)
-                        .map_err(|_| ForgeError::Internal("Transaction still in use".into()))?
-                        .into_inner();
-
-                    for job in &buffer.jobs {
-                        Self::insert_job(&mut tx, job).await?;
-                    }
-
-                    for workflow in &buffer.workflows {
-                        if self
-                            .workflow_dispatcher
-                            .as_ref()
-                            .and_then(|d| d.get_info(&workflow.workflow_name))
-                            .is_none()
-                        {
-                            return Err(ForgeError::NotFound(format!(
-                                "Workflow '{}' not found",
-                                workflow.workflow_name
-                            )));
-                        }
-                        Self::insert_workflow(&mut tx, workflow).await?;
-                    }
-
-                    tx.commit()
-                        .await
-                        .map_err(|e| ForgeError::Database(e.to_string()))?;
-
+                    self.check_result_size(&value)?;
+                    tx.commit().await.map_err(ForgeError::Database)?;
                     Ok(RouteResult::Mutation(value))
                 }
                 Err(e) => {
-                    drop(ctx);
+                    if let Err(rollback_err) = tx.rollback().await {
+                        tracing::error!(
+                            handler_error = %e,
+                            rollback_error = %rollback_err,
+                            "Mutation rollback failed; transaction will be released by Drop"
+                        );
+                    } else {
+                        tracing::warn!(
+                            handler_error = %e,
+                            "Mutation rolled back"
+                        );
+                    }
                     Err(e)
                 }
             }
@@ -467,104 +758,108 @@ impl FunctionRouter {
         .instrument(span)
         .await
     }
+}
 
-    async fn insert_job(
-        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-        job: &PendingJob,
-    ) -> Result<()> {
-        let now = Utc::now();
-        sqlx::query!(
-            r#"
-            INSERT INTO forge_jobs (
-                id, job_type, input, job_context, status, priority, attempts, max_attempts,
-                worker_capability, owner_subject, scheduled_at, created_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-            "#,
-            job.id,
-            &job.job_type,
-            job.args as _,
-            job.context as _,
-            JobStatus::Pending.as_str(),
-            job.priority,
-            0i32,
-            job.max_attempts,
-            job.worker_capability.as_deref(),
-            job.owner_subject as _,
-            now,
-            now,
-        )
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
-
-        Ok(())
+/// Measure the JSON-serialized byte length of a `serde_json::Value` without
+/// allocating a `String`. Uses a counting `io::Write` implementation fed to
+/// `serde_json::to_writer`.
+fn json_byte_length(value: &Value) -> usize {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 += buf.len();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
-
-    async fn insert_workflow(
-        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-        workflow: &PendingWorkflow,
-    ) -> Result<()> {
-        let now = Utc::now();
-        sqlx::query!(
-            r#"
-            INSERT INTO forge_workflow_runs (
-                id, workflow_name, workflow_version, workflow_signature,
-                owner_subject, input, status, current_step,
-                step_results, started_at, trace_id
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-            "#,
-            workflow.id,
-            &workflow.workflow_name,
-            &workflow.workflow_version,
-            &workflow.workflow_signature,
-            workflow.owner_subject as _,
-            workflow.input as _,
-            WorkflowStatus::Created.as_str(),
-            Option::<String>::None,
-            serde_json::json!({}) as _,
-            now,
-            workflow.id.to_string(),
-        )
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
-
-        Ok(())
+    let mut counter = Counter(0);
+    if serde_json::to_writer(&mut counter, value).is_ok() {
+        counter.0
+    } else {
+        usize::MAX
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    fn resolver() -> SharedRoleResolver {
+        default_role_resolver()
+    }
+
+    fn authed_as(roles: &[&str]) -> AuthContext {
+        AuthContext::authenticated(
+            uuid::Uuid::new_v4(),
+            roles.iter().map(|s| (*s).to_string()).collect(),
+            HashMap::new(),
+        )
+    }
+
     #[test]
-    fn test_check_auth_public() {
-        let info = FunctionInfo {
-            name: "test",
-            description: None,
-            kind: FunctionKind::Query,
-            required_role: None,
-            is_public: true,
-            cache_ttl: None,
-            timeout: None,
-            http_timeout: None,
-            rate_limit_requests: None,
-            rate_limit_per_secs: None,
-            rate_limit_key: None,
-            log_level: None,
-            table_dependencies: &[],
-            selected_columns: &[],
-            transactional: false,
-            consistent: false,
-            max_upload_size_bytes: None,
-        };
+    fn require_auth_allows_public_functions_for_anonymous_callers() {
+        let auth = AuthContext::unauthenticated();
+        assert!(require_auth(true, None, &auth, &resolver()).is_ok());
+    }
 
-        let _auth = AuthContext::unauthenticated();
+    #[test]
+    fn require_auth_allows_public_functions_even_with_required_role() {
+        // Public flag short-circuits: the role check never runs.
+        let auth = AuthContext::unauthenticated();
+        assert!(require_auth(true, Some("admin"), &auth, &resolver()).is_ok());
+    }
 
-        // Can't test check_auth directly without a router instance,
-        // but we can test the logic
-        assert!(info.is_public);
+    #[test]
+    fn require_auth_rejects_anonymous_callers_with_unauthorized() {
+        let auth = AuthContext::unauthenticated();
+        match require_auth(false, None, &auth, &resolver()) {
+            Err(ForgeError::Unauthorized(_)) => {}
+            other => panic!("expected Unauthorized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn require_auth_accepts_authenticated_caller_without_role_requirement() {
+        let auth = authed_as(&["user"]);
+        assert!(require_auth(false, None, &auth, &resolver()).is_ok());
+    }
+
+    #[test]
+    fn require_auth_accepts_caller_with_required_role() {
+        let auth = authed_as(&["user", "admin"]);
+        assert!(require_auth(false, Some("admin"), &auth, &resolver()).is_ok());
+    }
+
+    #[test]
+    fn require_auth_rejects_caller_missing_required_role_with_forbidden() {
+        let auth = authed_as(&["user"]);
+        match require_auth(false, Some("admin"), &auth, &resolver()) {
+            Err(ForgeError::Forbidden(msg)) => assert!(msg.contains("admin")),
+            other => panic!("expected Forbidden, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn require_auth_consults_custom_role_resolver() {
+        // Custom resolver expands "user" to also include "admin".
+        struct ExpandingResolver;
+        impl forge_core::RoleResolver for ExpandingResolver {
+            fn resolve(&self, auth: &AuthContext) -> Vec<String> {
+                let mut roles: Vec<String> = auth.roles().to_vec();
+                if roles.iter().any(|r| r == "user") {
+                    roles.push("admin".to_string());
+                }
+                roles
+            }
+        }
+        let auth = authed_as(&["user"]);
+        let resolver: SharedRoleResolver = Arc::new(ExpandingResolver);
+        // Without expansion this would Forbidden; with expansion it succeeds.
+        assert!(require_auth(false, Some("admin"), &auth, &resolver).is_ok());
     }
 
     #[test]
@@ -599,8 +894,8 @@ mod tests {
             ]),
         );
 
-        let scope_a = FunctionRouter::auth_cache_scope(&auth_a);
-        let scope_b = FunctionRouter::auth_cache_scope(&auth_b);
+        let scope_a = QueryCacheCoordinator::auth_scope(&auth_a);
+        let scope_b = QueryCacheCoordinator::auth_scope(&auth_b);
         assert_ne!(scope_a, scope_b);
     }
 }

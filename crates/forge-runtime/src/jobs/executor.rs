@@ -2,11 +2,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use forge_core::CircuitBreakerClient;
+use forge_core::function::{JobDispatch, KvHandle, WorkflowDispatch};
 use forge_core::job::{JobContext, ProgressUpdate};
 use tokio::time::timeout;
 
 use super::queue::{JobQueue, JobRecord};
 use super::registry::{JobEntry, JobRegistry};
+use crate::observability;
 
 /// Executes jobs with timeout and retry handling.
 pub struct JobExecutor {
@@ -14,22 +16,59 @@ pub struct JobExecutor {
     registry: Arc<JobRegistry>,
     db_pool: sqlx::PgPool,
     http_client: CircuitBreakerClient,
+    kv: Option<Arc<dyn KvHandle>>,
+    job_dispatch: Option<Arc<dyn JobDispatch>>,
+    workflow_dispatch: Option<Arc<dyn WorkflowDispatch>>,
 }
 
 impl JobExecutor {
     const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
-    /// Create a new job executor.
     pub fn new(queue: JobQueue, registry: JobRegistry, db_pool: sqlx::PgPool) -> Self {
         Self {
             queue,
             registry: Arc::new(registry),
             db_pool,
-            http_client: CircuitBreakerClient::with_defaults(reqwest::Client::new()),
+            http_client: CircuitBreakerClient::with_ssrf_protection(),
+            kv: None,
+            job_dispatch: None,
+            workflow_dispatch: None,
         }
     }
 
+    /// Attach a KV store handle so job handlers can call `ctx.kv()`.
+    pub fn with_kv(mut self, kv: Arc<dyn KvHandle>) -> Self {
+        self.kv = Some(kv);
+        self
+    }
+
+    pub fn set_kv(&mut self, kv: Arc<dyn KvHandle>) {
+        self.kv = Some(kv);
+    }
+
+    pub fn set_job_dispatch(&mut self, dispatcher: Arc<dyn JobDispatch>) {
+        self.job_dispatch = Some(dispatcher);
+    }
+
+    pub fn set_workflow_dispatch(&mut self, dispatcher: Arc<dyn WorkflowDispatch>) {
+        self.workflow_dispatch = Some(dispatcher);
+    }
+
     /// Execute a claimed job.
+    ///
+    /// # Semaphore cost on lost-claim races
+    ///
+    /// The `start()` fence check (marking the job as running) can fail with
+    /// `RowNotFound` when another worker reclaimed a stale claim between this
+    /// worker's `claim()` and `start()` calls. When that happens execution is
+    /// aborted before any real work is done, but **the semaphore permit is still
+    /// consumed for the full round-trip of the fence check**. Under a sustained
+    /// stale-reclaim storm this can exhaust the worker concurrency limit.
+    ///
+    /// Monitor the `worker_lost_claim_total` metric (tagged by `job_type`) to
+    /// quantify the race rate. Persistent elevation means `stale_threshold` is
+    /// too low relative to observed heartbeat latency; raise it until the
+    /// counter returns to near-zero.
     pub async fn execute(&self, job: &JobRecord) -> ExecutionResult {
         let entry = match self.registry.get(&job.job_type) {
             Some(e) => e,
@@ -63,6 +102,7 @@ impl JobExecutor {
         };
         if let Err(e) = self.queue.start(job.id, worker_id, job.attempts).await {
             if matches!(e, sqlx::Error::RowNotFound) {
+                observability::record_lost_claim(&job.job_type);
                 tracing::warn!(
                     job_id = %job.id,
                     job_type = %job.job_type,
@@ -78,11 +118,9 @@ impl JobExecutor {
             };
         }
 
-        // Set up progress channel
         let (progress_tx, progress_rx) = std::sync::mpsc::channel::<ProgressUpdate>();
 
-        // Spawn task to consume progress updates and save to database
-        // Use try_recv() with async sleep to avoid blocking the tokio runtime
+        // try_recv() + async sleep avoids blocking the tokio runtime on a sync channel
         let progress_queue = self.queue.clone();
         let progress_job_id = job.id;
         tokio::spawn(async move {
@@ -101,31 +139,87 @@ impl JobExecutor {
                         }
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => {
-                        // No message yet, sleep briefly and check again
                         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     }
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        // Sender dropped (job finished), exit loop
                         break;
                     }
                 }
             }
         });
 
-        // Create job context with progress channel
-        let mut ctx = JobContext::new(
-            job.id,
-            job.job_type.clone(),
-            job.attempts as u32,
-            job.max_attempts as u32,
-            self.db_pool.clone(),
-            self.http_client.clone(),
-        )
-        .with_saved(job.job_context.clone())
-        .with_progress(progress_tx);
+        let mut ctx = {
+            let mut c = JobContext::new(
+                job.id,
+                job.job_type.clone(),
+                job.attempts as u32,
+                job.max_attempts as u32,
+                self.db_pool.clone(),
+                self.http_client.clone(),
+            )
+            .with_saved(job.job_context.clone())
+            .with_progress(progress_tx);
+            if let Some(ref kv) = self.kv {
+                c = c.with_kv(Arc::clone(kv));
+            }
+            if let Some(ref dispatcher) = self.job_dispatch {
+                c = c.with_job_dispatch(Arc::clone(dispatcher));
+            }
+            if let Some(ref dispatcher) = self.workflow_dispatch {
+                c = c.with_workflow_dispatch(Arc::clone(dispatcher));
+            }
+            c
+        };
+        if let Some(ref subject) = job.owner_subject {
+            let mut claims = std::collections::HashMap::new();
+            if let Some(tid) = job.tenant_id {
+                claims.insert(
+                    "tenant_id".to_string(),
+                    serde_json::Value::String(tid.to_string()),
+                );
+            }
+            let auth = if let Ok(uuid) = uuid::Uuid::parse_str(subject) {
+                forge_core::AuthContext::authenticated(uuid, Vec::new(), claims)
+            } else {
+                claims.insert(
+                    "sub".to_string(),
+                    serde_json::Value::String(subject.clone()),
+                );
+                forge_core::AuthContext::authenticated_without_uuid(Vec::new(), claims)
+            };
+            ctx = ctx.with_auth(auth);
+        }
+
+        // Jobs store the owner subject but not their roles. When a job reaches
+        // the executor, the auth context is reconstructed with an empty role
+        // list regardless of what roles the dispatcher held. A `require_role`
+        // check at execution time is therefore impossible without a schema
+        // migration to persist roles at dispatch time.
+        //
+        // The role check IS enforced at RPC dispatch time (router.rs). Jobs
+        // dispatched programmatically via `ctx.dispatch_job()` bypass that
+        // check. If the job has `require_role` and was NOT dispatched through
+        // the RPC layer, the check is silently skipped here — log a warning so
+        // the gap is visible in production traces.
+        if let Some(required_role) = entry.info.required_role
+            && job.owner_subject.is_some()
+        {
+            tracing::warn!(
+                job_id = %job.id,
+                job_type = %job.job_type,
+                required_role = %required_role,
+                "job has require_role but roles are not persisted in the job \
+                 record; role enforcement is dispatch-time only (RPC path) — \
+                 jobs dispatched programmatically skip this check",
+            );
+        }
+
+        if let Some(tenant_id) = job.tenant_id {
+            ctx = ctx.with_tenant_id(tenant_id);
+        }
+
         ctx.set_http_timeout(entry.info.http_timeout);
 
-        // Keepalive heartbeat prevents stale cleanup from reclaiming healthy long jobs.
         let heartbeat_queue = self.queue.clone();
         let heartbeat_job_id = job.id;
         let (heartbeat_stop_tx, mut heartbeat_stop_rx) = tokio::sync::watch::channel(false);
@@ -146,7 +240,6 @@ impl JobExecutor {
             }
         });
 
-        // Execute with timeout
         let job_timeout = entry.info.timeout;
         let exec_start = std::time::Instant::now();
         let result = timeout(job_timeout, self.run_handler(&entry, &ctx, &job.input)).await;
@@ -159,14 +252,8 @@ impl JobExecutor {
 
         match result {
             Ok(Ok(output)) => {
-                // Job completed successfully
                 if let Err(e) = self.queue.complete(job.id, output.clone(), ttl).await {
-                    tracing::debug!(job_id = %job.id, error = %e, "Failed to mark job as complete");
-                }
-                // Flush buffered sub-job and workflow dispatches
-                let pending = ctx.take_pending_dispatches().await;
-                if let Err(e) = self.flush_pending_dispatches(&pending, &job.job_type).await {
-                    tracing::error!(job_id = %job.id, error = %e, "Failed to flush pending dispatches from job");
+                    tracing::error!(job_id = %job.id, error = %e, "Failed to complete job");
                 }
                 crate::signals::emit_server_execution(
                     &job.job_type,
@@ -178,9 +265,7 @@ impl JobExecutor {
                 ExecutionResult::Completed { output }
             }
             Ok(Err(e)) => {
-                // Job failed
                 let error_msg = e.to_string();
-                // Accepts either an explicit cancellation error or a late cancellation request.
                 let cancel_requested = match ctx.is_cancel_requested().await {
                     Ok(value) => value,
                     Err(err) => {
@@ -238,7 +323,6 @@ impl JobExecutor {
                 }
             }
             Err(_) => {
-                // Timeout
                 let error_msg = format!("Job timed out after {:?}", job_timeout);
                 let should_retry = job.attempts < job.max_attempts;
 
@@ -267,7 +351,6 @@ impl JobExecutor {
         }
     }
 
-    /// Run the job handler.
     async fn run_handler(
         &self,
         entry: &Arc<JobEntry>,
@@ -287,71 +370,6 @@ impl JobExecutor {
         (entry.compensation)(ctx, input.clone(), reason).await
     }
 
-    async fn flush_pending_dispatches(
-        &self,
-        pending: &forge_core::function::OutboxBuffer,
-        parent_job_type: &str,
-    ) -> forge_core::Result<()> {
-        for pj in &pending.jobs {
-            let mut record = JobRecord::new(
-                pj.job_type.clone(),
-                pj.args.clone(),
-                forge_core::job::JobPriority::from_i32(pj.priority),
-                pj.max_attempts,
-            )
-            .with_owner_subject(pj.owner_subject.clone());
-            record.id = pj.id;
-            record.job_context = pj.context.clone();
-            if let Some(cap) = &pj.worker_capability {
-                record = record.with_capability(cap.as_str());
-            }
-            if let Err(e) = self.queue.enqueue(record).await {
-                tracing::error!(
-                    parent_job_type = parent_job_type,
-                    child_job_type = %pj.job_type,
-                    error = %e,
-                    "Failed to flush sub-job dispatch"
-                );
-                return Err(forge_core::ForgeError::Job(format!(
-                    "Failed to dispatch sub-job '{}': {e}",
-                    pj.job_type
-                )));
-            }
-        }
-        for pw in &pending.workflows {
-            let run_id = pw.id;
-            // Runtime query: this path is rare (job-spawned workflows) and the
-            // table schema is internal, so skipping compile-time validation is acceptable.
-            let result = sqlx::query(
-                "INSERT INTO forge_workflow_runs \
-                 (id, workflow_name, workflow_version, workflow_signature, \
-                  input, status, owner_subject, created_at) \
-                 VALUES ($1, $2, $3, $4, $5, 'created', $6, NOW())",
-            )
-            .bind(run_id)
-            .bind(&pw.workflow_name)
-            .bind(&pw.workflow_version)
-            .bind(&pw.workflow_signature)
-            .bind(&pw.input)
-            .bind(&pw.owner_subject)
-            .execute(&self.db_pool)
-            .await;
-            if let Err(e) = result {
-                tracing::error!(
-                    parent_job_type = parent_job_type,
-                    workflow_name = %pw.workflow_name,
-                    error = %e,
-                    "Failed to flush workflow dispatch from job"
-                );
-                return Err(forge_core::ForgeError::Job(format!(
-                    "Failed to start workflow '{}': {e}",
-                    pw.workflow_name
-                )));
-            }
-        }
-        Ok(())
-    }
-
     fn cancellation_reason(job: &JobRecord, fallback: &str) -> String {
         job.cancel_reason
             .clone()
@@ -359,26 +377,19 @@ impl JobExecutor {
     }
 }
 
-/// Result of job execution.
 #[derive(Debug)]
 pub enum ExecutionResult {
-    /// Job completed successfully.
     Completed { output: serde_json::Value },
-    /// Job failed.
     Failed { error: String, retryable: bool },
-    /// Job timed out.
     TimedOut { retryable: bool },
-    /// Job cancelled.
     Cancelled { reason: String },
 }
 
 impl ExecutionResult {
-    /// Check if execution was successful.
     pub fn is_success(&self) -> bool {
         matches!(self, Self::Completed { .. })
     }
 
-    /// Check if the job should be retried.
     pub fn should_retry(&self) -> bool {
         match self {
             Self::Failed { retryable, .. } => *retryable,
@@ -435,5 +446,34 @@ mod tests {
         };
         assert!(!result.is_success());
         assert!(!result.should_retry());
+    }
+
+    #[test]
+    fn timed_out_not_retryable_does_not_request_retry() {
+        // The TimedOut branch in should_retry returns its own `retryable` flag —
+        // make sure the false case isn't lost when the worker passes through.
+        let result = ExecutionResult::TimedOut { retryable: false };
+        assert!(!result.should_retry());
+        assert!(!result.is_success());
+    }
+
+    #[test]
+    fn heartbeat_interval_is_30_seconds() {
+        // The stale-reclaim window in JobQueue assumes heartbeats land well
+        // under it; if this jumps, the cleanup deadline in queue.rs must move
+        // in lockstep.
+        assert_eq!(JobExecutor::HEARTBEAT_INTERVAL, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn execution_result_debug_includes_error_payload() {
+        // Workers log ExecutionResult via Debug on the unhappy path; the error
+        // message must be present so triage doesn't need to re-derive it.
+        let result = ExecutionResult::Failed {
+            error: "connection refused".to_string(),
+            retryable: false,
+        };
+        let rendered = format!("{result:?}");
+        assert!(rendered.contains("connection refused"), "got: {rendered}");
     }
 }

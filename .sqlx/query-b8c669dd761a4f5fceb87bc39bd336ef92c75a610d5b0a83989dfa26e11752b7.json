@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM forge_kv WHERE expires_at IS NOT NULL AND expires_at <= NOW()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "b8c669dd761a4f5fceb87bc39bd336ef92c75a610d5b0a83989dfa26e11752b7"
+}

@@ -15,7 +15,7 @@ pub struct UpdateTodoInput {
     pub completed: Option<bool>,
 }
 
-#[forge::query(public, tables = ["todos"])]
+#[forge::query(auth = "none", tables("todos"))]
 pub async fn list_todos(ctx: &QueryContext) -> Result<Vec<Todo>> {
     sqlx::query_as!(Todo, "SELECT * FROM todos ORDER BY created_at DESC")
         .fetch_all(ctx.db())
@@ -23,7 +23,7 @@ pub async fn list_todos(ctx: &QueryContext) -> Result<Vec<Todo>> {
         .map_err(Into::into)
 }
 
-#[forge::mutation(public)]
+#[forge::mutation(auth = "none")]
 pub async fn create_todo(ctx: &MutationContext, input: CreateTodoInput) -> Result<Todo> {
     if input.title.trim().is_empty() {
         return Err(ForgeError::Validation("Title cannot be empty".into()));
@@ -42,7 +42,7 @@ pub async fn create_todo(ctx: &MutationContext, input: CreateTodoInput) -> Resul
     .map_err(Into::into)
 }
 
-#[forge::mutation(public)]
+#[forge::mutation(auth = "none")]
 pub async fn update_todo(ctx: &MutationContext, input: UpdateTodoInput) -> Result<Todo> {
     let title = input.title.as_deref();
     let mut conn = ctx.conn().await?;
@@ -63,7 +63,7 @@ pub async fn update_todo(ctx: &MutationContext, input: UpdateTodoInput) -> Resul
     .ok_or_else(|| ForgeError::NotFound("Todo not found".into()))
 }
 
-#[forge::mutation(public)]
+#[forge::mutation(auth = "none")]
 pub async fn delete_todo(ctx: &MutationContext, id: Uuid) -> Result<bool> {
     let mut conn = ctx.conn().await?;
 

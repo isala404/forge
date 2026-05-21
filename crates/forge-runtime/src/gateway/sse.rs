@@ -14,7 +14,11 @@ use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::Stream;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{RwLock, mpsc};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use dashmap::DashMap;
+use subtle::ConstantTimeEq;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 /// Wraps an mpsc::Receiver as a Stream for SSE.
@@ -71,7 +75,12 @@ fn authorize_session_access(
     session_secret: &str,
     requester_auth: &AuthContext,
 ) -> Result<AuthContext, (StatusCode, Json<SseSubscribeResponse>)> {
-    if session.session_secret != session_secret {
+    let secret_match: bool = session
+        .session_secret
+        .as_bytes()
+        .ct_eq(session_secret.as_bytes())
+        .into();
+    if !secret_match {
         return Err(subscribe_error(
             StatusCode::UNAUTHORIZED,
             "INVALID_SESSION_SECRET",
@@ -90,6 +99,54 @@ fn authorize_session_access(
     Ok(session.auth_context.clone())
 }
 
+/// Validate that a client subscription ID does not exceed the maximum length.
+#[allow(clippy::result_large_err)]
+fn validate_client_sub_id(id: &str) -> Result<(), (StatusCode, Json<SseSubscribeResponse>)> {
+    if id.len() > MAX_CLIENT_SUB_ID_LEN {
+        return Err(subscribe_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ID",
+            format!(
+                "Subscription ID too long (max {} chars)",
+                MAX_CLIENT_SUB_ID_LEN
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Parse, look up, and authorize a session from a subscribe-style request.
+///
+/// Returns `(session_id, session_auth_context)` on success, or an error
+/// response that can be returned directly from the handler.
+#[allow(clippy::result_large_err)]
+async fn validate_session(
+    state: &SseState,
+    session_id_str: &str,
+    session_secret: &str,
+    request_auth: &AuthContext,
+) -> Result<(SessionId, AuthContext), (StatusCode, Json<SseSubscribeResponse>)> {
+    let Some(session_id) = try_parse_session_id(session_id_str) else {
+        return Err(subscribe_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_SESSION",
+            "Invalid session ID format",
+        ));
+    };
+
+    match state.sessions.get(&session_id) {
+        Some(session) => {
+            let auth = authorize_session_access(&session, session_secret, request_auth)?;
+            Ok((session_id, auth))
+        }
+        None => Err(subscribe_error(
+            StatusCode::NOT_FOUND,
+            "SESSION_NOT_FOUND",
+            "Session not found or expired",
+        )),
+    }
+}
+
 /// SSE configuration.
 #[derive(Debug, Clone)]
 pub struct SseConfig {
@@ -101,6 +158,12 @@ pub struct SseConfig {
     pub keepalive_interval_secs: u64,
     /// Maximum subscriptions per session.
     pub max_subscriptions_per_session: usize,
+    /// Maximum concurrent SSE sessions per authenticated user.
+    pub max_sessions_per_user: usize,
+    /// Maximum concurrent SSE sessions per source IP.
+    pub max_sessions_per_ip: usize,
+    /// Cap on a user's total subscriptions across every active session.
+    pub max_subscriptions_per_user: usize,
 }
 
 impl Default for SseConfig {
@@ -110,6 +173,9 @@ impl Default for SseConfig {
             channel_buffer_size: 256,
             keepalive_interval_secs: 30,
             max_subscriptions_per_session: 100,
+            max_sessions_per_user: 8,
+            max_sessions_per_ip: 32,
+            max_subscriptions_per_user: 500,
         }
     }
 }
@@ -124,6 +190,7 @@ pub struct SseQuery {
 struct SseSessionData {
     auth_context: AuthContext,
     session_secret: String,
+    client_ip: Option<String>,
     /// Maps client subscription ID -> internal SubscriptionId
     subscriptions: HashMap<String, SubscriptionId>,
 }
@@ -133,8 +200,14 @@ struct SseSessionData {
 pub struct SseState {
     reactor: Arc<Reactor>,
     auth_middleware: Arc<AuthMiddleware>,
-    /// Per-session data: auth context and subscription mappings
-    sessions: Arc<RwLock<HashMap<SessionId, SseSessionData>>>,
+    /// Per-session data: auth context and subscription mappings (sharded).
+    sessions: Arc<DashMap<SessionId, SseSessionData>>,
+    /// Per-user session count for O(1) limit enforcement.
+    user_session_counts: Arc<DashMap<uuid::Uuid, AtomicUsize>>,
+    /// Per-IP session count for O(1) limit enforcement.
+    ip_session_counts: Arc<DashMap<String, AtomicUsize>>,
+    /// Per-user subscription count across all sessions.
+    user_subscription_counts: Arc<DashMap<uuid::Uuid, AtomicUsize>>,
     config: SseConfig,
 }
 
@@ -153,14 +226,104 @@ impl SseState {
         Self {
             reactor,
             auth_middleware,
-            sessions: Arc::new(RwLock::new(HashMap::new())),
+            sessions: Arc::new(DashMap::new()),
+            user_session_counts: Arc::new(DashMap::new()),
+            ip_session_counts: Arc::new(DashMap::new()),
+            user_subscription_counts: Arc::new(DashMap::new()),
             config,
         }
     }
 
     /// Check if we can accept new sessions.
-    pub async fn can_accept_session(&self) -> bool {
-        self.sessions.read().await.len() < self.config.max_sessions
+    pub fn can_accept_session(&self) -> bool {
+        self.sessions.len() < self.config.max_sessions
+    }
+
+    fn increment_user_sessions(&self, user_id: uuid::Uuid) {
+        self.user_session_counts
+            .entry(user_id)
+            .or_insert_with(|| AtomicUsize::new(0))
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn decrement_user_sessions(&self, user_id: uuid::Uuid) {
+        if let Some(counter) = self.user_session_counts.get(&user_id) {
+            let prev = counter.fetch_sub(1, Ordering::Relaxed);
+            if prev <= 1 {
+                drop(counter);
+                self.user_session_counts.remove(&user_id);
+            }
+        }
+    }
+
+    fn increment_ip_sessions(&self, ip: &str) {
+        self.ip_session_counts
+            .entry(ip.to_string())
+            .or_insert_with(|| AtomicUsize::new(0))
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn decrement_ip_sessions(&self, ip: &str) {
+        if let Some(counter) = self.ip_session_counts.get(ip) {
+            let prev = counter.fetch_sub(1, Ordering::Relaxed);
+            if prev <= 1 {
+                drop(counter);
+                self.ip_session_counts.remove(ip);
+            }
+        }
+    }
+
+    fn user_session_count(&self, user_id: uuid::Uuid) -> usize {
+        self.user_session_counts
+            .get(&user_id)
+            .map(|c| c.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    fn ip_session_count(&self, ip: &str) -> usize {
+        self.ip_session_counts
+            .get(ip)
+            .map(|c| c.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    fn increment_user_subscriptions(&self, user_id: uuid::Uuid) {
+        self.user_subscription_counts
+            .entry(user_id)
+            .or_insert_with(|| AtomicUsize::new(0))
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn decrement_user_subscriptions(&self, user_id: uuid::Uuid, count: usize) {
+        if let Some(counter) = self.user_subscription_counts.get(&user_id) {
+            let prev = counter.fetch_sub(count, Ordering::Relaxed);
+            if prev <= count {
+                drop(counter);
+                self.user_subscription_counts.remove(&user_id);
+            }
+        }
+    }
+
+    fn user_subscription_count(&self, user_id: uuid::Uuid) -> usize {
+        self.user_subscription_counts
+            .get(&user_id)
+            .map(|c| c.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    fn remove_session(&self, session_id: SessionId) {
+        if let Some((_, session)) = self.sessions.remove(&session_id) {
+            if let Some(user_id) = session.auth_context.user_id() {
+                self.decrement_user_sessions(user_id);
+                let sub_count = session.subscriptions.len();
+                if sub_count > 0 {
+                    self.decrement_user_subscriptions(user_id, sub_count);
+                }
+            }
+            if let Some(ip) = &session.client_ip {
+                self.decrement_ip_sessions(ip);
+            }
+        }
     }
 }
 
@@ -169,20 +332,16 @@ impl SseState {
 struct SessionCleanupGuard {
     session_id: SessionId,
     reactor: Arc<Reactor>,
-    sessions: Arc<RwLock<HashMap<SessionId, SseSessionData>>>,
+    state: Arc<SseState>,
     dropped: bool,
 }
 
 impl SessionCleanupGuard {
-    fn new(
-        session_id: SessionId,
-        reactor: Arc<Reactor>,
-        sessions: Arc<RwLock<HashMap<SessionId, SseSessionData>>>,
-    ) -> Self {
+    fn new(session_id: SessionId, reactor: Arc<Reactor>, state: Arc<SseState>) -> Self {
         Self {
             session_id,
             reactor,
-            sessions,
+            state,
             dropped: false,
         }
     }
@@ -200,19 +359,16 @@ impl Drop for SessionCleanupGuard {
         }
         let session_id = self.session_id;
         let reactor = self.reactor.clone();
-        let sessions = self.sessions.clone();
+        let state = self.state.clone();
 
-        // Spawn cleanup task since we can't await in drop
-        // Use spawn to handle cleanup even if the runtime is shutting down
         crate::observability::set_active_connections("sse", -1);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 reactor.remove_session(session_id).await;
-                sessions.write().await.remove(&session_id);
+                state.remove_session(session_id);
                 tracing::debug!(%session_id, "SSE session cleaned up on disconnect");
             });
         } else {
-            // Runtime not available, likely shutting down. Session will be cleaned up on restart.
             tracing::warn!(%session_id, "Could not spawn cleanup task, runtime unavailable");
         }
     }
@@ -243,20 +399,6 @@ pub enum SsePayload {
         session_id: String,
         session_secret: String,
     },
-    /// Ephemeral pub-sub fan-out for `forge_channels`.
-    /// Wire format reserved for GA; behavior implementation lands in 1.0.x.
-    Channel {
-        channel: String,
-        payload: serde_json::Value,
-    },
-    /// Server detected a dropped or out-of-order delivery on `target` and is
-    /// signalling the client to resync via `last-event-id`.
-    /// Wire format reserved for GA; behavior implementation lands in 1.0.x.
-    Gap {
-        target: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        last_event_id: Option<String>,
-    },
 }
 
 /// Internal message type for SSE stream.
@@ -270,17 +412,6 @@ pub enum SseMessage {
         target: String,
         code: String,
         message: String,
-    },
-    /// Carries a Forge `forge_channels` pub-sub event to the SSE stream.
-    /// Implementation reserved; see [`SsePayload::Channel`].
-    Channel {
-        channel: String,
-        payload: serde_json::Value,
-    },
-    /// Tells the client a delivery gap was detected. See [`SsePayload::Gap`].
-    Gap {
-        target: String,
-        last_event_id: Option<String>,
     },
 }
 
@@ -415,11 +546,12 @@ fn unsubscribe_error(
 pub async fn sse_handler(
     State(state): State<Arc<SseState>>,
     Extension(request_auth): Extension<AuthContext>,
+    Extension(resolved_ip): Extension<super::ResolvedClientIp>,
     Query(query): Query<SseQuery>,
 ) -> impl IntoResponse {
     // Check session limit. Body matches the standard SseError shape so
     // clients can parse capacity rejections the same way as rate limits.
-    if !state.can_accept_session().await {
+    if !state.can_accept_session() {
         let body = SseError::new("SSE_AT_CAPACITY", "Server at maximum SSE session capacity")
             .with_retry_after(SSE_AT_CAPACITY_RETRY_SECS);
         return (
@@ -436,7 +568,6 @@ pub async fn sse_handler(
     let session_id = SessionId::new();
     let buffer_size = state.config.channel_buffer_size;
     let keepalive_secs = state.config.keepalive_interval_secs;
-    let (tx, mut rx) = mpsc::channel::<SseMessage>(buffer_size);
     let cancel_token = CancellationToken::new();
 
     let query_auth = if let Some(token) = &query.token {
@@ -454,77 +585,101 @@ pub async fn sse_handler(
         None
     };
     let auth_context = resolve_sse_auth_context(&request_auth, query_auth);
+
+    let client_ip = resolved_ip.0;
+    // UUIDv4 provides 122 bits of randomness, sufficient for session secret entropy
     let session_secret = uuid::Uuid::new_v4().to_string();
+    // Authenticated sessions without an explicit exp claim get a default
+    // expiry of 1 hour to prevent indefinite streaming on malformed tokens.
+    let token_exp = if auth_context.is_authenticated() {
+        Some(
+            auth_context
+                .token_exp()
+                .unwrap_or_else(|| chrono::Utc::now().timestamp() + 3600),
+        )
+    } else {
+        None
+    };
 
-    let token_exp = auth_context.token_exp();
+    // Check per-user and per-IP session limits via atomic counters (O(1)).
+    if let Some(user_id) = auth_context.user_id()
+        && state.user_session_count(user_id) >= state.config.max_sessions_per_user
+    {
+        let body = SseError::new(
+            "TOO_MANY_SESSIONS",
+            format!(
+                "User has reached the maximum of {} concurrent sessions",
+                state.config.max_sessions_per_user
+            ),
+        )
+        .with_retry_after(SSE_AT_CAPACITY_RETRY_SECS);
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(
+                axum::http::header::RETRY_AFTER,
+                SSE_AT_CAPACITY_RETRY_SECS_STR,
+            )],
+            Json(body),
+        )
+            .into_response();
+    }
 
-    // Register session with reactor
+    if let Some(ip) = &client_ip
+        && state.ip_session_count(ip) >= state.config.max_sessions_per_ip
+    {
+        let body = SseError::new(
+            "TOO_MANY_SESSIONS",
+            format!(
+                "IP has reached the maximum of {} concurrent sessions",
+                state.config.max_sessions_per_ip
+            ),
+        )
+        .with_retry_after(SSE_AT_CAPACITY_RETRY_SECS);
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(
+                axum::http::header::RETRY_AFTER,
+                SSE_AT_CAPACITY_RETRY_SECS_STR,
+            )],
+            Json(body),
+        )
+            .into_response();
+    }
+
+    if let Some(user_id) = auth_context.user_id() {
+        state.increment_user_sessions(user_id);
+    }
+    if let Some(ip) = &client_ip {
+        state.increment_ip_sessions(ip);
+    }
+    state.sessions.insert(
+        session_id,
+        SseSessionData {
+            auth_context: auth_context.clone(),
+            session_secret: session_secret.clone(),
+            client_ip,
+            subscriptions: HashMap::new(),
+        },
+    );
+
     let reactor = state.reactor.clone();
     let cancel = cancel_token.clone();
-
-    // Create a bridge channel for the reactor's message format
     let (rt_tx, mut rt_rx) = mpsc::channel(buffer_size);
     reactor.register_session(session_id, rt_tx, token_exp);
 
-    // Store session data for subscription handlers
-    {
-        let mut sessions = state.sessions.write().await;
-        sessions.insert(
-            session_id,
-            SseSessionData {
-                auth_context: auth_context.clone(),
-                session_secret: session_secret.clone(),
-                subscriptions: HashMap::new(),
-            },
-        );
-    }
-
-    // Capture sessions for cleanup guard
-    let sessions = state.sessions.clone();
-
-    // Create cleanup guard - will clean up on drop if stream ends unexpectedly
-    let cleanup_guard = SessionCleanupGuard::new(session_id, reactor.clone(), sessions.clone());
+    let state_for_cleanup = Arc::new((*state).clone());
+    let cleanup_guard =
+        SessionCleanupGuard::new(session_id, reactor.clone(), state_for_cleanup.clone());
     crate::observability::set_active_connections("sse", 1);
 
-    // Bridge reactor messages to SSE messages
-    let bridge_cancel = cancel_token.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                msg = rt_rx.recv() => {
-                    match msg {
-                        Some(rt_msg) => {
-                            if let Some(exp) = token_exp
-                                && chrono::Utc::now().timestamp() > exp
-                            {
-                                let expired_msg = SseMessage::Error {
-                                    target: "session".to_string(),
-                                    code: "SESSION_EXPIRED".to_string(),
-                                    message: "Authentication token expired".to_string(),
-                                };
-                                let _ = tx.send(expired_msg).await;
-                                break;
-                            }
-                            if let Some(sse_msg) = convert_realtime_to_sse(rt_msg)
-                                && tx.send(sse_msg).await.is_err() {
-                                    break;
-                                }
-                        }
-                        None => break,
-                    }
-                }
-                _ = bridge_cancel.cancelled() => break,
-            }
-        }
-    });
-
-    // Spawn a task that feeds SSE events into a channel
+    // Single task: bridge reactor messages directly to SSE events.
+    // Token expiry is enforced by SessionServer::try_send_to_session (per-push)
+    // and cleanup_expired_tokens (periodic sweep). No inline check needed here.
     let (event_tx, event_rx) = mpsc::channel::<Result<Event, Infallible>>(buffer_size);
 
     tokio::spawn(async move {
         let mut _guard = cleanup_guard;
 
-        // Send connected event
         let connected = SsePayload::Connected {
             session_id: session_id.to_string(),
             session_secret: session_secret.clone(),
@@ -542,39 +697,33 @@ pub async fn sse_handler(
 
         loop {
             tokio::select! {
-                msg = rx.recv() => {
+                msg = rt_rx.recv() => {
                     match msg {
-                        Some(sse_msg) => {
-                            let event = match sse_msg {
-                                SseMessage::Data { target, payload } => {
-                                    let data = SsePayload::Update { target, payload };
-                                    serde_json::to_string(&data).ok().map(|json| {
-                                        Event::default().event("update").data(json)
-                                    })
+                        Some(rt_msg) => {
+                            let event = convert_realtime_to_sse(rt_msg).and_then(|sse_msg| {
+                                match sse_msg {
+                                    SseMessage::Data { target, payload } => {
+                                        let data = SsePayload::Update { target, payload };
+                                        serde_json::to_string(&data).ok().map(|json| {
+                                            Event::default().event("update").data(json)
+                                        })
+                                    }
+                                    SseMessage::Error { target, code, message } => {
+                                        let data = SsePayload::Error { target, code, message };
+                                        serde_json::to_string(&data).ok().map(|json| {
+                                            Event::default().event("error").data(json)
+                                        })
+                                    }
                                 }
-                                SseMessage::Error { target, code, message } => {
-                                    let data = SsePayload::Error { target, code, message };
-                                    serde_json::to_string(&data).ok().map(|json| {
-                                        Event::default().event("error").data(json)
-                                    })
+                            });
+                            if let Some(evt) = event {
+                                match tokio::time::timeout(
+                                    Duration::from_secs(5),
+                                    event_tx.send(Ok(evt)),
+                                ).await {
+                                    Ok(Err(_)) | Err(_) => break,
+                                    Ok(Ok(())) => {}
                                 }
-                                SseMessage::Channel { channel, payload } => {
-                                    let data = SsePayload::Channel { channel, payload };
-                                    serde_json::to_string(&data).ok().map(|json| {
-                                        Event::default().event("channel").data(json)
-                                    })
-                                }
-                                SseMessage::Gap { target, last_event_id } => {
-                                    let data = SsePayload::Gap { target, last_event_id };
-                                    serde_json::to_string(&data).ok().map(|json| {
-                                        Event::default().event("gap").data(json)
-                                    })
-                                }
-                            };
-                            if let Some(evt) = event
-                                && event_tx.send(Ok(evt)).await.is_err()
-                            {
-                                break;
                             }
                         }
                         None => break,
@@ -584,11 +733,10 @@ pub async fn sse_handler(
             }
         }
 
-        // Clean shutdown: decrement counter and clean up session state
         _guard.mark_closed();
         crate::observability::set_active_connections("sse", -1);
         reactor.remove_session(session_id).await;
-        sessions.write().await.remove(&session_id);
+        state_for_cleanup.remove_session(session_id);
     });
 
     let stream = ReceiverStream { rx: event_rx };
@@ -610,7 +758,8 @@ fn convert_realtime_to_sse(msg: RealtimeMessage) -> Option<SseMessage> {
             data,
         } => Some(SseMessage::Data {
             target: format!("sub:{}", subscription_id),
-            payload: data,
+            payload: std::sync::Arc::try_unwrap(data)
+                .unwrap_or_else(|arc| serde_json::Value::clone(&arc)),
         }),
         RealtimeMessage::DeltaUpdate {
             subscription_id,
@@ -660,34 +809,13 @@ fn convert_realtime_to_sse(msg: RealtimeMessage) -> Option<SseMessage> {
                 })
             }
         },
-        RealtimeMessage::Error { code, message } => Some(SseMessage::Error {
-            target: String::new(),
-            code,
-            message,
+        // Lagging is an internal signal to slow clients; no client-visible event.
+        RealtimeMessage::Lagging => None,
+        RealtimeMessage::AuthFailed { reason } => Some(SseMessage::Error {
+            target: "session".to_string(),
+            code: "SESSION_EXPIRED".to_string(),
+            message: reason,
         }),
-        RealtimeMessage::ErrorWithId { id, code, message } => Some(SseMessage::Error {
-            target: id,
-            code,
-            message,
-        }),
-        RealtimeMessage::Channel { channel, payload } => {
-            Some(SseMessage::Channel { channel, payload })
-        }
-        RealtimeMessage::GapDetected {
-            client_sub_id,
-            last_event_id,
-        } => Some(SseMessage::Gap {
-            target: format!("sub:{client_sub_id}"),
-            last_event_id,
-        }),
-        // Ignore control messages
-        RealtimeMessage::Subscribe { .. }
-        | RealtimeMessage::Unsubscribe { .. }
-        | RealtimeMessage::Ping
-        | RealtimeMessage::Pong
-        | RealtimeMessage::AuthSuccess
-        | RealtimeMessage::AuthFailed { .. }
-        | RealtimeMessage::Lagging => None,
     }
 }
 
@@ -698,15 +826,8 @@ pub async fn sse_subscribe_handler(
     Json(request): Json<SseSubscribeRequest>,
 ) -> impl IntoResponse {
     // Validate subscription ID length to prevent memory bloat
-    if request.id.len() > MAX_CLIENT_SUB_ID_LEN {
-        return subscribe_error(
-            StatusCode::BAD_REQUEST,
-            "INVALID_ID",
-            format!(
-                "Subscription ID too long (max {} chars)",
-                MAX_CLIENT_SUB_ID_LEN
-            ),
-        );
+    if let Err(resp) = validate_client_sub_id(&request.id) {
+        return resp;
     }
 
     let Some(session_id) = try_parse_session_id(&request.session_id) else {
@@ -717,11 +838,8 @@ pub async fn sse_subscribe_handler(
         );
     };
 
-    // Get session data (auth context) - use write lock to atomically check limit and prevent TOCTOU
-    let sessions = state.sessions.write().await;
-    let session_data = match sessions.get(&session_id) {
+    let session_data = match state.sessions.get(&session_id) {
         Some(data) => {
-            // Enforce per-session subscription limit to prevent resource exhaustion
             if data.subscriptions.len() >= state.config.max_subscriptions_per_session {
                 return subscribe_error(
                     StatusCode::TOO_MANY_REQUESTS,
@@ -732,7 +850,19 @@ pub async fn sse_subscribe_handler(
                     ),
                 );
             }
-            match authorize_session_access(data, &request.session_secret, &request_auth) {
+            if let Some(user_id) = data.auth_context.user_id()
+                && state.user_subscription_count(user_id) >= state.config.max_subscriptions_per_user
+            {
+                return subscribe_error(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "TOO_MANY_SUBSCRIPTIONS",
+                    format!(
+                        "User has reached the maximum of {} total subscriptions",
+                        state.config.max_subscriptions_per_user
+                    ),
+                );
+            }
+            match authorize_session_access(&data, &request.session_secret, &request_auth) {
                 Ok(auth) => auth,
                 Err(resp) => return resp,
             }
@@ -745,9 +875,7 @@ pub async fn sse_subscribe_handler(
             );
         }
     };
-    drop(sessions);
 
-    // Subscribe via reactor
     let result = state
         .reactor
         .subscribe(
@@ -761,18 +889,12 @@ pub async fn sse_subscribe_handler(
 
     match result {
         Ok((subscription_id, data)) => {
-            // Store the subscription mapping. The session may have been evicted
-            // while `reactor.subscribe` was running (long-running query, slow
-            // auth check); if so the subscription is now orphaned in the
-            // reactor and session_server, so we have to unsubscribe before
-            // returning. We also re-check the per-session subscription limit:
-            // concurrent subscribe calls can each pass the pre-call limit
-            // check, so the post-call check is the actual enforcement point.
-            let mut sessions = state.sessions.write().await;
-            match sessions.get_mut(&session_id) {
-                Some(session) => {
+            // Store the subscription mapping. Re-check the per-session limit
+            // as a concurrent subscribe may have raced past the pre-call check.
+            match state.sessions.get_mut(&session_id) {
+                Some(mut session) => {
                     if session.subscriptions.len() >= state.config.max_subscriptions_per_session {
-                        drop(sessions);
+                        drop(session);
                         state.reactor.unsubscribe(subscription_id);
                         return subscribe_error(
                             StatusCode::TOO_MANY_REQUESTS,
@@ -784,9 +906,11 @@ pub async fn sse_subscribe_handler(
                         );
                     }
                     session.subscriptions.insert(request.id, subscription_id);
+                    if let Some(user_id) = session.auth_context.user_id() {
+                        state.increment_user_subscriptions(user_id);
+                    }
                 }
                 None => {
-                    drop(sessions);
                     state.reactor.unsubscribe(subscription_id);
                     return subscribe_error(
                         StatusCode::NOT_FOUND,
@@ -851,23 +975,27 @@ pub async fn sse_unsubscribe_handler(
         );
     };
 
-    // Look up internal subscription ID and validate session ownership
-    let subscription_id = {
-        let sessions = state.sessions.read().await;
-        match sessions.get(&session_id) {
+    let (subscription_id, user_id) = {
+        match state.sessions.get(&session_id) {
             Some(session) => {
-                if session.session_secret != request.session_secret
-                    || !same_principal(&session.auth_context, &request_auth)
-                {
+                let secret_match: bool = session
+                    .session_secret
+                    .as_bytes()
+                    .ct_eq(request.session_secret.as_bytes())
+                    .into();
+                if !secret_match || !same_principal(&session.auth_context, &request_auth) {
                     return unsubscribe_error(
                         StatusCode::FORBIDDEN,
                         "SESSION_PRINCIPAL_MISMATCH",
                         "Request principal does not match session principal",
                     );
                 }
-                session.subscriptions.get(&request.id).copied()
+                (
+                    session.subscriptions.get(&request.id).copied(),
+                    session.auth_context.user_id(),
+                )
             }
-            None => None,
+            None => (None, None),
         }
     };
 
@@ -879,15 +1007,13 @@ pub async fn sse_unsubscribe_handler(
         );
     };
 
-    // Unsubscribe via reactor
     state.reactor.unsubscribe(subscription_id);
 
-    // Remove from session tracking
-    {
-        let mut sessions = state.sessions.write().await;
-        if let Some(session) = sessions.get_mut(&session_id) {
-            session.subscriptions.remove(&request.id);
-        }
+    if let Some(mut session) = state.sessions.get_mut(&session_id) {
+        session.subscriptions.remove(&request.id);
+    }
+    if let Some(uid) = user_id {
+        state.decrement_user_subscriptions(uid, 1);
     }
 
     tracing::debug!(
@@ -911,46 +1037,22 @@ pub async fn sse_job_subscribe_handler(
     Extension(request_auth): Extension<AuthContext>,
     Json(request): Json<SseJobSubscribeRequest>,
 ) -> impl IntoResponse {
-    if request.id.len() > MAX_CLIENT_SUB_ID_LEN {
-        return subscribe_error(
-            StatusCode::BAD_REQUEST,
-            "INVALID_ID",
-            format!(
-                "Subscription ID too long (max {} chars)",
-                MAX_CLIENT_SUB_ID_LEN
-            ),
-        );
+    if let Err(resp) = validate_client_sub_id(&request.id) {
+        return resp;
     }
 
-    let Some(session_id) = try_parse_session_id(&request.session_id) else {
-        return subscribe_error(
-            StatusCode::BAD_REQUEST,
-            "INVALID_SESSION",
-            "Invalid session ID format",
-        );
+    let (session_id, session_auth) = match validate_session(
+        &state,
+        &request.session_id,
+        &request.session_secret,
+        &request_auth,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(resp) => return resp,
     };
 
-    // Validate session exists + principal binding
-    let session_auth = {
-        let sessions = state.sessions.read().await;
-        match sessions.get(&session_id) {
-            Some(session) => {
-                match authorize_session_access(session, &request.session_secret, &request_auth) {
-                    Ok(auth) => auth,
-                    Err(resp) => return resp,
-                }
-            }
-            None => {
-                return subscribe_error(
-                    StatusCode::NOT_FOUND,
-                    "SESSION_NOT_FOUND",
-                    "Session not found or expired",
-                );
-            }
-        }
-    };
-
-    // Parse job ID
     let job_uuid = match uuid::Uuid::parse_str(&request.job_id) {
         Ok(uuid) => uuid,
         Err(_) => {
@@ -962,7 +1064,6 @@ pub async fn sse_job_subscribe_handler(
         }
     };
 
-    // Subscribe to job updates via reactor
     match state
         .reactor
         .subscribe_job(session_id, request.id.clone(), job_uuid, &session_auth)
@@ -1020,46 +1121,22 @@ pub async fn sse_workflow_subscribe_handler(
     Extension(request_auth): Extension<AuthContext>,
     Json(request): Json<SseWorkflowSubscribeRequest>,
 ) -> impl IntoResponse {
-    if request.id.len() > MAX_CLIENT_SUB_ID_LEN {
-        return subscribe_error(
-            StatusCode::BAD_REQUEST,
-            "INVALID_ID",
-            format!(
-                "Subscription ID too long (max {} chars)",
-                MAX_CLIENT_SUB_ID_LEN
-            ),
-        );
+    if let Err(resp) = validate_client_sub_id(&request.id) {
+        return resp;
     }
 
-    let Some(session_id) = try_parse_session_id(&request.session_id) else {
-        return subscribe_error(
-            StatusCode::BAD_REQUEST,
-            "INVALID_SESSION",
-            "Invalid session ID format",
-        );
+    let (session_id, session_auth) = match validate_session(
+        &state,
+        &request.session_id,
+        &request.session_secret,
+        &request_auth,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(resp) => return resp,
     };
 
-    // Validate session exists + principal binding
-    let session_auth = {
-        let sessions = state.sessions.read().await;
-        match sessions.get(&session_id) {
-            Some(session) => {
-                match authorize_session_access(session, &request.session_secret, &request_auth) {
-                    Ok(auth) => auth,
-                    Err(resp) => return resp,
-                }
-            }
-            None => {
-                return subscribe_error(
-                    StatusCode::NOT_FOUND,
-                    "SESSION_NOT_FOUND",
-                    "Session not found or expired",
-                );
-            }
-        }
-    };
-
-    // Parse workflow ID
     let workflow_uuid = match uuid::Uuid::parse_str(&request.workflow_id) {
         Ok(uuid) => uuid,
         Err(_) => {
@@ -1071,7 +1148,6 @@ pub async fn sse_workflow_subscribe_handler(
         }
     };
 
-    // Subscribe to workflow updates via reactor
     match state
         .reactor
         .subscribe_workflow(session_id, request.id.clone(), workflow_uuid, &session_auth)
@@ -1129,6 +1205,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    use crate::realtime::{JobData, WorkflowData};
     use uuid::Uuid;
 
     #[test]
@@ -1178,32 +1255,6 @@ mod tests {
     }
 
     #[test]
-    fn channel_payload_locks_to_channel_and_payload_fields() {
-        // Wire format reserved for GA. Future implementation must keep
-        // the same field names so 1.0 clients keep parsing.
-        let payload = SsePayload::Channel {
-            channel: "room:lobby".to_string(),
-            payload: serde_json::json!({"text": "hi"}),
-        };
-        let json = serde_json::to_string(&payload).unwrap();
-        assert!(json.contains("\"type\":\"channel\""), "{json}");
-        assert!(json.contains("\"channel\":\"room:lobby\""), "{json}");
-        assert!(json.contains("\"payload\""), "{json}");
-    }
-
-    #[test]
-    fn gap_payload_omits_last_event_id_when_unset() {
-        let payload = SsePayload::Gap {
-            target: "sub:abc".to_string(),
-            last_event_id: None,
-        };
-        let json = serde_json::to_string(&payload).unwrap();
-        assert!(json.contains("\"type\":\"gap\""), "{json}");
-        assert!(json.contains("\"target\":\"sub:abc\""), "{json}");
-        assert!(!json.contains("last_event_id"), "{json}");
-    }
-
-    #[test]
     fn sse_error_carries_retry_after_when_set() {
         // Standardized 429/503 body must include retry_after_secs so
         // clients can back off without parsing the Retry-After header.
@@ -1211,5 +1262,153 @@ mod tests {
         let json = serde_json::to_string(&err).unwrap();
         assert!(json.contains("\"code\":\"SSE_AT_CAPACITY\""), "{json}");
         assert!(json.contains("\"retry_after_secs\":5"), "{json}");
+    }
+
+    #[test]
+    fn try_parse_session_id_accepts_valid_uuid() {
+        let uuid = Uuid::new_v4();
+        let parsed = try_parse_session_id(&uuid.to_string()).unwrap();
+        assert_eq!(parsed.as_uuid(), uuid);
+    }
+
+    #[test]
+    fn try_parse_session_id_rejects_garbage() {
+        assert!(try_parse_session_id("not-a-uuid").is_none());
+        assert!(try_parse_session_id("").is_none());
+        assert!(try_parse_session_id("12345").is_none());
+    }
+
+    #[test]
+    fn same_principal_two_anonymous_match() {
+        let a = AuthContext::unauthenticated();
+        let b = AuthContext::unauthenticated();
+        assert!(same_principal(&a, &b));
+    }
+
+    #[test]
+    fn same_principal_anonymous_vs_authenticated_does_not_match() {
+        let anon = AuthContext::unauthenticated();
+        let auth = AuthContext::authenticated(Uuid::new_v4(), vec![], HashMap::new());
+        assert!(!same_principal(&anon, &auth));
+        assert!(!same_principal(&auth, &anon));
+    }
+
+    #[test]
+    fn same_principal_same_uuid_matches() {
+        let id = Uuid::new_v4();
+        let a = AuthContext::authenticated(id, vec!["user".into()], HashMap::new());
+        let b = AuthContext::authenticated(id, vec!["admin".into()], HashMap::new());
+        // Roles differ but principal is the same.
+        assert!(same_principal(&a, &b));
+    }
+
+    #[test]
+    fn same_principal_different_uuids_do_not_match() {
+        let a = AuthContext::authenticated(Uuid::new_v4(), vec![], HashMap::new());
+        let b = AuthContext::authenticated(Uuid::new_v4(), vec![], HashMap::new());
+        assert!(!same_principal(&a, &b));
+    }
+
+    #[test]
+    fn same_principal_authenticated_without_uuid_never_matches() {
+        // Authenticated-without-uuid (e.g. external IDP sub) cannot prove sameness
+        // through `principal_id`, so guard against false matches.
+        let a = AuthContext::authenticated_without_uuid(vec!["user".into()], HashMap::new());
+        let b = AuthContext::authenticated_without_uuid(vec!["user".into()], HashMap::new());
+        assert!(!same_principal(&a, &b));
+    }
+
+    #[test]
+    fn validate_client_sub_id_accepts_short_id() {
+        assert!(validate_client_sub_id("abc-123").is_ok());
+    }
+
+    #[test]
+    fn validate_client_sub_id_accepts_max_length() {
+        let id = "x".repeat(MAX_CLIENT_SUB_ID_LEN);
+        assert!(validate_client_sub_id(&id).is_ok());
+    }
+
+    #[test]
+    fn validate_client_sub_id_rejects_oversize() {
+        let id = "x".repeat(MAX_CLIENT_SUB_ID_LEN + 1);
+        let err = validate_client_sub_id(&id).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn convert_realtime_to_sse_lagging_is_swallowed() {
+        // Lagging is an internal eviction precursor; clients must not see it.
+        assert!(convert_realtime_to_sse(RealtimeMessage::Lagging).is_none());
+    }
+
+    #[test]
+    fn convert_realtime_to_sse_data_uses_sub_prefix() {
+        let msg = RealtimeMessage::Data {
+            subscription_id: "abc".into(),
+            data: std::sync::Arc::new(serde_json::json!({"x": 1})),
+        };
+        let Some(SseMessage::Data { target, payload }) = convert_realtime_to_sse(msg) else {
+            panic!("expected Data");
+        };
+        assert_eq!(target, "sub:abc");
+        assert_eq!(payload, serde_json::json!({"x": 1}));
+    }
+
+    #[test]
+    fn convert_realtime_to_sse_job_uses_job_prefix() {
+        let msg = RealtimeMessage::JobUpdate {
+            client_sub_id: "j1".into(),
+            job: JobData {
+                job_id: "00000000-0000-0000-0000-000000000001".into(),
+                status: "running".into(),
+                progress_percent: Some(50),
+                progress_message: None,
+                output: None,
+                error: None,
+            },
+        };
+        let Some(SseMessage::Data { target, .. }) = convert_realtime_to_sse(msg) else {
+            panic!("expected Data");
+        };
+        assert_eq!(target, "job:j1");
+    }
+
+    #[test]
+    fn convert_realtime_to_sse_workflow_uses_wf_prefix() {
+        let msg = RealtimeMessage::WorkflowUpdate {
+            client_sub_id: "w1".into(),
+            workflow: WorkflowData {
+                workflow_id: "00000000-0000-0000-0000-000000000002".into(),
+                status: "running".into(),
+                current_step: None,
+                waiting_for: None,
+                steps: vec![],
+                output: None,
+                error: None,
+            },
+        };
+        let Some(SseMessage::Data { target, .. }) = convert_realtime_to_sse(msg) else {
+            panic!("expected Data");
+        };
+        assert_eq!(target, "wf:w1");
+    }
+
+    #[test]
+    fn convert_realtime_to_sse_auth_failed_targets_session() {
+        let msg = RealtimeMessage::AuthFailed {
+            reason: "token expired".into(),
+        };
+        let Some(SseMessage::Error {
+            target,
+            code,
+            message,
+        }) = convert_realtime_to_sse(msg)
+        else {
+            panic!("expected Error");
+        };
+        assert_eq!(target, "session");
+        assert_eq!(code, "SESSION_EXPIRED");
+        assert_eq!(message, "token expired");
     }
 }

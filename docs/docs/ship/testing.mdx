@@ -228,11 +228,18 @@ async fn test_order_dispatches_jobs() {
 
 ### Simulating Job Lifecycle
 
+The lifecycle methods on `MockJobDispatch` take the job's `Uuid` (returned by the dispatch call), not the job type string.
+
 ```rust
-// Simulate job lifecycle transitions in tests
-ctx.job_dispatch().complete_job("send_email", json!({ "result": "sent" }));
-ctx.job_dispatch().fail_job("send_email", "SMTP connection refused");
-ctx.job_dispatch().cancel_job("send_email");
+let ctx = TestMutationContext::authenticated(Uuid::new_v4());
+
+let job_id = ctx.dispatch_job("send_email", args).await.unwrap();
+
+// Transition the job to a terminal state for subsequent assertions
+ctx.job_dispatch().complete_job(job_id);
+ctx.job_dispatch().fail_job(job_id);
+ctx.job_dispatch().cancel_job(job_id, Some("user cancelled".to_string()));
+ctx.job_dispatch().cancel_job(job_id, None); // reason is optional
 ```
 
 ### Workflow Dispatch Assertions
@@ -255,8 +262,11 @@ async fn test_signup_starts_onboarding() {
     // Verify workflow was NOT started
     assert_workflow_not_started!(ctx, "enterprise_onboarding");
 
-    // Get started workflows
+    // Get started workflows by name
     let workflows = ctx.workflow_dispatch().workflows_named("user_onboarding");
+
+    // Verify count
+    ctx.workflow_dispatch().assert_start_count("user_onboarding", 1);
 }
 ```
 
@@ -453,20 +463,41 @@ fn test_job_retry_behavior() {
 
 ### Save/Load State
 
+`saved()` is synchronous. Use `save()` to write individual keys and `set_saved()` to replace the whole payload.
+
 ```rust
-let ctx = TestJobContext::builder("process_video")
-    .with_saved("temp_file", json!("/tmp/video.mp4"))
-    .build();
-let saved = ctx.saved().await;
+let ctx = TestJobContext::builder("process_video").build();
+
+// Write individual keys during the test
+ctx.save("temp_file", json!("/tmp/video.mp4")).unwrap();
+ctx.save("frame_count", json!(1200)).unwrap();
+
+// Read back — no .await needed
+let saved = ctx.saved();
+assert_eq!(saved["temp_file"], "/tmp/video.mp4");
+assert_eq!(saved["frame_count"], 1200);
+
+// Replace the whole payload at once
+ctx.set_saved(json!({ "status": "processed" })).unwrap();
 ```
 
 ### Cancellation Testing
 
 ```rust
+// Pre-set cancellation at build time
 let ctx = TestJobContext::builder("long_job")
     .with_cancellation_requested()
     .build();
-assert!(ctx.check_cancelled().await.is_err()); // returns Err(JobCancelled)
+
+// check_cancelled is sync — no .await
+assert!(ctx.check_cancelled().is_err()); // returns Err(JobCancelled)
+assert!(ctx.is_cancel_requested().unwrap());
+
+// Or trigger cancellation mid-test (useful when you hold a shared Arc)
+let ctx = TestJobContext::builder("long_job").build();
+assert!(ctx.check_cancelled().is_ok());
+ctx.request_cancellation();
+assert!(ctx.check_cancelled().is_err());
 ```
 
 ### Heartbeat
@@ -478,6 +509,30 @@ async fn test_long_running_job() {
 
     // Heartbeat is a no-op in tests but verifies the call compiles
     ctx.heartbeat().await.unwrap();
+}
+```
+
+### Sub-Job Dispatch from Jobs
+
+Jobs can dispatch other jobs or start workflows. `TestJobContext` records those calls for assertion.
+
+```rust
+#[tokio::test]
+async fn test_job_dispatches_sub_job() {
+    let ctx = TestJobContext::builder("process_order").build();
+
+    // Simulate the job dispatching a sub-job
+    let sub_id = ctx.dispatch_job("send_receipt", &json!({ "order_id": "ord_1" })).unwrap();
+    ctx.start_workflow("fulfillment", &json!({ "order_id": "ord_1" })).unwrap();
+
+    // Inspect recorded dispatches
+    let sub_jobs = ctx.dispatched_jobs();
+    assert_eq!(sub_jobs.len(), 1);
+    assert_eq!(sub_jobs[0].0, "send_receipt"); // (job_type, args, id)
+
+    let started = ctx.started_workflows();
+    assert_eq!(started.len(), 1);
+    assert_eq!(started[0].0, "fulfillment");
 }
 ```
 
@@ -833,9 +888,13 @@ assert!(!assert_json_matches(&actual, &json!({ "missing": true })));
 ## Timeout Constants
 
 ```rust
-use forge::testing::{ACTION_TIMEOUT, ASSERTION_TIMEOUT};
-// ACTION_TIMEOUT: 5s default for tokio::time::timeout in tests
-// ASSERTION_TIMEOUT: for eventually-consistent assertion helpers
+use forge::testing::{
+    ACTION_TIMEOUT,           // 5s — for tokio::time::timeout in individual test actions
+    ASSERTION_TIMEOUT,        // 5s — for eventually-consistent assertion helpers
+    DEFAULT_TEST_TIMEOUT,     // 30s — overall test timeout
+    DEFAULT_JOB_TIMEOUT,      // 10s — job execution timeout in tests
+    DEFAULT_WORKFLOW_TIMEOUT, // 60s — workflow execution timeout in tests
+};
 ```
 
 ## Under the Hood

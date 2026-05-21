@@ -3,32 +3,59 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{FnArg, ItemFn, Pat, ReturnType, Type, parse_macro_input};
 
-use crate::utils::{has_attr_flag, parse_duration_secs, to_pascal_case, validate_attr_keys};
+use darling::FromMeta;
+use darling::ast::NestedMeta;
 
-const ALLOWED_MCP_TOOL_KEYS: &[&str] = &[
-    "public",
-    "read_only",
-    "destructive",
-    "idempotent",
-    "open_world",
-    "require_role",
-    "name",
-    "title",
-    "description",
-    "timeout",
-    "rate_limit",
-];
+use crate::attrs::{
+    RateLimitMeta, RequireRole, default_true, parse_rate_limit_per, validate_rate_limit,
+    validate_rate_limit_key,
+};
+use crate::utils::{parse_duration_secs, to_pascal_case};
 
-/// Expand the #[forge::mcp_tool] attribute.
+/// Darling-parsed MCP tool attributes.
+#[derive(Debug, FromMeta)]
+struct DarlingMcpToolAttrs {
+    #[darling(default)]
+    public: bool,
+    #[darling(default)]
+    read_only: bool,
+    #[darling(default)]
+    destructive: bool,
+    #[darling(default)]
+    idempotent: bool,
+    #[darling(default)]
+    open_world: bool,
+    #[darling(default)]
+    require_role: Option<RequireRole>,
+    #[darling(default)]
+    name: Option<String>,
+    #[darling(default)]
+    title: Option<String>,
+    #[darling(default)]
+    description: Option<String>,
+    #[darling(default)]
+    timeout: Option<String>,
+    #[darling(default)]
+    rate_limit: Option<RateLimitMeta>,
+    /// Set `register = false` to skip `inventory::submit!` auto-registration.
+    #[darling(default = "default_true")]
+    register: bool,
+}
+
 pub fn expand_mcp_tool(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
-    let attr_str = attr.to_string();
 
-    if let Err(e) = validate_attr_keys(&attr_str, ALLOWED_MCP_TOOL_KEYS, "mcp_tool") {
-        return e.to_compile_error().into();
-    }
+    let attr_args = match NestedMeta::parse_meta_list(attr.into()) {
+        Ok(v) => v,
+        Err(e) => return TokenStream::from(e.into_compile_error()),
+    };
 
-    let attrs = match parse_mcp_tool_attrs(attr) {
+    let darling_attrs = match DarlingMcpToolAttrs::from_list(&attr_args) {
+        Ok(v) => v,
+        Err(e) => return TokenStream::from(e.write_errors()),
+    };
+
+    let attrs = match convert_mcp_tool_attrs(darling_attrs) {
         Ok(a) => a,
         Err(e) => return e.to_compile_error().into(),
     };
@@ -53,148 +80,48 @@ struct McpToolAttrs {
     destructive_hint: Option<bool>,
     idempotent_hint: Option<bool>,
     open_world_hint: Option<bool>,
+    register: bool,
 }
 
-fn parse_mcp_tool_attrs(attr: TokenStream) -> syn::Result<McpToolAttrs> {
-    let mut attrs = McpToolAttrs::default();
-    let attr_str = attr.to_string();
+fn convert_mcp_tool_attrs(darling: DarlingMcpToolAttrs) -> Result<McpToolAttrs, syn::Error> {
+    let timeout = darling
+        .timeout
+        .and_then(|s| parse_duration_secs(&s).or_else(|| s.parse::<u64>().ok()));
 
-    if has_attr_flag(&attr_str, "public") {
-        attrs.is_public = true;
-    }
-
-    if has_attr_flag(&attr_str, "read_only") {
-        attrs.read_only_hint = Some(true);
-    }
-    if has_attr_flag(&attr_str, "destructive") {
-        attrs.destructive_hint = Some(true);
-    }
-    if has_attr_flag(&attr_str, "idempotent") {
-        attrs.idempotent_hint = Some(true);
-    }
-    if has_attr_flag(&attr_str, "open_world") {
-        attrs.open_world_hint = Some(true);
-    }
-
-    if let Some(role_start) = attr_str.find("require_role")
-        && let Some(paren_start) = attr_str[role_start..].find('(')
-    {
-        let remaining = &attr_str[role_start + paren_start + 1..];
-        if let Some(paren_end) = remaining.find(')') {
-            let role = remaining[..paren_end].trim().trim_matches('"');
-            attrs.required_role = Some(role.to_string());
-        }
-    }
-
-    if let Some(name_start) = attr_str.find("name")
-        && let Some(eq_pos) = attr_str[name_start..].find('=')
-    {
-        let after_eq = &attr_str[name_start + eq_pos + 1..];
-        if let Some(quote_start) = after_eq.find('"') {
-            let after_quote = &after_eq[quote_start + 1..];
-            if let Some(quote_end) = after_quote.find('"') {
-                attrs.name = Some(after_quote[..quote_end].to_string());
-            }
-        }
-    }
-
-    if let Some(title_start) = attr_str.find("title")
-        && let Some(eq_pos) = attr_str[title_start..].find('=')
-    {
-        let after_eq = &attr_str[title_start + eq_pos + 1..];
-        if let Some(quote_start) = after_eq.find('"') {
-            let after_quote = &after_eq[quote_start + 1..];
-            if let Some(quote_end) = after_quote.find('"') {
-                attrs.title = Some(after_quote[..quote_end].to_string());
-            }
-        }
-    }
-
-    if let Some(desc_start) = attr_str.find("description")
-        && let Some(eq_pos) = attr_str[desc_start..].find('=')
-    {
-        let after_eq = &attr_str[desc_start + eq_pos + 1..];
-        if let Some(quote_start) = after_eq.find('"') {
-            let after_quote = &after_eq[quote_start + 1..];
-            if let Some(quote_end) = after_quote.find('"') {
-                attrs.description = Some(after_quote[..quote_end].to_string());
-            }
-        }
-    }
-
-    if let Some(timeout_start) = attr_str.find("timeout")
-        && let Some(eq_pos) = attr_str[timeout_start..].find('=')
-    {
-        let remaining = &attr_str[timeout_start + eq_pos + 1..];
-        let trimmed = remaining.trim();
-        let raw = trimmed
-            .split(&[',', ')'])
-            .next()
-            .unwrap_or("")
-            .trim()
-            .trim_matches('"');
-        if let Some(secs) = crate::utils::parse_duration_secs(raw) {
-            attrs.timeout = Some(secs);
-        } else if let Ok(secs) = raw.parse::<u64>() {
-            attrs.timeout = Some(secs);
-        }
-    }
-
-    if let Some(rl_start) = attr_str.find("rate_limit")
-        && let Some(paren_start) = attr_str[rl_start..].find('(')
-    {
-        let remaining = &attr_str[rl_start + paren_start + 1..];
-        if let Some(paren_end) = remaining.find(')') {
-            let rl_content = &remaining[..paren_end];
-
-            if let Some(req_start) = rl_content.find("requests")
-                && let Some(eq_pos) = rl_content[req_start..].find('=')
+    let (rate_limit_requests, rate_limit_per_secs, rate_limit_key) =
+        if let Some(ref rl) = darling.rate_limit {
+            validate_rate_limit(rl)?;
+            let per = parse_rate_limit_per(rl)?;
+            if let Some(ref key) = rl.key
+                && let Err(msg) = validate_rate_limit_key(key)
             {
-                let after_eq = &rl_content[req_start + eq_pos + 1..];
-                if let Ok(n) = after_eq
-                    .split(',')
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .parse::<u32>()
-                {
-                    attrs.rate_limit_requests = Some(n);
-                }
+                return Err(syn::Error::new(proc_macro2::Span::call_site(), msg));
             }
+            (rl.requests, per, rl.key.clone())
+        } else {
+            (None, None, None)
+        };
 
-            if let Some(per_start) = rl_content.find("per")
-                && let Some(quote_start) = rl_content[per_start..].find('"')
-            {
-                let after_quote = &rl_content[per_start + quote_start + 1..];
-                if let Some(quote_end) = after_quote.find('"') {
-                    let per_str = &after_quote[..quote_end];
-                    attrs.rate_limit_per_secs = parse_duration_secs(per_str);
-                }
-            }
-
-            if let Some(key_start) = rl_content.find("key")
-                && let Some(quote_start) = rl_content[key_start..].find('"')
-            {
-                let after_quote = &rl_content[key_start + quote_start + 1..];
-                if let Some(quote_end) = after_quote.find('"') {
-                    let key = &after_quote[..quote_end];
-                    if !["user", "ip", "tenant", "global"].contains(&key)
-                        && !key.starts_with("custom(")
-                    {
-                        return Err(syn::Error::new(
-                            proc_macro2::Span::call_site(),
-                            format!(
-                                "invalid rate_limit key \"{key}\". Valid keys: \"user\", \"ip\", \"tenant\", \"global\", or \"custom(...)\"."
-                            ),
-                        ));
-                    }
-                    attrs.rate_limit_key = Some(key.to_string());
-                }
-            }
-        }
-    }
-
-    Ok(attrs)
+    Ok(McpToolAttrs {
+        name: darling.name,
+        title: darling.title,
+        description: darling.description,
+        required_role: darling.require_role.map(|r| r.0),
+        is_public: darling.public,
+        timeout,
+        rate_limit_requests,
+        rate_limit_per_secs,
+        rate_limit_key,
+        read_only_hint: if darling.read_only { Some(true) } else { None },
+        destructive_hint: if darling.destructive {
+            Some(true)
+        } else {
+            None
+        },
+        idempotent_hint: if darling.idempotent { Some(true) } else { None },
+        open_world_hint: if darling.open_world { Some(true) } else { None },
+        register: darling.register,
+    })
 }
 
 fn validate_tool_name(name: &str) -> syn::Result<()> {
@@ -289,6 +216,14 @@ fn expand_mcp_tool_impl(input: ItemFn, attrs: McpToolAttrs) -> syn::Result<Token
     let is_ref = type_str.starts_with('&');
 
     let arg_params: Vec<_> = params.iter().skip(1).cloned().collect();
+
+    for p in &arg_params {
+        if let FnArg::Typed(pat_type) = p
+            && let Some((reason, span)) = crate::utils::check_arg_wire_type(&pat_type.ty)
+        {
+            return Err(syn::Error::new(span, reason));
+        }
+    }
 
     let args_fields: Vec<TokenStream2> = arg_params
         .iter()
@@ -478,6 +413,16 @@ fn expand_mcp_tool_impl(input: ItemFn, attrs: McpToolAttrs) -> syn::Result<Token
         }
     };
 
+    let registration = if attrs.register {
+        quote! {
+            forge::inventory::submit!(forge::AutoHandler(|registries| {
+                registries.mcp_tools.register::<#struct_name>();
+            }));
+        }
+    } else {
+        quote! {}
+    };
+
     Ok(quote! {
         #inner_fn
 
@@ -526,9 +471,7 @@ fn expand_mcp_tool_impl(input: ItemFn, attrs: McpToolAttrs) -> syn::Result<Token
                 }
             }
 
-            forge::inventory::submit!(forge::AutoMcpTool(|registry| {
-                registry.register::<#struct_name>();
-            }));
+            #registration
         }
     })
 }

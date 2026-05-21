@@ -98,19 +98,20 @@ interface WorkflowStepState {
     | "running"
     | "completed"
     | "failed"
-    | "compensated"
     | "skipped";
   error: string | null;
 }
 
 type WorkflowStatus =
-  | "created"
+  | "pending"
   | "running"
+  | "sleeping"
   | "waiting"
   | "completed"
-  | "compensating"
-  | "compensated"
   | "failed"
+  | "blocked_missing_version"
+  | "blocked_signature_mismatch"
+  | "blocked_missing_handler"
   | "not_found";
 ```
 
@@ -281,19 +282,6 @@ curl -X POST https://example.com/_api/rpc/export_users \
 ```
 
 Authentication is enforced identically to the standard `/rpc` endpoint.
-
-### Batch calls
-
-POST to `/_api/rpc/batch` with an array of call objects to reduce round-trips:
-
-```json
-[
-  { "fn": "get_user", "args": { "id": "abc-123" } },
-  { "fn": "get_team", "args": { "team_id": "t-456" } }
-]
-```
-
-The server executes queries in parallel and mutations serially. The generated client does not yet expose a typed `batch()` helper.
 
 ## Under the Hood
 

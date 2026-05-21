@@ -3,6 +3,10 @@
 //! Sessions are created when the first event arrives for a visitor_id.
 //! They are closed after `session_timeout_mins` of inactivity.
 
+// Signals tables are owned by the runtime crate and aren't always present in
+// the user's .sqlx cache; runtime queries are required.
+#![allow(clippy::disallowed_methods)]
+
 use std::sync::Arc;
 
 use sqlx::PgPool;
@@ -133,60 +137,6 @@ pub async fn close_stale_sessions(pool: &PgPool, timeout_mins: u32) {
     }
 }
 
-/// Link a user_id to an existing session (on identify).
-pub async fn identify_session(pool: &PgPool, session_id: Uuid, user_id: Uuid) {
-    let result = sqlx::query(
-        "UPDATE forge_signals_sessions SET user_id = $2 WHERE id = $1 AND user_id IS NULL",
-    )
-    .bind(session_id)
-    .bind(user_id)
-    .execute(pool)
-    .await;
-
-    if let Err(e) = result {
-        error!(error = %e, "failed to identify signal session");
-    }
-}
-
-/// Upsert user in forge_signals_users on identify().
-pub async fn upsert_user(
-    pool: &PgPool,
-    user_id: Uuid,
-    traits: &serde_json::Value,
-    referrer: Option<&str>,
-    utm_source: Option<&str>,
-    utm_medium: Option<&str>,
-    utm_campaign: Option<&str>,
-) {
-    let referrer_domain = referrer.and_then(extract_domain);
-
-    let result = sqlx::query(
-        "INSERT INTO forge_signals_users (
-            id, first_referrer, first_referrer_domain,
-            first_utm_source, first_utm_medium, first_utm_campaign,
-            traits, total_sessions, total_events
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, 1, 1)
-        ON CONFLICT (id) DO UPDATE SET
-            last_seen_at = NOW(),
-            total_events = forge_signals_users.total_events + 1,
-            traits = forge_signals_users.traits || $7,
-            updated_at = NOW()",
-    )
-    .bind(user_id)
-    .bind(referrer)
-    .bind(referrer_domain)
-    .bind(utm_source)
-    .bind(utm_medium)
-    .bind(utm_campaign)
-    .bind(traits)
-    .execute(pool)
-    .await;
-
-    if let Err(e) = result {
-        error!(error = %e, "failed to upsert signal user");
-    }
-}
-
 /// Spawn a background task that periodically closes stale sessions.
 pub fn spawn_session_reaper(pool: Arc<PgPool>, timeout_mins: u32) {
     tokio::spawn(async move {
@@ -202,15 +152,12 @@ pub fn spawn_session_reaper(pool: Arc<PgPool>, timeout_mins: u32) {
 
 /// Extract the domain from a URL string (e.g. "https://google.com/search" -> "google.com").
 fn extract_domain(url: &str) -> Option<String> {
-    // Strip scheme
     let without_scheme = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
         .unwrap_or(url);
 
-    // Take everything before the first /
     let domain = without_scheme.split('/').next()?;
-    // Strip port
     let domain = domain.split(':').next()?;
 
     if domain.is_empty() {

@@ -4,8 +4,11 @@
 //! definitions without requiring compilation.
 //!
 //! Key design decisions:
-//! - Context arguments are detected structurally (type ends with "Context"),
-//!   not by string-searching the entire token stream.
+//! - Context arguments are matched against `KNOWN_CONTEXT_TYPES`, a fixed list
+//!   of the 8 Forge context types. User-defined types like `AppContext` are not
+//!   accidentally skipped.
+//! - `Result<T, E>` extraction uses `syn::TypePath` recursion, handling
+//!   arbitrarily nested generics.
 //! - Unparseable inner types become `RustType::Custom(original_string)` instead
 //!   of silently falling back to `String`.
 //! - `NaiveTime` correctly maps to `RustType::LocalTime`.
@@ -39,9 +42,18 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Parse all Rust source files in a directory and extract schema definitions.
-pub fn parse_project(src_dir: &Path) -> Result<SchemaRegistry, Error> {
+/// Schema registry plus file-level parse failures from [`parse_project`].
+///
+/// Files that fail `syn::parse_file` are recorded instead of silently dropped,
+/// so a broken handler source doesn't disappear from the generated bindings.
+pub struct ParseOutcome {
+    pub registry: SchemaRegistry,
+    pub parse_failures: Vec<(PathBuf, String)>,
+}
+
+pub fn parse_project(src_dir: &Path) -> Result<ParseOutcome, Error> {
     let registry = SchemaRegistry::new();
+    let mut parse_failures = Vec::new();
 
     let mut files = Vec::new();
     collect_rs_files(src_dir, &mut files);
@@ -50,17 +62,21 @@ pub fn parse_project(src_dir: &Path) -> Result<SchemaRegistry, Error> {
     for path in &files {
         let content = std::fs::read_to_string(path)?;
         if let Err(e) = parse_file(&content, &registry) {
-            tracing::debug!(file = ?path, error = %e, "Failed to parse file");
+            tracing::warn!(file = ?path, error = %e, "failed to parse file; handlers in this file will be missing from generated bindings");
+            parse_failures.push((path.clone(), e.to_string()));
         }
     }
 
-    Ok(registry)
+    Ok(ParseOutcome {
+        registry,
+        parse_failures,
+    })
 }
 
-/// Validate every function in the registry uses types the binding emitters
-/// support. Surfaces platform-dependent types like `usize`/`isize` and
-/// unsupported integer widths up front instead of letting them fall through to
-/// silently-lossy `number` mappings on the frontend.
+/// Validate every function uses types the emitters support.
+///
+/// Surfaces `usize`/`isize` and unsupported integer widths before they fall
+/// through to silently-lossy `number` on the frontend.
 pub fn validate_registry(registry: &SchemaRegistry) -> Result<(), Vec<String>> {
     let mut errors = Vec::new();
     for func in registry.all_functions() {
@@ -115,9 +131,8 @@ fn unsupported_type_reason(name: &str) -> Option<String> {
     }
 }
 
-/// Scan a source directory and return every `(kind, name)` pair that appears in more
-/// than one file. The returned map is keyed by `"kind:name"` with a list of file paths
-/// as the value.
+/// Scan a source directory and return every `(kind, name)` pair that appears in more than one file.
+/// Map key is `"kind:name"`, value is the list of file paths.
 pub fn find_duplicate_handlers(src_dir: &Path) -> Result<BTreeMap<String, Vec<PathBuf>>, Error> {
     let mut occurrences: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
 
@@ -150,7 +165,6 @@ pub fn find_duplicate_handlers(src_dir: &Path) -> Result<BTreeMap<String, Vec<Pa
         .collect())
 }
 
-/// Parse a single Rust source file and extract schema definitions.
 fn parse_file(content: &str, registry: &SchemaRegistry) -> Result<(), Error> {
     let file = syn::parse_file(content).map_err(|e| Error::Parse {
         file: String::new(),
@@ -189,10 +203,6 @@ fn parse_file(content: &str, registry: &SchemaRegistry) -> Result<(), Error> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Attribute detection
-// ---------------------------------------------------------------------------
-
 /// Check if attributes contain `#[forge::name]` or `#[name]`.
 fn has_forge_attr(attrs: &[Attribute], name: &str) -> bool {
     attrs.iter().any(|attr| {
@@ -221,7 +231,6 @@ fn has_forge_enum_attr(attrs: &[Attribute]) -> bool {
     })
 }
 
-/// Check if attributes contain `#[derive(...Serialize...)]` or `#[derive(...Deserialize...)]`.
 fn has_serde_derive(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|attr| {
         if !attr.path().is_ident("derive") {
@@ -232,11 +241,6 @@ fn has_serde_derive(attrs: &[Attribute]) -> bool {
     })
 }
 
-// ---------------------------------------------------------------------------
-// Struct/model parsing
-// ---------------------------------------------------------------------------
-
-/// Parse a DTO struct (with Serialize/Deserialize) into a TableDef.
 fn parse_dto_struct(item: &syn::ItemStruct) -> Option<TableDef> {
     let struct_name = item.ident.to_string();
     let mut table = TableDef::new(&struct_name, &struct_name);
@@ -256,7 +260,6 @@ fn parse_dto_struct(item: &syn::ItemStruct) -> Option<TableDef> {
     Some(table)
 }
 
-/// Parse a struct with `#[model]` attribute into a TableDef.
 fn parse_model(item: &syn::ItemStruct) -> Option<TableDef> {
     let struct_name = item.ident.to_string();
     let table_name = get_table_name_from_attrs(&item.attrs).unwrap_or_else(|| {
@@ -288,10 +291,6 @@ fn parse_field(name: String, ty: &syn::Type, attrs: &[Attribute]) -> FieldDef {
     field
 }
 
-// ---------------------------------------------------------------------------
-// Enum parsing
-// ---------------------------------------------------------------------------
-
 fn parse_enum(item: &syn::ItemEnum) -> Option<EnumDef> {
     let enum_name = item.ident.to_string();
     let mut enum_def = EnumDef::new(&enum_name);
@@ -315,11 +314,6 @@ fn parse_enum(item: &syn::ItemEnum) -> Option<EnumDef> {
     Some(enum_def)
 }
 
-// ---------------------------------------------------------------------------
-// Function parsing
-// ---------------------------------------------------------------------------
-
-/// Parse a function with a forge decorator attribute.
 fn parse_function(item: &syn::ItemFn) -> Option<FunctionDef> {
     let kind = get_function_kind(&item.attrs)?;
     let func_name = item.sig.ident.to_string();
@@ -333,7 +327,6 @@ fn parse_function(item: &syn::ItemFn) -> Option<FunctionDef> {
     func.doc = get_doc_comment(&item.attrs);
     func.is_async = item.sig.asyncness.is_some();
 
-    // Parse arguments, skipping the context parameter.
     let mut is_first = true;
     for arg in &item.sig.inputs {
         if let FnArg::Typed(pat_type) = arg {
@@ -355,22 +348,33 @@ fn parse_function(item: &syn::ItemFn) -> Option<FunctionDef> {
     Some(func)
 }
 
-/// Check if a type is a Forge context type by examining the base type name.
-///
-/// Handles references (`&Context`, `&mut Context`) and qualified paths
-/// (`forge::QueryContext`). Only matches types whose final segment ends
-/// with "Context" — won't match `ContextManager` or `NoContextHere`.
+/// Known Forge context types. Only these are skipped as the first parameter.
+/// User-defined types like `AppContext` or `MyContext` are not matched.
+const KNOWN_CONTEXT_TYPES: &[&str] = &[
+    "QueryContext",
+    "MutationContext",
+    "JobContext",
+    "CronContext",
+    "WorkflowContext",
+    "DaemonContext",
+    "WebhookContext",
+    "McpToolContext",
+];
+
+/// Check if a type is a known Forge context type.
+/// Walks `&T`/`&mut T` references and checks the final path segment.
 fn is_context_type(ty: &syn::Type) -> bool {
-    // Get the type string, stripping whitespace for uniform matching.
-    let type_str = ty.to_token_stream().to_string().replace(' ', "");
-
-    // Strip leading references: &, &mut
-    let base = type_str.trim_start_matches('&').trim_start_matches("mut");
-
-    // Get the final path segment (after any :: qualifiers).
-    let final_segment = base.rsplit("::").next().unwrap_or(base);
-
-    final_segment.ends_with("Context")
+    let mut inner = ty;
+    while let syn::Type::Reference(r) = inner {
+        inner = &r.elem;
+    }
+    let syn::Type::Path(type_path) = inner else {
+        return false;
+    };
+    let Some(last) = type_path.path.segments.last() else {
+        return false;
+    };
+    KNOWN_CONTEXT_TYPES.contains(&last.ident.to_string().as_str())
 }
 
 fn get_function_kind(attrs: &[Attribute]) -> Option<FunctionKind> {
@@ -398,118 +402,79 @@ fn get_function_kind(attrs: &[Attribute]) -> Option<FunctionKind> {
     None
 }
 
-// ---------------------------------------------------------------------------
-// Type conversion
-// ---------------------------------------------------------------------------
-
-/// Extract the inner type from `Result<T, E>`.
+/// Extract the inner `T` from `Result<T, E>`.
 fn extract_result_type(ty: &syn::Type) -> RustType {
-    let type_str = quote::quote!(#ty).to_string().replace(' ', "");
-
-    if let Some(rest) = type_str.strip_prefix("Result<") {
-        // Find the inner type (T) before the comma or closing bracket.
-        let mut depth = 0;
-        let mut end_idx = 0;
-        for (i, c) in rest.chars().enumerate() {
-            match c {
-                '<' => depth += 1,
-                '>' => {
-                    if depth == 0 {
-                        end_idx = i;
-                        break;
-                    }
-                    depth -= 1;
-                }
-                ',' if depth == 0 => {
-                    end_idx = i;
-                    break;
-                }
-                _ => {}
-            }
-        }
-        let inner = &rest[..end_idx];
-        return match syn::parse_str::<syn::Type>(inner) {
-            Ok(inner_ty) => type_to_rust_type(&inner_ty),
-            Err(_) => {
-                tracing::warn!(
-                    "Could not parse Result inner type '{}', treating as custom type",
-                    inner
-                );
-                RustType::Custom(inner.to_string())
-            }
-        };
+    if let syn::Type::Path(type_path) = ty
+        && let Some(seg) = type_path.path.segments.last()
+        && seg.ident == "Result"
+        && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+        && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first()
+    {
+        return type_to_rust_type(inner_ty);
     }
 
     type_to_rust_type(ty)
 }
 
-/// Convert a `syn::Type` to `RustType`.
 fn type_to_rust_type(ty: &syn::Type) -> RustType {
-    let type_str = quote::quote!(#ty).to_string().replace(' ', "");
+    match ty {
+        syn::Type::Reference(r) => type_to_rust_type(&r.elem),
+        syn::Type::Path(tp) => path_to_rust_type(tp),
+        _ => RustType::Custom(quote::quote!(#ty).to_string()),
+    }
+}
 
-    match type_str.as_str() {
-        "String" | "&str" => RustType::String,
+fn path_to_rust_type(tp: &syn::TypePath) -> RustType {
+    let Some(last) = tp.path.segments.last() else {
+        return RustType::Custom(quote::quote!(#tp).to_string());
+    };
+    let ident = last.ident.to_string();
+
+    match ident.as_str() {
+        "String" | "str" => RustType::String,
         "i32" => RustType::I32,
         "i64" => RustType::I64,
         "f32" => RustType::F32,
         "f64" => RustType::F64,
         "bool" => RustType::Bool,
-        "Uuid" | "uuid::Uuid" => RustType::Uuid,
-        "DateTime<Utc>" | "chrono::DateTime<Utc>" | "chrono::DateTime<chrono::Utc>" => {
-            RustType::Instant
+        "Uuid" => RustType::Uuid,
+        "DateTime" => RustType::Instant,
+        "NaiveDate" => RustType::LocalDate,
+        "NaiveTime" => RustType::LocalTime,
+        "Value" => RustType::Json,
+        "Option" => {
+            let inner = first_generic_arg(last);
+            RustType::Option(Box::new(inner))
         }
-        "NaiveDate" | "chrono::NaiveDate" => RustType::LocalDate,
-        "NaiveTime" | "chrono::NaiveTime" => RustType::LocalTime,
-        "serde_json::Value" | "Value" => RustType::Json,
-        "Vec<u8>" => RustType::Bytes,
-        _ => parse_generic_or_custom(&type_str),
+        "Vec" => {
+            if is_vec_u8(last) {
+                return RustType::Bytes;
+            }
+            let inner = first_generic_arg(last);
+            RustType::Vec(Box::new(inner))
+        }
+        _ => RustType::Custom(ident),
     }
 }
 
-/// Handle generic types (`Option<T>`, `Vec<T>`) and custom types.
-fn parse_generic_or_custom(type_str: &str) -> RustType {
-    // Option<T>
-    if let Some(inner) = type_str
-        .strip_prefix("Option<")
-        .and_then(|s| s.strip_suffix('>'))
+fn is_vec_u8(seg: &syn::PathSegment) -> bool {
+    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+        && let Some(syn::GenericArgument::Type(syn::Type::Path(tp))) = args.args.first()
+        && let Some(s) = tp.path.segments.last()
     {
-        let inner_type = parse_inner_type(inner);
-        return RustType::Option(Box::new(inner_type));
+        return s.ident == "u8" && s.arguments.is_empty();
     }
+    false
+}
 
-    // Vec<T>
-    if let Some(inner) = type_str
-        .strip_prefix("Vec<")
-        .and_then(|s| s.strip_suffix('>'))
+fn first_generic_arg(seg: &syn::PathSegment) -> RustType {
+    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+        && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first()
     {
-        if inner == "u8" {
-            return RustType::Bytes;
-        }
-        let inner_type = parse_inner_type(inner);
-        return RustType::Vec(Box::new(inner_type));
+        return type_to_rust_type(inner_ty);
     }
-
-    // Everything else is a custom type.
-    RustType::Custom(type_str.to_string())
+    RustType::Custom(seg.ident.to_string())
 }
-
-/// Parse an inner type string, falling back to Custom on failure.
-fn parse_inner_type(inner: &str) -> RustType {
-    match syn::parse_str::<syn::Type>(inner) {
-        Ok(inner_ty) => type_to_rust_type(&inner_ty),
-        Err(_) => {
-            tracing::warn!(
-                "Could not parse inner type '{}', treating as custom type",
-                inner
-            );
-            RustType::Custom(inner.to_string())
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Attribute value helpers
-// ---------------------------------------------------------------------------
 
 /// Get `#[table(name = "...")]` value from attributes.
 fn get_table_name_from_attrs(attrs: &[Attribute]) -> Option<String> {
@@ -526,7 +491,6 @@ fn get_table_name_from_attrs(attrs: &[Attribute]) -> Option<String> {
     None
 }
 
-/// Get string value from attribute like `#[attr = "value"]`.
 fn get_attribute_string_value(attr: &Attribute) -> Option<String> {
     if let Meta::NameValue(nv) = &attr.meta
         && let Expr::Lit(lit) = &nv.value
@@ -537,7 +501,6 @@ fn get_attribute_string_value(attr: &Attribute) -> Option<String> {
     None
 }
 
-/// Get documentation comment from attributes.
 fn get_doc_comment(attrs: &[Attribute]) -> Option<String> {
     let docs: Vec<String> = attrs
         .iter()
@@ -562,7 +525,6 @@ fn get_doc_comment(attrs: &[Attribute]) -> Option<String> {
     }
 }
 
-/// Extract name value from `name = "value"` format.
 fn extract_name_value(s: &str) -> Option<String> {
     if let Some((_, value)) = s.split_once('=') {
         let value = value.trim();
@@ -573,32 +535,17 @@ fn extract_name_value(s: &str) -> Option<String> {
     None
 }
 
-// ---------------------------------------------------------------------------
-// Pluralization
-// ---------------------------------------------------------------------------
-
-/// Simple English pluralization for table names.
 fn pluralize(s: &str) -> String {
-    if s.ends_with('s')
-        || s.ends_with("sh")
-        || s.ends_with("ch")
-        || s.ends_with('x')
-        || s.ends_with('z')
-    {
-        format!("{}es", s)
-    } else if let Some(stem) = s.strip_suffix('y') {
-        if !s.ends_with("ay") && !s.ends_with("ey") && !s.ends_with("oy") && !s.ends_with("uy") {
-            format!("{}ies", stem)
-        } else {
-            format!("{}s", s)
-        }
-    } else {
-        format!("{}s", s)
-    }
+    forge_core::util::pluralize(s)
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::todo
+)]
 mod tests {
     use super::*;
 
@@ -649,7 +596,7 @@ mod tests {
     #[test]
     fn test_to_snake_case() {
         assert_eq!(to_snake_case("UserProfile"), "user_profile");
-        assert_eq!(to_snake_case("ID"), "i_d");
+        assert_eq!(to_snake_case("ID"), "id");
         assert_eq!(to_snake_case("createdAt"), "created_at");
     }
 
@@ -711,7 +658,6 @@ mod tests {
 
     #[test]
     fn test_context_detection_structural() {
-        // A type ending with "Context" should be detected.
         let source = r#"
             #[query]
             async fn test(ctx: forge::QueryContext, id: Uuid) -> Result<User> {
@@ -723,13 +669,12 @@ mod tests {
         let func = registry
             .get_function("test")
             .expect("test function should be registered");
-        assert_eq!(func.args.len(), 1); // Only `id`, context was skipped.
+        assert_eq!(func.args.len(), 1); // context skipped, only `id` remains
         assert_eq!(func.args.first().expect("id arg should exist").name, "id");
     }
 
     #[test]
     fn test_context_detection_does_not_match_other_types() {
-        // A type NOT ending with "Context" should not be skipped.
         let source = r#"
             #[query]
             async fn test(data: ContextManager, id: Uuid) -> Result<User> {
@@ -741,8 +686,48 @@ mod tests {
         let func = registry
             .get_function("test")
             .expect("test function should be registered");
-        // "ContextManager" ends with "Manager", not "Context", so both args kept.
-        assert_eq!(func.args.len(), 2);
+        assert_eq!(func.args.len(), 2); // "ContextManager" is not a known context type
+    }
+
+    #[test]
+    fn test_user_defined_context_not_skipped() {
+        let source = r#"
+            #[query]
+            async fn test(ctx: AppContext, id: Uuid) -> Result<User> {
+                todo!()
+            }
+        "#;
+        let registry = SchemaRegistry::new();
+        parse_file(source, &registry).expect("user context should parse");
+        let func = registry
+            .get_function("test")
+            .expect("test function should be registered");
+        assert_eq!(func.args.len(), 2, "AppContext should not be skipped");
+    }
+
+    #[test]
+    fn test_nested_result_type_extraction() {
+        let source = r#"
+            #[query]
+            async fn nested(ctx: QueryContext) -> Result<Vec<Option<User>>> {
+                todo!()
+            }
+        "#;
+        let registry = SchemaRegistry::new();
+        parse_file(source, &registry).expect("nested result should parse");
+        let func = registry
+            .get_function("nested")
+            .expect("nested function should be registered");
+        match &func.return_type {
+            RustType::Vec(inner) => match inner.as_ref() {
+                RustType::Option(inner2) => match inner2.as_ref() {
+                    RustType::Custom(name) => assert_eq!(name, "User"),
+                    other => panic!("Expected Custom(User), got: {other:?}"),
+                },
+                other => panic!("Expected Option, got: {other:?}"),
+            },
+            other => panic!("Expected Vec, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -768,11 +753,6 @@ mod tests {
         );
     }
 
-    // --- End-to-end pipeline tests ---
-
-    /// Simulates a realistic Forge project with models, enums, queries, mutations,
-    /// jobs, and workflows, then verifies the full parse pipeline produces
-    /// consistent and complete schema.
     #[test]
     fn end_to_end_realistic_schema_pipeline() {
         let source = r#"
@@ -851,23 +831,19 @@ mod tests {
         let registry = SchemaRegistry::new();
         parse_file(source, &registry).expect("realistic project should parse");
 
-        // Models
         let users = registry.get_table("users").expect("users table");
         assert_eq!(users.fields.len(), 5);
         let posts = registry.get_table("posts").expect("posts table");
         assert_eq!(posts.fields.len(), 7);
 
-        // Enum
         let role_enum = registry.get_enum("UserRole").expect("UserRole enum");
         assert_eq!(role_enum.variants.len(), 3);
 
-        // DTO
         let args = registry
             .get_table("CreateUserArgs")
             .expect("CreateUserArgs DTO");
         assert_eq!(args.fields.len(), 3);
 
-        // Functions
         let all_fns = registry.all_functions();
         assert_eq!(all_fns.len(), 7);
 
@@ -901,7 +877,6 @@ mod tests {
             .collect();
         assert_eq!(crons.len(), 1);
 
-        // Verify function details
         let get_users = registry.get_function("get_users").expect("get_users");
         assert!(
             get_users.args.is_empty(),
@@ -919,7 +894,6 @@ mod tests {
         assert_eq!(send_email.args.len(), 1);
     }
 
-    /// Verify that BindingSet correctly groups and filters functions.
     #[test]
     fn binding_set_from_mixed_schema() {
         use crate::binding::BindingSet;
@@ -949,7 +923,7 @@ mod tests {
         assert_eq!(bindings.mutations.len(), 1);
         assert_eq!(bindings.jobs.len(), 1);
         assert_eq!(bindings.workflows.len(), 1);
-        // Crons must NOT appear in client bindings
+        // crons are not client-callable and must not appear in bindings
     }
 
     #[test]
@@ -991,5 +965,76 @@ mod tests {
             },
             other => panic!("Expected Vec, got: {other:?}"),
         }
+    }
+
+    fn parse_type(s: &str) -> RustType {
+        let ty: syn::Type = syn::parse_str(s).expect("valid type");
+        type_to_rust_type(&ty)
+    }
+
+    #[test]
+    fn type_to_rust_type_primitives() {
+        assert_eq!(parse_type("String"), RustType::String);
+        assert_eq!(parse_type("&str"), RustType::String);
+        assert_eq!(parse_type("i32"), RustType::I32);
+        assert_eq!(parse_type("i64"), RustType::I64);
+        assert_eq!(parse_type("f32"), RustType::F32);
+        assert_eq!(parse_type("f64"), RustType::F64);
+        assert_eq!(parse_type("bool"), RustType::Bool);
+    }
+
+    #[test]
+    fn type_to_rust_type_qualified_paths() {
+        assert_eq!(parse_type("Uuid"), RustType::Uuid);
+        assert_eq!(parse_type("uuid::Uuid"), RustType::Uuid);
+        assert_eq!(parse_type("DateTime<Utc>"), RustType::Instant);
+        assert_eq!(parse_type("chrono::DateTime<Utc>"), RustType::Instant);
+        assert_eq!(
+            parse_type("chrono::DateTime<chrono::Utc>"),
+            RustType::Instant
+        );
+        assert_eq!(parse_type("NaiveDate"), RustType::LocalDate);
+        assert_eq!(parse_type("chrono::NaiveDate"), RustType::LocalDate);
+        assert_eq!(parse_type("NaiveTime"), RustType::LocalTime);
+        assert_eq!(parse_type("chrono::NaiveTime"), RustType::LocalTime);
+        assert_eq!(parse_type("serde_json::Value"), RustType::Json);
+        assert_eq!(parse_type("Value"), RustType::Json);
+    }
+
+    #[test]
+    fn type_to_rust_type_containers() {
+        assert_eq!(parse_type("Vec<u8>"), RustType::Bytes);
+        assert_eq!(
+            parse_type("Vec<String>"),
+            RustType::Vec(Box::new(RustType::String))
+        );
+        assert_eq!(
+            parse_type("Option<i32>"),
+            RustType::Option(Box::new(RustType::I32))
+        );
+        assert_eq!(
+            parse_type("Option<Vec<String>>"),
+            RustType::Option(Box::new(RustType::Vec(Box::new(RustType::String))))
+        );
+    }
+
+    #[test]
+    fn type_to_rust_type_std_qualified_vec() {
+        assert_eq!(
+            parse_type("std::vec::Vec<i32>"),
+            RustType::Vec(Box::new(RustType::I32))
+        );
+        assert_eq!(
+            parse_type("std::option::Option<String>"),
+            RustType::Option(Box::new(RustType::String))
+        );
+    }
+
+    #[test]
+    fn type_to_rust_type_custom() {
+        assert_eq!(
+            parse_type("MyStruct"),
+            RustType::Custom("MyStruct".to_string())
+        );
     }
 }

@@ -4,40 +4,13 @@ use crate::function::AuthContext;
 
 /// Extension point for role resolution.
 ///
-/// The default implementation returns the flat `roles` list from the JWT
-/// as parsed into [`AuthContext`]. Apps that need hierarchy expansion, group
-/// membership lookups, or remote permission services can register a custom
-/// resolver via `ForgeBuilder::with_role_resolver`.
+/// The default implementation returns the flat `roles` JWT claim.
+/// Register a custom resolver via `ForgeBuilder::with_role_resolver` for
+/// hierarchy expansion, group lookups, or remote permission services.
 ///
-/// The resolver is called for every request with a `require_role` constraint.
-/// Keep implementations cheap — cache remote lookups externally.
-///
-/// # Example
-///
-/// ```ignore
-/// struct HierarchyResolver;
-///
-/// impl RoleResolver for HierarchyResolver {
-///     fn resolve(&self, auth: &AuthContext) -> Vec<String> {
-///         let mut roles = auth.roles().to_vec();
-///         if roles.contains(&"admin".to_string()) {
-///             roles.extend(["editor", "viewer"].map(String::from));
-///         }
-///         roles
-///     }
-/// }
-///
-/// Forge::builder()
-///     .with_role_resolver(Arc::new(HierarchyResolver))
-///     .build()?
-///     .run()
-///     .await
-/// ```
+/// Called once per `require_role` check. Keep implementations cheap — the
+/// result is not cached between calls.
 pub trait RoleResolver: Send + Sync + 'static {
-    /// Return the effective roles for a request's auth context.
-    ///
-    /// Called once per `require_role` check. The returned vec is not cached
-    /// between calls — if your implementation is expensive, cache internally.
     fn resolve(&self, auth: &AuthContext) -> Vec<String>;
 }
 

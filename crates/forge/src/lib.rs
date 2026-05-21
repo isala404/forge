@@ -26,62 +26,38 @@ mod auto_register;
 mod embedded;
 mod runtime;
 
-// Re-export forge_core for macro-generated code
 #[doc(hidden)]
 pub use forge_core;
 
-// Re-export schemars so user crates don't need it as a direct dep.
 // The mcp_tool scaffold uses `#[schemars(crate = "forge::schemars")]` to point
 // the derive at this re-export.
 pub use forge_core::schemars;
 
-// Re-export inventory for macro-generated auto-registration
 #[doc(hidden)]
 pub use inventory;
 
-// Re-export auto-registration types for macro-generated code.
-// Each type is feature-gated; using e.g. `#[forge::job]` without the `jobs`
-// feature gives a compile error from the missing `forge::AutoJob` import.
-pub use auto_register::{AutoMutation, AutoQuery};
+pub use auto_register::{AutoHandler, HandlerRegistries};
 
-#[cfg(feature = "cron")]
-pub use auto_register::AutoCron;
-#[cfg(feature = "daemons")]
-pub use auto_register::AutoDaemon;
-#[cfg(feature = "jobs")]
-pub use auto_register::AutoJob;
-#[cfg(feature = "workflows")]
-pub use auto_register::AutoWorkflow;
-#[cfg(feature = "gateway")]
-pub use auto_register::{AutoMcpTool, AutoWebhook};
-
-// Re-export embedded frontend handler
 #[cfg(feature = "embedded-frontend")]
 pub use embedded::serve_embedded_assets;
 
-// Re-export proc macros at crate root
 pub use forge_macros::{
     cron, daemon, forge_enum, job, mcp_tool, model, mutation, query, webhook, workflow,
 };
 
-// Re-export Migration type for programmatic migrations
-pub use forge_runtime::migrations::Migration;
+pub use forge_runtime::pg::migration::Migration;
 
-// Re-export testing utilities
 pub use forge_core::testing;
 
-// Re-export testing assertion macros
 pub use forge_core::{
-    assert_err, assert_err_variant, assert_http_called, assert_http_not_called,
+    assert_err, assert_err_matches, assert_err_variant, assert_http_called, assert_http_not_called,
     assert_job_dispatched, assert_job_not_dispatched, assert_ok, assert_workflow_not_started,
     assert_workflow_started,
 };
 
-/// All internal FORGE schema SQL concatenated.
-///
-/// For tests: apply before user migrations. In production, migration runner handles versioning.
+/// All internal FORGE schema SQL concatenated. Apply before user migrations in tests.
 pub fn get_internal_sql() -> String {
-    forge_runtime::migrations::get_all_system_sql()
+    forge_runtime::pg::migration::get_all_system_sql()
 }
 
 pub use runtime::prelude;

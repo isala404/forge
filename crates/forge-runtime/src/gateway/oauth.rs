@@ -3,22 +3,27 @@
 //! Implements Authorization Code + PKCE flow so MCP clients like Claude Code
 //! can auto-authenticate via browser login.
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use axum::Extension;
 use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use forge_core::auth::Claims;
 use forge_core::oauth::{self, validate_redirect_uri};
+use forge_core::rate_limit::{RateLimitConfig, RateLimitKey};
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use sha2::Sha256;
+use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
 use super::auth::AuthMiddleware;
+use crate::rate_limit::StrictRateLimiter;
 
 const AUTHORIZE_PAGE: &str = include_str!("oauth_authorize.html");
 const AUTH_CODE_TTL_SECS: i64 = 60;
@@ -29,37 +34,88 @@ const MCP_AUDIENCE: &str = "forge:mcp";
 // Rate limiting constants
 const REGISTER_RATE_LIMIT: u32 = 10; // per minute per IP
 const LOGIN_FAIL_RATE_LIMIT: u32 = 5; // per minute per IP
-const RATE_WINDOW_SECS: u64 = 60;
-const RATE_CLEANUP_THRESHOLD: usize = 100;
+const RATE_WINDOW: Duration = Duration::from_secs(60);
 
-/// In-memory rate limiter for OAuth endpoints.
-#[derive(Clone, Default)]
-struct OAuthRateLimiter {
-    buckets: Arc<RwLock<HashMap<String, (u32, Instant)>>>,
+/// CSRF token TTL. OAuth authorize -> form-post is interactive; 5 minutes is
+/// generous for a human consent step while still bounding replay surface.
+const CSRF_TTL_SECS: u64 = 300;
+
+/// Length of the random nonce inside a CSRF token, in bytes. 16 bytes of
+/// entropy is plenty when paired with an HMAC over (timestamp || nonce).
+const CSRF_NONCE_LEN: usize = 16;
+
+/// Stateless HMAC-signed CSRF token: `base64url(ts_be_u64 || nonce || hmac)`.
+///
+/// Lives entirely in the cookie and the form field — no node-local state — so
+/// the OAuth flow tolerates a load balancer that bounces the authorize and the
+/// POST callback to different nodes.
+fn mint_csrf_token(secret: &[u8]) -> String {
+    // CSPRNG nonce sourced from UUIDv4 (avoids pulling `rand` into the gateway
+    // crate). 16 bytes matches the constant.
+    let nonce: [u8; CSRF_NONCE_LEN] = *Uuid::new_v4().as_bytes();
+    let ts: u64 = chrono::Utc::now().timestamp().max(0) as u64;
+
+    let mut payload = Vec::with_capacity(8 + CSRF_NONCE_LEN);
+    payload.extend_from_slice(&ts.to_be_bytes());
+    payload.extend_from_slice(&nonce);
+
+    let mac = match Hmac::<Sha256>::new_from_slice(secret) {
+        Ok(m) => m,
+        Err(_) => return String::new(),
+    };
+    let mut mac = mac;
+    mac.update(&payload);
+    let sig = mac.finalize().into_bytes();
+
+    let mut out = Vec::with_capacity(payload.len() + sig.len());
+    out.extend_from_slice(&payload);
+    out.extend_from_slice(&sig);
+    URL_SAFE_NO_PAD.encode(&out)
 }
 
-impl OAuthRateLimiter {
-    async fn check(&self, key: &str, limit: u32) -> bool {
-        let mut buckets = self.buckets.write().await;
-        let now = Instant::now();
-        let window = Duration::from_secs(RATE_WINDOW_SECS);
-
-        // Purge stale entries periodically to prevent unbounded growth
-        if buckets.len() > RATE_CLEANUP_THRESHOLD {
-            buckets.retain(|_, (_, ts)| now.duration_since(*ts) <= window);
-        }
-
-        let entry = buckets.entry(key.to_string()).or_insert((0, now));
-        if now.duration_since(entry.1) > window {
-            *entry = (1, now);
-            return true;
-        }
-        if entry.0 >= limit {
-            return false;
-        }
-        entry.0 += 1;
-        true
+/// Verify a CSRF token: signature must match and the timestamp must be inside
+/// the TTL window. Returns true only when both checks pass.
+fn verify_csrf_token(token: &str, secret: &[u8]) -> bool {
+    let bytes = match URL_SAFE_NO_PAD.decode(token) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    // 8 byte ts + 16 byte nonce + 32 byte HMAC-SHA256 output.
+    const EXPECTED_LEN: usize = 8 + CSRF_NONCE_LEN + 32;
+    if bytes.len() != EXPECTED_LEN {
+        return false;
     }
+    let (payload, sig) = match bytes.split_at_checked(8 + CSRF_NONCE_LEN) {
+        Some(parts) => parts,
+        None => return false,
+    };
+
+    let mut mac = match Hmac::<Sha256>::new_from_slice(secret) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    mac.update(payload);
+    if mac.verify_slice(sig).is_err() {
+        return false;
+    }
+
+    // Bounds-checked: payload is exactly 8 + CSRF_NONCE_LEN bytes, so the
+    // first 8 are always present.
+    let ts_slice = match payload.get(..8) {
+        Some(s) => s,
+        None => return false,
+    };
+    let mut ts_bytes = [0u8; 8];
+    ts_bytes.copy_from_slice(ts_slice);
+    let ts = u64::from_be_bytes(ts_bytes);
+
+    let now = chrono::Utc::now().timestamp().max(0) as u64;
+    // Reject tokens issued in the (significant) future, allowing only minor
+    // clock drift.
+    if ts > now.saturating_add(60) {
+        return false;
+    }
+    now.saturating_sub(ts) <= CSRF_TTL_SECS
 }
 
 /// Shared state for OAuth endpoints.
@@ -74,9 +130,10 @@ pub struct OAuthState {
     project_name: String,
     jwt_secret: String,
     session_cookie_ttl_secs: i64,
-    rate_limiter: OAuthRateLimiter,
-    /// CSRF tokens: token -> expiry
-    csrf_tokens: Arc<RwLock<HashMap<String, Instant>>>,
+    /// PG-backed rate limiter, shared across nodes. The OAuth endpoints used
+    /// to keep their own in-memory limiter, which multiplied the effective
+    /// quota by the cluster size.
+    rate_limiter: Arc<StrictRateLimiter>,
     /// Whether `POST /_api/oauth/register` accepts unauthenticated callers.
     /// Mirrors `mcp.allow_unauthenticated_dcr` from forge.toml. Defaults
     /// to `false` so a fresh deployment is not an open client registry.
@@ -97,6 +154,7 @@ impl OAuthState {
         session_cookie_ttl_secs: i64,
         allow_unauthenticated_dcr: bool,
     ) -> Self {
+        let rate_limiter = Arc::new(StrictRateLimiter::new(pool.clone()));
         Self {
             pool,
             auth_middleware,
@@ -107,30 +165,32 @@ impl OAuthState {
             project_name,
             jwt_secret,
             session_cookie_ttl_secs,
-            rate_limiter: OAuthRateLimiter::default(),
-            csrf_tokens: Arc::new(RwLock::new(HashMap::new())),
+            rate_limiter,
             allow_unauthenticated_dcr,
         }
     }
 
-    async fn store_csrf(&self, token: &str) {
-        let mut tokens = self.csrf_tokens.write().await;
-        let now = Instant::now();
-        let expiry = now + Duration::from_secs(600); // 10 min
-        tokens.insert(token.to_string(), expiry);
-        // Purge expired tokens periodically, not on every insert
-        if tokens.len() > RATE_CLEANUP_THRESHOLD {
-            tokens.retain(|_, exp| *exp > now);
+    /// Cluster-wide rate-limit check. Returns `true` when the request is
+    /// inside the configured quota. On DB errors we fail closed — the OAuth
+    /// surface is a known abuse target and unbounded access during a DB hiccup
+    /// is worse than rejecting a few legitimate retries.
+    async fn rate_check(&self, key: &str, limit: u32) -> bool {
+        let cfg = RateLimitConfig::new(limit, RATE_WINDOW).with_key(RateLimitKey::Global);
+        match self.rate_limiter.check(key, &cfg).await {
+            Ok(r) => r.allowed,
+            Err(e) => {
+                tracing::warn!(error = %e, key = %key, "OAuth rate-limit check failed; denying");
+                false
+            }
         }
     }
 
-    async fn validate_csrf(&self, token: &str) -> bool {
-        let mut tokens = self.csrf_tokens.write().await;
-        if let Some(expiry) = tokens.remove(token) {
-            expiry > Instant::now()
-        } else {
-            false
-        }
+    fn mint_csrf(&self) -> String {
+        mint_csrf_token(self.jwt_secret.as_bytes())
+    }
+
+    fn validate_csrf(&self, token: &str) -> bool {
+        verify_csrf_token(token, self.jwt_secret.as_bytes())
     }
 }
 
@@ -205,6 +265,7 @@ pub struct RegisterResponse {
 
 pub async fn oauth_register(
     headers: HeaderMap,
+    Extension(resolved_ip): Extension<super::ResolvedClientIp>,
     State(state): State<Arc<OAuthState>>,
     Json(req): Json<RegisterRequest>,
 ) -> Response {
@@ -240,13 +301,9 @@ pub async fn oauth_register(
         }
     }
 
-    let ip = client_ip(&headers);
-    let rate_key = format!("oauth_register:{ip}");
-    if !state
-        .rate_limiter
-        .check(&rate_key, REGISTER_RATE_LIMIT)
-        .await
-    {
+    let ip = resolved_ip.0.as_deref().unwrap_or("unknown");
+    let rate_key = format!("oauth:register:{ip}");
+    if !state.rate_check(&rate_key, REGISTER_RATE_LIMIT).await {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({
@@ -269,6 +326,49 @@ pub async fn oauth_register(
             Json(serde_json::json!({
                 "error": "too_many_clients",
                 "error_description": "Maximum number of registered clients reached"
+            })),
+        )
+            .into_response();
+    }
+
+    if req.client_name.as_ref().is_some_and(|n| n.len() > 256) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_client_metadata",
+                "error_description": "client_name must not exceed 256 characters"
+            })),
+        )
+            .into_response();
+    }
+    if req.redirect_uris.len() > 20 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_client_metadata",
+                "error_description": "redirect_uris must not exceed 20 entries"
+            })),
+        )
+            .into_response();
+    }
+    for uri in &req.redirect_uris {
+        if uri.len() > 2048 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid_client_metadata",
+                    "error_description": "each redirect_uri must not exceed 2048 characters"
+                })),
+            )
+                .into_response();
+        }
+    }
+    if req.grant_types.len() > 10 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_client_metadata",
+                "error_description": "grant_types must not exceed 10 entries"
             })),
         )
             .into_response();
@@ -380,6 +480,7 @@ fn default_s256() -> String {
 
 pub async fn oauth_authorize_get(
     headers: HeaderMap,
+    Extension(resolved_ip): Extension<super::ResolvedClientIp>,
     Query(params): Query<AuthorizeQuery>,
     State(state): State<Arc<OAuthState>>,
 ) -> Response {
@@ -439,13 +540,23 @@ pub async fn oauth_authorize_get(
     }
 
     // Check for existing session cookie (set by auth middleware on API calls)
-    let session_subject = extract_cookie(&headers, "forge_session")
-        .and_then(|v| super::auth::verify_session_cookie(&v, &state.jwt_secret));
+    let verify_ua = headers
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    let session_subject = extract_cookie(&headers, "forge_session").and_then(|v| {
+        super::auth::verify_session_cookie(
+            &v,
+            &state.jwt_secret,
+            resolved_ip.0.as_deref(),
+            verify_ua.as_deref(),
+        )
+    });
     let has_session = session_subject.is_some();
 
-    // Generate CSRF token (T5)
-    let csrf_token = oauth::generate_random_token();
-    state.store_csrf(&csrf_token).await;
+    // Generate CSRF token (T5). Stateless HMAC-signed token so the form-post
+    // callback can verify it on any node behind a load balancer.
+    let csrf_token = state.mint_csrf();
 
     let auth_mode = if has_session {
         "session" // user is known from cookie, show consent directly
@@ -488,10 +599,12 @@ pub async fn oauth_authorize_get(
         "Content-Security-Policy",
         HeaderValue::from_static("frame-ancestors 'none'"),
     );
-    // Set CSRF cookie (T1, T5)
+    // Set CSRF cookie (T1, T5). Cookie max-age tracks the token's HMAC TTL so
+    // the browser drops the cookie at roughly the same time the server would
+    // reject the token.
     let csrf_secure_flag = "; Secure";
     let cookie = format!(
-        "forge_oauth_csrf={csrf_token}; Path=/_api/oauth/; HttpOnly; SameSite=Lax; Max-Age=600{csrf_secure_flag}"
+        "forge_oauth_csrf={csrf_token}; Path=/_api/oauth/; HttpOnly; SameSite=Lax; Max-Age={CSRF_TTL_SECS}{csrf_secure_flag}"
     );
     if let Ok(cookie_val) = HeaderValue::from_str(&cookie) {
         response
@@ -520,13 +633,20 @@ pub struct AuthorizeForm {
 
 pub async fn oauth_authorize_post(
     headers: HeaderMap,
+    Extension(resolved_ip): Extension<super::ResolvedClientIp>,
     State(state): State<Arc<OAuthState>>,
     axum::Form(form): axum::Form<AuthorizeForm>,
 ) -> Response {
-    // Validate CSRF (T5): check both cookie and form value
+    // Validate CSRF (T5): check both cookie and form value. The token itself
+    // is HMAC-verified — node-local state no longer constrains which node
+    // serves the form-post callback.
     let csrf_from_cookie = extract_cookie(&headers, "forge_oauth_csrf");
     let csrf_valid = if let Some(cookie_csrf) = csrf_from_cookie {
-        cookie_csrf == form.csrf_token && state.validate_csrf(&form.csrf_token).await
+        let cookie_match: bool = cookie_csrf
+            .as_bytes()
+            .ct_eq(form.csrf_token.as_bytes())
+            .into();
+        cookie_match && state.validate_csrf(&form.csrf_token)
     } else {
         false
     };
@@ -541,9 +661,10 @@ pub async fn oauth_authorize_post(
             .into_response();
     }
 
-    // Rate limit login failures (T7)
-    let ip = client_ip(&headers);
-    let rate_key = format!("oauth_login:{ip}");
+    // Rate limit login failures (T7). PG-backed key so the budget is shared
+    // across cluster nodes.
+    let ip = resolved_ip.0.as_deref().unwrap_or("unknown");
+    let rate_key = format!("oauth:login:{ip}");
 
     // Validate client and redirect_uri again (form could be tampered)
     let client = sqlx::query!(
@@ -579,8 +700,18 @@ pub async fn oauth_authorize_post(
     // Authenticate user: try session cookie first, then token, then email/password
     let user_id: Uuid;
 
-    let session_subject = extract_cookie(&headers, "forge_session")
-        .and_then(|v| super::auth::verify_session_cookie(&v, &state.jwt_secret));
+    let post_verify_ua = headers
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    let session_subject = extract_cookie(&headers, "forge_session").and_then(|v| {
+        super::auth::verify_session_cookie(
+            &v,
+            &state.jwt_secret,
+            resolved_ip.0.as_deref(),
+            post_verify_ua.as_deref(),
+        )
+    });
 
     if let Some(subject) = session_subject {
         // Session cookie flow: user identified by signed cookie from previous API calls.
@@ -631,11 +762,7 @@ pub async fn oauth_authorize_post(
             );
         }
 
-        if !state
-            .rate_limiter
-            .check(&rate_key, LOGIN_FAIL_RATE_LIMIT)
-            .await
-        {
+        if !state.rate_check(&rate_key, LOGIN_FAIL_RATE_LIMIT).await {
             return authorize_error_redirect(
                 &form.redirect_uri,
                 form.state.as_deref(),
@@ -652,17 +779,28 @@ pub async fn oauth_authorize_post(
         .fetch_optional(&state.pool)
         .await;
 
-        // Constant-time login: always run bcrypt even if user not found to
-        // prevent timing side-channels that reveal valid email addresses.
-        // Cost 10 dummy hash generated via: bcrypt::hash("dummy", 10)
-        const DUMMY_HASH: &str = "$2b$10$x5F0VyTQ6qjX5YKr.WPmXuGNQzGqGN1pYnHvMBRz5bFm3VUSqJGi";
+        // Constant-time login: always run argon2id verify even if user not
+        // found to prevent timing side-channels that reveal valid emails.
+        const DUMMY_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$BVZdp6MuG5LPIhHn/YNmhk/MWyLDoR//ljnfCNAr8Wg";
         let (found_id, hash) = match &row {
             Ok(Some(r)) if r.password_hash.is_some() => {
                 (Some(r.id), r.password_hash.as_deref().unwrap_or(DUMMY_HASH))
             }
             _ => (None, DUMMY_HASH),
         };
-        let password_valid = bcrypt::verify(password, hash).unwrap_or(false);
+        let password_valid = {
+            use password_hash::PasswordHash;
+            PasswordHash::new(hash)
+                .ok()
+                .and_then(|parsed| {
+                    use argon2::{Algorithm, Argon2, Params, PasswordVerifier, Version};
+                    let params = Params::new(65536, 3, 1, None).expect("valid argon2 params");
+                    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+                        .verify_password(password.as_bytes(), &parsed)
+                        .ok()
+                })
+                .is_some()
+        };
         if password_valid {
             if let Some(id) = found_id {
                 user_id = id;
@@ -743,8 +881,14 @@ pub async fn oauth_authorize_post(
     // instead of the login form. This is same-origin (backend serves both
     // the authorize page and this POST), so the cookie sticks.
     let cookie_ttl = state.session_cookie_ttl_secs;
-    let cookie_value =
-        super::auth::sign_session_cookie(&user_id.to_string(), &state.jwt_secret, cookie_ttl);
+    let sign_ua = headers.get("user-agent").and_then(|v| v.to_str().ok());
+    let cookie_value = super::auth::sign_session_cookie(
+        &user_id.to_string(),
+        &state.jwt_secret,
+        cookie_ttl,
+        resolved_ip.0.as_deref(),
+        sign_ua,
+    );
     let secure_flag = "; Secure";
     let session_cookie = format!(
         "forge_session={cookie_value}; Path=/_api/oauth/; HttpOnly; SameSite=Lax; Max-Age={cookie_ttl}{secure_flag}"
@@ -972,7 +1116,7 @@ fn mcp_token_issuer(
             .audience(MCP_AUDIENCE)
             .duration_secs(ttl)
             .build()
-            .map_err(forge_core::ForgeError::Internal)?;
+            .map_err(forge_core::ForgeError::internal)?;
         issuer.sign(&claims)
     }
 }
@@ -1012,27 +1156,16 @@ fn base_url_from_headers(headers: &HeaderMap) -> String {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("localhost:9081");
 
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("http");
+    // Do not trust x-forwarded-proto: OAuth routes bypass the trusted-proxy
+    // middleware, so any client can spoof the header. Default to "https" for
+    // production safety; localhost gets "http" for local development.
+    let scheme = if host.starts_with("localhost") || host.starts_with("127.0.0.1") {
+        "http"
+    } else {
+        "https"
+    };
 
     format!("{scheme}://{host}")
-}
-
-fn client_ip(headers: &HeaderMap) -> String {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(|s| s.trim().to_string())
-        .or_else(|| {
-            headers
-                .get("x-real-ip")
-                .and_then(|v| v.to_str().ok())
-                .map(String::from)
-        })
-        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -1056,17 +1189,248 @@ fn html_escape(s: &str) -> String {
 }
 
 fn urlencoding(s: &str) -> String {
-    // Minimal percent-encoding for OAuth parameters
-    let mut result = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                result.push(b as char);
-            }
-            _ => {
-                result.push_str(&format!("%{b:02X}"));
-            }
-        }
+    percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    #[test]
+    fn html_escape_neutralizes_script_tags() {
+        let xss = "<script>alert('xss')</script>";
+        let escaped = html_escape(xss);
+        assert_eq!(
+            escaped,
+            "&lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;"
+        );
+        assert!(!escaped.contains('<'));
+        assert!(!escaped.contains('>'));
     }
-    result
+
+    #[test]
+    fn html_escape_handles_quotes_and_ampersands() {
+        assert_eq!(html_escape("a & b"), "a &amp; b");
+        assert_eq!(html_escape(r#"say "hi""#), "say &quot;hi&quot;");
+        assert_eq!(html_escape("it's"), "it&#x27;s");
+    }
+
+    #[test]
+    fn html_escape_orders_ampersand_first_to_avoid_double_escape() {
+        // If we replaced `<` first as `&lt;`, then replaced `&` -> `&amp;`,
+        // the literal `<` would render as `&amp;lt;` and break the page.
+        // The current implementation escapes `&` first, so a raw `<` becomes
+        // exactly `&lt;`.
+        assert_eq!(html_escape("<"), "&lt;");
+    }
+
+    #[test]
+    fn urlencoding_percent_encodes_non_alphanumeric() {
+        // NON_ALPHANUMERIC encodes everything except [A-Za-z0-9].
+        assert_eq!(urlencoding("hello world"), "hello%20world");
+        assert_eq!(urlencoding("a/b?c=d&e"), "a%2Fb%3Fc%3Dd%26e");
+    }
+
+    #[test]
+    fn urlencoding_preserves_alphanumerics() {
+        assert_eq!(urlencoding("AbCdEf123"), "AbCdEf123");
+    }
+
+    #[test]
+    fn base_url_defaults_to_https_for_remote_host() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("api.example.com"));
+        assert_eq!(base_url_from_headers(&headers), "https://api.example.com");
+    }
+
+    #[test]
+    fn base_url_uses_http_for_localhost() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("localhost:9081"));
+        assert_eq!(base_url_from_headers(&headers), "http://localhost:9081");
+
+        headers.insert("host", HeaderValue::from_static("127.0.0.1:9081"));
+        assert_eq!(base_url_from_headers(&headers), "http://127.0.0.1:9081");
+    }
+
+    #[test]
+    fn base_url_ignores_x_forwarded_proto() {
+        // Anyone can spoof X-Forwarded-Proto on OAuth routes (no trusted-proxy
+        // middleware). Verify we ignore it and use the safe default.
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("api.example.com"));
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("http"));
+        assert_eq!(base_url_from_headers(&headers), "https://api.example.com");
+    }
+
+    #[test]
+    fn base_url_falls_back_when_host_missing() {
+        let headers = HeaderMap::new();
+        assert_eq!(base_url_from_headers(&headers), "http://localhost:9081");
+    }
+
+    #[test]
+    fn extract_cookie_finds_named_value() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("session=abc123; theme=dark"),
+        );
+        assert_eq!(extract_cookie(&headers, "session"), Some("abc123".into()));
+        assert_eq!(extract_cookie(&headers, "theme"), Some("dark".into()));
+        assert_eq!(extract_cookie(&headers, "missing"), None);
+    }
+
+    #[test]
+    fn extract_cookie_handles_whitespace_between_pairs() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::COOKIE, HeaderValue::from_static("a=1;   b=2;\tc=3"));
+        assert_eq!(extract_cookie(&headers, "b"), Some("2".into()));
+        assert_eq!(extract_cookie(&headers, "c"), Some("3".into()));
+    }
+
+    #[test]
+    fn extract_cookie_returns_none_when_header_absent() {
+        let headers = HeaderMap::new();
+        assert_eq!(extract_cookie(&headers, "anything"), None);
+    }
+
+    #[test]
+    fn extract_cookie_skips_malformed_pairs() {
+        // A cookie segment with no `=` is simply skipped, not treated as a
+        // match for any name.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("malformed; real=value"),
+        );
+        assert_eq!(extract_cookie(&headers, "malformed"), None);
+        assert_eq!(extract_cookie(&headers, "real"), Some("value".into()));
+    }
+
+    #[test]
+    fn csrf_round_trip_accepts_freshly_minted_token() {
+        let secret = b"oauth-csrf-secret-32-bytes-pad!!!";
+        let token = mint_csrf_token(secret);
+        assert!(!token.is_empty());
+        assert!(verify_csrf_token(&token, secret));
+    }
+
+    #[test]
+    fn csrf_verify_rejects_wrong_secret() {
+        let token = mint_csrf_token(b"secret-A-32-bytes-pad!!!!!!!!!!!");
+        assert!(!verify_csrf_token(
+            &token,
+            b"secret-B-32-bytes-pad!!!!!!!!!!!"
+        ));
+    }
+
+    #[test]
+    fn csrf_verify_rejects_tampered_payload() {
+        let secret = b"oauth-csrf-secret-32-bytes-pad!!!";
+        let token = mint_csrf_token(secret);
+        // Flip the last char of the base64url string to perturb the HMAC.
+        let mut tampered = token.clone();
+        let last = tampered.pop().expect("token non-empty");
+        tampered.push(if last == 'A' { 'B' } else { 'A' });
+        assert!(!verify_csrf_token(&tampered, secret));
+    }
+
+    #[test]
+    fn csrf_verify_rejects_garbage_input() {
+        let secret = b"oauth-csrf-secret-32-bytes-pad!!!";
+        assert!(!verify_csrf_token("not-base64-!!!", secret));
+        assert!(!verify_csrf_token("", secret));
+        assert!(!verify_csrf_token("AAAA", secret)); // valid base64 but wrong length
+    }
+
+    #[test]
+    fn csrf_verify_rejects_token_older_than_ttl() {
+        let secret = b"oauth-csrf-secret-32-bytes-pad!!!";
+
+        // Hand-craft a token with a stale timestamp so we don't have to wait
+        // CSRF_TTL_SECS in a unit test.
+        let stale_ts: u64 = (chrono::Utc::now().timestamp() - (CSRF_TTL_SECS as i64) - 5) as u64;
+        let nonce: [u8; CSRF_NONCE_LEN] = *Uuid::new_v4().as_bytes();
+        let mut payload = Vec::with_capacity(8 + CSRF_NONCE_LEN);
+        payload.extend_from_slice(&stale_ts.to_be_bytes());
+        payload.extend_from_slice(&nonce);
+
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("hmac accepts any key");
+        mac.update(&payload);
+        let sig = mac.finalize().into_bytes();
+
+        let mut out = Vec::with_capacity(payload.len() + sig.len());
+        out.extend_from_slice(&payload);
+        out.extend_from_slice(&sig);
+        let stale_token = URL_SAFE_NO_PAD.encode(&out);
+
+        assert!(!verify_csrf_token(&stale_token, secret));
+    }
+
+    #[tokio::test]
+    async fn token_error_returns_400_with_oauth_error_shape() {
+        let resp = token_error("invalid_grant", "bad code");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let body = to_bytes(resp.into_body(), 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "invalid_grant");
+        assert_eq!(json["error_description"], "bad code");
+    }
+
+    #[test]
+    fn authorize_error_redirect_encodes_query_params_and_state() {
+        let resp = authorize_error_redirect(
+            "https://client.example.com/cb",
+            Some("xyz state"),
+            "access_denied",
+            "user said no",
+        );
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(location.starts_with("https://client.example.com/cb?"));
+        // Parameter names are hard-coded literals; only the values are passed
+        // through urlencoding. NON_ALPHANUMERIC encodes both `_` (%5F) and ` `
+        // (%20), so error VALUES carrying underscores get encoded too.
+        assert!(location.contains("error=access%5Fdenied"), "got {location}");
+        assert!(
+            location.contains("error_description=user%20said%20no"),
+            "got {location}"
+        );
+        assert!(location.contains("state=xyz%20state"), "got {location}");
+    }
+
+    #[test]
+    fn authorize_error_redirect_omits_state_when_absent() {
+        let resp = authorize_error_redirect(
+            "https://client.example.com/cb",
+            None,
+            "invalid_request",
+            "missing param",
+        );
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(!location.contains("state="));
+        assert!(
+            location.contains("error=invalid%5Frequest"),
+            "got {location}"
+        );
+    }
+
+    #[test]
+    fn default_s256_returns_canonical_pkce_method() {
+        assert_eq!(default_s256(), "S256");
+    }
 }

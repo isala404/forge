@@ -1,5 +1,3 @@
-<!--
--->
 <script lang="ts">
   import { onMount, onDestroy, type Snippet } from 'svelte';
   import { createForgeClient } from './client.js';

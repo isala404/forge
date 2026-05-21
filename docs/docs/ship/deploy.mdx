@@ -100,15 +100,11 @@ Migrations run automatically on startup with distributed locking.
 
 ```sql
 -- migrations/0001_create_users.sql
--- @up
 CREATE TABLE users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     email TEXT UNIQUE NOT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
-
--- @down
-DROP TABLE users;
 ```
 
 Forge acquires a PostgreSQL advisory lock before running migrations:

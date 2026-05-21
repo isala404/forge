@@ -153,12 +153,10 @@ impl ForgeAuth {
     }
 }
 
-/// Read the auth handle from context.
 pub fn use_forge_auth() -> ForgeAuth {
     use_context::<ForgeAuth>()
 }
 
-/// Read the stored viewer, deserialized into the app's viewer type.
 /// Returns `None` when unauthenticated or if the viewer hasn't been set.
 pub fn use_viewer<V: DeserializeOwned + Clone + 'static>() -> Option<V> {
     use_forge_auth().viewer::<V>()

@@ -224,13 +224,29 @@ jobs:
             cp -r .sqlx "$crate_dir/.sqlx"
           done
 
+          wait_for_crate() {
+            local crate=$1 version=$2 elapsed=0
+            echo "Waiting for $crate@$version on crates.io index..."
+            while [ $elapsed -lt 120 ]; do
+              if curl -sf "https://crates.io/api/v1/crates/$crate/$version" | grep -q '"version"'; then
+                echo "$crate@$version is indexed"
+                return 0
+              fi
+              sleep 5
+              elapsed=$((elapsed + 5))
+            done
+            echo "Warning: $crate@$version not yet indexed after 120s, proceeding anyway"
+          }
+          VERSION="${{ needs.bump-versions.outputs.version }}"
+
           for pkg in forge-macros forge-core forge-runtime forge-codegen; do
-            sleep 30 && publish_crate -p $pkg --allow-dirty
+            publish_crate -p $pkg --allow-dirty
+            wait_for_crate "$pkg" "$VERSION"
           done
-          sleep 30 && cd packages/forge-dioxus && publish_crate --allow-dirty
-          cd "$GITHUB_WORKSPACE"
+          publish_crate -p forge-dioxus --allow-dirty
+          wait_for_crate "forge-dioxus" "$VERSION"
           bash scripts/build-template-archive.sh
-          sleep 30 && publish_crate -p forgex --allow-dirty
+          publish_crate -p forgex --allow-dirty
 
   publish-npm:
     name: Publish npm

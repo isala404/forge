@@ -6,16 +6,16 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
-use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use super::parallel::ParallelBuilder;
 use super::step::StepStatus;
 use super::suspend::{SuspendReason, WorkflowEvent};
 use crate::env::{EnvAccess, EnvProvider, RealEnvProvider};
-use crate::function::AuthContext;
+use crate::function::{AuthContext, KvHandle};
 use crate::http::CircuitBreakerClient;
 use crate::{ForgeError, Result};
+
+const LOCK_POISONED: &str = "workflow lock poisoned";
 
 /// Type alias for compensation handler function.
 pub type CompensationHandler = Arc<
@@ -98,24 +98,25 @@ pub struct WorkflowContext {
     /// Default timeout for outbound HTTP requests made through the
     /// circuit-breaker client. `None` means unlimited.
     http_timeout: Option<Duration>,
-    /// Step states (for resumption).
     step_states: Arc<RwLock<HashMap<String, StepState>>>,
-    /// Completed steps in order (for compensation).
+    /// Ordered list of completed step names, used to drive compensation in reverse.
     completed_steps: Arc<RwLock<Vec<String>>>,
-    /// Compensation handlers for completed steps.
     compensation_handlers: Arc<RwLock<HashMap<String, CompensationHandler>>>,
-    /// Channel for signaling suspension (sent by workflow, received by executor).
-    suspend_tx: Option<mpsc::Sender<SuspendReason>>,
-    /// Whether this is a resumed execution.
     is_resumed: bool,
-    /// Whether this execution resumed specifically from a sleep (timer expired).
     resumed_from_sleep: bool,
-    /// Tenant ID for multi-tenancy.
     tenant_id: Option<Uuid>,
-    /// Environment variable provider.
     env_provider: Arc<dyn EnvProvider>,
-    /// User-defined key-value state that persists across suspension points.
+    /// Persists across suspension points.
     saved_state: Arc<RwLock<HashMap<String, serde_json::Value>>>,
+    kv: Option<Arc<dyn KvHandle>>,
+    /// When `false` (default), `record_step_start` skips the DB write;
+    /// `persist_step_complete`'s upsert covers the missing start row, saving
+    /// one roundtrip per step. Set `true` for long-running steps where
+    /// in-progress observability matters.
+    persist_step_start: bool,
+    /// Set by `signal_suspend()` so the executor can read the reason without
+    /// a `ForgeError` variant as a side-channel.
+    suspend_reason: Arc<std::sync::Mutex<Option<SuspendReason>>>,
 }
 
 impl WorkflowContext {
@@ -139,13 +140,25 @@ impl WorkflowContext {
             step_states: Arc::new(RwLock::new(HashMap::new())),
             completed_steps: Arc::new(RwLock::new(Vec::new())),
             compensation_handlers: Arc::new(RwLock::new(HashMap::new())),
-            suspend_tx: None,
+
             is_resumed: false,
             resumed_from_sleep: false,
             tenant_id: None,
             env_provider: Arc::new(RealEnvProvider::new()),
             saved_state: Arc::new(RwLock::new(HashMap::new())),
+            kv: None,
+            persist_step_start: false,
+            suspend_reason: Arc::new(std::sync::Mutex::new(None)),
         }
+    }
+
+    /// Enable DB writes for `record_step_start`. By default, only
+    /// `record_step_complete` writes to the database (its upsert handles
+    /// the missing start row). Enable this for long-running steps where
+    /// observing in-progress state is important.
+    pub fn with_persist_step_start(mut self, persist: bool) -> Self {
+        self.persist_step_start = persist;
+        self
     }
 
     /// Create a resumed workflow context.
@@ -168,13 +181,30 @@ impl WorkflowContext {
             step_states: Arc::new(RwLock::new(HashMap::new())),
             completed_steps: Arc::new(RwLock::new(Vec::new())),
             compensation_handlers: Arc::new(RwLock::new(HashMap::new())),
-            suspend_tx: None,
+
             is_resumed: true,
             resumed_from_sleep: false,
             tenant_id: None,
             env_provider: Arc::new(RealEnvProvider::new()),
             saved_state: Arc::new(RwLock::new(HashMap::new())),
+            kv: None,
+            persist_step_start: false,
+            suspend_reason: Arc::new(std::sync::Mutex::new(None)),
         }
+    }
+
+    /// Attach a KV store handle. Called by the runtime before handing the
+    /// context to the handler.
+    pub fn with_kv(mut self, kv: Arc<dyn KvHandle>) -> Self {
+        self.kv = Some(kv);
+        self
+    }
+
+    /// Access the KV store.
+    pub fn kv(&self) -> crate::error::Result<&dyn KvHandle> {
+        self.kv
+            .as_deref()
+            .ok_or_else(|| crate::error::ForgeError::internal("KV store not available"))
     }
 
     /// Set environment provider.
@@ -186,12 +216,6 @@ impl WorkflowContext {
     /// Mark that this context resumed from a sleep (timer expired).
     pub fn with_resumed_from_sleep(mut self) -> Self {
         self.resumed_from_sleep = true;
-        self
-    }
-
-    /// Set the suspend channel.
-    pub fn with_suspend_channel(mut self, tx: mpsc::Sender<SuspendReason>) -> Self {
-        self.suspend_tx = Some(tx);
         self
     }
 
@@ -249,7 +273,7 @@ impl WorkflowContext {
 
     /// Restore saved state from persisted data (used on resume).
     pub fn with_saved_state(self, state: HashMap<String, serde_json::Value>) -> Self {
-        *self.saved_state.write().expect("workflow lock poisoned") = state;
+        *self.saved_state.write().expect(LOCK_POISONED) = state;
         self
     }
 
@@ -259,7 +283,7 @@ impl WorkflowContext {
             .map_err(|e| crate::ForgeError::Serialization(e.to_string()))?;
         self.saved_state
             .write()
-            .expect("workflow lock poisoned")
+            .expect(LOCK_POISONED)
             .insert(key.to_string(), json);
         Ok(())
     }
@@ -269,7 +293,7 @@ impl WorkflowContext {
         &self,
         key: &str,
     ) -> crate::Result<Option<T>> {
-        let guard = self.saved_state.read().expect("workflow lock poisoned");
+        let guard = self.saved_state.read().expect(LOCK_POISONED);
         match guard.get(key) {
             Some(value) => {
                 let result = serde_json::from_value(value.clone())
@@ -282,10 +306,7 @@ impl WorkflowContext {
 
     /// Get a snapshot of all saved state for persistence.
     pub fn take_saved_state(&self) -> HashMap<String, serde_json::Value> {
-        self.saved_state
-            .read()
-            .expect("workflow lock poisoned")
-            .clone()
+        self.saved_state.read().expect(LOCK_POISONED).clone()
     }
 
     /// Restore step states from persisted data.
@@ -296,18 +317,15 @@ impl WorkflowContext {
             .map(|(name, _)| name.clone())
             .collect();
 
-        *self.step_states.write().expect("workflow lock poisoned") = states;
-        *self
-            .completed_steps
-            .write()
-            .expect("workflow lock poisoned") = completed;
+        *self.step_states.write().expect(LOCK_POISONED) = states;
+        *self.completed_steps.write().expect(LOCK_POISONED) = completed;
         self
     }
 
     pub fn get_step_state(&self, name: &str) -> Option<StepState> {
         self.step_states
             .read()
-            .expect("workflow lock poisoned")
+            .expect(LOCK_POISONED)
             .get(name)
             .cloned()
     }
@@ -315,7 +333,7 @@ impl WorkflowContext {
     pub fn is_step_completed(&self, name: &str) -> bool {
         self.step_states
             .read()
-            .expect("workflow lock poisoned")
+            .expect(LOCK_POISONED)
             .get(name)
             .map(|s| s.status == StepStatus::Completed)
             .unwrap_or(false)
@@ -328,7 +346,7 @@ impl WorkflowContext {
     pub fn is_step_started(&self, name: &str) -> bool {
         self.step_states
             .read()
-            .expect("workflow lock poisoned")
+            .expect(LOCK_POISONED)
             .get(name)
             .map(|s| s.status != StepStatus::Pending)
             .unwrap_or(false)
@@ -337,87 +355,80 @@ impl WorkflowContext {
     pub fn get_step_result<T: serde::de::DeserializeOwned>(&self, name: &str) -> Option<T> {
         self.step_states
             .read()
-            .expect("workflow lock poisoned")
+            .expect(LOCK_POISONED)
             .get(name)
             .and_then(|s| s.result.as_ref())
             .and_then(|v| serde_json::from_value(v.clone()).ok())
     }
 
-    /// Record step start.
+    /// Record step start and persist to the database before returning.
     ///
     /// If the step is already running or beyond (completed/failed), this is a no-op.
-    /// This prevents race conditions when resuming workflows.
-    pub fn record_step_start(&self, name: &str) {
-        let mut states = self.step_states.write().expect("workflow lock poisoned");
-        let state = states
-            .entry(name.to_string())
-            .or_insert_with(|| StepState::new(name));
+    ///
+    /// **`name` is part of the workflow's persisted contract.** The `#[workflow]` macro
+    /// hashes every step name (along with wait keys, timeout, and type names) into a
+    /// signature stored at run creation. If you rename a step, the next deploy produces
+    /// a different signature, and any in-flight run that tries to resume will be blocked
+    /// with `WorkflowStatus::BlockedSignatureMismatch`. Treat step names as stable
+    /// public identifiers — change them only under a new workflow version.
+    ///
+    /// Persistence errors are propagated. A swallowed error here would let
+    /// the workflow continue running while its on-disk state diverged from
+    /// memory, producing a "completed" run with no recorded step rows.
+    pub async fn record_step_start(&self, name: &str) -> crate::Result<()> {
+        let state_clone = {
+            let mut states = self.step_states.write().expect(LOCK_POISONED);
+            let state = states
+                .entry(name.to_string())
+                .or_insert_with(|| StepState::new(name));
 
-        // Only update if step is pending - prevents race condition on resume
-        // where background DB update could overwrite a completed status
-        if state.status != StepStatus::Pending {
-            return;
+            if state.status != StepStatus::Pending {
+                return Ok(());
+            }
+
+            state.start();
+            state.clone()
+        };
+
+        if !self.persist_step_start {
+            return Ok(());
         }
 
-        state.start();
-        let state_clone = state.clone();
-        drop(states);
-
-        // Persist to database in background
-        let pool = self.db_pool.clone();
-        let run_id = self.run_id;
+        let step_id = Uuid::new_v4();
         let step_name = name.to_string();
-        tokio::spawn(async move {
-            let step_id = Uuid::new_v4();
-            if let Err(e) = sqlx::query!(
-                r#"
+        sqlx::query!(
+            r#"
                 INSERT INTO forge_workflow_steps (id, workflow_run_id, step_name, status, started_at)
                 VALUES ($1, $2, $3, $4, $5)
                 ON CONFLICT (workflow_run_id, step_name) DO NOTHING
                 "#,
-                step_id,
-                run_id,
-                step_name,
-                state_clone.status.as_str(),
-                state_clone.started_at,
-            )
-            .execute(&pool)
-            .await
-            {
-                tracing::warn!(
-                    workflow_run_id = %run_id,
-                    step = %step_name,
-                    "Failed to persist step start: {}",
-                    e
-                );
-            }
-        });
+            step_id,
+            self.run_id,
+            step_name,
+            state_clone.status.as_str(),
+            state_clone.started_at,
+        )
+        .execute(&self.db_pool)
+        .await
+        .map_err(crate::ForgeError::Database)?;
+        Ok(())
     }
 
-    /// Record step completion (fire-and-forget database update).
-    /// Use `record_step_complete_async` if you need to ensure persistence before continuing.
-    pub fn record_step_complete(&self, name: &str, result: serde_json::Value) {
+    /// Record step completion and persist to the database before returning.
+    ///
+    /// Errors from the persist call are propagated so the workflow can react
+    /// rather than continuing past a step the database never observed.
+    pub async fn record_step_complete(
+        &self,
+        name: &str,
+        result: serde_json::Value,
+    ) -> crate::Result<()> {
         let state_clone = self.update_step_state_complete(name, result);
 
-        // Persist to database in background
         if let Some(state) = state_clone {
-            let pool = self.db_pool.clone();
-            let run_id = self.run_id;
-            let step_name = name.to_string();
-            tokio::spawn(async move {
-                Self::persist_step_complete(&pool, run_id, &step_name, &state).await;
-            });
+            Self::persist_step_complete(&self.db_pool, self.run_id, name, &state).await?;
         }
-    }
-
-    /// Record step completion and wait for database persistence.
-    pub async fn record_step_complete_async(&self, name: &str, result: serde_json::Value) {
-        let state_clone = self.update_step_state_complete(name, result);
-
-        // Persist to database synchronously
-        if let Some(state) = state_clone {
-            Self::persist_step_complete(&self.db_pool, self.run_id, name, &state).await;
-        }
+        Ok(())
     }
 
     /// Update in-memory step state to completed.
@@ -426,17 +437,14 @@ impl WorkflowContext {
         name: &str,
         result: serde_json::Value,
     ) -> Option<StepState> {
-        let mut states = self.step_states.write().expect("workflow lock poisoned");
+        let mut states = self.step_states.write().expect(LOCK_POISONED);
         if let Some(state) = states.get_mut(name) {
             state.complete(result.clone());
         }
         let state_clone = states.get(name).cloned();
         drop(states);
 
-        let mut completed = self
-            .completed_steps
-            .write()
-            .expect("workflow lock poisoned");
+        let mut completed = self.completed_steps.write().expect(LOCK_POISONED);
         if !completed.contains(&name.to_string()) {
             completed.push(name.to_string());
         }
@@ -451,9 +459,9 @@ impl WorkflowContext {
         run_id: Uuid,
         step_name: &str,
         state: &StepState,
-    ) {
+    ) -> crate::Result<()> {
         // Use UPSERT to handle race condition where persist_step_start hasn't completed yet
-        if let Err(e) = sqlx::query!(
+        sqlx::query!(
             r#"
             INSERT INTO forge_workflow_steps (id, workflow_run_id, step_name, status, result, started_at, completed_at)
             VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6)
@@ -469,107 +477,92 @@ impl WorkflowContext {
         )
         .execute(pool)
         .await
-        {
-            tracing::warn!(
-                workflow_run_id = %run_id,
-                step = %step_name,
-                "Failed to persist step completion: {}",
-                e
-            );
-        }
+        .map_err(crate::ForgeError::Database)?;
+        Ok(())
     }
 
-    /// Record step failure.
-    pub fn record_step_failure(&self, name: &str, error: impl Into<String>) {
+    /// Record step failure and persist to the database before returning.
+    ///
+    /// Errors from the persist call are propagated so the workflow doesn't
+    /// declare a step "failed" only in memory while the row still claims it
+    /// is running.
+    pub async fn record_step_failure(
+        &self,
+        name: &str,
+        error: impl Into<String>,
+    ) -> crate::Result<()> {
         let error_str = error.into();
-        let mut states = self.step_states.write().expect("workflow lock poisoned");
-        if let Some(state) = states.get_mut(name) {
-            state.fail(error_str.clone());
-        }
-        let state_clone = states.get(name).cloned();
-        drop(states);
+        let state_clone = {
+            let mut states = self.step_states.write().expect(LOCK_POISONED);
+            if let Some(state) = states.get_mut(name) {
+                state.fail(error_str.clone());
+            }
+            states.get(name).cloned()
+        };
 
-        // Persist to database in background
         if let Some(state) = state_clone {
-            let pool = self.db_pool.clone();
-            let run_id = self.run_id;
             let step_name = name.to_string();
-            tokio::spawn(async move {
-                if let Err(e) = sqlx::query!(
-                    r#"
+            sqlx::query!(
+                r#"
                     UPDATE forge_workflow_steps
                     SET status = $3, error = $4, completed_at = $5
                     WHERE workflow_run_id = $1 AND step_name = $2
                     "#,
-                    run_id,
-                    step_name,
-                    state.status.as_str(),
-                    state.error as _,
-                    state.completed_at,
-                )
-                .execute(&pool)
-                .await
-                {
-                    tracing::warn!(
-                        workflow_run_id = %run_id,
-                        step = %step_name,
-                        "Failed to persist step failure: {}",
-                        e
-                    );
-                }
-            });
+                self.run_id,
+                step_name,
+                state.status.as_str(),
+                state.error as _,
+                state.completed_at,
+            )
+            .execute(&self.db_pool)
+            .await
+            .map_err(crate::ForgeError::Database)?;
         }
+        Ok(())
     }
 
-    /// Record step compensation.
-    pub fn record_step_compensated(&self, name: &str) {
-        let mut states = self.step_states.write().expect("workflow lock poisoned");
-        if let Some(state) = states.get_mut(name) {
-            state.compensate();
-        }
-        let state_clone = states.get(name).cloned();
-        drop(states);
+    /// Record step compensation and persist to the database before returning.
+    ///
+    /// Persistence is inline (not `tokio::spawn`'d): if the process crashes
+    /// after the in-memory state changes but before the row update lands, a
+    /// later resume would see the step as still completed and re-run its
+    /// compensation handler. Inline await ties durability to the caller and
+    /// surfaces failures through `Result`.
+    pub async fn record_step_compensated(&self, name: &str) -> crate::Result<()> {
+        let state_clone = {
+            let mut states = self.step_states.write().expect(LOCK_POISONED);
+            if let Some(state) = states.get_mut(name) {
+                state.compensate();
+            }
+            states.get(name).cloned()
+        };
 
-        // Persist to database in background
         if let Some(state) = state_clone {
-            let pool = self.db_pool.clone();
-            let run_id = self.run_id;
             let step_name = name.to_string();
-            tokio::spawn(async move {
-                if let Err(e) = sqlx::query!(
-                    r#"
+            sqlx::query!(
+                r#"
                     UPDATE forge_workflow_steps
                     SET status = $3
                     WHERE workflow_run_id = $1 AND step_name = $2
                     "#,
-                    run_id,
-                    step_name,
-                    state.status.as_str(),
-                )
-                .execute(&pool)
-                .await
-                {
-                    tracing::warn!(
-                        workflow_run_id = %run_id,
-                        step = %step_name,
-                        "Failed to persist step compensation: {}",
-                        e
-                    );
-                }
-            });
+                self.run_id,
+                step_name,
+                state.status.as_str(),
+            )
+            .execute(&self.db_pool)
+            .await
+            .map_err(crate::ForgeError::Database)?;
         }
+        Ok(())
     }
 
     pub fn completed_steps_reversed(&self) -> Vec<String> {
-        let completed = self.completed_steps.read().expect("workflow lock poisoned");
+        let completed = self.completed_steps.read().expect(LOCK_POISONED);
         completed.iter().rev().cloned().collect()
     }
 
     pub fn all_step_states(&self) -> HashMap<String, StepState> {
-        self.step_states
-            .read()
-            .expect("workflow lock poisoned")
-            .clone()
+        self.step_states.read().expect(LOCK_POISONED).clone()
     }
 
     pub fn elapsed(&self) -> chrono::Duration {
@@ -577,18 +570,24 @@ impl WorkflowContext {
     }
 
     /// Register a compensation handler for a step.
+    ///
+    /// Limitation: compensation handlers are in-memory closures and cannot
+    /// survive a process restart. If the process crashes between step completion
+    /// and workflow termination, compensation handlers for completed steps are
+    /// lost. The `WorkflowExecutor::cancel` method detects this and fails the
+    /// workflow with a clear message indicating manual remediation is required.
+    /// This is an inherent constraint of closure-based compensation; a durable
+    /// alternative would require serializable compensation descriptors (e.g.,
+    /// naming a registered handler + captured args as JSON).
     pub fn register_compensation(&self, step_name: &str, handler: CompensationHandler) {
-        let mut handlers = self
-            .compensation_handlers
-            .write()
-            .expect("workflow lock poisoned");
+        let mut handlers = self.compensation_handlers.write().expect(LOCK_POISONED);
         handlers.insert(step_name.to_string(), handler);
     }
 
     pub fn get_compensation_handler(&self, step_name: &str) -> Option<CompensationHandler> {
         self.compensation_handlers
             .read()
-            .expect("workflow lock poisoned")
+            .expect(LOCK_POISONED)
             .get(step_name)
             .cloned()
     }
@@ -596,7 +595,7 @@ impl WorkflowContext {
     pub fn has_compensation(&self, step_name: &str) -> bool {
         self.compensation_handlers
             .read()
-            .expect("workflow lock poisoned")
+            .expect(LOCK_POISONED)
             .contains_key(step_name)
     }
 
@@ -615,19 +614,35 @@ impl WorkflowContext {
             if let Some(handler) = handler {
                 let step_result = result.unwrap_or(serde_json::Value::Null);
                 match handler(step_result).await {
-                    Ok(()) => {
-                        self.record_step_compensated(&step_name);
-                        results.push((step_name, true));
-                    }
+                    Ok(()) => match self.record_step_compensated(&step_name).await {
+                        Ok(()) => results.push((step_name, true)),
+                        Err(e) => {
+                            tracing::error!(
+                                step = %step_name,
+                                error = %e,
+                                "Failed to persist step compensation; marking compensation as failed",
+                            );
+                            results.push((step_name, false));
+                        }
+                    },
                     Err(e) => {
                         tracing::error!(step = %step_name, error = %e, "Compensation failed");
                         results.push((step_name, false));
                     }
                 }
             } else {
-                // No compensation handler, mark as compensated anyway
-                self.record_step_compensated(&step_name);
-                results.push((step_name, true));
+                // No compensation handler, mark as compensated anyway.
+                match self.record_step_compensated(&step_name).await {
+                    Ok(()) => results.push((step_name, true)),
+                    Err(e) => {
+                        tracing::error!(
+                            step = %step_name,
+                            error = %e,
+                            "Failed to persist step compensation",
+                        );
+                        results.push((step_name, false));
+                    }
+                }
             }
         }
 
@@ -637,7 +652,7 @@ impl WorkflowContext {
     pub fn compensation_handlers(&self) -> HashMap<String, CompensationHandler> {
         self.compensation_handlers
             .read()
-            .expect("workflow lock poisoned")
+            .expect(LOCK_POISONED)
             .clone()
     }
 
@@ -775,7 +790,7 @@ impl WorkflowContext {
         )
         .fetch_optional(&self.db_pool)
         .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        .map_err(ForgeError::Database)?;
 
         Ok(result.map(|row| WorkflowEvent {
             id: row.id,
@@ -806,7 +821,7 @@ impl WorkflowContext {
         )
         .fetch_optional(&self.db_pool)
         .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        .map_err(ForgeError::Database)?;
 
         Ok(result.map(|row| WorkflowEvent {
             id: row.id,
@@ -817,12 +832,12 @@ impl WorkflowContext {
         }))
     }
 
-    /// Persist wake time to database.
+    /// Persist wake time to database and notify the scheduler.
     async fn set_wake_at(&self, wake_at: DateTime<Utc>) -> Result<()> {
         sqlx::query!(
             r#"
             UPDATE forge_workflow_runs
-            SET status = 'waiting', suspended_at = NOW(), wake_at = $2
+            SET status = 'sleeping', suspended_at = NOW(), wake_at = $2
             WHERE id = $1
             "#,
             self.run_id,
@@ -830,7 +845,23 @@ impl WorkflowContext {
         )
         .execute(&self.db_pool)
         .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        .map_err(ForgeError::Database)?;
+
+        // Notify the scheduler so it can pick up this workflow without
+        // waiting for the next poll interval.
+        #[allow(clippy::disallowed_methods)]
+        if let Err(e) = sqlx::query("SELECT pg_notify('forge_workflow_wakeup', $1::text)")
+            .bind(self.run_id.to_string())
+            .execute(&self.db_pool)
+            .await
+        {
+            tracing::debug!(
+                workflow_run_id = %self.run_id,
+                error = %e,
+                "Failed to send workflow wakeup notify (scheduler will poll)",
+            );
+        }
+
         Ok(())
     }
 
@@ -852,96 +883,28 @@ impl WorkflowContext {
         )
         .execute(&self.db_pool)
         .await
-        .map_err(|e| ForgeError::Database(e.to_string()))?;
+        .map_err(ForgeError::Database)?;
         Ok(())
     }
 
     /// Signal suspension to the executor.
+    ///
+    /// Stores the reason in the context so the executor can retrieve it via
+    /// `take_suspend_reason()` and returns a typed
+    /// [`ForgeError::WorkflowSuspended`] so the handler short-circuits via `?`.
+    /// The executor matches on the variant — no string parsing, no risk of a
+    /// real internal error being misclassified as a suspension.
     async fn signal_suspend(&self, reason: SuspendReason) -> Result<()> {
-        if let Some(ref tx) = self.suspend_tx {
-            tx.send(reason)
-                .await
-                .map_err(|_| ForgeError::Internal("Failed to signal suspension".into()))?;
-        }
-        // Return a special error that the executor catches
-        Err(ForgeError::WorkflowSuspended)
+        *self.suspend_reason.lock().expect(LOCK_POISONED) = Some(reason.clone());
+        Err(ForgeError::WorkflowSuspended(reason))
     }
 
-    /// Create a parallel builder for executing steps concurrently.
+    /// Take the stored suspension reason, if any.
     ///
-    /// # Example
-    /// ```ignore
-    /// let results = ctx.parallel()
-    ///     .step("fetch_user", || async { get_user(id).await })
-    ///     .step("fetch_orders", || async { get_orders(id).await })
-    ///     .step_with_compensate("charge_card",
-    ///         || async { charge_card(amount).await },
-    ///         |charge| async move { refund(charge.id).await })
-    ///     .run().await?;
-    ///
-    /// let user: User = results.get("fetch_user")?;
-    /// let orders: Vec<Order> = results.get("fetch_orders")?;
-    /// ```
-    pub fn parallel(&self) -> ParallelBuilder<'_> {
-        ParallelBuilder::new(self)
-    }
-
-    /// Create a step runner for executing a workflow step.
-    ///
-    /// This provides a fluent API for defining steps with retry, compensation,
-    /// timeout, and optional behavior.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// use std::time::Duration;
-    ///
-    /// // Simple step
-    /// let data = ctx.step("fetch_data", || async {
-    ///     Ok(fetch_from_api().await?)
-    /// }).run().await?;
-    ///
-    /// // Step with retry (3 attempts, 2 second delay)
-    /// ctx.step("send_email", || async {
-    ///     send_verification_email(&user.email).await
-    /// })
-    /// .retry(3, Duration::from_secs(2))
-    /// .run()
-    /// .await?;
-    ///
-    /// // Step with compensation (rollback on later failure)
-    /// let charge = ctx.step("charge_card", || async {
-    ///     charge_credit_card(&card).await
-    /// })
-    /// .compensate(|charge_result| async move {
-    ///     refund_charge(&charge_result.charge_id).await
-    /// })
-    /// .run()
-    /// .await?;
-    ///
-    /// // Optional step (failure won't trigger compensation)
-    /// ctx.step("notify_slack", || async {
-    ///     post_to_slack("User signed up!").await
-    /// })
-    /// .optional()
-    /// .run()
-    /// .await?;
-    ///
-    /// // Step with timeout
-    /// ctx.step("slow_operation", || async {
-    ///     process_large_file().await
-    /// })
-    /// .timeout(Duration::from_secs(60))
-    /// .run()
-    /// .await?;
-    /// ```
-    pub fn step<T, F, Fut>(&self, name: impl Into<String>, f: F) -> super::StepRunner<'_, T>
-    where
-        T: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
-        F: Fn() -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = crate::Result<T>> + Send + 'static,
-    {
-        super::StepRunner::new(self, name, f)
+    /// Called by the executor after the handler returns an error to determine
+    /// whether the error represents a suspension or a real failure.
+    pub fn take_suspend_reason(&self) -> Option<SuspendReason> {
+        self.suspend_reason.lock().expect(LOCK_POISONED).take()
     }
 }
 
@@ -960,6 +923,7 @@ mod tests {
     async fn test_workflow_context_creation() {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(1))
             .connect_lazy("postgres://localhost/nonexistent")
             .expect("Failed to create mock pool");
 
@@ -979,6 +943,7 @@ mod tests {
     async fn test_step_state_tracking() {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(1))
             .connect_lazy("postgres://localhost/nonexistent")
             .expect("Failed to create mock pool");
 
@@ -989,10 +954,25 @@ mod tests {
             CircuitBreakerClient::with_defaults(reqwest::Client::new()),
         );
 
-        ctx.record_step_start("step1");
+        // `persist_step_start` defaults to false, so record_step_start does
+        // not touch the database and is safe with a non-routable pool.
+        ctx.record_step_start("step1")
+            .await
+            .expect("record_step_start should not touch db when persist disabled");
         assert!(!ctx.is_step_completed("step1"));
 
-        ctx.record_step_complete("step1", serde_json::json!({"result": "ok"}));
+        // record_step_complete must always persist (it's the only path that
+        // writes the row), so without a live database it must surface an
+        // error rather than silently succeeding.
+        let complete_err = ctx
+            .record_step_complete("step1", serde_json::json!({"result": "ok"}))
+            .await
+            .expect_err("record_step_complete should propagate db errors");
+        assert!(
+            matches!(complete_err, crate::ForgeError::Database(_)),
+            "expected Database error, got {complete_err:?}",
+        );
+        // In-memory state still moved forward — the DB error doesn't roll it back.
         assert!(ctx.is_step_completed("step1"));
 
         let result: Option<serde_json::Value> = ctx.get_step_result("step1");
@@ -1011,5 +991,159 @@ mod tests {
         state.complete(serde_json::json!({}));
         assert_eq!(state.status, StepStatus::Completed);
         assert!(state.completed_at.is_some());
+    }
+
+    fn lazy_ctx() -> WorkflowContext {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(1))
+            .connect_lazy("postgres://localhost/nonexistent")
+            .expect("Failed to create mock pool");
+        WorkflowContext::new(
+            Uuid::new_v4(),
+            "test".to_string(),
+            pool,
+            CircuitBreakerClient::with_defaults(reqwest::Client::new()),
+        )
+    }
+
+    #[test]
+    fn step_state_fail_records_error_and_completion() {
+        let mut state = StepState::new("step");
+        state.start();
+        state.fail("boom");
+        assert_eq!(state.status, StepStatus::Failed);
+        assert_eq!(state.error.as_deref(), Some("boom"));
+        assert!(state.completed_at.is_some());
+    }
+
+    #[test]
+    fn step_state_compensate_only_flips_status() {
+        let mut state = StepState::new("step");
+        state.complete(serde_json::json!({"ok": true}));
+        let completed_at = state.completed_at;
+        state.compensate();
+        assert_eq!(state.status, StepStatus::Compensated);
+        // compensate() must not erase or overwrite the completion timestamp.
+        assert_eq!(state.completed_at, completed_at);
+    }
+
+    #[tokio::test]
+    async fn save_state_and_load_state_round_trip() {
+        let ctx = lazy_ctx();
+        ctx.save_state("count", 42_u32).unwrap();
+        let v: Option<u32> = ctx.load_state("count").unwrap();
+        assert_eq!(v, Some(42));
+    }
+
+    #[tokio::test]
+    async fn load_state_returns_none_for_unknown_key() {
+        let ctx = lazy_ctx();
+        let v: Option<String> = ctx.load_state("missing").unwrap();
+        assert!(v.is_none());
+    }
+
+    #[tokio::test]
+    async fn load_state_returns_deserialization_error_on_type_mismatch() {
+        let ctx = lazy_ctx();
+        ctx.save_state("k", "a string").unwrap();
+        let err = ctx.load_state::<u32>("k").unwrap_err();
+        assert!(matches!(err, ForgeError::Deserialization(_)));
+    }
+
+    #[tokio::test]
+    async fn take_saved_state_returns_snapshot_of_all_entries() {
+        let ctx = lazy_ctx();
+        ctx.save_state("a", 1_u32).unwrap();
+        ctx.save_state("b", "two").unwrap();
+        let snap = ctx.take_saved_state();
+        assert_eq!(snap.len(), 2);
+        assert_eq!(snap.get("a"), Some(&serde_json::json!(1)));
+        assert_eq!(snap.get("b"), Some(&serde_json::json!("two")));
+    }
+
+    #[tokio::test]
+    async fn tenant_id_defaults_to_none_and_with_tenant_sets_it() {
+        let ctx = lazy_ctx();
+        assert!(ctx.tenant_id().is_none());
+        let tenant = Uuid::new_v4();
+        let ctx = ctx.with_tenant(tenant);
+        assert_eq!(ctx.tenant_id(), Some(tenant));
+    }
+
+    #[tokio::test]
+    async fn is_resumed_defaults_to_false() {
+        let ctx = lazy_ctx();
+        assert!(!ctx.is_resumed());
+    }
+
+    #[tokio::test]
+    async fn is_step_completed_and_started_return_false_for_unknown_steps() {
+        let ctx = lazy_ctx();
+        assert!(!ctx.is_step_completed("nope"));
+        assert!(!ctx.is_step_started("nope"));
+    }
+
+    #[tokio::test]
+    async fn get_step_result_returns_none_for_unknown_step() {
+        let ctx = lazy_ctx();
+        let v: Option<serde_json::Value> = ctx.get_step_result("nope");
+        assert!(v.is_none());
+    }
+
+    #[tokio::test]
+    async fn with_step_states_rebuilds_completed_steps_from_status() {
+        let ctx = lazy_ctx();
+        let mut s = HashMap::new();
+        let mut completed = StepState::new("done");
+        completed.complete(serde_json::json!({"v": 1}));
+        s.insert("done".to_string(), completed);
+        let pending = StepState::new("pending");
+        s.insert("pending".to_string(), pending);
+
+        let ctx = ctx.with_step_states(s);
+        assert!(ctx.is_step_completed("done"));
+        assert!(!ctx.is_step_completed("pending"));
+
+        let reversed = ctx.completed_steps_reversed();
+        assert_eq!(reversed, vec!["done".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn completed_steps_reversed_is_empty_initially() {
+        let ctx = lazy_ctx();
+        assert!(ctx.completed_steps_reversed().is_empty());
+    }
+
+    #[tokio::test]
+    async fn elapsed_is_non_negative() {
+        let ctx = lazy_ctx();
+        let e = ctx.elapsed();
+        // started_at was set at construction, so elapsed must be >= 0.
+        assert!(e.num_milliseconds() >= 0);
+    }
+
+    #[tokio::test]
+    async fn register_and_has_compensation_round_trip() {
+        let ctx = lazy_ctx();
+        assert!(!ctx.has_compensation("step1"));
+        let handler: CompensationHandler =
+            Arc::new(|_v| Box::pin(async { Ok::<(), ForgeError>(()) }));
+        ctx.register_compensation("step1", handler);
+        assert!(ctx.has_compensation("step1"));
+        assert!(ctx.get_compensation_handler("step1").is_some());
+        assert!(ctx.get_compensation_handler("step2").is_none());
+    }
+
+    #[tokio::test]
+    async fn all_step_states_returns_independent_clone() {
+        let ctx = lazy_ctx();
+        let mut s = HashMap::new();
+        s.insert("a".to_string(), StepState::new("a"));
+        let ctx = ctx.with_step_states(s);
+
+        let snap = ctx.all_step_states();
+        assert_eq!(snap.len(), 1);
+        assert!(snap.contains_key("a"));
     }
 }

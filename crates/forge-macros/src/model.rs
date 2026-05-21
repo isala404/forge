@@ -19,7 +19,15 @@ fn expand_model_impl(
     _original_tokens: TokenStream2,
 ) -> syn::Result<TokenStream2> {
     let attr_str = attr.to_string();
-    crate::utils::validate_attr_keys(&attr_str, &[], "model")?;
+    let trimmed = attr_str.trim();
+    if !trimmed.is_empty() {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!(
+                "Unknown attribute `{trimmed}` for #[model]. This macro accepts no attributes."
+            ),
+        ));
+    }
     let struct_name = &input.ident;
     let vis = &input.vis;
     let table_name = get_table_name(&input)?;
@@ -135,53 +143,18 @@ fn extract_string_value(s: &str) -> Option<String> {
     None
 }
 
-fn to_snake_case(s: &str) -> String {
-    let mut result = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if c.is_uppercase() {
-            if i > 0 {
-                result.push('_');
-            }
-            result.push(c.to_lowercase().next().unwrap());
-        } else {
-            result.push(c);
-        }
-    }
-    result
-}
-
-fn pluralize(s: &str) -> String {
-    // Simple English pluralization rules
-    if s.ends_with('s')
-        || s.ends_with("sh")
-        || s.ends_with("ch")
-        || s.ends_with('x')
-        || s.ends_with('z')
-    {
-        format!("{}es", s)
-    } else if let Some(stem) = s.strip_suffix('y') {
-        if !s.ends_with("ay") && !s.ends_with("ey") && !s.ends_with("oy") && !s.ends_with("uy") {
-            format!("{}ies", stem)
-        } else {
-            format!("{}s", s)
-        }
-    } else {
-        format!("{}s", s)
-    }
-}
+use crate::utils::{pluralize, to_snake_case};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
     use super::*;
 
-    // --- to_snake_case ---
-
     #[test]
     fn snake_case_simple() {
         assert_eq!(to_snake_case("User"), "user");
         assert_eq!(to_snake_case("UserProfile"), "user_profile");
-        assert_eq!(to_snake_case("HTTPRequest"), "h_t_t_p_request");
+        assert_eq!(to_snake_case("HTTPRequest"), "http_request");
     }
 
     #[test]
@@ -189,8 +162,6 @@ mod tests {
         assert_eq!(to_snake_case("user"), "user");
         assert_eq!(to_snake_case("item"), "item");
     }
-
-    // --- pluralize ---
 
     #[test]
     fn pluralize_regular_nouns() {
@@ -203,17 +174,15 @@ mod tests {
 
     #[test]
     fn pluralize_sibilant_endings() {
-        // Words ending in s, sh, ch, x, z get "es"
         assert_eq!(pluralize("address"), "addresses");
         assert_eq!(pluralize("crash"), "crashes");
         assert_eq!(pluralize("match"), "matches");
         assert_eq!(pluralize("box"), "boxes");
-        assert_eq!(pluralize("quiz"), "quizes");
+        assert_eq!(pluralize("quiz"), "quizzes");
     }
 
     #[test]
     fn pluralize_consonant_y() {
-        // Consonant + y -> ies
         assert_eq!(pluralize("category"), "categories");
         assert_eq!(pluralize("company"), "companies");
         assert_eq!(pluralize("policy"), "policies");
@@ -222,14 +191,11 @@ mod tests {
 
     #[test]
     fn pluralize_vowel_y() {
-        // Vowel + y -> ys
         assert_eq!(pluralize("key"), "keys");
         assert_eq!(pluralize("day"), "days");
         assert_eq!(pluralize("boy"), "boys");
         assert_eq!(pluralize("buy"), "buys");
     }
-
-    // --- extract_string_value ---
 
     #[test]
     fn extract_string_value_valid() {

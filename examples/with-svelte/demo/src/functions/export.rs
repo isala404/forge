@@ -16,7 +16,9 @@ pub struct ExportOutput {
 
 fn render_export_data(users: &[User], format: &str) -> Result<String> {
     match format {
-        "json" => serde_json::to_string_pretty(users).map_err(|e| ForgeError::Job(e.to_string())),
+        "json" => {
+            serde_json::to_string_pretty(users).map_err(|e| ForgeError::internal(e.to_string()))
+        }
         _ => {
             let mut csv = String::from("id,email,name,role,created_at\n");
             for user in users {
@@ -36,7 +38,7 @@ fn render_export_data(users: &[User], format: &str) -> Result<String> {
     priority = "low",
     retry(max_attempts = 3, backoff = "exponential"),
     idempotent,
-    public
+    auth = "none"
 )]
 pub async fn export_users(ctx: &JobContext, input: ExportInput) -> Result<ExportOutput> {
     if ctx.is_retry() {

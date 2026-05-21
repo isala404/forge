@@ -4,18 +4,42 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{ItemFn, parse_macro_input};
 
-use crate::utils::{
-    has_attr_flag, parse_attr_value, parse_duration_tokens, to_pascal_case, validate_attr_keys,
-};
+use darling::FromMeta;
+use darling::ast::NestedMeta;
 
-const ALLOWED_CRON_KEYS: &[&str] = &[
-    "name",
-    "timezone",
-    "group",
-    "catch_up",
-    "catch_up_limit",
-    "timeout",
-];
+use crate::attrs::default_true;
+use crate::utils::{daily_at_to_cron, every_to_cron, parse_duration_tokens, to_pascal_case};
+
+/// Darling-parsed cron attributes (excludes the positional schedule string).
+#[derive(Debug, Default, FromMeta)]
+struct DarlingCronAttrs {
+    /// Override the registry name (default: function name).
+    #[darling(default)]
+    name: Option<String>,
+    /// Named raw cron expression: `schedule = "0 * * * *"`.
+    #[darling(default)]
+    schedule: Option<String>,
+    /// Duration sugar: `every = "5m"` or `every = "1h"`.
+    /// Converts to a cron expression; minimum granularity is 1 minute.
+    #[darling(default)]
+    every: Option<String>,
+    /// Time-of-day sugar: `daily_at = "03:00"` → runs once a day at 03:00.
+    #[darling(default)]
+    daily_at: Option<String>,
+    #[darling(default)]
+    timezone: Option<String>,
+    #[darling(default)]
+    group: Option<String>,
+    #[darling(default)]
+    catch_up: bool,
+    #[darling(default)]
+    catch_up_limit: Option<u32>,
+    #[darling(default)]
+    timeout: Option<String>,
+    /// Set `register = false` to skip `inventory::submit!` auto-registration.
+    #[darling(default = "default_true")]
+    register: bool,
+}
 
 #[derive(Debug, Default)]
 struct CronAttrs {
@@ -27,81 +51,90 @@ struct CronAttrs {
     catch_up: bool,
     catch_up_limit: Option<u32>,
     timeout: Option<String>,
-}
-
-fn parse_cron_attrs(attr: TokenStream) -> CronAttrs {
-    let mut result = CronAttrs::default();
-    let attr_str = attr.to_string();
-
-    if let Some(name) = parse_attr_value(&attr_str, "name") {
-        result.name = Some(name);
-    }
-
-    if let Some(quote_start) = attr_str.find('"') {
-        let remaining = &attr_str[quote_start + 1..];
-        if let Some(quote_end) = remaining.find('"') {
-            result.schedule = Some(remaining[..quote_end].to_string());
-        }
-    }
-
-    if let Some(tz_start) = attr_str.find("timezone")
-        && let Some(eq_pos) = attr_str[tz_start..].find('=')
-    {
-        let after_eq = &attr_str[tz_start + eq_pos + 1..];
-        if let Some(quote_start) = after_eq.find('"')
-            && let Some(quote_end) = after_eq[quote_start + 1..].find('"')
-        {
-            result.timezone = Some(after_eq[quote_start + 1..][..quote_end].to_string());
-        }
-    }
-
-    if let Some(grp_start) = attr_str.find("group")
-        && let Some(eq_pos) = attr_str[grp_start..].find('=')
-    {
-        let after_eq = &attr_str[grp_start + eq_pos + 1..];
-        if let Some(quote_start) = after_eq.find('"')
-            && let Some(quote_end) = after_eq[quote_start + 1..].find('"')
-        {
-            result.group = Some(after_eq[quote_start + 1..][..quote_end].to_string());
-        }
-    }
-
-    if let Some(timeout) = parse_attr_value(&attr_str, "timeout") {
-        result.timeout = Some(timeout);
-    }
-
-    // Parse catch_up_limit = 5 first (so catch_up doesn't match it)
-    if let Some(limit_start) = attr_str.find("catch_up_limit")
-        && let Some(eq_pos) = attr_str[limit_start..].find('=')
-    {
-        let after_eq = &attr_str[limit_start + eq_pos + 1..];
-        if let Ok(n) = after_eq
-            .split(&[',', ')'])
-            .next()
-            .unwrap_or("")
-            .trim()
-            .parse::<u32>()
-        {
-            result.catch_up_limit = Some(n);
-        }
-    }
-
-    if has_attr_flag(&attr_str, "catch_up") {
-        result.catch_up = true;
-    }
-
-    result
+    register: bool,
 }
 
 pub fn cron_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
-    let attr_str = attr.to_string();
 
-    if let Err(e) = validate_attr_keys(&attr_str, ALLOWED_CRON_KEYS, "cron") {
-        return e.to_compile_error().into();
+    let attr_args = match NestedMeta::parse_meta_list(attr.into()) {
+        Ok(v) => v,
+        Err(e) => return TokenStream::from(e.into_compile_error()),
+    };
+
+    let mut positional_schedule: Option<String> = None;
+    let mut remaining_args: Vec<NestedMeta> = Vec::new();
+
+    for (i, arg) in attr_args.into_iter().enumerate() {
+        if i == 0
+            && let NestedMeta::Lit(syn::Lit::Str(s)) = &arg
+        {
+            positional_schedule = Some(s.value());
+            continue;
+        }
+        remaining_args.push(arg);
     }
 
-    let attrs = parse_cron_attrs(attr);
+    let darling_attrs = match DarlingCronAttrs::from_list(&remaining_args) {
+        Ok(v) => v,
+        Err(e) => return TokenStream::from(e.write_errors()),
+    };
+
+    let named_schedule = darling_attrs.schedule;
+    let every = darling_attrs.every;
+    let daily_at = darling_attrs.daily_at;
+
+    let source_count = [
+        positional_schedule.is_some(),
+        named_schedule.is_some(),
+        every.is_some(),
+        daily_at.is_some(),
+    ]
+    .into_iter()
+    .filter(|&b| b)
+    .count();
+
+    if source_count > 1 {
+        return syn::Error::new_spanned(
+            &input.sig.ident,
+            "only one of a positional schedule, `schedule`, `every`, or `daily_at` may be specified",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    let resolved_schedule: Option<String> = if let Some(ref e) = every {
+        match every_to_cron(e) {
+            Ok(expr) => Some(expr),
+            Err(msg) => {
+                return syn::Error::new_spanned(&input.sig.ident, msg)
+                    .to_compile_error()
+                    .into();
+            }
+        }
+    } else if let Some(ref d) = daily_at {
+        match daily_at_to_cron(d) {
+            Ok(expr) => Some(expr),
+            Err(msg) => {
+                return syn::Error::new_spanned(&input.sig.ident, msg)
+                    .to_compile_error()
+                    .into();
+            }
+        }
+    } else {
+        positional_schedule.or(named_schedule)
+    };
+
+    let attrs = CronAttrs {
+        name: darling_attrs.name,
+        schedule: resolved_schedule,
+        timezone: darling_attrs.timezone,
+        group: darling_attrs.group,
+        catch_up: darling_attrs.catch_up,
+        catch_up_limit: darling_attrs.catch_up_limit,
+        timeout: darling_attrs.timeout,
+        register: darling_attrs.register,
+    };
 
     let fn_name = &input.sig.ident;
     let fn_name_str = fn_name.to_string();
@@ -114,7 +147,6 @@ pub fn cron_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let schedule = attrs.schedule.unwrap_or_else(|| "* * * * *".to_string());
 
-    // Validate cron expression at compile time to prevent runtime panics.
     // Normalize 5-part to 6-part (prepend seconds) to match what CronSchedule::new does.
     {
         let parts: Vec<&str> = schedule.split_whitespace().collect();
@@ -151,6 +183,16 @@ pub fn cron_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let other_attrs = &input.attrs;
 
+    let registration = if attrs.register {
+        quote! {
+            forge::inventory::submit!(forge::AutoHandler(|registries| {
+                registries.crons.register::<#struct_name>();
+            }));
+        }
+    } else {
+        quote! {}
+    };
+
     let expanded = quote! {
         #[doc(hidden)]
         #[allow(non_snake_case)]
@@ -168,8 +210,7 @@ pub fn cron_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 fn info() -> forge::forge_core::cron::CronInfo {
                     forge::forge_core::cron::CronInfo {
                         name: #rpc_name,
-                        schedule: forge::forge_core::cron::CronSchedule::new(#schedule)
-                            .expect("Invalid cron schedule"),
+                        schedule: forge::forge_core::cron::CronSchedule::new_validated(#schedule),
                         timezone: #timezone,
                         group: #group,
                         catch_up: #catch_up,
@@ -186,13 +227,9 @@ pub fn cron_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
             }
 
-            forge::inventory::submit!(forge::AutoCron(|registry| {
-                registry.register::<#struct_name>();
-            }));
+            #registration
         }
     };
 
     TokenStream::from(expanded)
 }
-
-// Tests for to_pascal_case and parse_duration are in utils.rs (single source of truth).

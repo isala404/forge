@@ -20,60 +20,24 @@ use crate::function::AuthContext;
 /// Progress update recorded during testing.
 #[derive(Debug, Clone)]
 pub struct TestProgressUpdate {
-    /// Progress percentage (0-100).
     pub percent: u8,
-    /// Progress message.
     pub message: String,
 }
 
 /// Test context for job functions.
-///
-/// Provides an isolated testing environment for jobs with progress tracking,
-/// retry simulation, cancellation testing, and HTTP mocking.
-///
-/// # Example
-///
-/// ```ignore
-/// let ctx = TestJobContext::builder("export_users")
-///     .with_job_id(Uuid::new_v4())
-///     .build();
-///
-/// // Simulate progress
-/// ctx.progress(50, "Halfway there")?;
-///
-/// // Verify progress was recorded
-/// assert_eq!(ctx.progress_updates().len(), 1);
-///
-/// // Test cancellation
-/// ctx.request_cancellation();
-/// assert!(ctx.is_cancel_requested().unwrap());
-/// ```
 pub struct TestJobContext {
-    /// Job ID.
     pub job_id: Uuid,
-    /// Job type name.
     pub job_type: String,
-    /// Current attempt number (1-based).
     pub attempt: u32,
-    /// Maximum attempts allowed.
     pub max_attempts: u32,
-    /// Authentication context.
     pub auth: AuthContext,
-    /// Optional database pool.
     pool: Option<PgPool>,
-    /// Mock HTTP client.
     http: Arc<MockHttp>,
-    /// Progress updates recorded during execution.
     progress_updates: Arc<RwLock<Vec<TestProgressUpdate>>>,
-    /// Mock environment provider.
     env_provider: Arc<MockEnvProvider>,
-    /// Persisted saved data (in-memory).
     saved_data: Arc<RwLock<serde_json::Value>>,
-    /// Whether cancellation has been requested.
     cancel_requested: Arc<AtomicBool>,
-    /// Dispatched sub-jobs (for assertion).
     dispatched_jobs: Arc<RwLock<Vec<(String, serde_json::Value, Uuid)>>>,
-    /// Started workflows (for assertion).
     started_workflows: Arc<RwLock<Vec<(String, serde_json::Value, Uuid)>>>,
 }
 
@@ -109,18 +73,16 @@ impl TestJobContext {
     }
 
     /// Get all saved job data.
+    ///
+    /// Returns the in-memory data that was written via [`save()`](Self::save).
     pub fn saved(&self) -> serde_json::Value {
         self.saved_data.read().unwrap().clone()
     }
 
-    /// Replace all saved job data.
-    pub fn set_saved(&self, data: serde_json::Value) -> Result<()> {
-        let mut guard = self.saved_data.write().unwrap();
-        *guard = data;
-        Ok(())
-    }
-
     /// Save a key-value pair to job data.
+    ///
+    /// Merges `key` into the saved data object. Use [`saved()`](Self::saved)
+    /// to read it back in assertions.
     pub fn save(&self, key: &str, value: serde_json::Value) -> Result<()> {
         let mut guard = self.saved_data.write().unwrap();
         if let Some(map) = guard.as_object_mut() {
@@ -294,6 +256,18 @@ impl TestJobContextBuilder {
     /// Add a role.
     pub fn with_role(mut self, role: impl Into<String>) -> Self {
         self.roles.push(role.into());
+        self
+    }
+
+    /// Add multiple roles.
+    pub fn with_roles(mut self, roles: Vec<String>) -> Self {
+        self.roles.extend(roles);
+        self
+    }
+
+    /// Add a custom claim.
+    pub fn with_claim(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
+        self.claims.insert(key.into(), value);
         self
     }
 

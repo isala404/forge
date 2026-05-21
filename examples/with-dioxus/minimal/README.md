@@ -45,8 +45,7 @@ The frontend connects to the backend at `http://localhost:9081` by default.
 forge generate              # regenerate Dioxus bindings from Rust models/functions
 forge check                 # validate config, migrations, and project health
 forge migrate status        # check which migrations have run
-forge migrate up            # apply pending migrations
-forge migrate down          # rollback the last migration
+forge migrate up            # apply pending migrations (forward-only)
 ```
 
 ### Production Build

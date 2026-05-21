@@ -30,9 +30,9 @@ pub async fn create_order(ctx: &MutationContext, input: CreateOrderInput) -> Res
 
 ## What Happens
 
-By default, mutations execute directly against the database pool without a transaction wrapper. For single-statement mutations, this is fine since individual SQL statements are atomic.
+By default, mutations execute inside a database transaction. If the function returns `Err`, the entire transaction rolls back automatically.
 
-For multi-statement mutations or when dispatching jobs/workflows, add `#[forge::mutation(transactional)]` to wrap everything in a database transaction. If the function returns `Err` or panics, the entire transaction rolls back.
+To opt out of the transaction wrapper — for example, when running a single idempotent statement where the overhead is unnecessary — add `transactional = false`: `#[forge::mutation(transactional = false)]`.
 
 The generated TypeScript client calls this mutation as a type-safe RPC.
 
@@ -44,7 +44,7 @@ The generated TypeScript client calls this mutation as a type-safe RPC.
 | `require_role("x")` | string | - | Require specific role |
 | `timeout` | seconds | from `[function]` config | Request timeout (overrides global `timeout_secs`) |
 | `rate_limit(...)` | - | - | Token bucket rate limiting |
-| `transactional` | flag | - | Wrap in database transaction with outbox pattern for jobs/workflows |
+| `transactional` | bool | `true` | Wrap in database transaction with outbox pattern for jobs/workflows. Set `transactional = false` to opt out. |
 | `log` | string | - | Log level override |
 
 ## Patterns
@@ -116,12 +116,12 @@ pub async fn create_order(ctx: &MutationContext, input: CreateOrderInput) -> Res
 
 The `transactional` attribute enables the outbox pattern: jobs are buffered in memory during the mutation and only inserted into the database after the transaction commits successfully. If the mutation fails, no jobs are dispatched.
 
-**Runtime enforcement**: If your mutation calls `dispatch_job()` or `start_workflow()` without `transactional`, you get an error at runtime:
+**Compile-time enforcement**: If your mutation calls `dispatch_job()` or `start_workflow()` with `transactional = false`, you get an error at compile time:
 
 ```
 error: Mutations that call `dispatch_job()` or `start_workflow()` must use
-       #[forge::mutation(transactional)] to ensure atomicity. Without it,
-       jobs may be dispatched but database changes rolled back on error.
+       the transactional outbox pattern. Remove `transactional = false` or
+       avoid dispatching jobs/workflows from a non-transactional mutation.
 ```
 
 ### Start Workflows from Mutations
@@ -206,15 +206,14 @@ Rate limit keys: `user` (per authenticated user), `ip` (per client IP), `tenant`
 |--------|-------------|-------------|
 | `ctx.db()` | `DbConn<'_>` | Database connection (pool or transaction handle) |
 | `ctx.pool()` | `&PgPool` | Direct pool access for non-transactional operations |
-| `ctx.http()` | `&reqwest::Client` | HTTP client for external APIs |
+| `ctx.http()` | `HttpClient` | Circuit-breaker-backed HTTP client for external calls |
+| `ctx.raw_http()` | `&reqwest::Client` | Raw HTTP client, bypasses circuit breaker |
 | `ctx.require_user_id()` | `Result<Uuid>` | Authenticated user ID or error |
 | `ctx.require_subject()` | `Result<&str>` | Raw subject claim (Firebase, Clerk) |
 | `ctx.dispatch_job(name, args)` | `Result<Uuid>` | Dispatch background job |
 | `ctx.cancel_job(job_id, reason)` | `Result<bool>` | Request cancellation for a job (`reason` is `Option<String>`) |
 | `ctx.issue_token(claims)` | `Result<String>` | Issue HMAC-signed JWT token (requires HMAC auth config) |
 | `ctx.start_workflow(name, input)` | `Result<Uuid>` | Start workflow |
-| `ctx.dispatch_job_with_context(name, args, context)` | `Result<Uuid>` | Dispatch job with additional JSON context |
-| `ctx.http_with_circuit_breaker()` | `&CircuitBreakerClient` | HTTP client with circuit breaker |
 | `ctx.env(key)` | `Option<String>` | Environment variable |
 | `ctx.env_or(key, default)` | `String` | Environment variable with default |
 | `ctx.env_require(key)` | `Result<String>` | Required environment variable |
@@ -256,7 +255,7 @@ If the mutation fails, the transaction rolls back and no jobs are inserted. Jobs
 
 ### Circuit Breaker for HTTP
 
-The `ctx.http()` method returns a raw `reqwest::Client` for external calls. For circuit breaker protection, use `ctx.http_with_circuit_breaker()` which tracks failure rates per host. After repeated failures (default: 5), requests fail fast rather than waiting for timeouts. This prevents cascade failures when downstream services are unhealthy.
+`ctx.http()` returns an `HttpClient` backed by the circuit breaker, which tracks failure rates per host. After repeated failures (default: 5), requests fail fast rather than waiting for timeouts. This prevents cascade failures when downstream services are unhealthy. Use `ctx.raw_http()` only when you need streaming responses or a custom redirect policy — it bypasses the circuit breaker.
 
 The circuit breaker has three states:
 - **Closed**: Normal operation, requests pass through

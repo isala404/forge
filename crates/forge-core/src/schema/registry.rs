@@ -1,15 +1,7 @@
 //! Schema registration system.
 //!
-//! The [`SchemaRegistry`] collects all schema definitions at startup. Proc macros
-//! (`#[forge::model]`, `#[forge::query]`, etc.) register their definitions here.
-//!
-//! The registry uses `BTreeMap` for deterministic iteration order, which ensures
-//! consistent TypeScript generation and migration diffing across runs.
-//!
-//! # Thread Safety
-//!
-//! Registration happens during single-threaded startup. After startup, the registry
-//! is read-only. `RwLock` provides interior mutability for the registration phase.
+//! `BTreeMap` storage ensures deterministic iteration order for codegen and migration diffs.
+//! `RwLock` supports the registration phase; the registry is effectively read-only after startup.
 
 use std::collections::BTreeMap;
 use std::sync::RwLock;
@@ -17,17 +9,12 @@ use std::sync::RwLock;
 use super::function::FunctionDef;
 use super::model::TableDef;
 
-/// Global registry of all schema definitions.
-/// This is populated at compile time by the proc macros.
-/// Uses BTreeMap for deterministic iteration order.
+const LOCK_POISONED: &str = "schema registry lock poisoned";
+
+/// Global registry of all schema definitions, populated by proc macros.
 pub struct SchemaRegistry {
-    /// All registered tables by name.
     tables: RwLock<BTreeMap<String, TableDef>>,
-
-    /// All registered enums by name.
     enums: RwLock<BTreeMap<String, EnumDef>>,
-
-    /// All registered functions by name.
     functions: RwLock<BTreeMap<String, FunctionDef>>,
 }
 
@@ -43,81 +30,63 @@ impl SchemaRegistry {
 
     /// Register a table definition.
     pub fn register_table(&self, table: TableDef) {
-        let mut tables = self.tables.write().expect("schema registry lock poisoned");
+        let mut tables = self.tables.write().expect(LOCK_POISONED);
         tables.insert(table.name.clone(), table);
     }
 
     /// Register an enum definition.
     pub fn register_enum(&self, enum_def: EnumDef) {
-        let mut enums = self.enums.write().expect("schema registry lock poisoned");
+        let mut enums = self.enums.write().expect(LOCK_POISONED);
         enums.insert(enum_def.name.clone(), enum_def);
     }
 
     /// Register a function definition.
     pub fn register_function(&self, func: FunctionDef) {
-        let mut functions = self
-            .functions
-            .write()
-            .expect("schema registry lock poisoned");
+        let mut functions = self.functions.write().expect(LOCK_POISONED);
         functions.insert(func.name.clone(), func);
     }
 
     /// Get a table by name.
     pub fn get_table(&self, name: &str) -> Option<TableDef> {
-        let tables = self.tables.read().expect("schema registry lock poisoned");
+        let tables = self.tables.read().expect(LOCK_POISONED);
         tables.get(name).cloned()
     }
 
     /// Get an enum by name.
     pub fn get_enum(&self, name: &str) -> Option<EnumDef> {
-        let enums = self.enums.read().expect("schema registry lock poisoned");
+        let enums = self.enums.read().expect(LOCK_POISONED);
         enums.get(name).cloned()
     }
 
     /// Get a function by name.
     pub fn get_function(&self, name: &str) -> Option<FunctionDef> {
-        let functions = self
-            .functions
-            .read()
-            .expect("schema registry lock poisoned");
+        let functions = self.functions.read().expect(LOCK_POISONED);
         functions.get(name).cloned()
     }
 
     /// Get all registered tables.
     pub fn all_tables(&self) -> Vec<TableDef> {
-        let tables = self.tables.read().expect("schema registry lock poisoned");
+        let tables = self.tables.read().expect(LOCK_POISONED);
         tables.values().cloned().collect()
     }
 
     /// Get all registered enums.
     pub fn all_enums(&self) -> Vec<EnumDef> {
-        let enums = self.enums.read().expect("schema registry lock poisoned");
+        let enums = self.enums.read().expect(LOCK_POISONED);
         enums.values().cloned().collect()
     }
 
     /// Get all registered functions.
     pub fn all_functions(&self) -> Vec<FunctionDef> {
-        let functions = self
-            .functions
-            .read()
-            .expect("schema registry lock poisoned");
+        let functions = self.functions.read().expect(LOCK_POISONED);
         functions.values().cloned().collect()
     }
 
     /// Clear all registrations (useful for testing).
     pub fn clear(&self) {
-        self.tables
-            .write()
-            .expect("schema registry lock poisoned")
-            .clear();
-        self.enums
-            .write()
-            .expect("schema registry lock poisoned")
-            .clear();
-        self.functions
-            .write()
-            .expect("schema registry lock poisoned")
-            .clear();
+        self.tables.write().expect(LOCK_POISONED).clear();
+        self.enums.write().expect(LOCK_POISONED).clear();
+        self.functions.write().expect(LOCK_POISONED).clear();
     }
 }
 

@@ -16,13 +16,20 @@ pub fn expand_enum(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 fn expand_enum_impl(attr: TokenStream2, input: DeriveInput) -> syn::Result<TokenStream2> {
     let attr_str = attr.to_string();
-    crate::utils::validate_attr_keys(&attr_str, &[], "forge_enum")?;
+    let trimmed = attr_str.trim();
+    if !trimmed.is_empty() {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!(
+                "Unknown attribute `{trimmed}` for #[forge_enum]. This macro accepts no attributes."
+            ),
+        ));
+    }
     let enum_name = &input.ident;
     let vis = &input.vis;
     let sql_name = to_snake_case(&enum_name.to_string());
     let enum_attrs = &input.attrs;
 
-    // Extract variants
     let variants = match &input.data {
         Data::Enum(data) => &data.variants,
         _ => {
@@ -45,7 +52,6 @@ fn expand_enum_impl(attr: TokenStream2, input: DeriveInput) -> syn::Result<Token
         });
     }
 
-    // Generate variant arms for Display (to SQL string)
     let to_string_arms: Vec<TokenStream2> = variant_infos
         .iter()
         .map(|v| {
@@ -57,7 +63,6 @@ fn expand_enum_impl(attr: TokenStream2, input: DeriveInput) -> syn::Result<Token
         })
         .collect();
 
-    // Generate variant arms for FromStr (from SQL string)
     let from_string_arms: Vec<TokenStream2> = variant_infos
         .iter()
         .map(|v| {
@@ -69,7 +74,6 @@ fn expand_enum_impl(attr: TokenStream2, input: DeriveInput) -> syn::Result<Token
         })
         .collect();
 
-    // Generate variant definitions for the original enum
     let variant_defs: Vec<TokenStream2> = variants
         .iter()
         .map(|v| {
@@ -149,20 +153,7 @@ struct VariantInfo {
     sql_value: String,
 }
 
-fn to_snake_case(s: &str) -> String {
-    let mut result = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if c.is_uppercase() {
-            if i > 0 {
-                result.push('_');
-            }
-            result.push(c.to_lowercase().next().unwrap());
-        } else {
-            result.push(c);
-        }
-    }
-    result
-}
+use crate::utils::to_snake_case;
 
 #[cfg(test)]
 mod tests {

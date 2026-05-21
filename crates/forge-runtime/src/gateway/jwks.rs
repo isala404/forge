@@ -7,10 +7,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use dashmap::DashMap;
 use jsonwebtoken::DecodingKey;
 use serde::Deserialize;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, warn};
+
+/// How long to remember that a `kid` was absent from the latest JWKS fetch.
+/// Short enough to pick up a legitimate key rotation within one cache cycle,
+/// long enough to absorb a flood of forged-kid tokens without hammering the
+/// JWKS endpoint.
+const NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(30);
 
 /// JWKS response structure from providers.
 #[derive(Debug, Deserialize)]
@@ -78,6 +85,15 @@ pub struct JwksClient {
     cache: Arc<RwLock<Option<CachedJwks>>>,
     /// Cache time-to-live.
     cache_ttl: Duration,
+    /// Singleflight guard: only one refresh at a time. Concurrent callers
+    /// wait on the same lock and re-read the cache once it's released,
+    /// preventing a thundering herd of JWKS HTTP fetches after key rotation.
+    refresh_lock: Arc<Mutex<()>>,
+    /// Short-lived negative cache for unknown `kid` values. Without it, an
+    /// attacker can amplify each forged token into one JWKS HTTP fetch.
+    /// Populated only after a refresh completes and the kid is still missing
+    /// — never before — so legitimate rotations are not blocked.
+    negative_cache: Arc<DashMap<String, Instant>>,
 }
 
 impl std::fmt::Debug for JwksClient {
@@ -107,6 +123,8 @@ impl JwksClient {
             http_client,
             cache: Arc::new(RwLock::new(None)),
             cache_ttl: Duration::from_secs(cache_ttl_secs),
+            refresh_lock: Arc::new(Mutex::new(())),
+            negative_cache: Arc::new(DashMap::new()),
         })
     }
 
@@ -127,23 +145,60 @@ impl JwksClient {
             }
         }
 
-        // Cache miss or expired - refresh
+        // Short-circuit forged-kid flood: if we previously failed to find
+        // this kid right after a refresh and the negative cache entry is
+        // still fresh, do not trigger another refresh. The entry is only
+        // ever written *after* a refresh has run, so legitimate rotation is
+        // not blocked.
+        if let Some(entry) = self.negative_cache.get(kid) {
+            if entry.value().elapsed() < NEGATIVE_CACHE_TTL {
+                return Err(JwksError::KeyNotFound(kid.to_string()));
+            }
+            drop(entry);
+            self.negative_cache.remove(kid);
+        }
+
+        // Cache miss or expired — refresh, but coalesce concurrent callers.
         debug!(kid = %kid, "JWKS cache miss, refreshing");
-        self.refresh().await?;
+        self.refresh_if_needed().await?;
 
         // Try again from refreshed cache
         let cache = self.cache.read().await;
         if let Some(ref cached) = *cache {
-            cached
-                .keys
-                .get(kid)
-                .cloned()
-                .ok_or_else(|| JwksError::KeyNotFound(kid.to_string()))
+            match cached.keys.get(kid).cloned() {
+                Some(key) => Ok(key),
+                None => {
+                    drop(cache);
+                    // Record the miss so subsequent requests for this kid
+                    // don't each trigger another refresh.
+                    self.negative_cache.insert(kid.to_string(), Instant::now());
+                    Err(JwksError::KeyNotFound(kid.to_string()))
+                }
+            }
         } else {
             Err(JwksError::FetchFailed(
                 "Cache empty after refresh".to_string(),
             ))
         }
+    }
+
+    /// Refresh once across concurrent callers. Holds a Mutex while the HTTP
+    /// fetch is in flight; waiters re-check the cache after the lock is
+    /// released so they pick up the freshly fetched keys without firing
+    /// another request.
+    async fn refresh_if_needed(&self) -> Result<(), JwksError> {
+        let _guard = self.refresh_lock.lock().await;
+        // Re-check the cache under the lock: if another caller already
+        // refreshed while we were waiting, skip the second fetch.
+        {
+            let cache = self.cache.read().await;
+            if let Some(ref cached) = *cache
+                && cached.fetched_at.elapsed() < self.cache_ttl
+            {
+                return Ok(());
+            }
+        }
+        self.refresh().await
     }
 
     /// Get any available key (for tokens without kid header).
@@ -163,9 +218,9 @@ impl JwksClient {
             }
         }
 
-        // Cache miss or expired - refresh
+        // Cache miss or expired — refresh, coalescing concurrent callers.
         debug!("JWKS cache miss for any key, refreshing");
-        self.refresh().await?;
+        self.refresh_if_needed().await?;
 
         let cache = self.cache.read().await;
         if let Some(ref cached) = *cache {
@@ -236,6 +291,13 @@ impl JwksClient {
         }
 
         debug!(count = keys.len(), "Cached JWKS keys");
+
+        // Drop negative-cache entries for any kid that's now present, so a
+        // rotation that hands us a previously-missing kid takes effect
+        // immediately rather than after the negative TTL.
+        for kid in keys.keys() {
+            self.negative_cache.remove(kid);
+        }
 
         let mut cache = self.cache.write().await;
         *cache = Some(CachedJwks {
@@ -376,5 +438,131 @@ mod tests {
         let result = client.parse_jwk(&jwk);
         assert!(result.is_ok());
         assert!(result.unwrap().is_none()); // Should return None when missing components
+    }
+
+    #[test]
+    fn jwks_client_exposes_configured_url() {
+        let client =
+            JwksClient::new("https://issuer.example.com/.well-known/jwks".into(), 60).unwrap();
+        assert_eq!(client.url(), "https://issuer.example.com/.well-known/jwks");
+    }
+
+    #[test]
+    fn parse_jwk_returns_none_for_non_rsa_kty() {
+        // "oct" (symmetric) keys can't be used for asymmetric verification; we
+        // skip them silently rather than erroring, so the caller can keep
+        // processing the rest of the JWKS.
+        let client = JwksClient::new("http://example.com".into(), 60).unwrap();
+        let jwk = JsonWebKey {
+            kid: Some("sym".into()),
+            kty: "oct".into(),
+            alg: None,
+            key_use: Some("sig".into()),
+            n: None,
+            e: None,
+            x5c: None,
+        };
+        assert!(client.parse_jwk(&jwk).unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_jwk_returns_none_when_only_modulus_present() {
+        // RSA with `n` but no `e` is malformed; we drop it rather than crashing.
+        let client = JwksClient::new("http://example.com".into(), 60).unwrap();
+        let jwk = JsonWebKey {
+            kid: Some("partial".into()),
+            kty: "RSA".into(),
+            alg: Some("RS256".into()),
+            key_use: Some("sig".into()),
+            n: Some("AQAB".into()),
+            e: None,
+            x5c: None,
+        };
+        assert!(client.parse_jwk(&jwk).unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_jwk_x5c_takes_precedence_over_n_e_and_fails_loudly_on_bad_cert() {
+        // When x5c is present, the implementation uses it first. A garbage
+        // cert string therefore surfaces as KeyParseFailed, not silent
+        // fallthrough to the n/e branch (which would otherwise succeed).
+        let client = JwksClient::new("http://example.com".into(), 60).unwrap();
+        let jwk = JsonWebKey {
+            kid: Some("bad-x5c".into()),
+            kty: "RSA".into(),
+            alg: Some("RS256".into()),
+            key_use: Some("sig".into()),
+            n: Some(
+                "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw"
+                    .into(),
+            ),
+            e: Some("AQAB".into()),
+            x5c: Some(vec!["not-a-real-cert".into()]),
+        };
+        let err = client.parse_jwk(&jwk).unwrap_err();
+        assert!(matches!(err, JwksError::KeyParseFailed(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn jwks_error_display_messages_are_descriptive() {
+        // The error messages flow into operator logs; keep their shape stable.
+        assert_eq!(
+            JwksError::FetchFailed("HTTP 500".into()).to_string(),
+            "Failed to fetch JWKS: HTTP 500"
+        );
+        assert_eq!(
+            JwksError::ParseFailed("eof".into()).to_string(),
+            "Failed to parse JWKS: eof"
+        );
+        assert_eq!(
+            JwksError::KeyParseFailed("bad PEM".into()).to_string(),
+            "Failed to parse key: bad PEM"
+        );
+        assert_eq!(
+            JwksError::KeyNotFound("abc".into()).to_string(),
+            "Key not found: abc"
+        );
+        assert_eq!(
+            JwksError::NoKeysAvailable.to_string(),
+            "No keys available in JWKS"
+        );
+        assert_eq!(
+            JwksError::HttpClientError("tls".into()).to_string(),
+            "Failed to create HTTP client: tls"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_key_returns_cached_match_without_network() {
+        // Pre-populate the cache so the read path is exercised without
+        // touching the JWKS endpoint. Verifies the cached-key fast path.
+        let client = JwksClient::new("http://example.invalid".into(), 3600).unwrap();
+        let key = DecodingKey::from_secret(b"placeholder");
+        let mut keys = HashMap::new();
+        keys.insert("kid-1".to_string(), key);
+        *client.cache.write().await = Some(CachedJwks {
+            keys,
+            fetched_at: Instant::now(),
+        });
+
+        // Hit
+        let got = client.get_key("kid-1").await;
+        assert!(got.is_ok());
+    }
+
+    #[tokio::test]
+    async fn get_any_key_returns_first_cached_when_kid_absent() {
+        // Some providers issue tokens without a `kid` header; the fallback
+        // must return whichever key is cached.
+        let client = JwksClient::new("http://example.invalid".into(), 3600).unwrap();
+        let mut keys = HashMap::new();
+        keys.insert("only".into(), DecodingKey::from_secret(b"placeholder"));
+        *client.cache.write().await = Some(CachedJwks {
+            keys,
+            fetched_at: Instant::now(),
+        });
+
+        let got = client.get_any_key().await;
+        assert!(got.is_ok());
     }
 }

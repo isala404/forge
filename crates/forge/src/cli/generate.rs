@@ -33,7 +33,6 @@ pub struct GenerateCommand {
 }
 
 impl GenerateCommand {
-    /// Execute the generate command.
     pub async fn execute(self) -> Result<()> {
         let root = super::project_root::enter_project_root()?;
         eprintln!(
@@ -54,14 +53,26 @@ impl GenerateCommand {
             .unwrap_or_else(|| detected_target.default_output_dir().to_string());
         let output_path = Path::new(&output_dir);
 
-        // Parse source files
         eprint!("  Scanning Rust source files...");
         let registry = if src_path.exists() {
-            forge_codegen::parse_project(src_path)?
+            let outcome = forge_codegen::parse_project(src_path)?;
+            eprintln!(" done");
+            if !outcome.parse_failures.is_empty() {
+                eprintln!();
+                eprintln!(
+                    "  {} {} source file(s) failed to parse; handlers in those files will be missing from bindings:",
+                    ui::warn(),
+                    outcome.parse_failures.len()
+                );
+                for (path, msg) in &outcome.parse_failures {
+                    eprintln!("    - {}: {}", path.display(), msg);
+                }
+            }
+            outcome.registry
         } else {
+            eprintln!(" done");
             forge_core::schema::SchemaRegistry::new()
         };
-        eprintln!(" done");
 
         if let Err(errors) = forge_codegen::validate_registry(&registry) {
             eprintln!();
@@ -78,6 +89,11 @@ impl GenerateCommand {
         let has_schema = !registry.all_tables().is_empty()
             || !registry.all_enums().is_empty()
             || !registry.all_functions().is_empty();
+
+        let schema_path = Path::new("forge.schema.json");
+        let schema_json = forge_codegen::emit_schema_json(&registry)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize schema: {}", e))?;
+        std::fs::write(schema_path, &schema_json)?;
 
         eprint!(
             "  Generating {} bindings...",

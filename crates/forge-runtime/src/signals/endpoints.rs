@@ -1,15 +1,11 @@
-//! HTTP ingestion endpoints for client-side signal events.
+//! HTTP ingestion endpoint for client-side signal events.
 //!
-//! Routes (under /_api/):
-//! - POST /signal/event  -- custom events
-//! - POST /signal/view   -- page views
-//! - POST /signal/user   -- identify (link session to user)
-//! - POST /signal/report -- diagnostic error reports
-//! - POST /signal/vital  -- Web Vitals / performance metrics
+//! Route (under /_api/):
+//! - POST /signal -- unified signal ingestion, discriminated by `type` field
 //!
-//! Every endpoint except `/signal/report` short-circuits when the request
-//! carries `DNT: 1` or `Sec-GPC: 1`. Error reports still land so production
-//! crashes from opted-out browsers remain visible.
+//! The `event` and `view` subtypes short-circuit when the request carries
+//! `DNT: 1` or `Sec-GPC: 1`. Error reports still land so production crashes
+//! from opted-out browsers remain visible.
 
 use std::sync::Arc;
 
@@ -19,12 +15,11 @@ use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use forge_core::AuthContext;
 use forge_core::signals::{
-    DiagnosticReport, IdentifyPayload, PageViewPayload, SignalEvent, SignalEventBatch,
-    SignalEventType, SignalResponse, UtmParams, WebVitalBatch,
+    DiagnosticReport, PageViewPayload, SignalEvent, SignalEventBatch, SignalEventType,
+    SignalPayload, SignalResponse, UtmParams,
 };
 use serde_json::Value;
 use sqlx::PgPool;
-use tracing::warn;
 use uuid::Uuid;
 
 use super::bot;
@@ -38,7 +33,7 @@ use super::visitor;
 const MAX_BATCH_SIZE: usize = 50;
 
 /// Check the client's Do-Not-Track header. We honor DNT: 1 by short-circuiting
-/// signal ingestion — the browser has explicitly opted out of tracking.
+/// signal ingestion -- the browser has explicitly opted out of tracking.
 /// Sec-GPC (Global Privacy Control) is also respected.
 fn dnt_opted_out(headers: &HeaderMap) -> bool {
     let dnt = extract_header(headers, "dnt");
@@ -52,14 +47,17 @@ fn dnt_opted_out(headers: &HeaderMap) -> bool {
 /// Shared state for signal endpoints.
 #[derive(Clone)]
 pub struct SignalsState {
+    /// Collector that buffers signal events for batch insertion.
     pub collector: SignalsCollector,
+    /// Database pool for session upserts.
     pub pool: PgPool,
+    /// Server secret used for visitor ID hashing.
     pub server_secret: String,
     /// When true, strip raw client IP from stored events (GDPR-compliant).
     pub anonymize_ip: bool,
     /// Optional GeoIP resolver for country code lookups from client IP.
     pub geoip: Option<super::geoip::GeoIpResolver>,
-    /// Per-IP fixed-window limiter shared across all signal endpoints.
+    /// Per-IP fixed-window limiter shared across all signal subtypes.
     pub rate_limiter: Arc<SignalRateLimiter>,
 }
 
@@ -68,12 +66,9 @@ pub struct SignalsState {
 /// not run (tests, edge configurations).
 fn resolve_rate_limit_ip(
     resolved_ip: &Option<axum::Extension<crate::gateway::ResolvedClientIp>>,
-    headers: &HeaderMap,
+    _headers: &HeaderMap,
 ) -> Option<String> {
-    resolved_ip
-        .as_ref()
-        .and_then(|r| r.0.0.clone())
-        .or_else(|| extract_client_ip(headers))
+    resolved_ip.as_ref().and_then(|r| r.0.0.clone())
 }
 
 /// Build a 429 response when the per-IP signal quota is exhausted.
@@ -84,15 +79,44 @@ fn rate_limited_response() -> Json<SignalResponse> {
     })
 }
 
-/// POST /signal/event -- batch custom events.
-pub async fn event_handler(
+/// POST /signal -- unified signal ingestion endpoint.
+///
+/// Accepts a discriminated payload with `type` and `payload` fields:
+/// - `type: "event"` -- batch of custom/tracked events
+/// - `type: "view"` -- page view with UTM and referrer context
+/// - `type: "report"` -- diagnostic error report (bypasses DNT/Sec-GPC)
+pub async fn signal_handler(
     State(state): State<Arc<SignalsState>>,
     resolved_ip: Option<axum::Extension<crate::gateway::ResolvedClientIp>>,
     auth: Option<axum::Extension<AuthContext>>,
     headers: HeaderMap,
-    Json(batch): Json<SignalEventBatch>,
+    Json(payload): Json<SignalPayload>,
 ) -> impl IntoResponse {
-    if dnt_opted_out(&headers) {
+    let limiter_ip = resolve_rate_limit_ip(&resolved_ip, &headers);
+    if !state.rate_limiter.check(limiter_ip.as_deref()) {
+        return rate_limited_response();
+    }
+
+    match payload {
+        SignalPayload::Event(batch) => {
+            handle_event(&state, resolved_ip, &auth, &headers, batch).await
+        }
+        SignalPayload::View(view) => handle_view(&state, resolved_ip, &auth, &headers, view).await,
+        SignalPayload::Report(report) => {
+            handle_report(&state, resolved_ip, &auth, &headers, report).await
+        }
+    }
+}
+
+/// Process a batch of custom events.
+async fn handle_event(
+    state: &SignalsState,
+    resolved_ip: Option<axum::Extension<crate::gateway::ResolvedClientIp>>,
+    auth: &Option<axum::Extension<AuthContext>>,
+    headers: &HeaderMap,
+    batch: SignalEventBatch,
+) -> Json<SignalResponse> {
+    if dnt_opted_out(headers) {
         return Json(SignalResponse {
             ok: true,
             session_id: None,
@@ -101,15 +125,11 @@ pub async fn event_handler(
     if batch.events.len() > MAX_BATCH_SIZE {
         return rate_limited_response();
     }
-    let limiter_ip = resolve_rate_limit_ip(&resolved_ip, &headers);
-    if !state.rate_limiter.check(limiter_ip.as_deref()) {
-        return rate_limited_response();
-    }
 
     let ctx = extract_request_ctx(
-        &headers,
+        headers,
         resolved_ip.and_then(|r| r.0.0.clone()),
-        &auth,
+        auth,
         &state.server_secret,
         state.anonymize_ip,
         state.geoip.as_ref(),
@@ -175,33 +195,29 @@ pub async fn event_handler(
     })
 }
 
-/// POST /signal/view -- page view event.
-pub async fn view_handler(
-    State(state): State<Arc<SignalsState>>,
+/// Process a page view event.
+async fn handle_view(
+    state: &SignalsState,
     resolved_ip: Option<axum::Extension<crate::gateway::ResolvedClientIp>>,
-    auth: Option<axum::Extension<AuthContext>>,
-    headers: HeaderMap,
-    Json(payload): Json<PageViewPayload>,
-) -> impl IntoResponse {
-    if dnt_opted_out(&headers) {
+    auth: &Option<axum::Extension<AuthContext>>,
+    headers: &HeaderMap,
+    payload: PageViewPayload,
+) -> Json<SignalResponse> {
+    if dnt_opted_out(headers) {
         return Json(SignalResponse {
             ok: true,
             session_id: None,
         });
     }
-    let limiter_ip = resolve_rate_limit_ip(&resolved_ip, &headers);
-    if !state.rate_limiter.check(limiter_ip.as_deref()) {
-        return rate_limited_response();
-    }
     let ctx = extract_request_ctx(
-        &headers,
+        headers,
         resolved_ip.and_then(|r| r.0.0.clone()),
-        &auth,
+        auth,
         &state.server_secret,
         state.anonymize_ip,
         state.geoip.as_ref(),
     );
-    let session_id_header = extract_header(&headers, "x-session-id");
+    let session_id_header = extract_header(headers, "x-session-id");
     let session_id = resolve_session_id(session_id_header.as_deref());
 
     let session_id = session::upsert_session(
@@ -274,131 +290,32 @@ pub async fn view_handler(
     })
 }
 
-/// POST /signal/user -- identify user.
-pub async fn user_handler(
-    State(state): State<Arc<SignalsState>>,
-    resolved_ip: Option<axum::Extension<crate::gateway::ResolvedClientIp>>,
-    auth: Option<axum::Extension<AuthContext>>,
-    headers: HeaderMap,
-    Json(payload): Json<IdentifyPayload>,
-) -> impl IntoResponse {
-    if dnt_opted_out(&headers) {
-        return Json(SignalResponse {
-            ok: true,
-            session_id: None,
-        });
-    }
-    let limiter_ip = resolve_rate_limit_ip(&resolved_ip, &headers);
-    if !state.rate_limiter.check(limiter_ip.as_deref()) {
-        return rate_limited_response();
-    }
-    let user_id = Uuid::parse_str(&payload.user_id).ok().or_else(|| {
-        warn!(raw_id = %payload.user_id, "identify called with non-UUID user_id, ignoring");
-        None
-    });
-
-    let Some(user_id) = user_id else {
-        return Json(SignalResponse {
-            ok: false,
-            session_id: None,
-        });
-    };
-
-    let session_id_header = extract_header(&headers, "x-session-id");
-    let session_id = resolve_session_id(session_id_header.as_deref());
-
-    if let Some(sid) = session_id {
-        session::identify_session(&state.pool, sid, user_id).await;
-    }
-
-    let referrer: Option<&str> = None;
-    session::upsert_user(
-        &state.pool,
-        user_id,
-        &payload.traits,
-        referrer,
-        None,
-        None,
-        None,
-    )
-    .await;
-
-    let ctx = extract_request_ctx(
-        &headers,
-        resolved_ip.and_then(|r| r.0.0.clone()),
-        &auth,
-        &state.server_secret,
-        state.anonymize_ip,
-        state.geoip.as_ref(),
-    );
-
-    let signal = SignalEvent {
-        event_type: SignalEventType::Identify,
-        event_name: None,
-        correlation_id: None,
-        session_id,
-        visitor_id: Some(ctx.visitor_id),
-        user_id: Some(user_id),
-        tenant_id: ctx.tenant_id,
-        properties: payload.traits,
-        page_url: None,
-        referrer: None,
-        function_name: None,
-        function_kind: None,
-        duration_ms: None,
-        status: None,
-        error_message: None,
-        error_stack: None,
-        error_context: None,
-        client_ip: ctx.client_ip,
-        country: ctx.country,
-        city: ctx.city,
-        user_agent: ctx.user_agent,
-        device_type: ctx.device_type,
-        browser: ctx.browser,
-        os: ctx.os,
-        utm: None,
-        is_bot: ctx.is_bot,
-        timestamp: chrono::Utc::now(),
-    };
-    state.collector.try_send(signal);
-
-    Json(SignalResponse {
-        ok: true,
-        session_id,
-    })
-}
-
-/// POST /signal/report -- diagnostic error reports.
+/// Process a diagnostic error report.
 ///
 /// Error reports are never dropped on DNT: users explicitly opted out of
 /// *tracking*, not of crash reporting. Without this exception, production
 /// crashes from DNT-enabled browsers would be invisible. Reports carry no
 /// persistent identifier by default.
-pub async fn report_handler(
-    State(state): State<Arc<SignalsState>>,
+async fn handle_report(
+    state: &SignalsState,
     resolved_ip: Option<axum::Extension<crate::gateway::ResolvedClientIp>>,
-    auth: Option<axum::Extension<AuthContext>>,
-    headers: HeaderMap,
-    Json(report): Json<DiagnosticReport>,
-) -> impl IntoResponse {
+    auth: &Option<axum::Extension<AuthContext>>,
+    headers: &HeaderMap,
+    report: DiagnosticReport,
+) -> Json<SignalResponse> {
     if report.errors.len() > MAX_BATCH_SIZE {
-        return rate_limited_response();
-    }
-    let limiter_ip = resolve_rate_limit_ip(&resolved_ip, &headers);
-    if !state.rate_limiter.check(limiter_ip.as_deref()) {
         return rate_limited_response();
     }
 
     let ctx = extract_request_ctx(
-        &headers,
+        headers,
         resolved_ip.and_then(|r| r.0.0.clone()),
-        &auth,
+        auth,
         &state.server_secret,
         state.anonymize_ip,
         state.geoip.as_ref(),
     );
-    let session_id_header = extract_header(&headers, "x-session-id");
+    let session_id_header = extract_header(headers, "x-session-id");
     let session_id = resolve_session_id(session_id_header.as_deref());
 
     if let Some(sid) = session_id {
@@ -460,124 +377,7 @@ pub async fn report_handler(
     })
 }
 
-/// POST /signal/vital -- Web Vitals + browser performance metrics.
-///
-/// Accepts a batch of named measurements (lcp, cls, inp, fcp, ttfb,
-/// navigation, long_task, resource, etc.). Each is stored as a `web_vital`
-/// event so dashboards can slice by metric name and aggregate p75/p95.
-pub async fn vital_handler(
-    State(state): State<Arc<SignalsState>>,
-    resolved_ip: Option<axum::Extension<crate::gateway::ResolvedClientIp>>,
-    auth: Option<axum::Extension<AuthContext>>,
-    headers: HeaderMap,
-    Json(batch): Json<WebVitalBatch>,
-) -> impl IntoResponse {
-    if dnt_opted_out(&headers) {
-        return Json(SignalResponse {
-            ok: true,
-            session_id: None,
-        });
-    }
-    if batch.vitals.len() > MAX_BATCH_SIZE {
-        return rate_limited_response();
-    }
-    let limiter_ip = resolve_rate_limit_ip(&resolved_ip, &headers);
-    if !state.rate_limiter.check(limiter_ip.as_deref()) {
-        return rate_limited_response();
-    }
-
-    let ctx = extract_request_ctx(
-        &headers,
-        resolved_ip.and_then(|r| r.0.0.clone()),
-        &auth,
-        &state.server_secret,
-        state.anonymize_ip,
-        state.geoip.as_ref(),
-    );
-    let session_id =
-        resolve_session_id(batch.context.as_ref().and_then(|c| c.session_id.as_deref()));
-    let page_url = batch.context.as_ref().and_then(|c| c.page_url.clone());
-
-    let session_id = session::upsert_session(
-        &state.pool,
-        session_id,
-        &ctx.visitor_id,
-        ctx.user_id,
-        ctx.tenant_id,
-        page_url.as_deref(),
-        batch.context.as_ref().and_then(|c| c.referrer.as_deref()),
-        ctx.user_agent.as_deref(),
-        ctx.client_ip.as_deref(),
-        ctx.is_bot,
-        "web_vital",
-        ctx.device_type.as_deref(),
-        ctx.browser.as_deref(),
-        ctx.os.as_deref(),
-    )
-    .await;
-
-    for vital in batch.vitals {
-        // Duration for timing vitals is encoded into duration_ms; for unitless
-        // metrics like CLS we keep the raw value in properties.
-        let duration_ms =
-            if vital.value.is_finite() && vital.value >= 0.0 && vital.value <= i32::MAX as f64 {
-                Some(vital.value.round() as i32)
-            } else {
-                None
-            };
-        let mut props = serde_json::Map::new();
-        props.insert(
-            "value".to_string(),
-            serde_json::Number::from_f64(vital.value)
-                .map(serde_json::Value::Number)
-                .unwrap_or(serde_json::Value::Null),
-        );
-        if let Some(r) = vital.rating.clone() {
-            props.insert("rating".to_string(), serde_json::Value::String(r));
-        }
-        if !vital.attribution.is_null() {
-            props.insert("attribution".to_string(), vital.attribution);
-        }
-
-        let signal = SignalEvent {
-            event_type: SignalEventType::WebVital,
-            event_name: Some(vital.name),
-            correlation_id: vital.correlation_id,
-            session_id,
-            visitor_id: Some(ctx.visitor_id.clone()),
-            user_id: ctx.user_id,
-            tenant_id: ctx.tenant_id,
-            properties: serde_json::Value::Object(props),
-            page_url: vital.page_url.or_else(|| page_url.clone()),
-            referrer: None,
-            function_name: None,
-            function_kind: None,
-            duration_ms,
-            status: vital.rating,
-            error_message: None,
-            error_stack: None,
-            error_context: None,
-            client_ip: ctx.client_ip.clone(),
-            country: ctx.country.clone(),
-            city: ctx.city.clone(),
-            user_agent: ctx.user_agent.clone(),
-            device_type: ctx.device_type.clone(),
-            browser: ctx.browser.clone(),
-            os: ctx.os.clone(),
-            utm: None,
-            is_bot: ctx.is_bot,
-            timestamp: vital.timestamp.unwrap_or_else(chrono::Utc::now),
-        };
-        state.collector.try_send(signal);
-    }
-
-    Json(SignalResponse {
-        ok: true,
-        session_id,
-    })
-}
-
-/// Shared request context extracted from headers and auth for all signal endpoints.
+/// Shared request context extracted from headers and auth for all signal subtypes.
 struct RequestCtx {
     user_agent: Option<String>,
     client_ip: Option<String>,
@@ -602,7 +402,7 @@ fn extract_request_ctx(
 ) -> RequestCtx {
     let user_agent = extract_header(headers, "user-agent");
     let platform_header = extract_header(headers, "x-forge-platform");
-    let raw_ip = resolved_ip.or_else(|| extract_client_ip(headers));
+    let raw_ip = resolved_ip;
     let ua_lower = user_agent
         .as_deref()
         .unwrap_or_default()
@@ -638,10 +438,6 @@ fn extract_header(headers: &HeaderMap, name: &str) -> Option<String> {
     crate::gateway::extract_header(headers, name)
 }
 
-fn extract_client_ip(headers: &HeaderMap) -> Option<String> {
-    crate::gateway::extract_client_ip(headers)
-}
-
 fn resolve_session_id(raw: Option<&str>) -> Option<Uuid> {
     raw.and_then(|s| Uuid::parse_str(s).ok())
 }
@@ -652,7 +448,7 @@ mod tests {
     use axum::http::{HeaderMap, HeaderValue};
     use uuid::Uuid;
 
-    use super::{extract_client_ip, extract_header, resolve_session_id};
+    use super::{extract_header, resolve_session_id};
 
     #[tokio::test]
     async fn extract_header_returns_value() {
@@ -672,36 +468,6 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-custom", HeaderValue::from_static(""));
         assert_eq!(extract_header(&headers, "x-custom"), None);
-    }
-
-    #[tokio::test]
-    async fn extract_client_ip_from_forwarded_for_single() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", HeaderValue::from_static("1.2.3.4"));
-        assert_eq!(extract_client_ip(&headers), Some("1.2.3.4".into()));
-    }
-
-    #[tokio::test]
-    async fn extract_client_ip_from_forwarded_for_multiple() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-forwarded-for",
-            HeaderValue::from_static("1.2.3.4, 5.6.7.8"),
-        );
-        assert_eq!(extract_client_ip(&headers), Some("1.2.3.4".into()));
-    }
-
-    #[tokio::test]
-    async fn extract_client_ip_falls_back_to_real_ip() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-real-ip", HeaderValue::from_static("9.8.7.6"));
-        assert_eq!(extract_client_ip(&headers), Some("9.8.7.6".into()));
-    }
-
-    #[tokio::test]
-    async fn extract_client_ip_returns_none_when_no_headers() {
-        let headers = HeaderMap::new();
-        assert_eq!(extract_client_ip(&headers), None);
     }
 
     #[tokio::test]

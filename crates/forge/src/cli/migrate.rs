@@ -5,7 +5,7 @@ use std::path::Path;
 
 use forge_core::config::ForgeConfig;
 use forge_runtime::Database;
-use forge_runtime::migrations::{MigrationRunner, load_migrations_from_dir};
+use forge_runtime::pg::migration::{DriftStatus, MigrationRunner, load_migrations_from_dir};
 
 use super::ui;
 
@@ -29,13 +29,6 @@ pub enum MigrateAction {
     /// Run all pending migrations (default behavior).
     Up,
 
-    /// Rollback the last N migrations.
-    Down {
-        /// Number of migrations to rollback.
-        #[arg(default_value = "1")]
-        count: usize,
-    },
-
     /// Show migration status.
     Status,
 
@@ -55,7 +48,6 @@ impl MigrateCommand {
             style(root.display()).cyan()
         );
 
-        // Load configuration
         let config_path = Path::new(&self.config);
         if !config_path.exists() {
             anyhow::bail!(
@@ -66,12 +58,10 @@ impl MigrateCommand {
 
         let config = ForgeConfig::from_file(&self.config)?;
 
-        // Connect to database
         let db = Database::from_config_with_service(&config.database, &config.project.name).await?;
         let pool = db.primary().clone();
         let runner = MigrationRunner::new(pool);
 
-        // Load available migrations
         let migrations_dir = Path::new(&self.migrations_dir);
         let available = load_migrations_from_dir(migrations_dir)?;
 
@@ -94,38 +84,9 @@ impl MigrateCommand {
                 println!();
             }
 
-            MigrateAction::Down { count } => {
-                ui::section("FORGE Migrations");
-
-                if count == 0 {
-                    println!("  {} Nothing to rollback (count=0)", ui::info());
-                    return Ok(());
-                }
-
-                println!("  {} Rolling back {} migration(s)...", ui::step(), count);
-
-                let rolled_back = runner.rollback(count).await?;
-
-                if rolled_back.is_empty() {
-                    println!("  {} No migrations to rollback", ui::info());
-                } else {
-                    for name in &rolled_back {
-                        println!("  {} Rolled back: {}", ui::ok(), name);
-                    }
-                    println!();
-                    println!(
-                        "  {} Rolled back {} migration(s)",
-                        ui::ok(),
-                        rolled_back.len()
-                    );
-                }
-                println!();
-            }
-
             MigrateAction::Prepare => {
                 ui::section("FORGE Prepare");
 
-                // Run pending migrations first
                 if !available.is_empty() {
                     println!("  {} Running pending migrations...", ui::step());
                     runner.run(available).await?;
@@ -170,26 +131,33 @@ impl MigrateCommand {
                     return Ok(());
                 }
 
-                // Show applied migrations
+                let mut drifted = 0usize;
+                let mut missing = 0usize;
                 if !status.applied.is_empty() {
                     println!("  {} Applied:", ui::ok());
                     for m in &status.applied {
-                        let down_marker = if m.has_down {
-                            style("↓").green().to_string()
-                        } else {
-                            style("-").dim().to_string()
+                        let drift_note = match &m.drift {
+                            DriftStatus::Unchanged => String::new(),
+                            DriftStatus::Drifted { current_checksum } => {
+                                drifted += 1;
+                                let short = current_checksum.get(..12).unwrap_or(current_checksum);
+                                format!(" {}", style(format!("[DRIFT now={short}]")).yellow())
+                            }
+                            DriftStatus::SourceMissing => {
+                                missing += 1;
+                                format!(" {}", style("[SOURCE FILE MISSING]").red())
+                            }
                         };
                         println!(
-                            "    {} {} {} ({})",
-                            down_marker,
-                            style(&m.name).cyan(),
+                            "    {} {} ({}){}",
+                            style(&m.version).cyan(),
                             style("at").dim(),
-                            m.applied_at.format("%Y-%m-%d %H:%M:%S")
+                            m.applied_at.format("%Y-%m-%d %H:%M:%S"),
+                            drift_note,
                         );
                     }
                 }
 
-                // Show pending migrations
                 if !status.pending.is_empty() {
                     if !status.applied.is_empty() {
                         println!();
@@ -207,14 +175,14 @@ impl MigrateCommand {
                     status.applied.len(),
                     status.pending.len()
                 );
-                println!();
-
-                // Legend
-                println!(
-                    "  {} = has down migration, {} = no down migration",
-                    style("↓").green(),
-                    style("-").dim()
-                );
+                if drifted > 0 || missing > 0 {
+                    println!(
+                        "  {} {} drifted, {} missing source",
+                        ui::warn(),
+                        drifted,
+                        missing,
+                    );
+                }
                 println!();
             }
         }

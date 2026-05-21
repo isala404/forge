@@ -27,10 +27,10 @@ fn sign_jwt(user_id: Uuid, secret: &str) -> Result<String> {
         &claims,
         &jsonwebtoken::EncodingKey::from_secret(secret.as_bytes()),
     )
-    .map_err(|e| ForgeError::Internal(format!("JWT signing failed: {e}")))
+    .map_err(|e| ForgeError::internal_with("JWT signing failed", e))
 }
 
-#[forge::mutation(public)]
+#[forge::mutation(auth = "none")]
 pub async fn register(ctx: &MutationContext, input: RegisterInput) -> Result<AuthResponse> {
     let mut conn = ctx.conn().await?;
 

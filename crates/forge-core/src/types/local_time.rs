@@ -5,40 +5,24 @@ use std::fmt;
 use chrono::{NaiveTime, Timelike};
 use serde::{Deserialize, Serialize};
 
-/// A local time without date information.
-///
-/// Represents a time of day like "14:30:00" without any date or timezone.
-/// Useful for schedules, opening hours, and other time-only values.
-///
-/// # Examples
-///
-/// ```
-/// use forge_core::types::LocalTime;
-///
-/// let noon = LocalTime::from_hms(12, 0, 0).unwrap();
-/// let now = LocalTime::now();
-/// ```
+/// A time of day without date or timezone information.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct LocalTime(NaiveTime);
 
 impl LocalTime {
-    /// Create a time from hours, minutes, and seconds.
     pub fn from_hms(hour: u32, min: u32, sec: u32) -> Option<Self> {
         NaiveTime::from_hms_opt(hour, min, sec).map(Self)
     }
 
-    /// Create a time from hours, minutes, seconds, and milliseconds.
     pub fn from_hms_milli(hour: u32, min: u32, sec: u32, milli: u32) -> Option<Self> {
         NaiveTime::from_hms_milli_opt(hour, min, sec, milli).map(Self)
     }
 
-    /// Get the current time in the local timezone.
     pub fn now() -> Self {
         Self(chrono::Local::now().time())
     }
 
-    /// Get the current time in UTC.
     pub fn now_utc() -> Self {
         Self(chrono::Utc::now().time())
     }
@@ -48,29 +32,25 @@ impl LocalTime {
         Self(NaiveTime::from_hms_opt(0, 0, 0).expect("midnight is always valid"))
     }
 
-    /// Get the inner `NaiveTime`.
     pub fn into_inner(self) -> NaiveTime {
         self.0
     }
 
-    /// Format to ISO 8601 time string (HH:MM:SS).
     pub fn to_iso8601(&self) -> String {
         self.0.format("%H:%M:%S").to_string()
     }
 
-    /// Parse from ISO 8601 time string (HH:MM:SS).
     pub fn parse_iso8601(s: &str) -> Result<Self, chrono::ParseError> {
         NaiveTime::parse_from_str(s, "%H:%M:%S").map(Self)
     }
 
-    /// Parse from flexible time format (supports HH:MM and HH:MM:SS).
+    /// Parses HH:MM or HH:MM:SS.
     pub fn parse(s: &str) -> Result<Self, chrono::ParseError> {
         NaiveTime::parse_from_str(s, "%H:%M:%S")
             .or_else(|_| NaiveTime::parse_from_str(s, "%H:%M"))
             .map(Self)
     }
 
-    /// Calculate seconds since midnight.
     pub fn seconds_since_midnight(&self) -> u32 {
         self.0.num_seconds_from_midnight()
     }

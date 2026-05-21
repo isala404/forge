@@ -2,8 +2,6 @@
 //!
 //! Provides ergonomic assertion macros for common FORGE testing patterns.
 
-use crate::error::ForgeError;
-
 /// Assert that a result is Ok.
 ///
 /// # Example
@@ -53,7 +51,7 @@ macro_rules! assert_err {
     };
 }
 
-/// Assert that an error matches a specific variant.
+/// Assert that an error matches a specific variant (pattern matching, not substring).
 ///
 /// # Example
 ///
@@ -66,6 +64,62 @@ macro_rules! assert_err_variant {
     ($expr:expr, $variant:pat) => {
         match &$expr {
             Err($variant) => (),
+            Err(e) => panic!(
+                "assertion failed: expected {}, got {:?}",
+                stringify!($variant),
+                e
+            ),
+            Ok(v) => panic!(
+                "assertion failed: expected Err({}), got Ok({:?})",
+                stringify!($variant),
+                v
+            ),
+        }
+    };
+}
+
+/// Assert that an error matches a pattern, with an optional guard expression.
+///
+/// Prefer this over `error_contains` or substring checks — guards can inspect
+/// the inner value without forcing a string round-trip.
+///
+/// # Example
+///
+/// ```ignore
+/// // Match variant only
+/// assert_err_matches!(result, ForgeError::NotFound(_));
+///
+/// // Match variant with a guard on the inner value
+/// assert_err_matches!(result, ForgeError::Validation(msg) if msg.contains("email"));
+///
+/// // Bind the inner value in the guard
+/// assert_err_matches!(result, ForgeError::InvalidArgument(msg) if msg == "bad input");
+/// ```
+#[macro_export]
+macro_rules! assert_err_matches {
+    ($expr:expr, $variant:pat) => {
+        match &$expr {
+            Err($variant) => (),
+            Err(e) => panic!(
+                "assertion failed: expected {}, got {:?}",
+                stringify!($variant),
+                e
+            ),
+            Ok(v) => panic!(
+                "assertion failed: expected Err({}), got Ok({:?})",
+                stringify!($variant),
+                v
+            ),
+        }
+    };
+    ($expr:expr, $variant:pat if $guard:expr) => {
+        match &$expr {
+            Err($variant) if $guard => (),
+            Err($variant) => panic!(
+                "assertion failed: pattern {} matched but guard failed for {:?}",
+                stringify!($variant),
+                $expr
+            ),
             Err(e) => panic!(
                 "assertion failed: expected {}, got {:?}",
                 stringify!($variant),
@@ -174,19 +228,6 @@ macro_rules! assert_http_not_called {
     };
 }
 
-/// Check if an error message contains a substring.
-pub fn error_contains(error: &ForgeError, substring: &str) -> bool {
-    error.to_string().contains(substring)
-}
-
-/// Check if a validation error contains a specific field.
-pub fn validation_error_for_field(error: &ForgeError, field: &str) -> bool {
-    match error {
-        ForgeError::Validation(msg) => msg.contains(field),
-        _ => false,
-    }
-}
-
 /// Assert that a value matches a JSON pattern (partial matching).
 ///
 /// The pattern only needs to contain the fields you want to verify.
@@ -236,7 +277,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{assert_contains, assert_json_matches};
     use crate::error::ForgeError;
 
     #[test]
@@ -266,21 +307,47 @@ mod tests {
     }
 
     #[test]
-    fn test_error_contains() {
-        let error = ForgeError::Validation("email is required".to_string());
-        assert!(error_contains(&error, "email"));
-        assert!(error_contains(&error, "required"));
-        assert!(!error_contains(&error, "password"));
+    fn test_assert_err_variant() {
+        let result: Result<(), ForgeError> = Err(ForgeError::NotFound("user".into()));
+        assert_err_variant!(result, ForgeError::NotFound(_));
     }
 
     #[test]
-    fn test_validation_error_for_field() {
-        let error = ForgeError::Validation("email: is invalid".to_string());
-        assert!(validation_error_for_field(&error, "email"));
-        assert!(!validation_error_for_field(&error, "password"));
+    #[should_panic(expected = "expected ForgeError::Unauthorized(_)")]
+    fn test_assert_err_variant_wrong_variant() {
+        let result: Result<(), ForgeError> = Err(ForgeError::NotFound("user".into()));
+        assert_err_variant!(result, ForgeError::Unauthorized(_));
+    }
 
-        let other_error = ForgeError::Internal("internal error".to_string());
-        assert!(!validation_error_for_field(&other_error, "email"));
+    #[test]
+    fn test_assert_err_matches_no_guard() {
+        let result: Result<(), ForgeError> =
+            Err(ForgeError::Validation("email is required".into()));
+        assert_err_matches!(result, ForgeError::Validation(_));
+    }
+
+    #[test]
+    #[allow(unused_variables)]
+    fn test_assert_err_matches_with_guard() {
+        let result: Result<(), ForgeError> =
+            Err(ForgeError::Validation("email is required".into()));
+        assert_err_matches!(result, ForgeError::Validation(msg) if msg.contains("email"));
+    }
+
+    #[test]
+    #[should_panic(expected = "guard failed")]
+    #[allow(unused_variables)]
+    fn test_assert_err_matches_guard_fails() {
+        let result: Result<(), ForgeError> =
+            Err(ForgeError::Validation("email is required".into()));
+        assert_err_matches!(result, ForgeError::Validation(msg) if msg.contains("password"));
+    }
+
+    #[test]
+    #[should_panic(expected = "expected ForgeError::Unauthorized(_)")]
+    fn test_assert_err_matches_wrong_variant() {
+        let result: Result<(), ForgeError> = Err(ForgeError::NotFound("user".into()));
+        assert_err_matches!(result, ForgeError::Unauthorized(_));
     }
 
     #[test]
@@ -293,7 +360,6 @@ mod tests {
             }
         });
 
-        // Partial match
         assert!(assert_json_matches(
             &actual,
             &serde_json::json!({"id": 123})
@@ -307,7 +373,6 @@ mod tests {
             &serde_json::json!({"nested": {"foo": "bar"}})
         ));
 
-        // Non-match
         assert!(!assert_json_matches(
             &actual,
             &serde_json::json!({"id": 456})

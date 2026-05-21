@@ -395,7 +395,7 @@ Like jobs, `public` workflows get generated frontend bindings that track step-le
       </div>
     {/each}
   </div>
-  {#if ["completed", "failed", "compensated"].includes($workflowStore.status)}
+  {#if ["completed", "failed"].includes($workflowStore.status)}
     <button onclick={startVerificationWorkflow}>Run Again</button>
   {/if}
 {:else}

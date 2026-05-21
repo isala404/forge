@@ -5,8 +5,6 @@
 //! [`axum::serve::Listener`], so the gateway's single
 //! `axum::serve(listener, service).await` hotpath handles both HTTP and HTTPS.
 
-use std::fs::File;
-use std::io::BufReader;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -15,7 +13,7 @@ use std::task::{Context, Poll};
 
 use forge_core::error::{ForgeError, Result};
 use rustls::ServerConfig;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
@@ -50,15 +48,13 @@ impl TlsListenConfig {
                 key_path: key.clone(),
             })),
             (None, None) => Ok(None),
-            (Some(_), None) => Err(ForgeError::Config(
+            (Some(_), None) => Err(ForgeError::config(
                 "gateway.tls.cert_path is set but gateway.tls.key_path is missing. \
-                 Set both to enable TLS, or neither to serve plain HTTP."
-                    .into(),
+                 Set both to enable TLS, or neither to serve plain HTTP.",
             )),
-            (None, Some(_)) => Err(ForgeError::Config(
+            (None, Some(_)) => Err(ForgeError::config(
                 "gateway.tls.key_path is set but gateway.tls.cert_path is missing. \
-                 Set both to enable TLS, or neither to serve plain HTTP."
-                    .into(),
+                 Set both to enable TLS, or neither to serve plain HTTP.",
             )),
         }
     }
@@ -253,24 +249,23 @@ fn build_from_files(cert_path: &str, key_path: &str) -> Result<ServerConfig> {
     ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(cert_chain, key)
-        .map_err(|e| ForgeError::Config(format!("invalid TLS certificate or key: {e}")))
+        .map_err(|e| ForgeError::config_with("invalid TLS certificate or key", e))
 }
 
 fn read_pem_certs(path: &str) -> Result<Vec<CertificateDer<'static>>> {
-    let file = File::open(path).map_err(|e| {
-        ForgeError::Config(format!(
-            "failed to open gateway.tls.cert_path '{path}': {e}"
-        ))
-    })?;
-    let mut reader = BufReader::new(file);
-
-    let certs: std::result::Result<Vec<_>, _> = rustls_pemfile::certs(&mut reader).collect();
-    let certs = certs.map_err(|e| {
-        ForgeError::Config(format!("failed to parse PEM certificates in '{path}': {e}"))
-    })?;
+    let certs: Vec<_> = CertificateDer::pem_file_iter(path)
+        .map_err(|e| {
+            ForgeError::config(format!(
+                "failed to read PEM certificates from '{path}': {e}"
+            ))
+        })?
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|e| {
+            ForgeError::config(format!("failed to parse PEM certificates in '{path}': {e}"))
+        })?;
 
     if certs.is_empty() {
-        return Err(ForgeError::Config(format!(
+        return Err(ForgeError::config(format!(
             "no PEM certificates found in '{path}'"
         )));
     }
@@ -279,16 +274,9 @@ fn read_pem_certs(path: &str) -> Result<Vec<CertificateDer<'static>>> {
 }
 
 fn read_pem_key(path: &str) -> Result<PrivateKeyDer<'static>> {
-    let file = File::open(path).map_err(|e| {
-        ForgeError::Config(format!("failed to open gateway.tls.key_path '{path}': {e}"))
-    })?;
-    let mut reader = BufReader::new(file);
-
-    rustls_pemfile::private_key(&mut reader)
-        .map_err(|e| {
-            ForgeError::Config(format!("failed to parse PEM private key in '{path}': {e}"))
-        })?
-        .ok_or_else(|| ForgeError::Config(format!("no PEM private key found in '{path}'")))
+    PrivateKeyDer::from_pem_file(path).map_err(|e| {
+        ForgeError::config(format!("failed to read PEM private key from '{path}': {e}"))
+    })
 }
 
 #[cfg(test)]
@@ -307,7 +295,7 @@ mod tests {
         let err = load_rustls_config(&cfg).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("failed to open gateway.tls.cert_path"),
+            msg.contains("failed to read PEM certificates from '/nonexistent/cert.pem'"),
             "unexpected error: {msg}"
         );
     }

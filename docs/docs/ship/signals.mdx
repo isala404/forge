@@ -187,30 +187,113 @@ When the user navigates away or closes the tab, pending events are flushed via t
 
 ## Endpoints
 
-The server exposes four ingestion endpoints. These are added to `quiet_paths` internally so they don't generate their own telemetry noise.
+The server exposes a single ingestion endpoint at `POST /_api/signal`. It is added to `quiet_paths` internally so it doesn't generate its own telemetry noise. The endpoint is unauthenticated by design — see [Limitations](#limitations).
 
-| Endpoint | Method | Purpose |
-| --- | --- | --- |
-| `/_api/signal/event` | POST | Batch custom events (max 50 per request) |
-| `/_api/signal/view` | POST | Page view with referrer and UTM params |
-| `/_api/signal/user` | POST | Identify user and store traits |
-| `/_api/signal/report` | POST | Frontend error reports with breadcrumbs |
-| `/_api/signal/vital` | POST | Web Vitals / performance metrics (max 50 per request) |
+All requests share the same shape: a `type` discriminator field and a `payload` object whose structure depends on the type.
 
-All endpoints return:
+```
+POST /_api/signal
+Content-Type: application/json
 
-```json
-{ "ok": true, "session_id": "uuid" }
+{ "type": "<discriminator>", "payload": { ... } }
 ```
 
-Request headers the server looks at:
+### Discriminators
+
+| `type` | Purpose | DNT/Sec-GPC honoured |
+| --- | --- | --- |
+| `event` | Batch of custom/tracked events (max 50 per request). Covers `track()`, `identify()`, web vitals, breadcrumbs. | Yes — short-circuits silently |
+| `view` | Single page view with URL, referrer, title, and UTM parameters. | Yes — short-circuits silently |
+| `report` | Frontend error report. Bypasses DNT/Sec-GPC so crashes from opted-out browsers remain visible. | No |
+
+#### `type: "event"`
+
+```json
+{
+  "type": "event",
+  "payload": {
+    "events": [
+      {
+        "event": "button_clicked",
+        "properties": { "button_id": "signup" },
+        "correlation_id": "req-abc123",
+        "timestamp": "2026-05-18T12:00:00Z"
+      }
+    ],
+    "context": {
+      "page_url": "https://example.com/signup",
+      "referrer": "https://google.com",
+      "session_id": "550e8400-e29b-41d4-a716-446655440000"
+    }
+  }
+}
+```
+
+`events` is required; `context` and per-event `correlation_id`/`timestamp` are optional.
+
+#### `type: "view"`
+
+```json
+{
+  "type": "view",
+  "payload": {
+    "url": "https://example.com/dashboard",
+    "referrer": "https://example.com/",
+    "title": "Dashboard",
+    "utm_source": "newsletter",
+    "utm_medium": "email",
+    "utm_campaign": "may-launch",
+    "utm_term": null,
+    "utm_content": null,
+    "correlation_id": "req-abc123"
+  }
+}
+```
+
+Only `url` is required. All UTM fields, `referrer`, `title`, and `correlation_id` are optional.
+
+#### `type: "report"`
+
+```json
+{
+  "type": "report",
+  "payload": {
+    "errors": [
+      {
+        "message": "Payment failed",
+        "stack": "Error: Payment failed\n    at checkout.ts:42",
+        "context": { "order_id": "123" },
+        "correlation_id": "req-abc123",
+        "page_url": "https://example.com/checkout",
+        "breadcrumbs": [
+          { "message": "Opened checkout modal", "data": {}, "timestamp": "2026-05-18T11:59:55Z" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+`errors` is required. Per-error `stack`, `context`, `correlation_id`, `page_url`, and `breadcrumbs` are optional. Max 50 errors per request.
+
+### Response
+
+All three discriminators return the same shape:
+
+```json
+{ "ok": true, "session_id": "550e8400-e29b-41d4-a716-446655440000" }
+```
+
+`session_id` is assigned on the first request and must be echoed back in the `x-session-id` header on subsequent requests to maintain session continuity. On DNT short-circuit, `session_id` is `null`.
+
+### Request headers
 
 | Header | Purpose |
 | --- | --- |
-| `x-session-id` | Session continuity (value from previous response) |
+| `x-session-id` | Session continuity (UUID from previous response) |
 | `x-forge-platform` | Device classification (`web`, `desktop-macos`, `desktop-windows`, `desktop-linux`, `ios`, `android`) |
 | `x-correlation-id` | Links frontend events to backend RPC execution |
-| `Authorization` | Optional, associates events with authenticated user |
+| `Authorization` | Optional — associates events with an authenticated user |
 
 ## Storage
 
@@ -222,13 +305,12 @@ Signals use three PostgreSQL tables on the analytics connection pool.
 
 **`forge_signals_users`** stores identified user profiles with traits, acquisition data (first referrer, UTM params), and lifetime counters.
 
-Materialized views refresh every 5 minutes for dashboard queries:
+Incremental rollup tables aggregate data for dashboard queries:
 
-| View | Content |
+| Table | Content |
 | --- | --- |
-| `forge_signals_daily_stats` | DAU, sessions, events by day |
-| `forge_signals_retention` | Weekly cohort retention |
-| `forge_signals_function_stats` | Hourly function performance |
+| `forge_signals_hourly_stats` | Hourly event counts, session counts, and function performance |
+| `forge_signals_daily_rollup` | DAU, sessions, events by day and weekly cohort retention |
 
 ## Grafana Dashboard
 
@@ -245,7 +327,7 @@ Signals are designed around GDPR compliance without cookie banners:
 - Visitor identity is a daily-rotating SHA-256 hash of `IP + UA + daily_salt`. The salt is derived from `auth.jwt_secret` and the current UTC date, so cross-day correlation is impossible without access to the secret. Rotate `auth.jwt_secret` to break correlation across deployments
 - With `anonymize_ip = true`, the raw IP is hashed into the visitor ID and then zeroed before storage; the `client_ip` column always ends up empty
 - `identify()` is opt-in and only links sessions you explicitly associate
-- The server short-circuits `/signal/view`, `/signal/event`, `/signal/user`, and `/signal/vital` for requests carrying `DNT: 1` or `Sec-GPC: 1`. The client SDKs disable themselves when the browser has set those signals. Crash reports (`/signal/report`) still land so production errors from DNT users don't disappear, but they carry no `visitor_id` and no `user_id`
+- The server short-circuits `event` and `view` payloads to `/_api/signal` for requests carrying `DNT: 1` or `Sec-GPC: 1`. The client SDKs disable themselves when the browser has set those signals. Crash reports (`type: "report"`) still land so production errors from DNT users don't disappear, but they carry no `visitor_id` and no `user_id`
 - Bot traffic is tagged but not filtered, so you retain full data for debugging
 
 ### Data retention and right-to-delete
@@ -295,7 +377,7 @@ Signals are designed for product analytics and diagnostics, not as a security au
 
 ## Troubleshooting
 
-**Events not appearing in Grafana**: Check that `[signals] enabled = true` in forge.toml, the PostgreSQL datasource is configured in Grafana, and materialized views have had time to refresh (first refresh is 5 minutes after startup). Verify events exist with `SELECT count(*) FROM forge_signals_events`.
+**Events not appearing in Grafana**: Check that `[signals] enabled = true` in forge.toml, the PostgreSQL datasource is configured in Grafana, and the rollup tables have been populated (rows appear in `forge_signals_hourly_stats` after the first flush interval). Verify events exist with `SELECT count(*) FROM forge_signals_events`.
 
 **High event volume dropping events**: The collector uses a bounded channel with 10,000 capacity. If you see `signals collector channel full` in logs, increase `batch_size` or decrease `flush_interval_ms` to drain faster.
 

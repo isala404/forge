@@ -58,6 +58,36 @@ pub async fn delete_user(ctx: &MutationContext, id: Uuid) -> Result<()> {
 }
 ```
 
+### Custom Role Resolution
+
+By default, `require_role` checks the flat `roles` list from the JWT claim. If you need role hierarchy expansion, group membership lookups, or any other custom logic, implement `RoleResolver` and register it on the builder.
+
+```rust
+use std::sync::Arc;
+use forge_core::{RoleResolver, AuthContext};
+
+struct HierarchyResolver;
+
+impl RoleResolver for HierarchyResolver {
+    fn resolve(&self, auth: &AuthContext) -> Vec<String> {
+        let mut roles = auth.roles().to_vec();
+        // Admins implicitly hold all lower-privileged roles
+        if roles.contains(&"admin".to_string()) {
+            roles.extend(["editor", "viewer"].map(String::from));
+        }
+        roles
+    }
+}
+
+Forge::builder()
+    .with_role_resolver(Arc::new(HierarchyResolver))
+    .build()?
+    .run()
+    .await
+```
+
+`resolve` is called once per request that carries a `require_role` constraint. The returned list is not cached between calls, so keep implementations cheap — cache remote lookups inside the resolver struct.
+
 ### Checking Roles in Code
 
 ```rust
@@ -80,6 +110,91 @@ pub async fn get_orders(ctx: &QueryContext) -> Result<Vec<Order>> {
         .await
         .map_err(Into::into)
     }
+}
+```
+
+### Tenant Isolation
+
+For multi-tenant products, Forge enforces a `tenant_id` claim from the JWT and provides helpers for filtering data by tenant.
+
+**How `tenant_id` flows through the system:**
+
+1. Your auth provider issues a JWT with a `tenant_id` claim (a UUID).
+2. The gateway validates the token and makes `ctx.auth.tenant_id()` available in every handler.
+3. If your SQL uses `tenant_id` in a WHERE clause, the macro detects this at compile time and sets `requires_tenant_scope = true` on the function. The runtime then rejects calls that lack a `tenant_id` claim with 403 Forbidden — before your handler runs.
+4. You apply the filter in SQL using the claim value.
+
+**Isolation modes** are available via `TenantContext` when you need finer control inside a handler:
+
+| Mode | Constant | Behaviour |
+|------|----------|-----------|
+| `none` | `TenantIsolationMode::None` | No tenant isolation; global access. Default. |
+| `strict` | `TenantIsolationMode::Strict` | Only see own tenant's data. Reads and writes are scoped. |
+| `read_shared` | `TenantIsolationMode::ReadShared` | Reads may include shared/global rows; writes are tenant-scoped. |
+
+```rust
+use forge_core::{TenantContext, TenantIsolationMode};
+
+#[forge::query]
+pub async fn list_documents(ctx: &QueryContext) -> Result<Vec<Document>> {
+    let tenant_id = ctx.auth.tenant_id()
+        .ok_or_else(|| ForgeError::Forbidden("tenant_id claim required".into()))?;
+
+    // TenantContext::strict() builds a context with TenantIsolationMode::Strict.
+    // sql_filter() returns a parameterized clause + the bound UUID — safe against injection.
+    let tenant_ctx = TenantContext::strict(tenant_id);
+    let (clause, id) = tenant_ctx
+        .sql_filter("tenant_id", 1)
+        .expect("strict context always produces a filter");
+
+    // Use the clause and bound value in your query.
+    // In practice, embed tenant_id directly as a bind param (shown below).
+    sqlx::query_as!(
+        Document,
+        "SELECT * FROM documents WHERE tenant_id = $1",
+        tenant_id,
+    )
+    .fetch_all(ctx.db())
+    .await
+    .map_err(Into::into)
+}
+```
+
+For `ReadShared` — where some rows are global (no tenant) and others are tenant-scoped:
+
+```rust
+#[forge::query]
+pub async fn list_templates(ctx: &QueryContext) -> Result<Vec<Template>> {
+    let tenant_id = ctx.auth.tenant_id()
+        .ok_or_else(|| ForgeError::Forbidden("tenant_id claim required".into()))?;
+
+    // Return global templates (tenant_id IS NULL) + this tenant's own templates.
+    sqlx::query_as!(
+        Template,
+        "SELECT * FROM templates WHERE tenant_id IS NULL OR tenant_id = $1",
+        tenant_id,
+    )
+    .fetch_all(ctx.db())
+    .await
+    .map_err(Into::into)
+}
+```
+
+**Compile-time enforcement:** When a private (non-`public`, non-`unscoped`) query contains `tenant_id` in its SQL WHERE clause, the runtime enforces that the caller's JWT includes a valid `tenant_id` claim. No tenant claim → 403 before your handler runs. Use `#[query(unscoped)]` to opt out for admin queries that span all tenants.
+
+**Testing with a tenant context:**
+
+```rust
+#[tokio::test]
+async fn test_tenant_query() {
+    let tenant_id = Uuid::new_v4();
+    let ctx = TestQueryContext::builder()
+        .as_user(Uuid::new_v4())
+        .with_tenant(tenant_id)
+        .build();
+
+    let result = list_documents(&ctx).await;
+    assert_ok!(result);
 }
 ```
 
@@ -117,6 +232,32 @@ pub async fn admin_list_orders(ctx: &QueryContext) -> Result<Vec<Order>> {
 ```
 
 Public queries skip this check since they don't require authentication.
+
+### `public` vs `unscoped`
+
+These two flags look similar but control different things:
+
+| | `public` | `unscoped` |
+|---|---|---|
+| **JWT required** | No — anonymous access allowed | Yes — valid token still required |
+| **Scope check** | Skipped (no identity to check against) | Skipped explicitly |
+| **Use for** | Login endpoints, public APIs, landing page data | Admin queries, shared/global data that any authenticated user may read |
+
+`public` bypasses JWT validation entirely. The request reaches your handler with no auth context — `ctx.auth.user_id()` returns `None`.
+
+`unscoped` keeps authentication in place but tells the compiler not to enforce the `user_id`/`owner_id` filter rule. The caller must still present a valid JWT. Use it when your SQL intentionally spans all users (e.g., `SELECT * FROM products` — a catalogue that every logged-in user can browse).
+
+```rust
+// Anonymous access — no token needed
+#[forge::query(public)]
+pub async fn get_pricing(ctx: &QueryContext) -> Result<Vec<Plan>> { ... }
+
+// Auth required, but not scoped to a single user
+#[forge::query(unscoped)]
+pub async fn list_all_products(ctx: &QueryContext) -> Result<Vec<Product>> { ... }
+```
+
+Combining both (`public` + `unscoped`) is redundant: `public` already implies no scope check.
 
 ### Accessing Custom Claims
 

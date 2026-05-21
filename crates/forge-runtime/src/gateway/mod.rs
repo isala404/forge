@@ -1,7 +1,9 @@
+mod admin;
 mod auth;
 pub mod jwks;
 mod mcp;
 mod multipart;
+#[cfg(feature = "mcp-oauth")]
 pub mod oauth;
 mod request;
 mod response;
@@ -11,12 +13,14 @@ mod sse;
 mod tls;
 mod tracing;
 
+pub use admin::{AdminState, admin_router};
 pub use auth::{AuthConfig, AuthMiddleware, HmacTokenIssuer, build_auth_context_from_claims};
 pub use jwks::{JwksClient, JwksError};
 pub use mcp::{McpState, mcp_get_handler, mcp_post_handler};
 pub use multipart::rpc_multipart_handler;
+#[cfg(feature = "mcp-oauth")]
 pub use oauth::OAuthState;
-pub use request::{BatchRpcRequest, BatchRpcResponse, RpcRequest};
+pub use request::RpcRequest;
 pub use response::{RpcError, RpcResponse};
 pub use rpc::RpcHandler;
 pub use server::{GatewayConfig, GatewayServer, TrustedProxies};
@@ -78,24 +82,6 @@ pub(crate) fn resolve_client_ip(
     }
 
     Some(peer.to_string())
-}
-
-/// Legacy header-based IP extraction (no proxy validation).
-/// Used only in contexts where peer address is unavailable.
-pub(crate) fn extract_client_ip(headers: &axum::http::HeaderMap) -> Option<String> {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            headers
-                .get("x-real-ip")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        })
 }
 
 pub(crate) fn extract_header(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {

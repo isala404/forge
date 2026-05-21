@@ -3,6 +3,7 @@ name = "forge-dioxus-demo-template"
 version = "0.9.0"
 edition = "2024"
 rust-version = "1.92"
+publish = false
 
 [features]
 default = ["embedded-frontend"]
@@ -21,7 +22,8 @@ dotenvy = "0.15"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
-bcrypt = "0.16"
+argon2 = "0.5"
+password-hash = "0.5"
 rust-embed = { version = "8", optional = true }
 
 [build-dependencies]

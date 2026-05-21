@@ -10,18 +10,16 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use base64::{
-    Engine as _,
-    engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig, general_purpose},
-};
-use ed25519_dalek::{Signature as Ed25519Signature, Verifier as _, VerifyingKey};
+use base64::{Engine as _, engine::general_purpose};
 use forge_core::CircuitBreakerClient;
-use forge_core::function::JobDispatch;
-use forge_core::webhook::{IdempotencySource, SignatureAlgorithm, WebhookContext};
+use forge_core::function::{JobDispatch, KvHandle, WorkflowDispatch};
+use forge_core::webhook::{
+    IdempotencySource, REPLAY_TIMESTAMP_HEADER, SignatureAlgorithm, WebhookContext,
+};
 use hmac::{Hmac, Mac};
+use ring::signature::{self, UnparsedPublicKey};
 use serde_json::{Value, json};
-use sha1::Sha1;
-use sha2::{Sha256, Sha512};
+use sha2::Sha256;
 use sqlx::PgPool;
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -36,34 +34,39 @@ pub struct WebhookState {
     pool: PgPool,
     http_client: CircuitBreakerClient,
     job_dispatcher: Option<Arc<dyn JobDispatch>>,
+    workflow_dispatcher: Option<Arc<dyn WorkflowDispatch>>,
+    kv: Option<Arc<dyn KvHandle>>,
 }
 
 impl WebhookState {
-    /// Create new webhook state.
     pub fn new(registry: Arc<WebhookRegistry>, pool: PgPool) -> Self {
         Self {
             registry,
             pool,
-            http_client: CircuitBreakerClient::with_defaults(reqwest::Client::new()),
+            http_client: CircuitBreakerClient::with_ssrf_protection(),
             job_dispatcher: None,
+            workflow_dispatcher: None,
+            kv: None,
         }
     }
 
-    /// Set job dispatcher.
     pub fn with_job_dispatcher(mut self, dispatcher: Arc<dyn JobDispatch>) -> Self {
         self.job_dispatcher = Some(dispatcher);
+        self
+    }
+
+    pub fn with_workflow_dispatcher(mut self, dispatcher: Arc<dyn WorkflowDispatch>) -> Self {
+        self.workflow_dispatcher = Some(dispatcher);
+        self
+    }
+
+    pub fn with_kv(mut self, kv: Arc<dyn KvHandle>) -> Self {
+        self.kv = Some(kv);
         self
     }
 }
 
 /// Handle webhook requests.
-///
-/// This handler:
-/// 1. Looks up webhook by path
-/// 2. Validates signature if configured
-/// 3. Checks idempotency
-/// 4. Executes handler
-/// 5. Records idempotency key
 pub async fn webhook_handler(
     State(state): State<Arc<WebhookState>>,
     Path(path): Path<String>,
@@ -73,7 +76,6 @@ pub async fn webhook_handler(
     let full_path = format!("/webhooks/{}", path);
     let request_id = Uuid::new_v4().to_string();
 
-    // Look up webhook by path
     let entry = match state.registry.get_by_path(&full_path) {
         Some(e) => e,
         None => {
@@ -106,9 +108,7 @@ pub async fn webhook_handler(
             .into_response();
     }
 
-    // Validate signature if configured
     if let Some(ref sig_config) = info.signature {
-        // Get signature from header
         let signature = match headers
             .get(sig_config.header_name)
             .and_then(|v| v.to_str().ok())
@@ -124,8 +124,7 @@ pub async fn webhook_handler(
             }
         };
 
-        // Get secret(s) from environment. Comma-separated values support
-        // rotation: set to "new-secret,old-secret" during rollover.
+        // Comma-separated values support rotation: "new-secret,old-secret".
         let secrets_raw = match std::env::var(sig_config.secret_env) {
             Ok(s) => s,
             Err(_) => {
@@ -142,14 +141,20 @@ pub async fn webhook_handler(
             }
         };
 
-        // Try each secret, first match wins
         let secrets: Vec<&str> = secrets_raw
             .split(',')
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .collect();
         let signature_valid = secrets.iter().any(|secret| {
-            validate_signature(sig_config.algorithm, &body, secret, signature, &headers)
+            validate_signature(
+                sig_config.algorithm,
+                &body,
+                secret,
+                signature,
+                &headers,
+                sig_config.replay_window_secs,
+            )
         });
         if !signature_valid {
             warn!(webhook = info.name, "Invalid signature");
@@ -161,7 +166,6 @@ pub async fn webhook_handler(
         }
     }
 
-    // Extract idempotency key if configured
     let idempotency_key = if let Some(ref idem_config) = info.idempotency {
         match &idem_config.source {
             IdempotencySource::Header(header_name) => headers
@@ -169,7 +173,6 @@ pub async fn webhook_handler(
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string()),
             IdempotencySource::Body(json_path) => {
-                // Parse body and extract value using JSON path
                 if let Ok(payload) = serde_json::from_slice::<Value>(&body) {
                     extract_json_path(&payload, json_path)
                 } else {
@@ -183,7 +186,6 @@ pub async fn webhook_handler(
         None
     };
 
-    // Atomically claim idempotency key before execution.
     let mut idempotency_claimed = false;
     if let Some(ref key) = idempotency_key
         && let Some(ref idem_config) = info.idempotency
@@ -199,6 +201,18 @@ pub async fn webhook_handler(
         {
             Ok(true) => {
                 idempotency_claimed = true;
+                let headers_json = serde_json::to_value(
+                    headers
+                        .iter()
+                        .filter_map(|(k, v)| {
+                            v.to_str()
+                                .ok()
+                                .map(|v| (k.as_str().to_string(), v.to_string()))
+                        })
+                        .collect::<HashMap<String, String>>(),
+                )
+                .unwrap_or_default();
+                store_raw_payload(&state.pool, info.name, key, &body, &headers_json).await;
             }
             Ok(false) => {
                 info!(
@@ -225,7 +239,6 @@ pub async fn webhook_handler(
         }
     }
 
-    // Parse payload
     let payload: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
@@ -248,7 +261,6 @@ pub async fn webhook_handler(
         }
     };
 
-    // Build headers map (lowercase keys)
     let header_map: HashMap<String, String> = headers
         .iter()
         .filter_map(|(k, v)| {
@@ -258,40 +270,144 @@ pub async fn webhook_handler(
         })
         .collect();
 
-    // Create context
-    let mut ctx = WebhookContext::new(
+    // Open a transaction so the handler's dispatches commit atomically with
+    // its DB writes. The idempotency claim was already committed (it must
+    // outlive a rollback so a retry can see the claim), but anything the
+    // handler does — `dispatch_job`, `start_workflow`, or queries via
+    // `ctx.conn()` — lands on this connection and rolls back together on
+    // error or timeout.
+    let tx = match state.pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            error!(webhook = info.name, error = %e, "Failed to begin webhook transaction");
+            if idempotency_claimed
+                && let Some(ref key) = idempotency_key
+                && let Err(release_err) = release_idempotency(&state.pool, info.name, key).await
+            {
+                warn!(
+                    webhook = info.name,
+                    error = %release_err,
+                    "Failed to release idempotency key after transaction begin failure"
+                );
+            }
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(RpcError::new(
+                    "SERVICE_UNAVAILABLE",
+                    "Service temporarily unavailable",
+                )),
+            )
+                .into_response();
+        }
+    };
+
+    let (mut ctx, tx_handle) = WebhookContext::with_transaction(
         info.name.to_string(),
         request_id.clone(),
         header_map,
         state.pool.clone(),
+        tx,
         state.http_client.clone(),
-    )
-    .with_idempotency_key(idempotency_key.clone());
+    );
+    ctx = ctx.with_idempotency_key(idempotency_key.clone());
     ctx.set_http_timeout(info.http_timeout);
 
     if let Some(ref dispatcher) = state.job_dispatcher {
         ctx = ctx.with_job_dispatch(dispatcher.clone());
     }
+    if let Some(ref dispatcher) = state.workflow_dispatcher {
+        ctx = ctx.with_workflow_dispatch(dispatcher.clone());
+    }
+    if let Some(ref kv) = state.kv {
+        ctx = ctx.with_kv(Arc::clone(kv));
+    }
 
-    // Execute handler with timeout
     let exec_start = std::time::Instant::now();
     let result = tokio::time::timeout(info.timeout, (entry.handler)(&ctx, payload)).await;
     let exec_duration_ms = exec_start.elapsed().as_millis().min(i32::MAX as u128) as i32;
+    drop(ctx);
+
+    let take_tx = || async {
+        let mut guard = tx_handle.lock().await;
+        guard.take()
+    };
 
     match result {
         Ok(Ok(webhook_result)) => {
-            if idempotency_claimed
-                && let Some(ref key) = idempotency_key
-                && let Err(complete_err) = complete_idempotency(&state.pool, info.name, key).await
-            {
-                warn!(
-                    webhook = info.name,
-                    error = %complete_err,
-                    "Failed to mark idempotency key as completed"
-                );
-            }
             let status =
                 StatusCode::from_u16(webhook_result.status_code()).unwrap_or(StatusCode::OK);
+            if status.is_success() {
+                if let Some(tx) = take_tx().await
+                    && let Err(commit_err) = tx.commit().await
+                {
+                    error!(
+                        webhook = info.name,
+                        error = %commit_err,
+                        "Failed to commit webhook transaction"
+                    );
+                    if idempotency_claimed
+                        && let Some(ref key) = idempotency_key
+                        && let Err(release_err) =
+                            release_idempotency(&state.pool, info.name, key).await
+                    {
+                        warn!(
+                            webhook = info.name,
+                            error = %release_err,
+                            "Failed to release idempotency key after commit failure"
+                        );
+                    }
+                    crate::signals::emit_server_execution(
+                        info.name,
+                        "webhook",
+                        exec_duration_ms,
+                        false,
+                        Some(commit_err.to_string()),
+                    );
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(RpcError::with_details(
+                            "INTERNAL_ERROR",
+                            "Internal server error",
+                            json!({ "request_id": request_id }),
+                        )),
+                    )
+                        .into_response();
+                }
+                if idempotency_claimed
+                    && let Some(ref key) = idempotency_key
+                    && let Err(complete_err) =
+                        complete_idempotency(&state.pool, info.name, key).await
+                {
+                    warn!(
+                        webhook = info.name,
+                        error = %complete_err,
+                        "Failed to mark idempotency key as completed"
+                    );
+                }
+            } else {
+                // Handler returned a non-2xx but didn't error. Treat as a
+                // soft failure: roll back the handler's writes, release the
+                // claim, and surface the status.
+                if let Some(tx) = take_tx().await
+                    && let Err(rollback_err) = tx.rollback().await
+                {
+                    warn!(
+                        webhook = info.name,
+                        error = %rollback_err,
+                        "Failed to roll back webhook transaction on non-success status"
+                    );
+                }
+                if idempotency_claimed
+                    && let Some(ref key) = idempotency_key
+                    && let Err(release_err) = release_idempotency(&state.pool, info.name, key).await
+                {
+                    warn!(
+                        webhook = info.name,
+                        error = %release_err,
+                        "Failed to release idempotency key after non-success response"
+                    );
+                }
+            }
             crate::signals::emit_server_execution(
                 info.name,
                 "webhook",
@@ -302,6 +418,15 @@ pub async fn webhook_handler(
             (status, Json(webhook_result.body())).into_response()
         }
         Ok(Err(e)) => {
+            if let Some(tx) = take_tx().await
+                && let Err(rollback_err) = tx.rollback().await
+            {
+                warn!(
+                    webhook = info.name,
+                    error = %rollback_err,
+                    "Failed to roll back webhook transaction after handler error"
+                );
+            }
             if idempotency_claimed
                 && let Some(ref key) = idempotency_key
                 && let Err(release_err) = release_idempotency(&state.pool, info.name, key).await
@@ -332,6 +457,15 @@ pub async fn webhook_handler(
                 .into_response()
         }
         Err(_) => {
+            if let Some(tx) = take_tx().await
+                && let Err(rollback_err) = tx.rollback().await
+            {
+                warn!(
+                    webhook = info.name,
+                    error = %rollback_err,
+                    "Failed to roll back webhook transaction after timeout"
+                );
+            }
             if idempotency_claimed
                 && let Some(ref key) = idempotency_key
                 && let Err(release_err) = release_idempotency(&state.pool, info.name, key).await
@@ -364,125 +498,83 @@ pub async fn webhook_handler(
 }
 
 /// Validate webhook signature, dispatching to the appropriate algorithm.
+///
+/// Stripe handles its own timestamp via the `t=` field. All other schemes
+/// require an `x-webhook-timestamp` header carrying unix seconds; the request
+/// is rejected as a replay when the difference from `now` falls outside
+/// `replay_window_secs`. A `replay_window_secs` of 0 disables enforcement.
 fn validate_signature(
     algorithm: SignatureAlgorithm,
     body: &[u8],
     secret: &str,
     signature: &str,
     headers: &HeaderMap,
+    replay_window_secs: u64,
 ) -> bool {
+    if !matches!(algorithm, SignatureAlgorithm::StripeWebhooks)
+        && replay_window_secs > 0
+        && !timestamp_within_replay_window(headers, replay_window_secs)
+    {
+        return false;
+    }
     match algorithm {
-        SignatureAlgorithm::StandardWebhooks => {
-            validate_standard_webhooks(body, secret, signature, headers)
+        SignatureAlgorithm::StripeWebhooks => {
+            validate_stripe_webhooks(body, secret, signature, replay_window_secs)
         }
-        SignatureAlgorithm::StripeWebhooks => validate_stripe_webhooks(body, secret, signature),
         SignatureAlgorithm::HmacSha256Base64 => {
             validate_hmac_sha256_base64(body, secret, signature)
         }
         SignatureAlgorithm::Ed25519 => validate_ed25519(body, secret, signature),
-        alg => {
-            // HMAC variants: decode hex, verify
-            let sig_hex = signature.strip_prefix(alg.prefix()).unwrap_or(signature);
+        SignatureAlgorithm::HmacSha256 => {
+            let sig_hex = signature
+                .strip_prefix(SignatureAlgorithm::HmacSha256.prefix())
+                .unwrap_or(signature);
             let expected = match decode_hex(sig_hex) {
                 Some(b) => b,
                 None => return false,
             };
-            match alg {
-                SignatureAlgorithm::HmacSha256 => {
-                    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
-                        .expect("HMAC can take key of any size");
-                    mac.update(body);
-                    mac.verify_slice(&expected).is_ok()
-                }
-                SignatureAlgorithm::HmacSha1 => {
-                    let mut mac = Hmac::<Sha1>::new_from_slice(secret.as_bytes())
-                        .expect("HMAC can take key of any size");
-                    mac.update(body);
-                    mac.verify_slice(&expected).is_ok()
-                }
-                SignatureAlgorithm::HmacSha512 => {
-                    let mut mac = Hmac::<Sha512>::new_from_slice(secret.as_bytes())
-                        .expect("HMAC can take key of any size");
-                    mac.update(body);
-                    mac.verify_slice(&expected).is_ok()
-                }
-                _ => unreachable!(),
-            }
+            let mut mac = match Hmac::<Sha256>::new_from_slice(secret.as_bytes()) {
+                Ok(m) => m,
+                Err(_) => return false,
+            };
+            mac.update(body);
+            mac.verify_slice(&expected).is_ok()
         }
+        // Future variants added to SignatureAlgorithm are caught here until handler support lands.
+        _ => false,
     }
 }
 
-/// Validate a Standard Webhooks signature (https://www.standardwebhooks.com).
-///
-/// - Secret: strip `whsec_` or `polar_whs_` prefix, then base64-decode.
-/// - Signed content: `{webhook-id}\n{webhook-timestamp}\n{body}`.
-/// - Signature header format: `v1,<base64>` (space-separated for multiple).
-fn validate_standard_webhooks(
-    body: &[u8],
-    secret: &str,
-    signature_header: &str,
-    headers: &HeaderMap,
-) -> bool {
-    let msg_id = match headers.get("webhook-id").and_then(|v| v.to_str().ok()) {
-        Some(v) => v,
-        None => return false,
-    };
-
-    let msg_timestamp = match headers
-        .get("webhook-timestamp")
+/// Reject requests whose `x-webhook-timestamp` header is missing, malformed,
+/// dated in the future, or older than `window_secs`. Returns `true` only when
+/// the request falls inside the window.
+fn timestamp_within_replay_window(headers: &HeaderMap, window_secs: u64) -> bool {
+    let Some(ts_str) = headers
+        .get(REPLAY_TIMESTAMP_HEADER)
         .and_then(|v| v.to_str().ok())
-    {
-        Some(v) => v,
-        None => return false,
+    else {
+        return false;
     };
-
-    // Strip known prefixes and base64-decode the raw key.
-    // Use a permissive decoder: accept both padded and unpadded input, and allow
-    // non-zero trailing bits. Polar (and some other providers) emit base64 keys
-    // whose last group has non-canonical trailing bits that strict decoders reject.
-    let decoder = GeneralPurpose::new(
-        &base64::alphabet::STANDARD,
-        GeneralPurposeConfig::new()
-            .with_decode_padding_mode(DecodePaddingMode::Indifferent)
-            .with_decode_allow_trailing_bits(true),
-    );
-    let b64_key = secret
-        .strip_prefix("whsec_")
-        .or_else(|| secret.strip_prefix("polar_whs_"))
-        .unwrap_or(secret);
-
-    let key_bytes = match decoder.decode(b64_key) {
-        Ok(b) => b,
-        Err(_) => return false,
+    let Ok(ts) = ts_str.parse::<i64>() else {
+        return false;
     };
-
-    // Build the signed content per Standard Webhooks spec: "{id}.{timestamp}.{body}"
-    let mut signed = Vec::with_capacity(msg_id.len() + msg_timestamp.len() + body.len() + 2);
-    signed.extend_from_slice(msg_id.as_bytes());
-    signed.push(b'.');
-    signed.extend_from_slice(msg_timestamp.as_bytes());
-    signed.push(b'.');
-    signed.extend_from_slice(body);
-
-    let mut mac =
-        Hmac::<Sha256>::new_from_slice(&key_bytes).expect("HMAC can take key of any size");
-    mac.update(&signed);
-    let computed = mac.finalize().into_bytes();
-    let computed_b64 = general_purpose::STANDARD.encode(computed);
-
-    // The header may contain multiple space-separated signatures: "v1,<b64> v1,<b64>"
-    signature_header
-        .split_whitespace()
-        .filter_map(|s| s.strip_prefix("v1,"))
-        .any(|sig| sig == computed_b64)
+    let now = chrono::Utc::now().timestamp();
+    let window = i64::try_from(window_secs).unwrap_or(i64::MAX);
+    let age = now.saturating_sub(ts);
+    age >= 0 && age <= window
 }
 
 /// Validate a Stripe webhook signature.
 ///
 /// - Header format: `t=1234567890,v1=<hex>,v1=<hex>`
 /// - Signed content: `{timestamp}.{body}`
-/// - Rejects requests where the timestamp is more than 5 minutes old.
-fn validate_stripe_webhooks(body: &[u8], secret: &str, signature_header: &str) -> bool {
+/// - Rejects requests outside `replay_window_secs` (0 disables the check).
+fn validate_stripe_webhooks(
+    body: &[u8],
+    secret: &str,
+    signature_header: &str,
+    replay_window_secs: u64,
+) -> bool {
     let mut timestamp: Option<&str> = None;
     let mut signatures: Vec<&str> = Vec::new();
 
@@ -499,12 +591,13 @@ fn validate_stripe_webhooks(body: &[u8], secret: &str, signature_header: &str) -
         None => return false,
     };
 
-    // Replay protection: reject if timestamp is more than 5 minutes off
     let ts: i64 = match timestamp.parse() {
         Ok(n) => n,
         Err(_) => return false,
     };
-    if (chrono::Utc::now().timestamp() - ts).abs() > 300 {
+    if replay_window_secs > 0
+        && (chrono::Utc::now().timestamp() - ts).unsigned_abs() > replay_window_secs
+    {
         return false;
     }
 
@@ -520,8 +613,10 @@ fn validate_stripe_webhooks(body: &[u8], secret: &str, signature_header: &str) -
         let Some(decoded) = decode_hex(sig) else {
             continue;
         };
-        let mut verifier = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
-            .expect("HMAC can take key of any size");
+        let mut verifier = match Hmac::<Sha256>::new_from_slice(secret.as_bytes()) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
         verifier.update(&signed);
         if verifier.verify_slice(&decoded).is_ok() {
             return true;
@@ -538,8 +633,10 @@ fn validate_hmac_sha256_base64(body: &[u8], secret: &str, signature: &str) -> bo
     let Ok(provided) = general_purpose::STANDARD.decode(signature) else {
         return false;
     };
-    let mut mac =
-        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
+    let mut mac = match Hmac::<Sha256>::new_from_slice(secret.as_bytes()) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
     mac.update(body);
     mac.verify_slice(&provided).is_ok()
 }
@@ -553,26 +650,14 @@ fn validate_ed25519(body: &[u8], public_key_b64: &str, signature_b64: &str) -> b
         Ok(b) => b,
         Err(_) => return false,
     };
-    let pub_key_array: [u8; 32] = match pub_key_bytes.as_slice().try_into() {
-        Ok(b) => b,
-        Err(_) => return false,
-    };
-    let verifying_key = match VerifyingKey::from_bytes(&pub_key_array) {
-        Ok(k) => k,
-        Err(_) => return false,
-    };
 
     let sig_bytes = match general_purpose::STANDARD.decode(signature_b64) {
         Ok(b) => b,
         Err(_) => return false,
     };
-    let sig_array: [u8; 64] = match sig_bytes.as_slice().try_into() {
-        Ok(b) => b,
-        Err(_) => return false,
-    };
-    let signature = Ed25519Signature::from_bytes(&sig_array);
 
-    verifying_key.verify(body, &signature).is_ok()
+    let peer_public_key = UnparsedPublicKey::new(&signature::ED25519, &pub_key_bytes);
+    peer_public_key.verify(body, &sig_bytes).is_ok()
 }
 
 fn decode_hex(s: &str) -> Option<Vec<u8>> {
@@ -619,9 +704,9 @@ async fn claim_idempotency(
 ) -> Result<bool, sqlx::Error> {
     let expires_at =
         chrono::Utc::now() + chrono::Duration::from_std(ttl).unwrap_or(chrono::Duration::hours(24));
-    let processing_timeout_secs = processing_timeout.as_secs().try_into().unwrap_or(i32::MAX);
+    let processing_timeout_secs = processing_timeout.as_secs_f64();
 
-    let result = sqlx::query(
+    let result = sqlx::query!(
         r#"
         INSERT INTO forge_webhook_events (idempotency_key, webhook_name, status, processed_at, expires_at)
         VALUES ($1, $2, 'claimed', NOW(), $3)
@@ -631,17 +716,46 @@ async fn claim_idempotency(
                 expires_at = EXCLUDED.expires_at
         WHERE forge_webhook_events.expires_at < NOW()
            OR (forge_webhook_events.status = 'claimed'
-               AND forge_webhook_events.processed_at + make_interval(secs => $4::double precision) < NOW())
+               AND forge_webhook_events.processed_at + make_interval(secs => $4) < NOW())
         "#,
+        key,
+        webhook_name,
+        expires_at,
+        processing_timeout_secs,
     )
-    .bind(key)
-    .bind(webhook_name)
-    .bind(expires_at)
-    .bind(processing_timeout_secs)
     .execute(pool)
     .await?;
 
     Ok(result.rows_affected() > 0)
+}
+
+/// Store the raw request body and headers for replay.
+#[allow(clippy::disallowed_methods)]
+async fn store_raw_payload(
+    pool: &PgPool,
+    webhook_name: &str,
+    key: &str,
+    body: &[u8],
+    headers: &serde_json::Value,
+) {
+    if let Err(e) = sqlx::query(
+        "UPDATE forge_webhook_events \
+         SET raw_body = $1, raw_headers = $2 \
+         WHERE webhook_name = $3 AND idempotency_key = $4",
+    )
+    .bind(body)
+    .bind(headers)
+    .bind(webhook_name)
+    .bind(key)
+    .execute(pool)
+    .await
+    {
+        tracing::debug!(
+            webhook = webhook_name,
+            error = %e,
+            "Failed to store raw webhook payload for replay"
+        );
+    }
 }
 
 /// Mark idempotency key as completed after successful processing.
@@ -650,32 +764,32 @@ async fn complete_idempotency(
     webhook_name: &str,
     key: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE forge_webhook_events
         SET status = 'completed'
         WHERE webhook_name = $1 AND idempotency_key = $2
         "#,
+        webhook_name,
+        key,
     )
-    .bind(webhook_name)
-    .bind(key)
     .execute(pool)
     .await?;
 
     Ok(())
 }
 
-/// Release idempotency key after failure so retries can proceed.
+/// Mark idempotency key as failed so the raw body is preserved for replay.
 async fn release_idempotency(
     pool: &PgPool,
     webhook_name: &str,
     key: &str,
 ) -> Result<(), sqlx::Error> {
+    #[allow(clippy::disallowed_methods)]
     sqlx::query(
-        r#"
-        DELETE FROM forge_webhook_events
-        WHERE webhook_name = $1 AND idempotency_key = $2
-        "#,
+        "UPDATE forge_webhook_events \
+         SET status = 'failed' \
+         WHERE webhook_name = $1 AND idempotency_key = $2",
     )
     .bind(webhook_name)
     .bind(key)
@@ -730,6 +844,13 @@ mod tests {
         assert_eq!(extract_json_path(&value, "$.id"), None);
     }
 
+    fn fresh_timestamp_headers() -> HeaderMap {
+        let mut h = HeaderMap::new();
+        let now = chrono::Utc::now().timestamp().to_string();
+        h.insert(REPLAY_TIMESTAMP_HEADER, now.parse().unwrap());
+        h
+    }
+
     #[test]
     fn test_validate_signature_sha256() {
         use hmac::{Hmac, Mac};
@@ -737,7 +858,7 @@ mod tests {
 
         let body = b"test payload";
         let secret = "test_secret";
-        let empty_headers = HeaderMap::new();
+        let headers = fresh_timestamp_headers();
 
         let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
         mac.update(body);
@@ -748,7 +869,8 @@ mod tests {
             body,
             secret,
             &signature,
-            &empty_headers,
+            &headers,
+            300,
         ));
 
         // With prefix
@@ -758,20 +880,33 @@ mod tests {
             body,
             secret,
             &sig_with_prefix,
+            &headers,
+            300,
+        ));
+
+        // Replay window disabled (0) — header presence no longer matters
+        let empty_headers = HeaderMap::new();
+        assert!(validate_signature(
+            SignatureAlgorithm::HmacSha256,
+            body,
+            secret,
+            &signature,
             &empty_headers,
+            0,
         ));
     }
 
     #[test]
     fn test_validate_signature_invalid() {
-        let empty_headers = HeaderMap::new();
+        let headers = fresh_timestamp_headers();
 
         assert!(!validate_signature(
             SignatureAlgorithm::HmacSha256,
             b"test",
             "secret",
             "invalid_hex",
-            &empty_headers,
+            &headers,
+            300,
         ));
 
         assert!(!validate_signature(
@@ -779,7 +914,134 @@ mod tests {
             b"test",
             "secret",
             "0000000000000000000000000000000000000000000000000000000000000000",
+            &headers,
+            300,
+        ));
+    }
+
+    #[test]
+    fn test_replay_window_rejects_when_header_missing() {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let body = b"test payload";
+        let secret = "test_secret";
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        let signature = encode_hex(&mac.finalize().into_bytes());
+
+        let headers = HeaderMap::new();
+        assert!(!validate_signature(
+            SignatureAlgorithm::HmacSha256,
+            body,
+            secret,
+            &signature,
+            &headers,
+            300,
+        ));
+    }
+
+    #[test]
+    fn test_replay_window_rejects_when_header_malformed() {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let body = b"test payload";
+        let secret = "test_secret";
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        let signature = encode_hex(&mac.finalize().into_bytes());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(REPLAY_TIMESTAMP_HEADER, "not-a-timestamp".parse().unwrap());
+        assert!(!validate_signature(
+            SignatureAlgorithm::HmacSha256,
+            body,
+            secret,
+            &signature,
+            &headers,
+            300,
+        ));
+    }
+
+    #[test]
+    fn test_replay_window_rejects_stale_timestamp() {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let body = b"test payload";
+        let secret = "test_secret";
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        let signature = encode_hex(&mac.finalize().into_bytes());
+
+        let stale = (chrono::Utc::now().timestamp() - 600).to_string();
+        let mut headers = HeaderMap::new();
+        headers.insert(REPLAY_TIMESTAMP_HEADER, stale.parse().unwrap());
+        assert!(!validate_signature(
+            SignatureAlgorithm::HmacSha256,
+            body,
+            secret,
+            &signature,
+            &headers,
+            300,
+        ));
+    }
+
+    #[test]
+    fn test_replay_window_rejects_future_timestamp() {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let body = b"test payload";
+        let secret = "test_secret";
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        let signature = encode_hex(&mac.finalize().into_bytes());
+
+        let future = (chrono::Utc::now().timestamp() + 3600).to_string();
+        let mut headers = HeaderMap::new();
+        headers.insert(REPLAY_TIMESTAMP_HEADER, future.parse().unwrap());
+        assert!(!validate_signature(
+            SignatureAlgorithm::HmacSha256,
+            body,
+            secret,
+            &signature,
+            &headers,
+            300,
+        ));
+    }
+
+    #[test]
+    fn test_replay_window_does_not_apply_to_stripe() {
+        // Stripe carries its own timestamp inside the header and ignores
+        // x-webhook-timestamp, so the window does not gate the dispatch.
+        // This test exercises that the dispatch reaches the Stripe validator
+        // regardless of the auxiliary header state.
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let body = b"{\"type\":\"event\"}";
+        let secret = "whsec_x";
+        let ts = chrono::Utc::now().timestamp().to_string();
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        let mut signed = Vec::new();
+        signed.extend_from_slice(ts.as_bytes());
+        signed.push(b'.');
+        signed.extend_from_slice(body);
+        mac.update(&signed);
+        let sig = encode_hex(&mac.finalize().into_bytes());
+        let header = format!("t={ts},v1={sig}");
+
+        // No x-webhook-timestamp at all — Stripe still validates
+        let empty_headers = HeaderMap::new();
+        assert!(validate_signature(
+            SignatureAlgorithm::StripeWebhooks,
+            body,
+            secret,
+            &header,
             &empty_headers,
+            300,
         ));
     }
 
@@ -802,24 +1064,26 @@ mod tests {
         let sig_hex = encode_hex(&mac.finalize().into_bytes());
 
         let header = format!("t={timestamp},v1={sig_hex}");
-        assert!(validate_stripe_webhooks(body, secret, &header));
+        assert!(validate_stripe_webhooks(body, secret, &header, 300));
 
         // Multiple signatures (Stripe can include both v1 and a legacy v0)
         let header_multi = format!("t={timestamp},v0=ignored,v1={sig_hex}");
-        assert!(validate_stripe_webhooks(body, secret, &header_multi));
+        assert!(validate_stripe_webhooks(body, secret, &header_multi, 300));
 
         // Wrong signature
         assert!(!validate_stripe_webhooks(
             body,
             secret,
-            &format!("t={timestamp},v1=deadbeef")
+            &format!("t={timestamp},v1=deadbeef"),
+            300,
         ));
 
         // Missing timestamp
         assert!(!validate_stripe_webhooks(
             body,
             secret,
-            &format!("v1={sig_hex}")
+            &format!("v1={sig_hex}"),
+            300,
         ));
 
         // Stale timestamp (replay attack)
@@ -834,7 +1098,16 @@ mod tests {
         assert!(!validate_stripe_webhooks(
             body,
             secret,
-            &format!("t={old_ts},v1={old_sig}")
+            &format!("t={old_ts},v1={old_sig}"),
+            300,
+        ));
+
+        // replay_window_secs = 0 disables the check
+        assert!(validate_stripe_webhooks(
+            body,
+            secret,
+            &format!("t={old_ts},v1={old_sig}"),
+            0,
         ));
     }
 
@@ -865,17 +1138,14 @@ mod tests {
     #[test]
     fn test_validate_ed25519() {
         use base64::{Engine as _, engine::general_purpose};
-        use ed25519_dalek::{Signer, SigningKey};
+        use ring::signature::{Ed25519KeyPair, KeyPair};
 
         let body = b"{\"event\":\"user.created\"}";
-        // Deterministic key from a fixed seed
         let seed = [42u8; 32];
-        let signing_key = SigningKey::from_bytes(&seed);
-        let verifying_key = signing_key.verifying_key();
-
-        let public_key_b64 = general_purpose::STANDARD.encode(verifying_key.as_bytes());
-        let signature = signing_key.sign(body);
-        let signature_b64 = general_purpose::STANDARD.encode(signature.to_bytes());
+        let key_pair = Ed25519KeyPair::from_seed_unchecked(&seed).expect("valid seed");
+        let public_key_b64 = general_purpose::STANDARD.encode(key_pair.public_key().as_ref());
+        let sig = key_pair.sign(body);
+        let signature_b64 = general_purpose::STANDARD.encode(sig.as_ref());
 
         assert!(validate_ed25519(body, &public_key_b64, &signature_b64));
 
@@ -891,61 +1161,8 @@ mod tests {
 
         // Wrong public key
         let other_seed = [99u8; 32];
-        let other_key = SigningKey::from_bytes(&other_seed).verifying_key();
-        let other_pub_b64 = general_purpose::STANDARD.encode(other_key.as_bytes());
+        let other_pair = Ed25519KeyPair::from_seed_unchecked(&other_seed).expect("valid seed");
+        let other_pub_b64 = general_purpose::STANDARD.encode(other_pair.public_key().as_ref());
         assert!(!validate_ed25519(body, &other_pub_b64, &signature_b64));
-    }
-
-    #[test]
-    fn test_validate_standard_webhooks() {
-        use base64::{Engine as _, engine::general_purpose};
-        use hmac::{Hmac, Mac};
-        use sha2::Sha256;
-
-        let msg_id = "msg_test_123";
-        let msg_timestamp = "1234567890";
-        let body = b"{\"event\":\"subscription.created\"}";
-        // raw key bytes, base64-encoded as the "secret"
-        let raw_key = b"super_secret_key_bytes_32_chars!!";
-        let secret = format!("whsec_{}", general_purpose::STANDARD.encode(raw_key));
-
-        let mut signed = Vec::new();
-        signed.extend_from_slice(msg_id.as_bytes());
-        signed.push(b'.');
-        signed.extend_from_slice(msg_timestamp.as_bytes());
-        signed.push(b'.');
-        signed.extend_from_slice(body);
-
-        let mut mac = Hmac::<Sha256>::new_from_slice(raw_key).unwrap();
-        mac.update(&signed);
-        let sig_b64 = general_purpose::STANDARD.encode(mac.finalize().into_bytes());
-        let signature_header = format!("v1,{}", sig_b64);
-
-        let mut headers = HeaderMap::new();
-        headers.insert("webhook-id", msg_id.parse().unwrap());
-        headers.insert("webhook-timestamp", msg_timestamp.parse().unwrap());
-
-        assert!(validate_standard_webhooks(
-            body,
-            &secret,
-            &signature_header,
-            &headers
-        ));
-
-        // Wrong signature should fail
-        assert!(!validate_standard_webhooks(
-            body,
-            &secret,
-            "v1,invalidsig",
-            &headers
-        ));
-
-        // Missing headers should fail
-        assert!(!validate_standard_webhooks(
-            body,
-            &secret,
-            &signature_header,
-            &HeaderMap::new()
-        ));
     }
 }

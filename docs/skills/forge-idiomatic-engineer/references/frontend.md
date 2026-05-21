@@ -30,7 +30,7 @@ All subscription stores and hooks return a consistent state object to help you m
 
 ### Specialized Statuses
 - **Jobs and Workflows**: These states include additional fields such as `jobId`, `status`, `progress`, and `output`.
-- **Terminal Errors**: Statuses like `blocked_version` or `signature_mismatch` indicate an operational error (e.g., a version mismatch between frontend and backend). These should be displayed as critical system errors.
+- **Terminal Errors**: Statuses like `blocked_missing_version`, `blocked_signature_mismatch`, or `blocked_missing_handler` indicate an operational error (e.g., a version mismatch between frontend and backend). These should be displayed as critical system errors.
 
 ## Authentication and Session Management
 
@@ -77,7 +77,7 @@ Access the signals instance via `getForgeSignals()` from any component inside `F
   signals.track('button_click', { target: 'upgrade-plan', variant: 'A' });
 
   // Identify authenticated users (call on login/signup)
-  await signals.identify(user.id, { name: user.name, plan: 'pro' });
+  signals.identify(user.id, { name: user.name, plan: 'pro' });
 
   // Add breadcrumbs for error context (attached to the next captured error)
   signals.breadcrumb('Opened settings modal', { tab: 'billing' });
@@ -104,7 +104,7 @@ let signals = use_signals();
 signals.track_with_properties("button_click", json!({"target": "upgrade-plan"}));
 
 // Identify authenticated users
-signals.identify("user-id", json!({"name": "Alice", "plan": "pro"})).await;
+signals.identify("user-id", json!({"name": "Alice", "plan": "pro"}));
 
 // Breadcrumbs for error context
 signals.breadcrumb("Opened settings", Some(json!({"tab": "billing"})));
@@ -113,7 +113,7 @@ signals.breadcrumb("Opened settings", Some(json!({"tab": "billing"})));
 signals.capture_error("Payment failed", Some(json!({"order_id": "123"})));
 
 // Manual page view
-signals.page("/settings").await;
+signals.page("/settings");
 ```
 
 ### Correlation IDs

@@ -1,7 +1,7 @@
 mod dispatcher;
 mod executor;
 mod queue;
-mod registry;
+pub(crate) mod registry;
 mod worker;
 
 pub use dispatcher::JobDispatcher;

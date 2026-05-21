@@ -2,6 +2,13 @@
 //!
 //! Classifies requests as bot or human based on known crawler patterns.
 //! Bot events are stored with `is_bot = true` for dashboard filtering.
+//!
+//! Uses an Aho-Corasick automaton built once at startup for O(n) matching
+//! in the length of the input string, rather than O(n*m) for m patterns.
+
+use std::sync::LazyLock;
+
+use aho_corasick::AhoCorasick;
 
 /// Known bot User-Agent substrings (case-insensitive matching).
 const BOT_PATTERNS: &[&str] = &[
@@ -60,6 +67,12 @@ const BOT_PATTERNS: &[&str] = &[
     "postman",
 ];
 
+/// Pre-compiled Aho-Corasick automaton for bot detection.
+/// Built once on first access; all patterns are lowercase so we match
+/// against a lowercased UA string.
+static BOT_AUTOMATON: LazyLock<AhoCorasick> =
+    LazyLock::new(|| AhoCorasick::new(BOT_PATTERNS).expect("bot patterns are valid"));
+
 /// Check if a User-Agent string belongs to a known bot.
 pub fn is_bot(user_agent: Option<&str>) -> bool {
     let ua = match user_agent {
@@ -71,9 +84,7 @@ pub fn is_bot(user_agent: Option<&str>) -> bool {
 
 /// Check if a pre-lowercased User-Agent string belongs to a known bot.
 pub fn is_bot_lower(ua_lower: &str) -> bool {
-    BOT_PATTERNS
-        .iter()
-        .any(|pattern| ua_lower.contains(pattern))
+    BOT_AUTOMATON.is_match(ua_lower)
 }
 
 #[cfg(test)]

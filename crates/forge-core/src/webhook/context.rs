@@ -2,34 +2,40 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use sqlx::{Postgres, Transaction};
+use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use crate::env::{EnvAccess, EnvProvider, RealEnvProvider};
-use crate::function::JobDispatch;
+use crate::function::{JobDispatch, KvHandle, WorkflowDispatch};
 use crate::http::CircuitBreakerClient;
+
+/// Shared handle to the webhook's active transaction.
+///
+/// The runtime keeps ownership and commits/rolls back; the handler dispatches
+/// jobs and workflows on the same connection so they roll back with the
+/// webhook on error.
+pub type WebhookTxHandle = Arc<AsyncMutex<Option<Transaction<'static, Postgres>>>>;
 
 /// Context available to webhook handlers.
 #[non_exhaustive]
 pub struct WebhookContext {
-    /// Webhook name.
     pub webhook_name: String,
-    /// Unique request ID for this webhook invocation.
     pub request_id: String,
-    /// Idempotency key if extracted from request.
     pub idempotency_key: Option<String>,
-    /// Request headers (lowercase keys).
+    /// Lowercase keys.
     headers: HashMap<String, String>,
-    /// Database pool.
     db_pool: sqlx::PgPool,
-    /// HTTP client for external calls.
+    /// Held by the runtime; handler dispatches piggy-back on this connection
+    /// so they roll back with the webhook on error.
+    tx: Option<WebhookTxHandle>,
     http_client: CircuitBreakerClient,
-    /// Default timeout for outbound HTTP requests made through the
-    /// circuit-breaker client. `None` means unlimited.
+    /// `None` means unlimited.
     http_timeout: Option<Duration>,
-    /// Job dispatcher for async processing.
     job_dispatch: Option<Arc<dyn JobDispatch>>,
-    /// Environment variable provider.
+    workflow_dispatch: Option<Arc<dyn WorkflowDispatch>>,
     env_provider: Arc<dyn EnvProvider>,
+    kv: Option<Arc<dyn KvHandle>>,
 }
 
 impl WebhookContext {
@@ -47,11 +53,65 @@ impl WebhookContext {
             idempotency_key: None,
             headers,
             db_pool,
+            tx: None,
             http_client,
             http_timeout: None,
             job_dispatch: None,
+            workflow_dispatch: None,
             env_provider: Arc::new(RealEnvProvider::new()),
+            kv: None,
         }
+    }
+
+    /// Build a webhook context that dispatches jobs and workflows on `tx`.
+    ///
+    /// The runtime opens the transaction, owns the handle, and commits or
+    /// rolls back based on the handler's result. Anything the handler
+    /// dispatches lands on the same connection, so failed webhooks don't
+    /// leave orphaned jobs behind.
+    pub fn with_transaction(
+        webhook_name: String,
+        request_id: String,
+        headers: HashMap<String, String>,
+        db_pool: sqlx::PgPool,
+        tx: Transaction<'static, Postgres>,
+        http_client: CircuitBreakerClient,
+    ) -> (Self, WebhookTxHandle) {
+        let handle: WebhookTxHandle = Arc::new(AsyncMutex::new(Some(tx)));
+        let ctx = Self {
+            webhook_name,
+            request_id,
+            idempotency_key: None,
+            headers,
+            db_pool,
+            tx: Some(handle.clone()),
+            http_client,
+            http_timeout: None,
+            job_dispatch: None,
+            workflow_dispatch: None,
+            env_provider: Arc::new(RealEnvProvider::new()),
+            kv: None,
+        };
+        (ctx, handle)
+    }
+
+    /// Whether dispatches will participate in an enclosing transaction.
+    pub fn is_transactional(&self) -> bool {
+        self.tx.is_some()
+    }
+
+    /// Attach a KV store handle. Called by the runtime before handing the
+    /// context to the handler.
+    pub fn with_kv(mut self, kv: Arc<dyn KvHandle>) -> Self {
+        self.kv = Some(kv);
+        self
+    }
+
+    /// Access the KV store.
+    pub fn kv(&self) -> crate::error::Result<&dyn KvHandle> {
+        self.kv
+            .as_deref()
+            .ok_or_else(|| crate::error::ForgeError::internal("KV store not available"))
     }
 
     /// Set idempotency key.
@@ -63,6 +123,12 @@ impl WebhookContext {
     /// Set job dispatcher.
     pub fn with_job_dispatch(mut self, dispatcher: Arc<dyn JobDispatch>) -> Self {
         self.job_dispatch = Some(dispatcher);
+        self
+    }
+
+    /// Set workflow dispatcher.
+    pub fn with_workflow_dispatch(mut self, dispatcher: Arc<dyn WorkflowDispatch>) -> Self {
+        self.workflow_dispatch = Some(dispatcher);
         self
     }
 
@@ -78,15 +144,28 @@ impl WebhookContext {
     }
 
     /// Get a `DbConn` for use in shared helper functions.
+    ///
+    /// In transactional mode, returns a transaction-backed handle. Outside
+    /// a transaction, returns a pool-backed handle.
     pub fn db_conn(&self) -> crate::function::DbConn<'_> {
-        crate::function::DbConn::Pool(self.db_pool.clone())
+        match &self.tx {
+            Some(tx) => crate::function::DbConn::Transaction(tx.clone(), &self.db_pool),
+            None => crate::function::DbConn::Pool(self.db_pool.clone()),
+        }
     }
 
     /// Acquire a connection compatible with sqlx compile-time checked macros.
-    pub async fn conn(&self) -> sqlx::Result<crate::function::ForgeConn<'static>> {
-        Ok(crate::function::ForgeConn::Pool(
-            self.db_pool.acquire().await?,
-        ))
+    ///
+    /// In transactional mode, returns a guard over the active transaction so
+    /// the handler's queries participate in the same transaction as its
+    /// dispatches. Outside a transaction, acquires a fresh pool connection.
+    pub async fn conn(&self) -> sqlx::Result<crate::function::ForgeConn<'_>> {
+        match &self.tx {
+            Some(tx) => Ok(crate::function::ForgeConn::Tx(tx.lock().await)),
+            None => Ok(crate::function::ForgeConn::Pool(
+                self.db_pool.acquire().await?,
+            )),
+        }
     }
 
     /// Get the HTTP client for external requests.
@@ -133,11 +212,68 @@ impl WebhookContext {
         job_type: &str,
         args: T,
     ) -> crate::error::Result<Uuid> {
-        let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::Internal("Job dispatch not available".into())
-        })?;
+        let dispatcher = self
+            .job_dispatch
+            .as_ref()
+            .ok_or_else(|| crate::error::ForgeError::internal("Job dispatch not available"))?;
         let args_json = serde_json::to_value(args)?;
-        dispatcher.dispatch_by_name(job_type, args_json, None).await
+
+        if let Some(tx) = &self.tx {
+            let mut guard = tx.lock().await;
+            let conn = guard.as_mut().ok_or_else(|| {
+                crate::error::ForgeError::internal("Transaction already taken; cannot dispatch job")
+            })?;
+            return dispatcher
+                .dispatch_in_conn(conn, job_type, args_json, None, None)
+                .await;
+        }
+
+        dispatcher
+            .dispatch_by_name(job_type, args_json, None, None)
+            .await
+    }
+
+    /// Type-safe dispatch: resolves the job name from the type's `ForgeJob`
+    /// impl and serializes the args at the call site.
+    pub async fn dispatch<J: crate::ForgeJob>(&self, args: J::Args) -> crate::error::Result<Uuid> {
+        self.dispatch_job(J::info().name, args).await
+    }
+
+    /// Start a workflow.
+    pub async fn start_workflow<T: serde::Serialize>(
+        &self,
+        workflow_name: &str,
+        input: T,
+    ) -> crate::error::Result<Uuid> {
+        let dispatcher = self
+            .workflow_dispatch
+            .as_ref()
+            .ok_or_else(|| crate::error::ForgeError::internal("Workflow dispatch not available"))?;
+        let input_json = serde_json::to_value(input)?;
+
+        if let Some(tx) = &self.tx {
+            let mut guard = tx.lock().await;
+            let conn = guard.as_mut().ok_or_else(|| {
+                crate::error::ForgeError::internal(
+                    "Transaction already taken; cannot start workflow",
+                )
+            })?;
+            return dispatcher
+                .start_in_conn(conn, workflow_name, input_json, None, None)
+                .await;
+        }
+
+        dispatcher
+            .start_by_name(workflow_name, input_json, None, None)
+            .await
+    }
+
+    /// Type-safe workflow start.
+    pub async fn start<W: crate::ForgeWorkflow>(
+        &self,
+        input: W::Input,
+    ) -> crate::error::Result<Uuid> {
+        self.start_workflow(W::info().name, input).await
     }
 
     /// Request cancellation for a job.
@@ -146,9 +282,10 @@ impl WebhookContext {
         job_id: Uuid,
         reason: Option<String>,
     ) -> crate::error::Result<bool> {
-        let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::Internal("Job dispatch not available".into())
-        })?;
+        let dispatcher = self
+            .job_dispatch
+            .as_ref()
+            .ok_or_else(|| crate::error::ForgeError::internal("Job dispatch not available"))?;
         dispatcher.cancel(job_id, reason).await
     }
 }

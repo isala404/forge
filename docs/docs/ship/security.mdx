@@ -1,0 +1,128 @@
+# Security Model
+
+Overview of the security layers Forge applies before your handler code runs.
+
+## Authentication
+
+All functions require authentication by default. The JWT from the `Authorization: Bearer <token>` header is validated on every request:
+
+1. Extract token from the header.
+2. Decode the JWT header and payload.
+3. Verify both `exp` and `sub` claims are present.
+4. Check `exp` against current time (60s clock-skew leeway).
+5. Validate `iss` and `aud` if configured.
+6. Verify signature — HMAC secret or RSA public key fetched from JWKS.
+
+Signature verification uses constant-time comparison to prevent timing attacks. RSA public keys are cached (default 1 hour) and matched by `kid`.
+
+Mark a function `public` to skip authentication:
+
+```rust
+#[forge::query(public)]
+pub async fn get_public_stats(ctx: &QueryContext) -> Result<Stats> { ... }
+```
+
+See [Protect Routes](../build/protect-routes) for the full auth API and refresh token system.
+
+## Authorization
+
+### Role-based access
+
+Declare the required role in the attribute — Forge enforces it before calling your handler:
+
+```rust
+#[forge::mutation(require_role("admin"))]
+pub async fn delete_user(ctx: &MutationContext, id: Uuid) -> Result<()> { ... }
+```
+
+Missing role returns `403 Forbidden`. Check roles programmatically with `ctx.auth.has_role("role")` for finer-grained decisions inside a handler.
+
+### Compile-time scope enforcement
+
+Private queries (anything not marked `public` or `unscoped`) must filter by `user_id` or `owner_id` in their SQL. The `#[query]` macro checks this at compile time and fails the build if the filter is absent:
+
+```rust
+// Compile error: no user_id/owner_id in WHERE clause
+#[forge::query]
+pub async fn list_all_orders(ctx: &QueryContext) -> Result<Vec<Order>> {
+    sqlx::query_as!(Order, "SELECT * FROM orders")
+        .fetch_all(ctx.db()).await.map_err(Into::into)
+}
+
+// Opt out for admin/shared data with an explicit annotation
+#[forge::query(unscoped)]
+pub async fn admin_list_orders(ctx: &QueryContext) -> Result<Vec<Order>> {
+    sqlx::query_as!(Order, "SELECT * FROM orders")
+        .fetch_all(ctx.db()).await.map_err(Into::into)
+}
+```
+
+This turns accidental data leakage between users into a build failure rather than a runtime bug.
+
+## SQL Injection Protection
+
+Forge uses `sqlx::query!()` and `sqlx::query_as!()` macros for every database interaction. These macros:
+
+- Verify query syntax and parameter types at compile time against the live schema (or cached `.sqlx/` metadata).
+- Always use parameterized queries — user input is never interpolated into SQL strings.
+- Reject runtime query construction via the workspace lint `clippy::unwrap_used` and the enforced `sqlx::query!()` convention.
+
+Dynamic SQL is not supported by design. If you reach for string interpolation, the macro will not compile.
+
+## SSRF Protection
+
+The HTTP client available in `MutationContext` and `JobContext` blocks requests to private and loopback addresses by default. This prevents server-side request forgery when your handlers fetch URLs supplied by users.
+
+Protection runs at two levels:
+
+- **IP literal rejection** — requests to `127.0.0.1`, `10.x.x.x`, `172.16-31.x.x`, `192.168.x.x`, `::1`, link-local, and other RFC-1918/RFC-4193 ranges are blocked before the TCP connection opens.
+- **DNS rebinding prevention** — hostnames are resolved, and each resolved IP is checked against the same blocklist. A hostname that resolves to a private address is refused even if the URL looks public.
+
+A blocked request returns `ForgeError::Internal` (mapped to 502 at the gateway) rather than silently succeeding or leaking internal network topology.
+
+To allow inbound calls to internal services from your own code (e.g., a sidecar), pass `allow_private_hosts = true` when building the client — this is opt-in and auditable at the call site.
+
+## Circuit Breaker
+
+The same HTTP client wraps every outbound request in a circuit breaker. After repeated failures to a host, the breaker opens and fast-fails subsequent requests for a configurable window instead of queuing threads behind a slow or dead dependency. This limits the blast radius of downstream outages and prevents retry storms from cascading into your database.
+
+## Rate Limiting
+
+Per-function rate limits are declared in the macro attribute:
+
+```rust
+#[forge::query(rate_limit(requests = 100, per = "1m", key = "user"))]
+pub async fn search(ctx: &QueryContext, q: String) -> Result<Vec<Result_>> { ... }
+```
+
+`key` can be `"user"` (per authenticated user), `"ip"`, or a custom string. Exceeded limits return `429 Too Many Requests` with a `Retry-After` header.
+
+Two backends are available via `[rate_limit]` in `forge.toml`:
+
+- `mode = "local"` (default) — in-process token buckets, zero latency overhead, per-node counts.
+- `mode = "strict"` — counts are stored in the shared `forge_rate_limits` table (`UNLOGGED` for low write cost), cluster-wide and exact. Use this for billing-grade or contractual quotas.
+
+Auth failures and rate-limit rejections are captured as signals events (`auth.failed`, `rate_limit.exceeded`) so Grafana dashboards surface attack patterns automatically.
+
+## CORS
+
+CORS is opt-in. Enable it and list allowed origins in `forge.toml`:
+
+```toml
+[gateway]
+cors_enabled = true
+cors_origins = ["https://myapp.com"]
+```
+
+`["*"]` permits any origin. You cannot mix `"*"` with concrete origins — browsers ignore wildcards on credentialed requests and Forge rejects that combination at startup.
+
+## MCP Security
+
+MCP tools reuse the same auth middleware. See [MCP Security](./mcp-security) for OAuth 2.1 + PKCE, CSRF protection, redirect URI validation, and the hardening checklist.
+
+## What Forge Does Not Provide
+
+- **TLS termination** — terminate TLS at a reverse proxy (nginx, Caddy, a load balancer). Forge speaks plain HTTP internally.
+- **WAF / DDoS mitigation** — use a CDN or cloud provider layer in front.
+- **Secrets management** — use `${ENV_VAR}` interpolation in `forge.toml` and inject secrets via environment variables from your secret store.
+- **Audit logging** — the signals system records function calls and auth failures; full audit trails require you to emit structured log events from your handlers.

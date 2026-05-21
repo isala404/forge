@@ -69,41 +69,72 @@ impl std::fmt::Display for SubscriberId {
 /// Authentication scope for query group identity.
 /// Two subscriptions with the same query+args but different auth scopes
 /// must be in different groups (different users see different data).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// Includes a hash of the sorted roles so users with different role sets
+/// don't share a group.
+#[derive(Debug, Clone)]
 pub struct AuthScope {
     pub principal_id: Option<String>,
     pub tenant_id: Option<String>,
+    /// Hash of the sorted roles for this auth context.
+    pub role_hash: u64,
+}
+
+impl PartialEq for AuthScope {
+    fn eq(&self, other: &Self) -> bool {
+        self.principal_id == other.principal_id
+            && self.tenant_id == other.tenant_id
+            && self.role_hash == other.role_hash
+    }
+}
+
+impl Eq for AuthScope {}
+
+impl std::hash::Hash for AuthScope {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.principal_id.hash(state);
+        self.tenant_id.hash(state);
+        self.role_hash.hash(state);
+    }
 }
 
 impl AuthScope {
     pub fn from_auth(auth: &crate::function::AuthContext) -> Self {
+        use std::hash::{Hash, Hasher};
+
+        let mut roles: Vec<&str> = auth.roles().iter().map(|s| s.as_str()).collect();
+        roles.sort_unstable();
+        let mut hasher = FnvHasher::new();
+        roles.hash(&mut hasher);
+        let role_hash = hasher.finish();
+
         Self {
             principal_id: auth.principal_id(),
             tenant_id: auth
                 .claim("tenant_id")
                 .and_then(|v| v.as_str())
                 .map(ToString::to_string),
+            role_hash,
         }
     }
 }
 
-/// A query group is the primary unit of execution.
-/// Multiple subscribers watching the same query+args+auth_scope share a single group.
-/// On invalidation, the query executes once per group (not per subscriber).
+/// Coalesces subscriptions sharing the same query+args+auth_scope.
+/// On invalidation the query executes once per group, not per subscriber.
 pub struct QueryGroup {
     pub id: QueryGroupId,
     pub query_name: String,
     pub args: Arc<serde_json::Value>,
     pub auth_scope: AuthScope,
+    /// Cached at subscribe time; not refreshed mid-lifetime. The reactor skips
+    /// re-execution for groups with expired tokens; session cleanup evicts them.
     pub auth_context: crate::function::AuthContext,
-    /// Compile-time table dependencies from FunctionInfo.
     pub table_deps: &'static [&'static str],
-    /// Compile-time selected columns from FunctionInfo.
     pub selected_cols: &'static [&'static str],
     pub read_set: ReadSet,
-    /// Result hash for delta detection. Shared across all subscribers.
+    /// Shared across all subscribers for delta detection.
     pub last_result_hash: Option<String>,
-    /// All subscribers in this group.
+    /// Sent to new subscribers joining an existing group.
+    pub last_result: Option<Arc<serde_json::Value>>,
     pub subscribers: Vec<SubscriberId>,
     pub created_at: DateTime<Utc>,
     pub execution_count: u64,
@@ -173,13 +204,33 @@ impl QueryGroup {
         self.execution_count += 1;
     }
 
+    /// Record execution with the result data cached for new subscribers.
+    pub fn record_execution_with_data(
+        &mut self,
+        read_set: ReadSet,
+        result_hash: String,
+        data: Arc<serde_json::Value>,
+    ) {
+        self.read_set = read_set;
+        self.last_result_hash = Some(result_hash);
+        self.last_result = Some(data);
+        self.execution_count += 1;
+    }
+
     /// Check if a change should invalidate this group.
+    /// Uses the runtime read set when populated, otherwise falls back to the
+    /// compile-time table dependencies from macro extraction.
     pub fn should_invalidate(&self, change: &super::readset::Change) -> bool {
-        if !change.invalidates(&self.read_set) {
+        let table_matches = if self.read_set.tables.is_empty() {
+            self.table_deps.iter().any(|t| *t == change.table)
+        } else {
+            change.invalidates(&self.read_set)
+        };
+
+        if !table_matches {
             return false;
         }
 
-        // Column-level filtering: skip if changed columns don't overlap with selected
         if !change.invalidates_columns(self.selected_cols) {
             return false;
         }
@@ -333,6 +384,7 @@ mod tests {
         let scope = AuthScope {
             principal_id: Some("user-1".to_string()),
             tenant_id: None,
+            role_hash: 0,
         };
         let key1 = QueryGroup::compute_lookup_key(
             "get_projects",
@@ -349,6 +401,7 @@ mod tests {
         let other_scope = AuthScope {
             principal_id: Some("user-2".to_string()),
             tenant_id: None,
+            role_hash: 0,
         };
         let key3 = QueryGroup::compute_lookup_key(
             "get_projects",
@@ -363,6 +416,7 @@ mod tests {
         let scope = AuthScope {
             principal_id: Some("u1".to_string()),
             tenant_id: None,
+            role_hash: 0,
         };
         let key =
             QueryGroup::compute_lookup_key("get_items", &serde_json::json!({"id": "42"}), &scope);
@@ -378,6 +432,7 @@ mod tests {
         let scope = AuthScope {
             principal_id: None,
             tenant_id: None,
+            role_hash: 0,
         };
         let key_ab =
             QueryGroup::compute_lookup_key("q", &serde_json::json!({"a": 1, "b": 2}), &scope);

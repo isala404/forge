@@ -1,63 +1,108 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
+use syn::visit::Visit;
 use syn::{FnArg, ItemFn, Pat, ReturnType, Type, parse_macro_input};
 
-use crate::utils::{
-    has_attr_flag, parse_attr_value, parse_duration_secs, parse_size_bytes, parse_tables_attr,
-    reject_reserved_keys, to_pascal_case, validate_attr_keys,
-};
+use darling::FromMeta;
+use darling::ast::NestedMeta;
 
-const ALLOWED_MUTATION_KEYS: &[&str] = &[
-    "name",
-    "description",
-    "transactional",
-    "public",
-    "unscoped",
-    "require_role",
-    "timeout",
-    "rate_limit",
-    "log",
-    "max_size",
-    "tables",
-    // Reserved for future Forge releases. Parsed here so apps fail loudly
-    // (via `reject_reserved_keys` below) until coalescing lands.
-    "coalesce_window",
-    "coalesce_by",
-];
+use crate::attrs::{
+    RateLimitMeta, RequireRole, TablesList, default_true, parse_rate_limit_per, reject_reserved,
+    validate_rate_limit,
+};
+use crate::sql_extractor::{
+    DbDelegationDetector, ScopeCheckResult, SqlStringExtractor, TableExtractionResult,
+    extract_changed_columns_from_sql, extract_tables_from_sql, sql_references_identity_scope,
+    sql_scope_requires_tenant,
+};
+use crate::utils::{parse_duration_secs, parse_size_bytes, to_pascal_case};
 
 /// Attribute keys whose names are reserved for upcoming mutation-coalescing
 /// support (cursor positions, autosave, etc). Using one today is a hard
 /// compile error to surface that the feature isn't wired up yet.
 const RESERVED_MUTATION_KEYS: &[&str] = &["coalesce_window", "coalesce_by"];
 
-/// Expand the #[forge::mutation] attribute.
-///
-/// This transforms an async function into a mutation handler that:
-/// - Takes a MutationContext as the first parameter
-/// - Returns a Result<T>
-/// - Runs within a database transaction
-/// - Generates a struct implementing ForgeMutation trait
-pub fn expand_mutation(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(item as ItemFn);
-    let attr_str = attr.to_string();
+/// Darling-parsed mutation attributes.
+#[derive(Debug, FromMeta)]
+#[darling(and_then = DarlingMutationAttrs::validate)]
+#[allow(dead_code)]
+struct DarlingMutationAttrs {
+    #[darling(default)]
+    name: Option<String>,
+    #[darling(default)]
+    description: Option<String>,
+    /// Defaults to `true`. `transactional = false` opts out.
+    #[darling(default)]
+    transactional: Option<bool>,
+    #[darling(default)]
+    public: bool,
+    #[darling(default)]
+    unscoped: bool,
+    /// New-style alias for `public`. Accepted values: "none", "required".
+    #[darling(default)]
+    auth: Option<String>,
+    /// New-style alias for `unscoped`. Accepted values: "global", "user".
+    #[darling(default)]
+    scope: Option<String>,
+    #[darling(default)]
+    require_role: Option<RequireRole>,
+    #[darling(default)]
+    timeout: Option<String>,
+    #[darling(default)]
+    rate_limit: Option<RateLimitMeta>,
+    #[darling(default)]
+    log: Option<String>,
+    #[darling(default)]
+    max_size: Option<String>,
+    #[darling(default)]
+    tables: Option<TablesList>,
+    /// Set `register = false` to skip `inventory::submit!` auto-registration.
+    #[darling(default = "default_true")]
+    register: bool,
+    /// Opt out of the compile-time guard against `ctx.http()` inside a
+    /// transactional mutation. Use only when the HTTP call is genuinely safe
+    /// to leave un-rolled-back on transaction failure (e.g. an idempotent
+    /// read-only request).
+    #[darling(default)]
+    allow_http: bool,
+    // Reserved keys
+    #[darling(default)]
+    coalesce_window: Option<String>,
+    #[darling(default)]
+    coalesce_by: Option<String>,
+}
 
-    if let Err(e) = reject_reserved_keys(&attr_str, RESERVED_MUTATION_KEYS, "mutation") {
-        return e.to_compile_error().into();
+impl DarlingMutationAttrs {
+    fn validate(self) -> darling::Result<Self> {
+        reject_reserved(
+            RESERVED_MUTATION_KEYS,
+            &[
+                ("coalesce_window", self.coalesce_window.is_some()),
+                ("coalesce_by", self.coalesce_by.is_some()),
+            ],
+            "mutation",
+        )
+        .map_err(|e| darling::Error::custom(e.to_string()))?;
+
+        if let Some(ref a) = self.auth
+            && !["none", "required"].contains(&a.as_str())
+        {
+            return Err(darling::Error::custom(format!(
+                "invalid auth value \"{a}\": expected \"none\" or \"required\""
+            )));
+        }
+
+        if let Some(ref s) = self.scope
+            && !["global", "user"].contains(&s.as_str())
+        {
+            return Err(darling::Error::custom(format!(
+                "invalid scope value \"{s}\": expected \"global\" or \"user\""
+            )));
+        }
+
+        Ok(self)
     }
-
-    if let Err(e) = validate_attr_keys(&attr_str, ALLOWED_MUTATION_KEYS, "mutation") {
-        return e.to_compile_error().into();
-    }
-
-    let attrs = match parse_mutation_attrs(attr) {
-        Ok(a) => a,
-        Err(e) => return e.to_compile_error().into(),
-    };
-
-    expand_mutation_impl(input, attrs)
-        .unwrap_or_else(|e| e.to_compile_error())
-        .into()
 }
 
 struct MutationAttrs {
@@ -78,6 +123,10 @@ struct MutationAttrs {
     max_upload_size_bytes: Option<usize>,
     /// Override auto-detected table dependencies from SQL extraction.
     tables: Option<Vec<String>>,
+    register: bool,
+    /// Opt out of the compile-time guard against `ctx.http()` inside a
+    /// transactional mutation.
+    allow_http: bool,
 }
 
 impl Default for MutationAttrs {
@@ -96,168 +145,73 @@ impl Default for MutationAttrs {
             transactional: true,
             max_upload_size_bytes: None,
             tables: None,
+            register: true,
+            allow_http: false,
         }
     }
 }
 
-fn parse_mutation_attrs(attr: TokenStream) -> Result<MutationAttrs, syn::Error> {
-    let mut attrs = MutationAttrs::default();
+pub fn expand_mutation(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as ItemFn);
 
-    let attr_str = attr.to_string();
+    let attr_args = match NestedMeta::parse_meta_list(attr.into()) {
+        Ok(v) => v,
+        Err(e) => return TokenStream::from(e.into_compile_error()),
+    };
 
-    if let Some(name) = parse_attr_value(&attr_str, "name") {
-        attrs.name = Some(name);
-    }
+    let darling_attrs = match DarlingMutationAttrs::from_list(&attr_args) {
+        Ok(v) => v,
+        Err(e) => return TokenStream::from(e.write_errors()),
+    };
 
-    if let Some(desc) = parse_attr_value(&attr_str, "description") {
-        attrs.description = Some(desc);
-    }
+    let attrs = match convert_mutation_attrs(darling_attrs) {
+        Ok(a) => a,
+        Err(e) => return e.to_compile_error().into(),
+    };
 
-    // `transactional = false` opts out; bare `transactional` flag is a no-op
-    // (the default is already true, but we accept it for clarity).
-    if let Some(val) = parse_attr_value(&attr_str, "transactional")
-        && val == "false"
-    {
-        attrs.transactional = false;
-    }
+    expand_mutation_impl(input, attrs)
+        .unwrap_or_else(|e| e.to_compile_error())
+        .into()
+}
 
-    if has_attr_flag(&attr_str, "public") {
-        attrs.is_public = true;
-    }
+fn convert_mutation_attrs(darling: DarlingMutationAttrs) -> Result<MutationAttrs, syn::Error> {
+    let timeout = match darling.timeout {
+        Some(ref s) => Some(parse_duration_secs(s).ok_or_else(|| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!(
+                    "invalid timeout \"{s}\": use a duration string like \"30s\", \"5m\", or \"1h\""
+                ),
+            )
+        })?),
+        None => None,
+    };
 
-    if has_attr_flag(&attr_str, "unscoped") {
-        attrs.is_unscoped = true;
-    }
+    let (rate_limit_requests, rate_limit_per_secs, rate_limit_key) =
+        if let Some(ref rl) = darling.rate_limit {
+            validate_rate_limit(rl)?;
+            (rl.requests, parse_rate_limit_per(rl)?, rl.key.clone())
+        } else {
+            (None, None, None)
+        };
 
-    if let Some(role_start) = attr_str.find("require_role")
-        && let Some(paren_start) = attr_str[role_start..].find('(')
-    {
-        let remaining = &attr_str[role_start + paren_start + 1..];
-        if let Some(paren_end) = remaining.find(')') {
-            let role = remaining[..paren_end].trim().trim_matches('"');
-            attrs.required_role = Some(role.to_string());
-        }
-    }
-
-    if let Some(timeout) = parse_attr_value(&attr_str, "timeout") {
-        match parse_duration_secs(&timeout) {
-            Some(secs) => attrs.timeout = Some(secs),
-            None => {
-                return Err(syn::Error::new(
-                    proc_macro2::Span::call_site(),
-                    format!(
-                        "invalid timeout \"{timeout}\": use a duration string like \"30s\", \"5m\", or \"1h\""
-                    ),
-                ));
-            }
-        }
-    }
-
-    if let Some(rl_start) = attr_str.find("rate_limit")
-        && let Some(paren_start) = attr_str[rl_start..].find('(')
-    {
-        let remaining = &attr_str[rl_start + paren_start + 1..];
-        if let Some(paren_end) = remaining.find(')') {
-            let rl_content = &remaining[..paren_end];
-
-            if let Some(req_start) = rl_content.find("requests")
-                && let Some(eq_pos) = rl_content[req_start..].find('=')
-            {
-                let after_eq = rl_content[req_start + eq_pos + 1..]
-                    .split(',')
-                    .next()
-                    .unwrap_or("")
-                    .trim();
-                match after_eq.parse::<u32>() {
-                    Ok(0) => {
-                        return Err(syn::Error::new(
-                            proc_macro2::Span::call_site(),
-                            "rate_limit requests must be at least 1",
-                        ));
-                    }
-                    Ok(n) => attrs.rate_limit_requests = Some(n),
-                    Err(_) => {
-                        return Err(syn::Error::new(
-                            proc_macro2::Span::call_site(),
-                            format!(
-                                "invalid rate_limit requests value \"{after_eq}\": expected a positive integer"
-                            ),
-                        ));
-                    }
-                }
-            }
-
-            if let Some(per_start) = rl_content.find("per")
-                && let Some(quote_start) = rl_content[per_start..].find('"')
-            {
-                let after_quote = &rl_content[per_start + quote_start + 1..];
-                if let Some(quote_end) = after_quote.find('"') {
-                    let per_str = &after_quote[..quote_end];
-                    match parse_duration_secs(per_str) {
-                        Some(secs) => attrs.rate_limit_per_secs = Some(secs),
-                        None => {
-                            return Err(syn::Error::new(
-                                proc_macro2::Span::call_site(),
-                                format!(
-                                    "invalid rate_limit per duration \"{per_str}\": use a duration like \"1m\", \"30s\", or \"1h\""
-                                ),
-                            ));
-                        }
-                    }
-                }
-            }
-
-            if let Some(key_start) = rl_content.find("key")
-                && let Some(quote_start) = rl_content[key_start..].find('"')
-            {
-                let after_quote = &rl_content[key_start + quote_start + 1..];
-                if let Some(quote_end) = after_quote.find('"') {
-                    let key = &after_quote[..quote_end];
-                    if !["user", "ip", "tenant", "global"].contains(&key)
-                        && !key.starts_with("custom(")
-                    {
-                        return Err(syn::Error::new(
-                            proc_macro2::Span::call_site(),
-                            format!(
-                                "invalid rate_limit key \"{key}\". Valid keys: \"user\", \"ip\", \"tenant\", \"global\", or \"custom(...)\""
-                            ),
-                        ));
-                    }
-                    attrs.rate_limit_key = Some(key.to_string());
-                }
-            }
-
-            let has_any_rl = attrs.rate_limit_requests.is_some()
-                || attrs.rate_limit_per_secs.is_some()
-                || attrs.rate_limit_key.is_some();
-            if has_any_rl && attrs.rate_limit_requests.is_none() {
-                return Err(syn::Error::new(
-                    proc_macro2::Span::call_site(),
-                    "rate_limit requires `requests` field (e.g. rate_limit(requests = 100, per = \"1m\", key = \"user\"))",
-                ));
-            }
-            if has_any_rl && attrs.rate_limit_per_secs.is_none() {
-                return Err(syn::Error::new(
-                    proc_macro2::Span::call_site(),
-                    "rate_limit requires `per` field (e.g. rate_limit(requests = 100, per = \"1m\", key = \"user\"))",
-                ));
-            }
-        }
-    }
-
-    if let Some(level) = parse_attr_value(&attr_str, "log") {
-        attrs.log_level = Some(level);
-    }
-
-    if let Some(size_str) = parse_attr_value(&attr_str, "max_size") {
-        attrs.max_upload_size_bytes = parse_size_bytes(&size_str);
-    }
-
-    if let Some(tables) = parse_tables_attr(&attr_str) {
-        attrs.tables = Some(tables);
-    }
-
-    Ok(attrs)
+    Ok(MutationAttrs {
+        name: darling.name,
+        description: darling.description,
+        required_role: darling.require_role.map(|r| r.0),
+        is_public: darling.public || darling.auth.as_deref() == Some("none"),
+        is_unscoped: darling.unscoped || darling.scope.as_deref() == Some("global"),
+        timeout,
+        rate_limit_requests,
+        rate_limit_per_secs,
+        rate_limit_key,
+        log_level: darling.log,
+        transactional: darling.transactional.unwrap_or(true),
+        max_upload_size_bytes: darling.max_size.and_then(|s| parse_size_bytes(&s)),
+        tables: darling.tables.map(|t| t.0),
+        register: darling.register,
+        allow_http: darling.allow_http,
+    })
 }
 
 fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<TokenStream2> {
@@ -282,23 +236,67 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
     // dispatch_job / start_workflow require a transaction so the outbox flush is
     // atomic with the database write. Explicitly opting out of transactions with
     // `transactional = false` while calling these is always a bug.
+    //
+    // The visitor only fires when the call's receiver chain bottoms out on the
+    // mutation context binding (usually `ctx`). A name-only match would treat
+    // any third-party `.dispatch_job()` on an unrelated type as a violation.
+    let mutation_ctx_ident: Option<syn::Ident> = input.sig.inputs.iter().next().and_then(|arg| {
+        if let FnArg::Typed(pat_type) = arg
+            && let Pat::Ident(pat_ident) = pat_type.pat.as_ref()
+        {
+            Some(pat_ident.ident.clone())
+        } else {
+            None
+        }
+    });
+
     let has_dispatch = {
         struct DispatchCallVisitor {
+            ctx_ident: Option<syn::Ident>,
             found: bool,
+        }
+        impl DispatchCallVisitor {
+            fn receiver_root_ident(mut expr: &syn::Expr) -> Option<&syn::Ident> {
+                loop {
+                    match expr {
+                        syn::Expr::MethodCall(inner) => expr = &inner.receiver,
+                        syn::Expr::Try(inner) => expr = &inner.expr,
+                        syn::Expr::Await(inner) => expr = &inner.base,
+                        syn::Expr::Paren(inner) => expr = &inner.expr,
+                        syn::Expr::Reference(inner) => expr = &inner.expr,
+                        syn::Expr::Path(path) => {
+                            if path.qself.is_none() && path.path.segments.len() == 1 {
+                                return path.path.segments.first().map(|s| &s.ident);
+                            }
+                            return None;
+                        }
+                        _ => return None,
+                    }
+                }
+            }
+
+            fn receiver_is_ctx(&self, receiver: &syn::Expr) -> bool {
+                let Some(ref ctx) = self.ctx_ident else {
+                    return true;
+                };
+                Self::receiver_root_ident(receiver).is_some_and(|root| root == ctx)
+            }
         }
         impl<'ast> syn::visit::Visit<'ast> for DispatchCallVisitor {
             fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
                 let method = node.method.to_string();
-                if method == "dispatch_job"
-                    || method == "dispatch_job_with_context"
-                    || method == "start_workflow"
+                if (method == "dispatch_job" || method == "start_workflow")
+                    && self.receiver_is_ctx(&node.receiver)
                 {
                     self.found = true;
                 }
                 syn::visit::visit_expr_method_call(self, node);
             }
         }
-        let mut visitor = DispatchCallVisitor { found: false };
+        let mut visitor = DispatchCallVisitor {
+            ctx_ident: mutation_ctx_ident.clone(),
+            found: false,
+        };
         syn::visit::visit_block(&mut visitor, fn_block);
         visitor.found
     };
@@ -311,7 +309,50 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         ));
     }
 
-    // Validate async
+    // Calling ctx.http() inside a transactional mutation is a footgun:
+    //   1. The HTTP request cannot be rolled back if the transaction fails,
+    //      so external side-effects may occur even when the DB write is undone.
+    //   2. The DB connection is held open for the full HTTP round-trip, which
+    //      increases contention on the connection pool under load.
+    //
+    // Emit a compile error when this is detected. Opt out with
+    // `#[mutation(allow_http = true)]` when the HTTP call is genuinely safe to
+    // leave un-rolled-back (e.g. an idempotent read-only request).
+    //
+    // The check is skipped for `transactional = false` mutations — HTTP calls
+    // there are fine.
+    if attrs.transactional && !attrs.allow_http {
+        struct HttpCallVisitor {
+            found: bool,
+        }
+        impl<'ast> syn::visit::Visit<'ast> for HttpCallVisitor {
+            fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+                if node.method == "http" {
+                    self.found = true;
+                }
+                syn::visit::visit_expr_method_call(self, node);
+            }
+        }
+        let mut visitor = HttpCallVisitor { found: false };
+        syn::visit::visit_block(&mut visitor, fn_block);
+        if visitor.found {
+            return Err(syn::Error::new_spanned(
+                &input.sig.ident,
+                format!(
+                    "`{fn_name_str}` calls ctx.http() inside a transactional mutation. \
+                     The HTTP request cannot be rolled back if the transaction fails, \
+                     and the database connection is held open for the full HTTP round-trip. \
+                     To fix: move the HTTP call outside the transaction by using \
+                     `#[mutation(transactional = false)]` and dispatching a job for the \
+                     DB write, or restructure so http() is called after the mutation returns. \
+                     If the HTTP call is intentionally safe un-rolled-back (e.g. an \
+                     idempotent read-only request), suppress with \
+                     `#[mutation(allow_http = true)]`."
+                ),
+            ));
+        }
+    }
+
     if asyncness.is_none() {
         return Err(syn::Error::new_spanned(
             &input.sig,
@@ -319,7 +360,6 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         ));
     }
 
-    // Extract parameters (skip first which should be &MutationContext)
     let params: Vec<_> = input.sig.inputs.iter().collect();
     if params.is_empty() {
         return Err(syn::Error::new_spanned(
@@ -328,7 +368,6 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         ));
     }
 
-    // Get context param - extract name and ensure it uses reference
     let (ctx_name, ctx_type) = match &params[0] {
         FnArg::Typed(pat_type) => {
             let name = if let Pat::Ident(pat_ident) = &*pat_type.pat {
@@ -349,14 +388,19 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         }
     };
 
-    // Determine the context type string (e.g., MutationContext)
     let type_str = quote! { #ctx_type }.to_string();
     let is_ref = type_str.starts_with('&');
 
-    // Get remaining params for args struct
     let arg_params: Vec<_> = params.iter().skip(1).cloned().collect();
 
-    // Build args struct fields
+    for p in &arg_params {
+        if let FnArg::Typed(pat_type) = p
+            && let Some((reason, span)) = crate::utils::check_arg_wire_type(&pat_type.ty)
+        {
+            return Err(syn::Error::new(span, reason));
+        }
+    }
+
     let args_fields: Vec<TokenStream2> = arg_params
         .iter()
         .filter_map(|p| {
@@ -371,7 +415,6 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         })
         .collect();
 
-    // Build destructuring for function call
     let arg_names: Vec<TokenStream2> = arg_params
         .iter()
         .filter_map(|p| {
@@ -385,7 +428,6 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         })
         .collect();
 
-    // Get return type
     let output_type = match &input.sig.output {
         ReturnType::Default => quote! { () },
         ReturnType::Type(_, ty) => {
@@ -413,7 +455,6 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         }
     };
 
-    // Generate timeout option as Duration so all handler Info structs agree.
     let timeout = match attrs.timeout {
         Some(t) => quote! { Some(::std::time::Duration::from_secs(#t)) },
         None => quote! { None },
@@ -475,17 +516,116 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         None => quote! { None },
     };
 
-    let table_deps_tokens = match &attrs.tables {
-        Some(tables) => quote! { &[#(#tables),*] },
-        None => quote! { &[] },
+    let mut extractor = SqlStringExtractor::new();
+    extractor.visit_block(fn_block);
+
+    let has_explicit_tables = attrs.tables.is_some();
+    let table_dependencies: Vec<String> = if let Some(ref tables) = attrs.tables {
+        tables.clone()
+    } else {
+        match extract_tables_from_sql(&extractor.sql_strings) {
+            TableExtractionResult::Ok(tables) => {
+                let mut sorted: Vec<String> = tables.into_iter().collect();
+                sorted.sort();
+                sorted
+            }
+            TableExtractionResult::ParseFailed(sql) => {
+                let preview: String = sql.chars().take(80).collect();
+                return Err(syn::Error::new_spanned(
+                    &input.sig.ident,
+                    format!(
+                        "SQL in `{fn_name_str}` could not be parsed: \"{preview}...\"\n\
+                         Add #[mutation(tables(\"your_table\"))] to specify table dependencies explicitly."
+                    ),
+                ));
+            }
+        }
+    };
+
+    let table_deps_tokens = if table_dependencies.is_empty() {
+        quote! { &[] }
+    } else {
+        let deps = &table_dependencies;
+        quote! { &[#(#deps),*] }
+    };
+
+    let changed_columns_tokens: TokenStream2 = {
+        let mut cols: Vec<String> = extract_changed_columns_from_sql(&extractor.sql_strings)
+            .into_iter()
+            .collect();
+        cols.sort();
+        if cols.is_empty() {
+            quote! { &[] }
+        } else {
+            quote! { &[#(#cols),*] }
+        }
+    };
+
+    if !attrs.is_public
+        && !attrs.is_unscoped
+        && table_dependencies.is_empty()
+        && !has_explicit_tables
+    {
+        let mut delegation = DbDelegationDetector::new();
+        delegation.visit_block(fn_block);
+        if delegation.found {
+            return Err(syn::Error::new_spanned(
+                &input.sig.ident,
+                format!(
+                    "Private mutation `{fn_name_str}` calls .pool() but contains no inline SQL, \
+                     so table dependencies and scope cannot be verified. Inline the SQL in the \
+                     handler body, or add #[mutation(tables(\"...\"))] to declare dependencies \
+                     explicitly."
+                ),
+            ));
+        }
+    }
+
+    if !attrs.is_public && !attrs.is_unscoped && !table_dependencies.is_empty() {
+        let mut scope_extractor = SqlStringExtractor::new();
+        scope_extractor.visit_block(fn_block);
+        match sql_references_identity_scope(&scope_extractor.sql_strings) {
+            ScopeCheckResult::Scoped => {}
+            ScopeCheckResult::Unscoped => {
+                let tables_str = table_dependencies.join(", ");
+                return Err(syn::Error::new_spanned(
+                    &input.sig.ident,
+                    format!(
+                        "Private mutation `{fn_name_str}` references table(s) [{tables_str}] but \
+                         SQL does not filter by user_id or owner_id. Add a WHERE clause scoped to \
+                         the authenticated user, or use #[mutation(scope = \"global\")] if this is \
+                         intentional."
+                    ),
+                ));
+            }
+            ScopeCheckResult::ParseFailed => {
+                let tables_str = table_dependencies.join(", ");
+                return Err(syn::Error::new_spanned(
+                    &input.sig.ident,
+                    format!(
+                        "Private mutation `{fn_name_str}` references table(s) [{tables_str}] but \
+                         SQL could not be parsed to verify scope. Add #[mutation(scope = \"global\")] to \
+                         opt out of scope checking, or add #[mutation(tables(\"...\"))] to skip \
+                         automatic extraction."
+                    ),
+                ));
+            }
+        }
+    }
+
+    let requires_tenant_scope = if !attrs.is_public && !attrs.is_unscoped {
+        let mut tenant_extractor = SqlStringExtractor::new();
+        tenant_extractor.visit_block(fn_block);
+        sql_scope_requires_tenant(&tenant_extractor.sql_strings)
+    } else {
+        false
     };
 
     let transactional = attrs.transactional;
     let is_public = attrs.is_public;
 
-    // A single non-primitive struct argument is passed through to the handler
-    // as the args type directly. Primitives and collections get wrapped in a
-    // generated #StructNameArgs struct so RPC payloads stay JSON-named.
+    // Single non-primitive struct args are passed through directly; primitives and
+    // collections are wrapped in a generated #StructNameArgs to keep RPC payloads JSON-named.
     let single_custom_args_type: Option<&Type> = if arg_params.len() == 1 {
         if let FnArg::Typed(pat_type) = &arg_params[0] {
             if crate::utils::is_primitive_arg_type(&pat_type.ty) {
@@ -527,9 +667,7 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         )
     };
 
-    // Generate the inner function - always take context by reference
     let inner_fn = if is_ref {
-        // User already uses reference, keep the type as-is
         if arg_names.is_empty() {
             quote! {
                 #(#fn_attrs)*
@@ -541,19 +679,26 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
                 #vis async fn #fn_name(#ctx_name: #ctx_type, #(#arg_params),*) -> forge::forge_core::Result<#output_type> #fn_block
             }
         }
-    } else {
-        // User uses value, convert to reference in the generated function
-        if arg_names.is_empty() {
-            quote! {
-                #(#fn_attrs)*
-                #vis async fn #fn_name(#ctx_name: &#ctx_type) -> forge::forge_core::Result<#output_type> #fn_block
-            }
-        } else {
-            quote! {
-                #(#fn_attrs)*
-                #vis async fn #fn_name(#ctx_name: &#ctx_type, #(#arg_params),*) -> forge::forge_core::Result<#output_type> #fn_block
-            }
+    } else if arg_names.is_empty() {
+        quote! {
+            #(#fn_attrs)*
+            #vis async fn #fn_name(#ctx_name: &#ctx_type) -> forge::forge_core::Result<#output_type> #fn_block
         }
+    } else {
+        quote! {
+            #(#fn_attrs)*
+            #vis async fn #fn_name(#ctx_name: &#ctx_type, #(#arg_params),*) -> forge::forge_core::Result<#output_type> #fn_block
+        }
+    };
+
+    let registration = if attrs.register {
+        quote! {
+            forge::inventory::submit!(forge::AutoHandler(|registries| {
+                registries.functions.register_mutation::<#struct_name>();
+            }));
+        }
+    } else {
+        quote! {}
     };
 
     Ok(quote! {
@@ -588,9 +733,11 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
                         log_level: #log_level,
                         table_dependencies: #table_deps_tokens,
                         selected_columns: &[],
+                        changed_columns: #changed_columns_tokens,
                         transactional: #transactional,
                         consistent: false,
                         max_upload_size_bytes: #max_upload_size_bytes,
+                        requires_tenant_scope: #requires_tenant_scope,
                     }
                 }
 
@@ -604,9 +751,7 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
                 }
             }
 
-            forge::inventory::submit!(forge::AutoMutation(|registry| {
-                registry.register_mutation::<#struct_name>();
-            }));
+            #registration
         }
     })
 }
@@ -616,18 +761,11 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
 mod tests {
     use super::*;
 
-    // Note: proc_macro::TokenStream cannot be created outside the compiler bridge,
-    // so we test parse_mutation_attrs indirectly through the has_attr_flag/parse_attr_value
-    // utilities and test expand_mutation_impl directly with syn::ItemFn + MutationAttrs.
-
-    // --- MutationAttrs default ---
-
     #[test]
     fn default_attrs_transactional_is_true() {
         let attrs = MutationAttrs::default();
         assert!(attrs.transactional, "transactional defaults to true");
         assert!(!attrs.is_public);
-        assert!(!attrs.is_unscoped);
         assert!(attrs.required_role.is_none());
         assert!(attrs.timeout.is_none());
         assert!(attrs.rate_limit_requests.is_none());
@@ -637,8 +775,6 @@ mod tests {
         assert!(attrs.max_upload_size_bytes.is_none());
         assert!(attrs.tables.is_none());
     }
-
-    // --- Validation: transactional requirement ---
 
     #[test]
     fn rejects_dispatch_job_with_transactional_false() {
@@ -699,7 +835,6 @@ mod tests {
         )
         .unwrap();
 
-        // Default is transactional = true, so dispatch_job is fine.
         let attrs = MutationAttrs::default();
         let result = expand_mutation_impl(input, attrs);
         assert!(
@@ -750,8 +885,6 @@ mod tests {
         );
     }
 
-    // --- Validation: async requirement ---
-
     #[test]
     fn rejects_non_async_mutation() {
         let input: ItemFn = syn::parse_str(
@@ -773,8 +906,6 @@ mod tests {
         );
     }
 
-    // --- Validation: context parameter ---
-
     #[test]
     fn rejects_mutation_without_parameters() {
         let input: ItemFn = syn::parse_str(
@@ -795,8 +926,6 @@ mod tests {
             "Error should mention context param: {err_msg}"
         );
     }
-
-    // --- Generated output structure ---
 
     #[test]
     fn generates_struct_for_no_arg_mutation() {
@@ -865,6 +994,7 @@ mod tests {
 
         let attrs = MutationAttrs {
             tables: Some(vec!["users".into(), "orders".into()]),
+            is_unscoped: true,
             ..Default::default()
         };
         let output = expand_mutation_impl(input, attrs).expect("should expand");
@@ -892,6 +1022,103 @@ mod tests {
         assert!(
             output_str.contains("table_dependencies : & []"),
             "Should have empty table_dependencies by default: {output_str}"
+        );
+    }
+
+    #[test]
+    fn rejects_http_call_inside_transactional_mutation() {
+        let input: ItemFn = syn::parse_str(
+            r#"
+            pub async fn notify_user(ctx: &MutationContext) -> Result<()> {
+                ctx.http().get("https://example.com/ping").send().await?;
+                Ok(())
+            }
+            "#,
+        )
+        .unwrap();
+
+        let attrs = MutationAttrs::default();
+        let result = expand_mutation_impl(input, attrs);
+        assert!(
+            result.is_err(),
+            "Should reject ctx.http() in transactional mutation"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("http"),
+            "Error should mention http: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("transactional"),
+            "Error should mention transactional footgun: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn accepts_http_call_when_transactional_false() {
+        let input: ItemFn = syn::parse_str(
+            r#"
+            pub async fn notify_user(ctx: &MutationContext) -> Result<()> {
+                ctx.http().get("https://example.com/ping").send().await?;
+                Ok(())
+            }
+            "#,
+        )
+        .unwrap();
+
+        let attrs = MutationAttrs {
+            transactional: false,
+            ..MutationAttrs::default()
+        };
+        let result = expand_mutation_impl(input, attrs);
+        assert!(
+            result.is_ok(),
+            "http() in non-transactional mutation is fine: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn accepts_http_call_with_allow_http() {
+        let input: ItemFn = syn::parse_str(
+            r#"
+            pub async fn notify_user(ctx: &MutationContext) -> Result<()> {
+                ctx.http().get("https://example.com/ping").send().await?;
+                Ok(())
+            }
+            "#,
+        )
+        .unwrap();
+
+        let attrs = MutationAttrs {
+            transactional: true,
+            allow_http: true,
+            ..MutationAttrs::default()
+        };
+        let result = expand_mutation_impl(input, attrs);
+        assert!(
+            result.is_ok(),
+            "http() with allow_http = true should be accepted: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn accepts_mutation_without_http_call() {
+        let input: ItemFn = syn::parse_str(
+            r#"
+            pub async fn update_user(ctx: &MutationContext, name: String) -> Result<()> {
+                Ok(())
+            }
+            "#,
+        )
+        .unwrap();
+
+        let attrs = MutationAttrs::default();
+        let result = expand_mutation_impl(input, attrs);
+        assert!(
+            result.is_ok(),
+            "Mutation without http() should always be accepted"
         );
     }
 }

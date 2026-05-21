@@ -6,62 +6,33 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::Result;
-use crate::metadata::HandlerMetadata;
+use crate::function::{FunctionInfo, FunctionKind};
 
 use super::context::WebhookContext;
 use super::signature::{IdempotencyConfig, SignatureConfig};
 
-/// Trait for FORGE webhook handlers.
-///
-/// Webhooks are HTTP endpoints that receive external events (e.g., from Stripe, GitHub).
-/// They support signature validation, idempotency, and bypass authentication.
+/// Trait for inbound webhook handlers.
 pub trait ForgeWebhook: crate::__sealed::Sealed + Send + Sync + 'static {
-    /// Deserialized payload type. Use `serde_json::Value` for raw access.
     type Payload: serde::de::DeserializeOwned + Send + Sync + 'static;
 
-    /// Get webhook metadata.
     fn info() -> WebhookInfo;
 
-    /// Unified metadata for uniform consumers (observability, admin, codegen).
-    fn metadata() -> HandlerMetadata {
-        HandlerMetadata::from(&Self::info())
-    }
-
-    /// Execute the webhook handler.
-    ///
-    /// # Arguments
-    /// * `ctx` - Webhook context with db, http, and dispatch capabilities
-    /// * `payload` - The deserialized request body
     fn execute(
         ctx: &WebhookContext,
         payload: Self::Payload,
     ) -> Pin<Box<dyn Future<Output = Result<WebhookResult>> + Send + '_>>;
 }
 
-/// Webhook metadata.
-///
-/// Constructed by the `#[webhook]` macro. Adding a field is a breaking change
-/// for hand-written `ForgeWebhook` impls; stage extensions through a builder
-/// or major bump.
+/// Metadata for a registered webhook handler.
 #[derive(Debug, Clone)]
 pub struct WebhookInfo {
-    /// Webhook name (used for identification).
     pub name: &'static str,
-    /// Human-readable description of the webhook's purpose.
     pub description: Option<&'static str>,
-    /// URL path for the webhook (e.g., "/webhooks/stripe").
     pub path: &'static str,
-    /// Signature validation configuration.
     pub signature: Option<SignatureConfig>,
-    /// Allow unsigned requests for this webhook.
-    ///
-    /// Defaults to `false` for security. Only enable for trusted internal callers.
     pub allow_unsigned: bool,
-    /// Idempotency configuration.
     pub idempotency: Option<IdempotencyConfig>,
-    /// Request timeout.
     pub timeout: Duration,
-    /// Default timeout for outbound HTTP requests made by the webhook.
     pub http_timeout: Option<Duration>,
 }
 
@@ -80,29 +51,45 @@ impl Default for WebhookInfo {
     }
 }
 
-/// Result returned by webhook handlers.
+impl From<&WebhookInfo> for FunctionInfo {
+    fn from(webhook: &WebhookInfo) -> Self {
+        Self {
+            name: webhook.name,
+            description: webhook.description,
+            kind: FunctionKind::Webhook,
+            required_role: None,
+            is_public: true,
+            cache_ttl: None,
+            timeout: Some(webhook.timeout),
+            http_timeout: webhook.http_timeout,
+            rate_limit_requests: None,
+            rate_limit_per_secs: None,
+            rate_limit_key: None,
+            log_level: None,
+            table_dependencies: &[],
+            selected_columns: &[],
+            changed_columns: &[],
+            transactional: false,
+            consistent: false,
+            max_upload_size_bytes: None,
+            requires_tenant_scope: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status")]
 #[non_exhaustive]
 pub enum WebhookResult {
-    /// Request processed successfully (HTTP 200).
     #[serde(rename = "ok")]
     Ok,
-    /// Request accepted for async processing (HTTP 202).
     #[serde(rename = "accepted")]
     Accepted,
-    /// Custom response with specific status and body.
     #[serde(rename = "custom")]
-    Custom {
-        /// HTTP status code.
-        status_code: u16,
-        /// Response body.
-        body: Value,
-    },
+    Custom { status_code: u16, body: Value },
 }
 
 impl WebhookResult {
-    /// Get the HTTP status code for this result.
     pub fn status_code(&self) -> u16 {
         match self {
             Self::Ok => 200,
@@ -111,7 +98,6 @@ impl WebhookResult {
         }
     }
 
-    /// Get the response body.
     pub fn body(&self) -> Value {
         match self {
             Self::Ok => serde_json::json!({"status": "ok"}),

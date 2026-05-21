@@ -1,7 +1,7 @@
 use crate::schema::DemoStats;
 use forge::prelude::*;
 
-#[forge::query(cache = "10s", public)]
+#[forge::query(cache = "10s", auth = "none")]
 pub async fn get_demo_stats(ctx: &QueryContext) -> Result<DemoStats> {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 

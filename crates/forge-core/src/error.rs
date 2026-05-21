@@ -2,250 +2,166 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-/// Core error type for Forge operations.
-///
-/// Each variant maps to an HTTP status code and error code for consistent client handling.
-///
-/// Marked `#[non_exhaustive]` so new variants can be added in minor releases without
-/// breaking exhaustive `match` arms in user code. Always include a `_ =>` catch-all
-/// when matching on this enum.
+use crate::workflow::SuspendReason;
+
+/// Core error type mapping variants to HTTP status codes.
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum ForgeError {
-    /// Configuration file parsing or validation failed.
-    #[error("Configuration error: {0}")]
-    Config(String),
+    #[error("Configuration error: {context}")]
+    Config {
+        context: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
-    /// Database operation failed.
     #[error("Database error: {0}")]
-    Database(String),
+    Database(#[from] sqlx::Error),
 
-    /// Function execution failed.
-    #[error("Function error: {0}")]
-    Function(String),
-
-    /// Job execution failed.
-    #[error("Job error: {0}")]
-    Job(String),
-
-    /// Job was cancelled before completion.
     #[error("Job cancelled: {0}")]
     JobCancelled(String),
 
-    /// Cluster coordination failed.
-    #[error("Cluster error: {0}")]
-    Cluster(String),
-
-    /// Failed to serialize data to JSON.
     #[error("Serialization error: {0}")]
     Serialization(String),
 
-    /// Failed to deserialize JSON input.
     #[error("Deserialization error: {0}")]
     Deserialization(String),
 
-    /// File system operation failed.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// SQL execution failed.
-    #[error("SQL error: {0}")]
-    Sql(#[from] sqlx::Error),
-
-    /// Invalid argument provided (400).
     #[error("Invalid argument: {0}")]
     InvalidArgument(String),
 
-    /// Requested resource not found (404).
     #[error("Not found: {0}")]
     NotFound(String),
 
-    /// Authentication required or failed (401).
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
 
-    /// Permission denied (403).
     #[error("Forbidden: {0}")]
     Forbidden(String),
 
-    /// Input validation failed (400).
     #[error("Validation error: {0}")]
     Validation(String),
 
-    /// Operation timed out (504).
     #[error("Timeout: {0}")]
     Timeout(String),
 
-    /// Unexpected internal error (500).
-    #[error("Internal error: {0}")]
-    Internal(String),
+    #[error("Internal error: {context}")]
+    Internal {
+        context: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
-    /// Invalid state transition attempted.
     #[error("Invalid state: {0}")]
     InvalidState(String),
 
-    /// Internal signal for workflow suspension. Never returned to clients.
-    #[error("Workflow suspended")]
-    WorkflowSuspended,
-
-    /// Rate limit exceeded (429).
     #[error("Rate limit exceeded: retry after {retry_after:?}")]
     RateLimitExceeded {
-        /// How long to wait before retrying.
         retry_after: Duration,
-        /// The configured request limit.
         limit: u32,
-        /// Remaining requests (always 0 when exceeded).
         remaining: u32,
     },
 
-    /// Conflict (409). Use for concurrent modification errors.
-    #[error("Conflict: {0}")]
-    Conflict(String),
-
-    /// Unprocessable entity (422). Use when input is syntactically valid but
-    /// semantically wrong.
-    #[error("Unprocessable entity: {0}")]
-    UnprocessableEntity(String),
-
-    /// Service unavailable (503). Use for temporary outages.
+    /// Service unavailable (503).
     #[error("Service unavailable: {0}")]
     ServiceUnavailable(String),
 
-    /// Reserved for future audit-logging errors. Maps to 500.
-    #[doc(hidden)]
-    #[error("Audit event: {0}")]
-    AuditEvent(String),
-
-    /// Reserved for future policy-enforcement errors. Maps to 500.
-    #[doc(hidden)]
-    #[error("Policy denied: {0}")]
-    PolicyDenied(String),
-
-    /// Reserved for future operational-constraint errors. Maps to 500.
-    #[doc(hidden)]
-    #[error("Operational constraint: {0}")]
-    OperationalConstraint(String),
-
-    /// Reserved for future channel-publish failures. Maps to 500.
-    #[doc(hidden)]
-    #[error("Channel publish failed: {0}")]
-    ChannelPublishFailed(String),
-
-    /// Reserved for future quota-exhaustion errors (distinct from per-window
-    /// rate limits). Maps to 429.
-    #[doc(hidden)]
-    #[error("Quota exceeded: {0}")]
-    QuotaExceeded(String),
-
-    /// Reserved for future SSE subscription gap signaling. Maps to 410.
-    #[doc(hidden)]
-    #[error("Subscription gapped: {0}")]
-    SubscriptionGapped(String),
-
-    /// Reserved for future oversized-result errors. Maps to 413.
-    #[doc(hidden)]
-    #[error("Result too large: {0}")]
-    ResultTooLarge(String),
-
-    /// Reserved for future revoked-role errors. Maps to 403.
-    #[doc(hidden)]
-    #[error("Role revoked: {0}")]
-    RoleRevoked(String),
-
-    /// Reserved for future oversized-payload errors. Maps to 413.
-    #[doc(hidden)]
-    #[error("Payload too large: {0}")]
-    PayloadTooLarge(String),
+    /// Internal control signal raised when a workflow handler suspends
+    /// (`ctx.sleep(...)` / `ctx.wait_for_event(...)`). The executor handles
+    /// it before any HTTP mapping layer; it is never returned to a client.
+    #[error("Workflow suspended")]
+    WorkflowSuspended(SuspendReason),
 }
 
 impl ForgeError {
-    /// Build a 404 [`ForgeError::NotFound`] from any displayable message.
-    ///
-    /// ```
-    /// # use forge_core::ForgeError;
-    /// let e = ForgeError::not_found("user 42");
-    /// assert_eq!(e.to_string(), "Not found: user 42");
-    /// ```
     pub fn not_found(msg: impl Into<String>) -> Self {
         ForgeError::NotFound(msg.into())
     }
 
-    /// Build a 401 [`ForgeError::Unauthorized`].
+    pub fn config(msg: impl Into<String>) -> Self {
+        ForgeError::Config {
+            context: msg.into(),
+            source: None,
+        }
+    }
+
     pub fn unauthorized(msg: impl Into<String>) -> Self {
         ForgeError::Unauthorized(msg.into())
     }
 
-    /// Build a 403 [`ForgeError::Forbidden`].
     pub fn forbidden(msg: impl Into<String>) -> Self {
         ForgeError::Forbidden(msg.into())
     }
 
-    /// Build a 400 [`ForgeError::Validation`].
     pub fn validation(msg: impl Into<String>) -> Self {
         ForgeError::Validation(msg.into())
     }
 
-    /// Build a 400 [`ForgeError::InvalidArgument`].
-    pub fn invalid_argument(msg: impl Into<String>) -> Self {
-        ForgeError::InvalidArgument(msg.into())
-    }
-
-    /// Build a 504 [`ForgeError::Timeout`].
     pub fn timeout(msg: impl Into<String>) -> Self {
         ForgeError::Timeout(msg.into())
     }
 
-    /// Build a 500 [`ForgeError::Internal`]. Use sparingly — prefer one of
-    /// the typed variants when the cause is known.
     pub fn internal(msg: impl Into<String>) -> Self {
-        ForgeError::Internal(msg.into())
+        ForgeError::Internal {
+            context: msg.into(),
+            source: None,
+        }
     }
 
-    /// Build a [`ForgeError::InvalidState`] (also surfaces as 500).
-    pub fn invalid_state(msg: impl Into<String>) -> Self {
-        ForgeError::InvalidState(msg.into())
+    pub fn internal_with(
+        msg: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        ForgeError::Internal {
+            context: msg.into(),
+            source: Some(Box::new(source)),
+        }
     }
 
-    /// Returns the HTTP status code for this error.
-    ///
-    /// This is the canonical variant → status mapping. The gateway layer uses it
-    /// when converting errors to HTTP responses so downstream consumers don't need
-    /// to depend on `forge-runtime` just to know what status a variant maps to.
-    ///
-    /// | Variant | Status |
-    /// |---|---|
-    /// | `NotFound` | 404 |
-    /// | `Unauthorized` | 401 |
-    /// | `Forbidden`, `RoleRevoked` | 403 |
-    /// | `Validation` | 400 |
-    /// | `InvalidArgument` | 400 |
-    /// | `Deserialization` | 400 |
-    /// | `Timeout` | 504 |
-    /// | `RateLimitExceeded`, `QuotaExceeded` | 429 |
-    /// | `JobCancelled`, `Conflict` | 409 |
-    /// | `UnprocessableEntity` | 422 |
-    /// | `ServiceUnavailable` | 503 |
-    /// | `PayloadTooLarge`, `ResultTooLarge` | 413 |
-    /// | `SubscriptionGapped` | 410 |
-    /// | All others | 500 |
+    pub fn config_with(
+        msg: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        ForgeError::Config {
+            context: msg.into(),
+            source: Some(Box::new(source)),
+        }
+    }
+
+    /// Canonical variant-to-HTTP-status mapping.
     pub fn http_status(&self) -> u16 {
         match self {
             Self::NotFound(_) => 404,
             Self::Unauthorized(_) => 401,
-            Self::Forbidden(_) | Self::RoleRevoked(_) => 403,
+            Self::Forbidden(_) => 403,
             Self::Validation(_) => 400,
             Self::InvalidArgument(_) => 400,
             Self::Deserialization(_) => 400,
             Self::Timeout(_) => 504,
-            Self::RateLimitExceeded { .. } | Self::QuotaExceeded(_) => 429,
-            Self::JobCancelled(_) | Self::Conflict(_) => 409,
-            Self::UnprocessableEntity(_) => 422,
+            Self::RateLimitExceeded { .. } => 429,
+            Self::JobCancelled(_) => 409,
             Self::ServiceUnavailable(_) => 503,
-            Self::PayloadTooLarge(_) | Self::ResultTooLarge(_) => 413,
-            Self::SubscriptionGapped(_) => 410,
             _ => 500,
         }
+    }
+
+    pub fn is_client_error(&self) -> bool {
+        let status = self.http_status();
+        (400..500).contains(&status)
+    }
+
+    pub fn is_server_error(&self) -> bool {
+        self.http_status() >= 500
+    }
+
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::ServiceUnavailable(_) | Self::Timeout(_) | Self::RateLimitExceeded { .. }
+        )
     }
 }
 
@@ -264,7 +180,10 @@ impl From<crate::http::CircuitBreakerError> for ForgeError {
             crate::http::CircuitBreakerError::Request(err) if err.is_timeout() => {
                 ForgeError::Timeout(err.to_string())
             }
-            crate::http::CircuitBreakerError::Request(err) => ForgeError::Internal(err.to_string()),
+            crate::http::CircuitBreakerError::Request(err) => ForgeError::Internal {
+                context: "HTTP request failed".to_string(),
+                source: Some(Box::new(err)),
+            },
             crate::http::CircuitBreakerError::PrivateHostBlocked(host) => {
                 ForgeError::Forbidden(format!("Outbound request to private host '{host}' blocked"))
             }
@@ -278,33 +197,24 @@ pub type Result<T> = std::result::Result<T, ForgeError>;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
-    use super::*;
+    use std::error::Error as _;
 
-    // --- Display / error messages ---
+    use super::*;
 
     #[test]
     fn display_preserves_inner_message() {
         let cases: Vec<(ForgeError, &str)> = vec![
             (
-                ForgeError::Config("bad toml".into()),
+                ForgeError::config("bad toml"),
                 "Configuration error: bad toml",
             ),
             (
-                ForgeError::Database("conn refused".into()),
-                "Database error: conn refused",
+                ForgeError::Database(sqlx::Error::RowNotFound),
+                "Database error: no rows returned by a query that expected to return at least one row",
             ),
-            (
-                ForgeError::Function("handler panic".into()),
-                "Function error: handler panic",
-            ),
-            (ForgeError::Job("timeout".into()), "Job error: timeout"),
             (
                 ForgeError::JobCancelled("user request".into()),
                 "Job cancelled: user request",
-            ),
-            (
-                ForgeError::Cluster("split brain".into()),
-                "Cluster error: split brain",
             ),
             (
                 ForgeError::Serialization("bad json".into()),
@@ -336,14 +246,13 @@ mod tests {
                 "Timeout: 5s exceeded",
             ),
             (
-                ForgeError::Internal("null pointer".into()),
+                ForgeError::internal("null pointer"),
                 "Internal error: null pointer",
             ),
             (
                 ForgeError::InvalidState("already completed".into()),
                 "Invalid state: already completed",
             ),
-            (ForgeError::WorkflowSuspended, "Workflow suspended"),
         ];
 
         for (error, expected) in cases {
@@ -361,8 +270,6 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("30"), "Expected retry_after in message: {msg}");
     }
-
-    // --- From implementations ---
 
     #[test]
     fn from_serde_json_error_maps_to_serialization() {
@@ -402,8 +309,6 @@ mod tests {
         }
     }
 
-    // --- Variant matching (critical for downstream error handling) ---
-
     #[test]
     fn variants_are_distinguishable_via_pattern_match() {
         let errors: Vec<ForgeError> = vec![
@@ -413,10 +318,9 @@ mod tests {
             ForgeError::Validation("x".into()),
             ForgeError::InvalidArgument("x".into()),
             ForgeError::Timeout("x".into()),
-            ForgeError::Internal("x".into()),
+            ForgeError::internal("x"),
         ];
 
-        // Each variant must match only its own pattern
         for (i, err) in errors.iter().enumerate() {
             let matched = match err {
                 ForgeError::NotFound(_) => 0,
@@ -425,7 +329,7 @@ mod tests {
                 ForgeError::Validation(_) => 3,
                 ForgeError::InvalidArgument(_) => 4,
                 ForgeError::Timeout(_) => 5,
-                ForgeError::Internal(_) => 6,
+                ForgeError::Internal { .. } => 6,
                 _ => usize::MAX,
             };
             assert_eq!(matched, i, "Variant at index {i} matched wrong pattern");
@@ -458,7 +362,6 @@ mod tests {
     fn error_is_send_and_sync() {
         fn assert_send<T: Send>() {}
         fn assert_sync<T: Sync>() {}
-        // ForgeError must be Send+Sync for use across async task boundaries
         assert_send::<ForgeError>();
         assert_sync::<ForgeError>();
     }
@@ -482,34 +385,57 @@ mod tests {
             .http_status(),
             429
         );
-        // Internal variants all map to 500
         for err in [
-            ForgeError::Internal("x".into()),
-            ForgeError::Database("x".into()),
-            ForgeError::Function("x".into()),
-            ForgeError::Config("x".into()),
-            ForgeError::Cluster("x".into()),
+            ForgeError::internal("x"),
+            ForgeError::Database(sqlx::Error::RowNotFound),
+            ForgeError::config("x"),
             ForgeError::InvalidState("x".into()),
-            ForgeError::Job("x".into()),
-            ForgeError::WorkflowSuspended,
         ] {
             assert_eq!(err.http_status(), 500, "expected 500 for {err:?}");
         }
     }
 
     #[test]
-    fn reserved_variants_have_stable_status_mappings() {
-        assert_eq!(ForgeError::RoleRevoked("x".into()).http_status(), 403);
-        assert_eq!(ForgeError::QuotaExceeded("x".into()).http_status(), 429);
-        assert_eq!(ForgeError::PayloadTooLarge("x".into()).http_status(), 413);
-        assert_eq!(ForgeError::ResultTooLarge("x".into()).http_status(), 413);
-        assert_eq!(
-            ForgeError::SubscriptionGapped("x".into()).http_status(),
-            410
+    fn is_client_error_for_4xx() {
+        assert!(ForgeError::not_found("x").is_client_error());
+        assert!(ForgeError::unauthorized("x").is_client_error());
+        assert!(ForgeError::forbidden("x").is_client_error());
+        assert!(ForgeError::validation("x").is_client_error());
+        assert!(!ForgeError::internal("x").is_client_error());
+        assert!(!ForgeError::timeout("x").is_client_error());
+    }
+
+    #[test]
+    fn is_server_error_for_5xx() {
+        assert!(ForgeError::internal("x").is_server_error());
+        assert!(ForgeError::timeout("x").is_server_error());
+        assert!(ForgeError::config("x").is_server_error());
+        assert!(!ForgeError::not_found("x").is_server_error());
+        assert!(!ForgeError::unauthorized("x").is_server_error());
+    }
+
+    #[test]
+    fn is_retryable_for_transient_errors() {
+        assert!(ForgeError::ServiceUnavailable("x".into()).is_retryable());
+        assert!(ForgeError::timeout("x").is_retryable());
+        assert!(
+            ForgeError::RateLimitExceeded {
+                retry_after: Duration::from_secs(1),
+                limit: 10,
+                remaining: 0,
+            }
+            .is_retryable()
         );
-        assert_eq!(
-            ForgeError::ChannelPublishFailed("x".into()).http_status(),
-            500
-        );
+        assert!(!ForgeError::not_found("x").is_retryable());
+        assert!(!ForgeError::internal("x").is_retryable());
+        assert!(!ForgeError::validation("x").is_retryable());
+    }
+
+    #[test]
+    fn internal_with_preserves_source_chain() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe broken");
+        let err = ForgeError::internal_with("connection failed", io_err);
+        assert_eq!(err.to_string(), "Internal error: connection failed");
+        assert!(err.source().is_some(), "source should be preserved");
     }
 }

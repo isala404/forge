@@ -1,5 +1,15 @@
 use std::time::Duration;
 
+/// Default replay window for non-Stripe webhook signature schemes (5 minutes).
+/// Stripe enforces its own 5-minute window via the `t=` field in its header
+/// and ignores this value.
+pub const DEFAULT_REPLAY_WINDOW_SECS: u64 = 300;
+
+/// Header used by non-Stripe schemes to convey the request's unix-seconds
+/// timestamp. Senders that don't ship this header are rejected when the
+/// scheme requires replay protection.
+pub const REPLAY_TIMESTAMP_HEADER: &str = "x-webhook-timestamp";
+
 /// Configuration for webhook signature validation.
 #[derive(Debug, Clone)]
 pub struct SignatureConfig {
@@ -9,6 +19,12 @@ pub struct SignatureConfig {
     pub header_name: &'static str,
     /// Environment variable name containing the secret.
     pub secret_env: &'static str,
+    /// Maximum age, in seconds, that a request may have before it is rejected
+    /// as a replay. For non-Stripe schemes the runtime reads
+    /// `x-webhook-timestamp` and compares to `now`. A value of `0` disables
+    /// replay enforcement (not recommended). Stripe always uses its own
+    /// 300s window from the `t=` field and ignores this setting.
+    pub replay_window_secs: u64,
 }
 
 /// Supported signature algorithms.
@@ -17,16 +33,6 @@ pub struct SignatureConfig {
 pub enum SignatureAlgorithm {
     /// HMAC-SHA256 (e.g., GitHub)
     HmacSha256,
-    /// HMAC-SHA1 (legacy, e.g., older GitHub)
-    HmacSha1,
-    /// HMAC-SHA512
-    HmacSha512,
-    /// Standard Webhooks (https://www.standardwebhooks.com) — used by Polar, Svix, Clerk, and others.
-    ///
-    /// Signs `{webhook-id}\n{webhook-timestamp}\n{body}` with HMAC-SHA256.
-    /// Signature header is always `webhook-signature` with format `v1,<base64>`.
-    /// Secret prefixes `whsec_` and `polar_whs_` are stripped before base64 decoding.
-    StandardWebhooks,
     /// Stripe webhook format.
     ///
     /// Signs `{timestamp}.{body}` with HMAC-SHA256. Timestamp and signatures are
@@ -51,9 +57,6 @@ impl SignatureAlgorithm {
     pub fn prefix(&self) -> &'static str {
         match self {
             Self::HmacSha256 => "sha256=",
-            Self::HmacSha1 => "sha1=",
-            Self::HmacSha512 => "sha512=",
-            Self::StandardWebhooks => "v1,",
             Self::StripeWebhooks | Self::HmacSha256Base64 | Self::Ed25519 => "",
         }
     }
@@ -67,24 +70,6 @@ pub enum IdempotencySource {
     Header(&'static str),
     /// Extract from request body using JSONPath (e.g., "$.id").
     Body(&'static str),
-}
-
-impl IdempotencySource {
-    /// Parse from attribute string (e.g., "header:X-Request-Id" or "body:$.id").
-    ///
-    /// NOTE: This uses `Box::leak` to produce `&'static str` references, so it
-    /// must only be called at startup/registration time (e.g., from proc macros),
-    /// never in request-handling hot paths. Calling this in a loop will leak memory.
-    pub fn parse(s: &str) -> Option<Self> {
-        let (prefix, value) = s.split_once(':')?;
-        // SAFETY: This is intended to be called only at startup during webhook registration.
-        // The leaked strings live for the program's lifetime, matching webhook configurations.
-        match prefix {
-            "header" => Some(Self::Header(Box::leak(value.to_string().into_boxed_str()))),
-            "body" => Some(Self::Body(Box::leak(value.to_string().into_boxed_str()))),
-            _ => None,
-        }
-    }
 }
 
 /// Configuration for webhook idempotency.
@@ -146,50 +131,7 @@ impl WebhookSignature {
             algorithm: SignatureAlgorithm::HmacSha256,
             header_name: header,
             secret_env,
-        }
-    }
-
-    /// Create HMAC-SHA1 signature config.
-    ///
-    /// # Arguments
-    /// * `header` - The HTTP header containing the signature
-    /// * `secret_env` - Environment variable containing the secret
-    pub const fn hmac_sha1(header: &'static str, secret_env: &'static str) -> SignatureConfig {
-        SignatureConfig {
-            algorithm: SignatureAlgorithm::HmacSha1,
-            header_name: header,
-            secret_env,
-        }
-    }
-
-    /// Create HMAC-SHA512 signature config.
-    ///
-    /// # Arguments
-    /// * `header` - The HTTP header containing the signature
-    /// * `secret_env` - Environment variable containing the secret
-    pub const fn hmac_sha512(header: &'static str, secret_env: &'static str) -> SignatureConfig {
-        SignatureConfig {
-            algorithm: SignatureAlgorithm::HmacSha512,
-            header_name: header,
-            secret_env,
-        }
-    }
-
-    /// Create a Standard Webhooks signature config (https://www.standardwebhooks.com).
-    ///
-    /// Used by Polar and other services that implement the Standard Webhooks spec.
-    /// The signature header is always `webhook-signature`; no need to specify it.
-    ///
-    /// The secret may have a `whsec_` or `polar_whs_` prefix — both are stripped
-    /// and the remainder is base64-decoded to obtain the raw HMAC key.
-    ///
-    /// # Arguments
-    /// * `secret_env` - Environment variable containing the webhook secret
-    pub const fn standard_webhooks(secret_env: &'static str) -> SignatureConfig {
-        SignatureConfig {
-            algorithm: SignatureAlgorithm::StandardWebhooks,
-            header_name: "webhook-signature",
-            secret_env,
+            replay_window_secs: DEFAULT_REPLAY_WINDOW_SECS,
         }
     }
 
@@ -206,6 +148,7 @@ impl WebhookSignature {
             algorithm: SignatureAlgorithm::StripeWebhooks,
             header_name: "stripe-signature",
             secret_env,
+            replay_window_secs: DEFAULT_REPLAY_WINDOW_SECS,
         }
     }
 
@@ -221,6 +164,7 @@ impl WebhookSignature {
             algorithm: SignatureAlgorithm::HmacSha256Base64,
             header_name: "x-shopify-hmac-sha256",
             secret_env,
+            replay_window_secs: DEFAULT_REPLAY_WINDOW_SECS,
         }
     }
 
@@ -238,6 +182,7 @@ impl WebhookSignature {
             algorithm: SignatureAlgorithm::Ed25519,
             header_name: header,
             secret_env: public_key_env,
+            replay_window_secs: DEFAULT_REPLAY_WINDOW_SECS,
         }
     }
 }
@@ -258,23 +203,8 @@ mod tests {
     #[test]
     fn test_algorithm_prefix() {
         assert_eq!(SignatureAlgorithm::HmacSha256.prefix(), "sha256=");
-        assert_eq!(SignatureAlgorithm::HmacSha1.prefix(), "sha1=");
-        assert_eq!(SignatureAlgorithm::HmacSha512.prefix(), "sha512=");
-    }
-
-    #[test]
-    fn test_idempotency_source_parsing() {
-        let header = IdempotencySource::parse("header:X-Request-Id");
-        assert!(matches!(
-            header,
-            Some(IdempotencySource::Header("X-Request-Id"))
-        ));
-
-        let body = IdempotencySource::parse("body:$.id");
-        assert!(matches!(body, Some(IdempotencySource::Body("$.id"))));
-
-        let invalid = IdempotencySource::parse("invalid");
-        assert!(invalid.is_none());
+        assert_eq!(SignatureAlgorithm::StripeWebhooks.prefix(), "");
+        assert_eq!(SignatureAlgorithm::Ed25519.prefix(), "");
     }
 
     #[test]

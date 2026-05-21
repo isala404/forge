@@ -131,7 +131,6 @@ where
         let had_data = previous.data.is_some();
         has_received_data.set(had_data);
 
-        // Only update visible state on the initial connection, not retries.
         // Retries happen silently to avoid re-render storms in desktop WebViews.
         if !is_reconnect {
             state.set(SubscriptionState {
@@ -167,7 +166,6 @@ where
                 {
                     let attempts = reconnect_attempts.get();
                     if attempts >= 10 {
-                        // Exhausted retries, now surface the error
                         let mut next = state.peek().clone();
                         next.loading = false;
                         next.connection_state = ConnectionState::Disconnected;
@@ -224,8 +222,7 @@ where
                 });
             }
             StreamEvent::Error(err) => {
-                // During reconnect attempts, suppress errors to avoid UI churn.
-                // Only surface errors on the initial connection or after retries exhaust.
+                // Suppress errors during reconnect attempts to avoid UI churn.
                 let attempts = reconnect_attempts.get();
                 if attempts > 0 && attempts < 10 {
                     return;
@@ -482,13 +479,11 @@ where
     let mut pending: Signal<Option<PendingOptimistic<D>>> = use_signal(|| None);
     let apply = use_hook(|| Rc::new(apply));
 
-    // Sync view with subscription data. When a pending optimistic update
-    // exists, an incoming SSE push is treated as server confirmation.
+    // An incoming SSE push while a pending optimistic update exists is treated
+    // as server confirmation: adopt server state and clear pending.
     use_effect(move || {
         let sub_data = subscription.read().data.clone();
         if pending.read().is_some() {
-            // SSE delivered fresh data while optimistic patch was active.
-            // Treat as confirmation: adopt server state, clear pending.
             pending.set(None);
         }
         view.set(sub_data);

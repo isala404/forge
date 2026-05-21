@@ -18,7 +18,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 use forge_core::cluster::NodeId;
 use forge_core::config::McpConfig;
-use forge_core::function::{JobDispatch, WorkflowDispatch};
+use forge_core::function::{JobDispatch, KvHandle, WorkflowDispatch};
 #[cfg(feature = "otel")]
 use opentelemetry::global;
 #[cfg(feature = "otel")]
@@ -27,20 +27,21 @@ use tracing::Instrument;
 #[cfg(feature = "otel")]
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
+use super::admin::{AdminState, admin_router};
 use super::auth::{AuthConfig, AuthMiddleware, HmacTokenIssuer, auth_middleware};
 use super::mcp::{McpState, mcp_get_handler, mcp_post_handler};
 use super::multipart::{MultipartConfig, rpc_multipart_handler};
 use super::response::{RpcError, RpcResponse};
-use super::rpc::{RpcHandler, rpc_batch_handler, rpc_function_handler, rpc_handler};
+use super::rpc::{RpcHandler, rpc_function_handler, rpc_handler};
 use super::sse::{
     SseState, sse_handler, sse_job_subscribe_handler, sse_subscribe_handler,
     sse_unsubscribe_handler, sse_workflow_subscribe_handler,
 };
 use super::tls::{TlsListenConfig, bind_listener};
 use super::tracing::{REQUEST_ID_HEADER, SPAN_ID_HEADER, TRACE_ID_HEADER, TracingState};
-use crate::db::Database;
 use crate::function::FunctionRegistry;
 use crate::mcp::McpToolRegistry;
+use crate::pg::{Database, PgNotifyBus};
 use crate::realtime::{Reactor, ReactorConfig};
 
 const DEFAULT_MAX_JSON_BODY_SIZE: usize = 1024 * 1024;
@@ -49,6 +50,18 @@ const DEFAULT_MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
 const MAX_MULTIPART_CONCURRENCY: usize = 32;
 /// Fallback for visitor ID hashing when no JWT secret is configured (dev only).
 const DEFAULT_SIGNAL_SECRET: &str = "forge-default-signal-secret";
+
+/// Resolve the visitor-ID hashing secret, falling back to a stable dev value
+/// with a one-time warning when no JWT secret is configured.
+fn signal_visitor_secret(jwt_secret: &Option<String>) -> String {
+    jwt_secret.clone().unwrap_or_else(|| {
+        tracing::warn!(
+            "No jwt_secret configured; using default signal secret for visitor ID hashing. \
+             Visitor IDs will be predictable. Set [auth] jwt_secret in forge.toml."
+        );
+        DEFAULT_SIGNAL_SECRET.to_string()
+    })
+}
 
 /// Gateway server configuration.
 #[derive(Debug, Clone)]
@@ -77,15 +90,21 @@ pub struct GatewayConfig {
     pub project_name: String,
     /// Maximum body size in bytes for uploads. Defaults to 20 MB.
     pub max_body_size_bytes: usize,
+    /// Maximum JSON body size in bytes for RPC endpoints. Defaults to 1 MB.
+    pub max_json_body_bytes: usize,
     /// Default per-file cap in bytes for multipart uploads. Applies when
     /// a mutation does not declare its own `max_size`. Defaults to 10 MB.
     pub max_file_size_bytes: usize,
     /// Optional TLS configuration. When `None`, the gateway serves plain HTTP.
     pub tls: Option<TlsListenConfig>,
-    /// Maximum requests in a single RPC batch call.
-    pub max_rpc_batch_size: usize,
     /// Maximum file fields in a single multipart upload.
     pub max_multipart_fields: usize,
+    /// Maximum concurrent SSE sessions per authenticated user.
+    pub max_sessions_per_user: usize,
+    /// Maximum concurrent SSE sessions per source IP.
+    pub max_sessions_per_ip: usize,
+    /// Cap on a user's total subscriptions across every active session.
+    pub max_subscriptions_per_user: usize,
     /// Reactor, invalidation, listener, and SSE knobs. Defaults match production.
     pub reactor_config: ReactorConfig,
     /// Add standard security headers to all responses.
@@ -94,6 +113,13 @@ pub struct GatewayConfig {
     pub hsts: bool,
     /// Parsed trusted proxy CIDR ranges for IP extraction.
     pub trusted_proxies: Vec<ipnet::IpNet>,
+    /// Maximum number of background jobs a single mutation request may dispatch.
+    /// 0 disables the limit. Defaults to 10.
+    pub max_jobs_per_request: usize,
+    /// Maximum serialized response size in bytes. Defaults to 10 MiB.
+    pub max_result_size_bytes: usize,
+    /// Maximum JSON nesting depth for incoming request bodies. Defaults to 64.
+    pub max_json_depth: usize,
 }
 
 impl Default for GatewayConfig {
@@ -111,14 +137,20 @@ impl Default for GatewayConfig {
             token_ttl: forge_core::AuthTokenTtl::default(),
             project_name: "forge-app".to_string(),
             max_body_size_bytes: DEFAULT_MAX_MULTIPART_BODY_SIZE,
+            max_json_body_bytes: DEFAULT_MAX_JSON_BODY_SIZE,
             max_file_size_bytes: DEFAULT_MAX_FILE_SIZE,
             tls: None,
-            max_rpc_batch_size: 100,
             max_multipart_fields: 20,
+            max_sessions_per_user: 8,
+            max_sessions_per_ip: 32,
+            max_subscriptions_per_user: 500,
             reactor_config: ReactorConfig::default(),
             security_headers: true,
             hsts: false,
             trusted_proxies: Vec::new(),
+            max_jobs_per_request: 10,
+            max_result_size_bytes: 10 * 1024 * 1024,
+            max_json_depth: 64,
         }
     }
 }
@@ -134,20 +166,24 @@ pub struct HealthResponse {
     pub version: String,
 }
 
-/// Public readiness probe payload.
+/// Readiness probe payload.
 ///
 /// Intentionally minimal: load-balancer probes can call this without
 /// authentication and we don't want to leak internal deployment signals (queue
-/// depths, blocked-run counts, version skew) to anonymous callers. The
-/// `workflows` boolean folds in the blocked-run check; detailed per-subsystem
-/// state lives in tracing, metrics, and the operator dashboards.
+/// depths, blocked-run counts, version skew) to anonymous callers.
 #[derive(Debug, Serialize)]
 #[non_exhaustive]
 pub struct ReadinessResponse {
     pub ready: bool,
     pub database: bool,
     pub reactor: bool,
-    pub workflows: bool,
+    /// NOTIFY queue usage below the failure threshold (75%).
+    pub notify_queue_ok: bool,
+    /// All embedded system migrations applied to the database.
+    pub migrations_ok: bool,
+    /// This node has an `active` row in `forge_nodes`.
+    /// `None` when cluster registration is not enabled for this process.
+    pub cluster_registered: Option<bool>,
     pub version: String,
 }
 
@@ -156,11 +192,17 @@ pub struct ReadinessResponse {
 pub struct ReadinessState {
     db_pool: sqlx::PgPool,
     reactor: Arc<Reactor>,
-    #[cfg(feature = "workflows")]
-    workflow_readiness: Option<Arc<crate::workflow::WorkflowReadiness>>,
-    #[cfg(feature = "workflows")]
-    workflow_registry: Option<Arc<crate::workflow::WorkflowRegistry>>,
+    /// Local node id when cluster registration is enabled.
+    node_id: Option<uuid::Uuid>,
+    /// Count of embedded system migrations the process expects to be applied.
+    expected_system_migrations: i64,
 }
+
+/// pg_notification_queue_usage() returns a fraction in [0, 1].
+/// Above this fraction the probe reports the cluster as not ready so the
+/// load balancer drains traffic before the queue fills and NOTIFY starts
+/// dropping rows. Matches Postgres' own warning threshold.
+const NOTIFY_QUEUE_FAIL_THRESHOLD: f64 = 0.75;
 
 /// Gateway HTTP server.
 pub struct GatewayServer {
@@ -170,6 +212,7 @@ pub struct GatewayServer {
     reactor: Arc<Reactor>,
     job_dispatcher: Option<Arc<dyn JobDispatch>>,
     workflow_dispatcher: Option<Arc<dyn WorkflowDispatch>>,
+    kv: Option<Arc<dyn KvHandle>>,
     mcp_registry: Option<McpToolRegistry>,
     token_ttl: forge_core::AuthTokenTtl,
     signals_collector: Option<crate::signals::SignalsCollector>,
@@ -178,21 +221,24 @@ pub struct GatewayServer {
     custom_routes: Option<Router>,
     rate_limiter: Option<Arc<dyn forge_core::rate_limit::RateLimiterBackend>>,
     role_resolver: Option<forge_core::SharedRoleResolver>,
-    #[cfg(feature = "workflows")]
-    workflow_readiness: Option<Arc<crate::workflow::WorkflowReadiness>>,
-    #[cfg(feature = "workflows")]
-    workflow_registry: Option<Arc<crate::workflow::WorkflowRegistry>>,
+    cluster_node_id: Option<uuid::Uuid>,
 }
 
 impl GatewayServer {
     /// Create a new gateway server.
-    pub fn new(config: GatewayConfig, registry: FunctionRegistry, db: Database) -> Self {
+    pub fn new(
+        config: GatewayConfig,
+        registry: FunctionRegistry,
+        db: Database,
+        notify_bus: Arc<PgNotifyBus>,
+    ) -> Self {
         let node_id = NodeId::new();
         let reactor = Arc::new(Reactor::new(
             node_id,
-            db.primary().clone(),
+            Arc::new(db.clone()),
             registry.clone(),
             config.reactor_config.clone(),
+            notify_bus,
         ));
 
         let token_ttl = config.token_ttl.clone();
@@ -203,6 +249,7 @@ impl GatewayServer {
             reactor,
             job_dispatcher: None,
             workflow_dispatcher: None,
+            kv: None,
             mcp_registry: None,
             token_ttl,
             signals_collector: None,
@@ -211,11 +258,15 @@ impl GatewayServer {
             custom_routes: None,
             rate_limiter: None,
             role_resolver: None,
-            #[cfg(feature = "workflows")]
-            workflow_readiness: None,
-            #[cfg(feature = "workflows")]
-            workflow_registry: None,
+            cluster_node_id: None,
         }
+    }
+
+    /// Record this process's cluster node id so the readiness probe can
+    /// verify the node's row in `forge_nodes` is still `active`.
+    pub fn with_node_id(mut self, id: NodeId) -> Self {
+        self.cluster_node_id = Some(id.as_uuid());
+        self
     }
 
     /// Override the default rate limiter backend.
@@ -235,20 +286,6 @@ impl GatewayServer {
         self
     }
 
-    /// Wire the shared workflow readiness handle. Must be set when
-    /// the runtime registers workflows so the readiness probe can detect
-    /// stranded runs from removed `(name, version)` tuples.
-    #[cfg(feature = "workflows")]
-    pub fn with_workflow_readiness(
-        mut self,
-        registry: Arc<crate::workflow::WorkflowRegistry>,
-        readiness: Arc<crate::workflow::WorkflowReadiness>,
-    ) -> Self {
-        self.workflow_registry = Some(registry);
-        self.workflow_readiness = Some(readiness);
-        self
-    }
-
     /// Set the job dispatcher.
     pub fn with_job_dispatcher(mut self, dispatcher: Arc<dyn JobDispatch>) -> Self {
         self.job_dispatcher = Some(dispatcher);
@@ -258,6 +295,12 @@ impl GatewayServer {
     /// Set the workflow dispatcher.
     pub fn with_workflow_dispatcher(mut self, dispatcher: Arc<dyn WorkflowDispatch>) -> Self {
         self.workflow_dispatcher = Some(dispatcher);
+        self
+    }
+
+    /// Attach a KV store handle so handlers can call `ctx.kv()`.
+    pub fn with_kv(mut self, kv: Arc<dyn KvHandle>) -> Self {
+        self.kv = Some(kv);
         self
     }
 
@@ -310,6 +353,9 @@ impl GatewayServer {
     }
 
     /// Build an OAuth router (bypasses auth middleware). Returns None if OAuth is disabled.
+    ///
+    /// Only available when the `mcp-oauth` feature is enabled.
+    #[cfg(feature = "mcp-oauth")]
     pub fn oauth_router(&self) -> Option<(Router, Arc<super::oauth::OAuthState>)> {
         if !self.config.mcp.oauth {
             return None;
@@ -347,6 +393,12 @@ impl GatewayServer {
         Some((router, oauth_state))
     }
 
+    /// Stub when `mcp-oauth` is not enabled — always returns `None`.
+    #[cfg(not(feature = "mcp-oauth"))]
+    pub fn oauth_router(&self) -> Option<(Router, ())> {
+        None
+    }
+
     /// Build the Axum router.
     pub fn router(&self) -> Router {
         let token_issuer = HmacTokenIssuer::from_config(&self.config.auth)
@@ -360,7 +412,11 @@ impl GatewayServer {
             token_issuer,
         );
         rpc.set_token_ttl(self.token_ttl.clone());
-        rpc.set_max_batch_size(self.config.max_rpc_batch_size);
+        rpc.set_max_jobs_per_request(self.config.max_jobs_per_request);
+        rpc.set_max_result_size_bytes(self.config.max_result_size_bytes);
+        if let Some(kv) = &self.kv {
+            rpc.set_kv(Arc::clone(kv));
+        }
         if let Some(rate_limiter) = &self.rate_limiter {
             rpc.set_rate_limiter(rate_limiter.clone());
         }
@@ -368,16 +424,18 @@ impl GatewayServer {
             rpc.set_role_resolver(resolver.clone());
         }
         if let Some(collector) = &self.signals_collector {
-            let secret = self.config.auth.jwt_secret.clone().unwrap_or_else(|| {
-                tracing::warn!(
-                    "No jwt_secret configured; using default signal secret for visitor ID hashing. \
-                         Visitor IDs will be predictable. Set [auth] jwt_secret in forge.toml."
-                );
-                DEFAULT_SIGNAL_SECRET.to_string()
-            });
+            let secret = signal_visitor_secret(&self.config.auth.jwt_secret);
             rpc.set_signals_collector(collector.clone(), secret);
         }
         let rpc_handler_state = Arc::new(rpc);
+
+        // Cluster cache invalidation: peer-node mutations broadcast over PG
+        // NOTIFY, and each node evicts its local query cache for the changed
+        // tables/columns. Without this, every node would serve stale data
+        // until the per-entry TTL expired. Dropping the JoinHandle detaches
+        // the task; it exits when the broadcast channel closes during shutdown.
+        let cluster_cache = rpc_handler_state.router().cache();
+        drop(cluster_cache.spawn_cluster_invalidator(self.reactor.change_subscriber()));
 
         let auth_middleware_state = Arc::new(AuthMiddleware::new(self.config.auth.clone()));
 
@@ -432,12 +490,14 @@ impl GatewayServer {
                         axum::http::HeaderName::from_static("x-forge-platform"),
                     ])
                     .allow_credentials(true)
+                    // 24-hour preflight cache: browsers won't fire OPTIONS for
+                    // repeat cross-origin requests within this window.
+                    .max_age(Duration::from_secs(86400))
             }
         } else {
             CorsLayer::new()
         };
 
-        // SSE state for Server-Sent Events
         let sse_state = Arc::new(SseState::with_config(
             self.reactor.clone(),
             auth_middleware_state.clone(),
@@ -448,35 +508,38 @@ impl GatewayServer {
                     .reactor_config
                     .realtime
                     .max_subscriptions_per_session,
+                max_sessions_per_user: self.config.max_sessions_per_user,
+                max_sessions_per_ip: self.config.max_sessions_per_ip,
+                max_subscriptions_per_user: self.config.max_subscriptions_per_user,
                 ..Default::default()
             },
         ));
 
-        // Readiness state for DB + reactor health check
+        let expected_system_migrations = crate::pg::migration::get_system_migrations().len() as i64;
         let readiness_state = Arc::new(ReadinessState {
             db_pool: self.db.primary().clone(),
             reactor: self.reactor.clone(),
-            #[cfg(feature = "workflows")]
-            workflow_readiness: self.workflow_readiness.clone(),
-            #[cfg(feature = "workflows")]
-            workflow_registry: self.workflow_registry.clone(),
+            node_id: self.cluster_node_id,
+            expected_system_migrations,
         });
 
-        // Build the main router with middleware
+        let json_depth_config = JsonDepthConfig {
+            max_depth: self.config.max_json_depth,
+            max_body_bytes: self.config.max_json_body_bytes,
+        };
         let mut main_router = Router::new()
-            // Health check endpoint (liveness)
             .route("/health", get(health_handler))
-            // Readiness check endpoint (checks DB)
             .route("/ready", get(readiness_handler).with_state(readiness_state))
-            // RPC endpoint
             .route("/rpc", post(rpc_handler))
-            // Batch RPC endpoint
-            .route("/rpc/batch", post(rpc_batch_handler))
-            // REST-style function endpoint (JSON)
             .route("/rpc/{function}", post(rpc_function_handler))
             // Prevent oversized JSON payloads from exhausting memory.
-            .layer(DefaultBodyLimit::max(DEFAULT_MAX_JSON_BODY_SIZE))
-            // Add state
+            .layer(DefaultBodyLimit::max(self.config.max_json_body_bytes))
+            // Reject JSON bodies that exceed the nesting depth limit to prevent
+            // stack exhaustion during recursive deserialization.
+            .layer(middleware::from_fn_with_state(
+                json_depth_config,
+                json_depth_check_middleware,
+            ))
             .with_state(rpc_handler_state.clone());
 
         // Multipart RPC router. The Axum layer limit is set to the highest
@@ -501,9 +564,8 @@ impl GatewayServer {
             .layer(Extension(mp_config))
             // Cap upload fan-out; each request buffers data in memory.
             .layer(ConcurrencyLimitLayer::new(MAX_MULTIPART_CONCURRENCY))
-            .with_state(rpc_handler_state);
+            .with_state(rpc_handler_state.clone());
 
-        // SSE router
         let sse_router = Router::new()
             .route("/events", get(sse_handler))
             .route("/subscribe", post(sse_subscribe_handler))
@@ -515,13 +577,18 @@ impl GatewayServer {
         let mut mcp_router = Router::new();
         if self.config.mcp.enabled {
             let path = self.config.mcp.path.clone();
-            let mcp_state = Arc::new(McpState::new(
+            let mut mcp_state = McpState::new(
                 self.config.mcp.clone(),
                 self.mcp_registry.clone().unwrap_or_default(),
                 self.db.primary().clone(),
                 self.job_dispatcher.clone(),
                 self.workflow_dispatcher.clone(),
-            ));
+                Some(rpc_handler_state.router()),
+            );
+            if let Some(ref kv) = self.kv {
+                mcp_state = mcp_state.with_kv(Arc::clone(kv));
+            }
+            let mcp_state = Arc::new(mcp_state);
             mcp_router = mcp_router.route(
                 &path,
                 post(mcp_post_handler)
@@ -530,78 +597,56 @@ impl GatewayServer {
             );
         }
 
-        // Signal ingestion endpoints (product analytics + diagnostics)
         let mut signals_router = Router::new();
         if let Some(collector) = &self.signals_collector {
             let signals_state = Arc::new(crate::signals::endpoints::SignalsState {
                 collector: collector.clone(),
-                pool: self.db.analytics_pool().clone(),
-                server_secret: self
-                    .config
-                    .auth
-                    .jwt_secret
-                    .clone()
-                    .unwrap_or_else(|| {
-                        tracing::warn!(
-                            "No jwt_secret configured; using default signal secret for visitor ID hashing. \
-                             Visitor IDs will be predictable. Set [auth] jwt_secret in forge.toml."
-                        );
-                        DEFAULT_SIGNAL_SECRET.to_string()
-                    }),
+                pool: self.db.primary().clone(),
+                server_secret: signal_visitor_secret(&self.config.auth.jwt_secret),
                 anonymize_ip: self.signals_anonymize_ip,
                 geoip: self.signals_geoip.clone(),
                 rate_limiter: Arc::new(crate::signals::rate_limit::SignalRateLimiter::new()),
             });
             signals_router = Router::new()
-                .route(
-                    "/signal/event",
-                    post(crate::signals::endpoints::event_handler),
-                )
-                .route(
-                    "/signal/view",
-                    post(crate::signals::endpoints::view_handler),
-                )
-                .route(
-                    "/signal/user",
-                    post(crate::signals::endpoints::user_handler),
-                )
-                .route(
-                    "/signal/report",
-                    post(crate::signals::endpoints::report_handler),
-                )
-                .route(
-                    "/signal/vital",
-                    post(crate::signals::endpoints::vital_handler),
-                )
+                .route("/signal", post(crate::signals::endpoints::signal_handler))
                 .with_state(signals_state);
         }
 
+        let admin_router = admin_router(AdminState {
+            db_pool: self.db.primary().clone(),
+        });
+
         main_router = main_router
             .merge(multipart_router)
-            .merge(sse_router)
             .merge(mcp_router)
-            .merge(signals_router);
+            .merge(signals_router)
+            .merge(admin_router);
 
         if let Some(custom) = &self.custom_routes {
             main_router = main_router.merge(custom.clone());
         }
 
-        // Security headers config
+        let bounded_router = main_router.layer(
+            ServiceBuilder::new()
+                .layer(HandleErrorLayer::new(handle_middleware_error))
+                .layer(ConcurrencyLimitLayer::new(self.config.max_connections))
+                .layer(TimeoutLayer::new(Duration::from_secs(
+                    self.config.request_timeout_secs,
+                ))),
+        );
+
+        // SSE and health probes are excluded from concurrency/timeout limits:
+        // SSE connections are long-lived, health probes must never be blocked.
+        let full_router = bounded_router.merge(sse_router);
+
         let security_config = Arc::new(SecurityHeadersConfig {
             enabled: self.config.security_headers,
             hsts: self.config.hsts,
         });
 
-        // Trusted proxies for client IP resolution
         let trusted_proxies = TrustedProxies(Arc::new(self.config.trusted_proxies.clone()));
 
-        // Build middleware stack
         let service_builder = ServiceBuilder::new()
-            .layer(HandleErrorLayer::new(handle_middleware_error))
-            .layer(ConcurrencyLimitLayer::new(self.config.max_connections))
-            .layer(TimeoutLayer::new(Duration::from_secs(
-                self.config.request_timeout_secs,
-            )))
             .layer(cors.clone())
             .layer(middleware::from_fn_with_state(
                 security_config,
@@ -617,12 +662,11 @@ impl GatewayServer {
                 auth_middleware,
             ))
             .layer(middleware::from_fn_with_state(
-                Arc::new(self.config.quiet_paths.clone()),
+                Arc::new(normalize_quiet_paths(&self.config.quiet_paths)),
                 tracing_middleware,
             ));
 
-        // Apply the remaining middleware layers
-        main_router.layer(service_builder)
+        full_router.layer(service_builder)
     }
 
     /// Get the socket address to bind to.
@@ -660,76 +704,86 @@ async fn health_handler() -> Json<HealthResponse> {
 }
 
 /// Readiness check handler (readiness probe).
+///
+/// Reports green only when:
+/// - The primary pool can serve `SELECT 1`.
+/// - The reactor's change listener is connected.
+/// - `pg_notification_queue_usage()` is below 75% (NOTIFY won't start
+///   dropping events when reactivity bursts).
+/// - Every embedded system migration has a corresponding row in
+///   `forge_system_migrations` (no schema drift between binary and DB).
+/// - When cluster registration is enabled for this process, this node's
+///   row in `forge_nodes` exists with `status = 'active'`.
 async fn readiness_handler(
     axum::extract::State(state): axum::extract::State<Arc<ReadinessState>>,
 ) -> (axum::http::StatusCode, Json<ReadinessResponse>) {
-    // Check database connectivity
     let db_ok = sqlx::query_scalar!("SELECT 1 as \"v!\"")
         .fetch_one(&state.db_pool)
         .await
         .is_ok();
 
-    // Check reactor health (change listener must be running for real-time updates)
     let reactor_stats = state.reactor.stats().await;
     let reactor_ok = reactor_stats.listener_running;
 
-    // Check for blocked workflow runs (strict mode: unhealthy if any runs are blocked).
-    // The count is intentionally not exposed in the response — it would let
-    // anonymous callers probe for internal load. We log it so operators see
-    // the detail in tracing/metrics.
-    let workflows_ok =
-        if db_ok {
-            match sqlx::query_scalar!(
-            r#"SELECT COUNT(*) as "count!" FROM forge_workflow_runs WHERE status LIKE 'blocked_%'"#,
+    let notify_queue_ok = if db_ok {
+        match sqlx::query_scalar!("SELECT pg_notification_queue_usage() AS \"usage!\"")
+            .fetch_one(&state.db_pool)
+            .await
+        {
+            Ok(usage) => usage < NOTIFY_QUEUE_FAIL_THRESHOLD,
+            Err(err) => {
+                tracing::warn!(error = %err, "pg_notification_queue_usage() failed; failing readiness probe");
+                false
+            }
+        }
+    } else {
+        false
+    };
+
+    let migrations_ok = if db_ok {
+        match sqlx::query_scalar!(
+            "SELECT COUNT(*) AS \"count!\" FROM forge_system_migrations WHERE version LIKE '__forge_v%'"
         )
         .fetch_one(&state.db_pool)
         .await
         {
-            Ok(count) => {
-                if count > 0 {
-                    tracing::warn!(blocked_workflow_runs = count, "Blocked workflow runs present");
-                }
-                count == 0
-            }
-            Err(_) => true, // if query fails, don't block on this check
-        }
-        } else {
-            true
-        };
-
-    // Check for stranded workflow runs whose (name, version) is no longer
-    // in this binary's registry. Refresh the cached count if it has aged
-    // out, otherwise reuse it to avoid hammering PG on hot probe paths.
-    let drain_pending = {
-        #[cfg(feature = "workflows")]
-        {
-            match (&state.workflow_registry, &state.workflow_readiness) {
-                (Some(registry), Some(readiness)) if db_ok => {
-                    if let Err(e) = readiness.refresh_if_stale(registry, &state.db_pool).await {
-                        tracing::warn!(error = %e, "drain check refresh failed");
-                    }
-                    readiness.drain_pending()
-                }
-                (_, Some(readiness)) => readiness.drain_pending(),
-                _ => 0,
+            Ok(applied) => applied >= state.expected_system_migrations,
+            Err(err) => {
+                tracing::warn!(error = %err, "forge_system_migrations count failed; failing readiness probe");
+                false
             }
         }
-        #[cfg(not(feature = "workflows"))]
-        {
-            0usize
-        }
+    } else {
+        false
     };
 
-    let workflows_drain_clear = drain_pending == 0;
-    if !workflows_drain_clear {
-        tracing::warn!(
-            drain_pending,
-            "readiness probe failing: workflow runs blocked on missing (name, version) entries"
-        );
-    }
+    let cluster_registered = match state.node_id {
+        Some(node_id) if db_ok => match sqlx::query_scalar!(
+            r#"SELECT EXISTS(
+                   SELECT 1 FROM forge_nodes
+                   WHERE id = $1 AND status = 'active'
+               ) AS "found!""#,
+            node_id
+        )
+        .fetch_one(&state.db_pool)
+        .await
+        {
+            Ok(found) => Some(found),
+            Err(err) => {
+                tracing::warn!(error = %err, "forge_nodes lookup failed; failing readiness probe");
+                Some(false)
+            }
+        },
+        Some(_) => Some(false),
+        None => None,
+    };
 
-    let workflows_ready = workflows_ok && workflows_drain_clear;
-    let ready = db_ok && reactor_ok && workflows_ready;
+    let ready = db_ok
+        && reactor_ok
+        && notify_queue_ok
+        && migrations_ok
+        && cluster_registered.unwrap_or(true);
+
     let status_code = if ready {
         axum::http::StatusCode::OK
     } else {
@@ -742,7 +796,9 @@ async fn readiness_handler(
             ready,
             database: db_ok,
             reactor: reactor_ok,
-            workflows: workflows_ready,
+            notify_queue_ok,
+            migrations_ok,
+            cluster_registered,
             version: env!("CARGO_PKG_VERSION").to_string(),
         }),
     )
@@ -862,7 +918,6 @@ async fn api_version_middleware(
     let is_rpc = req.uri().path().starts_with("/rpc");
     if is_rpc && let Some(accept) = req.headers().get(axum::http::header::ACCEPT) {
         let accept_str = accept.to_str().unwrap_or("");
-        // Allow wildcard and explicit v1; reject anything else.
         if accept_str != "*/*" && !accept_str.is_empty() && !accept_str.contains(FORGE_API_V1) {
             return RpcResponse::error(RpcError::new(
                 "UNSUPPORTED_API_VERSION",
@@ -883,7 +938,7 @@ async fn api_version_middleware(
 /// Quiet routes skip spans, logs, and metrics to avoid noise from
 /// probes or high-frequency internal endpoints.
 async fn tracing_middleware(
-    axum::extract::State(quiet_paths): axum::extract::State<Arc<Vec<String>>>,
+    axum::extract::State(quiet_paths): axum::extract::State<Arc<std::collections::HashSet<String>>>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
@@ -908,6 +963,11 @@ async fn tracing_middleware(
 
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
+    let route_pattern = req
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|m| m.as_str().to_string())
+        .unwrap_or_else(|| normalize_metric_path(&path));
 
     let mut tracing_state = TracingState::with_trace_id(trace_id.clone());
     if let Some(span_id) = parent_span_id {
@@ -926,10 +986,7 @@ async fn tracing_middleware(
             .insert(forge_core::function::AuthContext::unauthenticated());
     }
 
-    // Config uses full paths (/_api/health) but axum strips the prefix
-    // for nested routers, so the middleware sees /health not /_api/health.
-    let full_path = format!("/_api{}", path);
-    let is_quiet = quiet_paths.iter().any(|r| *r == full_path || *r == path);
+    let is_quiet = quiet_paths.contains(path.as_str());
 
     if is_quiet {
         let mut response = next.run(req).await;
@@ -964,10 +1021,144 @@ async fn tracing_middleware(
         200..=299 => tracing::info!(parent: &span, duration_ms, "Request completed"),
         _ => tracing::trace!(parent: &span, duration_ms, "Request completed"),
     }
-    crate::observability::record_http_request(&method, &path, status, elapsed.as_secs_f64());
+    crate::observability::record_http_request(
+        &method,
+        &route_pattern,
+        status,
+        elapsed.as_secs_f64(),
+    );
 
     set_tracing_headers(&mut response, &trace_id, &tracing_state.request_id);
     response
+}
+
+/// Count the maximum JSON nesting depth in a byte slice by scanning for `{`
+/// and `[` delimiters. String contents are skipped so quoted brackets don't
+/// inflate the count. This is a conservative O(n) pre-parse guard, not a full
+/// parser — its purpose is to catch stack-busting inputs before `serde_json`
+/// recurses into them.
+/// Normalize a raw URI path into a bounded route template for metric labels.
+/// Replaces dynamic segments (UUIDs, numeric IDs) with placeholders to prevent
+/// unbounded cardinality in OTLP backends.
+fn normalize_metric_path(path: &str) -> String {
+    let segments: Vec<&str> = path.split('/').collect();
+    let mut out = String::with_capacity(path.len());
+    for (i, seg) in segments.iter().enumerate() {
+        if i > 0 {
+            out.push('/');
+        }
+        if seg.is_empty() {
+            continue;
+        }
+        if uuid::Uuid::try_parse(seg).is_ok() || seg.chars().all(|c| c.is_ascii_digit()) {
+            out.push_str("{id}");
+        } else {
+            out.push_str(seg);
+        }
+    }
+    if out.is_empty() { "/".to_string() } else { out }
+}
+
+/// Pre-compute the quiet-paths set at startup. Config entries may use the full
+/// `/_api/health` form while axum strips the prefix for nested routers, so the
+/// middleware sees `/health`. We store the stripped form to avoid a per-request
+/// `format!`.
+fn normalize_quiet_paths(paths: &[String]) -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::with_capacity(paths.len() * 2);
+    for p in paths {
+        let stripped = p.strip_prefix("/_api").unwrap_or(p);
+        set.insert(stripped.to_string());
+        set.insert(p.clone());
+    }
+    set
+}
+
+fn json_max_depth(bytes: &[u8]) -> usize {
+    let mut depth: usize = 0;
+    let mut max_depth: usize = 0;
+    let mut in_string = false;
+    let mut escape = false;
+    for &b in bytes {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if in_string {
+            if b == b'\\' {
+                escape = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                depth += 1;
+                if depth > max_depth {
+                    max_depth = depth;
+                }
+            }
+            b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+    max_depth
+}
+
+/// JSON depth-check config passed as middleware state.
+#[derive(Debug, Clone, Copy)]
+struct JsonDepthConfig {
+    max_depth: usize,
+    max_body_bytes: usize,
+}
+
+/// Middleware that rejects request bodies whose JSON nesting depth exceeds
+/// `max_depth`. Runs on all POST requests regardless of Content-Type, because
+/// serde_json will parse the body downstream even if the client lies about
+/// the content type.
+///
+/// The body is buffered, inspected, and re-inserted into the request so that
+/// downstream handlers see the original bytes.
+async fn json_depth_check_middleware(
+    axum::extract::State(config): axum::extract::State<JsonDepthConfig>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::body::Body;
+
+    if req.method() != axum::http::Method::POST || config.max_depth == 0 {
+        return next.run(req).await;
+    }
+
+    let (parts, body) = req.into_parts();
+    let bytes = match axum::body::to_bytes(body, config.max_body_bytes).await {
+        Ok(b) => b,
+        Err(_) => {
+            return super::response::RpcResponse::error(super::response::RpcError::new(
+                "BAD_REQUEST",
+                "Failed to read request body",
+            ))
+            .into_response();
+        }
+    };
+
+    let depth = json_max_depth(&bytes);
+    if depth > config.max_depth {
+        return super::response::RpcResponse::error(super::response::RpcError::new(
+            "BAD_REQUEST",
+            format!(
+                "JSON nesting depth {} exceeds the maximum of {}",
+                depth, config.max_depth
+            ),
+        ))
+        .into_response();
+    }
+
+    let req = axum::extract::Request::from_parts(parts, Body::from(bytes));
+    next.run(req).await
 }
 
 #[cfg(test)]
@@ -991,5 +1182,88 @@ mod tests {
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("healthy"));
+    }
+
+    #[test]
+    fn json_max_depth_flat_object_is_one() {
+        assert_eq!(json_max_depth(b"{\"a\":1}"), 1);
+    }
+
+    #[test]
+    fn json_max_depth_flat_array_is_one() {
+        assert_eq!(json_max_depth(b"[1,2,3]"), 1);
+    }
+
+    #[test]
+    fn json_max_depth_nested_object_counts_levels() {
+        assert_eq!(json_max_depth(b"{\"a\":{\"b\":{\"c\":1}}}"), 3);
+    }
+
+    #[test]
+    fn json_max_depth_nested_array_counts_levels() {
+        assert_eq!(json_max_depth(b"[[[[1]]]]"), 4);
+    }
+
+    #[test]
+    fn json_max_depth_mixed_nesting_tracks_peak() {
+        assert_eq!(json_max_depth(b"{\"a\":[{\"b\":[1]}]}"), 4);
+    }
+
+    #[test]
+    fn json_max_depth_ignores_braces_inside_strings() {
+        // Without string-awareness this would report 3.
+        assert_eq!(json_max_depth(b"{\"k\":\"{{{[[[\"}"), 1);
+    }
+
+    #[test]
+    fn json_max_depth_respects_escaped_quote_in_string() {
+        // The escaped quote does NOT close the string, so the trailing { inside the string is ignored.
+        assert_eq!(json_max_depth(b"{\"k\":\"a\\\"{b\"}"), 1);
+    }
+
+    #[test]
+    fn json_max_depth_empty_input_is_zero() {
+        assert_eq!(json_max_depth(b""), 0);
+    }
+
+    #[test]
+    fn json_max_depth_unbalanced_close_does_not_underflow() {
+        // Saturating sub guards against this; should not panic.
+        assert_eq!(json_max_depth(b"}}}}"), 0);
+        assert_eq!(json_max_depth(b"[1]]]]"), 1);
+    }
+
+    #[test]
+    fn signal_visitor_secret_uses_jwt_secret_when_present() {
+        let secret = Some("my-jwt-secret".to_string());
+        assert_eq!(signal_visitor_secret(&secret), "my-jwt-secret");
+    }
+
+    #[test]
+    fn signal_visitor_secret_falls_back_to_default_when_absent() {
+        assert_eq!(signal_visitor_secret(&None), DEFAULT_SIGNAL_SECRET);
+    }
+
+    #[test]
+    fn set_tracing_headers_inserts_both_headers() {
+        let mut response = axum::response::Response::new(axum::body::Body::empty());
+        set_tracing_headers(&mut response, "trace-abc", "req-xyz");
+        assert_eq!(
+            response.headers().get(TRACE_ID_HEADER).unwrap(),
+            "trace-abc"
+        );
+        assert_eq!(
+            response.headers().get(REQUEST_ID_HEADER).unwrap(),
+            "req-xyz"
+        );
+    }
+
+    #[test]
+    fn set_tracing_headers_skips_invalid_header_values() {
+        // Header values cannot contain control chars; should not panic, just skip.
+        let mut response = axum::response::Response::new(axum::body::Body::empty());
+        set_tracing_headers(&mut response, "bad\nvalue", "req-ok");
+        assert!(response.headers().get(TRACE_ID_HEADER).is_none());
+        assert_eq!(response.headers().get(REQUEST_ID_HEADER).unwrap(), "req-ok");
     }
 }

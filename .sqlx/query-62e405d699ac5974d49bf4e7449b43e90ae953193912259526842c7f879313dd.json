@@ -1,0 +1,42 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO forge_rate_limits (bucket_key, tokens, last_refill, max_tokens, refill_rate)\n            VALUES ($1, $2 - 1, NOW(), $2, $3)\n            ON CONFLICT (bucket_key) DO UPDATE SET\n                tokens = GREATEST(\n                    LEAST(\n                        forge_rate_limits.max_tokens::double precision,\n                        forge_rate_limits.tokens +\n                            (EXTRACT(EPOCH FROM (NOW() - forge_rate_limits.last_refill)) * forge_rate_limits.refill_rate)\n                    ) - 1,\n                    -1.0\n                ),\n                last_refill = NOW()\n            RETURNING tokens, max_tokens, last_refill, (tokens >= 0) as \"allowed!\"\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "tokens",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 1,
+        "name": "max_tokens",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "last_refill",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 3,
+        "name": "allowed!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int4",
+        "Float8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "62e405d699ac5974d49bf4e7449b43e90ae953193912259526842c7f879313dd"
+}

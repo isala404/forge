@@ -70,7 +70,6 @@ impl HandlerKind {
         }
     }
 
-    /// Schemas (`model`, `enum`) live under `src/schema/`; everything else under `src/functions/`.
     fn target_dir(self) -> &'static str {
         match self {
             Self::Model | Self::Enum => "src/schema",
@@ -200,28 +199,7 @@ fn rustfmt_files(paths: &[&Path]) {
         .status();
 }
 
-fn to_snake_case(name: &str) -> String {
-    let mut out = String::with_capacity(name.len() + 4);
-    let chars: Vec<char> = name.chars().collect();
-    for (i, &ch) in chars.iter().enumerate() {
-        if ch.is_ascii_uppercase() {
-            let prev = i.checked_sub(1).and_then(|j| chars.get(j)).copied();
-            let prev_lower = prev.is_some_and(|c| c.is_ascii_lowercase());
-            let prev_digit = prev.is_some_and(|c| c.is_ascii_digit());
-            let prev_upper = prev.is_some_and(|c| c.is_ascii_uppercase());
-            let next_lower = chars.get(i + 1).is_some_and(|c| c.is_ascii_lowercase());
-            // Insert `_` before an uppercase that follows a lowercase/digit (HTTPServer -> http_server,
-            // foo2Bar -> foo2_bar) or starts a new word inside an acronym (HTTPServer at the `S`).
-            if (prev_lower || prev_digit) || (prev_upper && next_lower) {
-                out.push('_');
-            }
-            out.extend(ch.to_lowercase());
-        } else {
-            out.push(ch);
-        }
-    }
-    out
-}
+use forge_core::util::to_snake_case;
 
 fn ensure_mod_entry(dir: &Path, name: &str) -> Result<()> {
     let mod_path = dir.join("mod.rs");

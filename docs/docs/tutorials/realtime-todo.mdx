@@ -64,7 +64,6 @@ pub struct Todo {
 Create `migrations/0001_todos.sql`:
 
 ```sql
--- @up
 CREATE TABLE todos (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     title TEXT NOT NULL,
@@ -73,10 +72,6 @@ CREATE TABLE todos (
 );
 
 SELECT forge_enable_reactivity('todos');
-
--- @down
-SELECT forge_disable_reactivity('todos');
-DROP TABLE IF EXISTS todos;
 ```
 
 `forge_enable_reactivity('todos')` installs a PostgreSQL trigger on the `todos` table. Whenever a row is inserted, updated, or deleted, the trigger fires a `NOTIFY` event. Forge listens for these events and automatically re-runs any subscribed queries, pushing updates to connected clients over SSE.
@@ -91,7 +86,7 @@ use uuid::Uuid;
 
 use crate::schema::Todo;
 
-#[forge::query(public, tables = ["todos"])]
+#[forge::query(public, tables("todos"))]
 pub async fn list_todos(ctx: &QueryContext) -> Result<Vec<Todo>> {
     sqlx::query_as!(Todo, "SELECT * FROM todos ORDER BY created_at DESC")
         .fetch_all(ctx.db())
@@ -103,7 +98,7 @@ pub async fn list_todos(ctx: &QueryContext) -> Result<Vec<Todo>> {
 Key points:
 
 - **`public`** -- no authentication required. Remove this for authenticated endpoints.
-- **`tables = ["todos"]`** -- tells Forge which tables this query reads from. When a mutation modifies the `todos` table, Forge knows to re-run this query and push updates to all subscribers.
+- **`tables("todos")`** -- tells Forge which tables this query reads from. When a mutation modifies the `todos` table, Forge knows to re-run this query and push updates to all subscribers.
 - **`QueryContext`** -- provides access to the database pool via `ctx.db()`.
 
 ## Step 5: Create Mutations
@@ -441,7 +436,7 @@ The real-time pipeline:
 1. A client calls `createTodo()`, which sends a request to the Forge backend.
 2. The mutation inserts a row into the `todos` table.
 3. The PostgreSQL trigger (installed by `forge_enable_reactivity`) fires a `NOTIFY` event.
-4. Forge receives the notification via `LISTEN` and re-executes all queries that declared `tables = ["todos"]`.
+4. Forge receives the notification via `LISTEN` and re-executes all queries that declared `tables("todos")`.
 5. Forge hashes the new query result and compares it to the previous hash. If different, it pushes the updated data to all subscribed clients over SSE.
 6. The frontend binding (`listTodos$()` or `use_list_todos_live()`) receives the update and re-renders.
 

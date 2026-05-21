@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO forge_workflow_runs (\n                id, workflow_name, workflow_version, workflow_signature,\n                owner_subject, input, status, current_step,\n                started_at, trace_id\n            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Text",
+        "Jsonb",
+        "Varchar",
+        "Varchar",
+        "Timestamptz",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "469d4c3e4b063701818ef8a877a64698d4ed3535b8f2e30f270efebb3d603f01"
+}

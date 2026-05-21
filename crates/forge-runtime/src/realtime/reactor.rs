@@ -16,6 +16,7 @@ use super::message::{
     JobData, RealtimeConfig, RealtimeMessage, SessionServer, WorkflowData, WorkflowStepData,
 };
 use crate::function::{FunctionEntry, FunctionRegistry};
+use crate::pg::{Database, PgNotifyBus};
 
 #[derive(Debug, Clone)]
 pub struct ReactorConfig {
@@ -23,19 +24,16 @@ pub struct ReactorConfig {
     pub invalidation: InvalidationConfig,
     pub realtime: RealtimeConfig,
     pub max_listener_restarts: u32,
-    /// Doubles with each attempt for exponential backoff
     pub listener_restart_delay_ms: u64,
-    /// Maximum concurrent re-executions during flush.
     pub max_concurrent_reexecutions: usize,
-    /// Session cleanup interval in seconds.
+    /// Per-group query timeout; slow groups are skipped for the cycle.
+    pub reexecution_timeout: std::time::Duration,
     pub session_cleanup_interval_secs: u64,
-    /// Periodic resync sweep interval in seconds. PG silently drops
-    /// `LISTEN/NOTIFY` payloads when listeners are slow, leaving subscribers
-    /// stale. Re-evaluating every active group on this cadence recovers from
-    /// dropped notifications. `0` disables the sweep.
+    /// Periodic resync sweep interval. `0` disables.
     pub resync_interval_secs: u64,
-    /// Number of DashMap shards for the subscription manager.
     pub shard_count: usize,
+    /// Results larger than this are not cached in QueryGroup::last_result.
+    pub max_cached_result_bytes: usize,
 }
 
 impl Default for ReactorConfig {
@@ -47,48 +45,57 @@ impl Default for ReactorConfig {
             max_listener_restarts: 5,
             listener_restart_delay_ms: 1000,
             max_concurrent_reexecutions: 64,
+            reexecution_timeout: std::time::Duration::from_secs(5),
             session_cleanup_interval_secs: 60,
-            resync_interval_secs: 60,
+            resync_interval_secs: 600,
             shard_count: 64,
+            max_cached_result_bytes: 10_485_760,
         }
     }
 }
 
-/// Job subscription tracking.
-/// The job_id is the HashMap key, not stored here.
+/// Job subscription tracking (keyed by job_id externally).
 #[derive(Debug, Clone)]
 pub struct JobSubscription {
     pub session_id: SessionId,
     pub client_sub_id: String,
     pub auth_context: forge_core::function::AuthContext,
+    pub token_exp: Option<i64>,
 }
 
-/// Workflow subscription tracking.
-/// The workflow_id is the HashMap key, not stored here.
+/// Workflow subscription tracking (keyed by workflow_id externally).
 #[derive(Debug, Clone)]
 pub struct WorkflowSubscription {
     pub session_id: SessionId,
     pub client_sub_id: String,
     pub auth_context: forge_core::function::AuthContext,
+    pub token_exp: Option<i64>,
 }
 
-/// ChangeListener -> InvalidationEngine -> Group Re-execution -> SSE Fan-out
+/// Drives change-listener -> invalidation -> re-execution -> SSE fan-out.
 pub struct Reactor {
     node_id: NodeId,
-    db_pool: sqlx::PgPool,
+    database: Arc<Database>,
     registry: FunctionRegistry,
     subscription_manager: Arc<SubscriptionManager>,
     session_server: Arc<SessionServer>,
     change_listener: Arc<ChangeListener>,
+    notify_bus: Arc<PgNotifyBus>,
     invalidation_engine: Arc<InvalidationEngine>,
     /// Job subscriptions: job_id -> list of subscribers.
     job_subscriptions: Arc<RwLock<HashMap<Uuid, Vec<JobSubscription>>>>,
     /// Workflow subscriptions: workflow_id -> list of subscribers.
     workflow_subscriptions: Arc<RwLock<HashMap<Uuid, Vec<WorkflowSubscription>>>>,
+    /// Reverse index for O(1) session cleanup.
+    session_job_ids: Arc<RwLock<HashMap<SessionId, HashSet<Uuid>>>>,
+    /// Reverse index for O(1) session cleanup.
+    session_workflow_ids: Arc<RwLock<HashMap<SessionId, HashSet<Uuid>>>>,
     shutdown_tx: broadcast::Sender<()>,
+    bus_shutdown_tx: tokio::sync::watch::Sender<bool>,
     max_listener_restarts: u32,
     listener_restart_delay_ms: u64,
     max_concurrent_reexecutions: usize,
+    reexecution_timeout: std::time::Duration,
     session_cleanup_interval_secs: u64,
     resync_interval_secs: u64,
 }
@@ -97,36 +104,47 @@ impl Reactor {
     /// Create a new reactor.
     pub fn new(
         node_id: NodeId,
-        db_pool: sqlx::PgPool,
+        database: Arc<Database>,
         registry: FunctionRegistry,
         config: ReactorConfig,
+        notify_bus: Arc<PgNotifyBus>,
     ) -> Self {
-        let subscription_manager = Arc::new(SubscriptionManager::with_shard_count(
+        let subscription_manager = Arc::new(SubscriptionManager::with_config(
             config.realtime.max_subscriptions_per_session,
             config.shard_count,
+            config.max_cached_result_bytes,
         ));
         let session_server = Arc::new(SessionServer::new(node_id, config.realtime.clone()));
-        let change_listener = Arc::new(ChangeListener::new(db_pool.clone(), config.listener));
+        let change_listener = Arc::new(ChangeListener::new(
+            database.primary().clone(),
+            config.listener,
+        ));
         let invalidation_engine = Arc::new(InvalidationEngine::new(
             subscription_manager.clone(),
             config.invalidation,
         ));
         let (shutdown_tx, _) = broadcast::channel(1);
+        let (bus_shutdown_tx, _) = tokio::sync::watch::channel(false);
 
         Self {
             node_id,
-            db_pool,
+            database,
             registry,
             subscription_manager,
             session_server,
             change_listener,
+            notify_bus,
             invalidation_engine,
             job_subscriptions: Arc::new(RwLock::new(HashMap::new())),
             workflow_subscriptions: Arc::new(RwLock::new(HashMap::new())),
+            session_job_ids: Arc::new(RwLock::new(HashMap::new())),
+            session_workflow_ids: Arc::new(RwLock::new(HashMap::new())),
             shutdown_tx,
+            bus_shutdown_tx,
             max_listener_restarts: config.max_listener_restarts,
             listener_restart_delay_ms: config.listener_restart_delay_ms,
             max_concurrent_reexecutions: config.max_concurrent_reexecutions,
+            reexecution_timeout: config.reexecution_timeout,
             session_cleanup_interval_secs: config.session_cleanup_interval_secs,
             resync_interval_secs: config.resync_interval_secs,
         }
@@ -144,14 +162,12 @@ impl Reactor {
         self.subscription_manager.clone()
     }
 
-    pub fn shutdown_receiver(&self) -> broadcast::Receiver<()> {
-        self.shutdown_tx.subscribe()
+    /// Subscribe to the cluster-wide change stream.
+    pub fn change_subscriber(&self) -> broadcast::Receiver<Change> {
+        self.change_listener.subscribe()
     }
 
-    /// Register a new session.
-    ///
-    /// `token_exp` is the JWT `exp` claim (Unix timestamp) from the session's
-    /// authentication token. Pass `None` for unauthenticated sessions.
+    /// Register a new SSE session with optional JWT expiry.
     pub fn register_session(
         &self,
         session_id: SessionId,
@@ -165,29 +181,40 @@ impl Reactor {
 
     /// Remove a session and all its subscriptions.
     pub async fn remove_session(&self, session_id: SessionId) {
-        // Clean up query subscriptions via the subscription manager
         self.subscription_manager
             .remove_session_subscriptions(session_id);
-
-        // Clean up session server
         self.session_server.remove_connection(session_id);
 
-        // Clean up job subscriptions
+        // Clean up job subscriptions using reverse index for O(1) lookup
         {
-            let mut job_subs = self.job_subscriptions.write().await;
-            for subscribers in job_subs.values_mut() {
-                subscribers.retain(|s| s.session_id != session_id);
+            let job_ids = self.session_job_ids.write().await.remove(&session_id);
+            if let Some(ids) = job_ids {
+                let mut job_subs = self.job_subscriptions.write().await;
+                for id in ids {
+                    if let Some(subscribers) = job_subs.get_mut(&id) {
+                        subscribers.retain(|s| s.session_id != session_id);
+                        if subscribers.is_empty() {
+                            job_subs.remove(&id);
+                        }
+                    }
+                }
             }
-            job_subs.retain(|_, v| !v.is_empty());
         }
 
-        // Clean up workflow subscriptions
+        // Clean up workflow subscriptions using reverse index for O(1) lookup
         {
-            let mut workflow_subs = self.workflow_subscriptions.write().await;
-            for subscribers in workflow_subs.values_mut() {
-                subscribers.retain(|s| s.session_id != session_id);
+            let wf_ids = self.session_workflow_ids.write().await.remove(&session_id);
+            if let Some(ids) = wf_ids {
+                let mut workflow_subs = self.workflow_subscriptions.write().await;
+                for id in ids {
+                    if let Some(subscribers) = workflow_subs.get_mut(&id) {
+                        subscribers.retain(|s| s.session_id != session_id);
+                        if subscribers.is_empty() {
+                            workflow_subs.remove(&id);
+                        }
+                    }
+                }
             }
-            workflow_subs.retain(|_, v| !v.is_empty());
         }
 
         tracing::trace!(?session_id, "Session removed");
@@ -202,7 +229,6 @@ impl Reactor {
         args: serde_json::Value,
         auth_context: forge_core::function::AuthContext,
     ) -> forge_core::Result<(SubscriptionId, serde_json::Value)> {
-        // Look up function info for compile-time metadata
         let (table_deps, selected_cols) = match self.registry.get(&query_name) {
             Some(FunctionEntry::Query { info, .. }) => {
                 (info.table_dependencies, info.selected_columns)
@@ -220,7 +246,6 @@ impl Reactor {
             selected_cols,
         )?;
 
-        // Register subscription in session server for message routing
         if let Err(error) = self
             .session_server
             .add_subscription(session_id, subscription_id)
@@ -240,7 +265,7 @@ impl Reactor {
                 }
             };
 
-            let result_hash = Self::compute_hash(&data);
+            let (result_hash, serialized_len) = Self::compute_hash(&data);
 
             tracing::trace!(
                 ?group_id,
@@ -248,21 +273,34 @@ impl Reactor {
                 "New query group created"
             );
 
-            self.subscription_manager
-                .update_group(group_id, read_set, result_hash);
+            let data_arc = std::sync::Arc::new(data.clone());
+            self.subscription_manager.update_group_with_data(
+                group_id,
+                read_set,
+                result_hash,
+                data_arc,
+                serialized_len,
+            );
 
             data
         } else {
-            // Group exists, re-execute to get fresh data for this subscriber
-            // (they might have joined mid-cycle)
-            let (data, _) = match self.execute_query(&query_name, &args, &auth_context).await {
-                Ok(result) => result,
-                Err(error) => {
-                    self.unsubscribe(subscription_id);
-                    return Err(error);
-                }
-            };
-            data
+            let cached = self
+                .subscription_manager
+                .get_group(group_id)
+                .and_then(|g| g.last_result.clone());
+
+            if let Some(cached_data) = cached {
+                (*cached_data).clone()
+            } else {
+                let (data, _) = match self.execute_query(&query_name, &args, &auth_context).await {
+                    Ok(result) => result,
+                    Err(error) => {
+                        self.unsubscribe(subscription_id);
+                        return Err(error);
+                    }
+                };
+                data
+            }
         };
 
         tracing::trace!(?subscription_id, "Subscription created");
@@ -284,17 +322,27 @@ impl Reactor {
         job_id: Uuid,
         auth_context: &forge_core::function::AuthContext,
     ) -> forge_core::Result<JobData> {
-        Self::ensure_job_access(&self.db_pool, job_id, auth_context).await?;
+        Self::ensure_job_access(self.database.read_pool(), job_id, auth_context).await?;
         let job_data = self.fetch_job_data(job_id).await?;
 
         let subscription = JobSubscription {
             session_id,
             client_sub_id,
             auth_context: auth_context.clone(),
+            token_exp: auth_context.token_exp(),
         };
 
         let mut subs = self.job_subscriptions.write().await;
         subs.entry(job_id).or_default().push(subscription);
+        drop(subs);
+
+        // Track in reverse index for O(1) cleanup on session removal
+        self.session_job_ids
+            .write()
+            .await
+            .entry(session_id)
+            .or_default()
+            .insert(job_id);
 
         tracing::trace!(%job_id, %session_id, "Job subscription created");
         Ok(job_data)
@@ -303,11 +351,29 @@ impl Reactor {
     /// Unsubscribe from job updates.
     pub async fn unsubscribe_job(&self, session_id: SessionId, client_sub_id: &str) {
         let mut subs = self.job_subscriptions.write().await;
-        for subscribers in subs.values_mut() {
+        let mut removed_ids = Vec::new();
+        for (job_id, subscribers) in subs.iter_mut() {
+            let before = subscribers.len();
             subscribers
                 .retain(|s| !(s.session_id == session_id && s.client_sub_id == client_sub_id));
+            if subscribers.len() < before {
+                removed_ids.push(*job_id);
+            }
         }
         subs.retain(|_, v| !v.is_empty());
+        drop(subs);
+
+        if !removed_ids.is_empty() {
+            let mut session_jobs = self.session_job_ids.write().await;
+            if let Some(ids) = session_jobs.get_mut(&session_id) {
+                for id in &removed_ids {
+                    ids.remove(id);
+                }
+                if ids.is_empty() {
+                    session_jobs.remove(&session_id);
+                }
+            }
+        }
     }
 
     /// Subscribe to workflow progress updates.
@@ -318,17 +384,27 @@ impl Reactor {
         workflow_id: Uuid,
         auth_context: &forge_core::function::AuthContext,
     ) -> forge_core::Result<WorkflowData> {
-        Self::ensure_workflow_access(&self.db_pool, workflow_id, auth_context).await?;
+        Self::ensure_workflow_access(self.database.read_pool(), workflow_id, auth_context).await?;
         let workflow_data = self.fetch_workflow_data(workflow_id).await?;
 
         let subscription = WorkflowSubscription {
             session_id,
             client_sub_id,
             auth_context: auth_context.clone(),
+            token_exp: auth_context.token_exp(),
         };
 
         let mut subs = self.workflow_subscriptions.write().await;
         subs.entry(workflow_id).or_default().push(subscription);
+        drop(subs);
+
+        // Track in reverse index for O(1) cleanup on session removal
+        self.session_workflow_ids
+            .write()
+            .await
+            .entry(session_id)
+            .or_default()
+            .insert(workflow_id);
 
         tracing::trace!(%workflow_id, %session_id, "Workflow subscription created");
         Ok(workflow_data)
@@ -337,20 +413,38 @@ impl Reactor {
     /// Unsubscribe from workflow updates.
     pub async fn unsubscribe_workflow(&self, session_id: SessionId, client_sub_id: &str) {
         let mut subs = self.workflow_subscriptions.write().await;
-        for subscribers in subs.values_mut() {
+        let mut removed_ids = Vec::new();
+        for (wf_id, subscribers) in subs.iter_mut() {
+            let before = subscribers.len();
             subscribers
                 .retain(|s| !(s.session_id == session_id && s.client_sub_id == client_sub_id));
+            if subscribers.len() < before {
+                removed_ids.push(*wf_id);
+            }
         }
         subs.retain(|_, v| !v.is_empty());
+        drop(subs);
+
+        if !removed_ids.is_empty() {
+            let mut session_wfs = self.session_workflow_ids.write().await;
+            if let Some(ids) = session_wfs.get_mut(&session_id) {
+                for id in &removed_ids {
+                    ids.remove(id);
+                }
+                if ids.is_empty() {
+                    session_wfs.remove(&session_id);
+                }
+            }
+        }
     }
 
     #[allow(clippy::type_complexity)]
     async fn fetch_job_data(&self, job_id: Uuid) -> forge_core::Result<JobData> {
-        Self::fetch_job_data_static(job_id, &self.db_pool).await
+        Self::fetch_job_data_static(job_id, self.database.read_pool()).await
     }
 
     async fn fetch_workflow_data(&self, workflow_id: Uuid) -> forge_core::Result<WorkflowData> {
-        Self::fetch_workflow_data_static(workflow_id, &self.db_pool).await
+        Self::fetch_workflow_data_static(workflow_id, self.database.read_pool()).await
     }
 
     /// Execute a query and return data with read set.
@@ -362,7 +456,7 @@ impl Reactor {
     ) -> forge_core::Result<(serde_json::Value, ReadSet)> {
         Self::execute_query_static(
             &self.registry,
-            &self.db_pool,
+            self.database.read_pool(),
             query_name,
             args,
             auth_context,
@@ -370,12 +464,18 @@ impl Reactor {
         .await
     }
 
-    fn compute_hash(data: &serde_json::Value) -> String {
-        let json = serde_json::to_string(data).unwrap_or_default();
-        crate::stable_hash::sha256_hex(json.as_bytes())
+    /// Content hash for change detection; returns `(hash, byte_count)`.
+    fn compute_hash(data: &serde_json::Value) -> (String, usize) {
+        match serde_json::to_vec(data) {
+            Ok(bytes) => {
+                let len = bytes.len();
+                (crate::stable_hash::sha256_hex(&bytes), len)
+            }
+            Err(_) => ("!serialization_failed!".to_string(), usize::MAX),
+        }
     }
 
-    /// Parallel group re-execution with bounded concurrency.
+    /// Flush pending invalidations with bounded concurrent re-execution.
     async fn flush_invalidations(
         invalidation_engine: &Arc<InvalidationEngine>,
         subscription_manager: &Arc<SubscriptionManager>,
@@ -383,8 +483,9 @@ impl Reactor {
         registry: &FunctionRegistry,
         db_pool: &sqlx::PgPool,
         max_concurrent: usize,
+        reexecution_timeout: std::time::Duration,
     ) {
-        let invalidated_groups = invalidation_engine.check_pending().await;
+        let invalidated_groups = invalidation_engine.check_pending();
         if invalidated_groups.is_empty() {
             return;
         }
@@ -401,20 +502,33 @@ impl Reactor {
             registry,
             db_pool,
             max_concurrent,
+            reexecution_timeout,
         )
         .await;
     }
 
-    /// Resync sweep: re-evaluate every active subscription group. Recovers
-    /// from `LISTEN/NOTIFY` payload drops where invalidation never fired.
-    /// Hash comparison inside `reexecute_groups` ensures we only push when
-    /// the result actually changed, so an idle resync is a no-op on the wire.
+    /// Trim old entries from the durable change log.
+    async fn trim_change_log(db_pool: &sqlx::PgPool) {
+        let cutoff = chrono::Utc::now() - chrono::Duration::hours(1);
+        match crate::pg::trim_change_log(db_pool, cutoff).await {
+            Ok(deleted) if deleted > 0 => {
+                tracing::debug!(deleted, "Trimmed change log");
+            }
+            Err(e) => {
+                tracing::trace!(error = %e, "Change log trim skipped (table may not exist)");
+            }
+            _ => {}
+        }
+    }
+
+    /// Resync sweep: re-evaluate every active group to recover from dropped notifications.
     async fn resync_all_groups(
         subscription_manager: &Arc<SubscriptionManager>,
         session_server: &Arc<SessionServer>,
         registry: &FunctionRegistry,
         db_pool: &sqlx::PgPool,
         max_concurrent: usize,
+        reexecution_timeout: std::time::Duration,
     ) {
         let group_ids = subscription_manager.all_group_ids();
         if group_ids.is_empty() {
@@ -430,12 +544,12 @@ impl Reactor {
             registry,
             db_pool,
             max_concurrent,
+            reexecution_timeout,
         )
         .await;
     }
 
-    /// Re-run the queries for `group_ids`, push to subscribers when the result
-    /// hash changes. Shared by invalidation flush and the periodic resync.
+    /// Re-run queries for groups, pushing to subscribers on hash change.
     async fn reexecute_groups(
         group_ids: &[forge_core::realtime::QueryGroupId],
         subscription_manager: &Arc<SubscriptionManager>,
@@ -443,6 +557,7 @@ impl Reactor {
         registry: &FunctionRegistry,
         db_pool: &sqlx::PgPool,
         max_concurrent: usize,
+        reexecution_timeout: std::time::Duration,
     ) {
         // Collect group data we need for re-execution. Skip groups whose
         // cached auth context has an expired JWT — re-running the query would
@@ -473,7 +588,10 @@ impl Reactor {
             })
             .collect();
 
-        // Parallel re-execution bounded by semaphore
+        // Each group is spawned as an independent task so slow groups cannot
+        // block the progress of faster ones. The semaphore still bounds total
+        // concurrent DB queries; the permit is held only for the duration of
+        // the query, not for the fan-out phase.
         let semaphore = Arc::new(Semaphore::new(max_concurrent));
         let mut futures = FuturesUnordered::new();
 
@@ -485,36 +603,58 @@ impl Reactor {
             let registry = registry.clone();
             let db_pool = db_pool.clone();
 
-            futures.push(async move {
-                let result = Self::execute_query_static(
+            // spawn so this group's query runs concurrently with the result
+            // processing loop below, and does not block other spawned tasks.
+            let handle = tokio::spawn(async move {
+                let query_fut = Self::execute_query_static(
                     &registry,
                     &db_pool,
                     &query_name,
                     &args,
                     &auth_context,
-                )
-                .await;
+                );
+                let result = tokio::time::timeout(reexecution_timeout, query_fut)
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(forge_core::ForgeError::Timeout(format!(
+                            "query '{}' exceeded reexecution timeout ({:?})",
+                            query_name, reexecution_timeout,
+                        )))
+                    });
                 drop(permit);
                 (group_id, last_hash, result)
             });
+
+            futures.push(handle);
         }
 
-        // Process results and fan out to subscribers
-        while let Some((group_id, last_hash, result)) = futures.next().await {
+        while let Some(join_result) = futures.next().await {
+            let (group_id, last_hash, result) = match join_result {
+                Ok(inner) => inner,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Re-execution task panicked");
+                    continue;
+                }
+            };
             match result {
                 Ok((new_data, read_set)) => {
-                    let new_hash = Self::compute_hash(&new_data);
+                    let (new_hash, serialized_len) = Self::compute_hash(&new_data);
 
                     if last_hash.as_ref() != Some(&new_hash) {
-                        // Update group state
-                        subscription_manager.update_group(group_id, read_set, new_hash);
+                        let data_arc = std::sync::Arc::new(new_data);
+                        subscription_manager.update_group_with_data(
+                            group_id,
+                            read_set,
+                            new_hash,
+                            std::sync::Arc::clone(&data_arc),
+                            serialized_len,
+                        );
 
-                        // Fan out to all subscribers in this group
                         let subscribers = subscription_manager.get_group_subscribers(group_id);
                         for (session_id, client_sub_id) in subscribers {
                             let message = RealtimeMessage::Data {
                                 subscription_id: client_sub_id.clone(),
-                                data: new_data.clone(),
+                                data: std::sync::Arc::clone(&data_arc),
                             };
 
                             if let Err(e) = session_server.try_send_to_session(session_id, message)
@@ -528,6 +668,13 @@ impl Reactor {
                         }
                     }
                 }
+                Err(forge_core::ForgeError::Timeout(ref msg)) => {
+                    tracing::warn!(
+                        ?group_id,
+                        message = %msg,
+                        "Query group timed out during re-execution"
+                    );
+                }
                 Err(e) => {
                     tracing::warn!(?group_id, error = %e, "Failed to re-execute query group");
                 }
@@ -537,18 +684,28 @@ impl Reactor {
 
     /// Start the reactor.
     pub async fn start(&self) -> forge_core::Result<()> {
+        let bus = self.notify_bus.clone();
+        let bus_shutdown_rx = self.bus_shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            bus.run(bus_shutdown_rx).await;
+        });
+
         let listener = self.change_listener.clone();
+        let notify_bus = self.notify_bus.clone();
         let invalidation_engine = self.invalidation_engine.clone();
         let subscription_manager = self.subscription_manager.clone();
         let job_subscriptions = self.job_subscriptions.clone();
         let workflow_subscriptions = self.workflow_subscriptions.clone();
+        let session_job_ids = self.session_job_ids.clone();
+        let session_workflow_ids = self.session_workflow_ids.clone();
         let session_server = self.session_server.clone();
         let registry = self.registry.clone();
-        let db_pool = self.db_pool.clone();
+        let database = self.database.clone();
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let max_restarts = self.max_listener_restarts;
         let base_delay_ms = self.listener_restart_delay_ms;
         let max_concurrent = self.max_concurrent_reexecutions;
+        let reexecution_timeout = self.reexecution_timeout;
         let cleanup_secs = self.session_cleanup_interval_secs;
         let resync_secs = self.resync_interval_secs;
 
@@ -562,9 +719,10 @@ impl Reactor {
 
             // Start initial listener
             let listener_clone = listener.clone();
+            let bus_clone = notify_bus.clone();
             let error_tx = listener_error_tx.clone();
             let mut listener_handle = Some(tokio::spawn(async move {
-                if let Err(e) = listener_clone.run().await {
+                if let Err(e) = listener_clone.run(&bus_clone).await {
                     let _ = error_tx.send(format!("Change listener error: {}", e)).await;
                 }
             }));
@@ -579,7 +737,7 @@ impl Reactor {
             // `resync_secs == 0` disables the sweep. Use a far-future interval
             // so the select! arm is well-typed but never fires.
             let mut resync_interval = if resync_secs == 0 {
-                let mut i = tokio::time::interval(std::time::Duration::from_secs(u64::MAX / 2));
+                let mut i = tokio::time::interval(std::time::Duration::from_secs(86400 * 365));
                 i.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 i
             } else {
@@ -595,17 +753,25 @@ impl Reactor {
                     result = change_rx.recv() => {
                         match result {
                             Ok(change) => {
+                                // Any successful change means the listener is healthy
+                                // again; reset so a long-lived process can absorb more
+                                // transient failures over its lifetime.
+                                restart_count = 0;
                                 Self::handle_change(
                                     &change,
                                     &invalidation_engine,
                                     &job_subscriptions,
                                     &workflow_subscriptions,
                                     &session_server,
-                                    &db_pool,
+                                    database.read_pool(),
                                 ).await;
                             }
                             Err(broadcast::error::RecvError::Lagged(n)) => {
-                                tracing::warn!("Reactor lagged by {} messages", n);
+                                tracing::warn!(
+                                    missed = n,
+                                    "Reactor lagged; scheduling full resync"
+                                );
+                                listener.set_needs_resync();
                             }
                             Err(broadcast::error::RecvError::Closed) => {
                                 tracing::debug!("Change channel closed");
@@ -614,25 +780,85 @@ impl Reactor {
                         }
                     }
                     _ = flush_interval.tick() => {
+                        if listener.take_needs_resync() {
+                            tracing::info!("Change log gap detected, running immediate full resync");
+                            Self::resync_all_groups(
+                                &subscription_manager,
+                                &session_server,
+                                &registry,
+                                database.read_pool(),
+                                max_concurrent,
+                                reexecution_timeout,
+                            ).await;
+                        }
                         Self::flush_invalidations(
                             &invalidation_engine,
                             &subscription_manager,
                             &session_server,
                             &registry,
-                            &db_pool,
+                            database.read_pool(),
                             max_concurrent,
+                            reexecution_timeout,
                         ).await;
                     }
                     _ = cleanup_interval.tick() => {
                         session_server.cleanup_stale(std::time::Duration::from_secs(300));
+                        let expired_sessions = session_server.cleanup_expired_tokens();
+                        if !expired_sessions.is_empty() {
+                            // Immediately purge query-group subscriptions for
+                            // expired sessions so stale groups are not
+                            // re-executed during the next invalidation flush or
+                            // resync sweep. Job/workflow subscription entries
+                            // are likewise pruned so change fan-out skips them
+                            // without waiting for the SSE bridge task to detect
+                            // the closed channel.
+                            let mut job_subs = job_subscriptions.write().await;
+                            let mut wf_subs = workflow_subscriptions.write().await;
+                            let mut sess_jobs = session_job_ids.write().await;
+                            let mut sess_wfs = session_workflow_ids.write().await;
+
+                            for session_id in expired_sessions {
+                                subscription_manager
+                                    .remove_session_subscriptions(session_id);
+
+                                if let Some(job_ids) = sess_jobs.remove(&session_id) {
+                                    for id in job_ids {
+                                        if let Some(subs) = job_subs.get_mut(&id) {
+                                            subs.retain(|s| s.session_id != session_id);
+                                        }
+                                    }
+                                }
+                                if let Some(wf_ids) = sess_wfs.remove(&session_id) {
+                                    for id in wf_ids {
+                                        if let Some(subs) = wf_subs.get_mut(&id) {
+                                            subs.retain(|s| s.session_id != session_id);
+                                        }
+                                    }
+                                }
+                            }
+
+                            job_subs.retain(|_, v| !v.is_empty());
+                            wf_subs.retain(|_, v| !v.is_empty());
+                        }
+                        Self::trim_change_log(database.read_pool()).await;
+
+                        // Emit subscription cardinality gauges on the cleanup
+                        // cadence so dashboards show steady-state counts.
+                        let counts = subscription_manager.counts();
+                        crate::observability::record_subscription_counts(
+                            counts.total,
+                            counts.unique_queries,
+                            counts.indexed_tables,
+                        );
                     }
                     _ = resync_interval.tick(), if resync_secs != 0 => {
                         Self::resync_all_groups(
                             &subscription_manager,
                             &session_server,
                             &registry,
-                            &db_pool,
+                            database.read_pool(),
                             max_concurrent,
+                            reexecution_timeout,
                         ).await;
                     }
                     Some(error_msg) = listener_error_rx.recv() => {
@@ -658,13 +884,14 @@ impl Reactor {
                         tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
 
                         let listener_clone = listener.clone();
+                        let bus_clone = notify_bus.clone();
                         let error_tx = listener_error_tx.clone();
                         if let Some(handle) = listener_handle.take() {
                             handle.abort();
                         }
                         change_rx = listener.subscribe();
                         listener_handle = Some(tokio::spawn(async move {
-                            if let Err(e) = listener_clone.run().await {
+                            if let Err(e) = listener_clone.run(&bus_clone).await {
                                 let _ = error_tx.send(format!("Change listener error: {}", e)).await;
                             }
                         }));
@@ -701,6 +928,15 @@ impl Reactor {
                 if let Some(job_id) = change.row_id {
                     Self::handle_job_change(job_id, job_subscriptions, session_server, db_pool)
                         .await;
+                } else {
+                    // Statement-level trigger: refresh all active job subscriptions
+                    let subs = job_subscriptions.read().await;
+                    let job_ids: Vec<Uuid> = subs.keys().copied().collect();
+                    drop(subs);
+                    for job_id in job_ids {
+                        Self::handle_job_change(job_id, job_subscriptions, session_server, db_pool)
+                            .await;
+                    }
                 }
                 return;
             }
@@ -713,6 +949,19 @@ impl Reactor {
                         db_pool,
                     )
                     .await;
+                } else {
+                    let subs = workflow_subscriptions.read().await;
+                    let workflow_ids: Vec<Uuid> = subs.keys().copied().collect();
+                    drop(subs);
+                    for workflow_id in workflow_ids {
+                        Self::handle_workflow_change(
+                            workflow_id,
+                            workflow_subscriptions,
+                            session_server,
+                            db_pool,
+                        )
+                        .await;
+                    }
                 }
                 return;
             }
@@ -725,14 +974,26 @@ impl Reactor {
                         db_pool,
                     )
                     .await;
+                } else {
+                    let subs = workflow_subscriptions.read().await;
+                    let workflow_ids: Vec<Uuid> = subs.keys().copied().collect();
+                    drop(subs);
+                    for workflow_id in workflow_ids {
+                        Self::handle_workflow_change(
+                            workflow_id,
+                            workflow_subscriptions,
+                            session_server,
+                            db_pool,
+                        )
+                        .await;
+                    }
                 }
                 return;
             }
             _ => {}
         }
 
-        // Record change for debounced group invalidation
-        invalidation_engine.process_change(change.clone()).await;
+        invalidation_engine.process_change(change.clone());
     }
 
     async fn handle_job_change(
@@ -764,9 +1025,16 @@ impl Reactor {
             }
         };
 
+        let now = chrono::Utc::now().timestamp();
         let mut unauthorized: HashSet<(SessionId, String)> = HashSet::new();
 
         for sub in &subscribers {
+            // Skip subscribers with expired tokens
+            if sub.token_exp.is_some_and(|exp| exp < now) {
+                unauthorized.insert((sub.session_id, sub.client_sub_id.clone()));
+                continue;
+            }
+
             if Self::check_owner_access(owner_subject.clone(), &sub.auth_context).is_err() {
                 unauthorized.insert((sub.session_id, sub.client_sub_id.clone()));
                 continue;
@@ -777,11 +1045,8 @@ impl Reactor {
                 job: job_data.clone(),
             };
 
-            if let Err(e) = session_server
-                .send_to_session(sub.session_id, message)
-                .await
-            {
-                tracing::trace!(%job_id, error = %e, "Failed to send job update");
+            if let Err(e) = session_server.try_send_to_session(sub.session_id, message) {
+                tracing::trace!(%job_id, error = ?e, "Failed to send job update");
             }
         }
 
@@ -825,9 +1090,16 @@ impl Reactor {
                 }
             };
 
+        let now = chrono::Utc::now().timestamp();
         let mut unauthorized: HashSet<(SessionId, String)> = HashSet::new();
 
         for sub in &subscribers {
+            // Skip subscribers with expired tokens
+            if sub.token_exp.is_some_and(|exp| exp < now) {
+                unauthorized.insert((sub.session_id, sub.client_sub_id.clone()));
+                continue;
+            }
+
             if Self::check_owner_access(owner_subject.clone(), &sub.auth_context).is_err() {
                 unauthorized.insert((sub.session_id, sub.client_sub_id.clone()));
                 continue;
@@ -838,11 +1110,8 @@ impl Reactor {
                 workflow: workflow_data.clone(),
             };
 
-            if let Err(e) = session_server
-                .send_to_session(sub.session_id, message)
-                .await
-            {
-                tracing::trace!(%workflow_id, error = %e, "Failed to send workflow update");
+            if let Err(e) = session_server.try_send_to_session(sub.session_id, message) {
+                tracing::trace!(%workflow_id, error = ?e, "Failed to send workflow update");
             }
         }
 
@@ -896,7 +1165,7 @@ impl Reactor {
         )
         .fetch_optional(db_pool)
         .await
-        .map_err(forge_core::ForgeError::Sql)?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         match row {
             Some(row) => Ok(JobData {
@@ -922,7 +1191,7 @@ impl Reactor {
             sqlx::query_scalar!("SELECT owner_subject FROM forge_jobs WHERE id = $1", job_id)
                 .fetch_optional(db_pool)
                 .await
-                .map_err(forge_core::ForgeError::Sql)?;
+                .map_err(forge_core::ForgeError::Database)?;
 
         owner_subject
             .ok_or_else(|| forge_core::ForgeError::NotFound(format!("Job {} not found", job_id)))
@@ -942,7 +1211,7 @@ impl Reactor {
         )
         .fetch_optional(db_pool)
         .await
-        .map_err(forge_core::ForgeError::Sql)?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         let row = match row {
             Some(r) => r,
@@ -965,7 +1234,7 @@ impl Reactor {
         )
         .fetch_all(db_pool)
         .await
-        .map_err(forge_core::ForgeError::Sql)?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         let steps = step_rows
             .into_iter()
@@ -997,7 +1266,7 @@ impl Reactor {
         )
         .fetch_optional(db_pool)
         .await
-        .map_err(forge_core::ForgeError::Sql)?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         owner_subject.ok_or_else(|| {
             forge_core::ForgeError::NotFound(format!("Workflow {} not found", workflow_id))
@@ -1054,19 +1323,10 @@ impl Reactor {
     }
 
     fn extract_table_name(query_name: &str) -> String {
-        if let Some(rest) = query_name.strip_prefix("get_") {
-            rest.to_string()
-        } else if let Some(rest) = query_name.strip_prefix("list_") {
-            rest.to_string()
-        } else if let Some(rest) = query_name.strip_prefix("find_") {
-            rest.to_string()
-        } else if let Some(rest) = query_name.strip_prefix("fetch_") {
-            rest.to_string()
-        } else {
-            query_name.to_string()
-        }
+        query_name.to_string()
     }
 
+    /// Auth check for re-execution (authentication only, roles checked at subscribe time).
     fn check_query_auth(
         info: &forge_core::function::FunctionInfo,
         auth: &forge_core::function::AuthContext,
@@ -1079,15 +1339,6 @@ impl Reactor {
             return Err(forge_core::ForgeError::Unauthorized(
                 "Authentication required".into(),
             ));
-        }
-
-        if let Some(role) = info.required_role
-            && !auth.has_role(role)
-        {
-            return Err(forge_core::ForgeError::Forbidden(format!(
-                "Role '{}' required",
-                role
-            )));
         }
 
         Ok(())
@@ -1104,7 +1355,7 @@ impl Reactor {
         )
         .fetch_optional(db_pool)
         .await
-        .map_err(forge_core::ForgeError::Sql)?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         let owner_subject = owner_subject_row
             .ok_or_else(|| forge_core::ForgeError::NotFound(format!("Job {} not found", job_id)))?;
@@ -1123,7 +1374,7 @@ impl Reactor {
         )
         .fetch_optional(db_pool)
         .await
-        .map_err(forge_core::ForgeError::Sql)?;
+        .map_err(forge_core::ForgeError::Database)?;
 
         let owner_subject = owner_subject_row.ok_or_else(|| {
             forge_core::ForgeError::NotFound(format!("Workflow {} not found", workflow_id))
@@ -1160,12 +1411,13 @@ impl Reactor {
 
     pub fn stop(&self) {
         let _ = self.shutdown_tx.send(());
+        let _ = self.bus_shutdown_tx.send(true);
         self.change_listener.stop();
     }
 
     pub async fn stats(&self) -> ReactorStats {
         let session_stats = self.session_server.stats();
-        let inv_stats = self.invalidation_engine.stats().await;
+        let inv_stats = self.invalidation_engine.stats();
 
         ReactorStats {
             connections: session_stats.connections,
@@ -1209,12 +1461,13 @@ mod tests {
         let data2 = serde_json::json!({"name": "test"});
         let data3 = serde_json::json!({"name": "different"});
 
-        let hash1 = Reactor::compute_hash(&data1);
-        let hash2 = Reactor::compute_hash(&data2);
-        let hash3 = Reactor::compute_hash(&data3);
+        let (hash1, len1) = Reactor::compute_hash(&data1);
+        let (hash2, _) = Reactor::compute_hash(&data2);
+        let (hash3, _) = Reactor::compute_hash(&data3);
 
         assert_eq!(hash1, hash2);
         assert_ne!(hash1, hash3);
+        assert!(len1 > 0);
     }
 
     #[test]

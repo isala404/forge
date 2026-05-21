@@ -8,15 +8,21 @@ Read-only database operations with caching and subscriptions.
 
 | Attribute              | Type           | Default | Description                                                  |
 | ---------------------- | -------------- | ------- | ------------------------------------------------------------ |
+| `name = "..."`         | `string`       | fn name | Override the wire name exposed to clients                    |
+| `description = "..."`  | `string`       | none    | Human-readable description surfaced in metadata              |
 | `public`               | flag           | `false` | Bypass authentication requirement                            |
 | `require_role("name")` | `string`       | none    | Require specific role (returns 403 if missing)               |
 | `consistent`           | flag           | `false` | Force reads from primary (skip replicas)                     |
 | `cache`                | `"duration"`   | none    | Cache TTL (`"30s"`, `"5m"`, `"1h"`)                          |
-| `timeout`              | `u64`          | none    | Statement timeout in seconds                                 |
-| `tables`               | `["t1", "t2"]` | auto    | Explicit table dependencies for subscriptions                |
+| `timeout`              | `"duration"`   | none    | Statement timeout (`"30s"`, `"5m"`)                          |
+| `tables("t1", "t2")`   | list           | auto    | Explicit table dependencies for subscriptions (overrides SQL extraction) |
 | `log`                  | `"level"`      | none    | Log level (`trace`, `debug`, `info`, `warn`, `error`, `off`). Requires a quoted value (e.g., `log = "debug"`); a bare `log` without a value is silently accepted but has no effect. |
 | `unscoped`             | flag           | `false` | Opt out of compile-time scope checking. By default, private queries must filter by `user_id` or `owner_id` in SQL. This attribute disables that check for admin or shared data queries. |
 | `rate_limit(...)`      | config         | none    | Rate limiting configuration                                  |
+
+:::note Auth and scope aliases
+`auth = "none"` is an alias for `public`; `auth = "required"` makes the default explicit. `scope = "global"` is an alias for `unscoped`; `scope = "user"` makes the default explicit. Prefer the flag forms (`public`, `unscoped`) — the string aliases exist for programmatic or configuration-driven usage.
+:::
 
 ### Rate Limit Config
 
@@ -28,7 +34,7 @@ rate_limit(requests = 100, per = "1m", key = "user")
 | ---------- | ------------ | ---------------------------------------------------- |
 | `requests` | `u32`        | Requests allowed per window                          |
 | `per`      | `"duration"` | Time window (`"30s"`, `"1m"`, `"1h"`)                |
-| `key`      | `string`     | Bucket key: `"user"`, `"ip"`, `"tenant"`, `"global"` |
+| `key`      | `string`     | Bucket key: `"user"`, `"ip"`, `"tenant"`, `"user_action"`, `"global"`, or `"custom(claim_name)"` |
 
 ### Example
 
@@ -151,16 +157,24 @@ The PostgreSQL type name is the snake_case form of the enum name (e.g., `TaskSta
 
 Transactional write operations.
 
-| Attribute | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `public` | flag | `false` | Bypass authentication requirement |
-| `require_role("name")` | `string` | none | Require specific role (returns 403 if missing) |
-| `transactional` | flag | `true` | Wrap in database transaction. Opt out with `transactional = false` for high-throughput writes that don't need atomicity. |
-| `timeout` | `u64` | none | Handler timeout in seconds; if explicitly set it also becomes the default outbound HTTP timeout for `ctx.http()` |
-| `max_size` | `"size"` | none | Maximum upload size for this mutation (`"100mb"`, `"1gb"`). Overrides the global `max_body_size` setting. Supports `b`, `kb`, `mb`, `gb` suffixes (case-insensitive). |
-| `log` | `"level"` | none | Log level (`trace`, `debug`, `info`, `warn`, `error`, `off`). Requires a quoted value (e.g., `log = "debug"`); a bare `log` without a value is silently accepted but has no effect. |
-| `unscoped` | flag | `false` | Opt out of compile-time scope checking. By default, private queries must filter by `user_id` or `owner_id` in SQL. This attribute disables that check for admin or shared data queries. |
-| `rate_limit(...)` | config | none | Rate limiting configuration (same as query) |
+| Attribute              | Type         | Default | Description                                                   |
+|------------------------|--------------|---------|---------------------------------------------------------------|
+| `name = "..."`         | `string`     | fn name | Override the wire name exposed to clients                     |
+| `description = "..."`  | `string`     | none    | Human-readable description surfaced in metadata               |
+| `public`               | flag         | `false` | Bypass authentication requirement                             |
+| `require_role("name")` | `string`     | none    | Require specific role (returns 403 if missing)                |
+| `transactional`        | flag         | `true`  | Wrap in database transaction. Opt out with `transactional = false` for high-throughput writes that don't need atomicity. |
+| `timeout`              | `"duration"` | none    | Handler timeout; if explicitly set it also becomes the default outbound HTTP timeout for `ctx.http()` |
+| `max_size`             | `"size"`     | none    | Maximum upload size for this mutation (`"100mb"`, `"1gb"`). Overrides the global `max_body_size` setting. Supports `b`, `kb`, `mb`, `gb` suffixes (case-insensitive). |
+| `tables("t1", "t2")`   | list         | auto    | Explicit table dependencies (overrides SQL extraction)        |
+| `log`                  | `"level"`    | none    | Log level (`trace`, `debug`, `info`, `warn`, `error`, `off`). Requires a quoted value (e.g., `log = "debug"`); a bare `log` without a value is silently accepted but has no effect. |
+| `unscoped`             | flag         | `false` | Opt out of compile-time scope checking. By default, private queries must filter by `user_id` or `owner_id` in SQL. This attribute disables that check for admin or shared data queries. |
+| `allow_http`           | flag         | `false` | Permit `ctx.http()` calls inside a transactional mutation. Without this flag, calling `ctx.http()` in a transaction is a compile error (outbound HTTP inside a transaction is a footgun — the request cannot be rolled back if the transaction fails). Only use when you understand this tradeoff. |
+| `rate_limit(...)`      | config       | none    | Rate limiting configuration (same as query)                   |
+
+:::note Auth and scope aliases
+`auth = "none"` / `auth = "required"` and `scope = "global"` / `scope = "user"` work the same as in `#[forge::query]`. See the note under that section.
+:::
 
 ### Compile-Time Enforcement
 
@@ -286,9 +300,10 @@ Background tasks with retries and worker routing.
 
 | Attribute                 | Type         | Default         | Description                                           |
 | ------------------------- | ------------ | --------------- | ----------------------------------------------------- |
+| `name = "..."`            | `string`     | fn name         | Override job name                                     |
+| `description = "..."`     | `string`     | none            | Human-readable description surfaced in metadata       |
 | `public`                  | flag         | `false`         | Allow dispatch without authentication                 |
 | `require_role("name")`    | `string`     | none            | Require role to dispatch                              |
-| `name`                    | `"string"`   | fn name         | Override job name                                     |
 | `timeout`                 | `"duration"` | `"1h"`          | Job timeout (`"30s"`, `"10m"`, `"2h"`); if explicitly set it also becomes the default outbound HTTP timeout for `ctx.http()` |
 | `priority`                | `"level"`    | `"normal"`      | `background`, `low`, `normal`, `high`, `critical`     |
 | `max_attempts`            | `u32`        | `3`             | Maximum retry attempts                                |
@@ -372,12 +387,18 @@ Scheduled tasks with exactly-once execution.
 
 | Attribute        | Type          | Default     | Description                                |
 | ---------------- | ------------- | ----------- | ------------------------------------------ |
-| (first arg)      | `"cron expr"` | required    | Cron schedule (5-part: `"0 9 * * *"`)      |
+| (first arg)      | `"cron expr"` | —           | Positional cron schedule (5-part: `"0 9 * * *"`). Mutually exclusive with `schedule`, `every`, and `daily_at`. |
+| `schedule = "..."` | `"cron expr"` | —         | Named form of the positional cron expression. Use when you prefer keyword syntax: `schedule = "0 9 * * *"`. |
+| `every = "..."`  | `"duration"`  | —           | Sugar for simple interval schedules. Converts to a cron expression automatically. Example: `every = "5m"` runs every 5 minutes. Supports `m` (minutes) and `h` (hours). |
+| `daily_at = "..."` | `"HH:MM"`   | —           | Sugar for daily schedules at a fixed time. Example: `daily_at = "03:00"` runs at 3:00 AM UTC (or the configured `timezone`). |
+| `name = "..."`   | `string`      | fn name     | Override the registry name                 |
 | `timezone`       | `"string"`    | `"UTC"`     | IANA timezone (e.g., `"America/New_York"`) |
 | `timeout`        | `"duration"`  | `"1h"`      | Execution timeout; if explicitly set it also becomes the default outbound HTTP timeout for `ctx.http()` |
 | `catch_up`       | flag          | `false`     | Run missed executions after downtime       |
 | `catch_up_limit` | `u32`         | `10`        | Maximum catch-up runs                      |
 | `group`          | `"string"`    | `"default"` | Sharded leader election group              |
+
+Exactly one of the four schedule forms (positional `"cron expr"`, `schedule`, `every`, `daily_at`) must be provided. Mixing them is a compile error.
 
 ### Cron Expression
 
@@ -420,19 +441,20 @@ pub async fn daily_report(ctx: &CronContext) -> Result<()> {
 
 Multi-step durable processes with compensation.
 
-| Attribute              | Type         | Default  | Description                                         |
-| ---------------------- | ------------ | -------- | --------------------------------------------------- |
-| `name`                 | `"string"`   | fn name  | Stable workflow identity. Two versions share the same name. |
-| `version`              | `"string"`   | `"v1"`   | Freeform version label (e.g., `"2026-05"`, `"v2"`, `"1.0.0"`). Paired with `name` to form the unique definition key. |
-| `active`               | flag         | `true`   | This version handles new runs. At most one active version per name. Default when neither `active` nor `deprecated` is set. |
-| `deprecated`           | flag         | `false`  | Keeps executing in-flight runs but rejects new starts. Cannot combine with `active` (compile error). |
-| `timeout`              | `"duration"` | `"24h"`  | Maximum workflow duration (`"1h"`, `"7d"`, `"30d"`); if explicitly set it also becomes the default outbound HTTP timeout for `ctx.http()` |
-| `public`               | flag         | `false`  | Allow start without authentication                  |
-| `require_role("name")` | `string`     | none     | Require role to start                               |
+| Attribute              | Type         | Default    | Description                                         |
+| ---------------------- | ------------ | ---------- | --------------------------------------------------- |
+| `name = "..."`         | `string`     | fn name    | Stable workflow identity. Two versions share the same name. |
+| `version = "..."`      | `string`     | `"v1"`     | Freeform version label (e.g., `"2026-05"`, `"v2"`, `"1.0.0"`). Paired with `name` to form the unique definition key. |
+| `status = "..."`       | `string`     | `"active"` | Version lifecycle: `"active"` (handles new runs), `"deprecated"` (drains in-flight only), or `"staging"` (registered but not started). Preferred over the legacy flags below. |
+| `active`               | flag         | —          | Legacy shorthand for `status = "active"`. Cannot combine with `deprecated` or `status`. |
+| `deprecated`           | flag         | —          | Legacy shorthand for `status = "deprecated"`. Keeps executing in-flight runs but rejects new starts. Cannot combine with `active` or `status`. |
+| `timeout`              | `"duration"` | `"24h"`    | Maximum workflow duration (`"1h"`, `"7d"`, `"30d"`); if explicitly set it also becomes the default outbound HTTP timeout for `ctx.http()` |
+| `public`               | flag         | `false`    | Allow start without authentication                  |
+| `require_role("name")` | `string`     | none       | Require role to start                               |
 
 ### Workflow Signatures
 
-A **signature** is derived automatically at compile time from the workflow's persisted contract: step keys, wait keys, timeout, and input/output types. The runtime stamps each run with the version and signature. On resume, the handler must match the exact version and signature the run was started with. If you add, remove, or rename steps, the signature changes — deploy a new `version` for the updated handler and mark the old version `deprecated` until its in-flight runs drain.
+A **signature** is derived automatically at compile time from the workflow's persisted contract: step keys, wait keys, timeout, and input/output types. The runtime stamps each run with the version and signature. On resume, the handler must match the exact version and signature the run was started with. If you add, remove, or rename steps, the signature changes — deploy a new `version` for the updated handler and set the old version to `status = "deprecated"` until its in-flight runs drain.
 
 ### Compile-Time Enforcement
 
@@ -478,6 +500,7 @@ Long-running singleton services with leader election.
 
 | Attribute          | Type         | Default   | Description                                |
 | ------------------ | ------------ | --------- | ------------------------------------------ |
+| `name = "..."`     | `string`     | fn name   | Override the registry name                 |
 | `leader_elected`   | `bool`       | `true`    | Single leader instance runs across cluster |
 | `restart_on_panic` | `bool`       | `true`    | Restart daemon if it panics                |
 | `timeout`          | `"duration"` | none      | Default outbound HTTP timeout for `ctx.http()` |
@@ -528,13 +551,16 @@ pub async fn metrics_aggregator(ctx: &DaemonContext) -> Result<()> {
 
 HTTP endpoints for external events with signature verification.
 
-| Attribute        | Type                    | Default  | Description                             |
-| ---------------- | ----------------------- | -------- | --------------------------------------- |
-| `path`           | `"string"`              | required | URL path (e.g., `"/webhooks/stripe"`)   |
-| `timeout`        | `"duration"`            | `"30s"`  | Request timeout; if explicitly set it also becomes the default outbound HTTP timeout for `ctx.http()` |
-| `signature`      | `WebhookSignature::...` | none     | Signature verification config           |
-| `idempotency`    | `"source:key"`          | none     | Idempotency key source                  |
-| `allow_unsigned` | flag                    | `false`  | Accept requests without valid signature |
+| Attribute              | Type                    | Default  | Description                             |
+| ---------------------- | ----------------------- | -------- | --------------------------------------- |
+| `name = "..."`         | `string`                | fn name  | Override the registry name              |
+| `description = "..."`  | `string`                | none     | Human-readable description              |
+| `path`                 | `"string"`              | required | URL path (e.g., `"/webhooks/stripe"`)   |
+| `timeout`              | `"duration"`            | `"30s"`  | Request timeout; if explicitly set it also becomes the default outbound HTTP timeout for `ctx.http()` |
+| `signature`            | `WebhookSignature::...` | none     | Signature verification config           |
+| `idempotency`          | `"source:key"`          | none     | Idempotency key source                  |
+| `allow_unsigned`       | flag                    | `false`  | Accept requests without valid signature |
+| `replay_window_secs`   | `u64`                   | `300`    | Maximum age of a valid signed request in seconds. Set to `0` to disable replay protection (not recommended). |
 
 ### Signature Verification
 
@@ -542,11 +568,12 @@ HTTP endpoints for external events with signature verification.
 signature = WebhookSignature::hmac_sha256("Header-Name", "SECRET_ENV_VAR")
 ```
 
-| Algorithm   | Function                                            |
-| ----------- | --------------------------------------------------- |
-| HMAC-SHA256 | `WebhookSignature::hmac_sha256(header, secret_env)` |
-| HMAC-SHA1   | `WebhookSignature::hmac_sha1(header, secret_env)`   |
-| HMAC-SHA512 | `WebhookSignature::hmac_sha512(header, secret_env)` |
+| Algorithm          | Function                                                    | Notes                                   |
+| ------------------ | ----------------------------------------------------------- | --------------------------------------- |
+| HMAC-SHA256        | `WebhookSignature::hmac_sha256(header, secret_env)`         | Generic HMAC-SHA256                     |
+| HMAC-SHA256-Base64 | `WebhookSignature::shopify_webhooks(secret_env)`            | Shopify convention; header auto-set     |
+| Ed25519            | `WebhookSignature::ed25519(header, secret_env)`             | Discord, Svix, and similar providers    |
+| Stripe             | `WebhookSignature::stripe_webhooks(secret_env)`             | Stripe's `Stripe-Signature` scheme; header auto-set |
 
 The secret is read from the environment variable at runtime.
 
@@ -569,11 +596,23 @@ Idempotency keys are stored for 24 hours by default. Duplicate requests return `
     idempotency = "header:X-GitHub-Delivery"
 )]
 
-// Stripe
+// Stripe (header auto-set to Stripe-Signature)
 #[forge::webhook(
     path = "/webhooks/stripe",
-    signature = WebhookSignature::hmac_sha256("Stripe-Signature", "STRIPE_WEBHOOK_SECRET"),
+    signature = WebhookSignature::stripe_webhooks("STRIPE_WEBHOOK_SECRET"),
     idempotency = "body:$.id"
+)]
+
+// Shopify (header auto-set to x-shopify-hmac-sha256)
+#[forge::webhook(
+    path = "/webhooks/shopify",
+    signature = WebhookSignature::shopify_webhooks("SHOPIFY_SECRET"),
+)]
+
+// Discord / Svix (Ed25519)
+#[forge::webhook(
+    path = "/webhooks/discord",
+    signature = WebhookSignature::ed25519("X-Signature-Ed25519", "DISCORD_PUBLIC_KEY"),
 )]
 
 // Generic

@@ -46,19 +46,16 @@ pub fn serve_embedded_assets<E: rust_embed::Embed + 'static>(
             return ([(header::CONTENT_TYPE, mime.as_ref())], content.data).into_response();
         }
 
-        // Flat pre-rendered SvelteKit page: /about → about.html
         let flat = format!("{}.html", path);
         if let Some(content) = E::get(&flat) {
             return ([(header::CONTENT_TYPE, "text/html")], content.data).into_response();
         }
 
-        // Nested pre-rendered page: /about → about/index.html
         let nested = format!("{}/index.html", path);
         if let Some(content) = E::get(&nested) {
             return ([(header::CONTENT_TYPE, "text/html")], content.data).into_response();
         }
 
-        // SPA fallback for client-side routes
         let fallback = E::get("200.html").or_else(|| E::get("index.html"));
         match fallback {
             Some(content) => ([(header::CONTENT_TYPE, "text/html")], content.data).into_response(),

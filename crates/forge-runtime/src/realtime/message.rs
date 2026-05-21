@@ -55,26 +55,16 @@ pub struct WorkflowStepData {
     pub error: Option<String>,
 }
 
-/// Message types for real-time communication.
+/// Server -> SSE-pipeline message envelope.
 ///
 /// `#[non_exhaustive]` so 1.0.x can add new variants without breaking
 /// downstream Rust matchers (forge-dioxus, custom integrations).
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum RealtimeMessage {
-    Subscribe {
-        id: String,
-        query: String,
-        args: serde_json::Value,
-    },
-    Unsubscribe {
-        subscription_id: SubscriptionId,
-    },
-    Ping,
-    Pong,
     Data {
         subscription_id: String,
-        data: serde_json::Value,
+        data: std::sync::Arc<serde_json::Value>,
     },
     DeltaUpdate {
         subscription_id: String,
@@ -88,34 +78,11 @@ pub enum RealtimeMessage {
         client_sub_id: String,
         workflow: WorkflowData,
     },
-    Error {
-        code: String,
-        message: String,
-    },
-    ErrorWithId {
-        id: String,
-        code: String,
-        message: String,
-    },
-    AuthSuccess,
     AuthFailed {
         reason: String,
     },
     /// Sent to slow clients before disconnecting them.
     Lagging,
-    /// Ephemeral pub-sub fan-out (forge_channels). The variant is reserved
-    /// for GA; the publish/subscribe pipeline lands in 1.0.x.
-    Channel {
-        channel: String,
-        payload: serde_json::Value,
-    },
-    /// Server detected a dropped or out-of-order delivery for a subscription
-    /// and asks the client to resync via `last-event-id`. Reserved for GA;
-    /// emission rules land in 1.0.x.
-    GapDetected {
-        client_sub_id: String,
-        last_event_id: Option<String>,
-    },
 }
 
 /// Per-session state with backpressure tracking.
@@ -132,12 +99,18 @@ struct SessionEntry {
     last_active: AtomicI64,
     /// Consecutive failed try_send attempts. Resets on success.
     consecutive_drops: AtomicU32,
+    /// Cumulative drops since connection. Never resets, so intermittently-slow
+    /// clients that drain just enough to avoid consecutive eviction still get
+    /// caught once total drops exceed the lifetime threshold.
+    total_drops: AtomicU32,
     /// JWT expiry as Unix timestamp. `None` for unauthenticated (anonymous) sessions.
     token_exp: Option<i64>,
 }
 
 /// Maximum consecutive drops before evicting a slow client.
 const MAX_CONSECUTIVE_DROPS: u32 = 10;
+/// Maximum lifetime drops before evicting an intermittently-slow client.
+const MAX_TOTAL_DROPS: u32 = 50;
 
 pub struct SessionServer {
     config: RealtimeConfig,
@@ -185,6 +158,7 @@ impl SessionServer {
             connected_at: now,
             last_active: AtomicI64::new(now.timestamp()),
             consecutive_drops: AtomicU32::new(0),
+            total_drops: AtomicU32::new(0),
             token_exp,
         };
         self.connections.insert(session_id, entry);
@@ -270,9 +244,9 @@ impl SessionServer {
                 Ok(())
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
-                let drops = conn.consecutive_drops.fetch_add(1, Ordering::Relaxed);
-                if drops >= MAX_CONSECUTIVE_DROPS {
-                    // Try to send lagging notification before evicting
+                let consecutive = conn.consecutive_drops.fetch_add(1, Ordering::Relaxed);
+                let total = conn.total_drops.fetch_add(1, Ordering::Relaxed);
+                if consecutive >= MAX_CONSECUTIVE_DROPS || total >= MAX_TOTAL_DROPS {
                     let _ = conn.sender.try_send(RealtimeMessage::Lagging);
                     drop(conn);
                     self.evict_session(session_id);
@@ -305,7 +279,7 @@ impl SessionServer {
         sender
             .send(message)
             .await
-            .map_err(|_| forge_core::ForgeError::Internal("Failed to send message".to_string()))
+            .map_err(|_| forge_core::ForgeError::internal("Failed to send message"))
     }
 
     /// Send a delta to all sessions subscribed to a subscription.
@@ -358,7 +332,7 @@ impl SessionServer {
     /// Cleanup stale connections.
     pub fn cleanup_stale(&self, max_idle: Duration) {
         let cutoff_ts = (chrono::Utc::now()
-            - chrono::Duration::from_std(max_idle).unwrap_or(chrono::TimeDelta::MAX))
+            - chrono::Duration::from_std(max_idle).unwrap_or(chrono::Duration::days(30)))
         .timestamp();
 
         let stale: Vec<(SessionId, chrono::DateTime<chrono::Utc>)> = self
@@ -381,6 +355,44 @@ impl SessionServer {
         for (session_id, _) in stale {
             self.remove_connection(session_id);
         }
+    }
+
+    /// Evict sessions whose JWT has expired. Sends an auth error event to each
+    /// so the client knows to re-authenticate rather than just reconnecting.
+    ///
+    /// Returns the session IDs that were evicted so callers can immediately
+    /// clean up associated subscription state (query groups, job/workflow
+    /// subscriptions) without waiting for the SSE bridge task to notice the
+    /// closed channel.
+    pub fn cleanup_expired_tokens(&self) -> Vec<SessionId> {
+        let now = chrono::Utc::now().timestamp();
+
+        let expired: Vec<SessionId> = self
+            .connections
+            .iter()
+            .filter(|entry| entry.token_exp.is_some_and(|exp| exp < now))
+            .map(|entry| *entry.key())
+            .collect();
+
+        if expired.is_empty() {
+            return Vec::new();
+        }
+
+        tracing::debug!(
+            count = expired.len(),
+            "Evicting sessions with expired tokens"
+        );
+
+        for &session_id in &expired {
+            if let Some(conn) = self.connections.get(&session_id) {
+                let _ = conn.sender.try_send(RealtimeMessage::AuthFailed {
+                    reason: "Token expired".to_string(),
+                });
+            }
+            self.evict_session(session_id);
+        }
+
+        expired
     }
 }
 
@@ -492,11 +504,11 @@ mod tests {
         server.register_connection(session_id, tx, None);
 
         // First send should succeed
-        let result = server.try_send_to_session(session_id, RealtimeMessage::Ping);
+        let result = server.try_send_to_session(session_id, RealtimeMessage::Lagging);
         assert!(result.is_ok());
 
         // Second send to full buffer should return Full
-        let result = server.try_send_to_session(session_id, RealtimeMessage::Ping);
+        let result = server.try_send_to_session(session_id, RealtimeMessage::Lagging);
         assert!(matches!(result, Err(SendError::Full)));
     }
 
@@ -532,7 +544,7 @@ mod tests {
         server.register_connection(session_id, tx, Some(1));
         assert_eq!(server.connection_count(), 1);
 
-        let result = server.try_send_to_session(session_id, RealtimeMessage::Ping);
+        let result = server.try_send_to_session(session_id, RealtimeMessage::Lagging);
 
         assert!(matches!(result, Err(SendError::TokenExpired)));
         // Session evicted — no longer tracked
@@ -550,9 +562,325 @@ mod tests {
         let future_exp = chrono::Utc::now().timestamp() + 3600;
         server.register_connection(session_id, tx, Some(future_exp));
 
-        let result = server.try_send_to_session(session_id, RealtimeMessage::Ping);
+        let result = server.try_send_to_session(session_id, RealtimeMessage::Lagging);
 
         assert!(result.is_ok());
         assert_eq!(server.connection_count(), 1);
+    }
+
+    #[test]
+    fn try_send_to_missing_session_returns_not_found() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+        let result = server.try_send_to_session(SessionId::new(), RealtimeMessage::Lagging);
+        assert!(matches!(result, Err(SendError::SessionNotFound)));
+    }
+
+    #[test]
+    fn try_send_to_closed_sender_returns_closed_and_evicts() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+        let session_id = SessionId::new();
+        let (tx, rx) = mpsc::channel(1);
+
+        server.register_connection(session_id, tx, None);
+        drop(rx);
+
+        let result = server.try_send_to_session(session_id, RealtimeMessage::Lagging);
+        assert!(matches!(result, Err(SendError::Closed)));
+        assert_eq!(server.connection_count(), 0);
+    }
+
+    #[test]
+    fn backpressure_evicts_after_max_consecutive_drops() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+        let session_id = SessionId::new();
+        // Buffer of 1: one send succeeds, all subsequent attempts return Full.
+        let (tx, _rx) = mpsc::channel(1);
+        server.register_connection(session_id, tx, None);
+
+        // Fill the buffer.
+        assert!(
+            server
+                .try_send_to_session(session_id, RealtimeMessage::Lagging)
+                .is_ok()
+        );
+
+        // First MAX_CONSECUTIVE_DROPS Full results don't evict.
+        for _ in 0..MAX_CONSECUTIVE_DROPS {
+            let r = server.try_send_to_session(session_id, RealtimeMessage::Lagging);
+            assert!(matches!(r, Err(SendError::Full)));
+        }
+        assert_eq!(server.connection_count(), 1);
+
+        // The next Full crosses the threshold and evicts.
+        let r = server.try_send_to_session(session_id, RealtimeMessage::Lagging);
+        assert!(matches!(r, Err(SendError::Evicted)));
+        assert_eq!(server.connection_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn drop_counter_resets_on_successful_send() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+        let session_id = SessionId::new();
+        let (tx, mut rx) = mpsc::channel(1);
+        server.register_connection(session_id, tx, None);
+
+        // Fill, then accumulate Full errors short of the threshold.
+        assert!(
+            server
+                .try_send_to_session(session_id, RealtimeMessage::Lagging)
+                .is_ok()
+        );
+        for _ in 0..(MAX_CONSECUTIVE_DROPS - 1) {
+            assert!(matches!(
+                server.try_send_to_session(session_id, RealtimeMessage::Lagging),
+                Err(SendError::Full)
+            ));
+        }
+
+        // Drain so the next send succeeds and resets the counter.
+        let _ = rx.recv().await;
+        assert!(
+            server
+                .try_send_to_session(session_id, RealtimeMessage::Lagging)
+                .is_ok()
+        );
+
+        // The counter reset, so we can now absorb a fresh batch of Full errors
+        // without being evicted.
+        for _ in 0..MAX_CONSECUTIVE_DROPS {
+            assert!(matches!(
+                server.try_send_to_session(session_id, RealtimeMessage::Lagging),
+                Err(SendError::Full)
+            ));
+        }
+        assert_eq!(server.connection_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn total_drops_evicts_intermittently_slow_client() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+        let session_id = SessionId::new();
+        let (tx, mut rx) = mpsc::channel(1);
+        server.register_connection(session_id, tx, None);
+
+        // Simulate an intermittently-slow client: accumulate drops just under
+        // the consecutive threshold, then drain and succeed to reset the
+        // consecutive counter. Repeat until total_drops crosses the lifetime
+        // threshold.
+        let batches_needed = MAX_TOTAL_DROPS / (MAX_CONSECUTIVE_DROPS - 1) + 1;
+        for batch in 0..batches_needed {
+            assert!(
+                server
+                    .try_send_to_session(session_id, RealtimeMessage::Lagging)
+                    .is_ok(),
+                "batch {batch}: initial send should succeed"
+            );
+
+            for _ in 0..(MAX_CONSECUTIVE_DROPS - 1) {
+                let r = server.try_send_to_session(session_id, RealtimeMessage::Lagging);
+                match r {
+                    Err(SendError::Full) => {}
+                    Err(SendError::Evicted) => {
+                        assert_eq!(server.connection_count(), 0);
+                        return;
+                    }
+                    other => panic!("unexpected result in batch {batch}: {other:?}"),
+                }
+            }
+
+            // Drain the buffer so the next batch's initial send can succeed,
+            // resetting the consecutive counter but leaving total_drops to grow.
+            let _ = rx.recv().await;
+        }
+        panic!("session should have been evicted by total_drops");
+    }
+
+    #[test]
+    fn remove_connection_purges_subscription_mappings() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+        let session_id = SessionId::new();
+        let sub_a = SubscriptionId::new();
+        let sub_b = SubscriptionId::new();
+        let (tx, _rx) = mpsc::channel(8);
+
+        server.register_connection(session_id, tx, None);
+        server.add_subscription(session_id, sub_a).unwrap();
+        server.add_subscription(session_id, sub_b).unwrap();
+        assert_eq!(server.subscription_count(), 2);
+
+        let removed = server.remove_connection(session_id).unwrap();
+        assert_eq!(removed.len(), 2);
+        assert_eq!(server.subscription_count(), 0);
+        // The reverse map is fully cleared.
+        assert!(server.remove_connection(session_id).is_none());
+    }
+
+    #[test]
+    fn add_subscription_to_unknown_session_errors() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+        let result = server.add_subscription(SessionId::new(), SubscriptionId::new());
+        assert!(result.is_err());
+        assert_eq!(server.subscription_count(), 0);
+    }
+
+    #[test]
+    fn remove_unknown_subscription_is_noop() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+        // No panic, no state change.
+        server.remove_subscription(SubscriptionId::new());
+        assert_eq!(server.subscription_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn broadcast_delta_routes_to_subscribed_session() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+        let session_id = SessionId::new();
+        let sub_id = SubscriptionId::new();
+        let (tx, mut rx) = mpsc::channel(8);
+
+        server.register_connection(session_id, tx, None);
+        server.add_subscription(session_id, sub_id).unwrap();
+
+        let mut delta = Delta::empty();
+        delta.added.push(serde_json::json!({"hello": "world"}));
+        server.broadcast_delta(sub_id, delta).await.unwrap();
+
+        match rx.recv().await {
+            Some(RealtimeMessage::DeltaUpdate {
+                subscription_id, ..
+            }) => {
+                assert_eq!(subscription_id, sub_id.to_string());
+            }
+            other => panic!("expected DeltaUpdate, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn broadcast_delta_without_subscription_is_noop() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+        // No matching subscription -> Ok(()) and no panic.
+        let result = server
+            .broadcast_delta(SubscriptionId::new(), Delta::empty())
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn send_to_session_delivers_message() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+        let session_id = SessionId::new();
+        let (tx, mut rx) = mpsc::channel(8);
+        server.register_connection(session_id, tx, None);
+
+        server
+            .send_to_session(
+                session_id,
+                RealtimeMessage::AuthFailed {
+                    reason: "test".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        match rx.recv().await {
+            Some(RealtimeMessage::AuthFailed { reason }) => assert_eq!(reason, "test"),
+            other => panic!("expected AuthFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_to_unknown_session_errors() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+        let result = server
+            .send_to_session(SessionId::new(), RealtimeMessage::Lagging)
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cleanup_stale_evicts_only_idle_sessions() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+
+        let idle = SessionId::new();
+        let active = SessionId::new();
+        let (tx1, _rx1) = mpsc::channel(8);
+        let (tx2, _rx2) = mpsc::channel(8);
+
+        // Both registered "now"; we'll then backdate `idle.last_active` so it
+        // crosses the cleanup cutoff.
+        server.register_connection(idle, tx1, None);
+        server.register_connection(active, tx2, None);
+
+        // Reach into the entry and rewrite last_active to two hours ago.
+        let two_hours_ago = chrono::Utc::now().timestamp() - 7200;
+        {
+            let entry = server.connections.get(&idle).unwrap();
+            entry.last_active.store(two_hours_ago, Ordering::Relaxed);
+        }
+
+        // Cutoff = now - 1 hour. `idle` (-2h) is stale; `active` (now) is fresh.
+        server.cleanup_stale(Duration::from_secs(3600));
+
+        assert_eq!(server.connection_count(), 1);
+        assert!(server.connections.contains_key(&active));
+        assert!(!server.connections.contains_key(&idle));
+    }
+
+    #[test]
+    fn cleanup_expired_tokens_evicts_and_notifies() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+
+        let expired = SessionId::new();
+        let valid = SessionId::new();
+        let (tx_expired, mut rx_expired) = mpsc::channel(8);
+        let (tx_valid, _rx_valid) = mpsc::channel(8);
+
+        // Token expired one second after the Unix epoch (clearly in the past).
+        server.register_connection(expired, tx_expired, Some(1));
+        // Token good for another hour.
+        server.register_connection(valid, tx_valid, Some(chrono::Utc::now().timestamp() + 3600));
+
+        let evicted = server.cleanup_expired_tokens();
+
+        // Only the expired session was evicted.
+        assert_eq!(server.connection_count(), 1);
+        assert!(server.connections.contains_key(&valid));
+        // Returned list contains exactly the evicted session.
+        assert_eq!(evicted, vec![expired]);
+
+        // The expired client received an AuthFailed notification before eviction.
+        match rx_expired.try_recv() {
+            Ok(RealtimeMessage::AuthFailed { reason }) => {
+                assert!(reason.contains("expired"), "unexpected reason: {reason}");
+            }
+            other => panic!("expected AuthFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cleanup_expired_tokens_skips_unauthenticated_sessions() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+        let session_id = SessionId::new();
+        let (tx, _rx) = mpsc::channel(8);
+        server.register_connection(session_id, tx, None);
+
+        let evicted = server.cleanup_expired_tokens();
+
+        assert_eq!(server.connection_count(), 1);
+        assert!(evicted.is_empty());
+    }
+
+    #[test]
+    fn cleanup_expired_tokens_returns_empty_when_nothing_expired() {
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+        let session_id = SessionId::new();
+        let (tx, _rx) = mpsc::channel(8);
+        // Token good for another hour — nothing should expire.
+        server.register_connection(session_id, tx, Some(chrono::Utc::now().timestamp() + 3600));
+
+        let evicted = server.cleanup_expired_tokens();
+
+        assert_eq!(server.connection_count(), 1);
+        assert!(evicted.is_empty());
     }
 }
