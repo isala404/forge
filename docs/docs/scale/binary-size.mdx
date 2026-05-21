@@ -15,7 +15,7 @@ need.
 ```toml
 # Cargo.toml — worker-only binary (no HTTP)
 [dependencies]
-forge = { version = "0.9", default-features = false, features = ["worker"] }
+forge = { version = "0.10.0", default-features = false, features = ["worker"] }
 ```
 
 | Preset    | What's included                                              | When to use                          |
@@ -42,7 +42,7 @@ If the presets don't fit, compose your own from primitives:
 Example:
 
 ```toml
-forge = { version = "0.9", default-features = false, features = ["gateway", "jobs", "otel"] }
+forge = { version = "0.10.0", default-features = false, features = ["gateway", "jobs", "otel"] }
 ```
 
 ## What you save
@@ -67,7 +67,7 @@ The `db_ip` crate behind the `geoip` feature downloads its database at
 build time. If your CI lacks network access, disable `geoip`:
 
 ```toml
-forge = { version = "0.9", default-features = false, features = [
+forge = { version = "0.10.0", default-features = false, features = [
     "gateway", "jobs", "workflows", "cron", "daemons", "otel"
 ] }
 ```
