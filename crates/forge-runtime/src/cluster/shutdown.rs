@@ -320,7 +320,11 @@ mod tests {
         assert!(!sd.should_accept_work(), "no new work after flag set");
 
         drop(guard);
-        assert_eq!(sd.in_flight_count(), 0, "RAII drop must decrement even mid-shutdown");
+        assert_eq!(
+            sd.in_flight_count(),
+            0,
+            "RAII drop must decrement even mid-shutdown"
+        );
     }
 
     #[tokio::test]

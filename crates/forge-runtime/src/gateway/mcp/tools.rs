@@ -1,15 +1,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Json;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::Response;
-use axum::Json;
 use forge_core::function::{AuthContext, RequestMetadata};
 use forge_core::mcp::McpToolContext;
 use serde_json::Value;
 
-use super::{DEFAULT_PAGE_SIZE, json_rpc_error, json_rpc_success, McpState};
+use super::{DEFAULT_PAGE_SIZE, McpState, json_rpc_error, json_rpc_success};
 use crate::function::FunctionRouter;
 
 /// Handle `tools/list` — unauthenticated by MCP protocol design.

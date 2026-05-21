@@ -19,11 +19,10 @@ mod telemetry;
 pub use db::{extract_table_name, instrumented_query, record_pool_metrics, record_query_duration};
 #[cfg(feature = "otel")]
 pub use metrics::{
-    ActiveConnectionsGauge, FnCacheMetrics, FnMetrics, HttpMetrics, JobMetrics,
-    NotifyMetrics, SubscriptionMetrics, WorkflowSchedulerMetrics,
-    record_fn_cache, record_fn_execution, record_http_request, record_job_execution,
-    record_lost_claim, record_notify_payload_bytes, record_subscription_counts,
-    record_workflow_scheduler_duration, set_active_connections,
+    ActiveConnectionsGauge, FnCacheMetrics, FnMetrics, HttpMetrics, JobMetrics, NotifyMetrics,
+    SubscriptionMetrics, WorkflowSchedulerMetrics, record_fn_cache, record_fn_execution,
+    record_http_request, record_job_execution, record_lost_claim, record_notify_payload_bytes,
+    record_subscription_counts, record_workflow_scheduler_duration, set_active_connections,
 };
 #[cfg(feature = "otel")]
 pub use telemetry::{

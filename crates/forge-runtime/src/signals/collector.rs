@@ -58,9 +58,14 @@ impl SignalsCollector {
         match self.tx.try_send(event) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_)) => {
-                let prev = self.dropped_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let prev = self
+                    .dropped_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if prev.is_multiple_of(1000) {
-                    warn!(dropped = prev + 1, "signals collector channel full, dropping events");
+                    warn!(
+                        dropped = prev + 1,
+                        "signals collector channel full, dropping events"
+                    );
                 }
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -71,7 +76,8 @@ impl SignalsCollector {
 
     /// Returns the total number of dropped events since this collector was created.
     pub fn dropped_count(&self) -> u64 {
-        self.dropped_count.load(std::sync::atomic::Ordering::Relaxed)
+        self.dropped_count
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Flush buffered events and wait for the background task to drain.
@@ -318,8 +324,7 @@ mod unit_tests {
         // No events sent => flush_loop's shutdown branch drains an empty rx
         // and skips flush_batch entirely — should complete well under the 5s
         // internal timeout.
-        let collector =
-            SignalsCollector::spawn(lazy_pool(), 100, Duration::from_secs(60), 100);
+        let collector = SignalsCollector::spawn(lazy_pool(), 100, Duration::from_secs(60), 100);
 
         let start = std::time::Instant::now();
         tokio::time::timeout(Duration::from_secs(1), collector.shutdown())
@@ -337,8 +342,7 @@ mod unit_tests {
         // Second shutdown sees the oneshot already taken and returns
         // immediately — calling shutdown from both a signal handler and Drop
         // must not panic or hang.
-        let collector =
-            SignalsCollector::spawn(lazy_pool(), 100, Duration::from_secs(60), 100);
+        let collector = SignalsCollector::spawn(lazy_pool(), 100, Duration::from_secs(60), 100);
         collector.shutdown().await;
         tokio::time::timeout(Duration::from_millis(100), collector.shutdown())
             .await
@@ -349,8 +353,7 @@ mod unit_tests {
     async fn try_send_after_shutdown_is_silent_noop() {
         // try_send must not panic when the receiver side has dropped (closed
         // channel). The drop happens implicitly when flush_loop exits.
-        let collector =
-            SignalsCollector::spawn(lazy_pool(), 100, Duration::from_secs(60), 100);
+        let collector = SignalsCollector::spawn(lazy_pool(), 100, Duration::from_secs(60), 100);
         collector.shutdown().await;
 
         // Give the spawned task a moment to release the rx.
@@ -373,8 +376,7 @@ mod unit_tests {
         // Clone shares the tx + shutdown_tx Arc. Shutting down via one clone
         // takes the shared oneshot so any other clone's shutdown is a no-op,
         // confirming both share the same flush-loop ownership.
-        let collector =
-            SignalsCollector::spawn(lazy_pool(), 100, Duration::from_secs(60), 100);
+        let collector = SignalsCollector::spawn(lazy_pool(), 100, Duration::from_secs(60), 100);
         let cloned = collector.clone();
         collector.shutdown().await;
         tokio::time::timeout(Duration::from_millis(100), cloned.shutdown())

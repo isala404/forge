@@ -1300,16 +1300,15 @@ impl MutationContext {
         }
 
         let args_json = serde_json::to_value(args)?;
-        let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::internal("Job dispatch not available")
-        })?;
+        let dispatcher = self
+            .job_dispatch
+            .as_ref()
+            .ok_or_else(|| crate::error::ForgeError::internal("Job dispatch not available"))?;
 
         if let Some(tx) = &self.tx {
             let mut guard = tx.lock().await;
             let conn = guard.as_mut().ok_or_else(|| {
-                crate::error::ForgeError::internal(
-                    "Transaction already taken; cannot dispatch job",
-                )
+                crate::error::ForgeError::internal("Transaction already taken; cannot dispatch job")
             })?;
             return dispatcher
                 .dispatch_in_conn(
@@ -1359,16 +1358,15 @@ impl MutationContext {
         }
 
         let args_json = serde_json::to_value(args)?;
-        let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::internal("Job dispatch not available")
-        })?;
+        let dispatcher = self
+            .job_dispatch
+            .as_ref()
+            .ok_or_else(|| crate::error::ForgeError::internal("Job dispatch not available"))?;
 
         if let Some(tx) = &self.tx {
             let mut guard = tx.lock().await;
             let conn = guard.as_mut().ok_or_else(|| {
-                crate::error::ForgeError::internal(
-                    "Transaction already taken; cannot dispatch job",
-                )
+                crate::error::ForgeError::internal("Transaction already taken; cannot dispatch job")
             })?;
             return dispatcher
                 .dispatch_in_conn_at(
@@ -1408,9 +1406,8 @@ impl MutationContext {
         delay: Duration,
     ) -> crate::error::Result<Uuid> {
         let scheduled_at = Utc::now()
-            + chrono::Duration::from_std(delay).map_err(|_| {
-                crate::error::ForgeError::InvalidArgument("delay too large".into())
-            })?;
+            + chrono::Duration::from_std(delay)
+                .map_err(|_| crate::error::ForgeError::InvalidArgument("delay too large".into()))?;
         self.dispatch_job_at(job_type, args, scheduled_at).await
     }
 
@@ -1445,9 +1442,10 @@ impl MutationContext {
         job_id: Uuid,
         reason: Option<String>,
     ) -> crate::error::Result<bool> {
-        let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::internal("Job dispatch not available")
-        })?;
+        let dispatcher = self
+            .job_dispatch
+            .as_ref()
+            .ok_or_else(|| crate::error::ForgeError::internal("Job dispatch not available"))?;
         dispatcher.cancel(job_id, reason).await
     }
 
@@ -1463,9 +1461,10 @@ impl MutationContext {
         input: T,
     ) -> crate::error::Result<Uuid> {
         let input_json = serde_json::to_value(input)?;
-        let dispatcher = self.workflow_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::internal("Workflow dispatch not available")
-        })?;
+        let dispatcher = self
+            .workflow_dispatch
+            .as_ref()
+            .ok_or_else(|| crate::error::ForgeError::internal("Workflow dispatch not available"))?;
 
         let trace_id = Some(self.request.trace_id().to_string());
 
@@ -1504,7 +1503,6 @@ impl MutationContext {
         input: W::Input,
     ) -> crate::error::Result<Uuid> {
         self.start_workflow(W::info().name, input).await
-
     }
 }
 

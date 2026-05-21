@@ -86,11 +86,12 @@ gateway = [
 # Background job queue and worker.
 jobs = ["forge-runtime/jobs"]
 
-# Durable workflow executor.
-workflows = ["forge-runtime/workflows"]
+# Durable workflow executor. Depends on `jobs` because workflow steps
+# resume via job dispatch.
+workflows = ["jobs", "forge-runtime/workflows"]
 
-# Cron scheduler.
-cron = ["forge-runtime/cron"]
+# Cron scheduler. Depends on `jobs` because scheduled runs dispatch as jobs.
+cron = ["jobs", "forge-runtime/cron"]
 
 # Long-running daemon runner.
 daemons = ["forge-runtime/daemons"]

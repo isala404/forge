@@ -179,9 +179,7 @@ impl WorkflowRegistry {
             .get_version(name, version)
             .ok_or(ResumeBlockReason::MissingVersion)?;
 
-        if self.signature_check == SignatureCheckMode::Strict
-            && entry.info.signature != signature
-        {
+        if self.signature_check == SignatureCheckMode::Strict && entry.info.signature != signature {
             return Err(ResumeBlockReason::SignatureMismatch {
                 expected: signature.to_string(),
                 actual: entry.info.signature.to_string(),

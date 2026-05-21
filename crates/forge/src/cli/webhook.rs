@@ -88,7 +88,8 @@ async fn replay(args: ReplayArgs) -> Result<()> {
         None => {
             println!(
                 "Webhook event found (status: {status}) but raw body was not stored. \
-                 Only events processed after v011 migration have replay data."
+                 Replay data is only available for events captured by a runtime that \
+                 stores raw_body/raw_headers."
             );
             return Ok(());
         }
@@ -133,11 +134,10 @@ async fn replay(args: ReplayArgs) -> Result<()> {
         }
     }
 
-    let response = request
-        .body(body)
-        .send()
-        .await
-        .map_err(|e| forge_core::ForgeError::internal_with("Failed to send replay request", e))?;
+    let response =
+        request.body(body).send().await.map_err(|e| {
+            forge_core::ForgeError::internal_with("Failed to send replay request", e)
+        })?;
 
     let status_code = response.status();
     let reason = status_code.canonical_reason().unwrap_or_default();
@@ -160,33 +160,34 @@ async fn list(args: ListArgs) -> Result<()> {
         .await
         .map_err(forge_core::ForgeError::Database)?;
 
-    let rows: Vec<(String, String, String, chrono::DateTime<chrono::Utc>, bool)> = if let Some(ref name) = args.name {
-        sqlx::query_as(
-            "SELECT webhook_name, idempotency_key, status, processed_at, \
+    let rows: Vec<(String, String, String, chrono::DateTime<chrono::Utc>, bool)> =
+        if let Some(ref name) = args.name {
+            sqlx::query_as(
+                "SELECT webhook_name, idempotency_key, status, processed_at, \
                     raw_body IS NOT NULL as has_body \
              FROM forge_webhook_events \
              WHERE webhook_name = $1 \
              ORDER BY processed_at DESC \
              LIMIT $2",
-        )
-        .bind(name)
-        .bind(args.limit)
-        .fetch_all(&pool)
-        .await
-        .map_err(forge_core::ForgeError::Database)?
-    } else {
-        sqlx::query_as(
-            "SELECT webhook_name, idempotency_key, status, processed_at, \
+            )
+            .bind(name)
+            .bind(args.limit)
+            .fetch_all(&pool)
+            .await
+            .map_err(forge_core::ForgeError::Database)?
+        } else {
+            sqlx::query_as(
+                "SELECT webhook_name, idempotency_key, status, processed_at, \
                     raw_body IS NOT NULL as has_body \
              FROM forge_webhook_events \
              ORDER BY processed_at DESC \
              LIMIT $1",
-        )
-        .bind(args.limit)
-        .fetch_all(&pool)
-        .await
-        .map_err(forge_core::ForgeError::Database)?
-    };
+            )
+            .bind(args.limit)
+            .fetch_all(&pool)
+            .await
+            .map_err(forge_core::ForgeError::Database)?
+        };
 
     if rows.is_empty() {
         println!("No webhook events found.");
@@ -202,7 +203,11 @@ async fn list(args: ListArgs) -> Result<()> {
         println!(
             "{:<20} {:<30} {:<10} {:<24} {}",
             webhook,
-            if key.len() > 28 { key.get(..28).unwrap_or_default() } else { key.as_str() },
+            if key.len() > 28 {
+                key.get(..28).unwrap_or_default()
+            } else {
+                key.as_str()
+            },
             status,
             processed_at.format("%Y-%m-%d %H:%M:%S UTC"),
             replay

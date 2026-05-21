@@ -1005,13 +1005,8 @@ impl Reactor {
                     let job_ids: Vec<Uuid> = subs.keys().copied().collect();
                     drop(subs);
                     for job_id in job_ids {
-                        Self::handle_job_change(
-                            job_id,
-                            job_subscriptions,
-                            session_server,
-                            db_pool,
-                        )
-                        .await;
+                        Self::handle_job_change(job_id, job_subscriptions, session_server, db_pool)
+                            .await;
                     }
                 }
                 return;

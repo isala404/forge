@@ -202,12 +202,10 @@ impl AuthConfig {
         ];
         for (name, val) in &indicators {
             if val.is_some() {
-                return Err(forge_core::ForgeError::config(
-                    format!(
-                        "AuthConfig::dev_mode() refused: {name} is set, indicating a production \
+                return Err(forge_core::ForgeError::config(format!(
+                    "AuthConfig::dev_mode() refused: {name} is set, indicating a production \
                          environment. Configure a real jwt_secret or jwks_url instead."
-                    ),
-                ));
+                )));
             }
         }
         Ok(Self {
@@ -490,7 +488,8 @@ impl AuthMiddleware {
         const MAX_CACHE_SIZE: usize = 10_000;
         if self.token_cache.len() > MAX_CACHE_SIZE {
             let now = std::time::Instant::now();
-            self.token_cache.retain(|_, (_, expires_at)| *expires_at > now);
+            self.token_cache
+                .retain(|_, (_, expires_at)| *expires_at > now);
         }
     }
 
@@ -1051,10 +1050,7 @@ mod tests {
     fn test_coarsen_ip_masks_correctly() {
         assert_eq!(coarsen_ip("192.168.1.42"), "192.168.1");
         assert_eq!(coarsen_ip("10.0.0.1"), "10.0.0");
-        assert_eq!(
-            coarsen_ip("2001:db8:85a3::8a2e:370:7334"),
-            "2001:db8:85a3"
-        );
+        assert_eq!(coarsen_ip("2001:db8:85a3::8a2e:370:7334"), "2001:db8:85a3");
         assert_eq!(coarsen_ip("not-an-ip"), "");
     }
 
@@ -1347,10 +1343,7 @@ mod tests {
             verify_session_cookie(&tampered, "session-secret", ip, ua),
             None
         );
-        assert_eq!(
-            verify_session_cookie(&cookie, "wrong-secret", ip, ua),
-            None
-        );
+        assert_eq!(verify_session_cookie(&cookie, "wrong-secret", ip, ua), None);
     }
 
     #[cfg(feature = "mcp-oauth")]

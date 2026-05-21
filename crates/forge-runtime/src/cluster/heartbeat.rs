@@ -224,9 +224,8 @@ impl HeartbeatLoop {
     /// was terminated or the connection became broken.
     async fn heartbeat_conn(
         &self,
-    ) -> forge_core::Result<
-        tokio::sync::MutexGuard<'_, sqlx::pool::PoolConnection<sqlx::Postgres>>,
-    > {
+    ) -> forge_core::Result<tokio::sync::MutexGuard<'_, sqlx::pool::PoolConnection<sqlx::Postgres>>>
+    {
         use sqlx::Connection as _;
         let mut guard = self.heartbeat_conn.lock().await;
         if guard.ping().await.is_err() {

@@ -189,25 +189,21 @@ pub fn every_to_cron(s: &str) -> Result<String, String> {
     // Reject sub-minute units before numeric parsing. "ms" must be checked
     // first so that "500ms" doesn't also match the bare-'s' arm.
     if s.ends_with("ms") {
-        return Err(
-            "cron minimum granularity is 1 minute; use \"1m\" or higher".to_string(),
-        );
+        return Err("cron minimum granularity is 1 minute; use \"1m\" or higher".to_string());
     }
     if let Some(body) = s.strip_suffix('s') {
         // Only treat it as a seconds suffix when the body ends with a digit
         // (e.g. "30s"). Things like "hours" ending in 's' are caught by the
         // fallthrough error at the end.
         if body.chars().last().is_some_and(|c| c.is_ascii_digit()) {
-            return Err(
-                "cron minimum granularity is 1 minute; use \"1m\" or higher".to_string(),
-            );
+            return Err("cron minimum granularity is 1 minute; use \"1m\" or higher".to_string());
         }
     }
 
     if let Some(num_str) = s.strip_suffix('m') {
-        let n: u64 = num_str
-            .parse()
-            .map_err(|_| format!("invalid duration \"{s}\": expected a positive integer before 'm'"))?;
+        let n: u64 = num_str.parse().map_err(|_| {
+            format!("invalid duration \"{s}\": expected a positive integer before 'm'")
+        })?;
         if n == 0 {
             return Err(format!("invalid duration \"{s}\": value must be >= 1"));
         }
@@ -223,9 +219,9 @@ pub fn every_to_cron(s: &str) -> Result<String, String> {
     }
 
     if let Some(num_str) = s.strip_suffix('h') {
-        let n: u64 = num_str
-            .parse()
-            .map_err(|_| format!("invalid duration \"{s}\": expected a positive integer before 'h'"))?;
+        let n: u64 = num_str.parse().map_err(|_| {
+            format!("invalid duration \"{s}\": expected a positive integer before 'h'")
+        })?;
         if n == 0 {
             return Err(format!("invalid duration \"{s}\": value must be >= 1"));
         }
@@ -503,8 +499,8 @@ mod tests {
         // is_primitive_arg_type accepts — keeps the list and the test in
         // lockstep if either drifts.
         let scalars = [
-            "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128",
-            "usize", "f32", "f64", "bool", "char", "String", "Uuid",
+            "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize",
+            "f32", "f64", "bool", "char", "String", "Uuid",
         ];
         for s in scalars {
             assert!(

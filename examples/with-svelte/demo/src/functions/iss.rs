@@ -68,7 +68,10 @@ pub async fn iss_location(ctx: &CronContext) -> Result<()> {
         .map_err(|e| ForgeError::internal(format!("HTTP request failed: {}", e)))?;
 
     if !response.status().is_success() {
-        tracing::error!(status = response.status().as_u16(), "Failed to fetch ISS location");
+        tracing::error!(
+            status = response.status().as_u16(),
+            "Failed to fetch ISS location"
+        );
         return Err(ForgeError::internal("Failed to fetch ISS location"));
     }
 

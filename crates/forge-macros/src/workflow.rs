@@ -564,8 +564,18 @@ pub fn workflow_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     // signature. This surfaces in `cargo expand` so developers can see exactly
     // which step/wait names are locked in, making rename-induced mismatches
     // visible before they reach production.
-    let step_keys_display = contract_extractor.step_keys.iter().cloned().collect::<Vec<_>>().join(", ");
-    let wait_keys_display = contract_extractor.wait_keys.iter().cloned().collect::<Vec<_>>().join(", ");
+    let step_keys_display = contract_extractor
+        .step_keys
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let wait_keys_display = contract_extractor
+        .wait_keys
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
     let contract_doc = format!(
         " forge:contract steps=[{step_keys_display}] waits=[{wait_keys_display}] \
          timeout={timeout_secs}s input={input_type_str} output={output_type_str} — \

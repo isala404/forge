@@ -249,5 +249,4 @@ mod tests {
         ctx.set_http_timeout(None);
         let _ = ctx.http();
     }
-
 }

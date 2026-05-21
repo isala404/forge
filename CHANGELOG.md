@@ -7,30 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+This release collapses the runtime into a single-pool doctrine, unifies handler registration, overhauls reactivity, and hardens the security surface. Pre-1.0 policy applies: breaking changes are listed but no migration shims are kept.
+
 ### Added
 
-- **Cargo feature flags for runtime subsystems.** Forge subsystems are now opt-in via Cargo features. `forge-runtime` exposes `gateway`, `jobs`, `workflows`, `cron`, `daemons`, `geoip`, `otel`. The public `forge` crate composes them into presets: `full` (default — everything, transparent for existing apps), `worker` (background subsystems, no HTTP), `api` (gateway + OTel only), `minimal` (gateway only). Use `default-features = false` to opt into a slim build:
+- **Cargo feature flags for runtime subsystems.** Forge subsystems are opt-in via Cargo features. `forge-runtime` exposes `gateway`, `jobs`, `workflows`, `cron`, `daemons`, `geoip`, `otel`. The public `forge` crate composes them into presets: `full` (default), `worker`, `api`, `minimal`. Approximate cold-build savings on the demo template: `worker` -55%/-65% (compile/target), `api` -25%/-30%, `minimal` -65%/-75%.
   ```toml
-  forge = { version = "0.9", default-features = false, features = ["worker"] }
+  forge = { version = "0.10", default-features = false, features = ["worker"] }
   ```
-- **`release-fast` build profile.** Release-quality optimization without LTO or single-codegen-unit. Ideal for local smoke tests and ad-hoc benchmarks. Use with `cargo build --profile release-fast`.
-- **`docs/scale/binary-size.mdx`** and an updated `api.md` skill reference cover features, presets, and build-profile/linker tuning.
+- **`release-fast` build profile.** Release-quality optimization without LTO or single-codegen-unit. Use with `cargo build --profile release-fast`.
+- **Typed config with `${ENV_VAR}` / `${VAR-default}` substitution.** Per-section files under `forge-core/config/`. New `[workflow]`, `[cron]`, `[daemon]` sections drive poll intervals; `gateway.max_json_body_size` is now configurable.
+- **KV store primitive** (`ctx.kv`) backed by Postgres, with namespace isolation.
+- **Email primitive** (`ctx.email_sender`) for mutations.
+- **PgNotifyBus multiplexer.** One LISTEN connection multiplexes every notify channel; consumers subscribe in-process. Workflow wakeups and cache invalidations ride this bus.
+- **Cross-node cache invalidation** via the `forge_changes` broadcast channel; mutations invalidate cache by the intersection of read-set columns and written columns.
+- **Admin API** for operator workflow actions (cancel, force-abort) and queue tier observability. Phase 9-10 workflow cancel exposed at the gateway.
+- **Schema JSON emission** from the codegen pipeline; structural `syn::Type` walk (no string-based fallback) drives both TypeScript and Dioxus type mapping.
+- **`docs/`**: quick start, security model, production architecture, role resolver, tenant isolation, migrations, cluster setup, cargo features, admin API, health probes, workflow status, error catalog, reactivity, worker queue, MCP/OAuth, stability posture, pitfalls reference, observability profile, signals endpoint and frontend client API, testing framework, onboarding. Skill references kept in sync.
 
 ### Changed
 
-- **Dev profile slimmed.** `[profile.dev]` now uses `debug = "line-tables-only"`, `split-debuginfo = "unpacked"`, `codegen-units = 256`, and disables debug info on dependencies (`[profile.dev.package."*"] debug = false`). Cuts `target/` size and improves incremental rebuild latency.
-- **Observability is now a no-op stub when `otel` is disabled.** Call sites (`record_fn_execution`, `record_pool_metrics`, etc.) compile to nothing without the feature; `tracing-subscriber` still emits structured logs to stderr.
-- **GeoIP support is opt-in.** Disabling the `geoip` feature skips the build-time `db_ip` database download — unblocks builds in air-gapped environments and shaves several minutes off cold builds.
+- **Single-pool doctrine.** Removed `ForgePool` newtype. One primary pool plus optional read replicas (round-robin, health-checked) serves every workload — queries, mutations, jobs, cron, workflows, daemons, observability, signals. Workload isolation belongs at the worker level.
+- **Function registry unification.** `FunctionExecutor` folded into `FunctionRouter`; MCP and webhooks now dispatch through the same registry as queries and mutations. Eight `Auto*` inventory types collapsed into a single `AutoHandler`.
+- **Macro pipeline.** Attribute parsing moved to `darling` derives. Regex fallback in SQL table extraction replaced with a strict `sqlparser` walk (unparseable SQL is a compile error; explicit `tables(...)` is required when extraction is impossible). Compile-time wire-type validation on `#[query]`, `#[mutation]`, `#[mcp_tool]`. `register = false` opt-out for inventory auto-registration. Span info on every diagnostic.
+- **Migration runner** renamed to `forge_system_migrations`. Per-migration transactions, SHA-256 drift detection, bounded advisory lock acquire, non-transactional mode, `forge_validate_identifier` helper for dynamic SQL identifiers. Rollback dropped (forward-only).
+- **Workflow runtime.** `WorkflowStatus` simplified from 12 variants to 6 (with blocked statuses non-terminal). Step persistence is synchronous. Sub-job dispatch is atomic with job completion. Cron and workflows now run on the shared job worker pool. Leader-gated scheduler.
+- **Reactivity engine.** Invalidation engine and SSE session map moved from `RwLock` to `DashMap` with atomic counters; cross-shard deadlock removed; broadcast-lag triggers durable resync (with idempotency guard); PgListener tasks reconnect with exponential backoff; fan-out data wrapped in `Arc` to eliminate per-subscriber cloning.
+- **Mutation dispatch.** `OutboxBuffer` replaced with in-transaction dispatch in `MutationContext`. Transactional mutation timeout bound to `SET LOCAL statement_timeout`. Trace IDs propagate onto workflow runs.
+- **Auth attribute rename.** `#[query(public)]` / `#[query(unscoped)]` renamed to `auth` / `scope`. Compile-time scope check tracks all CTEs, rejects literal scope-column bindings, removes the `tables()` bypass, and detects pool delegation in private queries.
+- **Single signal endpoint** at `POST /_api/signal` (collapses three prior endpoints). Frontend signal clients updated.
+- **Password hashing** uses argon2id (replaces bcrypt).
+- **Dev profile** uses `debug = "line-tables-only"`, `split-debuginfo = "unpacked"`, `codegen-units = 256`, and disables debug info on dependencies.
+- **Observability** is a no-op stub when `otel` is disabled; structured logs still ship via `tracing-subscriber`.
+- **GeoIP** is opt-in; disabling the feature skips the build-time `db_ip` download.
+- **CI** enforces `cargo audit --deny warnings`, raw-SQL bash lint replaced with clippy `disallowed_methods`, sqlx cache integrity check, dioxus WASM built with `--release` in `forge test`, integration jobs gated on the guardrail jobs.
+- **Function registry** uses `ahash` for faster lookups. Mutation deps batched into a single `Arc` to cut per-request atomics.
+
+### Fixed
+
+- Mutation transactions could panic on commit because a lingering `Arc<Transaction>` clone in the context prevented `try_unwrap`. The context is dropped before commit/rollback on both paths.
+- Cron split-brain under leader failover. Stale claim reclaim is now safe; `change_log` trim race resolved; clock skew handled via DB clock.
+- DashMap cross-shard deadlock in the realtime fan-out path; `serialized_len` passed through to avoid re-serialization.
+- Job attempts counter is monotonic in stale reclaim.
+- Workflow event notify sends an empty payload (no payload-size limits hit).
+- Daemon failover uses a dedicated heartbeat connection; fan-out is isolated per node.
+- Shutdown broadcast, SSE task overhead, mock dispatch ordering, signal partition routing, and hash collisions in cache keys.
+- Error chains preserved through `ForgeError` (no more lossy `to_string()` rewrites in hot paths).
+- `to_snake_case` acronym handling produces idiomatic names; `pluralize` consolidated and `quiz` pluralization fixed.
 
 ### Removed
 
-- **`[realtime] change_tracking_row_threshold` config knob** (and its `adaptive_row_threshold` alias). The adaptive row-vs-table tracker that consumed this value was removed earlier in the v2 rewrite, leaving the field as a silent no-op. Operators who set it in `forge.toml` should delete the line.
+- `[realtime] change_tracking_row_threshold` config knob (and its `adaptive_row_threshold` alias).
+- `/rpc/batch` endpoint and matching config and docs.
+- `forge_leaders.term` fencing column and all dead fence-term SQL.
+- Signal `WebVital` and `Identify` event types (web-vitals were never wired correctly post-rewrite; identify was unused).
+- Legacy webhook signature schemes and unused JWT algorithm variants.
+- Row-level change tracking infrastructure.
+- `OutboxBuffer`, `LeaderGuard`, `IdempotencySource::parse` (Box::leak helper), `JobContext::set_saved` (redundant), `ForgePool` newtype, orphaned workflow readiness module.
+- `geoip` removed from default features.
+
+### Security
+
+- **JWT.** `alg=none` rejection with regression tests; algorithm-confusion test coverage. Issued JWTs stamped with `kid` header, validation routed through it. New `jwks_require_kid` config to guard against key-confusion attacks. Legacy JWT secrets require `valid_until`; expired entries dropped at startup. Positive token cache (60s TTL) avoids per-request validation. `aud` promoted from custom claims map to a typed field.
+- **Sessions.** Session cookie bound to coarsened client IP + UA hash. Constant-time comparisons for PKCE, CSRF, and SSE session secrets. Per-user session caps enforced.
+- **Webhook replay window** enforced for non-Stripe signatures. Webhook signature attribute parsed via `syn` AST (not substring matching).
+- **SSRF.** DNS-level guard via a custom `reqwest` resolver; private host names redacted from `SSRFError` `Display`.
+- **Gateway startup.** Auth config validated in `ForgeBuilder::build()`. Refuses to start with `cors_origins = ["*"]` in production. JSON depth scan on all POST requests regardless of content-type. Dev auth mode blocked on cloud platforms via env guards; fails closed when `FORGE_ENV=production`.
+- **OAuth.** Resolved client IP used for rate-limit buckets. Per-field validation on register requests. HTML-escape and URL-encode helpers for redirect surfaces.
+- **Scope hardening.** Tenant ID enforced at dispatch time (403 on mismatch). Mutations now go through the same scope check as queries. `owner_subject` required on typed job dispatch. Auth context restored in job/workflow executors from `owner_subject`.
+- **Logging.** Attacker-controlled strings sanitized before logging to prevent log injection. Legacy `extract_client_ip` replaced by trusted-proxy validation.
+- **Supply chain.** `deny.toml` migrated to cargo-deny v2 schema; template crates marked non-publishable. `cargo audit --deny warnings` enforced. `js_sys::eval` in dioxus signals replaced with `wasm-bindgen` `inline_js`. Root `docker-compose` hardened: dev DB bound to loopback, `shm_size` and restart policy set.
 
 ### Notes
 
-- Existing apps see no behavior change: `default = ["full"]` activates every subsystem just like before.
-- Macro/feature mismatch (e.g. `#[forge::job]` without the `jobs` feature) produces a compile error at the generated `forge::AutoJob` reference, pointing users to enable the feature.
-- Approximate cold-build savings on the demo template: `worker` -55%/-65% (compile/target), `api` -25%/-30%, `minimal` -65%/-75%.
+- Existing apps see no behavior change if they keep the default feature set (`default = ["full"]`).
+- Macro/feature mismatch (e.g. `#[forge::job]` without the `jobs` feature) produces a compile error at the generated `forge::AutoJob` reference.
+- Pre-1.0 policy: no migration shims. Renames are direct; deprecated surfaces are removed in this release rather than aliased.
 
 ## [0.9.0] - 2026-04-23
 

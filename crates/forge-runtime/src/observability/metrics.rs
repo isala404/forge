@@ -213,8 +213,7 @@ impl ActiveConnectionsGauge {
     }
 
     pub fn increment(&self, connection_type: &'static str) {
-        self.gauge
-            .add(1, &[KeyValue::new("type", connection_type)]);
+        self.gauge.add(1, &[KeyValue::new("type", connection_type)]);
     }
 
     pub fn decrement(&self, connection_type: &'static str) {
@@ -336,7 +335,9 @@ impl WorkflowSchedulerMetrics {
             .with_unit("s")
             .build();
 
-        Self { processing_duration }
+        Self {
+            processing_duration,
+        }
     }
 
     pub fn record_processing_duration(&self, duration_secs: f64) {

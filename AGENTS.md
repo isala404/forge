@@ -52,8 +52,8 @@ docker run -d --name forge-sqlx-pg -e POSTGRES_PASSWORD=forge -e POSTGRES_DB=for
   -p 5433:5432 postgres:18
 until docker exec forge-sqlx-pg pg_isready -U postgres -d forge 2>/dev/null; do sleep 1; done
 
-# 2. Apply bootstrap + system schema in version order
-for f in v000_bootstrap.sql v001_initial.sql v002_change_log.sql v003_job_wakeup.sql v004_kv.sql v005_workflow_status.sql v006_workflow_indexes.sql v007_statement_trigger.sql v008_workflow_state.sql v009_jobs_history.sql v010_signals_rollups.sql v011_webhook_replay.sql; do
+# 2. Apply bootstrap + system schema
+for f in v000_bootstrap.sql v001_initial.sql; do
   docker exec -i forge-sqlx-pg psql -U postgres -d forge \
     < "crates/forge-runtime/migrations/system/$f"
 done

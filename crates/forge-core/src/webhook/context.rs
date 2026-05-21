@@ -159,9 +159,10 @@ impl WebhookContext {
         job_type: &str,
         args: T,
     ) -> crate::error::Result<Uuid> {
-        let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::internal("Job dispatch not available")
-        })?;
+        let dispatcher = self
+            .job_dispatch
+            .as_ref()
+            .ok_or_else(|| crate::error::ForgeError::internal("Job dispatch not available"))?;
         let args_json = serde_json::to_value(args)?;
         dispatcher
             .dispatch_by_name(job_type, args_json, None, None)
@@ -180,9 +181,10 @@ impl WebhookContext {
         workflow_name: &str,
         input: T,
     ) -> crate::error::Result<Uuid> {
-        let dispatcher = self.workflow_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::internal("Workflow dispatch not available")
-        })?;
+        let dispatcher = self
+            .workflow_dispatch
+            .as_ref()
+            .ok_or_else(|| crate::error::ForgeError::internal("Workflow dispatch not available"))?;
         let input_json = serde_json::to_value(input)?;
         dispatcher
             .start_by_name(workflow_name, input_json, None, None)
@@ -203,9 +205,10 @@ impl WebhookContext {
         job_id: Uuid,
         reason: Option<String>,
     ) -> crate::error::Result<bool> {
-        let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::internal("Job dispatch not available")
-        })?;
+        let dispatcher = self
+            .job_dispatch
+            .as_ref()
+            .ok_or_else(|| crate::error::ForgeError::internal("Job dispatch not available"))?;
         dispatcher.cancel(job_id, reason).await
     }
 }

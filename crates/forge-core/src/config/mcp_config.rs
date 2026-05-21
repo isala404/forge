@@ -100,9 +100,7 @@ impl McpConfig {
             ));
         }
         if self.path.contains(' ') {
-            return Err(ForgeError::config(
-                "mcp.path cannot contain spaces",
-            ));
+            return Err(ForgeError::config("mcp.path cannot contain spaces"));
         }
         if Self::RESERVED_PATHS.contains(&self.path.as_str()) {
             return Err(ForgeError::config(format!(
@@ -111,9 +109,7 @@ impl McpConfig {
             )));
         }
         if self.session_ttl.as_secs() == 0 {
-            return Err(ForgeError::config(
-                "mcp.session_ttl must be greater than 0",
-            ));
+            return Err(ForgeError::config("mcp.session_ttl must be greater than 0"));
         }
         Ok(())
     }

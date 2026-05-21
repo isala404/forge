@@ -275,9 +275,7 @@ fn read_pem_certs(path: &str) -> Result<Vec<CertificateDer<'static>>> {
 
 fn read_pem_key(path: &str) -> Result<PrivateKeyDer<'static>> {
     PrivateKeyDer::from_pem_file(path).map_err(|e| {
-        ForgeError::config(format!(
-            "failed to read PEM private key from '{path}': {e}"
-        ))
+        ForgeError::config(format!("failed to read PEM private key from '{path}': {e}"))
     })
 }
 
@@ -297,7 +295,7 @@ mod tests {
         let err = load_rustls_config(&cfg).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("failed to open gateway.tls.cert_path"),
+            msg.contains("failed to read PEM certificates from '/nonexistent/cert.pem'"),
             "unexpected error: {msg}"
         );
     }

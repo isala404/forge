@@ -859,8 +859,7 @@ pub async fn sse_subscribe_handler(
                 );
             }
             if let Some(user_id) = data.auth_context.user_id()
-                && state.user_subscription_count(user_id)
-                    >= state.config.max_subscriptions_per_user
+                && state.user_subscription_count(user_id) >= state.config.max_subscriptions_per_user
             {
                 return subscribe_error(
                     StatusCode::TOO_MANY_REQUESTS,

@@ -1038,7 +1038,10 @@ mod tests {
         // Default is transactional = true, so ctx.http() should be rejected.
         let attrs = MutationAttrs::default();
         let result = expand_mutation_impl(input, attrs);
-        assert!(result.is_err(), "Should reject ctx.http() in transactional mutation");
+        assert!(
+            result.is_err(),
+            "Should reject ctx.http() in transactional mutation"
+        );
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("http"),

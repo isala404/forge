@@ -147,16 +147,15 @@ impl reqwest::dns::Resolve for SsrfSafeResolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
         Box::pin(async move {
             let host = name.as_str().to_string();
-            let addrs: Vec<SocketAddr> =
-                tokio::net::lookup_host(format!("{host}:0")).await?.collect();
+            let addrs: Vec<SocketAddr> = tokio::net::lookup_host(format!("{host}:0"))
+                .await?
+                .collect();
             let safe: Vec<SocketAddr> = addrs
                 .into_iter()
                 .filter(|addr| !is_private_ip(addr.ip()))
                 .collect();
             if safe.is_empty() {
-                return Err(
-                    format!("DNS resolution for {host} returned only private IPs").into(),
-                );
+                return Err(format!("DNS resolution for {host} returned only private IPs").into());
             }
             let addrs: reqwest::dns::Addrs = Box::new(safe.into_iter());
             Ok(addrs)
@@ -791,15 +790,15 @@ mod tests {
         // Walk every RFC class the docstring promises to cover; if one slips
         // the matrix, the SSRF guarantee is broken.
         let blocked = [
-            "http://10.0.0.1/",      // private 10/8
-            "http://172.16.0.1/",    // private 172.16/12
-            "http://192.168.1.1/",   // private 192.168/16
-            "http://169.254.1.1/",   // link-local
-            "http://0.0.0.0/",       // unspecified
+            "http://10.0.0.1/",        // private 10/8
+            "http://172.16.0.1/",      // private 172.16/12
+            "http://192.168.1.1/",     // private 192.168/16
+            "http://169.254.1.1/",     // link-local
+            "http://0.0.0.0/",         // unspecified
             "http://255.255.255.255/", // broadcast
-            "http://192.0.2.1/",     // documentation TEST-NET-1
-            "http://198.51.100.1/",  // documentation TEST-NET-2
-            "http://203.0.113.1/",   // documentation TEST-NET-3
+            "http://192.0.2.1/",       // documentation TEST-NET-1
+            "http://198.51.100.1/",    // documentation TEST-NET-2
+            "http://203.0.113.1/",     // documentation TEST-NET-3
         ];
         for u in blocked {
             assert!(
@@ -814,12 +813,12 @@ mod tests {
         // IPv6 mirror of the IPv4 cases. The bracket-trimming logic must
         // strip the URL-encoded brackets before parsing.
         let blocked = [
-            "http://[::1]/",          // loopback
-            "http://[::]/",           // unspecified
-            "http://[fe80::1]/",      // link-local fe80::/10
-            "http://[febf::1]/",      // link-local upper edge
-            "http://[fc00::1]/",      // ULA fc00::/7
-            "http://[fd00::1]/",      // ULA upper half
+            "http://[::1]/",     // loopback
+            "http://[::]/",      // unspecified
+            "http://[fe80::1]/", // link-local fe80::/10
+            "http://[febf::1]/", // link-local upper edge
+            "http://[fc00::1]/", // ULA fc00::/7
+            "http://[fd00::1]/", // ULA upper half
         ];
         for u in blocked {
             assert!(
@@ -955,7 +954,10 @@ mod tests {
         assert_eq!(s.state, CircuitStatus::Closed);
         assert_eq!(s.failure_count, 0);
         assert_eq!(s.success_count, 0);
-        assert!(s.opened_at.is_none(), "opened_at must clear on full recovery");
+        assert!(
+            s.opened_at.is_none(),
+            "opened_at must clear on full recovery"
+        );
     }
 
     #[test]
@@ -1169,7 +1171,10 @@ mod tests {
     fn private_host_blocked_display_redacts_host() {
         let err = CircuitBreakerError::PrivateHostBlocked("127.0.0.1".to_string());
         let s = err.to_string();
-        assert!(!s.contains("127.0.0.1"), "host must not leak through Display");
+        assert!(
+            !s.contains("127.0.0.1"),
+            "host must not leak through Display"
+        );
         assert!(s.contains("private IP"));
     }
 

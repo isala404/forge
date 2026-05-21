@@ -105,7 +105,9 @@ impl TestMutationContext {
         args: T,
         scheduled_at: DateTime<Utc>,
     ) -> Result<Uuid> {
-        self.job_dispatch.dispatch_at(job_type, args, scheduled_at).await
+        self.job_dispatch
+            .dispatch_at(job_type, args, scheduled_at)
+            .await
     }
 
     /// Dispatch a job after a delay (records for later verification).
@@ -116,10 +118,11 @@ impl TestMutationContext {
         delay: Duration,
     ) -> Result<Uuid> {
         let scheduled_at = Utc::now()
-            + chrono::Duration::from_std(delay).map_err(|_| {
-                crate::error::ForgeError::InvalidArgument("delay too large".into())
-            })?;
-        self.job_dispatch.dispatch_at(job_type, args, scheduled_at).await
+            + chrono::Duration::from_std(delay)
+                .map_err(|_| crate::error::ForgeError::InvalidArgument("delay too large".into()))?;
+        self.job_dispatch
+            .dispatch_at(job_type, args, scheduled_at)
+            .await
     }
 
     /// Type-safe dispatch: resolves the job name from the type's `ForgeJob`

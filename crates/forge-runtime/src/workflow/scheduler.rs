@@ -315,7 +315,8 @@ impl WorkflowScheduler {
             // merging them removes per-event latency and ensures atomicity:
             // a crash between consume and claim can no longer leave an event
             // consumed without a corresponding resume job.
-            self.consume_claim_and_resume(workflow_id, &event_name).await;
+            self.consume_claim_and_resume(workflow_id, &event_name)
+                .await;
         }
 
         Ok(())

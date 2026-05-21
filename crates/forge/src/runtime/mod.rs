@@ -62,6 +62,7 @@ use forge_runtime::gateway::{
 use forge_runtime::jobs::{JobDispatcher, JobQueue, JobRegistry, Worker, WorkerConfig};
 #[cfg(feature = "gateway")]
 use forge_runtime::mcp::McpToolRegistry;
+#[cfg(feature = "gateway")]
 use forge_runtime::realtime::{
     InvalidationConfig, ListenerConfig, ReactorConfig, RealtimeConfig as RuntimeRealtimeConfig,
 };
@@ -182,8 +183,7 @@ pub struct Forge {
     /// the full middleware stack (auth, CORS, tracing, concurrency, timeouts)
     /// applies automatically.
     #[cfg(feature = "gateway")]
-    pub(super) custom_routes_factory:
-        Option<Box<dyn FnOnce(sqlx::PgPool) -> Router + Send + Sync>>,
+    pub(super) custom_routes_factory: Option<Box<dyn FnOnce(sqlx::PgPool) -> Router + Send + Sync>>,
     /// Optional pluggable role resolver for RBAC.
     #[cfg(feature = "gateway")]
     pub(super) role_resolver: Option<forge_core::SharedRoleResolver>,
@@ -514,6 +514,7 @@ impl Forge {
             forge_runtime::cron::register_cron_bridges(&self.cron_registry, &mut self.job_registry);
         }
 
+        #[cfg(feature = "jobs")]
         let job_queue = JobQueue::new(pool.clone());
 
         let notify_bus = Arc::new(PgNotifyBus::new(
@@ -639,13 +640,8 @@ impl Forge {
             // connections briefly and the pool queues requests up to
             // `pool_timeout`. If the worker sum alone already exceeds pool_size,
             // RPC handlers will stall under load.
-            let total_worker_concurrency: usize = self
-                .config
-                .worker
-                .queues
-                .values()
-                .map(|q| q.workers)
-                .sum();
+            let total_worker_concurrency: usize =
+                self.config.worker.queues.values().map(|q| q.workers).sum();
             const PERSISTENT_CONN_OVERHEAD: usize = 6;
             let min_recommended = total_worker_concurrency + PERSISTENT_CONN_OVERHEAD;
             if (self.config.database.pool_size as usize) < min_recommended {
@@ -852,15 +848,23 @@ impl Forge {
                     let production_indicators = [
                         ("FORGE_ENV", std::env::var("FORGE_ENV").ok()),
                         ("NODE_ENV", std::env::var("NODE_ENV").ok()),
-                        ("RAILWAY_ENVIRONMENT", std::env::var("RAILWAY_ENVIRONMENT").ok()),
+                        (
+                            "RAILWAY_ENVIRONMENT",
+                            std::env::var("RAILWAY_ENVIRONMENT").ok(),
+                        ),
                         ("K_SERVICE", std::env::var("K_SERVICE").ok()),
                         ("FLY_APP_NAME", std::env::var("FLY_APP_NAME").ok()),
-                        ("KUBERNETES_SERVICE_HOST", std::env::var("KUBERNETES_SERVICE_HOST").ok()),
+                        (
+                            "KUBERNETES_SERVICE_HOST",
+                            std::env::var("KUBERNETES_SERVICE_HOST").ok(),
+                        ),
                         ("AWS_EXECUTION_ENV", std::env::var("AWS_EXECUTION_ENV").ok()),
                     ];
                     let hint = production_indicators
                         .iter()
-                        .find_map(|(name, val)| val.as_ref().map(|v| format!(" ({name}={v} detected)")))
+                        .find_map(|(name, val)| {
+                            val.as_ref().map(|v| format!(" ({name}={v} detected)"))
+                        })
                         .unwrap_or_default();
                     return Err(ForgeError::config(format!(
                         "gateway.cors_origins = [\"*\"] is only allowed when FORGE_ENV=development{hint}. \
@@ -1089,7 +1093,8 @@ impl Forge {
                 #[cfg(feature = "jobs")]
                 let webhook_state = webhook_state.with_job_dispatcher(job_dispatcher.clone());
                 #[cfg(feature = "workflows")]
-                let webhook_state = webhook_state.with_workflow_dispatcher(workflow_executor.clone());
+                let webhook_state =
+                    webhook_state.with_workflow_dispatcher(workflow_executor.clone());
                 let webhook_state = webhook_state.with_kv(Arc::clone(&kv_handle));
                 let webhook_state = Arc::new(webhook_state);
 

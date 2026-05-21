@@ -213,8 +213,9 @@ impl JobContext {
         };
 
         if let Some(ref tx) = self.progress_tx {
-            tx.send(update)
-                .map_err(|e| crate::ForgeError::internal(format!("Failed to send progress: {e}")))?;
+            tx.send(update).map_err(|e| {
+                crate::ForgeError::internal(format!("Failed to send progress: {e}"))
+            })?;
         }
 
         Ok(())
@@ -607,7 +608,8 @@ mod tests {
     async fn progress_without_channel_is_a_noop() {
         let ctx = nil_ctx();
         // No `.with_progress(...)` was attached — progress should succeed silently.
-        ctx.progress(42, "boot").expect("noop progress should not error");
+        ctx.progress(42, "boot")
+            .expect("noop progress should not error");
     }
 
     #[tokio::test]

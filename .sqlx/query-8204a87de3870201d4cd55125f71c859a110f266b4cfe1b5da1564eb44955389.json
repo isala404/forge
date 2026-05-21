@@ -1,15 +1,15 @@
 {
-    "db_name": "PostgreSQL",
-    "query": "\n                UPDATE forge_jobs\n                SET\n                    status = 'cancelled',\n                    cancelled_at = NOW(),\n                    cancel_reason = 'stale cron run reclaimed by new leader',\n                    expires_at = NOW() + INTERVAL '7 days'\n                WHERE job_type = $1\n                  AND input->>'run_id' = $2\n                  AND status NOT IN ('completed', 'failed', 'dead_letter', 'cancelled')\n                ",
-    "describe": {
-        "columns": [],
-        "parameters": {
-            "Left": [
-                "Text",
-                "Text"
-            ]
-        },
-        "nullable": []
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE forge_jobs\n                SET\n                    status = 'cancelled',\n                    cancelled_at = NOW(),\n                    cancel_reason = 'stale cron run reclaimed by new leader',\n                    expires_at = NOW() + INTERVAL '7 days'\n                WHERE job_type = $1\n                  AND input->>'run_id' = $2\n                  AND status NOT IN ('completed', 'failed', 'dead_letter', 'cancelled')\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
     },
-    "hash": "8204a87de3870201d4cd55125f71c859a110f266b4cfe1b5da1564eb44955389"
+    "nullable": []
+  },
+  "hash": "8204a87de3870201d4cd55125f71c859a110f266b4cfe1b5da1564eb44955389"
 }

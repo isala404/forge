@@ -42,7 +42,10 @@ impl MockEmailSender {
     /// Assert that exactly one email was sent to the given address.
     pub async fn assert_sent_to(&self, address: &str) {
         let sent = self.sent.lock().await;
-        let matching: Vec<_> = sent.iter().filter(|e| e.to.contains(&address.to_string())).collect();
+        let matching: Vec<_> = sent
+            .iter()
+            .filter(|e| e.to.contains(&address.to_string()))
+            .collect();
         assert!(
             matching.len() == 1,
             "Expected 1 email to {address}, found {}",

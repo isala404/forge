@@ -192,8 +192,7 @@ impl MigrationRunner {
         let mut unknown_applied: Vec<&str> = applied
             .keys()
             .filter(|v| {
-                !super::builtin::is_system_migration(v)
-                    && !known_user_versions.contains(v.as_str())
+                !super::builtin::is_system_migration(v) && !known_user_versions.contains(v.as_str())
             })
             .map(|v| v.as_str())
             .collect();
@@ -274,9 +273,11 @@ impl MigrationRunner {
             timeout_secs = self.config.lock_acquire_timeout.as_secs(),
             "Acquiring migration lock..."
         );
-        let mut conn = self.pool.acquire().await.map_err(|e| {
-            ForgeError::internal_with("Failed to acquire lock connection", e)
-        })?;
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| ForgeError::internal_with("Failed to acquire lock connection", e))?;
 
         // Decompose the i64 lock id into the (classid, objid) split that
         // pg_locks exposes so we can look up the holder PID for diagnostics.
@@ -303,9 +304,7 @@ impl MigrationRunner {
             )
             .fetch_one(&mut *conn)
             .await
-            .map_err(|e| {
-                ForgeError::internal_with("Failed to attempt migration lock", e)
-            })?;
+            .map_err(|e| ForgeError::internal_with("Failed to attempt migration lock", e))?;
 
             if acquired {
                 debug!("Migration lock acquired");
@@ -342,9 +341,7 @@ impl MigrationRunner {
         sqlx::query_scalar!("SELECT pg_advisory_unlock($1)", MIGRATION_LOCK_ID)
             .fetch_one(&mut **conn)
             .await
-            .map_err(|e| {
-                ForgeError::internal_with("Failed to release migration lock", e)
-            })?;
+            .map_err(|e| ForgeError::internal_with("Failed to release migration lock", e))?;
         debug!("Migration lock released");
         Ok(())
     }
@@ -352,9 +349,10 @@ impl MigrationRunner {
     /// Idempotent bootstrap: runs the `forge_system_migrations` table DDL.
     /// Statements are split because the bootstrap file may contain multiple.
     async fn bootstrap_tracking_table(&self) -> Result<()> {
-        let mut conn = self.pool.acquire().await.map_err(|e| {
-            ForgeError::internal_with("Failed to acquire bootstrap connection", e)
-        })?;
+        let mut conn =
+            self.pool.acquire().await.map_err(|e| {
+                ForgeError::internal_with("Failed to acquire bootstrap connection", e)
+            })?;
         for statement in split_sql_statements(BOOTSTRAP_SQL) {
             let stmt = statement.trim();
             if is_empty_or_comment_only(stmt) {
@@ -372,9 +370,7 @@ impl MigrationRunner {
         let rows = sqlx::query!("SELECT version, checksum FROM forge_system_migrations")
             .fetch_all(&self.pool)
             .await
-            .map_err(|e| {
-                ForgeError::internal_with("Failed to get applied migrations", e)
-            })?;
+            .map_err(|e| ForgeError::internal_with("Failed to get applied migrations", e))?;
 
         Ok(rows
             .into_iter()

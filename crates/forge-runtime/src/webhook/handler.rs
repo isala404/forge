@@ -224,7 +224,9 @@ pub async fn webhook_handler(
                     headers
                         .iter()
                         .filter_map(|(k, v)| {
-                            v.to_str().ok().map(|v| (k.as_str().to_string(), v.to_string()))
+                            v.to_str()
+                                .ok()
+                                .map(|v| (k.as_str().to_string(), v.to_string()))
                         })
                         .collect::<HashMap<String, String>>(),
                 )
@@ -683,15 +685,13 @@ async fn complete_idempotency(
 }
 
 /// Mark idempotency key as failed so the raw body is preserved for replay.
-/// Falls back to DELETE if the UPDATE fails (forward-compatible with the
-/// pre-v011 schema that lacks the `status = 'failed'` / `error` columns).
 async fn release_idempotency(
     pool: &PgPool,
     webhook_name: &str,
     key: &str,
 ) -> Result<(), sqlx::Error> {
     #[allow(clippy::disallowed_methods)]
-    let updated = sqlx::query(
+    sqlx::query(
         "UPDATE forge_webhook_events \
          SET status = 'failed' \
          WHERE webhook_name = $1 AND idempotency_key = $2",
@@ -699,19 +699,7 @@ async fn release_idempotency(
     .bind(webhook_name)
     .bind(key)
     .execute(pool)
-    .await;
-
-    if updated.is_err() {
-        #[allow(clippy::disallowed_methods)]
-        sqlx::query(
-            "DELETE FROM forge_webhook_events \
-             WHERE webhook_name = $1 AND idempotency_key = $2",
-        )
-        .bind(webhook_name)
-        .bind(key)
-        .execute(pool)
-        .await?;
-    }
+    .await?;
 
     Ok(())
 }

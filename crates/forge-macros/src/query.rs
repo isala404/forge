@@ -330,10 +330,7 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
     }
 
     // Compile-time scope check: private queries that touch tables must filter by user identity.
-    if !attrs.is_public
-        && !attrs.is_unscoped
-        && !table_dependencies.is_empty()
-    {
+    if !attrs.is_public && !attrs.is_unscoped && !table_dependencies.is_empty() {
         let mut scope_extractor = SqlStringExtractor::new();
         scope_extractor.visit_block(fn_block);
         match sql_references_identity_scope(&scope_extractor.sql_strings) {

@@ -135,9 +135,10 @@ impl McpToolContext {
 
     /// Dispatch a background job.
     pub async fn dispatch_job<T: serde::Serialize>(&self, job_type: &str, args: T) -> Result<Uuid> {
-        let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::internal("Job dispatch not available")
-        })?;
+        let dispatcher = self
+            .job_dispatch
+            .as_ref()
+            .ok_or_else(|| crate::error::ForgeError::internal("Job dispatch not available"))?;
 
         let args_json = serde_json::to_value(args)?;
         dispatcher
@@ -157,14 +158,11 @@ impl McpToolContext {
     }
 
     /// Request cancellation for a job.
-    pub async fn cancel_job(
-        &self,
-        job_id: Uuid,
-        reason: Option<String>,
-    ) -> Result<bool> {
-        let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::internal("Job dispatch not available")
-        })?;
+    pub async fn cancel_job(&self, job_id: Uuid, reason: Option<String>) -> Result<bool> {
+        let dispatcher = self
+            .job_dispatch
+            .as_ref()
+            .ok_or_else(|| crate::error::ForgeError::internal("Job dispatch not available"))?;
         dispatcher.cancel(job_id, reason).await
     }
 
@@ -174,9 +172,10 @@ impl McpToolContext {
         workflow_name: &str,
         input: T,
     ) -> Result<Uuid> {
-        let dispatcher = self.workflow_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::internal("Workflow dispatch not available")
-        })?;
+        let dispatcher = self
+            .workflow_dispatch
+            .as_ref()
+            .ok_or_else(|| crate::error::ForgeError::internal("Workflow dispatch not available"))?;
 
         let input_json = serde_json::to_value(input)?;
         dispatcher

@@ -831,9 +831,7 @@ pub async fn oauth_authorize_post(
     // instead of the login form. This is same-origin (backend serves both
     // the authorize page and this POST), so the cookie sticks.
     let cookie_ttl = state.session_cookie_ttl_secs;
-    let sign_ua = headers
-        .get("user-agent")
-        .and_then(|v| v.to_str().ok());
+    let sign_ua = headers.get("user-agent").and_then(|v| v.to_str().ok());
     let cookie_value = super::auth::sign_session_cookie(
         &user_id.to_string(),
         &state.jwt_secret,
@@ -1382,5 +1380,4 @@ mod tests {
     fn default_s256_returns_canonical_pkce_method() {
         assert_eq!(default_s256(), "S256");
     }
-
 }

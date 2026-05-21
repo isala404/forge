@@ -314,10 +314,7 @@ impl WorkflowContext {
 
     /// Get a snapshot of all saved state for persistence.
     pub fn take_saved_state(&self) -> HashMap<String, serde_json::Value> {
-        self.saved_state
-            .read()
-            .expect(LOCK_POISONED)
-            .clone()
+        self.saved_state.read().expect(LOCK_POISONED).clone()
     }
 
     /// Restore step states from persisted data.
@@ -329,10 +326,7 @@ impl WorkflowContext {
             .collect();
 
         *self.step_states.write().expect(LOCK_POISONED) = states;
-        *self
-            .completed_steps
-            .write()
-            .expect(LOCK_POISONED) = completed;
+        *self.completed_steps.write().expect(LOCK_POISONED) = completed;
         self
     }
 
@@ -452,10 +446,7 @@ impl WorkflowContext {
         let state_clone = states.get(name).cloned();
         drop(states);
 
-        let mut completed = self
-            .completed_steps
-            .write()
-            .expect(LOCK_POISONED);
+        let mut completed = self.completed_steps.write().expect(LOCK_POISONED);
         if !completed.contains(&name.to_string()) {
             completed.push(name.to_string());
         }
@@ -581,10 +572,7 @@ impl WorkflowContext {
     }
 
     pub fn all_step_states(&self) -> HashMap<String, StepState> {
-        self.step_states
-            .read()
-            .expect(LOCK_POISONED)
-            .clone()
+        self.step_states.read().expect(LOCK_POISONED).clone()
     }
 
     pub fn elapsed(&self) -> chrono::Duration {
@@ -602,10 +590,7 @@ impl WorkflowContext {
     /// alternative would require serializable compensation descriptors (e.g.,
     /// naming a registered handler + captured args as JSON).
     pub fn register_compensation(&self, step_name: &str, handler: CompensationHandler) {
-        let mut handlers = self
-            .compensation_handlers
-            .write()
-            .expect(LOCK_POISONED);
+        let mut handlers = self.compensation_handlers.write().expect(LOCK_POISONED);
         handlers.insert(step_name.to_string(), handler);
     }
 
@@ -903,10 +888,7 @@ impl WorkflowContext {
     /// to short-circuit the handler via `?`. The executor checks for a stored
     /// reason before treating the error as a real failure.
     async fn signal_suspend(&self, reason: SuspendReason) -> Result<()> {
-        *self
-            .suspend_reason
-            .lock()
-            .expect(LOCK_POISONED) = Some(reason);
+        *self.suspend_reason.lock().expect(LOCK_POISONED) = Some(reason);
         Err(ForgeError::internal("workflow suspended"))
     }
 
@@ -915,10 +897,7 @@ impl WorkflowContext {
     /// Called by the executor after the handler returns an error to determine
     /// whether the error represents a suspension or a real failure.
     pub fn take_suspend_reason(&self) -> Option<SuspendReason> {
-        self.suspend_reason
-            .lock()
-            .expect(LOCK_POISONED)
-            .take()
+        self.suspend_reason.lock().expect(LOCK_POISONED).take()
     }
 }
 

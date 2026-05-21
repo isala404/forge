@@ -51,8 +51,13 @@ impl JobDispatcher {
         let scheduled_at = Utc::now()
             + chrono::Duration::from_std(delay)
                 .map_err(|_| forge_core::ForgeError::InvalidArgument("delay too large".into()))?;
-        self.dispatch_at_with_info(&info, serde_json::to_value(args)?, scheduled_at, owner_subject)
-            .await
+        self.dispatch_at_with_info(
+            &info,
+            serde_json::to_value(args)?,
+            scheduled_at,
+            owner_subject,
+        )
+        .await
     }
 
     /// Dispatch a job at a specific time.

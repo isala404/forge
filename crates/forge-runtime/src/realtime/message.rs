@@ -669,8 +669,6 @@ mod tests {
         // threshold.
         let batches_needed = MAX_TOTAL_DROPS / (MAX_CONSECUTIVE_DROPS - 1) + 1;
         for batch in 0..batches_needed {
-            // Fill the buffer first.
-            let _ = rx.recv().await;
             assert!(
                 server
                     .try_send_to_session(session_id, RealtimeMessage::Lagging)
@@ -689,6 +687,10 @@ mod tests {
                     other => panic!("unexpected result in batch {batch}: {other:?}"),
                 }
             }
+
+            // Drain the buffer so the next batch's initial send can succeed,
+            // resetting the consecutive counter but leaving total_drops to grow.
+            let _ = rx.recv().await;
         }
         panic!("session should have been evicted by total_drops");
     }

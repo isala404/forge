@@ -97,11 +97,7 @@ pub struct FunctionRouter {
 impl FunctionRouter {
     /// Create a new function router.
     pub fn new(registry: Arc<FunctionRegistry>, db: Database) -> Self {
-        Self::with_http_client(
-            registry,
-            db,
-            CircuitBreakerClient::with_ssrf_protection(),
-        )
+        Self::with_http_client(registry, db, CircuitBreakerClient::with_ssrf_protection())
     }
 
     /// Create a new function router with a custom HTTP client.
@@ -733,9 +729,11 @@ impl FunctionRouter {
             // accidentally retained a clone of the Arc through a destructured
             // DbConn, the take() leaves a None behind that prevents further
             // misuse rather than leaking the transaction.
-            let tx = tx_handle.lock().await.take().ok_or_else(|| {
-                ForgeError::internal("Transaction already taken from handle")
-            })?;
+            let tx = tx_handle
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| ForgeError::internal("Transaction already taken from handle"))?;
 
             match result {
                 Ok(value) => {

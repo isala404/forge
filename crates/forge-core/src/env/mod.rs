@@ -445,8 +445,14 @@ mod tests {
         let err = ctx.env_require("STRIPE_API_KEY").unwrap_err();
         match err {
             ForgeError::Config { context: msg, .. } => {
-                assert!(msg.contains("STRIPE_API_KEY"), "msg should name the key: {msg}");
-                assert!(msg.contains("not set"), "msg should describe failure: {msg}");
+                assert!(
+                    msg.contains("STRIPE_API_KEY"),
+                    "msg should name the key: {msg}"
+                );
+                assert!(
+                    msg.contains("not set"),
+                    "msg should describe failure: {msg}"
+                );
             }
             other => panic!("expected ForgeError::Config, got {other:?}"),
         }
@@ -462,7 +468,10 @@ mod tests {
         match err {
             ForgeError::Config { context: msg, .. } => {
                 assert!(msg.contains("PORT"), "msg should name the key: {msg}");
-                assert!(msg.contains("not_a_port"), "msg should show the bad value: {msg}");
+                assert!(
+                    msg.contains("not_a_port"),
+                    "msg should show the bad value: {msg}"
+                );
             }
             other => panic!("expected ForgeError::Config, got {other:?}"),
         }

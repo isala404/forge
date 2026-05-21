@@ -29,7 +29,9 @@ use forge_runtime::webhook::WebhookRegistry;
 #[cfg(feature = "workflows")]
 use forge_runtime::workflow::WorkflowRegistry;
 
-use super::{Forge, FrontendHandler};
+use super::Forge;
+#[cfg(feature = "gateway")]
+use super::FrontendHandler;
 
 /// Builder for configuring the FORGE runtime.
 pub struct ForgeBuilder {

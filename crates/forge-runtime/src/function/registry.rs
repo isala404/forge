@@ -119,8 +119,9 @@ impl FunctionRegistry {
                 let parsed_args: Q::Args = serde_json::from_value(normalize_args(args))
                     .map_err(|e| forge_core::ForgeError::Validation(e.to_string()))?;
                 let result = Q::execute(ctx, parsed_args).await?;
-                serde_json::to_value(result)
-                    .map_err(|e| forge_core::ForgeError::internal_with("Failed to serialize result", e))
+                serde_json::to_value(result).map_err(|e| {
+                    forge_core::ForgeError::internal_with("Failed to serialize result", e)
+                })
             })
         });
 
@@ -142,8 +143,9 @@ impl FunctionRegistry {
                 let parsed_args: M::Args = serde_json::from_value(normalize_args(args))
                     .map_err(|e| forge_core::ForgeError::Validation(e.to_string()))?;
                 let result = M::execute(ctx, parsed_args).await?;
-                serde_json::to_value(result)
-                    .map_err(|e| forge_core::ForgeError::internal_with("Failed to serialize result", e))
+                serde_json::to_value(result).map_err(|e| {
+                    forge_core::ForgeError::internal_with("Failed to serialize result", e)
+                })
             })
         });
 

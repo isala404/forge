@@ -541,12 +541,14 @@ mod tests {
     fn is_retryable_for_transient_errors() {
         assert!(ForgeError::ServiceUnavailable("x".into()).is_retryable());
         assert!(ForgeError::timeout("x").is_retryable());
-        assert!(ForgeError::RateLimitExceeded {
-            retry_after: Duration::from_secs(1),
-            limit: 10,
-            remaining: 0,
-        }
-        .is_retryable());
+        assert!(
+            ForgeError::RateLimitExceeded {
+                retry_after: Duration::from_secs(1),
+                limit: 10,
+                remaining: 0,
+            }
+            .is_retryable()
+        );
         assert!(!ForgeError::not_found("x").is_retryable());
         assert!(!ForgeError::internal("x").is_retryable());
         assert!(!ForgeError::validation("x").is_retryable());

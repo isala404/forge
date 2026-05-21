@@ -40,13 +40,10 @@ impl EventStore {
         .map_err(ForgeError::Database)?;
 
         // Wakeup signal only — the scheduler polls for details.
-        sqlx::query_scalar!(
-            "SELECT pg_notify('forge_workflow_wakeup', $1)",
-            "",
-        )
-        .fetch_one(&self.pool)
-        .await
-        .map_err(ForgeError::Database)?;
+        sqlx::query_scalar!("SELECT pg_notify('forge_workflow_wakeup', $1)", "",)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(ForgeError::Database)?;
 
         tracing::debug!(
             event_id = %id,
@@ -67,11 +64,7 @@ impl EventStore {
         workflow_run_id: Uuid,
     ) -> Result<Option<WorkflowEvent>> {
         Self::consume_event_in_conn(
-            &mut *self
-                .pool
-                .acquire()
-                .await
-                .map_err(ForgeError::Database)?,
+            &mut *self.pool.acquire().await.map_err(ForgeError::Database)?,
             event_name,
             correlation_id,
             workflow_run_id,

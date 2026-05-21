@@ -127,9 +127,10 @@ impl DaemonContext {
         job_type: &str,
         args: T,
     ) -> crate::Result<Uuid> {
-        let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::internal("Job dispatch not available")
-        })?;
+        let dispatcher = self
+            .job_dispatch
+            .as_ref()
+            .ok_or_else(|| crate::error::ForgeError::internal("Job dispatch not available"))?;
 
         let args_json = serde_json::to_value(args)?;
         dispatcher
@@ -144,14 +145,11 @@ impl DaemonContext {
     }
 
     /// Request cancellation for a job.
-    pub async fn cancel_job(
-        &self,
-        job_id: Uuid,
-        reason: Option<String>,
-    ) -> crate::Result<bool> {
-        let dispatcher = self.job_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::internal("Job dispatch not available")
-        })?;
+    pub async fn cancel_job(&self, job_id: Uuid, reason: Option<String>) -> crate::Result<bool> {
+        let dispatcher = self
+            .job_dispatch
+            .as_ref()
+            .ok_or_else(|| crate::error::ForgeError::internal("Job dispatch not available"))?;
         dispatcher.cancel(job_id, reason).await
     }
 
@@ -161,9 +159,10 @@ impl DaemonContext {
         workflow_name: &str,
         input: T,
     ) -> crate::Result<Uuid> {
-        let dispatcher = self.workflow_dispatch.as_ref().ok_or_else(|| {
-            crate::error::ForgeError::internal("Workflow dispatch not available")
-        })?;
+        let dispatcher = self
+            .workflow_dispatch
+            .as_ref()
+            .ok_or_else(|| crate::error::ForgeError::internal("Workflow dispatch not available"))?;
 
         let input_json = serde_json::to_value(input)?;
         dispatcher

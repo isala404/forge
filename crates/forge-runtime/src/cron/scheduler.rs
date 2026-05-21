@@ -506,9 +506,7 @@ impl CronRunner {
             //  2. max_catch_up_per_tick — hard per-tick ceiling regardless of
             //     catch_up_limit, preventing a job storm on node restart when the
             //     backlog is large. Remaining slots are deferred to the next tick.
-            let tick_limit = info
-                .catch_up_limit
-                .min(self.config.max_catch_up_per_tick) as usize;
+            let tick_limit = info.catch_up_limit.min(self.config.max_catch_up_per_tick) as usize;
             let to_catch_up: Vec<_> = missed_times.into_iter().take(tick_limit).collect();
 
             Span::current().record("cron.missed_count", to_catch_up.len());
@@ -780,7 +778,10 @@ mod integration_tests {
             "SELECT COUNT(*) FROM forge_jobs WHERE job_type = '$cron:hourly' AND status = 'pending'",
         )
         .await;
-        assert_eq!(active_count, 1, "exactly one fresh $cron: job must be enqueued");
+        assert_eq!(
+            active_count, 1,
+            "exactly one fresh $cron: job must be enqueued"
+        );
     }
 
     #[tokio::test]

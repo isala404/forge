@@ -214,12 +214,20 @@ mod tests {
 
     #[tokio::test]
     async fn channels_returns_all_registered_names() {
-        let bus = make_bus(&["forge_changes", "forge_jobs_available", "forge_workflow_wakeup"]);
+        let bus = make_bus(&[
+            "forge_changes",
+            "forge_jobs_available",
+            "forge_workflow_wakeup",
+        ]);
         let mut names = bus.channels();
         names.sort();
         assert_eq!(
             names,
-            vec!["forge_changes", "forge_jobs_available", "forge_workflow_wakeup"],
+            vec![
+                "forge_changes",
+                "forge_jobs_available",
+                "forge_workflow_wakeup"
+            ],
         );
     }
 

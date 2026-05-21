@@ -321,14 +321,16 @@ mod tests {
 
     #[test]
     fn test_assert_err_matches_no_guard() {
-        let result: Result<(), ForgeError> = Err(ForgeError::Validation("email is required".into()));
+        let result: Result<(), ForgeError> =
+            Err(ForgeError::Validation("email is required".into()));
         assert_err_matches!(result, ForgeError::Validation(_));
     }
 
     #[test]
     #[allow(unused_variables)]
     fn test_assert_err_matches_with_guard() {
-        let result: Result<(), ForgeError> = Err(ForgeError::Validation("email is required".into()));
+        let result: Result<(), ForgeError> =
+            Err(ForgeError::Validation("email is required".into()));
         assert_err_matches!(result, ForgeError::Validation(msg) if msg.contains("email"));
     }
 
@@ -336,7 +338,8 @@ mod tests {
     #[should_panic(expected = "guard failed")]
     #[allow(unused_variables)]
     fn test_assert_err_matches_guard_fails() {
-        let result: Result<(), ForgeError> = Err(ForgeError::Validation("email is required".into()));
+        let result: Result<(), ForgeError> =
+            Err(ForgeError::Validation("email is required".into()));
         assert_err_matches!(result, ForgeError::Validation(msg) if msg.contains("password"));
     }
 

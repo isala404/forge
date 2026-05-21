@@ -1,16 +1,16 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use axum::Json;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::response::Response;
-use axum::Json;
 use forge_core::config::McpConfig;
 use serde_json::Value;
 
-use super::{SUPPORTED_VERSIONS, json_rpc_error, json_rpc_success, set_header, McpState};
-use super::MCP_SESSION_HEADER;
 use super::MCP_PROTOCOL_HEADER;
+use super::MCP_SESSION_HEADER;
+use super::{McpState, SUPPORTED_VERSIONS, json_rpc_error, json_rpc_success, set_header};
 
 pub(super) type ResponseError = Box<Response>;
 
@@ -246,7 +246,8 @@ pub(super) async fn handle_initialize(
             McpSession {
                 initialized: false,
                 protocol_version: requested_version.to_string(),
-                expires_at: Instant::now() + Duration::from_secs(state.config.session_ttl.as_secs()),
+                expires_at: Instant::now()
+                    + Duration::from_secs(state.config.session_ttl.as_secs()),
                 principal_id: principal,
             },
         );
@@ -297,8 +298,8 @@ pub(super) async fn handle_notification(
             let mut sessions = state.sessions.write().await;
             if let Some(session) = sessions.get_mut(&session_id) {
                 session.initialized = true;
-                session.expires_at = Instant::now()
-                    + Duration::from_secs(state.config.session_ttl.as_secs());
+                session.expires_at =
+                    Instant::now() + Duration::from_secs(state.config.session_ttl.as_secs());
                 return StatusCode::ACCEPTED.into_response();
             }
 

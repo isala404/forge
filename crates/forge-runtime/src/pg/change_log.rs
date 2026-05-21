@@ -3,7 +3,7 @@
 //! Doctrine: every consumer that needs at-least-once semantics over the
 //! framework's table-change feed reads the durable change log through this
 //! module. The table itself, the trigger that writes to it, and the trim
-//! function all live in system migration `__forge_v002`.
+//! function all live in system migration `__forge_v001`.
 //!
 //! # Recovery model
 //!
@@ -30,7 +30,7 @@ use forge_core::error::{ForgeError, Result};
 
 /// One row of `forge_change_log`.
 ///
-/// Mirrors the columns produced by the v002 migration's
+/// Mirrors the columns produced by the system migration's
 /// `forge_notify_change()` trigger. Kept deliberately close to the wire shape
 /// so callers can decide how to map `row_id` (TEXT, may not be a UUID for
 /// every table) and the comma-separated `changed_cols` string.

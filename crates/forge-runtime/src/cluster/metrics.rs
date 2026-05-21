@@ -22,7 +22,9 @@ pub struct ClusterMetrics {
     nodes_dead: Gauge<i64>,
     leader_election_attempts: Counter<u64>,
     is_leader: Gauge<i64>,
+    #[cfg(feature = "gateway")]
     notifications_processed: Counter<u64>,
+    #[cfg(feature = "gateway")]
     notification_latency: Histogram<f64>,
 }
 
@@ -57,11 +59,13 @@ impl ClusterMetrics {
             .with_description("Whether this node is the leader (1) or not (0)")
             .build();
 
+        #[cfg(feature = "gateway")]
         let notifications_processed = meter
             .u64_counter("cluster.reactor.notifications_processed")
             .with_description("Total change notifications processed")
             .build();
 
+        #[cfg(feature = "gateway")]
         let notification_latency = meter
             .f64_histogram("cluster.reactor.notification_latency")
             .with_description("Change notification processing latency in seconds")
@@ -74,7 +78,9 @@ impl ClusterMetrics {
             nodes_dead,
             leader_election_attempts,
             is_leader,
+            #[cfg(feature = "gateway")]
             notifications_processed,
+            #[cfg(feature = "gateway")]
             notification_latency,
         }
     }
@@ -152,4 +158,3 @@ pub fn record_notification_processed(_table: &str) {}
 #[cfg(all(not(feature = "otel"), feature = "gateway"))]
 #[inline]
 pub fn record_notification_latency(_latency_secs: f64) {}
-

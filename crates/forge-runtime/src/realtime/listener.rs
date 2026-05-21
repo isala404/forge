@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use tokio::sync::{broadcast, watch};
 
-use forge_core::realtime::Change;
 use crate::pg::PgNotifyBus;
+use forge_core::realtime::Change;
 
 // Reserved Forge-owned NOTIFY channels. Documented here so apps don't squat
 // on these names with their own LISTEN/NOTIFY traffic before the runtime
@@ -106,7 +106,7 @@ impl ChangeListener {
     /// Replay changes missed while disconnected by querying the durable
     /// change log. Returns the number of replayed changes, or `None` if
     /// the log read failed (e.g. the table is absent on first boot before
-    /// v002 has applied).
+    /// the system schema has applied).
     async fn replay_missed(&self) -> Option<usize> {
         use futures_util::stream::TryStreamExt;
 
@@ -244,8 +244,8 @@ impl ChangeListener {
     /// Row-level format: `v1:table:OP:row_id[:col1,col2,...][#seq]`
     /// Statement-level format: `v1s:table:OP`
     ///
-    /// The `#seq` suffix is appended by the v002 trigger and enables gap
-    /// recovery from `forge_change_log`. Pre-v002 payloads without `#seq`
+    /// The `#seq` suffix is appended by the `forge_notify_change` trigger and
+    /// enables gap recovery from `forge_change_log`. Payloads without `#seq`
     /// still parse correctly (seq = 0). Statement-level payloads never
     /// carry a seq (no change-log row is written).
     fn parse_notification(&self, payload: &str) -> Option<(Change, i64)> {

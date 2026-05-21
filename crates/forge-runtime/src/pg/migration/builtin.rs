@@ -6,7 +6,7 @@
 //!
 //! # Migration Naming
 //!
-//! - System migrations: `__forge_v001` (single migration, pre-1.0)
+//! - System migrations: `__forge_vXXX` (pre-1.0: a single `__forge_v001`)
 //! - User migrations: `0001_xxx`, `0002_xxx`, etc.
 //!
 //! System migrations are always applied before user migrations, regardless of
@@ -19,23 +19,6 @@ use super::runner::Migration;
 pub const SYSTEM_MIGRATION_PREFIX: &str = "__forge_v";
 
 const V001_INITIAL: &str = include_str!("../../../migrations/system/v001_initial.sql");
-const V002_CHANGE_LOG: &str = include_str!("../../../migrations/system/v002_change_log.sql");
-const V003_JOB_WAKEUP: &str = include_str!("../../../migrations/system/v003_job_wakeup.sql");
-const V004_KV: &str = include_str!("../../../migrations/system/v004_kv.sql");
-const V005_WORKFLOW_STATUS: &str =
-    include_str!("../../../migrations/system/v005_workflow_status.sql");
-const V006_WORKFLOW_INDEXES: &str =
-    include_str!("../../../migrations/system/v006_workflow_indexes.sql");
-const V007_STATEMENT_TRIGGER: &str =
-    include_str!("../../../migrations/system/v007_statement_trigger.sql");
-const V008_WORKFLOW_STATE: &str =
-    include_str!("../../../migrations/system/v008_workflow_state.sql");
-const V009_JOBS_HISTORY: &str =
-    include_str!("../../../migrations/system/v009_jobs_history.sql");
-const V010_SIGNALS_ROLLUPS: &str =
-    include_str!("../../../migrations/system/v010_signals_rollups.sql");
-const V011_WEBHOOK_REPLAY: &str =
-    include_str!("../../../migrations/system/v011_webhook_replay.sql");
 
 /// A system migration with a version number.
 #[derive(Debug, Clone)]
@@ -64,63 +47,11 @@ impl SystemMigration {
 ///
 /// These are applied in order before any user migrations.
 pub fn get_system_migrations() -> Vec<SystemMigration> {
-    vec![
-        SystemMigration {
-            version: 1,
-            sql: V001_INITIAL,
-            description: "Complete FORGE schema",
-        },
-        SystemMigration {
-            version: 2,
-            sql: V002_CHANGE_LOG,
-            description: "Change log for gap-free reactivity",
-        },
-        SystemMigration {
-            version: 3,
-            sql: V003_JOB_WAKEUP,
-            description: "NOTIFY trigger for job wakeup",
-        },
-        SystemMigration {
-            version: 4,
-            sql: V004_KV,
-            description: "Key-value store tables",
-        },
-        SystemMigration {
-            version: 5,
-            sql: V005_WORKFLOW_STATUS,
-            description: "Simplify workflow status to 6 variants",
-        },
-        SystemMigration {
-            version: 6,
-            sql: V006_WORKFLOW_INDEXES,
-            description: "Fix partial indexes after status split",
-        },
-        SystemMigration {
-            version: 7,
-            sql: V007_STATEMENT_TRIGGER,
-            description: "Statement-level trigger mode and reactivity controls",
-        },
-        SystemMigration {
-            version: 8,
-            sql: V008_WORKFLOW_STATE,
-            description: "Separate workflow state from runs table",
-        },
-        SystemMigration {
-            version: 9,
-            sql: V009_JOBS_HISTORY,
-            description: "Archive table for completed jobs",
-        },
-        SystemMigration {
-            version: 10,
-            sql: V010_SIGNALS_ROLLUPS,
-            description: "Incremental rollup tables replacing materialized views",
-        },
-        SystemMigration {
-            version: 11,
-            sql: V011_WEBHOOK_REPLAY,
-            description: "Webhook replay storage",
-        },
-    ]
+    vec![SystemMigration {
+        version: 1,
+        sql: V001_INITIAL,
+        description: "FORGE internal schema",
+    }]
 }
 
 /// Get system migrations as Migration structs.
@@ -163,19 +94,9 @@ mod tests {
     #[test]
     fn test_get_system_migrations() {
         let migrations = get_system_migrations();
-        assert_eq!(migrations.len(), 11);
+        assert_eq!(migrations.len(), 1);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(migrations[0].name(), "__forge_v001");
-        assert_eq!(migrations[1].name(), "__forge_v002");
-        assert_eq!(migrations[2].name(), "__forge_v003");
-        assert_eq!(migrations[3].name(), "__forge_v004");
-        assert_eq!(migrations[4].name(), "__forge_v005");
-        assert_eq!(migrations[5].name(), "__forge_v006");
-        assert_eq!(migrations[6].name(), "__forge_v007");
-        assert_eq!(migrations[7].name(), "__forge_v008");
-        assert_eq!(migrations[8].name(), "__forge_v009");
-        assert_eq!(migrations[9].name(), "__forge_v010");
-        assert_eq!(migrations[10].name(), "__forge_v011");
     }
 
     #[test]
@@ -187,74 +108,82 @@ mod tests {
     }
 
     #[test]
-    fn test_migration_sql_contains_tables() {
-        let migrations = get_system_migrations();
+    fn test_migration_sql_contains_expected_objects() {
+        let v001 = get_system_migrations()[0].sql;
 
-        // v001: core schema
-        let v001 = migrations[0].sql;
-        assert!(v001.contains("forge_nodes"));
-        assert!(v001.contains("forge_leaders"));
-        assert!(v001.contains("forge_jobs"));
-        assert!(v001.contains("forge_cron_runs"));
-        assert!(v001.contains("forge_workflow_runs"));
-        assert!(v001.contains("forge_workflow_steps"));
-        assert!(v001.contains("forge_sessions"));
-        assert!(v001.contains("forge_subscriptions"));
-        assert!(v001.contains("forge_daemons"));
-        assert!(v001.contains("forge_webhook_events"));
-        assert!(v001.contains("forge_refresh_tokens"));
-        assert!(v001.contains("forge_oauth_clients"));
-        assert!(v001.contains("forge_oauth_codes"));
-        assert!(v001.contains("forge_signals_events"));
-        assert!(v001.contains("forge_signals_sessions"));
-        assert!(v001.contains("forge_signals_users"));
-        assert!(v001.contains("owner_subject"));
-        assert!(v001.contains("token_family"));
-        assert!(v001.contains("compensation_state"));
-        assert!(v001.contains("saved_state"));
+        // Core tables
+        for table in [
+            "forge_nodes",
+            "forge_leaders",
+            "forge_kv",
+            "forge_kv_counters",
+            "forge_jobs",
+            "forge_jobs_history",
+            "forge_cron_runs",
+            "forge_workflow_definitions",
+            "forge_workflow_runs",
+            "forge_workflow_state",
+            "forge_workflow_events",
+            "forge_workflow_steps",
+            "forge_admin_audit",
+            "forge_paused_queues",
+            "forge_rate_limits",
+            "forge_sessions",
+            "forge_subscriptions",
+            "forge_change_log",
+            "forge_invalidations",
+            "forge_daemons",
+            "forge_webhook_events",
+            "forge_refresh_tokens",
+            "forge_oauth_clients",
+            "forge_oauth_codes",
+            "forge_signals_events",
+            "forge_signals_sessions",
+            "forge_signals_users",
+            "forge_signals_hourly_stats",
+            "forge_signals_daily_rollup",
+        ] {
+            assert!(v001.contains(table), "expected table {table} in v001 SQL");
+        }
 
-        // v002: change log
-        let v002 = migrations[1].sql;
-        assert!(v002.contains("forge_change_log"));
-        assert!(v002.contains("forge_trim_change_log"));
+        // Key functions
+        for fn_name in [
+            "forge_validate_identifier",
+            "forge_notify_change",
+            "forge_notify_change_statement",
+            "forge_notify_job_available",
+            "forge_enable_reactivity",
+            "forge_disable_reactivity",
+            "forge_workflow_event_notify",
+            "forge_workflow_runs_cancel_notify",
+            "forge_cleanup_webhook_events",
+            "forge_cleanup_expired_jobs",
+            "forge_archive_completed_jobs",
+            "forge_purge_expired_refresh_tokens",
+            "forge_purge_expired_oauth_codes",
+            "forge_purge_expired_invalidations",
+            "forge_trim_change_log",
+            "forge_signals_ensure_partition",
+            "forge_signals_drop_old_partitions",
+            "forge_signals_roll_up_hour",
+            "forge_signals_roll_up_day",
+        ] {
+            assert!(
+                v001.contains(fn_name),
+                "expected function {fn_name} in v001 SQL"
+            );
+        }
 
-        // v003: job wakeup
-        let v003 = migrations[2].sql;
-        assert!(v003.contains("forge_notify_job_available"));
-
-        // v004: KV store
-        let v004 = migrations[3].sql;
-        assert!(v004.contains("forge_kv"));
-        assert!(v004.contains("forge_kv_counters"));
-
-        // v006: workflow indexes
-        let v006 = migrations[5].sql;
-        assert!(v006.contains("idx_forge_workflow_runs_sleeping"));
-        assert!(v006.contains("idx_forge_workflow_runs_pending"));
-
-        // v007: statement trigger
-        let v007 = migrations[6].sql;
-        assert!(v007.contains("forge_notify_change_statement"));
-        assert!(v007.contains("forge_enable_reactivity"));
-
-        // v008: workflow state separation
-        let v008 = migrations[7].sql;
-        assert!(v008.contains("forge_workflow_state"));
-
-        // v009: jobs history
-        let v009 = migrations[8].sql;
-        assert!(v009.contains("forge_jobs_history"));
-        assert!(v009.contains("forge_archive_completed_jobs"));
-
-        // v010: signals rollups
-        let v010 = migrations[9].sql;
-        assert!(v010.contains("forge_signals_hourly_stats"));
-        assert!(v010.contains("forge_signals_daily_rollup"));
-
-        // v011: webhook replay
-        let v011 = migrations[10].sql;
-        assert!(v011.contains("raw_body"));
-        assert!(v011.contains("raw_headers"));
+        // Notable columns and replay fields
+        for needle in [
+            "owner_subject",
+            "token_family",
+            "raw_body",
+            "raw_headers",
+            "tenant_id",
+        ] {
+            assert!(v001.contains(needle), "expected {needle} in v001 SQL");
+        }
     }
 
     #[test]

@@ -6,8 +6,8 @@
 use std::collections::HashSet;
 
 use sqlparser::ast::{
-    BinaryOperator, Expr, Query, Select, SelectItem, SetExpr,
-    Statement, TableFactor, TableWithJoins,
+    BinaryOperator, Expr, Query, Select, SelectItem, SetExpr, Statement, TableFactor,
+    TableWithJoins,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
@@ -186,11 +186,7 @@ impl<'ast> Visit<'ast> for SqlStringExtractor {
 
         if matches!(
             macro_name.as_str(),
-            "query"
-                | "query_as"
-                | "query_scalar"
-                | "query_as_unchecked"
-                | "query_scalar_unchecked"
+            "query" | "query_as" | "query_scalar" | "query_as_unchecked" | "query_scalar_unchecked"
         ) {
             // Extract string literals from the macro tokens
             self.extract_sql_from_tokens(&node.mac.tokens);
@@ -653,9 +649,7 @@ pub fn sql_scope_requires_tenant(sql_strings: &[String]) -> bool {
 fn stmt_mentions_tenant(stmt: &Statement) -> bool {
     match stmt {
         Statement::Query(q) => query_mentions_tenant(q),
-        Statement::Update { selection, .. } => {
-            selection.as_ref().is_some_and(expr_mentions_tenant)
-        }
+        Statement::Update { selection, .. } => selection.as_ref().is_some_and(expr_mentions_tenant),
         Statement::Delete(d) => d.selection.as_ref().is_some_and(expr_mentions_tenant),
         _ => false,
     }
@@ -914,11 +908,9 @@ fn expr_has_scope(e: &Expr) -> bool {
                     | BinaryOperator::HashLongArrow
             ) {
                 expr_has_scope(left) || value_is_scope_col(right)
-            } else if matches!(
-                op,
-                BinaryOperator::Eq | BinaryOperator::NotEq
-            ) && (is_direct_scope_ref(left) && is_literal_value(right)
-                || is_direct_scope_ref(right) && is_literal_value(left))
+            } else if matches!(op, BinaryOperator::Eq | BinaryOperator::NotEq)
+                && (is_direct_scope_ref(left) && is_literal_value(right)
+                    || is_direct_scope_ref(right) && is_literal_value(left))
             {
                 false
             } else {
@@ -1538,9 +1530,7 @@ mod tests {
     #[test]
     fn scope_check_rejects_literal_integer_binding() {
         assert!(matches!(
-            sql_references_identity_scope(&[
-                "SELECT * FROM tasks WHERE user_id = 1".to_string()
-            ]),
+            sql_references_identity_scope(&["SELECT * FROM tasks WHERE user_id = 1".to_string()]),
             ScopeCheckResult::Unscoped
         ));
     }
@@ -1559,9 +1549,7 @@ mod tests {
     #[test]
     fn scope_check_accepts_placeholder_binding() {
         assert!(matches!(
-            sql_references_identity_scope(&[
-                "SELECT * FROM tasks WHERE user_id = $1".to_string()
-            ]),
+            sql_references_identity_scope(&["SELECT * FROM tasks WHERE user_id = $1".to_string()]),
             ScopeCheckResult::Scoped
         ));
     }

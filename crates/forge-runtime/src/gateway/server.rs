@@ -1037,7 +1037,12 @@ async fn tracing_middleware(
         200..=299 => tracing::info!(parent: &span, duration_ms, "Request completed"),
         _ => tracing::trace!(parent: &span, duration_ms, "Request completed"),
     }
-    crate::observability::record_http_request(&method, &route_pattern, status, elapsed.as_secs_f64());
+    crate::observability::record_http_request(
+        &method,
+        &route_pattern,
+        status,
+        elapsed.as_secs_f64(),
+    );
 
     set_tracing_headers(&mut response, &trace_id, &tracing_state.request_id);
     response
@@ -1067,11 +1072,7 @@ fn normalize_metric_path(path: &str) -> String {
             out.push_str(seg);
         }
     }
-    if out.is_empty() {
-        "/".to_string()
-    } else {
-        out
-    }
+    if out.is_empty() { "/".to_string() } else { out }
 }
 
 /// Pre-compute the quiet-paths set at startup. Config entries may use the full

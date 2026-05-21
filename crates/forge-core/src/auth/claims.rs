@@ -281,7 +281,6 @@ mod tests {
         assert!(result.is_ok());
     }
 
-
     #[test]
     fn test_claims_expiration() {
         let claims = Claims {

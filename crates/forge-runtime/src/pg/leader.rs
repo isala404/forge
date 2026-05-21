@@ -307,13 +307,11 @@ impl LeaderElection {
         //    the signal was sent, false if permission was denied or the backend
         //    was already gone. We warn rather than error on false so the caller
         //    can degrade gracefully.
-        let terminated = sqlx::query_scalar!(
-            r#"SELECT pg_terminate_backend($1) AS "terminated!""#,
-            pid,
-        )
-        .fetch_one(&mut **conn)
-        .await
-        .map_err(forge_core::ForgeError::Database)?;
+        let terminated =
+            sqlx::query_scalar!(r#"SELECT pg_terminate_backend($1) AS "terminated!""#, pid,)
+                .fetch_one(&mut **conn)
+                .await
+                .map_err(forge_core::ForgeError::Database)?;
 
         if !terminated {
             tracing::warn!(
@@ -991,11 +989,13 @@ mod integration_tests {
 
         // Artificially expire the lease so standbys see a stale leader.
         #[allow(clippy::disallowed_methods)]
-        sqlx::query("UPDATE forge_leaders SET lease_until = NOW() - INTERVAL '1 second' WHERE role = $1")
-            .bind(LeaderRole::Scheduler.as_str())
-            .execute(db.pool())
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE forge_leaders SET lease_until = NOW() - INTERVAL '1 second' WHERE role = $1",
+        )
+        .bind(LeaderRole::Scheduler.as_str())
+        .execute(db.pool())
+        .await
+        .unwrap();
 
         // The zombie's lock-holding connection is still alive (we haven't
         // dropped it), simulating a connection-pooler-kept backend.
@@ -1009,7 +1009,10 @@ mod integration_tests {
             LeaderConfig::default(),
         );
         let got = standby.try_become_leader().await.unwrap();
-        assert!(got, "standby must take over after terminating zombie backend");
+        assert!(
+            got,
+            "standby must take over after terminating zombie backend"
+        );
         assert!(standby.is_leader());
     }
 }

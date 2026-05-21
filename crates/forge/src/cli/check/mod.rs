@@ -260,12 +260,12 @@ impl CheckCommand {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
-    use super::*;
     use self::sqlx::{
         SqlxCacheCheck, file_uses_sqlx_macros, inspect_sqlx_cache,
         project_uses_compile_time_sqlx_macros,
     };
     use self::system_tables::scan_system_table_writes;
+    use super::*;
 
     #[test]
     fn test_check_result() {

@@ -108,16 +108,6 @@ from = 'forge = { workspace = true }'
 to = 'forge = { version = "{{forge_version}}", package = "forgex" }'
 files = ["Cargo.toml"]
 
-[[replacement]]
-from = 'argon2 = { workspace = true }'
-to = 'argon2 = "0.5"'
-files = ["Cargo.toml"]
-
-[[replacement]]
-from = 'password-hash = { workspace = true }'
-to = 'password-hash = "0.5"'
-files = ["Cargo.toml"]
-
 # Convert path dep to published version
 [[replacement]]
 from = 'forge-dioxus = { path = "../../../../packages/forge-dioxus" }'

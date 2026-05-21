@@ -19,8 +19,12 @@ use forge_core::workflow::{CompensationHandler, StepStatus, WorkflowContext, Wor
 #[derive(Debug)]
 pub enum WorkflowResult {
     Completed(serde_json::Value),
-    Suspended { reason: String },
-    Failed { error: String },
+    Suspended {
+        reason: String,
+    },
+    Failed {
+        error: String,
+    },
     Blocked {
         status: forge_core::workflow::WorkflowStatus,
         reason: String,

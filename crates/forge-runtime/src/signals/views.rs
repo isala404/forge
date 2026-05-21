@@ -9,9 +9,7 @@ use tracing::{debug, error};
 #[allow(clippy::disallowed_methods)]
 pub async fn refresh_views(pool: &PgPool) {
     let now = chrono::Utc::now();
-    let current_hour = now
-        .format("%Y-%m-%d %H:00:00+00")
-        .to_string();
+    let current_hour = now.format("%Y-%m-%d %H:00:00+00").to_string();
     let prev_hour = (now - chrono::Duration::hours(1))
         .format("%Y-%m-%d %H:00:00+00")
         .to_string();

@@ -212,8 +212,7 @@ impl SubscriptionManager {
                     &group.auth_scope,
                 );
                 let table_deps: Vec<&'static str> = group.table_deps.to_vec();
-                let runtime_tables: Vec<String> =
-                    group.read_set.tables.to_vec();
+                let runtime_tables: Vec<String> = group.read_set.tables.to_vec();
                 let gid = group.id;
                 drop(group);
                 Some((lookup_key, table_deps, runtime_tables, gid))
@@ -253,28 +252,26 @@ impl SubscriptionManager {
 
                 // Collect eviction data while holding the group guard, then release
                 // before touching table_index to avoid cross-shard deadlocks.
-                let eviction_data =
-                    if let Some(mut group) = self.groups.get_mut(&sub.group_id) {
-                        group.subscribers.retain(|s| *s != sid);
+                let eviction_data = if let Some(mut group) = self.groups.get_mut(&sub.group_id) {
+                    group.subscribers.retain(|s| *s != sid);
 
-                        if group.subscribers.is_empty() {
-                            let lookup_key = QueryGroup::compute_lookup_key(
-                                &group.query_name,
-                                &group.args,
-                                &group.auth_scope,
-                            );
-                            let table_deps: Vec<&'static str> = group.table_deps.to_vec();
-                            let runtime_tables: Vec<String> =
-                                group.read_set.tables.to_vec();
-                            let gid = group.id;
-                            drop(group);
-                            Some((lookup_key, table_deps, runtime_tables, gid))
-                        } else {
-                            None
-                        }
+                    if group.subscribers.is_empty() {
+                        let lookup_key = QueryGroup::compute_lookup_key(
+                            &group.query_name,
+                            &group.args,
+                            &group.auth_scope,
+                        );
+                        let table_deps: Vec<&'static str> = group.table_deps.to_vec();
+                        let runtime_tables: Vec<String> = group.read_set.tables.to_vec();
+                        let gid = group.id;
+                        drop(group);
+                        Some((lookup_key, table_deps, runtime_tables, gid))
                     } else {
                         None
-                    };
+                    }
+                } else {
+                    None
+                };
 
                 if let Some((lookup_key, table_deps, runtime_tables, gid)) = eviction_data {
                     self.remove_group_from_table_index(gid, &table_deps, &runtime_tables);

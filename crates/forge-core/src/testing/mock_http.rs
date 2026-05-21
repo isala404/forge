@@ -579,9 +579,7 @@ mod tests {
         // The recording happens before the lookup so failed-match calls still
         // show up in requests() — important for diagnosing "why didn't my mock fire".
         let mock = MockHttp::new();
-        let _ = mock
-            .execute(req("DELETE", "https://nowhere/x", "/x"))
-            .await;
+        let _ = mock.execute(req("DELETE", "https://nowhere/x", "/x")).await;
         let recorded = mock.requests();
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].method, "DELETE");
@@ -610,11 +608,7 @@ mod tests {
         });
 
         let r = mock
-            .execute(req(
-                "GET",
-                "https://api.example.com/users",
-                "/users",
-            ))
+            .execute(req("GET", "https://api.example.com/users", "/users"))
             .await;
         assert_eq!(r.body["hit"], "first");
     }
@@ -627,9 +621,7 @@ mod tests {
         let _ = mock
             .execute(req("GET", "https://api.example.com/a", "/a"))
             .await;
-        let _ = mock
-            .execute(req("GET", "https://other.com/b", "/b"))
-            .await;
+        let _ = mock.execute(req("GET", "https://other.com/b", "/b")).await;
         let _ = mock
             .execute(req("GET", "https://api.example.com/c", "/c"))
             .await;

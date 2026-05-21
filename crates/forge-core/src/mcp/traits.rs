@@ -65,9 +65,7 @@ pub struct McpToolInfo {
 impl McpToolInfo {
     pub fn validate(&self) -> Result<()> {
         if self.name.is_empty() {
-            return Err(ForgeError::config(
-                "MCP tool name cannot be empty",
-            ));
+            return Err(ForgeError::config("MCP tool name cannot be empty"));
         }
         Ok(())
     }

@@ -253,12 +253,11 @@ impl IsolatedTestDb {
             .map_err(ForgeError::Database)?;
 
         // Force disconnect other connections and drop
-        if let Err(e) = sqlx::query(
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1",
-        )
-        .bind(&self.db_name)
-        .execute(&pool)
-        .await
+        if let Err(e) =
+            sqlx::query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1")
+                .bind(&self.db_name)
+                .execute(&pool)
+                .await
         {
             tracing::warn!(db = %self.db_name, error = %e, "failed to terminate backend connections during test cleanup");
         }

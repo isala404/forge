@@ -57,10 +57,7 @@ impl SchemaRegistry {
 
     /// Register a function definition.
     pub fn register_function(&self, func: FunctionDef) {
-        let mut functions = self
-            .functions
-            .write()
-            .expect(LOCK_POISONED);
+        let mut functions = self.functions.write().expect(LOCK_POISONED);
         functions.insert(func.name.clone(), func);
     }
 
@@ -78,10 +75,7 @@ impl SchemaRegistry {
 
     /// Get a function by name.
     pub fn get_function(&self, name: &str) -> Option<FunctionDef> {
-        let functions = self
-            .functions
-            .read()
-            .expect(LOCK_POISONED);
+        let functions = self.functions.read().expect(LOCK_POISONED);
         functions.get(name).cloned()
     }
 
@@ -99,27 +93,15 @@ impl SchemaRegistry {
 
     /// Get all registered functions.
     pub fn all_functions(&self) -> Vec<FunctionDef> {
-        let functions = self
-            .functions
-            .read()
-            .expect(LOCK_POISONED);
+        let functions = self.functions.read().expect(LOCK_POISONED);
         functions.values().cloned().collect()
     }
 
     /// Clear all registrations (useful for testing).
     pub fn clear(&self) {
-        self.tables
-            .write()
-            .expect(LOCK_POISONED)
-            .clear();
-        self.enums
-            .write()
-            .expect(LOCK_POISONED)
-            .clear();
-        self.functions
-            .write()
-            .expect(LOCK_POISONED)
-            .clear();
+        self.tables.write().expect(LOCK_POISONED).clear();
+        self.enums.write().expect(LOCK_POISONED).clear();
+        self.functions.write().expect(LOCK_POISONED).clear();
     }
 }
 
