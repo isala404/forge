@@ -175,10 +175,15 @@ jobs:
         with:
           ref: ${{ needs.bump-versions.outputs.commit_sha }}
       - run: |
+          TAG="v${{ needs.parse-changelog.outputs.version }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "v${{ needs.parse-changelog.outputs.version }}" -m "Release v${{ needs.parse-changelog.outputs.version }}"
-          git push origin "v${{ needs.parse-changelog.outputs.version }}"
+          if git ls-remote --tags --exit-code origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists on origin, skipping tag creation"
+          else
+            git tag -a "$TAG" -m "Release $TAG"
+            git push origin "$TAG"
+          fi
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -195,7 +200,7 @@ jobs:
   publish-crates:
     name: Publish crates.io
     if: ${{ inputs.dry_run != true }}
-    needs: [bump-versions, release]
+    needs: [parse-changelog, bump-versions, release]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -209,8 +214,9 @@ jobs:
           publish_crate() {
             local output
             output=$(cargo publish "$@" --token $TOKEN 2>&1) || {
-              if echo "$output" | grep -q "already uploaded"; then
-                echo "$output" | tail -1
+              if echo "$output" | grep -Eq "already uploaded|already exists on crates.io"; then
+                echo "$output" | tail -3
+                echo "(treated as success: version already on crates.io)"
                 return 0
               fi
               echo "$output"
@@ -237,13 +243,13 @@ jobs:
             done
             echo "Warning: $crate@$version not yet indexed after 120s, proceeding anyway"
           }
-          VERSION="${{ needs.bump-versions.outputs.version }}"
+          VERSION="${{ needs.parse-changelog.outputs.version }}"
 
           for pkg in forge-macros forge-core forge-runtime forge-codegen; do
             publish_crate -p $pkg --allow-dirty
             wait_for_crate "$pkg" "$VERSION"
           done
-          publish_crate -p forge-dioxus --allow-dirty
+          publish_crate --manifest-path packages/forge-dioxus/Cargo.toml --allow-dirty
           wait_for_crate "forge-dioxus" "$VERSION"
           bash scripts/build-template-archive.sh
           publish_crate -p forgex --allow-dirty
@@ -251,7 +257,7 @@ jobs:
   publish-npm:
     name: Publish npm
     if: ${{ inputs.dry_run != true }}
-    needs: [bump-versions, release]
+    needs: [parse-changelog, bump-versions, release]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -261,6 +267,14 @@ jobs:
         with:
           node-version: "22"
           registry-url: https://registry.npmjs.org
-      - run: cd packages/forge-svelte && npm publish --access public
-        env:
+      - env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.parse-changelog.outputs.version }}
+        run: |
+          cd packages/forge-svelte
+          PUBLISHED=$(npm view "@forge-rs/svelte@${VERSION}" version 2>/dev/null || true)
+          if [ "$PUBLISHED" = "$VERSION" ]; then
+            echo "@forge-rs/svelte@${VERSION} already published, skipping"
+            exit 0
+          fi
+          npm publish --access public
