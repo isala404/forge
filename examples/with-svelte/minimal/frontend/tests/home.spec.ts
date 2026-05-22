@@ -1,4 +1,4 @@
-import { test, expect, trackConsoleErrors, API_URL } from "./fixtures";
+import { test, expect, trackConsoleErrors } from "./fixtures";
 
 test("application boots without console errors", async ({ page }) => {
   const errors = trackConsoleErrors(page);
@@ -16,9 +16,10 @@ test("home page points the Backend link at the configured API URL", async ({
 }) => {
   await page.goto("/");
 
-  // Regression guard: the page used to read a non-existent VITE_API_URL var
-  // and silently fall back to localhost:8080 instead of PUBLIC_API_URL.
+  // `forge test` clears PUBLIC_API_URL so the embedded frontend serves
+  // same-origin with relative URLs. Regression guard: the page used to read a
+  // non-existent VITE_API_URL var and silently fall back to a hardcoded
+  // localhost:8080 — which would make this an absolute URL instead.
   const backendLink = page.locator("p.subtitle a");
-  await expect(backendLink).toHaveText(API_URL);
-  await expect(backendLink).toHaveAttribute("href", `${API_URL}/health`);
+  await expect(backendLink).toHaveAttribute("href", "/health");
 });

@@ -107,8 +107,21 @@ async fn trigger_webhook(api_url: &str, idempotency_key: &str) -> Result<(), Str
     // the 300s window. Send it alongside the signature.
     let timestamp = (now / 1000.0) as i64;
 
+    // In same-origin builds `api_url` is empty. Unlike browser `fetch`, reqwest
+    // can't parse a relative URL, so resolve it against the current origin.
+    #[cfg(target_arch = "wasm32")]
+    let base = if api_url.is_empty() {
+        web_sys::window()
+            .and_then(|w| w.location().origin().ok())
+            .unwrap_or_default()
+    } else {
+        api_url.to_string()
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let base = api_url.to_string();
+
     let resp = reqwest::Client::new()
-        .post(format!("{api_url}/_api/webhooks/demo"))
+        .post(format!("{base}/_api/webhooks/demo"))
         .header("Content-Type", "application/json")
         .header("X-Webhook-Signature", signature)
         .header("X-Webhook-Timestamp", timestamp.to_string())
