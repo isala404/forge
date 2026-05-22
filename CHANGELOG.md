@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Browser-originated webhook calls.** Webhook routes now ride the gateway's shared middleware stack instead of a separate router with a hand-rolled CORS layer. The old stack deadlocked browser `POST`s after the CORS preflight and omitted `x-webhook-timestamp` from the allowed headers, so an in-app `fetch` to a webhook would fail. The gateway CORS policy now allows `x-webhook-timestamp`.
+- **`forge generate` now syncs the SvelteKit toolchain.** It runs `svelte-kit sync` after emitting bindings, regenerating `.svelte-kit/tsconfig.json` (which the project `tsconfig.json` extends). A bare `forge generate` previously left that file stale, so `svelte-check` / `bun run check` failed until the dev server regenerated it.
 
 ## [0.10.0] - 2026-05-21
 

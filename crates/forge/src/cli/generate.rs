@@ -108,6 +108,12 @@ impl GenerateCommand {
         })?;
         eprintln!(" done");
 
+        // Sync the frontend toolchain. For SvelteKit this runs `svelte-kit
+        // sync`, which regenerates `.svelte-kit/tsconfig.json` — the file the
+        // project tsconfig extends and that `svelte-check` needs. No-op for
+        // Dioxus.
+        detected_target.post_generate(Path::new("frontend"))?;
+
         println!();
         if has_schema {
             let table_count = registry.all_tables().len();
