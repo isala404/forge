@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-05-22
+
+### Changed
+
+- **`forge new` pins the skill installer to the CLI release tag.** The `forge-idiomatic-engineer` skill is installed from `tree/v<version>` instead of `tree/main`, so a scaffolded project gets the skill matching the CLI that created it. The manual `bunx skills add` line in generated READMEs is pinned the same way.
+
+### Fixed
+
+- **Browser-originated webhook calls.** Webhook routes now ride the gateway's shared middleware stack instead of a separate router with a hand-rolled CORS layer. The old stack deadlocked browser `POST`s after the CORS preflight and omitted `x-webhook-timestamp` from the allowed headers, so an in-app `fetch` to a webhook would fail. The gateway CORS policy now allows `x-webhook-timestamp`.
+
 ## [0.10.0] - 2026-05-21
 
 This release collapses the runtime into a single-pool doctrine, unifies handler registration, overhauls reactivity, and hardens the security surface. Pre-1.0 policy applies: breaking changes are listed but no migration shims are kept.
@@ -624,6 +634,7 @@ This release collapses the runtime into a single-pool doctrine, unifies handler 
 - Release workflow cargo-edit installation
 
 [unreleased]: https://github.com/isala404/forge/compare/v0.10.0...HEAD
+[0.10.1]: https://github.com/isala404/forge/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/isala404/forge/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/isala404/forge/compare/v0.8.4...v0.9.0
 [0.8.4]: https://github.com/isala404/forge/compare/v0.8.3...v0.8.4

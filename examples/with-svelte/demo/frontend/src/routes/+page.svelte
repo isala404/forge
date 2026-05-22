@@ -194,6 +194,7 @@
       headers: {
         "Content-Type": "application/json",
         "X-Webhook-Signature": signatureHex,
+        "X-Webhook-Timestamp": Math.floor(Date.now() / 1000).toString(),
         "X-Idempotency-Key": idempotencyKey,
       },
       body: payload,

@@ -484,6 +484,7 @@ impl GatewayServer {
                         axum::http::header::AUTHORIZATION,
                         axum::http::header::ACCEPT,
                         axum::http::HeaderName::from_static("x-webhook-signature"),
+                        axum::http::HeaderName::from_static("x-webhook-timestamp"),
                         axum::http::HeaderName::from_static("x-idempotency-key"),
                         axum::http::HeaderName::from_static("x-correlation-id"),
                         axum::http::HeaderName::from_static("x-session-id"),

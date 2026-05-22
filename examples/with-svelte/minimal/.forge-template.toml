@@ -69,6 +69,12 @@ from = "minimal/"
 to = "{{project_slug}}/"
 files = ["README.md"]
 
+# Pin the skill install URL to the CLI's release tag
+[[replacement]]
+from = "tree/main/docs/skills/forge-idiomatic-engineer"
+to = "tree/v{{forge_version}}/docs/skills/forge-idiomatic-engineer"
+files = ["README.md"]
+
 [[replacement]]
 from = "<h1>minimal</h1>"
 to = "<h1>{{project_slug}}</h1>"

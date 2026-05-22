@@ -163,4 +163,15 @@ test("webhook endpoint rejects bad signatures and surfaces accepted events", asy
     has: page.getByText("Webhook"),
   });
   await expect(section.getByText(key)).toBeVisible({ timeout: ACTION_TIMEOUT });
+
+  // Exercises trigger_webhook() end to end via a real browser click: the
+  // replay-protection timestamp header and the CORS preflight that the
+  // request.post() above bypasses.
+  const errors = trackConsoleErrors(page);
+  await section.getByRole("button", { name: "Send" }).click();
+  await expect(section.getByText(/Webhook processed/i)).toBeVisible({
+    timeout: ACTION_TIMEOUT,
+  });
+  await expect(section.locator("p.hint.warning")).toHaveCount(0);
+  expect(errors).toHaveLength(0);
 });

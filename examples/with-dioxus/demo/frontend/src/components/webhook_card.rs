@@ -102,10 +102,16 @@ async fn trigger_webhook(api_url: &str, idempotency_key: &str) -> Result<(), Str
     mac.update(payload.as_bytes());
     let signature = hex::encode(mac.finalize().into_bytes());
 
+    // HMAC-SHA256 webhooks enforce a replay window: the server rejects any
+    // request whose `X-Webhook-Timestamp` (unix seconds) is missing or outside
+    // the 300s window. Send it alongside the signature.
+    let timestamp = (now / 1000.0) as i64;
+
     let resp = reqwest::Client::new()
         .post(format!("{api_url}/_api/webhooks/demo"))
         .header("Content-Type", "application/json")
         .header("X-Webhook-Signature", signature)
+        .header("X-Webhook-Timestamp", timestamp.to_string())
         .header("X-Idempotency-Key", idempotency_key)
         .body(payload)
         .send()

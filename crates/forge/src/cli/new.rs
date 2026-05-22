@@ -250,8 +250,11 @@ fn install_frontend_deps(dir: &Path, _frontend: FrontendTarget) -> Result<()> {
     Ok(())
 }
 
-const SKILL_INSTALL_URL: &str =
-    "https://github.com/isala404/forge/tree/main/docs/skills/forge-idiomatic-engineer";
+const SKILL_INSTALL_URL: &str = concat!(
+    "https://github.com/isala404/forge/tree/v",
+    env!("CARGO_PKG_VERSION"),
+    "/docs/skills/forge-idiomatic-engineer"
+);
 
 async fn install_skill(dir: &Path, non_interactive: bool) -> Result<()> {
     println!(
@@ -829,6 +832,37 @@ mod tests {
 
         assert!(path.join(".sqlx").exists());
         assert!(path.join(".sqlx").read_dir().unwrap().next().is_some());
+    }
+
+    #[test]
+    fn test_svelte_templates_pin_skill_url_to_release_tag() {
+        let expected = format!(
+            "tree/v{}/docs/skills/forge-idiomatic-engineer",
+            env!("CARGO_PKG_VERSION")
+        );
+
+        for template_id in [
+            "with-svelte/minimal",
+            "with-svelte/demo",
+            "with-svelte/realtime-todo-list",
+        ] {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("my-app");
+            fs::create_dir_all(&path).unwrap();
+
+            let template = load_template_definition(template_id).unwrap();
+            create_project_from_template(&path, "my-app", &template).unwrap();
+
+            let readme = fs::read_to_string(path.join("README.md")).unwrap();
+            assert!(
+                readme.contains(&expected),
+                "{template_id} README should pin the skill URL to the release tag"
+            );
+            assert!(
+                !readme.contains("tree/main/docs/skills"),
+                "{template_id} README should not reference the main branch for the skill URL"
+            );
+        }
     }
 
     #[test]

@@ -78,6 +78,10 @@ pub async fn internal(ctx: &WebhookContext, payload: Value) -> Result<WebhookRes
 
 Set `replay_window_secs = 0` to disable the check when integrating with a legacy provider that cannot stamp the header. Not recommended in production. Stripe is unaffected — it carries its own `t=` field and continues to enforce a 5-minute window regardless of this attribute.
 
+:::note Calling a webhook from the browser
+If your own frontend triggers a webhook (rather than an external service), the browser must send `X-Webhook-Timestamp` alongside the signature header — omitting it returns 401. The gateway's CORS policy already allows both headers, so a same-config `fetch` works once the timestamp is attached.
+:::
+
 ### Idempotency Sources
 
 ```rust

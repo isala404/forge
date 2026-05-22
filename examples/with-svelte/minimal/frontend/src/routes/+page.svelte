@@ -1,7 +1,8 @@
 <script lang="ts">
   import { getForgeSignals } from "@forge-rs/svelte";
+  import { PUBLIC_API_URL } from "$env/static/public";
   const signals = getForgeSignals();
-  const apiUrl = import.meta.env.VITE_API_URL || "http://localhost:8080";
+  const apiUrl = PUBLIC_API_URL;
 </script>
 
 <h1>minimal</h1>

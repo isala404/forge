@@ -919,9 +919,49 @@ impl Forge {
                 tracing::info!("Signals enabled (analytics + diagnostics)");
             }
 
-            if let Some(factory) = self.custom_routes_factory.take() {
-                gateway = gateway.with_custom_routes(factory(pool.clone()));
-                tracing::debug!("Custom routes merged into gateway middleware stack");
+            // Webhooks ride the gateway middleware stack via `with_custom_routes`.
+            // The previous separate router had a hand-rolled CORS stack that
+            // deadlocked post-preflight browser POSTs and omitted the
+            // `x-webhook-timestamp` header.
+            let mut custom_routes: Option<Router> = self
+                .custom_routes_factory
+                .take()
+                .map(|factory| factory(pool.clone()));
+
+            if !self.webhook_registry.is_empty() {
+                use axum::extract::DefaultBodyLimit;
+                use axum::routing::post;
+
+                let webhook_state = WebhookState::new(self.webhook_registry.clone(), pool.clone());
+                #[cfg(feature = "jobs")]
+                let webhook_state = webhook_state.with_job_dispatcher(job_dispatcher.clone());
+                #[cfg(feature = "workflows")]
+                let webhook_state =
+                    webhook_state.with_workflow_dispatcher(workflow_executor.clone());
+                let webhook_state = webhook_state.with_kv(Arc::clone(&kv_handle));
+                let webhook_state = Arc::new(webhook_state);
+
+                let webhook_routes = Router::new()
+                    .route(
+                        "/webhooks/{*path}",
+                        post(webhook_handler).with_state(webhook_state),
+                    )
+                    .layer(DefaultBodyLimit::max(1024 * 1024));
+
+                custom_routes = Some(match custom_routes {
+                    Some(existing) => existing.merge(webhook_routes),
+                    None => webhook_routes,
+                });
+
+                tracing::debug!(
+                    webhooks = ?self.webhook_registry.paths().collect::<Vec<_>>(),
+                    "Webhook routes registered"
+                );
+            }
+
+            if let Some(routes) = custom_routes {
+                gateway = gateway.with_custom_routes(routes);
+                tracing::debug!("Custom and webhook routes merged into gateway middleware stack");
             }
 
             let reactor = gateway.reactor();
@@ -934,96 +974,6 @@ impl Forge {
 
             let api_router = gateway.router();
             let mut router = Router::new().nest("/_api", api_router);
-
-            if !self.webhook_registry.is_empty() {
-                use axum::routing::post;
-                use tower_http::cors::{Any, CorsLayer};
-
-                let webhook_state = WebhookState::new(self.webhook_registry.clone(), pool.clone());
-                #[cfg(feature = "jobs")]
-                let webhook_state = webhook_state.with_job_dispatcher(job_dispatcher.clone());
-                #[cfg(feature = "workflows")]
-                let webhook_state =
-                    webhook_state.with_workflow_dispatcher(workflow_executor.clone());
-                let webhook_state = webhook_state.with_kv(Arc::clone(&kv_handle));
-                let webhook_state = Arc::new(webhook_state);
-
-                // Webhook routes sit outside the API router so they need their own CORS layer.
-                let webhook_cors = if self.config.gateway.cors_enabled
-                    || !self.config.gateway.cors_origins.is_empty()
-                {
-                    if self.config.gateway.cors_origins.iter().any(|o| o == "*") {
-                        CorsLayer::new()
-                            .allow_origin(Any)
-                            .allow_methods(Any)
-                            .allow_headers(Any)
-                    } else {
-                        use axum::http::Method;
-                        let origins: Vec<_> = self
-                            .config
-                            .gateway
-                            .cors_origins
-                            .iter()
-                            .filter_map(|o| o.parse().ok())
-                            .collect();
-                        CorsLayer::new()
-                            .allow_origin(origins)
-                            .allow_methods([
-                                Method::GET,
-                                Method::POST,
-                                Method::PUT,
-                                Method::DELETE,
-                                Method::PATCH,
-                                Method::OPTIONS,
-                            ])
-                            .allow_headers([
-                                axum::http::header::CONTENT_TYPE,
-                                axum::http::header::AUTHORIZATION,
-                                axum::http::header::ACCEPT,
-                                axum::http::HeaderName::from_static("x-webhook-signature"),
-                                axum::http::HeaderName::from_static("x-idempotency-key"),
-                            ])
-                            .allow_credentials(true)
-                    }
-                } else {
-                    CorsLayer::new()
-                };
-
-                let webhook_router = Router::new()
-                    .route("/{*path}", post(webhook_handler).with_state(webhook_state))
-                    .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
-                    .layer(
-                        tower::ServiceBuilder::new()
-                            .layer(axum::error_handling::HandleErrorLayer::new(
-                                |err: tower::BoxError| async move {
-                                    if err.is::<tower::timeout::error::Elapsed>() {
-                                        return (
-                                            axum::http::StatusCode::REQUEST_TIMEOUT,
-                                            "Request timed out",
-                                        );
-                                    }
-                                    (
-                                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                                        "Server overloaded",
-                                    )
-                                },
-                            ))
-                            .layer(tower::limit::ConcurrencyLimitLayer::new(
-                                self.config.gateway.max_connections,
-                            ))
-                            .layer(tower::timeout::TimeoutLayer::new(Duration::from_secs(
-                                self.config.gateway.request_timeout.as_secs(),
-                            ))),
-                    )
-                    .layer(webhook_cors);
-
-                router = router.nest("/_api/webhooks", webhook_router);
-
-                tracing::debug!(
-                    webhooks = ?self.webhook_registry.paths().collect::<Vec<_>>(),
-                    "Webhook routes registered"
-                );
-            }
 
             if self.config.mcp.enabled {
                 use axum::routing::get;
