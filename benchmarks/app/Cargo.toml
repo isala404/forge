@@ -1,6 +1,6 @@
 [package]
 name = "forge-bench"
-version = "0.10.0"
+version = "0.10.1"
 edition = "2024"
 rust-version = "1.92"
 publish = false
