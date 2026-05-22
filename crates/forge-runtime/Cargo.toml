@@ -12,7 +12,7 @@ workspace = true
 [dependencies]
 # Always required: core types, async runtime, database, serialization,
 # tracing, concurrent maps. Every feature touches some of these.
-forge-core = { version = "0.10.1", path = "../forge-core" }
+forge-core = { version = "0.10.2", path = "../forge-core" }
 tokio = { workspace = true }
 sqlx = { workspace = true }
 reqwest = { workspace = true }

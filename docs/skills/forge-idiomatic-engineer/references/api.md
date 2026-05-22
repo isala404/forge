@@ -570,7 +570,7 @@ Subsystems are feature-gated; default is `full`. Opt out with `default-features 
 | `embedded-frontend` | no | Embeds compiled frontend into binary at build time | rust-embed |
 
 ```toml
-forgex = { version = "0.10.1", default-features = false, features = ["worker"] }
+forgex = { version = "0.10.2", default-features = false, features = ["worker"] }
 ```
 
 `#[forge::job/cron/workflow/daemon/webhook/mcp_tool]` without the matching feature errors at the generated `forge::AutoHandler` reference. Without `otel`, `tracing-subscriber` still logs to stderr. `geoip` fetches a ~10 MB DB at compile time — disable for air-gapped builds or when not using signals.

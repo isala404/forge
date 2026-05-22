@@ -1235,7 +1235,7 @@ checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
 name = "forge-bench"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "chrono",
  "forgex",
@@ -1250,7 +1250,7 @@ dependencies = [
 
 [[package]]
 name = "forge-codegen"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "forge-core",
  "insta",
@@ -1265,7 +1265,7 @@ dependencies = [
 
 [[package]]
 name = "forge-core"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -1293,7 +1293,7 @@ dependencies = [
 
 [[package]]
 name = "forge-dioxus-demo-template"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "argon2",
  "chrono",
@@ -1315,7 +1315,7 @@ dependencies = [
 
 [[package]]
 name = "forge-dioxus-minimal-template"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "dotenvy",
  "forgex",
@@ -1328,7 +1328,7 @@ dependencies = [
 
 [[package]]
 name = "forge-harness"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "axum",
  "chrono",
@@ -1353,7 +1353,7 @@ dependencies = [
 
 [[package]]
 name = "forge-macros"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "blake3",
  "cron",
@@ -1366,7 +1366,7 @@ dependencies = [
 
 [[package]]
 name = "forge-runtime"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "ahash",
  "aho-corasick",
@@ -1420,7 +1420,7 @@ dependencies = [
 
 [[package]]
 name = "forge-svelte-demo-template"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "argon2",
  "chrono",
@@ -1442,7 +1442,7 @@ dependencies = [
 
 [[package]]
 name = "forge-svelte-minimal-template"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "dotenvy",
  "forgex",
@@ -1455,7 +1455,7 @@ dependencies = [
 
 [[package]]
 name = "forgex"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -4351,7 +4351,7 @@ dependencies = [
 
 [[package]]
 name = "todo"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "chrono",
  "dotenvy",
@@ -4366,7 +4366,7 @@ dependencies = [
 
 [[package]]
 name = "todo-dioxus"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "chrono",
  "dotenvy",
