@@ -222,67 +222,7 @@ impl Forge {
     /// under the same name+version (contract changed without a version bump).
     #[cfg(feature = "workflows")]
     async fn persist_workflow_definitions(&self, pool: &sqlx::PgPool) -> Result<()> {
-        for info in self.workflow_registry.definitions() {
-            let status = info.status.as_str();
-
-            // Try to insert. If row exists, check signature matches.
-            let existing = sqlx::query!(
-                r#"
-                SELECT workflow_signature FROM forge_workflow_definitions
-                WHERE workflow_name = $1 AND workflow_version = $2
-                "#,
-                info.name,
-                info.version,
-            )
-            .fetch_optional(pool)
-            .await
-            .map_err(ForgeError::Database)?;
-
-            if let Some(row) = existing {
-                if row.workflow_signature != info.signature {
-                    return Err(ForgeError::config(format!(
-                        "Workflow '{}' version '{}' has a different signature than previously registered. \
-                         Persisted contract changed under the same version. \
-                         Expected signature: {}, got: {}. \
-                         Create a new version instead of modifying the existing one.",
-                        info.name, info.version, row.workflow_signature, info.signature
-                    )));
-                }
-                sqlx::query!(
-                    "UPDATE forge_workflow_definitions SET status = $3 WHERE workflow_name = $1 AND workflow_version = $2",
-                    info.name,
-                    info.version,
-                    status,
-                )
-                .execute(pool)
-                .await
-                .map_err(ForgeError::Database)?;
-            } else {
-                sqlx::query!(
-                    r#"
-                    INSERT INTO forge_workflow_definitions (workflow_name, workflow_version, workflow_signature, status)
-                    VALUES ($1, $2, $3, $4)
-                    "#,
-                    info.name,
-                    info.version,
-                    info.signature,
-                    status,
-                )
-                .execute(pool)
-                .await
-                .map_err(ForgeError::Database)?;
-            }
-
-            tracing::debug!(
-                workflow = info.name,
-                version = info.version,
-                signature = info.signature,
-                status = status,
-                "Workflow definition registered"
-            );
-        }
-
-        Ok(())
+        self.workflow_registry.persist_definitions(pool).await
     }
 
     /// Start the runtime. Blocks until a ctrl-c or `Forge::shutdown()` is called.

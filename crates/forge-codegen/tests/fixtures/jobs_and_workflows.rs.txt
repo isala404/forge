@@ -1,0 +1,35 @@
+use forge::prelude::*;
+use uuid::Uuid;
+
+#[derive(Serialize, Deserialize)]
+pub struct ExportRequest {
+    pub format: String,
+    pub include_archived: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ExportResult {
+    pub url: String,
+    pub row_count: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct VerifyInput {
+    pub user_id: Uuid,
+    pub email: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct VerifyOutput {
+    pub verified: bool,
+}
+
+#[forge::job(timeout = "5m", retry(max_attempts = 3))]
+pub async fn export_users(ctx: &JobContext, request: ExportRequest) -> Result<ExportResult> {
+    Ok(ExportResult { url: "/tmp".into(), row_count: 0 })
+}
+
+#[forge::workflow(name = "verify_account", version = "2026-01", timeout = "1h")]
+pub async fn verify_account(ctx: &WorkflowContext, input: VerifyInput) -> Result<VerifyOutput> {
+    Ok(VerifyOutput { verified: true })
+}

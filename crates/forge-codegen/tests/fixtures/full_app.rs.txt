@@ -1,0 +1,83 @@
+//! Kitchen-sink fixture: covers queries, mutations, jobs, workflows, models,
+//! enums, custom args, Option/Vec, and tables-with-dependencies declarations.
+
+use forge::prelude::*;
+use uuid::Uuid;
+
+#[forge_enum]
+pub enum TodoStatus {
+    Open,
+    InProgress,
+    Done,
+}
+
+#[forge::model]
+pub struct Todo {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub title: String,
+    pub status: TodoStatus,
+    pub due_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct CreateTodoInput {
+    pub title: String,
+    pub status: TodoStatus,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct CleanupRequest {
+    pub older_than_days: i32,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct CleanupOutput {
+    pub deleted_count: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ReportInput {
+    pub user_id: Uuid,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ReportOutput {
+    pub url: String,
+}
+
+#[forge::query(tables("todos"))]
+pub async fn list_my_todos(ctx: &QueryContext) -> Result<Vec<Todo>> {
+    Ok(vec![])
+}
+
+#[forge::query(auth = "none", tables("todos"))]
+pub async fn count_by_status(ctx: &QueryContext, status: TodoStatus) -> Result<i64> {
+    Ok(0)
+}
+
+#[forge::mutation]
+pub async fn create_todo(ctx: &MutationContext, input: CreateTodoInput) -> Result<Todo> {
+    unimplemented!()
+}
+
+#[forge::mutation]
+pub async fn delete_todo(ctx: &MutationContext, id: Uuid) -> Result<bool> {
+    Ok(true)
+}
+
+#[forge::job(timeout = "10m", retry(max_attempts = 2))]
+pub async fn cleanup_old_todos(ctx: &JobContext, request: CleanupRequest) -> Result<CleanupOutput> {
+    Ok(CleanupOutput { deleted_count: 0 })
+}
+
+#[forge::workflow(name = "build_report", version = "2026-05", timeout = "30m")]
+pub async fn build_report(ctx: &WorkflowContext, input: ReportInput) -> Result<ReportOutput> {
+    Ok(ReportOutput { url: "/r".into() })
+}
+
+#[forge::cron(schedule = "0 * * * *")]
+pub async fn hourly_cleanup(ctx: &CronContext) -> Result<()> {
+    Ok(())
+}

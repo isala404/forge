@@ -1,0 +1,5 @@
+error: unsigned and narrow integer types are not supported in handler signatures; use i32 or i64 for portability
+ --> tests/ui/fail/query_bare_unsigned_arg.rs:9:50
+  |
+9 | pub async fn lookup(_ctx: &QueryContext, _count: u32) -> Result<i64> {
+  |                                                  ^^^

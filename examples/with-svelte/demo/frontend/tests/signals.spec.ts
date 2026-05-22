@@ -55,17 +55,30 @@ type SignalEnvelope =
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-async function waitForSignal<T extends SignalEnvelope["type"]>(
+function waitForSignal(
   page: Page,
-  type: T,
-  predicate: (
-    payload: Extract<SignalEnvelope, { type: T }>["payload"],
-  ) => boolean = () => true,
+  type: "view",
+  predicate?: (payload: ViewPayload) => boolean,
+  timeout?: number,
+): Promise<{ request: Request; payload: ViewPayload }>;
+function waitForSignal(
+  page: Page,
+  type: "event",
+  predicate?: (payload: EventPayload) => boolean,
+  timeout?: number,
+): Promise<{ request: Request; payload: EventPayload }>;
+function waitForSignal(
+  page: Page,
+  type: "report",
+  predicate?: (payload: ReportPayload) => boolean,
+  timeout?: number,
+): Promise<{ request: Request; payload: ReportPayload }>;
+async function waitForSignal(
+  page: Page,
+  type: SignalEnvelope["type"],
+  predicate: (payload: never) => boolean = () => true,
   timeout = ACTION_TIMEOUT * 3,
-): Promise<{
-  request: Request;
-  payload: Extract<SignalEnvelope, { type: T }>["payload"];
-}> {
+): Promise<{ request: Request; payload: SignalEnvelope["payload"] }> {
   const request = await page.waitForRequest(
     (req) => {
       if (!req.url().includes("/_api/signal")) return false;
@@ -73,9 +86,8 @@ async function waitForSignal<T extends SignalEnvelope["type"]>(
       try {
         const body = req.postDataJSON() as SignalEnvelope;
         if (body.type !== type) return false;
-        return predicate(
-          body.payload as Extract<SignalEnvelope, { type: T }>["payload"],
-        );
+        // overloads pair `type` with the matching payload shape at call sites
+        return predicate(body.payload as never);
       } catch {
         return false;
       }
@@ -83,10 +95,7 @@ async function waitForSignal<T extends SignalEnvelope["type"]>(
     { timeout },
   );
   const body = request.postDataJSON() as SignalEnvelope;
-  return {
-    request,
-    payload: body.payload as Extract<SignalEnvelope, { type: T }>["payload"],
-  };
+  return { request, payload: body.payload };
 }
 
 test.describe("signals: client SDK end-to-end", () => {

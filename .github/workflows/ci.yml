@@ -169,6 +169,24 @@ jobs:
       - name: Verify cache is up to date
         run: git diff --exit-code .sqlx/
 
+  codegen-typecheck:
+    name: Codegen typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          save-if: "false"
+      - uses: oven-sh/setup-bun@v2
+      - run: scripts/ci/create-env-stubs.sh
+      - name: Typecheck generated frontend bindings
+        run: scripts/ci/typecheck-codegen.sh
+      - name: Verify committed bindings are up to date
+        run: git diff --exit-code examples/with-svelte/*/frontend/src/lib/forge
+
   workspace-integration:
     name: Workspace integration
     needs: [validate, guardrails]
@@ -200,6 +218,7 @@ jobs:
       - run: cargo test -p forge-svelte-demo-template --features testcontainers
       - run: cargo test -p todo --features testcontainers
       - run: cargo test -p todo-dioxus --features testcontainers
+      - run: cargo test -p forge-harness --features testcontainers
 
   pr-smoke:
     name: PR Smoke

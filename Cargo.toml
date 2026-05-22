@@ -6,6 +6,7 @@ members = [
     "crates/forge-macros",
     "crates/forge-runtime",
     "crates/forge-codegen",
+    "crates/forge-harness",
     "examples/with-svelte/minimal",
     "examples/with-svelte/demo",
     "examples/with-svelte/realtime-todo-list",
@@ -36,6 +37,7 @@ forge-core = { path = "crates/forge-core" }
 forge-macros = { path = "crates/forge-macros" }
 forge-runtime = { path = "crates/forge-runtime" }
 forge-codegen = { path = "crates/forge-codegen" }
+forge-harness = { path = "crates/forge-harness" }
 
 # Async runtime
 tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "process", "io-util", "fs"] }
@@ -106,6 +108,9 @@ dashmap = "6"
 tokio-test = "0.4"
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
+insta = { version = "1.41", default-features = false }
+trybuild = "1.0"
+eventsource-stream = "0.2"
 
 # Example dependencies
 dotenvy = "0.15"

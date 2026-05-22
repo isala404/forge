@@ -1,0 +1,5 @@
+error: Mutations that call `dispatch_job()` or `start_workflow()` cannot use `transactional = false` — jobs dispatched outside a transaction may execute even when the database write is rolled back on error.
+ --> tests/ui/fail/mutation_nontransactional_dispatches_job.rs:9:14
+  |
+9 | pub async fn fire_and_forget(ctx: &MutationContext) -> Result<()> {
+  |              ^^^^^^^^^^^^^^^

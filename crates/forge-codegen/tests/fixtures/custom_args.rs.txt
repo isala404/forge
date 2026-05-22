@@ -1,0 +1,41 @@
+use forge::prelude::*;
+use uuid::Uuid;
+
+#[forge::model]
+pub struct Todo {
+    pub id: Uuid,
+    pub title: String,
+    pub completed: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct CreateTodoInput {
+    pub title: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct UpdateTodoInput {
+    pub id: Uuid,
+    pub title: Option<String>,
+    pub completed: Option<bool>,
+}
+
+#[forge::query(auth = "none", tables("todos"))]
+pub async fn list_todos(ctx: &QueryContext) -> Result<Vec<Todo>> {
+    Ok(vec![])
+}
+
+#[forge::mutation(auth = "none")]
+pub async fn create_todo(ctx: &MutationContext, input: CreateTodoInput) -> Result<Todo> {
+    unimplemented!()
+}
+
+#[forge::mutation(auth = "none")]
+pub async fn update_todo(ctx: &MutationContext, input: UpdateTodoInput) -> Result<Todo> {
+    unimplemented!()
+}
+
+#[forge::mutation(auth = "none")]
+pub async fn delete_todo(ctx: &MutationContext, id: Uuid) -> Result<bool> {
+    Ok(true)
+}

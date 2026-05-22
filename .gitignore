@@ -5,4 +5,5 @@ node_modules
 !examples/**/.env
 .agents/
 crates/forge/generated/
+forge.schema.json
 **/test-results/**

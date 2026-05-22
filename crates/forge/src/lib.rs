@@ -36,7 +36,7 @@ pub use forge_core::schemars;
 #[doc(hidden)]
 pub use inventory;
 
-pub use auto_register::{AutoHandler, HandlerRegistries};
+pub use auto_register::{AutoHandler, HandlerRegistries, auto_register_all};
 
 #[cfg(feature = "embedded-frontend")]
 pub use embedded::serve_embedded_assets;
