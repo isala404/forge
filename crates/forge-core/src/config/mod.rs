@@ -104,9 +104,6 @@ pub struct ForgeConfig {
 
     #[serde(default)]
     pub realtime: RealtimeConfig,
-
-    #[serde(default)]
-    pub email: crate::email::EmailConfig,
 }
 
 impl ForgeConfig {
@@ -218,6 +215,39 @@ impl ForgeConfig {
             )));
         }
 
+        let ratio = self.observability.sampling_ratio;
+        if !ratio.is_finite() || !(0.0..=1.0).contains(&ratio) {
+            return Err(ForgeError::config(format!(
+                "observability.sampling_ratio must be a finite number in [0.0, 1.0], got {ratio}"
+            )));
+        }
+
+        if let Some(path) = &self.signals.geoip_db_path
+            && !path.is_empty()
+        {
+            let p = std::path::Path::new(path);
+            if !p.exists() {
+                return Err(ForgeError::config(format!(
+                    "signals.geoip_db_path points to '{path}' which does not exist"
+                )));
+            }
+            if std::fs::File::open(p).is_err() {
+                return Err(ForgeError::config(format!(
+                    "signals.geoip_db_path '{path}' exists but is not readable"
+                )));
+            }
+        }
+
+        if self.gateway.cors_enabled
+            && self.gateway.cors_origins.iter().any(|o| o == "*")
+            && self.gateway.cors_origins.len() == 1
+        {
+            tracing::warn!(
+                "gateway.cors_origins = [\"*\"] allows any origin; browsers reject \
+                 wildcard with credentialed requests. Set explicit origins for production."
+            );
+        }
+
         for entry in &self.gateway.trusted_proxies {
             if entry.parse::<std::net::IpAddr>().is_err() && entry.parse::<ipnet::IpNet>().is_err()
             {
@@ -251,7 +281,6 @@ impl ForgeConfig {
             signals: SignalsConfig::default(),
             rate_limit: RateLimitSettings::default(),
             realtime: RealtimeConfig::default(),
-            email: crate::email::EmailConfig::default(),
         }
     }
 }
@@ -819,6 +848,142 @@ mod tests {
         let entry = &config.auth.legacy_secrets[0];
         assert_eq!(entry.secret, "retired-secret-key-32-bytes-pad!!");
         assert_eq!(entry.valid_until.to_rfc3339(), "2099-01-01T00:00:00+00:00");
+    }
+
+    #[test]
+    fn validate_rejects_invalid_trusted_proxy_entry() {
+        let toml = r#"
+            [database]
+            url = "postgres://localhost/test"
+            [gateway]
+            trusted_proxies = ["not-an-ip"]
+        "#;
+        let err = ForgeConfig::parse_toml(toml).unwrap_err().to_string();
+        assert!(
+            err.contains("trusted_proxies") && err.contains("not-an-ip"),
+            "expected trusted_proxies rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_ip_and_cidr_trusted_proxies() {
+        let toml = r#"
+            [database]
+            url = "postgres://localhost/test"
+            [gateway]
+            trusted_proxies = ["10.0.0.1", "10.0.0.0/8", "::1", "fd00::/8"]
+        "#;
+        assert!(ForgeConfig::parse_toml(toml).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_sampling_ratio_above_one() {
+        let toml = r#"
+            [database]
+            url = "postgres://localhost/test"
+            [observability]
+            sampling_ratio = 1.5
+        "#;
+        let err = ForgeConfig::parse_toml(toml).unwrap_err().to_string();
+        assert!(
+            err.contains("sampling_ratio") && err.contains("[0.0, 1.0]"),
+            "expected sampling_ratio bound error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_negative_sampling_ratio() {
+        let toml = r#"
+            [database]
+            url = "postgres://localhost/test"
+            [observability]
+            sampling_ratio = -0.1
+        "#;
+        let err = ForgeConfig::parse_toml(toml).unwrap_err().to_string();
+        assert!(
+            err.contains("sampling_ratio"),
+            "expected sampling_ratio bound error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_sampling_ratio_boundaries() {
+        for ratio in ["0.0", "1.0", "0.5"] {
+            let toml = format!(
+                r#"
+                [database]
+                url = "postgres://localhost/test"
+                [observability]
+                sampling_ratio = {ratio}
+                "#
+            );
+            assert!(
+                ForgeConfig::parse_toml(&toml).is_ok(),
+                "ratio {ratio} should validate"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rejects_debounce_quiet_window_exceeding_max_wait() {
+        let toml = r#"
+            [database]
+            url = "postgres://localhost/test"
+            [realtime]
+            debounce_quiet_window = "500ms"
+            debounce_max_wait = "200ms"
+        "#;
+        let err = ForgeConfig::parse_toml(toml).unwrap_err().to_string();
+        assert!(
+            err.contains("debounce_quiet_window") && err.contains("debounce_max_wait"),
+            "expected debounce ordering error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_debounce_quiet_window_equal_to_max_wait() {
+        // quiet == max is allowed; only quiet > max is rejected.
+        let toml = r#"
+            [database]
+            url = "postgres://localhost/test"
+            [realtime]
+            debounce_quiet_window = "200ms"
+            debounce_max_wait = "200ms"
+        "#;
+        assert!(ForgeConfig::parse_toml(toml).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_cors_origin_without_scheme() {
+        let toml = r#"
+            [database]
+            url = "postgres://localhost/test"
+            [gateway]
+            cors_enabled = true
+            cors_origins = ["example.com"]
+        "#;
+        let err = ForgeConfig::parse_toml(toml).unwrap_err().to_string();
+        assert!(
+            err.contains("http://") && err.contains("https://"),
+            "expected scheme-required error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_cors_origin_with_control_char() {
+        // A control char in an origin would corrupt the response header.
+        let toml = "
+            [database]
+            url = \"postgres://localhost/test\"
+            [gateway]
+            cors_enabled = true
+            cors_origins = [\"https://exa\tmple.com\"]
+        ";
+        let err = ForgeConfig::parse_toml(toml).unwrap_err().to_string();
+        assert!(
+            err.contains("invalid origin") || err.contains("valid HTTP header"),
+            "expected invalid-origin error, got: {err}"
+        );
     }
 
     #[test]

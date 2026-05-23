@@ -275,8 +275,15 @@ impl TestWorkflowContextBuilder {
     }
 
     /// Set the tenant ID.
+    ///
+    /// Production reads the tenant from `auth.claims["tenant_id"]`, so this
+    /// writes the same value into the claims map.
     pub fn with_tenant(mut self, tenant_id: Uuid) -> Self {
         self.tenant_id = Some(tenant_id);
+        self.claims.insert(
+            "tenant_id".to_string(),
+            serde_json::Value::String(tenant_id.to_string()),
+        );
         self
     }
 

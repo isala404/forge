@@ -11,7 +11,7 @@ use super::types::DurationStr;
 /// separation belongs at the worker level, not the connection level. The
 /// single-pool contention model and sizing formula are documented at the
 /// runtime side in `forge_runtime::pg::pool` module docs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct DatabaseConfig {
@@ -54,6 +54,24 @@ pub struct DatabaseConfig {
     /// Disabling this halves round-trips for read queries.
     #[serde(default = "default_true")]
     pub test_before_acquire: bool,
+}
+
+impl std::fmt::Debug for DatabaseConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted_replicas: Vec<&str> =
+            self.replica_urls.iter().map(|_| "***redacted***").collect();
+        f.debug_struct("DatabaseConfig")
+            .field("url", &"***redacted***")
+            .field("pool_size", &self.pool_size)
+            .field("pool_timeout", &self.pool_timeout)
+            .field("statement_timeout", &self.statement_timeout)
+            .field("replica_urls", &redacted_replicas)
+            .field("read_from_replica", &self.read_from_replica)
+            .field("replica_pool_size", &self.replica_pool_size)
+            .field("min_pool_size", &self.min_pool_size)
+            .field("test_before_acquire", &self.test_before_acquire)
+            .finish()
+    }
 }
 
 impl Default for DatabaseConfig {

@@ -2,14 +2,12 @@ pub mod assertions;
 pub mod context;
 pub mod db;
 pub mod mock_dispatch;
-pub mod mock_email;
 pub mod mock_http;
 
 pub use assertions::*;
 pub use context::*;
 pub use db::{IsolatedTestDb, TestDatabase};
 pub use mock_dispatch::{DispatchedJob, MockJobDispatch, MockWorkflowDispatch, StartedWorkflow};
-pub use mock_email::{MockEmailSender, SentEmail};
 pub use mock_http::{MockHttp, MockHttpBuilder, MockRequest, MockResponse};
 
 use std::time::Duration;

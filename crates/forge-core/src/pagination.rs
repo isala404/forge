@@ -17,10 +17,19 @@ impl Cursor {
         Self(value.into())
     }
 
-    pub fn as_str(&self) -> &str {
+    /// Internal accessor for serde / wire-format glue. Treat the returned
+    /// string as opaque: its encoding is an implementation detail and may
+    /// change between releases.
+    #[doc(hidden)]
+    pub fn as_inner_for_serde(&self) -> &str {
         &self.0
     }
 }
+
+/// Upper bound on items in a single [`Page`]. Helpers that build pages
+/// from client-supplied limits should clamp to this value to prevent a
+/// caller from extracting an unbounded number of rows.
+pub const MAX_PAGE_SIZE: usize = 1000;
 
 /// A page of results with cursor-based navigation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,7 +40,12 @@ pub struct Page<T> {
 }
 
 impl<T> Page<T> {
-    pub fn new(items: Vec<T>, page_info: PageInfo) -> Self {
+    /// Constructs a page, truncating `items` to [`MAX_PAGE_SIZE`] entries.
+    /// Callers that already enforce a stricter cap can pass shorter vecs.
+    pub fn new(mut items: Vec<T>, page_info: PageInfo) -> Self {
+        if items.len() > MAX_PAGE_SIZE {
+            items.truncate(MAX_PAGE_SIZE);
+        }
         Self { items, page_info }
     }
 }
@@ -44,7 +58,7 @@ pub struct PageInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_cursor: Option<Cursor>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub total_count: Option<i64>,
+    pub total_count: Option<u64>,
 }
 
 impl PageInfo {
@@ -77,7 +91,7 @@ mod tests {
             PageInfo {
                 has_next_page: true,
                 end_cursor: Some(Cursor::new("abc")),
-                total_count: Some(10),
+                total_count: Some(10u64),
             },
         );
         let json: serde_json::Value = serde_json::to_value(&page).unwrap();

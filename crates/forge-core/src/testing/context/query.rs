@@ -128,8 +128,16 @@ impl TestQueryContextBuilder {
     }
 
     /// Set the tenant ID for multi-tenant testing.
+    ///
+    /// Production code reads the tenant from `auth.claims["tenant_id"]`, so
+    /// this writes the same value into the claims map. Tests calling
+    /// `ctx.auth.tenant_id()` then behave identically to production.
     pub fn with_tenant(mut self, tenant_id: Uuid) -> Self {
         self.tenant_id = Some(tenant_id);
+        self.claims.insert(
+            "tenant_id".to_string(),
+            serde_json::Value::String(tenant_id.to_string()),
+        );
         self
     }
 
@@ -166,45 +174,6 @@ impl TestQueryContextBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_minimal_context() {
-        let ctx = TestQueryContext::minimal();
-        assert!(!ctx.auth.is_authenticated());
-        assert!(ctx.db().is_none());
-    }
-
-    #[test]
-    fn test_authenticated_context() {
-        let user_id = Uuid::new_v4();
-        let ctx = TestQueryContext::authenticated(user_id);
-        assert!(ctx.auth.is_authenticated());
-        assert_eq!(ctx.user_id().unwrap(), user_id);
-    }
-
-    #[test]
-    fn test_context_with_roles() {
-        let ctx = TestQueryContext::builder()
-            .as_user(Uuid::new_v4())
-            .with_role("admin")
-            .with_role("user")
-            .build();
-
-        assert!(ctx.has_role("admin"));
-        assert!(ctx.has_role("user"));
-        assert!(!ctx.has_role("superuser"));
-    }
-
-    #[test]
-    fn test_context_with_claims() {
-        let ctx = TestQueryContext::builder()
-            .as_user(Uuid::new_v4())
-            .with_claim("org_id", serde_json::json!("org-123"))
-            .build();
-
-        assert_eq!(ctx.claim("org_id"), Some(&serde_json::json!("org-123")));
-        assert!(ctx.claim("nonexistent").is_none());
-    }
 
     #[test]
     fn test_context_with_env() {

@@ -34,6 +34,10 @@ testcontainers-modules = { workspace = true, optional = true }
 
 [features]
 testcontainers = ["dep:testcontainers", "dep:testcontainers-modules"]
+# Unsafe escape hatches that bypass framework guard rails (circuit breaker,
+# host blocklists, etc). Opt-in only — keep this off unless a specific
+# integration genuinely needs raw access.
+escape-hatches = []
 
 [dev-dependencies]
 tokio-test = { workspace = true }

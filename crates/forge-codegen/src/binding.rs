@@ -123,7 +123,10 @@ fn build_binding(func: FunctionDef, tables: &[TableDef]) -> FunctionBinding {
 /// We require BOTH a naming convention match AND existence in the registry.
 /// This prevents false positives on types like "InputHandler" or "ArgumentParser".
 fn is_custom_args_type(rust_type: &RustType, tables: &[TableDef]) -> bool {
+    // Unwrap `Option`/`Vec` wrappers so `Vec<MyInput>` and `Option<MyInput>`
+    // are recognised as custom-args bindings.
     match rust_type {
+        RustType::Option(inner) | RustType::Vec(inner) => is_custom_args_type(inner, tables),
         RustType::Custom(name) => {
             (name.ends_with("Args") || name.ends_with("Input"))
                 && tables.iter().any(|t| t.struct_name == *name)

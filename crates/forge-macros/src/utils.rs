@@ -2,8 +2,42 @@
 
 use std::time::Duration;
 
+use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
+
+/// Resolve the path to the host `forge` crate at expansion time.
+///
+/// The crate is published as the `forgex` package but its library is named
+/// `forge` (`[lib] name` in `crates/forge/Cargo.toml`) so users write
+/// `use forge::...`. `proc-macro-crate` returns the *dependency key* from the
+/// consumer's `Cargo.toml`, which doesn't always equal the extern crate name
+/// rustc sees:
+///
+/// * `forge = { package = "forgex" }` (the scaffolded default) → key `forge`,
+///   which is also the extern name. Emit `::forge`.
+/// * a bare `forgex = "x"` dependency (what `cargo add forgex` produces, and
+///   what `trybuild` generates) → key `forgex`, but rustc only knows the crate
+///   by its lib name `forge`, so the key can't be used verbatim. Normalize the
+///   package name back to the lib name.
+/// * an explicit rename `myalias = { package = "forgex" }` → key `myalias`,
+///   which *is* the extern name. Emit `::myalias`.
+pub fn forge_path() -> TokenStream {
+    match crate_name("forgex") {
+        Ok(FoundCrate::Itself) => quote!(crate),
+        Ok(FoundCrate::Name(name)) => {
+            // proc-macro-crate hands back the dependency key; for a non-renamed
+            // `forgex` dep that key is the package name, but the crate is only
+            // reachable under its lib name `forge`.
+            let extern_name = if name == "forgex" { "forge" } else { &name };
+            let ident = format_ident!("{}", extern_name);
+            quote!(::#ident)
+        }
+        // Not resolvable as a direct dependency (transitive use, or a context
+        // proc-macro-crate can't read). The standard binding is `forge`.
+        Err(_) => quote!(::forge),
+    }
+}
 
 /// Convert a snake_case string to PascalCase.
 pub fn to_pascal_case(s: &str) -> String {
@@ -27,15 +61,20 @@ fn parse_duration(s: &str) -> Option<Duration> {
     } else if let Some(num) = s.strip_suffix('s') {
         num.parse::<u64>().ok().map(Duration::from_secs)
     } else if let Some(num) = s.strip_suffix('m') {
-        num.parse::<u64>().ok().map(|m| Duration::from_secs(m * 60))
+        num.parse::<u64>()
+            .ok()
+            .and_then(|m| m.checked_mul(60))
+            .map(Duration::from_secs)
     } else if let Some(num) = s.strip_suffix('h') {
         num.parse::<u64>()
             .ok()
-            .map(|h| Duration::from_secs(h * 3600))
+            .and_then(|h| h.checked_mul(3600))
+            .map(Duration::from_secs)
     } else if let Some(num) = s.strip_suffix('d') {
         num.parse::<u64>()
             .ok()
-            .map(|d| Duration::from_secs(d * 86400))
+            .and_then(|d| d.checked_mul(86400))
+            .map(Duration::from_secs)
     } else {
         // Bare integers without a unit suffix are not accepted. Require explicit
         // suffixes (e.g. "30s") so intent is unambiguous at the macro callsite.
@@ -74,28 +113,19 @@ pub fn parse_duration_tokens(s: &str, default_secs: u64) -> TokenStream {
             Err(_) => invalid(),
         }
     } else if let Some(num) = s.strip_suffix('m') {
-        match num.parse::<u64>() {
-            Ok(n) => {
-                let secs = n * 60;
-                quote! { std::time::Duration::from_secs(#secs) }
-            }
-            Err(_) => invalid(),
+        match num.parse::<u64>().ok().and_then(|n| n.checked_mul(60)) {
+            Some(secs) => quote! { std::time::Duration::from_secs(#secs) },
+            None => invalid(),
         }
     } else if let Some(num) = s.strip_suffix('h') {
-        match num.parse::<u64>() {
-            Ok(n) => {
-                let secs = n * 3600;
-                quote! { std::time::Duration::from_secs(#secs) }
-            }
-            Err(_) => invalid(),
+        match num.parse::<u64>().ok().and_then(|n| n.checked_mul(3600)) {
+            Some(secs) => quote! { std::time::Duration::from_secs(#secs) },
+            None => invalid(),
         }
     } else if let Some(num) = s.strip_suffix('d') {
-        match num.parse::<u64>() {
-            Ok(n) => {
-                let secs = n * 86400;
-                quote! { std::time::Duration::from_secs(#secs) }
-            }
-            Err(_) => invalid(),
+        match num.parse::<u64>().ok().and_then(|n| n.checked_mul(86400)) {
+            Some(secs) => quote! { std::time::Duration::from_secs(#secs) },
+            None => invalid(),
         }
     } else {
         let _ = default_secs;

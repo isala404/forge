@@ -30,7 +30,7 @@ pub enum JwtAlgorithm {
 /// Rotate by adding the outgoing secret here with `valid_until` set one
 /// access-token TTL into the future, swap `jwt_secret` to the new value,
 /// then remove the entry once the window closes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct LegacySecret {
     /// HMAC secret bytes (treated as opaque; min length is not re-enforced
     /// here — the active `jwt_secret` validation already covers minimum
@@ -40,8 +40,17 @@ pub struct LegacySecret {
     pub valid_until: chrono::DateTime<chrono::Utc>,
 }
 
+impl std::fmt::Debug for LegacySecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LegacySecret")
+            .field("secret", &"***redacted***")
+            .field("valid_until", &self.valid_until)
+            .finish()
+    }
+}
+
 /// Authentication configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct AuthConfig {
     /// Required for HS256.
@@ -106,6 +115,45 @@ pub struct AuthConfig {
     /// are silently dropped at middleware construction.
     #[serde(default)]
     pub legacy_secrets: Vec<LegacySecret>,
+
+    /// When `true` (default), browser clients (forge-svelte, forge-dioxus on
+    /// wasm) treat the refresh token as an `HttpOnly; Secure; SameSite=Strict`
+    /// cookie and do **not** persist it in JS-reachable storage. Your
+    /// `refresh` mutation should set the cookie on issue and clear it on
+    /// rotation/logout; the clients send it automatically via `credentials:
+    /// include`.
+    ///
+    /// Set to `false` only if you cannot serve the refresh endpoint from the
+    /// same registrable domain as the frontend, or for legacy clients that
+    /// must read the refresh token from a response body.
+    #[serde(default = "default_true")]
+    pub refresh_cookie: bool,
+}
+
+impl std::fmt::Debug for AuthConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthConfig")
+            .field(
+                "jwt_secret",
+                &self.jwt_secret.as_ref().map(|_| "***redacted***"),
+            )
+            .field("jwt_algorithm", &self.jwt_algorithm)
+            .field("jwt_issuer", &self.jwt_issuer)
+            .field("jwt_audience", &self.jwt_audience)
+            .field("access_token_ttl", &self.access_token_ttl)
+            .field("refresh_token_ttl", &self.refresh_token_ttl)
+            .field("jwks_url", &self.jwks_url)
+            .field("jwks_cache_ttl", &self.jwks_cache_ttl)
+            .field("session_ttl", &self.session_ttl)
+            .field("jwt_leeway", &self.jwt_leeway)
+            .field("audience_required", &self.audience_required)
+            .field("required_claims", &self.required_claims)
+            .field("session_cookie_ttl", &self.session_cookie_ttl)
+            .field("jwks_require_kid", &self.jwks_require_kid)
+            .field("legacy_secrets", &self.legacy_secrets)
+            .field("refresh_cookie", &self.refresh_cookie)
+            .finish()
+    }
 }
 
 impl Default for AuthConfig {
@@ -126,6 +174,7 @@ impl Default for AuthConfig {
             session_cookie_ttl: None,
             jwks_require_kid: default_true(),
             legacy_secrets: Vec::new(),
+            refresh_cookie: true,
         }
     }
 }
@@ -190,12 +239,24 @@ impl AuthConfig {
                 }
             }
             JwtAlgorithm::RS256 => {
-                if self.jwks_url.is_none() {
+                let Some(url) = self.jwks_url.as_deref() else {
                     return Err(ForgeError::config(
                         "auth.jwks_url is required for RSA algorithms (RS256). \
                          Set auth.jwks_url to your identity provider's JWKS endpoint, \
                          or switch to HS256 and provide auth.jwt_secret for symmetric signing.",
                     ));
+                };
+                // Plain HTTP would let an on-path attacker substitute keys and
+                // mint arbitrary RS256 tokens. Loopback is allowed for local
+                // dev so test mocks don't need TLS termination.
+                if let Some(hostname) = crate::util::http_hostname(url)
+                    && !crate::util::is_loopback_host(hostname)
+                {
+                    return Err(ForgeError::config(format!(
+                        "auth.jwks_url '{url}' uses plain HTTP. JWKS must be fetched over \
+                         HTTPS (or from loopback for local development) so an on-path \
+                         attacker cannot substitute signing keys."
+                    )));
                 }
             }
         }

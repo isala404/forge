@@ -160,7 +160,12 @@ fn dioxus_custom(name: &str) -> String {
         "Uuid" | "uuid::Uuid" => "String".into(),
         "DateTime<Utc>" | "NaiveDate" | "NaiveDateTime" | "Instant" | "LocalDate" | "LocalTime"
         | "Timestamp" => "String".into(),
-        "i32" | "u32" | "usize" | "isize" => "i64".into(),
+        // Preserve narrow integer widths instead of silently widening to i64.
+        // Mirrors what the handler actually returns on the wire.
+        "i32" => "i32".into(),
+        "u32" => "u32".into(),
+        "usize" => "usize".into(),
+        "isize" => "isize".into(),
         "i64" | "u64" => "i64".into(),
         "f32" => "f32".into(),
         "f64" => "f64".into(),
@@ -371,11 +376,10 @@ mod tests {
 
     #[test]
     fn dioxus_hashmap() {
-        // Custom-string primitives go through dioxus_custom which widens
-        // `i32`/`u32`/etc. to `i64`. The HashMap value follows the same path.
+        // Narrow integers are preserved; the HashMap value follows the same path.
         assert_eq!(
             dioxus_type(&RustType::Custom("HashMap<String, i32>".into())),
-            "std::collections::HashMap<String, i64>"
+            "std::collections::HashMap<String, i32>"
         );
         assert_eq!(
             dioxus_type(&RustType::Custom("HashMap<String, User>".into())),

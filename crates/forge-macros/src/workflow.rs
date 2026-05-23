@@ -377,6 +377,31 @@ impl<'ast> Visit<'ast> for ContractExtractor {
     }
 }
 
+/// Normalize a quote!-stringified type so signature hashes are stable across
+/// toolchain upgrades that re-shuffle whitespace. Collapses runs of
+/// whitespace to a single space and trims the ends. Does not re-parse — a
+/// full canonicalization via syn would also normalize generics and qualified
+/// paths, but the whitespace fix covers the common drift.
+fn canonicalize_type_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut last_was_space = true; // suppress leading whitespace
+    for ch in s.chars() {
+        if ch.is_whitespace() {
+            if !last_was_space {
+                out.push(' ');
+                last_was_space = true;
+            }
+        } else {
+            out.push(ch);
+            last_was_space = false;
+        }
+    }
+    if out.ends_with(' ') {
+        out.pop();
+    }
+    out
+}
+
 /// Derives a 32-char hex-encoded blake3 hash (128 bits) of name, version,
 /// step keys, wait keys, timeout, and input/output type name strings.
 ///
@@ -438,6 +463,7 @@ fn derive_signature(
 }
 
 pub fn workflow_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let forge = crate::utils::forge_path();
     let input = parse_macro_input!(item as ItemFn);
 
     let attr_args = match NestedMeta::parse_meta_list(attr.into()) {
@@ -544,17 +570,30 @@ pub fn workflow_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    let version_str = attrs.version.as_deref().unwrap_or("v1");
+    // Workflow versions must be explicit. A default of "v1" collides with
+    // a later explicit `version = "v1"` and silently keys both into the
+    // same WorkflowRegistry slot.
+    let Some(ref version_owned) = attrs.version else {
+        return syn::Error::new_spanned(
+            &input.sig.ident,
+            "workflow requires an explicit `version = \"...\"` attribute. \
+             Pin a starting version (e.g. `version = \"v1\"`) so future revisions \
+             can run alongside in-flight runs without signature collisions.",
+        )
+        .to_compile_error()
+        .into();
+    };
+    let version_str = version_owned.as_str();
     let is_public = attrs.is_public;
     let workflow_status = match attrs.status {
         WorkflowStatus::Active => {
-            quote! { forge::forge_core::workflow::WorkflowDefStatus::Active }
+            quote! { #forge::forge_core::workflow::WorkflowDefStatus::Active }
         }
         WorkflowStatus::Deprecated => {
-            quote! { forge::forge_core::workflow::WorkflowDefStatus::Deprecated }
+            quote! { #forge::forge_core::workflow::WorkflowDefStatus::Deprecated }
         }
         WorkflowStatus::Staging => {
-            quote! { forge::forge_core::workflow::WorkflowDefStatus::Staging }
+            quote! { #forge::forge_core::workflow::WorkflowDefStatus::Staging }
         }
     };
 
@@ -583,21 +622,28 @@ pub fn workflow_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! { None }
     };
 
+    // Canonicalize type-token whitespace so a syn/quote upgrade that adds or
+    // drops a space (e.g. `MyType<Inner>` vs `MyType < Inner >`) doesn't
+    // silently flip the signature for every in-flight run. Pragmatic minimal
+    // form: trim + collapse internal runs to a single space.
+    let canonical_input = canonicalize_type_str(&input_type_str);
+    let canonical_output = canonicalize_type_str(&output_type_str);
+
     let signature = derive_signature(
         workflow_name,
         version_str,
         &contract_extractor.step_keys,
         &contract_extractor.wait_keys,
         timeout_secs,
-        &input_type_str,
-        &output_type_str,
+        &canonical_input,
+        &canonical_output,
     );
 
     let fn_attrs = &input.attrs;
 
     let registration = if attrs.register {
         quote! {
-            forge::inventory::submit!(forge::AutoHandler(|registries| {
+            #forge::inventory::submit!(#forge::AutoHandler(|registries| {
                 registries.workflows.register::<#struct_name>();
             }));
         }
@@ -635,14 +681,14 @@ pub fn workflow_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             #[doc = #contract_doc]
             pub struct #struct_name;
 
-            impl forge::forge_core::__sealed::Sealed for #struct_name {}
+            impl #forge::forge_core::__sealed::Sealed for #struct_name {}
 
-            impl forge::forge_core::workflow::ForgeWorkflow for #struct_name {
+            impl #forge::forge_core::workflow::ForgeWorkflow for #struct_name {
                 type Input = #input_type;
                 type Output = #output_type;
 
-                fn info() -> forge::forge_core::workflow::WorkflowInfo {
-                    forge::forge_core::workflow::WorkflowInfo {
+                fn info() -> #forge::forge_core::workflow::WorkflowInfo {
+                    #forge::forge_core::workflow::WorkflowInfo {
                         name: #workflow_name,
                         version: #version_str,
                         signature: #signature,
@@ -655,9 +701,9 @@ pub fn workflow_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
 
                 fn execute(
-                    ctx: &forge::forge_core::workflow::WorkflowContext,
+                    ctx: &#forge::forge_core::workflow::WorkflowContext,
                     #input_ident: Self::Input,
-                ) -> std::pin::Pin<Box<dyn std::future::Future<Output = forge::forge_core::Result<Self::Output>> + Send + '_>> {
+                ) -> std::pin::Pin<Box<dyn std::future::Future<Output = #forge::forge_core::Result<Self::Output>> + Send + '_>> {
                     Box::pin(async move #block)
                 }
             }

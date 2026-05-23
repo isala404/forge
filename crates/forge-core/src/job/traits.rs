@@ -211,14 +211,51 @@ impl Default for RetryConfig {
 }
 
 impl RetryConfig {
+    /// Compute the retry delay for `attempt`. Adds ±25% jitter to the base
+    /// strategy so a fleet of jobs retrying after the same upstream outage
+    /// doesn't align to the same wall-clock second and re-thunder the
+    /// recovering dependency (#14 in issues doc). Also uses `checked_pow`
+    /// to avoid overflow at attempt 33+ (#21 in issues doc).
     pub fn calculate_backoff(&self, attempt: u32) -> Duration {
         let base = Duration::from_secs(1);
-        let backoff = match self.backoff {
+        let base_backoff = match self.backoff {
             BackoffStrategy::Fixed => base,
-            BackoffStrategy::Linear => base * attempt,
-            BackoffStrategy::Exponential => base * 2u32.pow(attempt.saturating_sub(1)),
+            BackoffStrategy::Linear => base.saturating_mul(attempt.max(1)),
+            BackoffStrategy::Exponential => {
+                let exp = attempt.saturating_sub(1);
+                let factor = 2u32.checked_pow(exp).unwrap_or(u32::MAX);
+                base.saturating_mul(factor)
+            }
         };
-        backoff.min(self.max_backoff)
+        let capped = base_backoff.min(self.max_backoff);
+        Self::apply_jitter(capped)
+    }
+
+    /// Apply ±25% jitter using a process-wide nanosecond clock as entropy.
+    /// No `rand`/`fastrand` dependency in the workspace; an Instant-derived
+    /// LCG is sufficient for desynchronizing retries.
+    fn apply_jitter(d: Duration) -> Duration {
+        let nanos = d.as_nanos();
+        if nanos == 0 {
+            return d;
+        }
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|x| x.as_nanos())
+            .unwrap_or(0);
+        // Stretch entropy with a small LCG step so adjacent calls don't return
+        // identical jitter.
+        let mixed = now_ns
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        // Map to [-0.25, +0.25] of the duration as a u128 fraction.
+        let bucket = (mixed % 1000) as i128 - 500; // -500..=499
+        let delta_nanos = (nanos as i128) * bucket / 2000; // ±25%
+        let adjusted = (nanos as i128).saturating_add(delta_nanos);
+        let adjusted_u: u128 = adjusted.max(0) as u128;
+        // Cap at u64::MAX nanos (≈ 584 years) to fit Duration::from_nanos.
+        let capped = adjusted_u.min(u64::MAX as u128) as u64;
+        Duration::from_nanos(capped)
     }
 }
 
@@ -272,20 +309,37 @@ mod tests {
 
     #[test]
     fn test_exponential_backoff() {
+        // Backoff now applies ±25% jitter; assert bounds rather than exact
+        // equality. Base values: 1s, 2s, 4s, 8s.
         let config = RetryConfig::default();
-        assert_eq!(config.calculate_backoff(1), Duration::from_secs(1));
-        assert_eq!(config.calculate_backoff(2), Duration::from_secs(2));
-        assert_eq!(config.calculate_backoff(3), Duration::from_secs(4));
-        assert_eq!(config.calculate_backoff(4), Duration::from_secs(8));
+        for (attempt, base_ms) in [(1u32, 1000u128), (2, 2000), (3, 4000), (4, 8000)] {
+            let got = config.calculate_backoff(attempt).as_millis();
+            let lo = base_ms * 75 / 100;
+            let hi = base_ms * 125 / 100;
+            assert!(
+                got >= lo && got <= hi,
+                "attempt {attempt}: expected {lo}..={hi}ms, got {got}ms"
+            );
+        }
     }
 
     #[test]
     fn test_max_backoff_cap() {
+        // The cap applies before jitter, so the returned value is in
+        // [0.75*cap, 1.25*cap].
+        let cap = Duration::from_secs(10);
         let config = RetryConfig {
-            max_backoff: Duration::from_secs(10),
+            max_backoff: cap,
             ..Default::default()
         };
-        assert_eq!(config.calculate_backoff(10), Duration::from_secs(10));
+        let got = config.calculate_backoff(10).as_millis();
+        let cap_ms = cap.as_millis();
+        let lo = cap_ms * 75 / 100;
+        let hi = cap_ms * 125 / 100;
+        assert!(
+            got >= lo && got <= hi,
+            "expected {lo}..={hi}ms (cap ±25%), got {got}ms"
+        );
     }
 
     #[test]
@@ -402,6 +456,18 @@ mod tests {
         assert!(cfg.retry_on.is_empty(), "empty list ⇒ retry on every error");
     }
 
+    // calculate_backoff applies ±25% jitter; assert bounds, not equality.
+    fn assert_within_jitter(actual: Duration, target: Duration) {
+        let target_ms = target.as_millis() as i128;
+        let actual_ms = actual.as_millis() as i128;
+        let low = target_ms * 75 / 100;
+        let high = target_ms * 125 / 100;
+        assert!(
+            actual_ms >= low && actual_ms <= high,
+            "{actual:?} outside ±25% of {target:?}"
+        );
+    }
+
     #[test]
     fn backoff_fixed_returns_base_for_any_attempt() {
         let cfg = RetryConfig {
@@ -409,7 +475,7 @@ mod tests {
             ..Default::default()
         };
         for attempt in [1u32, 2, 5, 100] {
-            assert_eq!(cfg.calculate_backoff(attempt), Duration::from_secs(1));
+            assert_within_jitter(cfg.calculate_backoff(attempt), Duration::from_secs(1));
         }
     }
 
@@ -419,23 +485,24 @@ mod tests {
             backoff: BackoffStrategy::Linear,
             ..Default::default()
         };
-        assert_eq!(cfg.calculate_backoff(1), Duration::from_secs(1));
-        assert_eq!(cfg.calculate_backoff(5), Duration::from_secs(5));
-        assert_eq!(cfg.calculate_backoff(50), Duration::from_secs(50));
+        assert_within_jitter(cfg.calculate_backoff(1), Duration::from_secs(1));
+        assert_within_jitter(cfg.calculate_backoff(5), Duration::from_secs(5));
+        assert_within_jitter(cfg.calculate_backoff(50), Duration::from_secs(50));
     }
 
     #[test]
     fn backoff_exponential_handles_attempt_zero_without_underflow() {
         // attempt = 0 ⇒ saturating_sub keeps exponent at 0 ⇒ 2^0 = 1 ⇒ base.
         let cfg = RetryConfig::default();
-        assert_eq!(cfg.calculate_backoff(0), Duration::from_secs(1));
+        assert_within_jitter(cfg.calculate_backoff(0), Duration::from_secs(1));
     }
 
     #[test]
     fn backoff_exponential_caps_at_max_backoff_for_large_attempt() {
-        // attempt = 20 ⇒ 2^19 seconds = ~6 days, must cap to default 5 min.
+        // attempt = 20 saturates above max_backoff (300s); jitter pulls it
+        // down by up to 25%.
         let cfg = RetryConfig::default();
-        assert_eq!(cfg.calculate_backoff(20), Duration::from_secs(300));
+        assert_within_jitter(cfg.calculate_backoff(20), Duration::from_secs(300));
     }
 
     #[test]

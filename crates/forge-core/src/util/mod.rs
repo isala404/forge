@@ -133,6 +133,62 @@ pub fn to_camel_case(s: &str) -> String {
     result
 }
 
+/// Normalize an args/input envelope before deserialization.
+///
+/// Job and workflow handlers accept either a bare value or a single-key
+/// `{"args": …}` / `{"input": …}` wrapper depending on how the caller phrased
+/// the dispatch. This helper unwraps the envelope so the handler's `Args` /
+/// `Input` deserialize path doesn't have to special-case both shapes. `null`
+/// is collapsed to an empty object so handlers with `()` args still match.
+pub fn normalize_handler_args(args: serde_json::Value) -> serde_json::Value {
+    let unwrapped = match &args {
+        serde_json::Value::Object(map) if map.len() == 1 => {
+            if map.contains_key("args") {
+                map.get("args").cloned().unwrap_or(serde_json::Value::Null)
+            } else if map.contains_key("input") {
+                map.get("input").cloned().unwrap_or(serde_json::Value::Null)
+            } else {
+                args
+            }
+        }
+        _ => args,
+    };
+
+    match &unwrapped {
+        serde_json::Value::Null => serde_json::Value::Object(serde_json::Map::new()),
+        _ => unwrapped,
+    }
+}
+
+/// Extract the bare hostname from an authority component (`host[:port]`),
+/// stripping an IPv6 bracket pair and any port. e.g. `[::1]:8080` -> `::1`,
+/// `localhost:9081` -> `localhost`, `127.0.0.1` -> `127.0.0.1`.
+pub fn hostname_from_authority(authority: &str) -> &str {
+    match authority.strip_prefix('[') {
+        // IPv6 literal: the hostname is everything up to the closing bracket.
+        Some(rest) => rest.split(']').next().unwrap_or(rest),
+        None => authority.split(':').next().unwrap_or(authority),
+    }
+}
+
+/// True if `hostname` is a loopback address. Expects a bare hostname with no
+/// port or brackets (see [`hostname_from_authority`]).
+pub fn is_loopback_host(hostname: &str) -> bool {
+    matches!(hostname, "localhost" | "127.0.0.1" | "::1")
+}
+
+/// Bare hostname of a plain-`http://` URL (port and IPv6 brackets stripped),
+/// or `None` if `url` is not `http://`.
+///
+/// Used to decide whether a plain-HTTP endpoint is a safe loopback exception to
+/// the HTTPS requirement. A naive `starts_with("http://localhost")` check would
+/// wrongly accept `http://localhost.evil.com`, so callers parse the host first.
+pub fn http_hostname(url: &str) -> Option<&str> {
+    let rest = url.strip_prefix("http://")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    Some(hostname_from_authority(authority))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
@@ -268,5 +324,73 @@ mod tests {
         assert_eq!(to_camel_case("get_user"), "getUser");
         assert_eq!(to_camel_case("list_all_projects"), "listAllProjects");
         assert_eq!(to_camel_case("simple"), "simple");
+    }
+
+    #[test]
+    fn normalize_handler_args_converts_null_to_empty_object() {
+        use serde_json::json;
+        assert_eq!(normalize_handler_args(json!(null)), json!({}));
+    }
+
+    #[test]
+    fn normalize_handler_args_unwraps_args_envelope() {
+        use serde_json::json;
+        assert_eq!(
+            normalize_handler_args(json!({"args": {"x": 1}})),
+            json!({"x": 1})
+        );
+        assert_eq!(normalize_handler_args(json!({"args": null})), json!({}));
+    }
+
+    #[test]
+    fn normalize_handler_args_unwraps_input_envelope() {
+        use serde_json::json;
+        assert_eq!(
+            normalize_handler_args(json!({"input": [1, 2]})),
+            json!([1, 2])
+        );
+    }
+
+    #[test]
+    fn normalize_handler_args_preserves_other_shapes() {
+        use serde_json::json;
+        assert_eq!(normalize_handler_args(json!({"id": 7})), json!({"id": 7}));
+        assert_eq!(normalize_handler_args(json!([1, 2])), json!([1, 2]));
+        assert_eq!(normalize_handler_args(json!(42)), json!(42));
+    }
+
+    #[test]
+    fn hostname_from_authority_strips_port_and_brackets() {
+        assert_eq!(hostname_from_authority("localhost:9081"), "localhost");
+        assert_eq!(hostname_from_authority("127.0.0.1"), "127.0.0.1");
+        assert_eq!(hostname_from_authority("[::1]:8080"), "::1");
+        assert_eq!(hostname_from_authority("[::1]"), "::1");
+        assert_eq!(hostname_from_authority("example.com:443"), "example.com");
+    }
+
+    #[test]
+    fn is_loopback_host_matches_only_loopback() {
+        assert!(is_loopback_host("localhost"));
+        assert!(is_loopback_host("127.0.0.1"));
+        assert!(is_loopback_host("::1"));
+        assert!(!is_loopback_host("localhost.evil.com"));
+        assert!(!is_loopback_host("example.com"));
+    }
+
+    #[test]
+    fn http_hostname_parses_host_and_rejects_spoofs() {
+        assert_eq!(
+            http_hostname("http://localhost:9081/jwks"),
+            Some("localhost")
+        );
+        assert_eq!(http_hostname("http://[::1]:8080/jwks"), Some("::1"));
+        assert_eq!(http_hostname("http://127.0.0.1/cb?x=1"), Some("127.0.0.1"));
+        // The classic spoof: a subdomain of localhost is not loopback.
+        assert_eq!(
+            http_hostname("http://localhost.evil.com/cb"),
+            Some("localhost.evil.com")
+        );
+        // Not plain HTTP.
+        assert_eq!(http_hostname("https://localhost/jwks"), None);
     }
 }

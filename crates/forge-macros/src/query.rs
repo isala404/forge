@@ -209,6 +209,7 @@ fn convert_query_attrs(darling: DarlingQueryAttrs) -> Result<QueryAttrs, syn::Er
 }
 
 fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStream2> {
+    let forge = crate::utils::forge_path();
     let fn_name = &input.sig.ident;
     let fn_name_str = fn_name.to_string();
     let rpc_name = attrs.name.as_deref().unwrap_or(&fn_name_str).to_string();
@@ -258,8 +259,7 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
         }
     };
 
-    let type_str = quote! { #ctx_type }.to_string();
-    let is_ref = type_str.starts_with('&');
+    let is_ref = matches!(ctx_type, syn::Type::Reference(_));
 
     let has_explicit_tables = attrs.tables.is_some();
     let table_dependencies: Vec<String> = if let Some(explicit_tables) = attrs.tables {
@@ -267,6 +267,16 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
     } else {
         let mut extractor = SqlStringExtractor::new();
         extractor.visit_block(fn_block);
+
+        // Bail if SQL extraction can't see the literal — `format!`-built SQL,
+        // hoisted `const SQL`, `include_str!`, runtime `sqlx::query()`, etc.
+        // The user must either inline a literal or set `tables(...)`.
+        if let Some(issue) = extractor.issues.first() {
+            return Err(syn::Error::new_spanned(
+                &input.sig.ident,
+                issue.describe(&fn_name_str, "query"),
+            ));
+        }
 
         match extract_tables_from_sql(&extractor.sql_strings) {
             TableExtractionResult::Ok(tables) => {
@@ -458,16 +468,18 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
     let rate_limit_key = match &attrs.rate_limit_key {
         Some(k) => {
             let key_tokens = match k.as_str() {
-                "user" => quote! { forge::forge_core::rate_limit::RateLimitKey::User },
-                "ip" => quote! { forge::forge_core::rate_limit::RateLimitKey::Ip },
-                "tenant" => quote! { forge::forge_core::rate_limit::RateLimitKey::Tenant },
-                "user_action" => quote! { forge::forge_core::rate_limit::RateLimitKey::UserAction },
-                "global" => quote! { forge::forge_core::rate_limit::RateLimitKey::Global },
+                "user" => quote! { #forge::forge_core::rate_limit::RateLimitKey::User },
+                "ip" => quote! { #forge::forge_core::rate_limit::RateLimitKey::Ip },
+                "tenant" => quote! { #forge::forge_core::rate_limit::RateLimitKey::Tenant },
+                "user_action" => {
+                    quote! { #forge::forge_core::rate_limit::RateLimitKey::UserAction }
+                }
+                "global" => quote! { #forge::forge_core::rate_limit::RateLimitKey::Global },
                 _ if k.starts_with("custom:") => {
                     let claim = k.trim_start_matches("custom:");
-                    quote! { forge::forge_core::rate_limit::RateLimitKey::Custom(#claim.to_string()) }
+                    quote! { #forge::forge_core::rate_limit::RateLimitKey::Custom(#claim.to_string()) }
                 }
-                _ => quote! { forge::forge_core::rate_limit::RateLimitKey::User },
+                _ => quote! { #forge::forge_core::rate_limit::RateLimitKey::User },
             };
             quote! { Some(#key_tokens) }
         }
@@ -477,13 +489,13 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
     let log_level = match &attrs.log_level {
         Some(l) => {
             let level_tokens = match l.as_str() {
-                "trace" => quote! { forge::forge_core::LogLevel::Trace },
-                "debug" => quote! { forge::forge_core::LogLevel::Debug },
-                "info" => quote! { forge::forge_core::LogLevel::Info },
-                "warn" => quote! { forge::forge_core::LogLevel::Warn },
-                "error" => quote! { forge::forge_core::LogLevel::Error },
-                "off" => quote! { forge::forge_core::LogLevel::Off },
-                _ => quote! { forge::forge_core::LogLevel::Trace },
+                "trace" => quote! { #forge::forge_core::LogLevel::Trace },
+                "debug" => quote! { #forge::forge_core::LogLevel::Debug },
+                "info" => quote! { #forge::forge_core::LogLevel::Info },
+                "warn" => quote! { #forge::forge_core::LogLevel::Warn },
+                "error" => quote! { #forge::forge_core::LogLevel::Error },
+                "off" => quote! { #forge::forge_core::LogLevel::Off },
+                _ => quote! { #forge::forge_core::LogLevel::Trace },
             };
             quote! { Some(#level_tokens) }
         }
@@ -551,29 +563,29 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
         if arg_names.is_empty() {
             quote! {
                 #(#fn_attrs)*
-                #vis async fn #fn_name(#ctx_name: #ctx_type) -> forge::forge_core::Result<#output_type> #fn_block
+                #vis async fn #fn_name(#ctx_name: #ctx_type) -> #forge::forge_core::Result<#output_type> #fn_block
             }
         } else {
             quote! {
                 #(#fn_attrs)*
-                #vis async fn #fn_name(#ctx_name: #ctx_type, #(#arg_params),*) -> forge::forge_core::Result<#output_type> #fn_block
+                #vis async fn #fn_name(#ctx_name: #ctx_type, #(#arg_params),*) -> #forge::forge_core::Result<#output_type> #fn_block
             }
         }
     } else if arg_names.is_empty() {
         quote! {
             #(#fn_attrs)*
-            #vis async fn #fn_name(#ctx_name: &#ctx_type) -> forge::forge_core::Result<#output_type> #fn_block
+            #vis async fn #fn_name(#ctx_name: &#ctx_type) -> #forge::forge_core::Result<#output_type> #fn_block
         }
     } else {
         quote! {
             #(#fn_attrs)*
-            #vis async fn #fn_name(#ctx_name: &#ctx_type, #(#arg_params),*) -> forge::forge_core::Result<#output_type> #fn_block
+            #vis async fn #fn_name(#ctx_name: &#ctx_type, #(#arg_params),*) -> #forge::forge_core::Result<#output_type> #fn_block
         }
     };
 
     let registration = if attrs.register {
         quote! {
-            forge::inventory::submit!(forge::AutoHandler(|registries| {
+            #forge::inventory::submit!(#forge::AutoHandler(|registries| {
                 registries.functions.register_query::<#struct_name>();
             }));
         }
@@ -591,17 +603,17 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
 
             #module_struct_defs
 
-            impl forge::forge_core::__sealed::Sealed for #struct_name {}
+            impl #forge::forge_core::__sealed::Sealed for #struct_name {}
 
-            impl forge::forge_core::ForgeQuery for #struct_name {
+            impl #forge::forge_core::ForgeQuery for #struct_name {
                 type Args = #args_type;
                 type Output = #output_type;
 
-                fn info() -> forge::forge_core::FunctionInfo {
-                    forge::forge_core::FunctionInfo {
+                fn info() -> #forge::forge_core::FunctionInfo {
+                    #forge::forge_core::FunctionInfo {
                         name: #rpc_name,
                         description: #description,
-                        kind: forge::forge_core::FunctionKind::Query,
+                        kind: #forge::forge_core::FunctionKind::Query,
                         required_role: #required_role,
                         is_public: #is_public,
                         cache_ttl: #cache_ttl,
@@ -622,9 +634,9 @@ fn expand_query_impl(input: ItemFn, attrs: QueryAttrs) -> syn::Result<TokenStrea
                 }
 
                 fn execute(
-                    ctx: &forge::forge_core::QueryContext,
+                    ctx: &#forge::forge_core::QueryContext,
                     args: Self::Args,
-                ) -> std::pin::Pin<Box<dyn std::future::Future<Output = forge::forge_core::Result<Self::Output>> + Send + '_>> {
+                ) -> std::pin::Pin<Box<dyn std::future::Future<Output = #forge::forge_core::Result<Self::Output>> + Send + '_>> {
                     Box::pin(async move {
                         #execute_call
                     })

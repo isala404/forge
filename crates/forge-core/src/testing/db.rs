@@ -119,10 +119,16 @@ impl TestDatabase {
     /// Create a dedicated database for a single test, providing full isolation.
     pub async fn isolated(&self, test_name: &str) -> Result<IsolatedTestDb> {
         let base_url = self.url.clone();
+        // Cap the final identifier well under Postgres' 63-char limit so two
+        // tests with the same long prefix never collide on a truncated name.
+        // Layout: `forge_test_` (11) + sanitized name (<=16) + `_` (1) +
+        // 8 hex chars of a UUID = 36 chars total.
+        let uuid_hex = uuid::Uuid::new_v4().simple().to_string();
+        let short_uuid: String = uuid_hex.chars().take(8).collect();
         let db_name = format!(
             "forge_test_{}_{}",
-            sanitize_db_name(test_name),
-            uuid::Uuid::new_v4().simple()
+            sanitize_db_name_short(test_name),
+            short_uuid
         );
 
         sqlx::query(&format!("CREATE DATABASE \"{}\"", db_name))
@@ -139,7 +145,7 @@ impl TestDatabase {
             .map_err(ForgeError::Database)?;
 
         Ok(IsolatedTestDb {
-            pool: test_pool,
+            pool: Some(test_pool),
             db_name,
             base_url,
             #[cfg(feature = "testcontainers")]
@@ -148,10 +154,15 @@ impl TestDatabase {
     }
 }
 
-/// A test database scoped to a single test. Call `cleanup()` to drop it immediately,
-/// or rely on future test runs to clean up orphaned databases.
+/// A test database scoped to a single test.
+///
+/// Cleanup happens in `Drop`: the pool is closed and `DROP DATABASE` is fired
+/// on a fresh sync connection via `tokio::task::block_in_place` +
+/// `Handle::current().block_on()`. Tests that want to surface cleanup errors
+/// can call [`IsolatedTestDb::cleanup`] (async) explicitly instead — `Drop`
+/// then becomes a no-op.
 pub struct IsolatedTestDb {
-    pool: PgPool,
+    pool: Option<PgPool>,
     db_name: String,
     base_url: String,
     #[cfg(feature = "testcontainers")]
@@ -160,16 +171,24 @@ pub struct IsolatedTestDb {
 
 impl IsolatedTestDb {
     /// Convenience: `from_env()` → `isolated()` → `run_sql(internal_sql)` → `migrate()`.
+    ///
+    /// On a partial failure (system SQL or user migrations), the freshly-created
+    /// database is dropped via the standard `Drop` path of the guard struct —
+    /// the caller never observes a leaked database.
     pub async fn setup(test_name: &str, internal_sql: &str, migrations_dir: &Path) -> Result<Self> {
         let base = TestDatabase::from_env().await?;
         let db = base.isolated(test_name).await?;
+        // The half-built db is owned by `db`; if either step below returns
+        // early, `db`'s Drop fires and the database is dropped.
         db.run_sql(internal_sql).await?;
         db.migrate(migrations_dir).await?;
         Ok(db)
     }
 
     pub fn pool(&self) -> &PgPool {
-        &self.pool
+        self.pool
+            .as_ref()
+            .expect("IsolatedTestDb pool is taken only during Drop/cleanup")
     }
 
     pub fn db_name(&self) -> &str {
@@ -179,7 +198,7 @@ impl IsolatedTestDb {
     /// Run raw SQL for test setup.
     pub async fn execute(&self, sql: &str) -> Result<()> {
         sqlx::query(sql)
-            .execute(&self.pool)
+            .execute(self.pool())
             .await
             .map_err(ForgeError::Database)?;
         Ok(())
@@ -193,7 +212,7 @@ impl IsolatedTestDb {
                 continue;
             }
             sqlx::query(stmt)
-                .execute(&self.pool)
+                .execute(self.pool())
                 .await
                 .map_err(|e| ForgeError::internal_with("Failed to execute SQL", e))?;
         }
@@ -201,32 +220,97 @@ impl IsolatedTestDb {
     }
 
     /// Drop the isolated database and close all connections.
-    pub async fn cleanup(self) -> Result<()> {
-        self.pool.close().await;
+    ///
+    /// Calling this disarms the `Drop` impl — useful for tests that want
+    /// cleanup errors to surface rather than being logged.
+    pub async fn cleanup(mut self) -> Result<()> {
+        let pool = match self.pool.take() {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+        drop_db_async(pool, &self.base_url, &self.db_name).await
+    }
+}
 
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&self.base_url)
+async fn drop_db_async(pool: PgPool, base_url: &str, db_name: &str) -> Result<()> {
+    pool.close().await;
+
+    let admin_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(base_url)
+        .await
+        .map_err(ForgeError::Database)?;
+
+    if let Err(e) =
+        sqlx::query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1")
+            .bind(db_name)
+            .execute(&admin_pool)
             .await
-            .map_err(ForgeError::Database)?;
-
-        if let Err(e) =
-            sqlx::query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1")
-                .bind(&self.db_name)
-                .execute(&pool)
-                .await
-        {
-            tracing::warn!(db = %self.db_name, error = %e, "failed to terminate backend connections during test cleanup");
-        }
-
-        sqlx::query(&format!("DROP DATABASE IF EXISTS \"{}\"", self.db_name))
-            .execute(&pool)
-            .await
-            .map_err(ForgeError::Database)?;
-
-        Ok(())
+    {
+        tracing::warn!(db = %db_name, error = %e, "failed to terminate backend connections during test cleanup");
     }
 
+    sqlx::query(&format!("DROP DATABASE IF EXISTS \"{}\"", db_name))
+        .execute(&admin_pool)
+        .await
+        .map_err(ForgeError::Database)?;
+
+    Ok(())
+}
+
+impl Drop for IsolatedTestDb {
+    fn drop(&mut self) {
+        let Some(pool) = self.pool.take() else {
+            return;
+        };
+        let base_url = self.base_url.clone();
+        let db_name = self.db_name.clone();
+
+        // The runtime flavor decides how we drive the async cleanup:
+        //   - multi_thread: `block_in_place` releases the worker so a nested
+        //     `block_on` is safe.
+        //   - current_thread: `block_in_place` panics; we instead spawn the
+        //     cleanup as a detached task on the existing handle. The runtime
+        //     drives it to completion before the process exits as long as the
+        //     test runtime outlives this Drop (true for `#[tokio::test]` since
+        //     the runtime owns the future).
+        //   - no runtime: nothing we can do; log and leak.
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => match handle.runtime_flavor() {
+                tokio::runtime::RuntimeFlavor::MultiThread => {
+                    tokio::task::block_in_place(|| {
+                        if let Err(e) = handle.block_on(drop_db_async(pool, &base_url, &db_name)) {
+                            tracing::warn!(
+                                db = %db_name,
+                                error = %e,
+                                "IsolatedTestDb::drop failed to clean up; database leaked"
+                            );
+                        }
+                    });
+                }
+                _ => {
+                    handle.spawn(async move {
+                        if let Err(e) = drop_db_async(pool, &base_url, &db_name).await {
+                            tracing::warn!(
+                                db = %db_name,
+                                error = %e,
+                                "IsolatedTestDb::drop failed to clean up; database leaked"
+                            );
+                        }
+                    });
+                }
+            },
+            Err(_) => {
+                tracing::warn!(
+                    db = %db_name,
+                    "IsolatedTestDb dropped outside a tokio runtime; database leaked"
+                );
+            }
+        }
+    }
+}
+
+impl IsolatedTestDb {
     /// Run migrations: loads all `.sql` files from the directory, sorts alphabetically, executes in order.
     pub async fn migrate(&self, migrations_dir: &Path) -> Result<()> {
         if !migrations_dir.exists() {
@@ -268,7 +352,7 @@ impl IsolatedTestDb {
                 if is_blank_sql(stmt) {
                     continue;
                 }
-                sqlx::query(stmt).execute(&self.pool).await.map_err(|e| {
+                sqlx::query(stmt).execute(self.pool()).await.map_err(|e| {
                     ForgeError::internal(format!("Failed to apply migration '{name}': {e}"))
                 })?;
             }
@@ -285,10 +369,14 @@ fn is_blank_sql(sql: &str) -> bool {
             .all(|l| l.trim().is_empty() || l.trim().starts_with("--"))
 }
 
-fn sanitize_db_name(name: &str) -> String {
+/// Sanitize a test name into something that's safe to embed in a Postgres
+/// identifier. Capped at 16 characters so the final
+/// `forge_test_<name>_<8hex>` identifier stays well under Postgres' 63-char
+/// identifier limit (11 + 16 + 1 + 8 = 36).
+fn sanitize_db_name_short(name: &str) -> String {
     name.chars()
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
-        .take(32)
+        .take(16)
         .collect()
 }
 
@@ -445,11 +533,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_sanitize_db_name() {
-        assert_eq!(sanitize_db_name("my_test"), "my_test");
-        assert_eq!(sanitize_db_name("my-test"), "my_test");
-        assert_eq!(sanitize_db_name("my test"), "my_test");
-        assert_eq!(sanitize_db_name("test::function"), "test__function");
+    fn test_sanitize_db_name_short() {
+        assert_eq!(sanitize_db_name_short("my_test"), "my_test");
+        assert_eq!(sanitize_db_name_short("my-test"), "my_test");
+        assert_eq!(sanitize_db_name_short("my test"), "my_test");
+        assert_eq!(sanitize_db_name_short("test::function"), "test__function");
     }
 
     #[test]
@@ -560,18 +648,21 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_truncates_long_names() {
+    fn sanitize_short_caps_at_16() {
         let long_name = "a".repeat(100);
-        let sanitized = sanitize_db_name(&long_name);
-        assert_eq!(sanitized.len(), 32);
+        let sanitized = sanitize_db_name_short(&long_name);
+        assert_eq!(sanitized.len(), 16);
+        // Full identifier: 11 ("forge_test_") + 16 + 1 + 8 = 36, safely <= 63.
+        let identifier = format!("forge_test_{}_{}", sanitized, "12345678");
+        assert!(identifier.len() <= 63);
     }
 
     #[test]
     fn sanitize_handles_special_characters() {
         assert_eq!(
-            sanitize_db_name("test/with:special!chars"),
-            "test_with_special_chars"
+            sanitize_db_name_short("test/with:specia"),
+            "test_with_specia"
         );
-        assert_eq!(sanitize_db_name(""), "");
+        assert_eq!(sanitize_db_name_short(""), "");
     }
 }

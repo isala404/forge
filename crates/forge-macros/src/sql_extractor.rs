@@ -11,6 +11,53 @@ use sqlparser::parser::Parser;
 use syn::visit::Visit;
 use syn::{Expr as SynExpr, ExprCall, ExprLit, ExprMacro, ExprMethodCall};
 
+/// Reasons that SQL extraction can't reason about the call site at all.
+/// Surfaced to callers so they can emit a clear compile error directing the
+/// user to set explicit `tables(...)`.
+#[derive(Debug, Clone)]
+pub enum SqlAnalysisIssue {
+    /// `sqlx::query(&some_string)` or `sqlx::query_as::<_, T>(...)` — runtime
+    /// variant that bypasses compile-time checking entirely.
+    RuntimeSqlxCall,
+    /// Inside a sqlx::query!{} macro, the SQL is built via `format!`,
+    /// `String::from`, `concat!`, or other non-literal construction.
+    DynamicSqlInMacro,
+    /// SQL string is hoisted into a `const`/`let` binding or `include_str!`,
+    /// so the macro can't see the literal at the call site.
+    HoistedSqlBinding,
+    /// `sqlx::query!{}` received a byte-string literal which would otherwise
+    /// be silently dropped.
+    ByteStringInMacro,
+}
+
+impl SqlAnalysisIssue {
+    pub fn describe(&self, fn_name: &str, macro_kind: &str) -> String {
+        let header = match self {
+            Self::RuntimeSqlxCall => format!(
+                "`{fn_name}` calls runtime `sqlx::query()`/`sqlx::query_as::<_, T>()`. \
+                 Use the `sqlx::query!` / `sqlx::query_as!` macros for compile-time checks."
+            ),
+            Self::DynamicSqlInMacro => format!(
+                "`{fn_name}` builds SQL dynamically (e.g. `format!`, `String::from`, `concat!`) \
+                 inside a `sqlx::query!` macro. Table dependencies and the scope lint cannot be \
+                 verified."
+            ),
+            Self::HoistedSqlBinding => format!(
+                "`{fn_name}` references SQL via `const`, `let`, or `include_str!` inside a \
+                 `sqlx::query!` macro. The literal is invisible to the extractor."
+            ),
+            Self::ByteStringInMacro => format!(
+                "`{fn_name}` passes a byte-string literal to a `sqlx::query!` macro. \
+                 SQL must be a regular string literal."
+            ),
+        };
+        format!(
+            "{header}\n\
+             Add #[{macro_kind}(tables(\"your_table\"))] to declare table dependencies explicitly."
+        )
+    }
+}
+
 /// Detects `.pool()` calls in a handler body, signalling DB work delegated
 /// to a helper function whose SQL is invisible to `SqlStringExtractor`.
 pub struct DbDelegationDetector {
@@ -35,12 +82,17 @@ impl<'ast> Visit<'ast> for DbDelegationDetector {
 /// Visitor that extracts SQL string literals from function bodies.
 pub struct SqlStringExtractor {
     pub sql_strings: Vec<String>,
+    /// Patterns that defeat static SQL analysis. Callers should treat any
+    /// non-empty list as a hard compile error unless explicit `tables(...)`
+    /// was provided.
+    pub issues: Vec<SqlAnalysisIssue>,
 }
 
 impl SqlStringExtractor {
     pub fn new() -> Self {
         Self {
             sql_strings: Vec::new(),
+            issues: Vec::new(),
         }
     }
 
@@ -83,6 +135,13 @@ impl SqlStringExtractor {
             match token {
                 proc_macro2::TokenTree::Literal(lit) => {
                     let lit_str = lit.to_string();
+                    // Reject byte strings outright — they parse as syn::LitStr
+                    // failures and would otherwise be silently dropped.
+                    let trimmed = lit_str.trim_start();
+                    if trimmed.starts_with("b\"") || trimmed.starts_with("br") {
+                        self.issues.push(SqlAnalysisIssue::ByteStringInMacro);
+                        continue;
+                    }
                     if let Some(sql) = Self::extract_string_content(&lit_str)
                         && Self::looks_like_sql(&sql)
                     {
@@ -94,6 +153,75 @@ impl SqlStringExtractor {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Inspect the first token-stream argument passed to a `sqlx::query!`
+    /// macro and decide whether the SQL is recoverable as a literal. Flags
+    /// `format!(...)`, `concat!(...)`, `String::from(...)`, `include_str!`,
+    /// and bare identifier references (hoisted into `const SQL` or `let sql`).
+    fn check_macro_first_arg(&mut self, tokens: &proc_macro2::TokenStream) {
+        // Peek at the leading token sequence before the first `,` separator.
+        let mut head: Vec<proc_macro2::TokenTree> = Vec::new();
+        for tt in tokens.clone() {
+            if let proc_macro2::TokenTree::Punct(ref p) = tt
+                && p.as_char() == ','
+            {
+                break;
+            }
+            head.push(tt);
+        }
+
+        // Strip leading `&` references — `sqlx::query!(&sql, ...)` is the
+        // same shape from our perspective.
+        let mut idx = 0;
+        while let Some(proc_macro2::TokenTree::Punct(p)) = head.get(idx) {
+            if p.as_char() == '&' {
+                idx += 1;
+            } else {
+                break;
+            }
+        }
+        let head = &head[idx..];
+
+        match head {
+            // Single string literal — handled by extract_sql_from_tokens.
+            [proc_macro2::TokenTree::Literal(_)] => {}
+            // Bare identifier: `query!(SQL)` or `query!(my_sql)` — hoisted.
+            [proc_macro2::TokenTree::Ident(_)] => {
+                self.issues.push(SqlAnalysisIssue::HoistedSqlBinding);
+            }
+            // `format!(...)`, `concat!(...)`, `include_str!(...)`, or a
+            // path-qualified call like `String::from(...)`. Detect by an
+            // ident followed by `!` or `(` / `::`.
+            _ if head.len() >= 2 => {
+                if let proc_macro2::TokenTree::Ident(first) = &head[0] {
+                    let name = first.to_string();
+                    let next = &head[1];
+                    let is_macro_call =
+                        matches!(next, proc_macro2::TokenTree::Punct(p) if p.as_char() == '!');
+                    let is_path =
+                        matches!(next, proc_macro2::TokenTree::Punct(p) if p.as_char() == ':');
+                    let is_call = matches!(next, proc_macro2::TokenTree::Group(_));
+                    if is_macro_call
+                        && matches!(
+                            name.as_str(),
+                            "format" | "concat" | "include_str" | "format_args"
+                        )
+                    {
+                        if name == "include_str" {
+                            self.issues.push(SqlAnalysisIssue::HoistedSqlBinding);
+                        } else {
+                            self.issues.push(SqlAnalysisIssue::DynamicSqlInMacro);
+                        }
+                    } else if is_path || is_call {
+                        // `String::from(...)`, `format!`, or general fn call —
+                        // treat as dynamic.
+                        self.issues.push(SqlAnalysisIssue::DynamicSqlInMacro);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -130,20 +258,25 @@ impl<'ast> Visit<'ast> for SqlStringExtractor {
 
     fn visit_expr_call(&mut self, node: &'ast ExprCall) {
         if let SynExpr::Path(path) = &*node.func {
-            let path_str = path
+            let last = path
                 .path
                 .segments
-                .iter()
+                .last()
                 .map(|s| s.ident.to_string())
-                .collect::<Vec<_>>()
-                .join("::");
+                .unwrap_or_default();
 
-            if (path_str.contains("query")
-                || path_str.ends_with("query_as")
-                || path_str.ends_with("raw_sql"))
-                && let Some(first_arg) = node.args.first()
-            {
-                self.visit_expr(first_arg);
+            // Runtime sqlx calls (no compile-time checks): `sqlx::query(...)`,
+            // `sqlx::query_as::<_, T>(...)`, `sqlx::query_scalar(...)`, etc.
+            // Match on the final path segment exactly — `query_helper` or
+            // `my_query` do not count.
+            if matches!(
+                last.as_str(),
+                "query" | "query_as" | "query_scalar" | "query_with" | "raw_sql"
+            ) {
+                self.issues.push(SqlAnalysisIssue::RuntimeSqlxCall);
+                if let Some(first_arg) = node.args.first() {
+                    self.visit_expr(first_arg);
+                }
             }
         }
 
@@ -171,11 +304,47 @@ impl<'ast> Visit<'ast> for SqlStringExtractor {
             macro_name.as_str(),
             "query" | "query_as" | "query_scalar" | "query_as_unchecked" | "query_scalar_unchecked"
         ) {
-            self.extract_sql_from_tokens(&node.mac.tokens);
+            // `query_as!(Type, sql, ...)` and `query_as_unchecked!(Type, sql, ...)`
+            // put the row type as the first arg. Skip past it so we inspect
+            // the actual SQL token, not the type ident.
+            let sql_tokens = if matches!(macro_name.as_str(), "query_as" | "query_as_unchecked") {
+                skip_first_macro_arg(&node.mac.tokens)
+            } else {
+                node.mac.tokens.clone()
+            };
+            self.check_macro_first_arg(&sql_tokens);
+            self.extract_sql_from_tokens(&sql_tokens);
         }
 
         syn::visit::visit_expr_macro(self, node);
     }
+}
+
+/// Drop the first comma-separated argument (and the comma itself) from a
+/// macro's raw token stream. Used to strip the row type from
+/// `query_as!(Type, sql, ...)` before inspecting the SQL token.
+fn skip_first_macro_arg(tokens: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    let mut depth = 0i32;
+    let mut seen_comma = false;
+    let mut out: Vec<proc_macro2::TokenTree> = Vec::new();
+    for tt in tokens.clone() {
+        if seen_comma {
+            out.push(tt);
+            continue;
+        }
+        if let proc_macro2::TokenTree::Punct(ref p) = tt {
+            if p.as_char() == ',' && depth == 0 {
+                seen_comma = true;
+                continue;
+            }
+            if matches!(p.as_char(), '<') {
+                depth += 1;
+            } else if matches!(p.as_char(), '>') {
+                depth -= 1;
+            }
+        }
+    }
+    out.into_iter().collect()
 }
 
 /// Parse SQL strings and extract all selected column names.
@@ -642,11 +811,32 @@ fn expr_mentions_tenant(e: &Expr) -> bool {
         Expr::InList { expr, list, .. } => {
             expr_mentions_tenant(expr) || list.iter().any(expr_mentions_tenant)
         }
-        Expr::InSubquery { expr, .. } => expr_mentions_tenant(expr),
+        Expr::InSubquery { expr, subquery, .. } => {
+            expr_mentions_tenant(expr) || query_mentions_tenant(subquery)
+        }
         Expr::Between {
             expr, low, high, ..
         } => expr_mentions_tenant(expr) || expr_mentions_tenant(low) || expr_mentions_tenant(high),
         Expr::IsNull(e) | Expr::IsNotNull(e) => expr_mentions_tenant(e),
+        // Mirror expr_has_scope so `(claims->>'tenant_id')::uuid = $1`,
+        // `EXISTS (SELECT ... WHERE tenant_id = $1)`, and Snowflake-style
+        // `obj:tenant_id` are all recognized.
+        Expr::Subquery(q) | Expr::Exists { subquery: q, .. } => query_mentions_tenant(q),
+        Expr::JsonAccess { value, path } => {
+            expr_mentions_tenant(value)
+                || path.path.iter().any(|elem| match elem {
+                    sqlparser::ast::JsonPathElem::Dot { key, .. } => {
+                        key.eq_ignore_ascii_case("tenant_id")
+                    }
+                    sqlparser::ast::JsonPathElem::Bracket { key } => match key {
+                        Expr::Value(sqlparser::ast::Value::SingleQuotedString(s))
+                        | Expr::Value(sqlparser::ast::Value::DoubleQuotedString(s)) => {
+                            s.eq_ignore_ascii_case("tenant_id")
+                        }
+                        _ => false,
+                    },
+                })
+        }
         _ => false,
     }
 }
@@ -717,8 +907,40 @@ fn stmt_is_scoped(stmt: &Statement) -> bool {
     let mut ctx = ScopeCtx::new();
     match stmt {
         Statement::Query(q) => query_is_scoped(q, &mut ctx),
-        Statement::Update { selection, .. } => selection.as_ref().is_some_and(expr_has_scope),
-        Statement::Delete(d) => d.selection.as_ref().is_some_and(expr_has_scope),
+        Statement::Update {
+            selection, from, ..
+        } => {
+            // UPDATE ... FROM ... WHERE ... — the FROM clause can carry the
+            // scope predicate via a join expression. Walk both.
+            if selection.as_ref().is_some_and(expr_has_scope) {
+                return true;
+            }
+            if let Some(from) = from {
+                let twj = match from {
+                    sqlparser::ast::UpdateTableFromKind::BeforeSet(t) => t,
+                    sqlparser::ast::UpdateTableFromKind::AfterSet(t) => t,
+                };
+                if twj_has_scope_on_join(twj) {
+                    return true;
+                }
+            }
+            false
+        }
+        Statement::Delete(d) => {
+            if d.selection.as_ref().is_some_and(expr_has_scope) {
+                return true;
+            }
+            // PG-style `DELETE FROM t USING ... WHERE ...` puts the scope
+            // predicate on the join in USING. Walk it.
+            if let Some(using) = &d.using {
+                for twj in using {
+                    if twj_has_scope_on_join(twj) {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
         _ => false,
     }
 }
@@ -838,6 +1060,27 @@ fn source_is_scoped(factor: &TableFactor, ctx: &ScopeCtx) -> bool {
     }
 }
 
+/// True if any JOIN ON clause attached to the given TableWithJoins carries a
+/// scope predicate. Used for UPDATE/DELETE where the scope often lives on a
+/// join in the FROM/USING clause rather than the top-level WHERE.
+fn twj_has_scope_on_join(twj: &TableWithJoins) -> bool {
+    for join in &twj.joins {
+        let constraint = match &join.join_operator {
+            sqlparser::ast::JoinOperator::Inner(c)
+            | sqlparser::ast::JoinOperator::LeftOuter(c)
+            | sqlparser::ast::JoinOperator::RightOuter(c)
+            | sqlparser::ast::JoinOperator::FullOuter(c) => c,
+            _ => continue,
+        };
+        if let sqlparser::ast::JoinConstraint::On(e) = constraint
+            && expr_has_scope(e)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn expr_has_scope(e: &Expr) -> bool {
     match e {
         Expr::Identifier(ident) => is_scope_col(&ident.value),
@@ -854,11 +1097,22 @@ fn expr_has_scope(e: &Expr) -> bool {
                     | BinaryOperator::HashLongArrow
             ) {
                 expr_has_scope(left) || value_is_scope_col(right)
-            } else if matches!(op, BinaryOperator::Eq | BinaryOperator::NotEq)
-                && (is_direct_scope_ref(left) && is_literal_value(right)
-                    || is_direct_scope_ref(right) && is_literal_value(left))
-            {
-                false
+            } else if matches!(op, BinaryOperator::Eq | BinaryOperator::NotEq) {
+                // Scope only passes when ONE side is a direct scope reference
+                // (or JSON-arrow into one) AND the other side is a $param
+                // binding. Comparing scope col to a hardcoded literal or to
+                // another column doesn't bind the row to the caller.
+                if (is_direct_scope_ref(left) && is_placeholder_value(right))
+                    || (is_direct_scope_ref(right) && is_placeholder_value(left))
+                {
+                    true
+                } else if is_direct_scope_ref(left) || is_direct_scope_ref(right) {
+                    // Scope col compared to a literal or to another column —
+                    // explicitly not scoped.
+                    false
+                } else {
+                    expr_has_scope(left) || expr_has_scope(right)
+                }
             } else {
                 expr_has_scope(left) || expr_has_scope(right)
             }
@@ -867,12 +1121,15 @@ fn expr_has_scope(e: &Expr) -> bool {
         Expr::Between {
             expr, low, high, ..
         } => expr_has_scope(expr) || expr_has_scope(low) || expr_has_scope(high),
-        Expr::IsNull(e)
-        | Expr::IsNotNull(e)
-        | Expr::IsTrue(e)
-        | Expr::IsNotTrue(e)
-        | Expr::IsFalse(e)
-        | Expr::IsNotFalse(e) => expr_has_scope(e),
+        // IS [NOT] NULL / TRUE / FALSE never compares against a parameter,
+        // so even if the operand names a scope column the predicate doesn't
+        // bind the row to the current principal. Reject these outright.
+        Expr::IsNull(_)
+        | Expr::IsNotNull(_)
+        | Expr::IsTrue(_)
+        | Expr::IsNotTrue(_)
+        | Expr::IsFalse(_)
+        | Expr::IsNotFalse(_) => false,
         Expr::InList { expr, list, .. } => expr_has_scope(expr) || list.iter().any(expr_has_scope),
         Expr::InSubquery { expr, subquery, .. } => {
             let sub_scoped = query_is_scoped(subquery, &mut ScopeCtx::new());
@@ -914,12 +1171,12 @@ fn is_direct_scope_ref(e: &Expr) -> bool {
     }
 }
 
-/// True if the expression is a non-placeholder literal. Placeholders ($1, $2) are
-/// acceptable scope column counterparts; hardcoded literals are not.
-fn is_literal_value(e: &Expr) -> bool {
+/// True if the expression eventually reduces to a parameter placeholder
+/// (`$1`, `$2`, ...). Unwraps Cast/Nested wrappers so `$1::uuid` counts.
+fn is_placeholder_value(e: &Expr) -> bool {
     match e {
-        Expr::Value(v) => !matches!(v, sqlparser::ast::Value::Placeholder(_)),
-        Expr::Cast { expr, .. } | Expr::Nested(expr) => is_literal_value(expr),
+        Expr::Value(sqlparser::ast::Value::Placeholder(_)) => true,
+        Expr::Cast { expr, .. } | Expr::Nested(expr) => is_placeholder_value(expr),
         _ => false,
     }
 }

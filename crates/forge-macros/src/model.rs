@@ -1,7 +1,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{Data, DeriveInput, Fields, Meta, parse_macro_input, spanned::Spanned};
+use syn::{Data, DeriveInput, Fields, parse_macro_input, spanned::Spanned};
 
 pub fn expand_model(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input_clone = item.clone();
@@ -18,6 +18,7 @@ fn expand_model_impl(
     input: DeriveInput,
     _original_tokens: TokenStream2,
 ) -> syn::Result<TokenStream2> {
+    let forge = crate::utils::forge_path();
     let attr_str = attr.to_string();
     let trimmed = attr_str.trim();
     if !trimmed.is_empty() {
@@ -55,8 +56,8 @@ fn expand_model_impl(
 
             quote! {
                 {
-                    let rust_type = forge::forge_core::schema::RustType::from_type_string(#type_str);
-                    let mut field = forge::forge_core::schema::FieldDef::new(#name, rust_type);
+                    let rust_type = #forge::forge_core::schema::RustType::from_type_string(#type_str);
+                    let mut field = #forge::forge_core::schema::FieldDef::new(#name, rust_type);
                     field.column_name = #column_name.to_string();
                     field
                 }
@@ -89,11 +90,11 @@ fn expand_model_impl(
             #(#field_defs),*
         }
 
-        impl forge::forge_core::schema::ModelMeta for #struct_name {
+        impl #forge::forge_core::schema::ModelMeta for #struct_name {
             const TABLE_NAME: &'static str = #table_name;
 
-            fn table_def() -> forge::forge_core::schema::TableDef {
-                let mut table = forge::forge_core::schema::TableDef::new(#table_name, stringify!(#struct_name));
+            fn table_def() -> #forge::forge_core::schema::TableDef {
+                let mut table = #forge::forge_core::schema::TableDef::new(#table_name, stringify!(#struct_name));
                 table.fields = vec![
                     #(#field_tokens),*
                 ];
@@ -110,18 +111,23 @@ fn expand_model_impl(
 }
 
 fn get_table_name(input: &DeriveInput) -> syn::Result<String> {
-    // Look for #[table(name = "...")]
+    // Look for #[table(name = "...")]. parse_nested_meta correctly handles
+    // escaped quotes and inner whitespace, unlike the previous string-slice
+    // parser which choked on `name = "with \"escape\""` and similar.
     for attr in &input.attrs {
         if attr.path().is_ident("table") {
-            let meta = attr.meta.clone();
-            if let Meta::List(list) = meta {
-                let tokens: TokenStream2 = list.tokens;
-                let tokens_str = tokens.to_string();
-                if tokens_str.starts_with("name")
-                    && let Some(value) = extract_string_value(&tokens_str)
-                {
-                    return Ok(value);
+            let mut found: Option<String> = None;
+            attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("name") {
+                    let lit: syn::LitStr = meta.value()?.parse()?;
+                    found = Some(lit.value());
+                    Ok(())
+                } else {
+                    Err(meta.error("expected `name = \"...\"`"))
                 }
+            })?;
+            if let Some(name) = found {
+                return Ok(name);
             }
         }
     }
@@ -129,18 +135,6 @@ fn get_table_name(input: &DeriveInput) -> syn::Result<String> {
     // Default: convert struct name to snake_case plural
     let name = to_snake_case(&input.ident.to_string());
     Ok(pluralize(&name))
-}
-
-fn extract_string_value(s: &str) -> Option<String> {
-    // Parse "name = \"value\"" pattern
-    let parts: Vec<&str> = s.splitn(2, '=').collect();
-    if parts.len() == 2 {
-        let value = parts[1].trim();
-        if let Some(stripped) = value.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
-            return Some(stripped.to_string());
-        }
-    }
-    None
 }
 
 use crate::utils::{pluralize, to_snake_case};
@@ -195,24 +189,6 @@ mod tests {
         assert_eq!(pluralize("day"), "days");
         assert_eq!(pluralize("boy"), "boys");
         assert_eq!(pluralize("buy"), "buys");
-    }
-
-    #[test]
-    fn extract_string_value_valid() {
-        assert_eq!(
-            extract_string_value(r#"name = "custom_table""#),
-            Some("custom_table".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_string_value_no_quotes() {
-        assert_eq!(extract_string_value("name = bare_value"), None);
-    }
-
-    #[test]
-    fn extract_string_value_no_equals() {
-        assert_eq!(extract_string_value(r#""just a string""#), None);
     }
 
     // --- Table name derivation (integration of to_snake_case + pluralize) ---

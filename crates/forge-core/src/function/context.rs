@@ -53,6 +53,11 @@ use crate::auth::Claims;
 use crate::env::{EnvAccess, EnvProvider, RealEnvProvider};
 use crate::http::CircuitBreakerClient;
 
+/// Default outbound HTTP timeout applied by [`MutationContext::http`] when
+/// no per-handler `timeout` is configured. Keeps a misbehaving downstream
+/// from hanging an RPC indefinitely.
+pub const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Token issuer for signing JWTs.
 ///
 /// Implemented by the runtime when HMAC auth is configured.
@@ -420,6 +425,13 @@ impl<'c> sqlx::Executor<'c> for &'c mut ForgeConn<'_> {
 }
 
 /// Authentication context available to all functions.
+///
+/// KNOWN ISSUE: `authenticated` and `user_id` encode overlapping state —
+/// an authenticated subject without a UUID (Firebase, Clerk) is represented
+/// as `authenticated = true` with `user_id = None`. Constructors are the
+/// only places that set these; each one preserves the invariant
+/// `authenticated == (user_id.is_some() || claims.contains_key("sub"))`.
+/// Collapsing into a single sum type is tracked for a future cleanup.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct AuthContext {
@@ -434,13 +446,15 @@ pub struct AuthContext {
 impl AuthContext {
     /// Create an unauthenticated context.
     pub fn unauthenticated() -> Self {
-        Self {
+        let ctx = Self {
             user_id: None,
             roles: Vec::new(),
             claims: HashMap::new(),
             authenticated: false,
             token_exp: None,
-        }
+        };
+        debug_assert!(!ctx.authenticated && ctx.user_id.is_none());
+        ctx
     }
 
     /// Create an authenticated context with a UUID user ID.
@@ -449,13 +463,15 @@ impl AuthContext {
         roles: Vec<String>,
         claims: HashMap<String, serde_json::Value>,
     ) -> Self {
-        Self {
+        let ctx = Self {
             user_id: Some(user_id),
             roles,
             claims,
             authenticated: true,
             token_exp: None,
-        }
+        };
+        debug_assert!(ctx.authenticated && ctx.user_id.is_some());
+        ctx
     }
 
     /// Create an authenticated context without requiring a UUID user ID.
@@ -467,13 +483,15 @@ impl AuthContext {
         roles: Vec<String>,
         claims: HashMap<String, serde_json::Value>,
     ) -> Self {
-        Self {
+        let ctx = Self {
             user_id: None,
             roles,
             claims,
             authenticated: true,
             token_exp: None,
-        }
+        };
+        debug_assert!(ctx.authenticated && ctx.user_id.is_none());
+        ctx
     }
 
     /// Attach the JWT expiry timestamp to this context.
@@ -853,7 +871,9 @@ pub struct MutationContext {
     pub request: RequestMetadata,
     db_pool: sqlx::PgPool,
     http_client: CircuitBreakerClient,
-    /// `None` means unlimited.
+    /// `None` means "apply the default ceiling" ([`DEFAULT_HTTP_TIMEOUT`]).
+    /// A caller that genuinely needs an unbounded outbound request should
+    /// build its own [`reqwest::Client`] outside the framework.
     http_timeout: Option<Duration>,
     job_dispatch: Option<Arc<dyn JobDispatch>>,
     workflow_dispatch: Option<Arc<dyn WorkflowDispatch>>,
@@ -867,7 +887,6 @@ pub struct MutationContext {
     /// 0 = unlimited.
     max_jobs_per_request: usize,
     kv: Option<Arc<dyn KvHandle>>,
-    email_sender: Option<Arc<dyn crate::email::EmailSender>>,
 }
 
 impl MutationContext {
@@ -888,7 +907,6 @@ impl MutationContext {
             dispatched_job_count: Arc::new(AtomicUsize::new(0)),
             max_jobs_per_request: 0,
             kv: None,
-            email_sender: None,
         }
     }
 
@@ -916,7 +934,6 @@ impl MutationContext {
             dispatched_job_count: Arc::new(AtomicUsize::new(0)),
             max_jobs_per_request: 0,
             kv: None,
-            email_sender: None,
         }
     }
 
@@ -945,7 +962,6 @@ impl MutationContext {
             dispatched_job_count: Arc::new(AtomicUsize::new(0)),
             max_jobs_per_request: 0,
             kv: None,
-            email_sender: None,
         }
     }
 
@@ -986,7 +1002,6 @@ impl MutationContext {
             dispatched_job_count: Arc::new(AtomicUsize::new(0)),
             max_jobs_per_request: 0,
             kv: None,
-            email_sender: None,
         };
 
         (ctx, tx_handle)
@@ -1007,18 +1022,6 @@ impl MutationContext {
         self.kv
             .as_deref()
             .ok_or_else(|| crate::error::ForgeError::internal("KV store not available"))
-    }
-
-    /// Attach an email sender.
-    pub fn set_email(&mut self, sender: Arc<dyn crate::email::EmailSender>) {
-        self.email_sender = Some(sender);
-    }
-
-    /// Access the email sender.
-    pub fn email(&self) -> crate::error::Result<&dyn crate::email::EmailSender> {
-        self.email_sender
-            .as_deref()
-            .ok_or_else(|| crate::error::ForgeError::internal("Email not configured"))
     }
 
     pub fn is_transactional(&self) -> bool {
@@ -1045,14 +1048,15 @@ impl MutationContext {
 
     /// Direct pool access that **bypasses the active transaction**.
     ///
-    /// In a transactional mutation, this returns the raw [`sqlx::PgPool`] and
-    /// any queries run on it execute outside the transaction — so they will
-    /// not see uncommitted writes and will not be rolled back if the mutation
-    /// fails. Prefer [`MutationContext::conn`] or [`MutationContext::db`] for
-    /// anything that should participate in the transaction. Reach for this
-    /// only for operations that fundamentally cannot run inside a transaction
-    /// (e.g. `LISTEN`/`NOTIFY`, advisory locks, or background pool work).
-    pub fn bypass_pool(&self) -> &sqlx::PgPool {
+    /// WARNING: in a transactional mutation, this returns the raw
+    /// [`sqlx::PgPool`] and any queries run on it execute outside the
+    /// transaction — they will not see uncommitted writes and will not be
+    /// rolled back if the mutation fails. Prefer
+    /// [`MutationContext::conn`] or [`MutationContext::db`] for anything
+    /// that should participate in the transaction. Reach for this only for
+    /// operations that fundamentally cannot run inside a transaction (e.g.
+    /// `LISTEN`/`NOTIFY`, advisory locks, or background pool work).
+    pub fn pool_outside_transaction(&self) -> &sqlx::PgPool {
         &self.db_pool
     }
 
@@ -1087,10 +1091,15 @@ impl MutationContext {
     /// declared an explicit `timeout`, that timeout is also applied to outbound
     /// HTTP requests unless the request overrides it.
     pub fn http(&self) -> crate::http::HttpClient {
-        self.http_client.with_timeout(self.http_timeout)
+        let timeout = self.http_timeout.or(Some(DEFAULT_HTTP_TIMEOUT));
+        self.http_client.with_timeout(timeout)
     }
 
-    /// Get the raw reqwest client, bypassing circuit breaker execution.
+    /// Get the raw reqwest client, bypassing circuit breaker execution,
+    /// host blocklist, and retries.
+    ///
+    /// Gated behind the `escape-hatches` feature; prefer [`Self::http`].
+    #[cfg(feature = "escape-hatches")]
     pub fn raw_http(&self) -> &reqwest::Client {
         self.http_client.inner()
     }
@@ -1131,6 +1140,35 @@ impl MutationContext {
     /// A value of 0 disables the limit.
     pub fn set_max_jobs_per_request(&mut self, limit: usize) {
         self.max_jobs_per_request = limit;
+    }
+
+    /// Atomically reserve a job-dispatch slot under `max_jobs_per_request`.
+    ///
+    /// Uses a `compare_exchange` loop so concurrent dispatches (e.g. via
+    /// `join_all`) cannot briefly exceed the limit. Returns an error when
+    /// the cap has been reached.
+    fn reserve_job_slot(&self) -> crate::error::Result<()> {
+        if self.max_jobs_per_request == 0 {
+            return Ok(());
+        }
+        let mut current = self.dispatched_job_count.load(Ordering::Acquire);
+        loop {
+            if current >= self.max_jobs_per_request {
+                return Err(crate::error::ForgeError::Validation(format!(
+                    "max_jobs_per_request limit of {} exceeded",
+                    self.max_jobs_per_request
+                )));
+            }
+            match self.dispatched_job_count.compare_exchange(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     /// Issue a signed JWT from the given claims.
@@ -1252,18 +1290,7 @@ impl MutationContext {
         job_type: &str,
         args: T,
     ) -> crate::error::Result<Uuid> {
-        if self.max_jobs_per_request > 0 {
-            let count = self.dispatched_job_count.fetch_add(1, Ordering::Relaxed);
-            if count >= self.max_jobs_per_request {
-                // Undo the increment so repeated calls after the limit give a
-                // consistent count rather than growing without bound.
-                self.dispatched_job_count.fetch_sub(1, Ordering::Relaxed);
-                return Err(crate::error::ForgeError::Validation(format!(
-                    "max_jobs_per_request limit of {} exceeded",
-                    self.max_jobs_per_request
-                )));
-            }
-        }
+        self.reserve_job_slot()?;
 
         let args_json = serde_json::to_value(args)?;
         let dispatcher = self
@@ -1312,16 +1339,7 @@ impl MutationContext {
         args: T,
         scheduled_at: DateTime<Utc>,
     ) -> crate::error::Result<Uuid> {
-        if self.max_jobs_per_request > 0 {
-            let count = self.dispatched_job_count.fetch_add(1, Ordering::Relaxed);
-            if count >= self.max_jobs_per_request {
-                self.dispatched_job_count.fetch_sub(1, Ordering::Relaxed);
-                return Err(crate::error::ForgeError::Validation(format!(
-                    "max_jobs_per_request limit of {} exceeded",
-                    self.max_jobs_per_request
-                )));
-            }
-        }
+        self.reserve_job_slot()?;
 
         let args_json = serde_json::to_value(args)?;
         let dispatcher = self

@@ -15,8 +15,17 @@ pub enum ForgeError {
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
 
-    #[error("Database error: {0}")]
-    Database(#[from] sqlx::Error),
+    /// Wraps the inner [`sqlx::Error`] without rendering it in `Display`.
+    /// The raw sqlx error (which may contain constraint names, schema names,
+    /// or bound parameter previews) is reachable via [`std::error::Error::source`]
+    /// for structured logging, but the public `Display` impl emits a generic
+    /// "database error" so it is safe to surface in API responses.
+    #[error("database error")]
+    Database(
+        #[source]
+        #[from]
+        sqlx::Error,
+    ),
 
     #[error("Job cancelled: {0}")]
     JobCancelled(String),
@@ -158,10 +167,31 @@ impl ForgeError {
     }
 
     pub fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            Self::ServiceUnavailable(_) | Self::Timeout(_) | Self::RateLimitExceeded { .. }
-        )
+        match self {
+            Self::ServiceUnavailable(_) | Self::Timeout(_) | Self::RateLimitExceeded { .. } => true,
+            Self::Database(err) => is_transient_sqlx_error(err),
+            _ => false,
+        }
+    }
+}
+
+/// Heuristic for sqlx errors that are safe-to-retry transient failures:
+/// pool checkout timeouts, dropped or closed connections, and IO errors
+/// against the database socket. Logical errors (constraint violations,
+/// type mismatches, missing rows) intentionally do not retry.
+fn is_transient_sqlx_error(err: &sqlx::Error) -> bool {
+    match err {
+        sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed | sqlx::Error::WorkerCrashed => true,
+        sqlx::Error::Io(_) => true,
+        sqlx::Error::Database(db_err) => {
+            // PostgreSQL connection_exception family (08xxx) and
+            // statement_timeout (57014) are transient.
+            db_err
+                .code()
+                .map(|c| c.starts_with("08") || c == "57014" || c == "57P03")
+                .unwrap_or(false)
+        }
+        _ => false,
     }
 }
 
@@ -180,10 +210,12 @@ impl From<crate::http::CircuitBreakerError> for ForgeError {
             crate::http::CircuitBreakerError::Request(err) if err.is_timeout() => {
                 ForgeError::Timeout(err.to_string())
             }
-            crate::http::CircuitBreakerError::Request(err) => ForgeError::Internal {
-                context: "HTTP request failed".to_string(),
-                source: Some(Box::new(err)),
-            },
+            crate::http::CircuitBreakerError::Request(err) => {
+                // Non-timeout reqwest failures (connection refused, DNS,
+                // TLS) are upstream-side problems, not local bugs. Map to
+                // 503 so clients understand it's worth retrying.
+                ForgeError::ServiceUnavailable(format!("HTTP request failed: {err}"))
+            }
             crate::http::CircuitBreakerError::PrivateHostBlocked(host) => {
                 ForgeError::Forbidden(format!("Outbound request to private host '{host}' blocked"))
             }
@@ -210,7 +242,7 @@ mod tests {
             ),
             (
                 ForgeError::Database(sqlx::Error::RowNotFound),
-                "Database error: no rows returned by a query that expected to return at least one row",
+                "database error",
             ),
             (
                 ForgeError::JobCancelled("user request".into()),
@@ -437,5 +469,144 @@ mod tests {
         let err = ForgeError::internal_with("connection failed", io_err);
         assert_eq!(err.to_string(), "Internal error: connection failed");
         assert!(err.source().is_some(), "source should be preserved");
+    }
+
+    /// Minimal `sqlx::error::DatabaseError` carrying a fixed SQLSTATE code so we
+    /// can drive `is_transient_sqlx_error`'s `Database` arm without a live PG.
+    #[derive(Debug)]
+    struct FakeDbError {
+        code: Option<String>,
+        unique: bool,
+    }
+
+    impl FakeDbError {
+        fn with_code(code: &str) -> Self {
+            Self {
+                code: Some(code.to_string()),
+                unique: false,
+            }
+        }
+
+        fn unique_violation() -> Self {
+            // 23505 is PG's unique_violation. A logical constraint failure must
+            // not be treated as transient.
+            Self {
+                code: Some("23505".to_string()),
+                unique: true,
+            }
+        }
+
+        fn no_code() -> Self {
+            Self {
+                code: None,
+                unique: false,
+            }
+        }
+    }
+
+    impl std::fmt::Display for FakeDbError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "fake db error ({:?})", self.code)
+        }
+    }
+
+    impl std::error::Error for FakeDbError {}
+
+    impl sqlx::error::DatabaseError for FakeDbError {
+        fn message(&self) -> &str {
+            "fake db error"
+        }
+
+        fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+            self.code.as_deref().map(std::borrow::Cow::Borrowed)
+        }
+
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+
+        fn kind(&self) -> sqlx::error::ErrorKind {
+            if self.unique {
+                sqlx::error::ErrorKind::UniqueViolation
+            } else {
+                sqlx::error::ErrorKind::Other
+            }
+        }
+    }
+
+    fn db(err: FakeDbError) -> sqlx::Error {
+        sqlx::Error::Database(Box::new(err))
+    }
+
+    #[test]
+    fn transient_sqlx_pool_and_worker_errors_retry() {
+        assert!(is_transient_sqlx_error(&sqlx::Error::PoolTimedOut));
+        assert!(is_transient_sqlx_error(&sqlx::Error::PoolClosed));
+        assert!(is_transient_sqlx_error(&sqlx::Error::WorkerCrashed));
+    }
+
+    #[test]
+    fn transient_sqlx_io_error_retries() {
+        let io = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset");
+        assert!(is_transient_sqlx_error(&sqlx::Error::Io(io)));
+    }
+
+    #[test]
+    fn transient_sqlx_connection_family_08xxx_retries() {
+        // 08006 connection_failure, 08003 connection_does_not_exist, etc.
+        assert!(is_transient_sqlx_error(&db(FakeDbError::with_code(
+            "08006"
+        ))));
+        assert!(is_transient_sqlx_error(&db(FakeDbError::with_code(
+            "08003"
+        ))));
+        assert!(is_transient_sqlx_error(&db(FakeDbError::with_code(
+            "08000"
+        ))));
+    }
+
+    #[test]
+    fn transient_sqlx_statement_timeout_and_admin_shutdown_retry() {
+        // 57014 query_canceled (statement_timeout), 57P03 cannot_connect_now.
+        assert!(is_transient_sqlx_error(&db(FakeDbError::with_code(
+            "57014"
+        ))));
+        assert!(is_transient_sqlx_error(&db(FakeDbError::with_code(
+            "57P03"
+        ))));
+    }
+
+    #[test]
+    fn non_transient_sqlx_logical_errors_do_not_retry() {
+        // Constraint violation, row-not-found, and a missing code are all
+        // logical/non-retryable.
+        assert!(!is_transient_sqlx_error(&db(
+            FakeDbError::unique_violation()
+        )));
+        assert!(!is_transient_sqlx_error(&db(FakeDbError::with_code(
+            "23503"
+        ))));
+        assert!(!is_transient_sqlx_error(&db(FakeDbError::no_code())));
+        assert!(!is_transient_sqlx_error(&sqlx::Error::RowNotFound));
+        // 57 family that isn't a retry code (e.g. 57000 operator_intervention).
+        assert!(!is_transient_sqlx_error(&db(FakeDbError::with_code(
+            "57000"
+        ))));
+    }
+
+    #[test]
+    fn is_retryable_database_delegates_to_transient_check() {
+        assert!(ForgeError::Database(db(FakeDbError::with_code("08006"))).is_retryable());
+        assert!(ForgeError::Database(db(FakeDbError::with_code("57014"))).is_retryable());
+        assert!(!ForgeError::Database(db(FakeDbError::unique_violation())).is_retryable());
+        assert!(!ForgeError::Database(sqlx::Error::RowNotFound).is_retryable());
     }
 }

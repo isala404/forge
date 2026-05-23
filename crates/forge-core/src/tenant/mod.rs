@@ -142,4 +142,45 @@ mod tests {
         let ctx = TenantContext::strict(tenant_id);
         assert!(ctx.require_tenant().is_ok());
     }
+
+    #[test]
+    fn sql_filter_rejects_injection_attempts() {
+        let ctx = TenantContext::strict(Uuid::new_v4());
+        // Anything outside [A-Za-z0-9_] must be refused so the column name can
+        // never carry SQL. Empty is rejected too.
+        for bad in [
+            "",
+            "tenant_id; DROP TABLE users",
+            "tenant_id OR 1=1",
+            "tenant_id--",
+            "tenant\"_id",
+            "tenant id",
+            "tenant.id",
+            "tenant_id)",
+            "té",
+        ] {
+            assert!(
+                ctx.sql_filter(bad, 1).is_none(),
+                "column {bad:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn sql_filter_accepts_valid_identifiers_and_quotes_them() {
+        let tenant_id = Uuid::new_v4();
+        let ctx = TenantContext::strict(tenant_id);
+        let (clause, id) = ctx
+            .sql_filter("org_id_2", 5)
+            .expect("alphanumeric+underscore column is valid");
+        assert_eq!(clause, "\"org_id_2\" = $5");
+        assert_eq!(id, tenant_id);
+    }
+
+    #[test]
+    fn sql_filter_returns_none_without_tenant_even_for_valid_column() {
+        // No tenant id => nothing to scope by, regardless of column validity.
+        let ctx = TenantContext::none();
+        assert!(ctx.sql_filter("tenant_id", 1).is_none());
+    }
 }

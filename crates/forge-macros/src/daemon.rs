@@ -45,6 +45,7 @@ struct DaemonAttrs {
 }
 
 pub fn daemon_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let forge = crate::utils::forge_path();
     let input = parse_macro_input!(item as ItemFn);
 
     let attr_args = match NestedMeta::parse_meta_list(attr.into()) {
@@ -108,7 +109,7 @@ pub fn daemon_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let registration = if attrs.register {
         quote! {
-            forge::inventory::submit!(forge::AutoHandler(|registries| {
+            #forge::inventory::submit!(#forge::AutoHandler(|registries| {
                 registries.daemons.register::<#struct_name>();
             }));
         }
@@ -125,11 +126,11 @@ pub fn daemon_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             #(#other_attrs)*
             pub struct #struct_name;
 
-            impl forge::forge_core::__sealed::Sealed for #struct_name {}
+            impl #forge::forge_core::__sealed::Sealed for #struct_name {}
 
-            impl forge::forge_core::daemon::ForgeDaemon for #struct_name {
-                fn info() -> forge::forge_core::daemon::DaemonInfo {
-                    forge::forge_core::daemon::DaemonInfo {
+            impl #forge::forge_core::daemon::ForgeDaemon for #struct_name {
+                fn info() -> #forge::forge_core::daemon::DaemonInfo {
+                    #forge::forge_core::daemon::DaemonInfo {
                         name: #rpc_name,
                         leader_elected: #leader_elected,
                         restart_on_panic: #restart_on_panic,
@@ -141,8 +142,8 @@ pub fn daemon_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
 
                 fn execute(
-                    ctx: &forge::forge_core::daemon::DaemonContext,
-                ) -> std::pin::Pin<Box<dyn std::future::Future<Output = forge::forge_core::Result<()>> + Send + '_>> {
+                    ctx: &#forge::forge_core::daemon::DaemonContext,
+                ) -> std::pin::Pin<Box<dyn std::future::Future<Output = #forge::forge_core::Result<()>> + Send + '_>> {
                     Box::pin(async move #block)
                 }
             }

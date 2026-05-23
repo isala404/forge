@@ -55,6 +55,7 @@ struct CronAttrs {
 }
 
 pub fn cron_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let forge = crate::utils::forge_path();
     let input = parse_macro_input!(item as ItemFn);
 
     let attr_args = match NestedMeta::parse_meta_list(attr.into()) {
@@ -145,26 +146,48 @@ pub fn cron_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let _vis = &input.vis;
     let block = &input.block;
 
-    let schedule = attrs.schedule.unwrap_or_else(|| "* * * * *".to_string());
+    // Require explicit schedule — silent fallback to `* * * * *` (every
+    // minute) is almost always wrong.
+    let Some(raw_schedule) = attrs.schedule else {
+        return syn::Error::new_spanned(
+            &input.sig.ident,
+            "cron handlers require an explicit schedule. Use a positional cron \
+             expression, `schedule = \"...\"`, `every = \"...\"`, or `daily_at = \"...\"`.",
+        )
+        .to_compile_error()
+        .into();
+    };
 
-    // Normalize 5-part to 6-part (prepend seconds) to match what CronSchedule::new does.
-    {
-        let parts: Vec<&str> = schedule.split_whitespace().collect();
+    // Normalize 5-part to 6-part (prepend seconds) to match what CronSchedule::new does,
+    // and pass the normalized form to the runtime so compile- and run-time agree.
+    let schedule = {
+        let parts: Vec<&str> = raw_schedule.split_whitespace().collect();
         let normalized = if parts.len() == 5 {
-            format!("0 {schedule}")
+            format!("0 {raw_schedule}")
         } else {
-            schedule.clone()
+            raw_schedule.clone()
         };
         if cron::Schedule::from_str(&normalized).is_err() {
             return syn::Error::new_spanned(
                 &input.sig.ident,
-                format!("Invalid cron schedule: \"{schedule}\""),
+                format!("Invalid cron schedule: \"{raw_schedule}\""),
             )
             .to_compile_error()
             .into();
         }
-    }
+        normalized
+    };
     let timezone = attrs.timezone.unwrap_or_else(|| "UTC".to_string());
+    if timezone.parse::<chrono_tz::Tz>().is_err() {
+        return syn::Error::new_spanned(
+            &input.sig.ident,
+            format!(
+                "Invalid timezone: \"{timezone}\". Must be an IANA tz database name (e.g., \"UTC\", \"America/New_York\")."
+            ),
+        )
+        .to_compile_error()
+        .into();
+    }
     let group = attrs.group.unwrap_or_else(|| "default".to_string());
     let catch_up = attrs.catch_up;
     let catch_up_limit = attrs.catch_up_limit.unwrap_or(10);
@@ -185,7 +208,7 @@ pub fn cron_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let registration = if attrs.register {
         quote! {
-            forge::inventory::submit!(forge::AutoHandler(|registries| {
+            #forge::inventory::submit!(#forge::AutoHandler(|registries| {
                 registries.crons.register::<#struct_name>();
             }));
         }
@@ -202,15 +225,15 @@ pub fn cron_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             #(#other_attrs)*
             pub struct #struct_name;
 
-            impl forge::forge_core::__sealed::Sealed for #struct_name {}
+            impl #forge::forge_core::__sealed::Sealed for #struct_name {}
 
-            impl forge::forge_core::cron::ForgeCron for #struct_name {
+            impl #forge::forge_core::cron::ForgeCron for #struct_name {
                 type Args = ();
 
-                fn info() -> forge::forge_core::cron::CronInfo {
-                    forge::forge_core::cron::CronInfo {
+                fn info() -> #forge::forge_core::cron::CronInfo {
+                    #forge::forge_core::cron::CronInfo {
                         name: #rpc_name,
-                        schedule: forge::forge_core::cron::CronSchedule::new_validated(#schedule),
+                        schedule: #forge::forge_core::cron::CronSchedule::new_validated(#schedule),
                         timezone: #timezone,
                         group: #group,
                         catch_up: #catch_up,
@@ -221,8 +244,8 @@ pub fn cron_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
 
                 fn execute(
-                    ctx: &forge::forge_core::cron::CronContext,
-                ) -> std::pin::Pin<Box<dyn std::future::Future<Output = forge::forge_core::Result<()>> + Send + '_>> {
+                    ctx: &#forge::forge_core::cron::CronContext,
+                ) -> std::pin::Pin<Box<dyn std::future::Future<Output = #forge::forge_core::Result<()>> + Send + '_>> {
                     Box::pin(async move #block)
                 }
             }

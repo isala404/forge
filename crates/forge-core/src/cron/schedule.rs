@@ -35,6 +35,15 @@ impl CronSchedule {
         })
     }
 
+    /// Validate a timezone string at registration time. Returns an error when
+    /// the timezone is not recognised so misconfigured crons fail loudly at
+    /// startup instead of silently never firing.
+    pub fn validate_timezone(timezone: &str) -> Result<(), CronParseError> {
+        timezone.parse::<Tz>().map(|_| ()).map_err(|e| {
+            CronParseError::InvalidExpression(format!("invalid timezone '{timezone}': {e}"))
+        })
+    }
+
     /// Create a cron schedule from an expression that was already validated at compile time.
     ///
     /// Falls back to a non-firing schedule if parsing somehow fails, which cannot happen
@@ -96,12 +105,17 @@ impl CronSchedule {
             return vec![];
         };
 
-        let local_start = start.with_timezone(&tz);
+        // `cron::Schedule::after` is exclusive of the boundary. Subtract one
+        // second so a scheduled tick that lands exactly on `start` is still
+        // emitted — otherwise a 1 s scheduler poll can drop a tick whose
+        // moment coincides with the window edge.
+        let local_start = start.with_timezone(&tz) - chrono::Duration::seconds(1);
         let local_end = end.with_timezone(&tz);
 
         schedule
             .after(&local_start)
             .take_while(|dt| *dt <= local_end)
+            .filter(|dt| *dt >= start.with_timezone(&tz))
             .map(|dt| dt.with_timezone(&Utc))
             .collect()
     }
