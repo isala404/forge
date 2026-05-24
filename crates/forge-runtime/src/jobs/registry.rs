@@ -5,28 +5,8 @@ use std::sync::Arc;
 
 use forge_core::Result;
 use forge_core::job::{ForgeJob, JobContext, JobInfo};
+use forge_core::util::normalize_handler_args as normalize_args;
 use serde_json::Value;
-
-/// Converts `null` to `{}` and unwraps single-key `args`/`input` envelopes.
-fn normalize_args(args: Value) -> Value {
-    let unwrapped = match &args {
-        Value::Object(map) if map.len() == 1 => {
-            if map.contains_key("args") {
-                map.get("args").cloned().unwrap_or(Value::Null)
-            } else if map.contains_key("input") {
-                map.get("input").cloned().unwrap_or(Value::Null)
-            } else {
-                args
-            }
-        }
-        _ => args,
-    };
-
-    match &unwrapped {
-        Value::Null => Value::Object(serde_json::Map::new()),
-        _ => unwrapped,
-    }
-}
 
 pub type BoxedJobHandler = Arc<
     dyn Fn(&JobContext, Value) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + '_>>
@@ -151,53 +131,9 @@ impl JobRegistry {
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
-    // jobs/registry collapses null to {} so derive(Default) empty-struct args deserialize correctly;
-    // function/registry keeps null as-is for unit () — this divergence is the contract.
-    #[test]
-    fn normalize_args_converts_null_to_empty_object() {
-        assert_eq!(normalize_args(json!(null)), json!({}));
-    }
-
-    #[test]
-    fn normalize_args_keeps_empty_object_intact() {
-        // `{}` (len 0) skips the envelope unwrap and the null branch.
-        assert_eq!(normalize_args(json!({})), json!({}));
-    }
-
-    #[test]
-    fn normalize_args_unwraps_args_envelope() {
-        assert_eq!(normalize_args(json!({"args": {"id": 7}})), json!({"id": 7}));
-        // The trailing null-to-{} step still applies after unwrap.
-        assert_eq!(normalize_args(json!({"args": null})), json!({}));
-    }
-
-    #[test]
-    fn normalize_args_unwraps_input_envelope() {
-        assert_eq!(normalize_args(json!({"input": [1,2]})), json!([1, 2]));
-    }
-
-    #[test]
-    fn normalize_args_keeps_other_single_key_objects_intact() {
-        // A handler with `struct Args { id: u32 }` must receive {"id":...}
-        // as-is — envelope stripping only fires for `args`/`input`.
-        assert_eq!(normalize_args(json!({"id": 7})), json!({"id": 7}));
-    }
-
-    #[test]
-    fn normalize_args_keeps_multi_key_objects_intact() {
-        let v = json!({"a": 1, "b": 2});
-        assert_eq!(normalize_args(v.clone()), v);
-    }
-
-    #[test]
-    fn normalize_args_keeps_non_null_non_object_values_intact() {
-        assert_eq!(normalize_args(json!(42)), json!(42));
-        assert_eq!(normalize_args(json!("x")), json!("x"));
-        assert_eq!(normalize_args(json!([1])), json!([1]));
-        assert_eq!(normalize_args(json!(true)), json!(true));
-    }
+    // normalize_args is exercised via `forge_core::util` tests; jobs/registry
+    // now delegates to that shared helper.
 
     fn sample_info(name: &'static str) -> JobInfo {
         JobInfo {

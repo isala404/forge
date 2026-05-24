@@ -5,6 +5,12 @@ use sqlx::PgPool;
 
 use forge_core::error::{ForgeError, Result};
 
+/// Hard cap on the value size accepted by `set` / `set_if_absent`. PG can
+/// store much larger BYTEA blobs, but the KV API is meant for small
+/// configuration / lock payloads, not blobs. Multi-MB values are almost
+/// always a misuse (and round-trip the protocol per call).
+const MAX_VALUE_BYTES: usize = 1024 * 1024;
+
 /// PostgreSQL-backed key-value store.
 ///
 /// Provides a simple get/set/delete/set_if_absent/increment API over
@@ -24,13 +30,37 @@ impl KvStore {
         Self { pool, namespace }
     }
 
-    fn prefixed_key(&self, key: &str) -> String {
-        format!("{}:{}", self.namespace, key)
+    fn prefixed_key(&self, key: &str) -> Result<String> {
+        // Reject `:` in either namespace or key — the prefix separator must
+        // be unambiguous so `(namespace=a, key=b:foo)` and
+        // `(namespace=a:b, key=foo)` can't collide on the same physical key.
+        if self.namespace.contains(':') {
+            return Err(ForgeError::InvalidArgument(format!(
+                "kv namespace must not contain ':' (got {:?})",
+                self.namespace
+            )));
+        }
+        if key.contains(':') {
+            return Err(ForgeError::InvalidArgument(
+                "kv key must not contain ':' (reserved as namespace separator)".to_string(),
+            ));
+        }
+        Ok(format!("{}:{}", self.namespace, key))
+    }
+
+    fn check_value_size(value: &[u8]) -> Result<()> {
+        if value.len() > MAX_VALUE_BYTES {
+            return Err(ForgeError::InvalidArgument(format!(
+                "kv value exceeds {MAX_VALUE_BYTES} byte limit (got {})",
+                value.len()
+            )));
+        }
+        Ok(())
     }
 
     /// Get a value by key. Returns `None` if the key doesn't exist or is expired.
     pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        let full_key = self.prefixed_key(key);
+        let full_key = self.prefixed_key(key)?;
         let row = sqlx::query_scalar!(
             r#"
             SELECT value
@@ -49,7 +79,8 @@ impl KvStore {
 
     /// Set a key to a value. Overwrites any existing value.
     pub async fn set(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<()> {
-        let full_key = self.prefixed_key(key);
+        Self::check_value_size(value)?;
+        let full_key = self.prefixed_key(key)?;
         let expires_at = ttl.map(|d| Utc::now() + d);
         sqlx::query!(
             r#"
@@ -80,10 +111,21 @@ impl KvStore {
         value: &[u8],
         ttl: Option<Duration>,
     ) -> Result<bool> {
-        let full_key = self.prefixed_key(key);
+        Self::check_value_size(value)?;
+        let full_key = self.prefixed_key(key)?;
         let expires_at = ttl.map(|d| Utc::now() + d);
-        // ON CONFLICT WHERE treats expired rows as absent atomically.
-        // Convert to query!() after next `cargo sqlx prepare`.
+        // Serialize concurrent reclaim-of-expired racers per key via a
+        // transaction-scoped advisory lock keyed on the full prefixed key.
+        // Without this, the ON CONFLICT WHERE branch is only race-free under
+        // READ COMMITTED — under REPEATABLE READ a second writer can see the
+        // pre-update snapshot and "succeed" against an already-claimed row.
+        let mut tx = self.pool.begin().await.map_err(ForgeError::Database)?;
+        #[allow(clippy::disallowed_methods)]
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)")
+            .bind(&full_key)
+            .execute(&mut *tx)
+            .await
+            .map_err(ForgeError::Database)?;
         #[allow(clippy::disallowed_methods)]
         let rows = sqlx::query(
             r#"
@@ -97,17 +139,18 @@ impl KvStore {
         .bind(&full_key)
         .bind(value)
         .bind(expires_at)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(ForgeError::Database)?
         .rows_affected();
+        tx.commit().await.map_err(ForgeError::Database)?;
 
         Ok(rows > 0)
     }
 
     /// Delete a key. Returns `true` if the key existed.
     pub async fn delete(&self, key: &str) -> Result<bool> {
-        let full_key = self.prefixed_key(key);
+        let full_key = self.prefixed_key(key)?;
         let result = sqlx::query!("DELETE FROM forge_kv WHERE key = $1", full_key)
             .execute(&self.pool)
             .await
@@ -123,13 +166,17 @@ impl KvStore {
     ///
     /// Uses `ON CONFLICT DO UPDATE ... WHERE` to handle expired rows atomically
     /// without CTE snapshot isolation issues.
+    ///
+    /// **Note:** counter storage is `BIGINT`, range `[-2^63, 2^63 - 1]`.
+    /// Increments that overflow surface as `ForgeError::InvalidArgument` so
+    /// callers can choose to reset rather than retry indefinitely.
     pub async fn increment(&self, key: &str, delta: i64, ttl: Option<Duration>) -> Result<i64> {
-        let full_key = self.prefixed_key(key);
+        let full_key = self.prefixed_key(key)?;
         let expires_at = ttl.map(|d| Utc::now() + d);
         // Expired counters reset to delta rather than accumulating.
         // Convert to query_scalar!() after next `cargo sqlx prepare`.
         #[allow(clippy::disallowed_methods)]
-        let row: (i64,) = sqlx::query_as(
+        let row: std::result::Result<(i64,), sqlx::Error> = sqlx::query_as(
             r#"
             INSERT INTO forge_kv_counters (key, value, expires_at, updated_at)
             VALUES ($1, $2, $3, NOW())
@@ -149,10 +196,41 @@ impl KvStore {
         .bind(delta)
         .bind(expires_at)
         .fetch_one(&self.pool)
+        .await;
+
+        match row {
+            Ok((v,)) => Ok(v),
+            Err(sqlx::Error::Database(db_err)) if db_err.code().as_deref() == Some("22003") => {
+                Err(ForgeError::InvalidArgument(format!(
+                    "counter overflow at key {full_key:?}: BIGINT range exceeded"
+                )))
+            }
+            Err(e) => Err(ForgeError::Database(e)),
+        }
+    }
+
+    /// Read a counter's current value. Returns `None` if missing or expired.
+    ///
+    /// Mirrors the TTL filter from `get()` so an expired counter behaves the
+    /// same as a missing one — keeps a future generic `get` over both tables
+    /// consistent.
+    pub async fn get_counter(&self, key: &str) -> Result<Option<i64>> {
+        let full_key = self.prefixed_key(key)?;
+        #[allow(clippy::disallowed_methods)]
+        let row: Option<(i64,)> = sqlx::query_as(
+            r#"
+            SELECT value
+            FROM forge_kv_counters
+            WHERE key = $1
+              AND (expires_at IS NULL OR expires_at > NOW())
+            "#,
+        )
+        .bind(&full_key)
+        .fetch_optional(&self.pool)
         .await
         .map_err(ForgeError::Database)?;
 
-        Ok(row.0)
+        Ok(row.map(|(v,)| v))
     }
 
     /// Remove expired keys from both tables. Returns total rows cleaned up.
@@ -190,8 +268,11 @@ mod tests {
             .expect("connect_lazy never fails for a syntactically valid URL");
 
         let store = KvStore::new(pool, "ratelimit");
-        assert_eq!(store.prefixed_key("user:42"), "ratelimit:user:42");
-        assert_eq!(store.prefixed_key(""), "ratelimit:");
+        // `:` in a key is now rejected — verify that and a couple of
+        // representative happy cases.
+        assert!(store.prefixed_key("user:42").is_err());
+        assert_eq!(store.prefixed_key("user_42").unwrap(), "ratelimit:user_42");
+        assert_eq!(store.prefixed_key("").unwrap(), "ratelimit:");
     }
 
     #[tokio::test]
@@ -205,7 +286,10 @@ mod tests {
         // physical keys — the property the namespace exists to guarantee.
         let a = KvStore::new(pool.clone(), "subsystem_a");
         let b = KvStore::new(pool, "subsystem_b");
-        assert_ne!(a.prefixed_key("shared"), b.prefixed_key("shared"));
+        assert_ne!(
+            a.prefixed_key("shared").unwrap(),
+            b.prefixed_key("shared").unwrap()
+        );
     }
 }
 

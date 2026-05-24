@@ -166,25 +166,30 @@ impl Worker {
         let wakeup_notify = Arc::new(tokio::sync::Notify::new());
         let wakeup_trigger = wakeup_notify.clone();
         let wakeup_shutdown = shutdown_notify.clone();
-        if let Some(mut rx) = self.notify_bus.subscribe("forge_jobs_available") {
-            tokio::spawn(async move {
-                loop {
-                    tokio::select! {
-                        _ = wakeup_shutdown.notified() => return,
-                        result = rx.recv() => {
-                            match result {
-                                Ok(_) => wakeup_trigger.notify_one(),
-                                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                                    tracing::debug!(missed = n, "Job wakeup receiver lagged");
-                                    wakeup_trigger.notify_one();
+        // Track the forwarder so shutdown can await it instead of leaking
+        // the JoinHandle (#8 in issues doc).
+        let forwarder_handle = self
+            .notify_bus
+            .subscribe("forge_jobs_available")
+            .map(|mut rx| {
+                tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            _ = wakeup_shutdown.notified() => return,
+                            result = rx.recv() => {
+                                match result {
+                                    Ok(_) => wakeup_trigger.notify_one(),
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                        tracing::debug!(missed = n, "Job wakeup receiver lagged");
+                                        wakeup_trigger.notify_one();
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                                 }
-                                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                             }
                         }
                     }
-                }
+                })
             });
-        }
 
         tracing::debug!(
             worker_id = %self.id,
@@ -200,6 +205,9 @@ impl Worker {
                     tracing::debug!(worker_id = %self.id, "Worker shutting down");
                     shutdown_notify.notify_waiters();
                     let _ = cleanup_handle.await;
+                    if let Some(h) = forwarder_handle {
+                        let _ = h.await;
+                    }
                     self.drain_jobs(&mut job_tasks).await;
                     break;
                 }

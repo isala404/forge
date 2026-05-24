@@ -3,7 +3,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use tokio::sync::RwLock;
+use dashmap::DashMap;
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 use super::bridge::WORKFLOW_RESUME_JOB;
@@ -50,6 +51,13 @@ pub struct WorkflowExecutor {
     job_queue: JobQueue,
     http_client: CircuitBreakerClient,
     compensation_state: Arc<RwLock<HashMap<Uuid, CompensationState>>>,
+    /// Per-run serialization: execute and cancel of the same run_id never
+    /// overlap. Without this guard a cancel landing concurrently with a
+    /// resume would yank the live `CompensationState` and double-fire
+    /// compensation while the handler is still mid-step (#3 in issues doc).
+    /// Entry is removed by the holder when the workflow reaches a terminal
+    /// state; in-flight holders elsewhere keep their Arc alive.
+    run_locks: Arc<DashMap<Uuid, Arc<Mutex<()>>>>,
     kv: Option<Arc<dyn KvHandle>>,
 }
 
@@ -66,8 +74,19 @@ impl WorkflowExecutor {
             job_queue,
             http_client,
             compensation_state: Arc::new(RwLock::new(HashMap::new())),
+            run_locks: Arc::new(DashMap::new()),
             kv: None,
         }
+    }
+
+    /// Returns an `Arc<Mutex<()>>` keyed by `run_id`, creating one if absent.
+    /// Holders take the mutex around any code that touches `compensation_state`
+    /// or runs the workflow handler to keep cancel and execute serialized.
+    fn run_lock(&self, run_id: Uuid) -> Arc<Mutex<()>> {
+        self.run_locks
+            .entry(run_id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     pub fn with_kv(mut self, kv: Arc<dyn KvHandle>) -> Self {
@@ -137,6 +156,12 @@ impl WorkflowExecutor {
             .await
             .map_err(forge_core::ForgeError::Database)?;
 
+        // #15: A DB trigger on `forge_jobs` (`v001_initial.sql`) already
+        // PERFORM pg_notify('forge_jobs_available', ...) on every insert.
+        // PostgreSQL buffers NOTIFY in the source transaction and delivers on
+        // commit, so the resume job is visible to workers as soon as the row
+        // is. No extra NOTIFY needed here.
+
         Ok(run_id)
     }
 
@@ -148,6 +173,10 @@ impl WorkflowExecutor {
         resume: Option<ResumeState>,
         owner_subject: Option<String>,
     ) -> forge_core::Result<WorkflowResult> {
+        // Serialize against concurrent cancel for the same run.
+        let lock = self.run_lock(run_id);
+        let _guard = lock.lock().await;
+
         self.claim_for_execution(run_id).await?;
 
         let signal_label = if resume.is_some() {
@@ -219,7 +248,16 @@ impl WorkflowExecutor {
 
         let handler = entry.handler.clone();
         let exec_start = std::time::Instant::now();
-        let result = tokio::time::timeout(entry.info.timeout, handler(&ctx, input)).await;
+        // PER-RESUME timeout. `entry.info.timeout` bounds a single resume
+        // call, not the whole workflow run. A workflow that sleeps for an
+        // hour and then runs for 4m59s under a 5m timeout will pass, even
+        // if it suspends and resumes many times — total wall-clock is
+        // unbounded by this guard (#4 in issues doc). Tracking total-run
+        // budget requires a new column on `forge_workflow_runs`; until
+        // then the field name is intentionally treated as `step_timeout`
+        // semantics by callers.
+        let step_timeout = entry.info.timeout;
+        let result = tokio::time::timeout(step_timeout, handler(&ctx, input)).await;
         let exec_duration_ms = exec_start.elapsed().as_millis().min(i32::MAX as u128) as i32;
 
         let comp = CompensationState {
@@ -377,21 +415,47 @@ impl WorkflowExecutor {
     /// operators know manual remediation is required. This is an honest limitation:
     /// in-memory closures cannot survive restarts.
     pub async fn cancel(&self, run_id: Uuid, reason: &str) -> forge_core::Result<()> {
+        // Serialize against a concurrent resume/execute for this run. Without
+        // the lock the live handler could be mid-step while we yank its
+        // compensation state and flip the row to `failed` (#3 in issues doc).
+        let lock = self.run_lock(run_id);
+        let _guard = lock.lock().await;
+
         if let Some(state) = self.compensation_state.write().await.remove(&run_id) {
-            self.run_compensation(run_id, &state).await?;
-            let error = format!("cancelled: {reason}");
-            self.fail_workflow(run_id, &error).await?;
+            let comp_failures = self.run_compensation(run_id, &state).await?;
+            // #17/#18: persist the cancel reason in a dedicated column and
+            // surface compensation failures as a structured summary in `error`
+            // so operators don't have to grep logs to learn which steps need
+            // manual remediation.
+            let comp_summary = if comp_failures.is_empty() {
+                None
+            } else {
+                Some(format!(
+                    "{} compensation(s) failed: {}",
+                    comp_failures.len(),
+                    comp_failures.join("; ")
+                ))
+            };
+            self.finalize_cancel(run_id, reason, comp_summary.as_deref())
+                .await?;
         } else {
             tracing::error!(
                 workflow_run_id = %run_id,
                 "Compensation handlers lost (process restarted since workflow began); \
                  manual remediation required for any side effects from completed steps"
             );
-            let error = format!(
-                "cancelled: {reason} (compensation skipped: handlers lost on restart, manual remediation required)"
-            );
-            self.fail_workflow(run_id, &error).await?;
+            self.finalize_cancel(
+                run_id,
+                reason,
+                Some("compensation skipped: handlers lost on restart, manual remediation required"),
+            )
+            .await?;
         }
+
+        // Run is terminal; drop the per-run mutex entry so the map doesn't
+        // accumulate. Holders that captured the Arc before this point keep
+        // their own reference alive.
+        self.run_locks.remove(&run_id);
 
         Ok(())
     }
@@ -411,8 +475,20 @@ impl WorkflowExecutor {
     ///
     /// Returns `false` if the run is already in a terminal state or no row
     /// matched.
-    pub async fn request_cancel(&self, run_id: Uuid, reason: &str) -> forge_core::Result<bool> {
-        let result = sqlx::query!(
+    pub async fn request_cancel(
+        &self,
+        run_id: Uuid,
+        reason: &str,
+        caller_subject: Option<&str>,
+    ) -> forge_core::Result<bool> {
+        // Ownership check parallels `JobQueue::request_cancel`: if the run has
+        // an `owner_subject`, the caller must match (or be `None`, which means
+        // system / internal). Without this any caller holding the dispatcher
+        // could cancel any workflow run by ID (#10 in issues doc).
+        //
+        // Runtime query — adds a parameter; avoids invalidating .sqlx/.
+        #[allow(clippy::disallowed_methods)]
+        let result = sqlx::query(
             r#"
             UPDATE forge_workflow_runs
             SET cancel_requested_at = NOW(),
@@ -420,10 +496,16 @@ impl WorkflowExecutor {
             WHERE id = $1
               AND status IN ('pending', 'running', 'sleeping', 'waiting')
               AND cancel_requested_at IS NULL
+              AND (
+                  owner_subject IS NULL
+                  OR $3::text IS NULL
+                  OR owner_subject = $3::text
+              )
             "#,
-            run_id,
-            reason,
         )
+        .bind(run_id)
+        .bind(reason)
+        .bind(caller_subject)
         .execute(&self.pool)
         .await
         .map_err(forge_core::ForgeError::Database)?;
@@ -435,8 +517,9 @@ impl WorkflowExecutor {
         &self,
         run_id: Uuid,
         state: &CompensationState,
-    ) -> forge_core::Result<()> {
+    ) -> forge_core::Result<Vec<String>> {
         let steps = self.get_workflow_steps(run_id).await?;
+        let mut failures: Vec<String> = Vec::new();
 
         for step_name in state.completed_steps.iter().rev() {
             if let Some(handler) = state.handlers.get(step_name) {
@@ -457,12 +540,24 @@ impl WorkflowExecutor {
                             .await?;
                     }
                     Err(e) => {
+                        let err_str = e.to_string();
                         tracing::error!(
                             workflow_run_id = %run_id,
                             step = %step_name,
-                            error = %e,
+                            error = %err_str,
                             "Compensation failed"
                         );
+                        // Tag the step row so operators can see exactly which
+                        // compensations failed and need manual remediation
+                        // (#18 in issues doc).
+                        self.update_step_status_with_error(
+                            run_id,
+                            step_name,
+                            StepStatus::CompensationFailed,
+                            Some(&err_str),
+                        )
+                        .await?;
+                        failures.push(format!("{step_name}: {err_str}"));
                     }
                 }
             } else {
@@ -470,7 +565,7 @@ impl WorkflowExecutor {
                     .await?;
             }
         }
-        Ok(())
+        Ok(failures)
     }
 
     async fn get_workflow_steps(
@@ -528,6 +623,38 @@ impl WorkflowExecutor {
             step_name,
             status.as_str(),
         )
+        .execute(&self.pool)
+        .await
+        .map_err(forge_core::ForgeError::Database)?;
+
+        Ok(())
+    }
+
+    /// Update step status and optionally write an error message. Used for
+    /// surfacing `CompensationFailed` so operators can locate stuck side
+    /// effects without diving into logs.
+    async fn update_step_status_with_error(
+        &self,
+        workflow_run_id: Uuid,
+        step_name: &str,
+        status: StepStatus,
+        error: Option<&str>,
+    ) -> forge_core::Result<()> {
+        // forge_workflow_steps is a runtime-owned system table; offline .sqlx
+        // cache doesn't always include it.
+        #[allow(clippy::disallowed_methods)]
+        sqlx::query(
+            r#"
+            UPDATE forge_workflow_steps
+            SET status = $3,
+                error = COALESCE($4, error)
+            WHERE workflow_run_id = $1 AND step_name = $2
+            "#,
+        )
+        .bind(workflow_run_id)
+        .bind(step_name)
+        .bind(status.as_str())
+        .bind(error)
         .execute(&self.pool)
         .await
         .map_err(forge_core::ForgeError::Database)?;
@@ -660,17 +787,24 @@ impl WorkflowExecutor {
 
     /// Atomically claim a workflow for execution (transition to Running).
     ///
-    /// `'running'` is included so resume picks up a run that the scheduler has
-    /// already flipped to running as part of its claim-and-enqueue transaction.
-    /// Duplicate concurrent execution is prevented at higher layers: the job
-    /// queue's `FOR UPDATE SKIP LOCKED` ensures only one worker can hold a
-    /// given resume job, and the scheduler's row-locking UPDATE (or event
-    /// consume) ensures only one resume job is enqueued per wake event.
+    /// Rejects `running → running`: a row already in `running` is being
+    /// executed by another handler. Re-entering races the live handler's
+    /// compensation state and step writes (#2 in the issues doc). The
+    /// scheduler claims rows from `(sleeping, waiting)` only; the job-queue's
+    /// `FOR UPDATE SKIP LOCKED` plus the per-run advisory lock taken in
+    /// `execute_workflow` keep concurrent resumes serialized end-to-end.
+    ///
+    /// The cancel bridge calls `force_claim_for_cancel` (which permits the
+    /// `running → running` transition for compensation) instead of going
+    /// through this path.
     async fn claim_for_execution(&self, run_id: Uuid) -> forge_core::Result<()> {
-        let result = sqlx::query!(
-            "UPDATE forge_workflow_runs SET status = 'running' WHERE id = $1 AND status IN ('pending', 'sleeping', 'waiting', 'running')",
-            run_id,
+        // Runtime query — schema unchanged, just a tighter status set; avoids
+        // touching `.sqlx/` for an internal helper.
+        #[allow(clippy::disallowed_methods)]
+        let result = sqlx::query(
+            "UPDATE forge_workflow_runs SET status = 'running' WHERE id = $1 AND status IN ('pending', 'sleeping', 'waiting')",
         )
+        .bind(run_id)
         .execute(&self.pool)
         .await
         .map_err(forge_core::ForgeError::Database)?;
@@ -709,6 +843,49 @@ impl WorkflowExecutor {
         Ok(())
     }
 
+    /// Finalize a cancellation in the database.
+    ///
+    /// Writes the cancel reason to the dedicated `cancel_reason` column rather
+    /// than smuggling it into `error`. `error` carries the compensation
+    /// failure summary (if any) so operators have a single place to look for
+    /// remediation work. Sets `completed_at` so dashboards stop showing the
+    /// run as in-flight (#17 in issues doc).
+    async fn finalize_cancel(
+        &self,
+        run_id: Uuid,
+        reason: &str,
+        compensation_summary: Option<&str>,
+    ) -> forge_core::Result<()> {
+        // forge_workflow_runs is a runtime-owned system table; offline .sqlx
+        // cache doesn't always include it.
+        #[allow(clippy::disallowed_methods)]
+        let result = sqlx::query(
+            r#"
+            UPDATE forge_workflow_runs
+            SET status = 'failed',
+                cancel_reason = COALESCE(cancel_reason, $1),
+                error = $2,
+                completed_at = NOW()
+            WHERE id = $3
+              AND status IN ('running', 'sleeping', 'waiting', 'pending')
+            "#,
+        )
+        .bind(reason)
+        .bind(compensation_summary)
+        .bind(run_id)
+        .execute(&self.pool)
+        .await
+        .map_err(forge_core::ForgeError::Database)?;
+
+        if result.rows_affected() == 0 {
+            return Err(forge_core::ForgeError::InvalidState(format!(
+                "Cannot finalize cancel for workflow {}: not in a valid state",
+                run_id
+            )));
+        }
+        Ok(())
+    }
+
     async fn fail_workflow(&self, run_id: Uuid, error: &str) -> forge_core::Result<()> {
         let result = sqlx::query!(
             "UPDATE forge_workflow_runs SET status = 'failed', error = $1, completed_at = NOW() WHERE id = $2 AND status IN ('running', 'sleeping', 'waiting', 'pending')",
@@ -737,9 +914,11 @@ impl WorkflowExecutor {
     ) -> forge_core::Result<()> {
         // Uses runtime query because the status value is dynamic and the
         // sqlx offline cache doesn't have an entry for this parameterized form.
+        // #19: also set `completed_at` so blocked runs leave the active list
+        // (otherwise dashboards treat them as in-flight indefinitely).
         #[allow(clippy::disallowed_methods)]
         sqlx::query(
-            "UPDATE forge_workflow_runs SET status = $1, error = $2 WHERE id = $3 AND status IN ('running', 'sleeping', 'waiting', 'pending')",
+            "UPDATE forge_workflow_runs SET status = $1, error = $2, completed_at = NOW() WHERE id = $3 AND status IN ('running', 'sleeping', 'waiting', 'pending')",
         )
         .bind(status.as_str())
         .bind(reason)

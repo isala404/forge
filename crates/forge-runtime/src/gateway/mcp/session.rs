@@ -89,13 +89,46 @@ pub(super) fn validate_origin(
     headers: &HeaderMap,
     config: &McpConfig,
 ) -> std::result::Result<(), ResponseError> {
-    let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) else {
-        return Ok(());
-    };
+    let origin = headers.get("origin").and_then(|v| v.to_str().ok());
 
-    // When no allowed_origins are configured, reject cross-origin requests
-    // rather than allowing all origins (secure by default)
-    if config.allowed_origins.is_empty() {
+    // When the operator has configured an allow-list, the Origin header is
+    // mandatory. Without this, a browser-adjacent context exploiting DNS
+    // rebinding (or any client suppressing Origin) bypasses the allow-list.
+    if !config.allowed_origins.is_empty() {
+        let allow_any = config.allowed_origins.iter().any(|c| c == "*");
+        return match origin {
+            Some(o) => {
+                let allowed = allow_any
+                    || config
+                        .allowed_origins
+                        .iter()
+                        .any(|candidate| candidate.eq_ignore_ascii_case(o));
+                if allowed {
+                    Ok(())
+                } else {
+                    Err(Box::new(
+                        (
+                            StatusCode::FORBIDDEN,
+                            Json(json_rpc_error(None, -32600, "Invalid Origin header", None)),
+                        )
+                            .into_response(),
+                    ))
+                }
+            }
+            None if allow_any => Ok(()),
+            None => Err(Box::new(
+                (
+                    StatusCode::FORBIDDEN,
+                    Json(json_rpc_error(None, -32600, "Missing Origin header", None)),
+                )
+                    .into_response(),
+            )),
+        };
+    }
+
+    // No allow-list configured: keep the "secure by default" reject for
+    // cross-origin requests, and allow non-browser clients that omit Origin.
+    if origin.is_some() {
         return Err(Box::new(
             (
                 StatusCode::FORBIDDEN,
@@ -110,21 +143,7 @@ pub(super) fn validate_origin(
         ));
     }
 
-    let allowed = config
-        .allowed_origins
-        .iter()
-        .any(|candidate| candidate == "*" || candidate.eq_ignore_ascii_case(origin));
-    if allowed {
-        return Ok(());
-    }
-
-    Err(Box::new(
-        (
-            StatusCode::FORBIDDEN,
-            Json(json_rpc_error(None, -32600, "Invalid Origin header", None)),
-        )
-            .into_response(),
-    ))
+    Ok(())
 }
 
 pub(super) fn enforce_protocol_header(

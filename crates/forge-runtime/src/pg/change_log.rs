@@ -176,9 +176,18 @@ mod integration_tests {
         let base = TestDatabase::from_env()
             .await
             .expect("Failed to create test database");
-        base.isolated(test_name)
+        let db = base
+            .isolated(test_name)
             .await
-            .expect("Failed to create isolated db")
+            .expect("Failed to create isolated db");
+        // forge_change_log and forge_notify_change() live in the system schema;
+        // an isolated DB starts empty, so apply it (mirrors queue.rs setup_db).
+        // Without this the tests fail with "relation forge_change_log does not
+        // exist" — which went unnoticed because this suite never ran in CI.
+        db.run_sql(&crate::pg::migration::get_all_system_sql())
+            .await
+            .expect("Failed to apply system schema");
+        db
     }
 
     /// Create a tracked table that fires the change trigger on every write.
@@ -234,23 +243,47 @@ mod integration_tests {
     #[tokio::test]
     async fn trim_deletes_only_rows_older_than_cutoff() {
         let db = setup_db("change_log_trim").await;
-        install_tracked_table(db.pool(), "trim_items").await;
 
-        sqlx::query("INSERT INTO trim_items (id, name) VALUES (gen_random_uuid(), 'old')")
-            .execute(db.pool())
-            .await
-            .unwrap();
-        // Forge a future cutoff so the row qualifies as "old".
-        let cutoff = Utc::now() + chrono::Duration::seconds(10);
-        let deleted = trim_change_log(db.pool(), cutoff).await.unwrap();
-        assert_eq!(deleted, 1);
-        let remaining: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM forge_change_log WHERE table_name='trim_items'",
+        // trim_change_log enforces a retention floor: it is a no-op until the log
+        // exceeds CHANGE_LOG_MIN_ROWS, so it never over-trims a small log. Seed
+        // just past the floor with OLD rows plus a handful of recent ones, then
+        // trim at a cutoff between them — only the old rows may be deleted.
+        // Insert directly (the trigger path is covered by the drain test) so the
+        // created_at timestamps are controllable.
+        let old_count = CHANGE_LOG_MIN_ROWS + 50;
+        sqlx::query(
+            "INSERT INTO forge_change_log (table_name, op, created_at)
+             SELECT 'trim_items', 'INSERT', NOW() - INTERVAL '2 days'
+             FROM generate_series(1, $1)",
         )
-        .fetch_one(db.pool())
+        .bind(old_count)
+        .execute(db.pool())
         .await
         .unwrap();
-        assert_eq!(remaining, 0);
+        sqlx::query(
+            "INSERT INTO forge_change_log (table_name, op, created_at)
+             SELECT 'trim_items', 'INSERT', NOW()
+             FROM generate_series(1, 5)",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let cutoff = Utc::now() - chrono::Duration::days(1);
+        let deleted = trim_change_log(db.pool(), cutoff).await.unwrap();
+        assert_eq!(
+            deleted, old_count as u64,
+            "every row older than the cutoff must be trimmed once past the floor",
+        );
+
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM forge_change_log")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            remaining, 5,
+            "rows newer than the cutoff must survive the trim"
+        );
     }
 
     #[tokio::test]

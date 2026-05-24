@@ -3,7 +3,7 @@ use opentelemetry::metrics::{Gauge, Histogram};
 use sqlx::PgPool;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
-use tracing::{Instrument, info_span};
+use tracing::{Instrument, Level, debug_span, enabled, info_span};
 
 const DB_SYSTEM: &str = "db.system";
 const DB_OPERATION_NAME: &str = "db.operation.name";
@@ -90,34 +90,69 @@ pub fn record_query_duration(operation: &str, duration: Duration) {
 }
 
 /// Extract the table name from a simple SQL query, or `None` for complex ones.
+///
+/// Walks the source by `char_indices` rather than fixed byte offsets so
+/// non-ASCII identifiers (quoted Unicode columns/tables) can't panic the
+/// slicer. `to_uppercase()` can change the byte length of a string, so we
+/// can't reuse byte offsets discovered in the uppercased copy against the
+/// original — locate keywords case-insensitively over the original instead.
 pub fn extract_table_name(sql: &str) -> Option<&str> {
     let sql = sql.trim();
-    let upper = sql.to_uppercase();
 
-    if upper.starts_with("SELECT") {
-        // SELECT ... FROM table_name ...
-        if let Some(from_pos) = upper.find(" FROM ") {
-            let after_from = &sql[from_pos + 6..];
-            return extract_first_identifier(after_from.trim_start());
-        }
-    } else if upper.starts_with("INSERT INTO ") {
-        let after_into = &sql[12..];
-        return extract_first_identifier(after_into.trim_start());
-    } else if upper.starts_with("UPDATE ") {
-        let after_update = &sql[7..];
-        return extract_first_identifier(after_update.trim_start());
-    } else if upper.starts_with("DELETE FROM ") {
-        let after_from = &sql[12..];
-        return extract_first_identifier(after_from.trim_start());
-    } else if upper.starts_with("CREATE TABLE ") {
-        let after_table = if upper.starts_with("CREATE TABLE IF NOT EXISTS ") {
-            &sql[27..]
-        } else {
-            &sql[13..]
-        };
-        return extract_first_identifier(after_table.trim_start());
+    if let Some(rest) = strip_keyword_prefix(sql, "INSERT INTO ")
+        .or_else(|| strip_keyword_prefix(sql, "DELETE FROM "))
+        .or_else(|| strip_keyword_prefix(sql, "CREATE TABLE IF NOT EXISTS "))
+        .or_else(|| strip_keyword_prefix(sql, "CREATE TABLE "))
+        .or_else(|| strip_keyword_prefix(sql, "UPDATE "))
+    {
+        return extract_first_identifier(rest.trim_start());
     }
 
+    if strip_keyword_prefix(sql, "SELECT").is_some() {
+        // Find " FROM " case-insensitively without re-allocating a full
+        // uppercase copy whose byte length can diverge from the source.
+        if let Some(from_byte) = find_ci(sql, " FROM ") {
+            let after = sql.get(from_byte + " FROM ".len()..)?;
+            return extract_first_identifier(after.trim_start());
+        }
+    }
+
+    None
+}
+
+fn strip_keyword_prefix<'a>(sql: &'a str, keyword: &str) -> Option<&'a str> {
+    if sql.len() < keyword.len() {
+        return None;
+    }
+    let prefix = sql.get(..keyword.len())?;
+    if prefix.eq_ignore_ascii_case(keyword) {
+        sql.get(keyword.len()..)
+    } else {
+        None
+    }
+}
+
+/// Case-insensitive search for an ASCII needle. Returns the byte offset of
+/// the first match in the source.
+fn find_ci(haystack: &str, needle_ascii_upper: &str) -> Option<usize> {
+    let bytes = haystack.as_bytes();
+    let n = needle_ascii_upper.as_bytes();
+    if n.is_empty() || bytes.len() < n.len() {
+        return None;
+    }
+    'outer: for start in 0..=bytes.len() - n.len() {
+        for (i, nb) in n.iter().enumerate() {
+            let hb = bytes.get(start + i)?;
+            if !hb.eq_ignore_ascii_case(nb) {
+                continue 'outer;
+            }
+        }
+        // Confirm the match begins on a UTF-8 char boundary so the caller's
+        // slice never bisects a multi-byte sequence.
+        if haystack.is_char_boundary(start) && haystack.is_char_boundary(start + n.len()) {
+            return Some(start);
+        }
+    }
     None
 }
 
@@ -126,7 +161,7 @@ fn extract_first_identifier(s: &str) -> Option<&str> {
         .find(|c: char| c.is_whitespace() || c == '(' || c == ',' || c == ';')
         .unwrap_or(s.len());
 
-    if end > 0 { Some(&s[..end]) } else { None }
+    if end > 0 { s.get(..end) } else { None }
 }
 
 /// Execute a database operation with tracing and duration recording.
@@ -134,7 +169,11 @@ pub async fn instrumented_query<F, T, E>(operation: &str, table: Option<&str>, f
 where
     F: std::future::Future<Output = Result<T, E>>,
 {
-    let span = if let Some(tbl) = table {
+    // Skip span allocation entirely when DEBUG isn't enabled — saves the
+    // ~few-hundred-ns alloc per query when the operator runs at warn/info.
+    let span = if !enabled!(Level::DEBUG) {
+        debug_span!("db.query")
+    } else if let Some(tbl) = table {
         info_span!(
             "db.query",
             db.system = DB_SYSTEM_POSTGRESQL,

@@ -69,7 +69,12 @@ pub async fn upsert_session(
         }
     }
 
-    let new_id = Uuid::new_v4();
+    // Reuse the caller-supplied session id when present: the handler already
+    // returned it to the client, so the persisted row MUST carry that same id.
+    // Minting a fresh UUID here orphaned the row under an id the client never
+    // saw, so every later event re-missed the UPDATE and spawned a new session —
+    // breaking session continuity. Only generate when no id was supplied.
+    let new_id = session_id.unwrap_or_else(Uuid::new_v4);
     let referrer_domain = referrer.and_then(extract_domain);
 
     let result = sqlx::query(

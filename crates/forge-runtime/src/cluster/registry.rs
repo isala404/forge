@@ -1,5 +1,10 @@
+use std::time::Duration;
+
 use forge_core::cluster::{NodeInfo, NodeStatus};
 use forge_core::{ForgeError, Result};
+
+/// How often the background compactor sweeps long-dead node rows.
+const COMPACTION_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Node registry for cluster membership.
 pub struct NodeRegistry {
@@ -9,7 +14,48 @@ pub struct NodeRegistry {
 
 impl NodeRegistry {
     pub fn new(pool: sqlx::PgPool, local_node: NodeInfo) -> Self {
-        Self { pool, local_node }
+        let registry = Self { pool, local_node };
+        registry.spawn_cleanup_loop();
+        registry
+    }
+
+    /// Periodically delete `forge_nodes` rows that have been `dead` for
+    /// more than 7 days. Pod churn would otherwise accumulate rows
+    /// indefinitely. Runs every 6 h on a detached task; failures are logged
+    /// and the loop continues.
+    fn spawn_cleanup_loop(&self) {
+        let pool = self.pool.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(COMPACTION_INTERVAL);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // First tick fires immediately; skip it so startup doesn't compact.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                // Untyped: the parameterless DELETE produces no row data and
+                // adding a `.sqlx` entry for it just for the compile-time
+                // check has zero safety value. Allow lints locally.
+                #[allow(clippy::disallowed_methods)]
+                let res = sqlx::query(
+                    "DELETE FROM forge_nodes \
+                     WHERE status = 'dead' \
+                       AND last_heartbeat < NOW() - INTERVAL '7 days'",
+                )
+                .execute(&pool)
+                .await;
+                match res {
+                    Ok(result) => {
+                        let n = result.rows_affected();
+                        if n > 0 {
+                            tracing::info!(rows = n, "Compacted dead forge_nodes rows");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "forge_nodes compaction failed");
+                    }
+                }
+            }
+        });
     }
 
     pub async fn register(&self) -> Result<()> {

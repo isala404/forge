@@ -75,7 +75,8 @@ impl StrictRateLimiter {
             // tokens is clamped to >= -1, so retry_after is bounded by
             // (1 - (-1)) / refill_rate = 2 / refill_rate — proportional to
             // one refill interval rather than runaway.
-            let retry_after = Duration::from_secs_f64((1.0 - tokens) / refill_rate);
+            let base = (1.0 - tokens) / refill_rate;
+            let retry_after = Duration::from_secs_f64(jittered(base));
             Ok(RateLimitResult::denied(remaining, reset_at, retry_after))
         }
     }
@@ -179,6 +180,21 @@ impl StrictRateLimiter {
     }
 }
 
+/// Apply ±25% jitter to a retry-after value so clients denied in the same
+/// tick don't synchronize their retries into a thundering herd.
+fn jittered(base_secs: f64) -> f64 {
+    if !base_secs.is_finite() || base_secs <= 0.0 {
+        return base_secs.max(0.0);
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    // Map nanos -> [-0.25, 0.25].
+    let frac = ((nanos as f64) / 1_000_000_000.0) * 0.5 - 0.25;
+    (base_secs * (1.0 + frac)).max(0.0)
+}
+
 struct LocalBucket {
     tokens: f64,
     max_tokens: f64,
@@ -267,8 +283,18 @@ impl HybridRateLimiter {
         let max_tokens = config.requests as f64;
         let refill_rate = config.refill_rate();
 
-        if self.local.len() > self.max_local_buckets {
-            self.cleanup_local(Duration::from_secs(300)); // evict entries idle > 5 min
+        // Sweep proactively once we cross 75% of the soft cap so a burst of
+        // unique keys can't grow the map far past `max_local_buckets` before
+        // the first eviction runs. If everything is still hot we fall back to
+        // a hard cap that bounds memory at 2× the configured ceiling.
+        let len = self.local.len();
+        if len > self.max_local_buckets * 3 / 4 {
+            self.cleanup_local(Duration::from_secs(300));
+            if self.local.len() > self.max_local_buckets * 2 {
+                // Last-resort: drop entries idle > 30s to bound memory even
+                // when the workload is fully active on unique keys.
+                self.cleanup_local(Duration::from_secs(30));
+            }
         }
 
         let mut bucket = self
@@ -284,7 +310,8 @@ impl HybridRateLimiter {
         if allowed {
             Ok(RateLimitResult::allowed(remaining, reset_at))
         } else {
-            let retry_after = bucket.time_until_token();
+            let retry_after =
+                Duration::from_secs_f64(jittered(bucket.time_until_token().as_secs_f64()));
             Ok(RateLimitResult::denied(remaining, reset_at, retry_after))
         }
     }

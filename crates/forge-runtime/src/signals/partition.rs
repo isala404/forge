@@ -2,6 +2,27 @@
 //!
 //! Creates partitions for upcoming months and drops partitions
 //! older than the configured retention period.
+//!
+//! ## Operational expectation
+//!
+//! Pre-creation runs every maintenance tick and covers the current month plus
+//! the next three months. Anything farther out lands in the catch-all
+//! `forge_signals_events_default` partition, which is **excluded from the
+//! retention sweep** — rows there accumulate forever and won't be dropped.
+//!
+//! Two failure modes to watch:
+//!
+//! 1. A node hibernates / loses its scheduler past the +3-month horizon. When
+//!    it wakes back up, any inserts whose `timestamp` falls outside the
+//!    rolling window land in the default partition until the maintenance loop
+//!    next runs.
+//! 2. A client sends events with `timestamp` far in the future (clock skew,
+//!    backfill jobs). Same outcome.
+//!
+//! `check_default_partition` logs an error whenever rows are present in the
+//! default partition. Treat that log as actionable: investigate the coverage
+//! gap, then move the misrouted rows into the correct month partition by
+//! hand (or accept that they'll never be cleaned up by retention).
 
 // Partition DDL constructs table names from runtime dates, so the query macros
 // can't validate them at compile time.

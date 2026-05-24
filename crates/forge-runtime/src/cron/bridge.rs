@@ -61,6 +61,25 @@ pub fn register_cron_bridges(cron_registry: &Arc<CronRegistry>, job_registry: &m
                 }
 
                 handler(&cron_ctx).await?;
+
+                // Transition the claimed run from 'running' to 'completed'. The
+                // scheduler only ever INSERTs status='running'; this is the sole
+                // place a successful run is finalized, so catch-up's "last
+                // completed scheduled_time" lookup and operator dashboards see a
+                // terminal state. Scoped to status='running' so a concurrent
+                // stale-reclaim that already rotated the id cannot be clobbered.
+                sqlx::query!(
+                    r#"
+                    UPDATE forge_cron_runs
+                    SET status = 'completed', completed_at = NOW(), error = NULL
+                    WHERE id = $1 AND status = 'running'
+                    "#,
+                    run_id,
+                )
+                .execute(ctx.pool())
+                .await
+                .map_err(forge_core::ForgeError::Database)?;
+
                 Ok(serde_json::Value::Null)
             })
         });

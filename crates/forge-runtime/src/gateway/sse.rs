@@ -5,7 +5,7 @@ use std::convert::Infallible;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::extract::{Extension, Query, State};
@@ -20,6 +20,71 @@ use dashmap::DashMap;
 use subtle::ConstantTimeEq;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+/// Maximum number of outstanding SSE tickets held in memory. Each ticket is
+/// small (~200 B), so 10k is a ~2 MB cap. New issuance evicts expired
+/// entries before falling back to a hard reject.
+const MAX_SSE_TICKETS: usize = 10_000;
+/// SSE ticket lifetime. The original ISSUES.md item requires "≤ 60 s";
+/// 30 s is short enough to bound replay risk yet generous for slow clients
+/// to complete the POST + EventSource handshake.
+const SSE_TICKET_TTL_SECS: u64 = 30;
+const SSE_TICKET_TTL_SECS_STR: &str = "30";
+
+/// One-shot SSE authentication ticket. Issued via `POST /events/ticket`
+/// against a validated bearer header; consumed exactly once by the SSE
+/// `GET /events?ticket=…` upgrade. Stored in-process (no DB), bound to
+/// the caller's resolved client IP so a leaked ticket from logs cannot
+/// be replayed from a different origin.
+struct TicketEntry {
+    auth: AuthContext,
+    client_ip: Option<String>,
+    expires_at: Instant,
+}
+
+/// Process-local store of outstanding SSE tickets. Bounded, TTL-evicted,
+/// one-time-use. Tickets are opaque uuid v4 strings (122 bits).
+#[derive(Default)]
+struct TicketStore {
+    entries: DashMap<String, TicketEntry>,
+}
+
+impl TicketStore {
+    fn new() -> Self {
+        Self {
+            entries: DashMap::new(),
+        }
+    }
+
+    /// Drop expired tickets. Called opportunistically on insert and consume.
+    fn sweep_expired(&self) {
+        let now = Instant::now();
+        self.entries.retain(|_, entry| entry.expires_at > now);
+    }
+
+    /// Insert a fresh ticket. Returns `false` when at capacity even after
+    /// sweeping expired entries (caller should reject with 503).
+    fn insert(&self, ticket: String, entry: TicketEntry) -> bool {
+        if self.entries.len() >= MAX_SSE_TICKETS {
+            self.sweep_expired();
+            if self.entries.len() >= MAX_SSE_TICKETS {
+                return false;
+            }
+        }
+        self.entries.insert(ticket, entry);
+        true
+    }
+
+    /// Atomically remove and validate a ticket. Returns `None` if missing,
+    /// already consumed, or expired.
+    fn consume(&self, ticket: &str) -> Option<TicketEntry> {
+        let (_, entry) = self.entries.remove(ticket)?;
+        if entry.expires_at <= Instant::now() {
+            return None;
+        }
+        Some(entry)
+    }
+}
 
 /// Wraps an mpsc::Receiver as a Stream for SSE.
 struct ReceiverStream<T> {
@@ -36,7 +101,6 @@ impl<T> Stream for ReceiverStream<T> {
 use forge_core::function::AuthContext;
 use forge_core::realtime::{SessionId, SubscriptionId};
 
-use super::auth::AuthMiddleware;
 use crate::realtime::Reactor;
 use crate::realtime::RealtimeMessage;
 
@@ -60,13 +124,6 @@ fn same_principal(a: &AuthContext, b: &AuthContext) -> bool {
         (true, true) => a.principal_id().is_some() && a.principal_id() == b.principal_id(),
         _ => false,
     }
-}
-
-fn resolve_sse_auth_context(
-    request_auth: &AuthContext,
-    query_auth: Option<AuthContext>,
-) -> AuthContext {
-    query_auth.unwrap_or_else(|| request_auth.clone())
 }
 
 #[allow(clippy::result_large_err)]
@@ -183,8 +240,9 @@ impl Default for SseConfig {
 /// SSE query parameters.
 #[derive(Debug, Deserialize)]
 pub struct SseQuery {
-    /// Authentication token.
-    pub token: Option<String>,
+    /// One-shot ticket obtained from `POST /events/ticket`. Required when
+    /// `EventSource` cannot send an `Authorization` header (browsers).
+    pub ticket: Option<String>,
 }
 
 struct SseSessionData {
@@ -199,7 +257,6 @@ struct SseSessionData {
 #[derive(Clone)]
 pub struct SseState {
     reactor: Arc<Reactor>,
-    auth_middleware: Arc<AuthMiddleware>,
     /// Per-session data: auth context and subscription mappings (sharded).
     sessions: Arc<DashMap<SessionId, SseSessionData>>,
     /// Per-user session count for O(1) limit enforcement.
@@ -208,28 +265,26 @@ pub struct SseState {
     ip_session_counts: Arc<DashMap<String, AtomicUsize>>,
     /// Per-user subscription count across all sessions.
     user_subscription_counts: Arc<DashMap<uuid::Uuid, AtomicUsize>>,
+    /// One-shot SSE auth tickets. See `TicketStore` for semantics.
+    tickets: Arc<TicketStore>,
     config: SseConfig,
 }
 
 impl SseState {
     /// Create new SSE state with default config.
-    pub fn new(reactor: Arc<Reactor>, auth_middleware: Arc<AuthMiddleware>) -> Self {
-        Self::with_config(reactor, auth_middleware, SseConfig::default())
+    pub fn new(reactor: Arc<Reactor>) -> Self {
+        Self::with_config(reactor, SseConfig::default())
     }
 
     /// Create new SSE state with custom config.
-    pub fn with_config(
-        reactor: Arc<Reactor>,
-        auth_middleware: Arc<AuthMiddleware>,
-        config: SseConfig,
-    ) -> Self {
+    pub fn with_config(reactor: Arc<Reactor>, config: SseConfig) -> Self {
         Self {
             reactor,
-            auth_middleware,
             sessions: Arc::new(DashMap::new()),
             user_session_counts: Arc::new(DashMap::new()),
             ip_session_counts: Arc::new(DashMap::new()),
             user_subscription_counts: Arc::new(DashMap::new()),
+            tickets: Arc::new(TicketStore::new()),
             config,
         }
     }
@@ -570,23 +625,51 @@ pub async fn sse_handler(
     let keepalive_secs = state.config.keepalive_interval_secs;
     let cancel_token = CancellationToken::new();
 
-    let query_auth = if let Some(token) = &query.token {
-        match state.auth_middleware.validate_token_async(token).await {
-            Ok(claims) => Some(super::auth::build_auth_context_from_claims(claims)),
-            Err(e) => {
-                tracing::warn!("SSE token validation failed: {}", e);
+    let client_ip = resolved_ip.0;
+
+    // Authentication resolution order:
+    //   1. If the request was authenticated by the `Authorization` header
+    //      (auth_middleware ran upstream), use that. Header is authoritative.
+    //   2. Otherwise, if a `?ticket=` is supplied, consume it. The ticket
+    //      was minted against a validated bearer header at `/events/ticket`
+    //      and is bound to the resolved client IP, so a leaked URL cannot
+    //      be replayed from a different origin.
+    //   3. Otherwise, treat the connection as anonymous.
+    //
+    // JWTs are deliberately never accepted in the URL. Query strings appear
+    // in access logs, browser history, referrer headers, and proxy caches.
+    let auth_context = if request_auth.is_authenticated() {
+        request_auth.clone()
+    } else if let Some(ticket) = &query.ticket {
+        match state.tickets.consume(ticket) {
+            Some(entry) => {
+                // Bind ticket to the IP that requested it. Reject if either
+                // side has no resolved IP (strict) or they disagree. The
+                // server-side store already guarantees one-shot use.
+                let ip_match = match (&entry.client_ip, &client_ip) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => false,
+                };
+                if !ip_match {
+                    tracing::warn!("SSE ticket IP mismatch; rejecting");
+                    return super::response::RpcResponse::error(
+                        super::response::RpcError::unauthorized("SSE ticket IP mismatch"),
+                    )
+                    .into_response();
+                }
+                entry.auth
+            }
+            None => {
+                tracing::warn!("SSE ticket missing, expired, or already consumed");
                 return super::response::RpcResponse::error(
-                    super::response::RpcError::unauthorized("Invalid authentication token"),
+                    super::response::RpcError::unauthorized("Invalid or expired SSE ticket"),
                 )
                 .into_response();
             }
         }
     } else {
-        None
+        request_auth.clone()
     };
-    let auth_context = resolve_sse_auth_context(&request_auth, query_auth);
-
-    let client_ip = resolved_ip.0;
     // UUIDv4 provides 122 bits of randomness, sufficient for session secret entropy
     let session_secret = uuid::Uuid::new_v4().to_string();
     // Authenticated sessions without an explicit exp claim get a default
@@ -748,6 +831,61 @@ pub async fn sse_handler(
                 .text("ping"),
         )
         .into_response()
+}
+
+/// Response body for `POST /events/ticket`.
+#[derive(Debug, Serialize)]
+pub struct SseTicketResponse {
+    /// Opaque single-use ticket. Send back as `?ticket=…` on the next
+    /// `GET /events` request.
+    pub ticket: String,
+    /// Lifetime hint in seconds; clients should connect well before this.
+    pub expires_in_secs: u64,
+}
+
+/// SSE ticket handler for POST `/events/ticket`. Issues a short-lived,
+/// IP-bound, single-use ticket so browsers (whose `EventSource` cannot
+/// set custom headers) can authenticate the SSE upgrade without putting
+/// a long-lived JWT in the URL.
+///
+/// Requires an authenticated bearer header. Anonymous callers get 401:
+/// anonymous SSE streams can simply connect to `/events` without a ticket.
+pub async fn sse_ticket_handler(
+    State(state): State<Arc<SseState>>,
+    Extension(request_auth): Extension<AuthContext>,
+    Extension(resolved_ip): Extension<super::ResolvedClientIp>,
+) -> impl IntoResponse {
+    if !request_auth.is_authenticated() {
+        return super::response::RpcResponse::error(super::response::RpcError::unauthorized(
+            "Authentication required to mint an SSE ticket",
+        ))
+        .into_response();
+    }
+
+    let ticket = uuid::Uuid::new_v4().to_string();
+    let entry = TicketEntry {
+        auth: request_auth.clone(),
+        client_ip: resolved_ip.0,
+        expires_at: Instant::now() + Duration::from_secs(SSE_TICKET_TTL_SECS),
+    };
+
+    if !state.tickets.insert(ticket.clone(), entry) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(axum::http::header::RETRY_AFTER, SSE_TICKET_TTL_SECS_STR)],
+            Json(
+                SseError::new("SSE_TICKET_CAPACITY", "Too many outstanding SSE tickets")
+                    .with_retry_after(SSE_TICKET_TTL_SECS),
+            ),
+        )
+            .into_response();
+    }
+
+    Json(SseTicketResponse {
+        ticket,
+        expires_in_secs: SSE_TICKET_TTL_SECS,
+    })
+    .into_response()
 }
 
 /// Convert realtime message to SSE message.
@@ -1232,26 +1370,51 @@ mod tests {
     }
 
     #[test]
-    fn resolve_sse_auth_context_prefers_request_auth_when_query_token_absent() {
-        let request_auth =
+    fn ticket_store_consume_is_one_shot() {
+        let store = TicketStore::new();
+        let auth =
             AuthContext::authenticated(Uuid::new_v4(), vec!["user".to_string()], HashMap::new());
-
-        let resolved = resolve_sse_auth_context(&request_auth, None);
-
-        assert!(resolved.is_authenticated());
-        assert_eq!(resolved.principal_id(), request_auth.principal_id());
+        let entry = TicketEntry {
+            auth,
+            client_ip: Some("1.2.3.4".into()),
+            expires_at: Instant::now() + Duration::from_secs(30),
+        };
+        assert!(store.insert("t1".into(), entry));
+        assert!(store.consume("t1").is_some());
+        assert!(store.consume("t1").is_none(), "second consume must fail");
     }
 
     #[test]
-    fn resolve_sse_auth_context_prefers_query_token_when_present() {
-        let request_auth =
+    fn ticket_store_rejects_expired() {
+        let store = TicketStore::new();
+        let auth =
             AuthContext::authenticated(Uuid::new_v4(), vec!["user".to_string()], HashMap::new());
-        let query_auth =
-            AuthContext::authenticated(Uuid::new_v4(), vec!["user".to_string()], HashMap::new());
+        let entry = TicketEntry {
+            auth,
+            client_ip: None,
+            expires_at: Instant::now() - Duration::from_secs(1),
+        };
+        assert!(store.insert("t2".into(), entry));
+        assert!(
+            store.consume("t2").is_none(),
+            "expired ticket must not validate"
+        );
+    }
 
-        let resolved = resolve_sse_auth_context(&request_auth, Some(query_auth.clone()));
-
-        assert_eq!(resolved.principal_id(), query_auth.principal_id());
+    #[test]
+    fn ticket_store_caps_at_max() {
+        let store = TicketStore::new();
+        let make_entry = || TicketEntry {
+            auth: AuthContext::unauthenticated(),
+            client_ip: None,
+            expires_at: Instant::now() + Duration::from_secs(30),
+        };
+        // Fill to cap.
+        for i in 0..MAX_SSE_TICKETS {
+            assert!(store.insert(format!("k{i}"), make_entry()));
+        }
+        // One more should fail (no expired entries to sweep).
+        assert!(!store.insert("overflow".into(), make_entry()));
     }
 
     #[test]

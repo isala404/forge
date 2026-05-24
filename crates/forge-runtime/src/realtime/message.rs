@@ -161,7 +161,39 @@ impl SessionServer {
             total_drops: AtomicU32::new(0),
             token_exp,
         };
-        self.connections.insert(session_id, entry);
+        // Notify the displaced client before replacing it so it doesn't
+        // think it's still receiving live data on a dead channel.
+        if let Some(prev) = self.connections.insert(session_id, entry) {
+            let _ = prev.sender.try_send(RealtimeMessage::AuthFailed {
+                reason: "Session replaced by a newer connection".to_string(),
+            });
+        }
+    }
+
+    /// Notify the client that its auth has been revoked, then tear down the
+    /// connection. Returns the subscription IDs the session held, so callers
+    /// can clean up associated query/job/workflow state. The notification is
+    /// best-effort (`try_send`): if the channel is full or closed, eviction
+    /// still proceeds.
+    ///
+    /// Use this when a session's underlying principal has been demoted,
+    /// tenant-moved, or revoked server-side before the JWT's `exp`. The
+    /// reactor's cached `AuthContext` on each `QueryGroup` is only
+    /// re-validated on token expiry, so without an explicit revocation path
+    /// the session would keep receiving data under the stale scope until
+    /// `exp`. After this call the client must reconnect and re-subscribe
+    /// with a fresh token.
+    pub fn revoke_session(
+        &self,
+        session_id: SessionId,
+        reason: &str,
+    ) -> Option<Vec<SubscriptionId>> {
+        if let Some(conn) = self.connections.get(&session_id) {
+            let _ = conn.sender.try_send(RealtimeMessage::AuthFailed {
+                reason: reason.to_string(),
+            });
+        }
+        self.remove_connection(session_id)
     }
 
     /// Remove a connection.
@@ -353,7 +385,17 @@ impl SessionServer {
         }
 
         for (session_id, _) in stale {
-            self.remove_connection(session_id);
+            // Re-check last_active under the entry guard: a concurrent
+            // try_send may have bumped it between the snapshot and now,
+            // and evicting a connection that just successfully received
+            // traffic would drop a healthy client.
+            let still_stale = self
+                .connections
+                .get(&session_id)
+                .is_some_and(|c| c.last_active.load(Ordering::Relaxed) < cutoff_ts);
+            if still_stale {
+                self.remove_connection(session_id);
+            }
         }
     }
 
@@ -868,6 +910,44 @@ mod tests {
 
         assert_eq!(server.connection_count(), 1);
         assert!(evicted.is_empty());
+    }
+
+    #[tokio::test]
+    async fn revoke_session_notifies_then_evicts_connection_and_subscriptions() {
+        // Server-side auth revocation path: client gets one final AuthFailed
+        // message, the connection is removed, and the subscription mappings
+        // are returned for caller cleanup. After revocation the session must
+        // be unreachable — any send returns SessionNotFound, forcing the
+        // client to reconnect with a fresh token.
+        let server = SessionServer::new(NodeId::new(), RealtimeConfig::default());
+        let session_id = SessionId::new();
+        let sub_a = SubscriptionId::new();
+        let sub_b = SubscriptionId::new();
+        let (tx, mut rx) = mpsc::channel(8);
+
+        server.register_connection(session_id, tx, None);
+        server.add_subscription(session_id, sub_a).unwrap();
+        server.add_subscription(session_id, sub_b).unwrap();
+
+        let removed = server
+            .revoke_session(session_id, "role demoted")
+            .expect("session existed");
+        assert_eq!(removed.len(), 2);
+        assert!(removed.contains(&sub_a));
+        assert!(removed.contains(&sub_b));
+
+        match rx.recv().await {
+            Some(RealtimeMessage::AuthFailed { reason }) => assert_eq!(reason, "role demoted"),
+            other => panic!("expected AuthFailed, got {other:?}"),
+        }
+
+        assert_eq!(server.connection_count(), 0);
+        assert_eq!(server.subscription_count(), 0);
+        let result = server.try_send_to_session(session_id, RealtimeMessage::Lagging);
+        assert!(matches!(result, Err(SendError::SessionNotFound)));
+
+        // Calling revoke again on a gone session is a no-op.
+        assert!(server.revoke_session(session_id, "again").is_none());
     }
 
     #[test]

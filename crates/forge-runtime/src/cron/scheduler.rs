@@ -223,9 +223,14 @@ impl CronRunner {
 
         async {
             let now = Utc::now();
+            // Window is poll_interval * 4 (was *2). The wider window covers
+            // short GC pauses, leader-loss recovery, and DB stalls that
+            // otherwise drop ticks for crons without catch_up. Inverse cost
+            // is bounded by the UNIQUE (cron_name, scheduled_time) constraint:
+            // re-checking the same slot twice claims at most one job.
             let window_start = now
-                - chrono::Duration::from_std(self.config.poll_interval * 2)
-                    .unwrap_or(chrono::Duration::seconds(2));
+                - chrono::Duration::from_std(self.config.poll_interval * 4)
+                    .unwrap_or(chrono::Duration::seconds(4));
 
             let cron_list = self.registry.list();
             let mut jobs_executed = 0u32;
@@ -250,10 +255,11 @@ impl CronRunner {
                     .between_in_tz(window_start, now, info.timezone);
 
                 if scheduled_times.len() > 1 {
-                    tracing::info!(
+                    tracing::warn!(
                         cron.name = info.name,
                         cron.missed_count = scheduled_times.len() - 1,
-                        "Detected missed cron runs"
+                        catch_up_enabled = info.catch_up,
+                        "missed cron tick: more than one scheduled time fell into the poll window"
                     );
                     Span::current().record("cron.missed_runs", scheduled_times.len() - 1);
                 }
@@ -268,6 +274,19 @@ impl CronRunner {
                 }
 
                 for scheduled in scheduled_times {
+                    // Re-check leadership between inserts so a node that lost
+                    // the lock mid-tick stops enqueueing slots tagged with its
+                    // node_id. UNIQUE constraint bounds the damage, but this
+                    // cuts observability noise.
+                    if let Some(election) = self.config.leader_election.as_ref()
+                        && !election.is_leader()
+                    {
+                        tracing::debug!(
+                            cron = info.name,
+                            "Leadership lost mid-tick; aborting remaining enqueues"
+                        );
+                        break;
+                    }
                     if let Ok(Some(_run_id)) =
                         self.try_claim_and_enqueue(entry, scheduled, false).await
                     {
@@ -898,5 +917,90 @@ mod integration_tests {
 
         assert!(leader.confirm_leadership_before_tick().await);
         assert!(!follower.confirm_leadership_before_tick().await);
+    }
+
+    #[tokio::test]
+    async fn dispatched_cron_run_is_marked_completed_on_success() {
+        // The scheduler only ever writes status='running'. A successful run must
+        // be finalized to 'completed' by the `$cron:` bridge job that the worker
+        // executes. This drives the real claim path (try_claim_and_enqueue) to
+        // create the running row + job, then runs the real bridge handler against
+        // the dispatched job's input. No row is seeded — completion is observed
+        // end-to-end, not asserted on a hand-written 'completed' row.
+        use crate::cron::register_cron_bridges;
+        use forge_core::CircuitBreakerClient;
+        use forge_core::job::JobContext;
+
+        let db = setup_db("cron_run_completed").await;
+        let pool = db.pool().clone();
+
+        // Real claim: inserts the 'running' row and enqueues the $cron: job.
+        let runner = make_runner(pool.clone());
+        let entry = make_entry("nightly_report", "0 0 * * * *");
+        let scheduled = Utc::now() - chrono::Duration::seconds(30);
+        let run_id = runner
+            .try_claim_and_enqueue(&entry, scheduled, false)
+            .await
+            .expect("claim ok")
+            .expect("claimed some id");
+
+        let status_after_claim: String =
+            sqlx::query_scalar("SELECT status FROM forge_cron_runs WHERE id = $1")
+                .bind(run_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            status_after_claim, "running",
+            "claim must leave the run in 'running'"
+        );
+
+        // Build the real bridge handler for this cron.
+        let cron_registry = Arc::new({
+            let mut reg = CronRegistry::new();
+            reg.register_entry(make_entry("nightly_report", "0 0 * * * *"));
+            reg
+        });
+        let mut job_registry = crate::jobs::registry::JobRegistry::new();
+        register_cron_bridges(&cron_registry, &mut job_registry);
+
+        let bridge = job_registry
+            .get("$cron:nightly_report")
+            .expect("bridge handler registered");
+
+        // Feed the handler the exact input the scheduler queued for this run.
+        let input: serde_json::Value = sqlx::query_scalar(
+            "SELECT input FROM forge_jobs WHERE job_type = '$cron:nightly_report'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let ctx = JobContext::new(
+            Uuid::new_v4(),
+            "$cron:nightly_report".to_string(),
+            0,
+            3,
+            pool.clone(),
+            CircuitBreakerClient::with_ssrf_protection(),
+        );
+        (bridge.handler)(&ctx, input)
+            .await
+            .expect("bridge handler succeeds");
+
+        let (status, completed_at): (String, Option<DateTime<Utc>>) =
+            sqlx::query_as("SELECT status, completed_at FROM forge_cron_runs WHERE id = $1")
+                .bind(run_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            status, "completed",
+            "successful run must become 'completed'"
+        );
+        assert!(
+            completed_at.is_some(),
+            "completed_at must be set on completion"
+        );
     }
 }

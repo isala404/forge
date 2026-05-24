@@ -11,6 +11,29 @@ use crate::jobs::JobQueue;
 use crate::pg::{LeaderElection, PgNotifyBus};
 use forge_core::Result;
 
+/// Why a workflow is being resumed. Surfaced to the bridge / handler in the
+/// `$workflow_resume` job args under the `resume_reason` key so replayed
+/// `wait_for_event` calls can distinguish "event arrived" from "event
+/// timeout" (and timer wakeups from event-driven ones).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResumeReason {
+    Timer,
+    EventArrived,
+    EventTimeout,
+    Cancel,
+}
+
+impl ResumeReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Timer => "timer",
+            Self::EventArrived => "event_arrived",
+            Self::EventTimeout => "event_timeout",
+            Self::Cancel => "cancel",
+        }
+    }
+}
+
 /// Configuration for the workflow scheduler.
 #[derive(Debug, Clone)]
 pub struct WorkflowSchedulerConfig {
@@ -198,10 +221,20 @@ impl WorkflowScheduler {
 
         for workflow in workflows {
             if workflow.waiting_for_event.is_some() {
-                self.claim_and_resume(workflow.id, false, "event_timeout")
-                    .await;
+                // Event-wait timed out: tag the resume so the bridge / handler
+                // can tell "event arrived" apart from "event timeout"
+                // (#5 in issues doc). Without this signal, replayed
+                // `wait_for_event` cannot tell which branch fired.
+                self.claim_and_resume(
+                    workflow.id,
+                    false,
+                    "event_timeout",
+                    ResumeReason::EventTimeout,
+                )
+                .await;
             } else {
-                self.claim_and_resume(workflow.id, true, "timer").await;
+                self.claim_and_resume(workflow.id, true, "timer", ResumeReason::Timer)
+                    .await;
             }
         }
 
@@ -249,6 +282,7 @@ impl WorkflowScheduler {
             "from_sleep": false,
             "cancel": true,
             "reason": reason,
+            "resume_reason": ResumeReason::Cancel.as_str(),
         });
         let job = crate::jobs::JobRecord::new(
             WORKFLOW_RESUME_JOB.to_string(),
@@ -343,12 +377,19 @@ impl WorkflowScheduler {
                 return Ok(());
             }
 
+            // Move the run out of the wait state to 'pending' (not 'running'):
+            // the executor's `claim_for_execution` is the sole claimer and only
+            // accepts pending/sleeping/waiting -> running. Pre-claiming to
+            // 'running' here would make the enqueued resume job unclaimable, so
+            // the handler would never run and the workflow would hang. 'pending'
+            // mirrors the start path (a fresh run is 'pending' with a resume job
+            // enqueued) and is not re-scanned by the timer/event poll queries.
             #[allow(clippy::disallowed_methods)]
             let claimed = sqlx::query(
                 r#"
                 UPDATE forge_workflow_runs
                 SET wake_at = NULL, waiting_for_event = NULL, event_timeout_at = NULL,
-                    suspended_at = NULL, status = 'running'
+                    suspended_at = NULL, status = 'pending'
                 WHERE id = $1 AND status IN ('sleeping', 'waiting')
                 "#,
             )
@@ -365,6 +406,7 @@ impl WorkflowScheduler {
             let input = serde_json::json!({
                 "run_id": workflow_run_id.to_string(),
                 "from_sleep": false,
+                "resume_reason": ResumeReason::EventArrived.as_str(),
             });
             let job = crate::jobs::JobRecord::new(
                 WORKFLOW_RESUME_JOB.to_string(),
@@ -399,18 +441,29 @@ impl WorkflowScheduler {
     /// Atomically claim a workflow and enqueue a resume job in a single transaction.
     /// If the claim fails (row already claimed), the transaction is rolled back
     /// and no resume job is enqueued.
-    async fn claim_and_resume(&self, workflow_run_id: Uuid, from_sleep: bool, trigger: &str) {
+    async fn claim_and_resume(
+        &self,
+        workflow_run_id: Uuid,
+        from_sleep: bool,
+        trigger: &str,
+        reason: ResumeReason,
+    ) {
         let result: std::result::Result<(), sqlx::Error> = async {
             let mut tx = self.pool.begin().await?;
 
             // Runtime query: rewritten for single-transaction claim+resume;
             // convert to query!() after next `cargo sqlx prepare`.
+            // Move to 'pending' (not 'running'): the executor's
+            // `claim_for_execution` is the sole claimer and rejects 'running'.
+            // Pre-claiming to 'running' here would leave the enqueued resume job
+            // unable to claim the run, hanging timer/sleep resumes (mirrors the
+            // event path in `consume_claim_and_resume`).
             #[allow(clippy::disallowed_methods)]
             let claimed = sqlx::query(
                 r#"
                 UPDATE forge_workflow_runs
                 SET wake_at = NULL, waiting_for_event = NULL, event_timeout_at = NULL,
-                    suspended_at = NULL, status = 'running'
+                    suspended_at = NULL, status = 'pending'
                 WHERE id = $1 AND status IN ('sleeping', 'waiting')
                 "#,
             )
@@ -426,6 +479,7 @@ impl WorkflowScheduler {
             let input = serde_json::json!({
                 "run_id": workflow_run_id.to_string(),
                 "from_sleep": from_sleep,
+                "resume_reason": reason.as_str(),
             });
             let job = crate::jobs::JobRecord::new(
                 WORKFLOW_RESUME_JOB.to_string(),

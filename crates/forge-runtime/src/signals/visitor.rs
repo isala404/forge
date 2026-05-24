@@ -8,6 +8,17 @@
 
 use sha2::{Digest, Sha256};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Must stay in sync with `gateway::server::DEFAULT_SIGNAL_SECRET`. If a
+/// caller passes this literal we refuse to emit a real visitor ID, since
+/// the daily salt would be trivially reversible by anyone who reads the
+/// open-source repo.
+const DEFAULT_SIGNAL_SECRET: &str = "forge-default-signal-secret";
+
+/// One-shot guard so we only log the "default secret in use" warning once
+/// rather than on every request.
+static WARNED_DEFAULT_SECRET: AtomicBool = AtomicBool::new(false);
 
 /// Cached daily salt to avoid recomputing on every request.
 struct DailySalt {
@@ -29,6 +40,15 @@ pub fn generate_visitor_id(
     user_agent: Option<&str>,
     server_secret: &str,
 ) -> String {
+    if server_secret == DEFAULT_SIGNAL_SECRET {
+        if !WARNED_DEFAULT_SECRET.swap(true, Ordering::Relaxed) {
+            tracing::error!(
+                "signals: default visitor-ID secret in use; refusing to emit a real visitor ID. \
+                 Configure [auth] jwt_secret in forge.toml to enable visitor tracking."
+            );
+        }
+        return String::new();
+    }
     let ip = client_ip.unwrap_or("unknown");
     let ua = user_agent.unwrap_or("unknown");
     let salt = get_daily_salt(server_secret);

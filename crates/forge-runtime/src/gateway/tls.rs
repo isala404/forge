@@ -274,10 +274,34 @@ fn read_pem_certs(path: &str) -> Result<Vec<CertificateDer<'static>>> {
 }
 
 fn read_pem_key(path: &str) -> Result<PrivateKeyDer<'static>> {
+    warn_if_key_world_readable(path);
     PrivateKeyDer::from_pem_file(path).map_err(|e| {
         ForgeError::config(format!("failed to read PEM private key from '{path}': {e}"))
     })
 }
+
+/// Emit a loud warning if the TLS private key is readable by group or other.
+/// We don't refuse to start — operators may rely on a key-management daemon
+/// that enforces its own ACL model — but silently loading a 0644 key would
+/// be a footgun on shared hosts.
+#[cfg(unix)]
+fn warn_if_key_world_readable(path: &str) {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    let mode = meta.mode() & 0o777;
+    if mode & 0o077 != 0 {
+        tracing::warn!(
+            path = %path,
+            mode = format!("{:o}", mode),
+            "TLS private key is readable by group or other; tighten to 0600 (chmod 600)"
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn warn_if_key_world_readable(_path: &str) {}
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]

@@ -22,6 +22,7 @@
 //! - `POST   /_api/admin/queues/{name}/resume`
 //! - `GET    /_api/admin/nodes`
 //! - `GET    /_api/admin/leaders`
+//! - `POST   /_api/admin/sessions/{session_id}/revoke   body: {reason?}`
 
 use std::sync::Arc;
 
@@ -37,6 +38,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use forge_core::function::AuthContext;
+use forge_core::realtime::SessionId;
+
+use crate::realtime::Reactor;
 
 use super::tracing::TracingState;
 
@@ -44,6 +48,9 @@ use super::tracing::TracingState;
 #[derive(Clone)]
 pub struct AdminState {
     pub db_pool: PgPool,
+    /// Reactor handle for session-revocation. None when running headless (e.g.
+    /// migration-only commands) — the route then returns 503.
+    pub reactor: Option<Arc<Reactor>>,
 }
 
 /// Build the admin router. Returns `None` when no admin handler can do any
@@ -69,6 +76,7 @@ pub fn admin_router(state: AdminState) -> Router {
         .route("/admin/queues/{name}/resume", post(resume_queue))
         .route("/admin/nodes", get(list_nodes))
         .route("/admin/leaders", get(list_leaders))
+        .route("/admin/sessions/{session_id}/revoke", post(revoke_session))
         .with_state(Arc::new(state))
 }
 
@@ -1146,6 +1154,50 @@ async fn list_leaders(
             format!("Failed to list leaders: {}", e),
         ),
     }
+}
+
+/// Revoke a session's cached `AuthContext` so the reactor stops re-pushing
+/// data tied to that session. Operators wire this to their identity system's
+/// revocation event (role demotion, tenant move, manual sign-out across all
+/// devices); the client must reconnect and re-subscribe with a fresh token to
+/// resume receiving updates.
+async fn revoke_session(
+    State(state): State<Arc<AdminState>>,
+    Extension(auth): Extension<AuthContext>,
+    Extension(tracing_state): Extension<TracingState>,
+    Path(session_id): Path<Uuid>,
+    body: Option<Json<ActionBody>>,
+) -> axum::response::Response {
+    if let Err(r) = require_admin(&auth) {
+        return r;
+    }
+    let reactor = match state.reactor.as_ref() {
+        Some(r) => r.clone(),
+        None => {
+            return admin_err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "reactor_unavailable",
+                "Realtime reactor is not running on this node",
+            );
+        }
+    };
+    let reason = body.and_then(|b| b.0.reason);
+    let reason_str = reason.as_deref().unwrap_or("admin revoke");
+    reactor
+        .revoke_session_auth(SessionId(session_id), reason_str)
+        .await;
+    audit(
+        &state.db_pool,
+        &auth,
+        Some(&tracing_state),
+        "session.revoke",
+        "session",
+        Some(session_id.to_string()),
+        reason.as_deref(),
+        serde_json::json!({"session_id": session_id}),
+    )
+    .await;
+    Json(serde_json::json!({"status": "revoked"})).into_response()
 }
 
 #[cfg(test)]

@@ -128,7 +128,16 @@ impl ChangeListener {
         };
 
         let count = rows.len();
+        // Track the highest seq across rows (including ones we skip because
+        // the op didn't parse) and only commit it after the whole batch is
+        // forwarded. Per-row stores let a live `rx.recv` racing this loop
+        // bump last_seq past unforwarded replay rows, and skipped rows used
+        // to leave a permanent gap that blocked future replays.
+        let mut max_seq = self.last_seq.load(Ordering::Relaxed);
         for row in &rows {
+            if row.seq > max_seq {
+                max_seq = row.seq;
+            }
             let Ok(operation) = row.op.parse::<forge_core::realtime::ChangeOperation>() else {
                 continue;
             };
@@ -145,7 +154,9 @@ impl ChangeListener {
             }
 
             let _ = self.change_tx.send(change);
-            self.last_seq.store(row.seq, Ordering::Relaxed);
+        }
+        if max_seq > self.last_seq.load(Ordering::Relaxed) {
+            self.last_seq.store(max_seq, Ordering::Relaxed);
         }
 
         if count > 0 {
@@ -228,6 +239,14 @@ impl ChangeListener {
                     match result {
                         Ok(payload) => {
                             let recv_time = std::time::Instant::now();
+                            // Always recover any embedded seq, even on parse
+                            // failure or unknown op, so a malformed/unknown
+                            // payload doesn't pin the watermark and force
+                            // the next reconnect-replay to refuse the gap.
+                            let trailing_seq = payload
+                                .rsplit_once('#')
+                                .and_then(|(_, s)| s.parse::<i64>().ok())
+                                .unwrap_or(0);
                             if let Some((change, seq)) = self.parse_notification(&payload) {
                                 // Skip already-processed seqs to prevent
                                 // double-processing during the seed window.
@@ -243,6 +262,11 @@ impl ChangeListener {
                                 crate::cluster::metrics::record_notification_latency(recv_time.elapsed().as_secs_f64());
                             } else {
                                 tracing::debug!(payload = %payload, "Failed to parse notification");
+                                if trailing_seq > 0
+                                    && trailing_seq > self.last_seq.load(Ordering::Relaxed)
+                                {
+                                    self.last_seq.store(trailing_seq, Ordering::Relaxed);
+                                }
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {

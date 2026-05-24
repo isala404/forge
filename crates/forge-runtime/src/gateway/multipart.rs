@@ -12,8 +12,105 @@ use forge_core::types::Upload;
 use super::rpc::RpcHandler;
 
 const MAX_FIELD_NAME_LENGTH: usize = 255;
+const MAX_FILENAME_LENGTH: usize = 255;
 const MAX_JSON_FIELD_SIZE: usize = 1024 * 1024;
 const JSON_FIELD_NAME: &str = "_json";
+
+/// Sanitize a raw upload filename for safe persistence and logging.
+///
+/// Strips path components, neutralizes traversal sequences after the basename
+/// is isolated, rejects null bytes / control chars, and rewrites Windows
+/// reserved device names (CON, PRN, NUL, AUX, COM[1-9], LPT[1-9]) so that
+/// downstream code that mirrors the upload to disk on Windows can't trip the
+/// reserved-name handling. Returns `None` when nothing salvageable remains.
+fn sanitize_filename(raw: &str) -> Option<String> {
+    // Basename first: take the last path component for either separator, then
+    // collapse traversal sequences inside the basename so `foo..bar` keeps the
+    // double-dot but `..` alone becomes `_`.
+    let basename = raw.rsplit(['/', '\\']).next().unwrap_or(raw);
+    let basename = basename.trim();
+    if basename.is_empty() || basename == "." || basename == ".." {
+        return None;
+    }
+
+    // Reject controls and null bytes outright. A null byte in a filename is a
+    // classic log-truncation / path-confusion vector.
+    if basename.chars().any(|c| c == '\0' || c.is_control()) {
+        return None;
+    }
+
+    let mut name: String = basename
+        .chars()
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '|' | '?' | '*' => '_',
+            _ => c,
+        })
+        .collect();
+
+    // Windows reserved device names match against the basename without its
+    // extension. Comparison is case-insensitive.
+    let stem = name.split('.').next().unwrap_or(&name).to_ascii_uppercase();
+    let is_reserved_dev = |prefix: &str| -> bool {
+        stem.strip_prefix(prefix)
+            .and_then(|rest| rest.parse::<u8>().ok())
+            .is_some_and(|n| (1..=9).contains(&n))
+    };
+    let is_reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || is_reserved_dev("COM")
+        || is_reserved_dev("LPT");
+    if is_reserved {
+        name = format!("_{name}");
+    }
+
+    if name.len() > MAX_FILENAME_LENGTH {
+        name.truncate(MAX_FILENAME_LENGTH);
+    }
+
+    if name.is_empty() { None } else { Some(name) }
+}
+
+#[cfg(test)]
+mod sanitize_tests {
+    use super::sanitize_filename;
+
+    #[test]
+    fn strips_path_components() {
+        assert_eq!(sanitize_filename("/etc/passwd").as_deref(), Some("passwd"));
+        assert_eq!(
+            sanitize_filename("C:\\Windows\\system.ini").as_deref(),
+            Some("system.ini")
+        );
+    }
+
+    #[test]
+    fn preserves_legitimate_double_dots() {
+        assert_eq!(sanitize_filename("foo..bar").as_deref(), Some("foo..bar"));
+    }
+
+    #[test]
+    fn rejects_traversal_only_basename() {
+        assert!(sanitize_filename("../../etc/passwd").is_some());
+        assert_eq!(
+            sanitize_filename("../../etc/passwd").as_deref(),
+            Some("passwd")
+        );
+        assert!(sanitize_filename("..").is_none());
+        assert!(sanitize_filename("foo/..").is_none());
+    }
+
+    #[test]
+    fn rejects_control_chars_and_nulls() {
+        assert!(sanitize_filename("foo\0bar").is_none());
+        assert!(sanitize_filename("foo\nbar").is_none());
+    }
+
+    #[test]
+    fn rewrites_windows_reserved_names() {
+        assert_eq!(sanitize_filename("CON").as_deref(), Some("_CON"));
+        assert_eq!(sanitize_filename("nul.txt").as_deref(), Some("_nul.txt"));
+        assert_eq!(sanitize_filename("COM1.log").as_deref(), Some("_COM1.log"));
+    }
+}
 
 /// Lightweight magic-byte check: for a small set of well-known media types,
 /// the declared `Content-Type` must match the file's leading bytes. Types
@@ -169,6 +266,17 @@ pub async fn rpc_multipart_handler(
         }
 
         if name == JSON_FIELD_NAME {
+            // Duplicate `_json` would silently let the last value win, which
+            // is a parameter-smuggling avenue when upstream validators only
+            // inspected the first occurrence.
+            if json_args.is_some() {
+                return multipart_error(
+                    StatusCode::BAD_REQUEST,
+                    "DUPLICATE_FIELD",
+                    "Multiple `_json` fields submitted; only one is allowed",
+                );
+            }
+
             let mut buffer = BytesMut::new();
             let mut json_field = field;
 
@@ -180,8 +288,7 @@ pub async fn rpc_multipart_handler(
                                 StatusCode::PAYLOAD_TOO_LARGE,
                                 "PAYLOAD_TOO_LARGE",
                                 format!(
-                                    "Multipart payload exceeds maximum size of {} bytes",
-                                    max_total
+                                    "Multipart payload exceeds maximum size of {max_total} bytes (field `_json`)"
                                 ),
                             );
                         }
@@ -235,20 +342,16 @@ pub async fn rpc_multipart_handler(
                 .file_name()
                 .map(String::from)
                 .unwrap_or_else(|| name.clone());
-            // Sanitize filename: strip path components to prevent path traversal
-            let filename = raw_filename
-                .rsplit(['/', '\\'])
-                .next()
-                .unwrap_or(&raw_filename)
-                .replace("..", "_")
-                .to_string();
-            if filename.is_empty() {
-                return multipart_error(
-                    StatusCode::BAD_REQUEST,
-                    "INVALID_FILENAME",
-                    "Filename is empty after sanitization",
-                );
-            }
+            let filename = match sanitize_filename(&raw_filename) {
+                Some(f) => f,
+                None => {
+                    return multipart_error(
+                        StatusCode::BAD_REQUEST,
+                        "INVALID_FILENAME",
+                        "Filename empty or contains disallowed characters after sanitization",
+                    );
+                }
+            };
             let content_type = field
                 .content_type()
                 .map(String::from)
@@ -265,8 +368,7 @@ pub async fn rpc_multipart_handler(
                                 StatusCode::PAYLOAD_TOO_LARGE,
                                 "PAYLOAD_TOO_LARGE",
                                 format!(
-                                    "Multipart payload exceeds maximum size of {} bytes",
-                                    max_total
+                                    "Multipart payload exceeds maximum size of {max_total} bytes (field `{name}`, file `{filename}`)"
                                 ),
                             );
                         }

@@ -111,14 +111,21 @@ impl SubscriptionManager {
         table_deps: &'static [&'static str],
         selected_cols: &'static [&'static str],
     ) -> forge_core::Result<(QueryGroupId, SubscriptionId, bool)> {
-        // Check per-session limit
-        if let Some(subs) = self.session_subscribers.get(&session_id)
-            && subs.len() >= self.max_per_session
+        // Reserve a slot under the entry write guard so two concurrent
+        // subscribes from the same session can't both observe `len < max`
+        // and race past the limit. We hold the slot for the rest of this
+        // call; if anything later fails we drop the placeholder so the
+        // user gets their seat back.
+        let placeholder = SubscriberId(u32::MAX);
         {
-            return Err(forge_core::ForgeError::Validation(format!(
-                "Maximum subscriptions per session ({}) exceeded",
-                self.max_per_session
-            )));
+            let mut entry = self.session_subscribers.entry(session_id).or_default();
+            if entry.len() >= self.max_per_session {
+                return Err(forge_core::ForgeError::Validation(format!(
+                    "Maximum subscriptions per session ({}) exceeded",
+                    self.max_per_session
+                )));
+            }
+            entry.push(placeholder);
         }
 
         let auth_scope = AuthScope::from_auth(auth_context);
@@ -176,10 +183,16 @@ impl SubscriptionManager {
             group.subscribers.push(subscriber_id);
         }
 
-        self.session_subscribers
-            .entry(session_id)
-            .or_default()
-            .push(subscriber_id);
+        // Swap the placeholder we reserved earlier for the real id. If for
+        // any reason the placeholder is gone (e.g. concurrent session
+        // teardown), fall back to pushing.
+        if let Some(mut entry) = self.session_subscribers.get_mut(&session_id) {
+            if let Some(slot) = entry.iter_mut().find(|s| s.0 == u32::MAX) {
+                *slot = subscriber_id;
+            } else {
+                entry.push(subscriber_id);
+            }
+        }
 
         Ok((group_id, subscription_id, is_new))
     }
@@ -339,17 +352,24 @@ impl SubscriptionManager {
     /// runtime-discovered tables from the read set that weren't in the
     /// compile-time `table_deps`.
     pub fn update_group(&self, group_id: QueryGroupId, read_set: ReadSet, result_hash: String) {
-        if let Some(mut group) = self.groups.get_mut(&group_id) {
-            for table in &read_set.tables {
-                let already_indexed = group.table_deps.iter().any(|t| *t == table);
-                if !already_indexed {
-                    self.table_index
-                        .entry(table.clone())
-                        .or_default()
-                        .insert(group_id);
-                }
-            }
+        // Record execution BEFORE extending the table_index so a concurrent
+        // `find_affected_groups` can't observe the new table in the index
+        // but still see the old read_set on the group (which would make
+        // `should_invalidate` return false and silently drop the change).
+        let new_tables: Vec<String> = if let Some(mut group) = self.groups.get_mut(&group_id) {
+            let tables = read_set
+                .tables
+                .iter()
+                .filter(|t| !group.table_deps.contains(&t.as_str()))
+                .cloned()
+                .collect();
             group.record_execution(read_set, result_hash);
+            tables
+        } else {
+            return;
+        };
+        for table in new_tables {
+            self.table_index.entry(table).or_default().insert(group_id);
         }
     }
 
@@ -368,16 +388,15 @@ impl SubscriptionManager {
         data: std::sync::Arc<serde_json::Value>,
         serialized_len: usize,
     ) {
-        if let Some(mut group) = self.groups.get_mut(&group_id) {
-            for table in &read_set.tables {
-                let already_indexed = group.table_deps.iter().any(|t| *t == table);
-                if !already_indexed {
-                    self.table_index
-                        .entry(table.clone())
-                        .or_default()
-                        .insert(group_id);
-                }
-            }
+        // Same ordering as `update_group`: record execution before
+        // publishing new tables into `table_index`.
+        let new_tables: Vec<String> = if let Some(mut group) = self.groups.get_mut(&group_id) {
+            let tables = read_set
+                .tables
+                .iter()
+                .filter(|t| !group.table_deps.contains(&t.as_str()))
+                .cloned()
+                .collect();
 
             if serialized_len > self.max_cached_result_bytes {
                 tracing::debug!(
@@ -390,6 +409,12 @@ impl SubscriptionManager {
             } else {
                 group.record_execution_with_data(read_set, result_hash, data);
             }
+            tables
+        } else {
+            return;
+        };
+        for table in new_tables {
+            self.table_index.entry(table).or_default().insert(group_id);
         }
     }
 

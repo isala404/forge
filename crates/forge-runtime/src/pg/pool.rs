@@ -173,7 +173,7 @@ impl Database {
     fn connect_options(url: &str, service_name: &str) -> sqlx::Result<PgConnectOptions> {
         let options: PgConnectOptions = url.parse()?;
         Ok(options
-            .application_name(service_name)
+            .application_name(&forge_application_name(service_name))
             .log_statements(LevelFilter::Off)
             .log_slow_statements(LevelFilter::Warn, Duration::from_millis(500)))
     }
@@ -185,7 +185,7 @@ impl Database {
     ) -> sqlx::Result<PgConnectOptions> {
         let options: PgConnectOptions = url.parse()?;
         let mut opts = options
-            .application_name(service_name)
+            .application_name(&forge_application_name(service_name))
             .log_statements(LevelFilter::Off)
             .log_slow_statements(LevelFilter::Warn, Duration::from_millis(500));
         if statement_timeout_secs > 0 {
@@ -342,6 +342,25 @@ impl Database {
     }
 }
 
+/// Build the `application_name` reported by every Forge connection.
+///
+/// Leader-election zombie preemption ([`crate::pg::leader`]) only terminates a
+/// lock-holding backend whose `application_name` starts with `forge`, so it
+/// never evicts an unrelated app sharing the database. For that guard to ever
+/// fire against Forge's *own* zombie, Forge connections must self-identify with
+/// that prefix. The service name passed in is the project name (e.g. `demo`),
+/// which would otherwise produce a non-matching `application_name`.
+///
+/// Idempotent: a service name already starting with `forge` (e.g. the internal
+/// `"forge"` default) is returned unchanged so we never produce `forge-forge`.
+fn forge_application_name(service_name: &str) -> String {
+    if service_name.starts_with("forge") {
+        service_name.to_string()
+    } else {
+        format!("forge-{service_name}")
+    }
+}
+
 /// Minimum supported PostgreSQL major version.
 ///
 /// Forge v0.9+ uses features (skip-locked semantics with `NOWAIT`, partitioned
@@ -465,5 +484,61 @@ mod tests {
         let cloned = config.clone();
         assert_eq!(cloned.url(), config.url());
         assert_eq!(cloned.pool_size, config.pool_size);
+    }
+
+    #[test]
+    fn forge_application_name_prefixes_project_names() {
+        // A bare project name must gain the `forge-` prefix so leader-election
+        // zombie preemption (which only terminates `forge`-prefixed backends)
+        // can evict Forge's own zombie leader.
+        assert_eq!(forge_application_name("demo"), "forge-demo");
+        assert_eq!(forge_application_name("my-app"), "forge-my-app");
+        // Idempotent: names already starting with `forge` are untouched.
+        assert_eq!(forge_application_name("forge"), "forge");
+        assert_eq!(forge_application_name("forge-worker"), "forge-worker");
+    }
+}
+
+#[cfg(all(test, feature = "testcontainers"))]
+#[allow(clippy::unwrap_used, clippy::disallowed_methods)]
+mod integration_tests {
+    use super::*;
+    use forge_core::testing::TestDatabase;
+
+    async fn base_db() -> TestDatabase {
+        TestDatabase::from_env()
+            .await
+            .expect("Failed to create test database")
+    }
+
+    /// A pool built with a production-shaped service name (the project name)
+    /// must report a `forge`-prefixed `application_name`. This is the precise
+    /// regressor for zombie-leader eviction: the leader-election guard only
+    /// terminates backends whose `application_name` starts with `forge`, so if
+    /// Forge's own pools reported the bare project name (`demo`) the framework
+    /// could never preempt its own zombie. Fails before the fix (reports
+    /// `demo`), passes after (reports `forge-demo`).
+    #[tokio::test]
+    async fn pool_application_name_is_forge_prefixed_for_preemption() {
+        let base = base_db().await;
+        let db = Database::from_config_with_service(&DatabaseConfig::new(base.url()), "demo")
+            .await
+            .expect("connect with production-shaped service name");
+
+        let app_name: String = sqlx::query_scalar("SELECT current_setting('application_name')")
+            .fetch_one(db.primary())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            app_name, "forge-demo",
+            "Forge pools must self-identify as forge-<project> so leader preemption can evict them"
+        );
+        assert!(
+            app_name.starts_with("forge"),
+            "application_name must satisfy the leader.rs preemption guard"
+        );
+
+        db.close().await;
     }
 }
