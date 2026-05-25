@@ -90,10 +90,13 @@ impl GenerateCommand {
             || !registry.all_enums().is_empty()
             || !registry.all_functions().is_empty();
 
+        // Serialize the schema up front, but only write it to disk after the
+        // binding generator succeeds. Otherwise a failed `forge generate` would
+        // leave `forge.schema.json` describing a state that doesn't match the
+        // bindings on disk.
         let schema_path = Path::new("forge.schema.json");
         let schema_json = forge_codegen::emit_schema_json(&registry)
             .map_err(|e| anyhow::anyhow!("Failed to serialize schema: {}", e))?;
-        std::fs::write(schema_path, &schema_json)?;
 
         eprint!(
             "  Generating {} bindings...",
@@ -106,6 +109,7 @@ impl GenerateCommand {
             has_schema,
             force: self.force,
         })?;
+        std::fs::write(schema_path, &schema_json)?;
         eprintln!(" done");
 
         // Sync the frontend toolchain. For SvelteKit this runs `svelte-kit

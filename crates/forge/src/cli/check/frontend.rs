@@ -151,8 +151,9 @@ impl CheckCommand {
             || !registry.all_enums().is_empty()
             || !registry.all_functions().is_empty();
 
-        let tmp_dir = frontend_dir.join(format!("forge-check-{}", std::process::id()));
-        let tmp_output = tmp_dir.join("bindings");
+        // tempfile::tempdir() avoids PID-reuse collisions on long-lived CI containers.
+        let tmp_handle = tempfile::tempdir_in(frontend_dir)?;
+        let tmp_output = tmp_handle.path().join("bindings");
         std::fs::create_dir_all(&tmp_output)?;
         let tmp_output_str = tmp_output.to_string_lossy().to_string();
 
@@ -164,12 +165,7 @@ impl CheckCommand {
             force: true,
         });
 
-        let cleanup = || {
-            let _ = std::fs::remove_dir_all(&tmp_dir);
-        };
-
         if let Err(e) = gen_result {
-            cleanup();
             result.warn(
                 &format!("Could not regenerate bindings: {}", e),
                 "Run 'forge generate' to check manually",
@@ -180,7 +176,6 @@ impl CheckCommand {
         if let Err(e) =
             format_generated_bindings_for_check(target, frontend_dir, output_path, &tmp_output)
         {
-            cleanup();
             result.warn(
                 &format!("Could not format regenerated bindings: {}", e),
                 "Run 'forge generate --force' to restore generated bindings",
@@ -217,8 +212,6 @@ impl CheckCommand {
                 }
             }
         }
-
-        cleanup();
 
         if modified.is_empty() && missing.is_empty() {
             result.pass("Generated bindings are up to date");

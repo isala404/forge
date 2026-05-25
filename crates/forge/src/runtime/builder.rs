@@ -57,6 +57,9 @@ pub struct ForgeBuilder {
     pub(super) frontend_handler: Option<FrontendHandler>,
     #[cfg(feature = "gateway")]
     pub(super) custom_routes_factory: Option<Box<dyn FnOnce(sqlx::PgPool) -> Router + Send + Sync>>,
+    /// Deferred error from `auto_register()` so the builder stays chainable.
+    /// Surfaced from `build()`.
+    pub(super) auto_register_error: Option<ForgeError>,
 }
 
 impl ForgeBuilder {
@@ -84,6 +87,7 @@ impl ForgeBuilder {
             frontend_handler: None,
             #[cfg(feature = "gateway")]
             custom_routes_factory: None,
+            auto_register_error: None,
         }
     }
 
@@ -194,7 +198,9 @@ impl ForgeBuilder {
             #[cfg(feature = "gateway")]
             mcp_tools: std::mem::take(&mut self.mcp_registry),
         };
-        crate::auto_register::auto_register_all(&mut registries);
+        if let Err(e) = crate::auto_register::auto_register_all(&mut registries) {
+            self.auto_register_error = Some(e);
+        }
         self.function_registry = registries.functions;
         #[cfg(feature = "jobs")]
         {
@@ -322,6 +328,10 @@ impl ForgeBuilder {
     }
 
     pub fn build(self) -> Result<Forge> {
+        if let Some(err) = self.auto_register_error {
+            return Err(err);
+        }
+
         let config = self
             .config
             .ok_or_else(|| ForgeError::config("Configuration is required"))?;

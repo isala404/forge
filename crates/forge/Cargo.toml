@@ -67,6 +67,7 @@ opentelemetry-otlp = { workspace = true, optional = true }
 
 rust-embed = { workspace = true, optional = true }
 mime_guess = { workspace = true, optional = true }
+tempfile = { workspace = true }
 
 [features]
 # Default to `full` so existing apps upgrade transparently. Users who want a
@@ -148,7 +149,6 @@ embedded-frontend = ["dep:rust-embed", "dep:mime_guess"]
 nix = { version = "0.29", features = ["signal", "hostname"] }
 
 [dev-dependencies]
-tempfile = { workspace = true }
 trybuild = { workspace = true }
 
 [build-dependencies]

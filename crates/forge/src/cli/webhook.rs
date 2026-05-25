@@ -26,8 +26,8 @@ struct ReplayArgs {
     webhook_name: String,
     /// Idempotency key of the event to replay.
     idempotency_key: String,
-    /// Base URL of the running forge server (default: http://localhost:3000).
-    #[arg(long, default_value = "http://localhost:3000")]
+    /// Base URL of the running forge server (default: http://localhost:9081).
+    #[arg(long, default_value = "http://localhost:9081")]
     base_url: String,
 }
 
@@ -47,6 +47,12 @@ struct ListArgs {
 impl WebhookCommand {
     /// Execute the webhook subcommand.
     pub async fn execute(self) -> Result<()> {
+        // Webhook subcommands rely on cwd-relative `forge.toml`; anchor at project root.
+        if let Err(e) = super::project_root::enter_project_root() {
+            return Err(forge_core::ForgeError::config(format!(
+                "must be run from inside a forge project: {e}"
+            )));
+        }
         match self.command {
             WebhookSubcommand::Replay(args) => replay(args).await,
             WebhookSubcommand::List(args) => list(args).await,
@@ -54,10 +60,28 @@ impl WebhookCommand {
     }
 }
 
+/// Mirror the runtime's URL resolution: prefer `DATABASE_URL` env var, then
+/// fall back to `[database].url` from forge.toml.
+fn resolve_database_url(config: &forge_core::config::ForgeConfig) -> Result<String> {
+    if let Ok(url) = std::env::var("DATABASE_URL")
+        && !url.is_empty()
+    {
+        return Ok(url);
+    }
+    let url = config.database.url();
+    if url.is_empty() {
+        return Err(forge_core::ForgeError::config(
+            "no database URL configured: set DATABASE_URL or [database].url in forge.toml",
+        ));
+    }
+    Ok(url.to_string())
+}
+
 #[allow(clippy::disallowed_methods)]
 async fn replay(args: ReplayArgs) -> Result<()> {
     let config = forge_core::config::ForgeConfig::from_file("forge.toml")?;
-    let pool = sqlx::PgPool::connect(&config.database.url)
+    let db_url = resolve_database_url(&config)?;
+    let pool = sqlx::PgPool::connect(&db_url)
         .await
         .map_err(forge_core::ForgeError::Database)?;
 
@@ -103,17 +127,6 @@ async fn replay(args: ReplayArgs) -> Result<()> {
         body.len()
     );
 
-    // Delete the existing idempotency record so the replay isn't rejected
-    sqlx::query(
-        "DELETE FROM forge_webhook_events \
-         WHERE webhook_name = $1 AND idempotency_key = $2",
-    )
-    .bind(&args.webhook_name)
-    .bind(&args.idempotency_key)
-    .execute(&pool)
-    .await
-    .map_err(forge_core::ForgeError::Database)?;
-
     let client = reqwest::Client::new();
     let mut request = client.post(format!(
         "{}/webhooks/{}",
@@ -142,6 +155,28 @@ async fn replay(args: ReplayArgs) -> Result<()> {
     let status_code = response.status();
     let reason = status_code.canonical_reason().unwrap_or_default();
     println!("Response: {} {}", status_code.as_u16(), reason);
+
+    // Only clear the dedup record on 2xx so a failed replay doesn't allow
+    // the original event to silently re-execute as a brand-new delivery.
+    if status_code.is_success() {
+        if let Err(e) = sqlx::query(
+            "DELETE FROM forge_webhook_events \
+             WHERE webhook_name = $1 AND idempotency_key = $2",
+        )
+        .bind(&args.webhook_name)
+        .bind(&args.idempotency_key)
+        .execute(&pool)
+        .await
+        {
+            eprintln!("Warning: replay succeeded but failed to clear dedup record: {e}");
+        }
+    } else {
+        eprintln!(
+            "Replay did not succeed (HTTP {}); dedup record preserved.",
+            status_code.as_u16()
+        );
+    }
+
     let body = response
         .text()
         .await
@@ -156,7 +191,8 @@ async fn replay(args: ReplayArgs) -> Result<()> {
 #[allow(clippy::disallowed_methods)]
 async fn list(args: ListArgs) -> Result<()> {
     let config = forge_core::config::ForgeConfig::from_file("forge.toml")?;
-    let pool = sqlx::PgPool::connect(&config.database.url)
+    let db_url = resolve_database_url(&config)?;
+    let pool = sqlx::PgPool::connect(&db_url)
         .await
         .map_err(forge_core::ForgeError::Database)?;
 
@@ -200,14 +236,15 @@ async fn list(args: ListArgs) -> Result<()> {
     );
     for (webhook, key, status, processed_at, has_body) in &rows {
         let replay = if *has_body { "yes" } else { "no" };
+        let key_display: String = if key.chars().count() > 28 {
+            key.chars().take(28).collect()
+        } else {
+            key.clone()
+        };
         println!(
             "{:<20} {:<30} {:<10} {:<24} {}",
             webhook,
-            if key.len() > 28 {
-                key.get(..28).unwrap_or_default()
-            } else {
-                key.as_str()
-            },
+            key_display,
             status,
             processed_at.format("%Y-%m-%d %H:%M:%S UTC"),
             replay

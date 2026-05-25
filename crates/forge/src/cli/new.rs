@@ -77,6 +77,36 @@ pub(super) fn extract_project_name(input: &str) -> String {
         .to_string()
 }
 
+/// Reject names that would escape the cwd, inject shell metacharacters into
+/// generated configs / commands, or produce a malformed Cargo / npm package.
+///
+/// Allow only `[a-zA-Z0-9_-]`, must start with alphanumeric.
+pub(super) fn validate_project_name(name: &str) -> Result<()> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("project name cannot be empty or whitespace");
+    }
+    if name != trimmed {
+        anyhow::bail!("project name cannot have leading or trailing whitespace");
+    }
+    let Some(first) = name.chars().next() else {
+        anyhow::bail!("project name cannot be empty");
+    };
+    if !first.is_ascii_alphanumeric() {
+        anyhow::bail!(
+            "invalid project name '{name}': must start with a letter or digit (got '{first}')"
+        );
+    }
+    for c in name.chars() {
+        if !(c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+            anyhow::bail!(
+                "invalid project name '{name}': only [a-zA-Z0-9_-] allowed (rejected character: {c:?})"
+            );
+        }
+    }
+    Ok(())
+}
+
 fn is_git_available() -> bool {
     StdCommand::new("git")
         .arg("--version")
@@ -160,8 +190,6 @@ fn run_formatters(dir: &Path, frontend: FrontendTarget) -> Result<()> {
 }
 
 fn generate_cargo_lockfile(dir: &Path, frontend: FrontendTarget) -> Result<()> {
-    println!("  {} Generating Cargo.lock...", ui::step());
-
     if !matches!(StdCommand::new("cargo").arg("--version").output(), Ok(o) if o.status.success()) {
         eprintln!(
             "  {} cargo not found, skipping lockfile generation",
@@ -169,6 +197,22 @@ fn generate_cargo_lockfile(dir: &Path, frontend: FrontendTarget) -> Result<()> {
         );
         return Ok(());
     }
+
+    generate_one_lockfile(dir, "Cargo.lock")?;
+    if frontend == FrontendTarget::Dioxus {
+        generate_one_lockfile(&dir.join("frontend"), "frontend/Cargo.lock")?;
+    }
+
+    Ok(())
+}
+
+fn generate_one_lockfile(dir: &Path, label: &str) -> Result<()> {
+    if dir.join("Cargo.lock").exists() {
+        println!("  {} {label} already present, skipping", ui::ok());
+        return Ok(());
+    }
+
+    println!("  {} Generating {label}...", ui::step());
 
     let output = StdCommand::new("cargo")
         .args(["generate-lockfile"])
@@ -178,33 +222,14 @@ fn generate_cargo_lockfile(dir: &Path, frontend: FrontendTarget) -> Result<()> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         eprintln!(
-            "  {} Failed to generate Cargo.lock: {}",
+            "  {} Failed to generate {label}: {}",
             ui::warn(),
             stderr.trim()
         );
         return Ok(());
     }
 
-    println!("  {} Cargo.lock generated", ui::ok());
-
-    if frontend == FrontendTarget::Dioxus {
-        let output = StdCommand::new("cargo")
-            .args(["generate-lockfile"])
-            .current_dir(dir.join("frontend"))
-            .output()?;
-
-        if output.status.success() {
-            println!("  {} frontend/Cargo.lock generated", ui::ok());
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!(
-                "  {} Failed to generate frontend/Cargo.lock: {}",
-                ui::warn(),
-                stderr.trim()
-            );
-        }
-    }
-
+    println!("  {} {label} generated", ui::ok());
     Ok(())
 }
 
@@ -520,6 +545,7 @@ impl NewCommand {
         let template = load_template_definition(template_id)?;
 
         let project_name = extract_project_name(&self.name);
+        validate_project_name(&project_name)?;
         let project_dir = self.output.as_ref().unwrap_or(&self.name);
         let path = Path::new(project_dir);
 
@@ -980,6 +1006,56 @@ mod tests {
         let output = pin_package_version(input);
         assert!(output.contains("version = \"9.9.9\""));
         assert!(!output.contains("1.0.0"));
+    }
+
+    #[test]
+    fn validate_project_name_accepts_simple_names() {
+        assert!(validate_project_name("my-app").is_ok());
+        assert!(validate_project_name("my_app").is_ok());
+        assert!(validate_project_name("App1").is_ok());
+        assert!(validate_project_name("a").is_ok());
+    }
+
+    #[test]
+    fn validate_project_name_rejects_path_traversal_and_separators() {
+        assert!(validate_project_name("..").is_err());
+        assert!(validate_project_name("../etc").is_err());
+        assert!(validate_project_name("../../etc").is_err());
+        assert!(validate_project_name("/abs").is_err());
+        assert!(validate_project_name("a/b").is_err());
+        assert!(validate_project_name("~root").is_err());
+    }
+
+    #[test]
+    fn validate_project_name_rejects_shell_metacharacters() {
+        for bad in [
+            "a;rm", "a&b", "a|b", "a`b`", "a$()", "a$x", "a b", "a\"b", "a'b", "a\nb",
+        ] {
+            assert!(validate_project_name(bad).is_err(), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn validate_project_name_rejects_empty_and_whitespace() {
+        assert!(validate_project_name("").is_err());
+        assert!(validate_project_name("   ").is_err());
+        assert!(validate_project_name("\t").is_err());
+        assert!(validate_project_name(" leading").is_err());
+        assert!(validate_project_name("trailing ").is_err());
+    }
+
+    #[test]
+    fn validate_project_name_rejects_leading_hyphen_or_digit_underscore() {
+        // Leading hyphen would be parsed as a clap flag.
+        assert!(validate_project_name("-flag").is_err());
+        // Leading underscore — must start with alphanumeric per the validator.
+        assert!(validate_project_name("_hidden").is_err());
+    }
+
+    #[test]
+    fn validate_project_name_rejects_unicode_only() {
+        assert!(validate_project_name("日本語").is_err());
+        assert!(validate_project_name("café").is_err());
     }
 
     #[test]
