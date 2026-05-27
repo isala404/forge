@@ -8,6 +8,8 @@ export interface ForgeClientConfig {
   refreshToken?: () => Promise<string | null>;
   onAuthError?: (error: ForgeError) => void;
   onMutationError?: (error: ForgeClientError) => void;
+  /** Opt-in diagnostic channel for non-fatal events (e.g. reconnect failures). */
+  onDebug?: (message: string) => void;
   timeout?: number;
 }
 
@@ -33,7 +35,6 @@ interface SsePayload {
   session_id?: string;
   session_secret?: string;
   channel?: string;
-  last_event_id?: string;
 }
 
 export class ForgeClientError extends Error implements ForgeError {
@@ -69,6 +70,12 @@ export class ForgeClient {
   private connectionListeners = new Set<(state: ConnectionState) => void>();
   private subscriptions = new Map<string, (data: unknown) => void>();
   private subscriptionMeta = new Map<string, SubscriptionMeta>();
+  // Job/workflow subscriptions keyed by client_sub_id -> job/workflow id. Like
+  // query subscriptions, these must be re-registered on the new SSE session
+  // after a reconnect, or their server-side entries stay bound to the abandoned
+  // session and progress/status pushes are silently lost.
+  private jobMeta = new Map<string, string>();
+  private workflowMeta = new Map<string, string>();
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 10;
   private maxSubscriptionRetries = 3;
@@ -90,8 +97,26 @@ export class ForgeClient {
     this.signals = signals;
   }
 
-  private hashToken(token: string | null): string | null {
-    return token ? token.substring(0, 20) : null;
+  /**
+   * Stable fingerprint of a token used to detect rotation. SHA-256 over the
+   * whole token avoids the trap where JWTs from the same signing config
+   * share the first ~37 characters (header is constant); a prefix-based
+   * hash would miss rotation entirely.
+   */
+  private async hashToken(token: string | null): Promise<string | null> {
+    if (!token) return null;
+    if (typeof crypto !== "undefined" && crypto.subtle) {
+      const bytes = new TextEncoder().encode(token);
+      const digest = await crypto.subtle.digest("SHA-256", bytes);
+      const view = new Uint8Array(digest);
+      let hex = "";
+      for (const b of view) hex += b.toString(16).padStart(2, "0");
+      return hex;
+    }
+    // Fallback for non-secure contexts: take the suffix instead of the
+    // prefix, which (unlike the prefix) varies between JWTs with identical
+    // headers/payloads in the same signing slot.
+    return token.length > 16 ? token.slice(-16) : token;
   }
 
   getUrl(): string {
@@ -124,13 +149,35 @@ export class ForgeClient {
       if (currentConnectionId !== this.connectionId) return;
     }
 
-    // Token must be resolved before EventSource is created (sent as query param)
+    // Resolve token to either (a) mint a short-lived single-use SSE ticket
+    // (authenticated streams) or (b) connect anonymously. The bearer JWT
+    // never appears in the URL — query strings leak into access logs,
+    // browser history, and Referer headers.
     const token = await this.getToken();
 
     if (currentConnectionId !== this.connectionId) return;
 
+    let ticket: string | null = null;
+    if (token) {
+      try {
+        const res = await fetch(`${this.config.url}/_api/events/ticket`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+          credentials: "include",
+        });
+        if (res.ok) {
+          const body = (await res.json()) as { ticket?: string };
+          ticket = body.ticket ?? null;
+        }
+      } catch {
+        // Network failure here is non-fatal; we'll fall through to anonymous
+        // connect and let the reconnect loop retry.
+      }
+      if (currentConnectionId !== this.connectionId) return;
+    }
+
     const params = new URLSearchParams();
-    if (token) params.set("token", token);
+    if (ticket) params.set("ticket", ticket);
 
     const sseUrl = `${this.config.url}/_api/events${params.toString() ? `?${params}` : ""}`;
 
@@ -165,13 +212,26 @@ export class ForgeClient {
         const data = JSON.parse((e as MessageEvent).data) as SsePayload;
         this.sessionId = data.session_id ?? null;
         this.sessionSecret = data.session_secret ?? null;
-        this.connectedTokenHash = this.hashToken(token);
         this.setConnectionState("connected");
         this.reconnectAttempts = 0;
         this.hasConnectedBefore = true;
-        this.reregisterSubscriptions();
-
-        resolve();
+        // Finish wiring up this session BEFORE resolving connect():
+        //   1. Set `connectedTokenHash` synchronously-before-resolve. It was
+        //      previously set in a detached `.then`, so a `call()` running right
+        //      after a reconnect could observe a stale hash and reconnect AGAIN,
+        //      stranding just-restored subscriptions on the abandoned session
+        //      (their pushes then land in a channel no client reads).
+        //   2. Re-register subscriptions, so callers awaiting connect()/
+        //      reconnect() (notably call() after a login) don't fire RPCs before
+        //      the subscriptions exist on this session.
+        void (async () => {
+          try {
+            this.connectedTokenHash = await this.hashToken(token);
+            await this.reregisterSubscriptions();
+          } finally {
+            resolve();
+          }
+        })();
       });
 
       this.addEventSourceListener("update", (e) => {
@@ -245,6 +305,8 @@ export class ForgeClient {
     this.setConnectionState("disconnected");
     this.subscriptions.clear();
     this.subscriptionMeta.clear();
+    this.jobMeta.clear();
+    this.workflowMeta.clear();
   }
 
   async reconnect(): Promise<void> {
@@ -293,11 +355,20 @@ export class ForgeClient {
   async call<T>(functionName: string, args: unknown): Promise<T> {
     const token = await this.getToken();
 
+    // If a reconnect is already in flight (e.g. one kicked off right after a
+    // login), wait for it to finish restoring subscriptions before issuing the
+    // RPC — otherwise the reactive update this call triggers can be pushed to a
+    // subscription that hasn't been re-registered on the new session yet.
+    if (this.reconnectPromise) await this.reconnectPromise;
+
     // Token rotated since SSE was established; reconnect so subscriptions
-    // pick up the new identity without waiting for a new _registerQuery call.
-    const tokenHash = this.hashToken(token);
+    // pick up the new identity. Await so two simultaneous mutations during
+    // rotation don't spawn interleaved reconnects (reconnect() coalesces
+    // via reconnectPromise, but the previous fire-and-forget call could
+    // still race the in-flight RPC against a session-less state).
+    const tokenHash = await this.hashToken(token);
     if (this.sessionId && tokenHash !== this.connectedTokenHash) {
-      this.reconnect();
+      await this.reconnect();
     }
 
     let response = await this.sendRpc(functionName, args, token);
@@ -305,6 +376,11 @@ export class ForgeClient {
     if (response.status === 401 && this.config.refreshToken) {
       const refreshed = await this.tryRefresh();
       if (refreshed) {
+        // NOTE: for multipart uploads, the retry will re-stream `args`. If a
+        // caller passes a one-shot ReadableStream or a Blob already piped
+        // elsewhere, the second send may transmit empty content. Callers
+        // that need refresh-safe uploads should pass File/Blob backed by
+        // bytes (re-readable) rather than streamed sources.
         response = await this.sendRpc(functionName, args, refreshed);
       }
     }
@@ -343,7 +419,9 @@ export class ForgeClient {
 
     if (hasFiles) {
       const formData = this.buildFormData(args);
-      const headers: Record<string, string> = { "x-forge-platform": "web" };
+      // X-Forge-CSRF forces a CORS preflight on cross-origin POSTs so the
+      // server's CORS allowlist gates cross-site requests despite credentials.
+      const headers: Record<string, string> = { "x-forge-platform": "web", "X-Forge-CSRF": "1" };
       if (token) headers["Authorization"] = `Bearer ${token}`;
       if (correlationId) headers["x-correlation-id"] = correlationId;
       return fetch(`${this.config.url}/_api/rpc/${functionName}/upload`, {
@@ -363,6 +441,7 @@ export class ForgeClient {
       "Content-Type": "application/json",
       "Accept": "application/vnd.forge.v1+json",
       "x-forge-platform": "web",
+      "X-Forge-CSRF": "1",
     };
     if (token) headers["Authorization"] = `Bearer ${token}`;
     if (correlationId) headers["x-correlation-id"] = correlationId;
@@ -398,14 +477,28 @@ export class ForgeClient {
     return () => this.subscriptions.delete(target);
   }
 
-  async _registerQuery(subscriptionId: string, functionName: string, args: unknown): Promise<unknown> {
-    // Must await here (unlike the fire-and-forget in call()) because
-    // registration needs the new session_id before hitting /_api/subscribe.
-    const currentToken = await this.getToken();
-    const currentHash = this.hashToken(currentToken);
-    if (this.sessionId && currentHash !== this.connectedTokenHash) {
+  /**
+   * Ensure the SSE session is settled and matches the current auth token before
+   * a subscription registers against it. Awaits any in-flight reconnect, then
+   * reconnects if the token rotated since the session was established. Without
+   * this, a subscription can bind to a session that's mid-reconnect and about to
+   * be abandoned — its server-side entry then lives on a dead session and every
+   * push is silently dropped. All subscription kinds funnel through here so they
+   * always land on the live session.
+   */
+  private async ensureCurrentSession(): Promise<void> {
+    if (this.reconnectPromise) await this.reconnectPromise;
+    const token = await this.getToken();
+    const hash = await this.hashToken(token);
+    if (this.sessionId && hash !== this.connectedTokenHash) {
       await this.reconnect();
     }
+  }
+
+  async _registerQuery(subscriptionId: string, functionName: string, args: unknown): Promise<unknown> {
+    // Settle the session before registering (needs the live session_id before
+    // hitting /_api/subscribe).
+    await this.ensureCurrentSession();
 
     this.subscriptionMeta.set(subscriptionId, { functionName, args, failedAttempts: 0 });
 
@@ -436,6 +529,7 @@ export class ForgeClient {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        "X-Forge-CSRF": "1",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
       body: JSON.stringify({
@@ -466,6 +560,7 @@ export class ForgeClient {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        "X-Forge-CSRF": "1",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
       body: JSON.stringify({
@@ -477,13 +572,18 @@ export class ForgeClient {
     });
   }
 
-  async _registerJob(clientSubId: string, jobId: string): Promise<unknown> {
+  // Raw job-subscribe POST against the current session. Used both by the
+  // public `_registerJob` (after settling the session) and by
+  // `reregisterSubscriptions` during a reconnect — the latter must NOT settle
+  // the session (it runs inside the reconnect) or it would deadlock.
+  private async registerSseJob(clientSubId: string, jobId: string): Promise<unknown> {
     if (!this.sessionId) return null;
     const token = await this.getToken();
     const res = await fetch(`${this.config.url}/_api/subscribe-job`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        "X-Forge-CSRF": "1",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
       body: JSON.stringify({
@@ -494,20 +594,29 @@ export class ForgeClient {
       }),
       credentials: "include",
     });
-    if (res.ok) {
-      const json = await res.json();
-      return json.data ?? null;
-    }
-    return null;
+    return this.parseTrackerResponse(res, "JOB_SUBSCRIBE_FAILED");
   }
 
-  async _registerWorkflow(clientSubId: string, workflowId: string): Promise<unknown> {
+  async _registerJob(clientSubId: string, jobId: string): Promise<unknown> {
+    // Track for re-registration on reconnect (see `jobMeta`). Recorded even if
+    // there's no session yet so a subscription made pre-connect is restored.
+    this.jobMeta.set(clientSubId, jobId);
+    await this.ensureCurrentSession();
+    return this.registerSseJob(clientSubId, jobId);
+  }
+
+  // Raw workflow-subscribe POST. See `registerSseJob` for why this is split.
+  private async registerSseWorkflow(
+    clientSubId: string,
+    workflowId: string,
+  ): Promise<unknown> {
     if (!this.sessionId) return null;
     const token = await this.getToken();
     const res = await fetch(`${this.config.url}/_api/subscribe-workflow`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        "X-Forge-CSRF": "1",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
       body: JSON.stringify({
@@ -518,18 +627,66 @@ export class ForgeClient {
       }),
       credentials: "include",
     });
+    return this.parseTrackerResponse(res, "WORKFLOW_SUBSCRIBE_FAILED");
+  }
+
+  async _registerWorkflow(clientSubId: string, workflowId: string): Promise<unknown> {
+    this.workflowMeta.set(clientSubId, workflowId);
+    await this.ensureCurrentSession();
+    return this.registerSseWorkflow(clientSubId, workflowId);
+  }
+
+  /** Drop a job subscription's local state so it isn't re-registered on reconnect. */
+  _unregisterJob(clientSubId: string): void {
+    this.jobMeta.delete(clientSubId);
+    this.subscriptions.delete(`job:${clientSubId}`);
+  }
+
+  /** Drop a workflow subscription's local state so it isn't re-registered on reconnect. */
+  _unregisterWorkflow(clientSubId: string): void {
+    this.workflowMeta.delete(clientSubId);
+    this.subscriptions.delete(`wf:${clientSubId}`);
+  }
+
+  /**
+   * Common envelope handling for job/workflow subscribe endpoints. Surfaces
+   * non-200 responses as ForgeClientError so the store can render a real
+   * failure state instead of "loading=false, error=null, data=null".
+   */
+  private async parseTrackerResponse(res: Response, fallbackCode: string): Promise<unknown> {
     if (res.ok) {
       const json = await res.json();
+      if (json && json.success === false) {
+        const err = json.error ?? {};
+        throw new ForgeClientError(err.code ?? fallbackCode, err.message ?? `Server returned ${res.status}`);
+      }
       return json.data ?? null;
     }
-    return null;
+    let body: { error?: { code?: string; message?: string } } | null = null;
+    try {
+      body = await res.json();
+    } catch {
+      // Non-JSON error body — fall through to status-based message.
+    }
+    const code = body?.error?.code ?? fallbackCode;
+    const message = body?.error?.message ?? `Server returned ${res.status}`;
+    throw new ForgeClientError(code, message);
   }
 
   private async reregisterSubscriptions(): Promise<void> {
     // Snapshot keys; callbacks for failed subs may mutate the map mid-loop
     const subscriptionIds = Array.from(this.subscriptionMeta.keys());
 
+    let first = true;
     for (const id of subscriptionIds) {
+      // Stagger re-registrations so a page with 100 subs doesn't issue 100
+      // POSTs in <1s after a reconnect. Skip the very first to keep latency
+      // low for single-sub pages.
+      if (!first) {
+        await new Promise((r) => setTimeout(r, 50 + Math.random() * 100));
+      }
+      first = false;
+
       const meta = this.subscriptionMeta.get(id);
       if (!meta) continue;
 
@@ -553,7 +710,9 @@ export class ForgeClient {
         meta.failedAttempts = 0;
       } catch (err) {
         meta.failedAttempts++;
-        console.error(`Failed to re-register subscription ${id} (attempt ${meta.failedAttempts}):`, err);
+        // Routed through onDebug so production builds don't leak subscription
+        // IDs into the browser console.
+        this.config.onDebug?.(`Failed to re-register subscription ${id} (attempt ${meta.failedAttempts}): ${err instanceof Error ? err.message : String(err)}`);
         const callback = this.subscriptions.get(`sub:${id}`);
         if (callback) {
           callback({
@@ -566,13 +725,66 @@ export class ForgeClient {
         }
       }
     }
+
+    // Re-register job/workflow subscriptions on the new session. Their server
+    // entries are bound to the prior (now-closed) session, so without this their
+    // progress/status pushes land on a channel no client reads. Skip any whose
+    // store has already torn down (callback removed) and forward the fresh
+    // snapshot so the store catches up to any state missed during the gap.
+    for (const [clientSubId, jobId] of Array.from(this.jobMeta)) {
+      if (!this.subscriptions.has(`job:${clientSubId}`)) {
+        this.jobMeta.delete(clientSubId);
+        continue;
+      }
+      try {
+        // Raw register — we're already inside the reconnect, so don't funnel
+        // through `_registerJob` (which would await this same reconnect).
+        const data = await this.registerSseJob(clientSubId, jobId);
+        if (data) this.subscriptions.get(`job:${clientSubId}`)?.(data);
+      } catch (err) {
+        this.config.onDebug?.(
+          `Failed to re-register job ${clientSubId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    for (const [clientSubId, workflowId] of Array.from(this.workflowMeta)) {
+      if (!this.subscriptions.has(`wf:${clientSubId}`)) {
+        this.workflowMeta.delete(clientSubId);
+        continue;
+      }
+      try {
+        // Raw register — see the job loop above.
+        const data = await this.registerSseWorkflow(clientSubId, workflowId);
+        if (data) this.subscriptions.get(`wf:${clientSubId}`)?.(data);
+      } catch (err) {
+        this.config.onDebug?.(
+          `Failed to re-register workflow ${clientSubId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
   }
 
-  private containsFiles(obj: unknown): boolean {
+  private containsFiles(obj: unknown, seen: WeakSet<object> = new WeakSet()): boolean {
     if (obj instanceof File || obj instanceof Blob) return true;
-    if (Array.isArray(obj)) return obj.some((item) => this.containsFiles(item));
     if (obj && typeof obj === "object") {
-      return Object.values(obj).some((value) => this.containsFiles(value));
+      if (seen.has(obj)) return false;
+      seen.add(obj);
+      // Date has no nested user data; skip to avoid scanning its prototype chain.
+      if (obj instanceof Date) return false;
+      if (obj instanceof Map) {
+        for (const v of obj.values()) {
+          if (this.containsFiles(v, seen)) return true;
+        }
+        return false;
+      }
+      if (obj instanceof Set) {
+        for (const v of obj.values()) {
+          if (this.containsFiles(v, seen)) return true;
+        }
+        return false;
+      }
+      if (Array.isArray(obj)) return obj.some((item) => this.containsFiles(item, seen));
+      return Object.values(obj).some((value) => this.containsFiles(value, seen));
     }
     return false;
   }
@@ -611,16 +823,24 @@ export class ForgeClient {
 
   private setConnectionState(state: ConnectionState): void {
     this.connectionState = state;
-    this.connectionListeners.forEach((listener) => listener(state));
+    for (const listener of this.connectionListeners) {
+      try {
+        listener(state);
+      } catch (err) {
+        // One misbehaving listener must not abort the rest. Surface via
+        // opt-in debug channel rather than the console.
+        this.config.onDebug?.(`connection listener threw: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
   }
 
   private scheduleReconnect(): void {
     if (this.reconnectAttempts >= this.maxReconnectAttempts) return;
 
-    // Exponential backoff with jitter to prevent synchronized retry storms
+    // Exponential backoff with full jitter: multiplier is [0,1) so retries
+    // are uniformly spread across the window rather than biased upward.
     const exponentialDelay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts);
-    const jitter = 0.5 + Math.random();
-    const delay = Math.min(exponentialDelay * jitter, 30000);
+    const delay = Math.min(exponentialDelay * Math.random(), 30000);
     this.reconnectAttempts++;
 
     setTimeout(() => {

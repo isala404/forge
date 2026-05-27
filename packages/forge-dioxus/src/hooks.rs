@@ -222,9 +222,16 @@ where
                 });
             }
             StreamEvent::Error(err) => {
-                // Suppress errors during reconnect attempts to avoid UI churn.
+                // Definitive auth/permission errors should surface immediately
+                // — no amount of retrying will fix them, and the UI needs to
+                // redirect to login. Transient errors are suppressed during
+                // reconnect attempts (1..10) to avoid UI churn.
+                let definitive = matches!(
+                    err.code.as_str(),
+                    "UNAUTHORIZED" | "FORBIDDEN" | "NOT_FOUND" | "VALIDATION_ERROR"
+                );
                 let attempts = reconnect_attempts.get();
-                if attempts > 0 && attempts < 10 {
+                if !definitive && attempts > 0 && attempts < 10 {
                     return;
                 }
                 let mut next = state.peek().clone();

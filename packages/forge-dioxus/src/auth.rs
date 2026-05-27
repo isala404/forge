@@ -261,6 +261,21 @@ pub fn ForgeAuthProvider(
     // Must follow use_context_provider above so ForgeClient is available
     let client: ForgeClient = use_context();
 
+    // Reconnect the SSE stream on every auth transition (login/logout) so
+    // existing subscriptions re-register over a session carrying the current
+    // token. Token *refresh* already reconnects (see `try_refresh_tokens`);
+    // without this, a manual login after the anonymous SSE handshake leaves
+    // queries subscribed on the anonymous session, where they keep returning
+    // UNAUTHORIZED and never deliver authenticated data. `generation` only bumps
+    // on actual login/logout transitions, and `reconnect_sse` is a no-op until
+    // subscriptions exist, so the initial mount costs nothing.
+    let client_for_auth = client.clone();
+    let auth_generation = generation;
+    use_effect(move || {
+        auth_generation.read();
+        client_for_auth.reconnect_sse();
+    });
+
     let url_for_refresh = url.clone();
     let client_for_refresh = client.clone();
     use_effect(move || {
@@ -375,6 +390,13 @@ async fn sleep(secs: u64) {
     tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
 }
 
+/// Browser-side auth storage.
+///
+/// SECURITY: refresh tokens are stored in `sessionStorage` rather than
+/// `localStorage` so they don't outlive the browsing context. Any XSS in the
+/// host page can still read them within the same tab — for production,
+/// configure the server to issue refresh tokens as `HttpOnly; Secure;
+/// SameSite=Strict` cookies and stop sending them in the JSON body.
 #[cfg(target_arch = "wasm32")]
 mod storage {
     use super::StoredAuth;
@@ -386,7 +408,7 @@ mod storage {
     pub fn save(app_name: &str, auth: &StoredAuth) {
         if let Ok(json) = serde_json::to_string(auth) {
             if let Some(storage) = web_sys::window()
-                .and_then(|w| w.local_storage().ok())
+                .and_then(|w| w.session_storage().ok())
                 .flatten()
             {
                 let _ = storage.set_item(&key(app_name), &json);
@@ -395,14 +417,14 @@ mod storage {
     }
 
     pub fn load(app_name: &str) -> Option<StoredAuth> {
-        let storage = web_sys::window()?.local_storage().ok()??;
+        let storage = web_sys::window()?.session_storage().ok()??;
         let json = storage.get_item(&key(app_name)).ok()??;
         serde_json::from_str(&json).ok()
     }
 
     pub fn clear(app_name: &str) {
         if let Some(storage) = web_sys::window()
-            .and_then(|w| w.local_storage().ok())
+            .and_then(|w| w.session_storage().ok())
             .flatten()
         {
             let _ = storage.remove_item(&key(app_name));
@@ -416,8 +438,29 @@ mod storage {
     use std::fs;
     use std::path::PathBuf;
 
+    /// Strip path separators and other unsafe characters so a caller-supplied
+    /// `app_name` cannot escape `data_local_dir()` via `..` or absolute paths.
+    fn sanitize_app_name(app_name: &str) -> String {
+        let cleaned: String = app_name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        if cleaned.is_empty() {
+            "forge_app".to_string()
+        } else {
+            cleaned
+        }
+    }
+
     fn storage_path(app_name: &str) -> Option<PathBuf> {
-        dirs::data_local_dir().map(|base| base.join(app_name).join("auth.json"))
+        let safe = sanitize_app_name(app_name);
+        dirs::data_local_dir().map(|base| base.join(safe).join("auth.json"))
     }
 
     pub fn save(app_name: &str, auth: &StoredAuth) {

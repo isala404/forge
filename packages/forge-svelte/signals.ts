@@ -141,8 +141,13 @@ export class ForgeSignals {
   async page(properties?: Record<string, unknown>): Promise<void> {
     if (!this.config.enabled) return;
     try {
+      // Re-extract UTM on each call so SPA navigations to new utm_*-bearing
+      // URLs still propagate. Drop the querystring from the captured URL
+      // since arbitrary query params often carry secrets (?ssoToken=…,
+      // ?reset_token=…).
+      this.utmParams = this.extractUtm();
       const payload: Record<string, unknown> = {
-        url: location.href,
+        url: location.pathname,
         referrer: document.referrer || undefined,
         title: document.title || undefined,
         ...this.utmParams,
@@ -177,7 +182,7 @@ export class ForgeSignals {
       context,
       correlation_id: this.lastCorrelationId ?? undefined,
       breadcrumbs: [...this.breadcrumbs],
-      page_url: typeof location !== "undefined" ? location.href : undefined,
+      page_url: typeof location !== "undefined" ? location.pathname : undefined,
     }]);
   }
 
@@ -211,7 +216,7 @@ export class ForgeSignals {
         value,
         rating: extra?.rating,
         attribution: extra?.attribution,
-        page_url: typeof location !== "undefined" ? location.href : undefined,
+        page_url: typeof location !== "undefined" ? location.pathname : undefined,
       },
       correlation_id: this.lastCorrelationId ?? undefined,
     });
@@ -229,6 +234,10 @@ export class ForgeSignals {
       headers: {
         "Content-Type": "application/json",
         "x-forge-platform": "web",
+        // CSRF mitigation: a custom header forces a preflight on cross-origin
+        // requests. If the server's CORS allowlist excludes attacker origins,
+        // the preflight is rejected before the credentialed POST is sent.
+        "X-Forge-CSRF": "1",
         ...(this.sessionId ? { "x-session-id": this.sessionId } : {}),
       },
       credentials: "include",
@@ -264,7 +273,7 @@ export class ForgeSignals {
           payload: {
             events,
             context: {
-              page_url: typeof location !== "undefined" ? location.href : undefined,
+              page_url: typeof location !== "undefined" ? location.pathname : undefined,
               session_id: this.sessionId,
             },
           },
@@ -293,7 +302,7 @@ export class ForgeSignals {
       payload: {
         events,
         context: {
-          page_url: typeof location !== "undefined" ? location.href : undefined,
+          page_url: typeof location !== "undefined" ? location.pathname : undefined,
           session_id: this.sessionId,
         },
       },
@@ -344,14 +353,14 @@ export class ForgeSignals {
     if (typeof window === "undefined") return;
 
     if (this.config.autoPageViews) {
-      this.lastPageUrl = location.href;
+      this.lastPageUrl = location.pathname;
       this.page();
 
       this.originalPushState = history.pushState.bind(history);
       this.originalReplaceState = history.replaceState.bind(history);
 
       const onNavigation = () => {
-        const current = location.href;
+        const current = location.pathname;
         if (current !== this.lastPageUrl) {
           this.lastPageUrl = current;
           this.page();
