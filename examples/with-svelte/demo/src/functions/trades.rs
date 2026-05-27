@@ -37,13 +37,23 @@ struct ParsedTradeRecord {
     is_buyer_maker: bool,
 }
 
-fn parse_trade_message(text: &str, fallback_time: Timestamp) -> Option<ParsedTradeRecord> {
-    let trade = serde_json::from_str::<BinanceTrade>(text).ok()?;
+fn parse_trade_message(text: &str, fallback_time: Timestamp) -> Result<ParsedTradeRecord> {
+    let trade = serde_json::from_str::<BinanceTrade>(text)
+        .map_err(|e| ForgeError::Deserialization(format!("invalid trade message: {e}")))?;
 
-    Some(ParsedTradeRecord {
+    let price = trade
+        .price
+        .parse::<f64>()
+        .map_err(|e| ForgeError::Deserialization(format!("invalid trade price: {e}")))?;
+    let quantity = trade
+        .quantity
+        .parse::<f64>()
+        .map_err(|e| ForgeError::Deserialization(format!("invalid trade quantity: {e}")))?;
+
+    Ok(ParsedTradeRecord {
         symbol: trade.symbol,
-        price: trade.price.parse().unwrap_or(0.0),
-        quantity: trade.quantity.parse().unwrap_or(0.0),
+        price,
+        quantity,
         trade_time: chrono::DateTime::from_timestamp_millis(trade.trade_time)
             .unwrap_or(fallback_time),
         is_buyer_maker: trade.is_buyer_maker,
@@ -91,30 +101,40 @@ pub async fn trade_stream(ctx: &DaemonContext) -> Result<()> {
             msg = read.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        if let Some(trade) = parse_trade_message(&text, Utc::now()) {
-                            sqlx::query!(
-                                "INSERT INTO trades (id, symbol, price, quantity, trade_time, is_buyer_maker, created_at) \
-                                 VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, NOW())",
-                                &trade.symbol,
-                                trade.price,
-                                trade.quantity,
-                                trade.trade_time,
-                                trade.is_buyer_maker
-                            )
-                            .execute(ctx.db())
-                            .await
-                            .ok();
+                        match parse_trade_message(&text, Utc::now()) {
+                            Ok(trade) => {
+                                sqlx::query!(
+                                    "INSERT INTO trades (id, symbol, price, quantity, trade_time, is_buyer_maker, created_at) \
+                                     VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, NOW())",
+                                    &trade.symbol,
+                                    trade.price,
+                                    trade.quantity,
+                                    trade.trade_time,
+                                    trade.is_buyer_maker
+                                )
+                                .execute(ctx.db())
+                                .await?;
+                            }
+                            Err(e) => {
+                                tracing::warn!("Skipping unparsable trade message: {e}");
+                            }
                         }
                     }
                     Some(Ok(Message::Close(_))) => {
-                        tracing::warn!("WebSocket closed by server");
-                        break;
+                        return Err(ForgeError::internal(
+                            "Binance WebSocket closed by server; daemon will restart",
+                        ));
                     }
                     Some(Err(e)) => {
-                        tracing::error!("WebSocket error: {}", e);
-                        break;
+                        return Err(ForgeError::internal(format!(
+                            "Binance WebSocket error: {e}"
+                        )));
                     }
-                    None => break,
+                    None => {
+                        return Err(ForgeError::internal(
+                            "Binance WebSocket stream ended; daemon will restart",
+                        ));
+                    }
                     _ => {}
                 }
             }
@@ -140,7 +160,7 @@ mod tests {
             r#"{"s":"EURUSDT","p":"1.1234","q":"250.50","T":1704067200000,"m":true}"#,
             fallback,
         )
-        .unwrap();
+        .expect("valid trade message parses");
 
         assert_eq!(parsed.symbol, "EURUSDT");
         assert_eq!(parsed.price, 1.1234);
@@ -150,23 +170,20 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_trade_message_returns_none_for_invalid_json() {
+    fn test_parse_trade_message_errors_for_invalid_json() {
         let fallback = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
-        assert!(parse_trade_message("not-json", fallback).is_none());
+        let err = parse_trade_message("not-json", fallback).unwrap_err();
+        assert!(matches!(err, ForgeError::Deserialization(_)));
     }
 
     #[test]
-    fn test_parse_trade_message_falls_back_for_invalid_numbers_and_timestamp() {
+    fn test_parse_trade_message_errors_for_invalid_numbers() {
         let fallback = Utc.with_ymd_and_hms(2024, 5, 12, 8, 30, 0).unwrap();
-        let parsed = parse_trade_message(
+        let err = parse_trade_message(
             r#"{"s":"EURUSDT","p":"oops","q":"nope","T":9223372036854775807,"m":false}"#,
             fallback,
         )
-        .unwrap();
-
-        assert_eq!(parsed.price, 0.0);
-        assert_eq!(parsed.quantity, 0.0);
-        assert_eq!(parsed.trade_time, fallback);
-        assert!(!parsed.is_buyer_maker);
+        .unwrap_err();
+        assert!(matches!(err, ForgeError::Deserialization(_)));
     }
 }

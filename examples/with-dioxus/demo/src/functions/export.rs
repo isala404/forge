@@ -14,7 +14,12 @@ pub struct ExportOutput {
     pub format: String,
 }
 
-/// Export users as CSV or JSON with progress reporting
+/// Export users as CSV or JSON with progress reporting.
+///
+/// The `tokio::time::sleep` calls below are SIMULATED work — they exist solely so the
+/// progress UI is visible in the demo. Replace them with real I/O (S3 puts, large
+/// DB scans, format conversion) in production code. Never ship sleep-padded jobs:
+/// they pin worker slots and inflate p99 for no value.
 #[forge::job(
     timeout = "5m",
     priority = "low",

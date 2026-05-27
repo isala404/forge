@@ -1,6 +1,4 @@
--- @up
-
--- Replace with your tables here
+-- Migrations are forward-only. Add your schema changes below.
 -- Example:
 -- CREATE TABLE IF NOT EXISTS users (
 --     id UUID PRIMARY KEY,
@@ -9,10 +7,3 @@
 --     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 -- );
 -- SELECT forge_enable_reactivity('users');
-
--- @down
-
--- Add your rollback statements here
--- Example:
--- SELECT forge_disable_reactivity('users');
--- DROP TABLE IF EXISTS users;

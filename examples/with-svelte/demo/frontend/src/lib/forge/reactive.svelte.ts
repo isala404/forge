@@ -13,6 +13,7 @@ import {
   login,
   refreshToken,
   register,
+  triggerDemoWebhook,
   updateUser,
 } from "./api";
 import {
@@ -31,6 +32,7 @@ import type {
   RegisterInput,
   TokenPair,
   Trade,
+  TriggerDemoWebhookInput,
   User,
   UserRole,
   WebhookEvent,
@@ -63,6 +65,10 @@ export const refreshToken$ = (): ReactiveMutation<RefreshInput, TokenPair> =>
   toReactiveMutation(refreshToken);
 export const register$ = (): ReactiveMutation<RegisterInput, AuthResponse> =>
   toReactiveMutation(register);
+export const triggerDemoWebhook$ = (): ReactiveMutation<
+  TriggerDemoWebhookInput,
+  boolean
+> => toReactiveMutation(triggerDemoWebhook);
 export const updateUser$ = (): ReactiveMutation<
   {
     id: string;

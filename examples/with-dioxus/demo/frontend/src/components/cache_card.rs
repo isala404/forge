@@ -36,15 +36,12 @@ pub fn CacheCard() -> Element {
             spawn(async move {
                 loading.set(true);
                 let start = now_ms();
-                match forge::get_demo_stats(&client).await {
-                    Ok(stats) => {
-                        let elapsed = now_ms() - start;
-                        signals.track_with_properties("cache_fetch", json!({"response_ms": elapsed, "cache_hit": elapsed < 100.0, "fetch_number": fetch_count() + 1}));
-                        data.set(Some(stats));
-                        response_ms.set(Some(elapsed));
-                        fetch_count.set(fetch_count() + 1);
-                    }
-                    Err(_) => {}
+                if let Ok(stats) = forge::get_demo_stats(&client).await {
+                    let elapsed = now_ms() - start;
+                    signals.track_with_properties("cache_fetch", json!({"response_ms": elapsed, "cache_hit": elapsed < 100.0, "fetch_number": fetch_count() + 1}));
+                    data.set(Some(stats));
+                    response_ms.set(Some(elapsed));
+                    fetch_count.set(fetch_count() + 1);
                 }
                 loading.set(false);
             });

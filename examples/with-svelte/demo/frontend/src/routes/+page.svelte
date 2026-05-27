@@ -10,6 +10,7 @@
     trackExportUsers,
     trackAccountVerification,
     confirmVerification,
+    triggerDemoWebhook,
     getUsers$,
     getIssLocation$,
     getTrades$,
@@ -26,7 +27,8 @@
   const signals = getForgeSignals();
   const apiUrl = PUBLIC_API_URL;
 
-  const users = getUsers$();
+  // `get_users` requires auth; only subscribe once logged in (avoids an
+  // anonymous 401 and a wasted SSE subscription). Created in the template.
   const issLocation = getIssLocation$();
   const trades = getTrades$();
   const webhookEvents = getWebhookEvents$();
@@ -55,8 +57,11 @@
 
   // Auth form state (only form inputs and UI state are local)
   let authMode = $state<"login" | "register">("login");
-  let authEmail = $state("demo@example.com");
-  let authPassword = $state("password123");
+  // Prefill credentials only when the SvelteKit build runs in dev mode (Vite `import.meta.env.DEV`).
+  // Production bundles ship with empty fields so leaked demos don't double as one-click logins.
+  const DEV_PREFILL = import.meta.env.DEV;
+  let authEmail = $state(DEV_PREFILL ? "demo@example.com" : "");
+  let authPassword = $state(DEV_PREFILL ? "password123" : "");
   let authName = $state("");
   let authLoading = $state(false);
   let authError = $state<string | null>(null);
@@ -173,39 +178,15 @@
   async function triggerWebhook() {
     signals.breadcrumb("Sending webhook");
     webhookError = null;
-    const secret = "demo-secret";
-    const payload = JSON.stringify({ action: "test", ts: Date.now() });
-
-    const encoder = new TextEncoder();
-    const key = await crypto.subtle.importKey(
-      "raw",
-      encoder.encode(secret),
-      { name: "HMAC", hash: "SHA-256" },
-      false,
-      ["sign"]
-    );
-    const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(payload));
-    const signatureHex = Array.from(new Uint8Array(signature))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
-
-    const res = await fetch(`${apiUrl}/_api/webhooks/demo`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Webhook-Signature": signatureHex,
-        "X-Webhook-Timestamp": Math.floor(Date.now() / 1000).toString(),
-        "X-Idempotency-Key": idempotencyKey,
-      },
-      body: payload,
-    });
-
-    if (res.ok) {
+    // The HMAC secret lives on the server. The backend signs and POSTs the
+    // webhook to itself so the browser bundle never ships the secret.
+    try {
+      await triggerDemoWebhook({ idempotency_key: idempotencyKey });
       keyUsed = true;
       signals.track("webhook_sent", { idempotency_key: idempotencyKey });
-    } else {
-      webhookError = `Error: ${res.status}`;
-      signals.track("webhook_error", { status: res.status });
+    } catch (err: unknown) {
+      webhookError = err instanceof Error ? err.message : String(err);
+      signals.track("webhook_error");
     }
   }
 
@@ -562,7 +543,9 @@
     </div>
   </div>
 
-  <section class="card">
+  {#if auth.isAuthenticated}
+    {@const users = getUsers$()}
+    <section class="card">
     <h2>Users <span class="badge green">crud + subscribe</span></h2>
     <form class="form-row" onsubmit={handleCreateUser}>
       <input type="text" placeholder="Name" bind:value={name} required />
@@ -612,7 +595,8 @@
     {:else if !users.loading}
       <p class="muted">No users yet. Create one above.</p>
     {/if}
-  </section>
+    </section>
+  {/if}
 </main>
 
 <style>

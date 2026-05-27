@@ -6,8 +6,9 @@ rust-version = "1.92"
 publish = false
 
 [features]
-default = ["embedded-frontend"]
+default = []
 embedded-frontend = ["dep:rust-embed", "forge/embedded-frontend"]
+testcontainers = ["forge/testcontainers"]
 
 [dependencies]
 forge = { workspace = true }
@@ -24,6 +25,9 @@ tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 argon2 = "0.5"
 password-hash = "0.5"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
 rust-embed = { version = "8", optional = true }
 
 [build-dependencies]

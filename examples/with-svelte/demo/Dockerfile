@@ -1,4 +1,4 @@
-FROM rust:1-slim-bookworm AS dev
+FROM rust:1.92-slim-bookworm AS dev
 
 WORKDIR /app
 
@@ -15,19 +15,19 @@ RUN cargo install cargo-watch --locked && \
 # Development command - no frontend embedding, watch for changes
 CMD ["cargo", "watch", "-x", "run --no-default-features"]
 
-FROM oven/bun:1-alpine AS frontend-builder
+FROM oven/bun:1.1.34-alpine AS frontend-builder
 
 WORKDIR /app/frontend
 
 COPY frontend/package.json frontend/bun.lock* ./
 
-RUN bun install --frozen-lockfile || bun install
+RUN bun install --frozen-lockfile
 
 COPY frontend ./
 
 RUN bun run build
 
-FROM rust:1-alpine AS builder
+FROM rust:1.92-alpine AS builder
 
 WORKDIR /app
 

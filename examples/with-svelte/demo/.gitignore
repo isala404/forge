@@ -13,6 +13,8 @@ frontend/playwright-report/
 frontend/test-results/
 
 # Environment
+# `.env` is tracked with dev-only secrets so `forge test` works from a clean
+# checkout; the template archive excludes it (see build-template-archive.sh).
 .env.local
 .env.*.local
 

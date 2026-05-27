@@ -30,10 +30,10 @@ pub async fn mcp_me(ctx: &McpToolContext) -> forge::forge_core::Result<McpUserIn
     name = "demo.list_users",
     title = "List Users",
     description = "List all users in the demo database with their roles",
-    public,
     read_only
 )]
 pub async fn mcp_list_users(ctx: &McpToolContext) -> forge::forge_core::Result<Vec<McpUserInfo>> {
+    let _ = ctx.user_id()?;
     let mut conn = ctx.conn().await?;
 
     let users = sqlx::query_as!(
@@ -63,13 +63,13 @@ pub struct McpGetUserInput {
     name = "demo.get_user_by_email",
     title = "Get User by Email",
     description = "Look up a single user by their email address",
-    public,
     read_only
 )]
 pub async fn mcp_get_user_by_email(
     ctx: &McpToolContext,
     input: McpGetUserInput,
 ) -> forge::forge_core::Result<Option<McpUserInfo>> {
+    let _ = ctx.user_id()?;
     let mut conn = ctx.conn().await?;
 
     let user = sqlx::query_as!(

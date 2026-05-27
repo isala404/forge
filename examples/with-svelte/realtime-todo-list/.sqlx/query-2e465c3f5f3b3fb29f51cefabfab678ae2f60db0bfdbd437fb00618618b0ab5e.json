@@ -1,14 +1,15 @@
 {
   "db_name": "PostgreSQL",
-  "query": "DELETE FROM todos WHERE id = $1",
+  "query": "DELETE FROM todos WHERE id = $1 AND user_id = $2",
   "describe": {
     "columns": [],
     "parameters": {
       "Left": [
+        "Uuid",
         "Uuid"
       ]
     },
     "nullable": []
   },
-  "hash": "183ad1d8316ef2ae5ac6ae4811b8a2bdbaeabbe137a871e26741a419a1aa5b19"
+  "hash": "2e465c3f5f3b3fb29f51cefabfab678ae2f60db0bfdbd437fb00618618b0ab5e"
 }

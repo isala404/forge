@@ -5,7 +5,7 @@ services:
       dockerfile: Dockerfile
       target: dev
     ports:
-      - "9081:9081"
+      - "127.0.0.1:9081:9081"
     env_file:
       - .env
     environment:
@@ -34,7 +34,7 @@ services:
     working_dir: /app
     command: sh -c "bun install && bun run dev --host 0.0.0.0 --port 9080"
     ports:
-      - "9080:9080"
+      - "127.0.0.1:9080:9080"
     env_file:
       - ./frontend/.env
     volumes:
@@ -60,7 +60,7 @@ services:
   otel:
     build: ../../../docker/otel-lgtm
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     env_file:
       - .env
     environment:

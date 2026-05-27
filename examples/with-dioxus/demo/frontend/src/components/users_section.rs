@@ -4,11 +4,30 @@ use serde_json::json;
 
 use crate::forge::{
     CreateUserParams, DeleteUserParams, UpdateUserParams, User, use_create_user, use_delete_user,
-    use_get_users_subscription, use_update_user,
+    use_forge_auth, use_get_users_subscription, use_update_user,
 };
 
+/// `get_users` requires an authenticated session, so only mount the subscribing
+/// inner component once logged in. Subscribing while anonymous would fire a 401
+/// on every page load (Dioxus hooks can't be called conditionally, so the gate
+/// has to live at the component boundary).
 #[component]
 pub fn UsersSection(selected_user: Signal<Option<User>>) -> Element {
+    let auth = use_forge_auth();
+    rsx! {
+        if auth.is_authenticated() {
+            UsersSectionInner { selected_user }
+        } else {
+            section { class: "card",
+                h2 { "Users " span { class: "badge green", "crud + subscribe" } }
+                p { class: "muted", "Log in to manage users." }
+            }
+        }
+    }
+}
+
+#[component]
+fn UsersSectionInner(selected_user: Signal<Option<User>>) -> Element {
     let create_user = use_create_user();
     let update_user = use_update_user();
     let delete_user = use_delete_user();

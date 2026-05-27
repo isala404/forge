@@ -23,7 +23,7 @@ pub fn DemoPage() -> Element {
                 div { class: "col",
                     TradesCard {}
                     AuthCard {}
-                    WebhookCard { api_url: API_URL.to_string() }
+                    WebhookCard {}
                     VerificationCard { selected_user }
                 }
             }

@@ -20,7 +20,12 @@ pub struct RefreshInput {
 }
 
 async fn auth_response(ctx: &MutationContext, user: &User) -> Result<AuthResponse> {
-    let pair = ctx.issue_token_pair(user.id, &["user"]).await?;
+    let role = match user.role {
+        UserRole::Admin => "admin",
+        UserRole::Member => "user",
+        UserRole::Guest => "guest",
+    };
+    let pair = ctx.issue_token_pair(user.id, &[role]).await?;
     Ok(AuthResponse {
         access_token: pair.access_token,
         refresh_token: pair.refresh_token,

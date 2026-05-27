@@ -112,14 +112,15 @@ pub struct ConfirmVerificationInput {
     pub workflow_id: String,
 }
 
-#[forge::mutation(auth = "none")]
 // forge_workflow_events is owned by the runtime, so the framework user's .sqlx
 // cache doesn't see it. Runtime sqlx::query is the right tool here.
+#[forge::mutation(tables("forge_workflow_events"), scope = "global")]
 #[allow(clippy::disallowed_methods)]
 pub async fn confirm_verification(
     ctx: &MutationContext,
     input: ConfirmVerificationInput,
 ) -> Result<bool> {
+    let _ = ctx.user_id()?;
     // Insert the confirmation event into the workflow events table.
     // The scheduler's NOTIFY trigger will wake the waiting workflow.
     sqlx::query(

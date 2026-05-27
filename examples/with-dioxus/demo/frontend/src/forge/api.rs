@@ -192,6 +192,16 @@ pub async fn register(
 pub fn use_register() -> Mutation<RegisterInput, AuthResponse> {
     use_forge_mutation("register")
 }
+pub async fn trigger_demo_webhook(
+    client: &ForgeClient,
+    args: TriggerDemoWebhookInput,
+) -> Result<bool, ForgeClientError> {
+    client.call("trigger_demo_webhook", args).await
+}
+
+pub fn use_trigger_demo_webhook() -> Mutation<TriggerDemoWebhookInput, bool> {
+    use_forge_mutation("trigger_demo_webhook")
+}
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct UpdateUserParams {
     pub id: String,

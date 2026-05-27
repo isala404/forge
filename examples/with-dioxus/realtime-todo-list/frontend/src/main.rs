@@ -3,7 +3,7 @@ mod todo_app;
 mod todo_item;
 
 use dioxus::prelude::*;
-use forge::ForgeProvider;
+use forge::ForgeAuthProvider;
 use todo_app::TodoApp;
 
 fn api_url() -> &'static str {
@@ -19,8 +19,9 @@ fn App() -> Element {
     rsx! {
         document::Title { "Todos" }
         document::Stylesheet { href: asset!("/public/style.css") }
-        ForgeProvider {
+        ForgeAuthProvider {
             url: api_url().to_string(),
+            app_name: "todo-dioxus".to_string(),
             TodoApp {}
         }
     }

@@ -69,35 +69,53 @@ pub async fn trade_stream(ctx: &DaemonContext) -> Result<()> {
             msg = read.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        if let Ok(trade) = serde_json::from_str::<BinanceTrade>(&text) {
-                            let price: f64 = trade.price.parse().unwrap_or(0.0);
-                            let quantity: f64 = trade.quantity.parse().unwrap_or(0.0);
-                            let trade_time = chrono::DateTime::from_timestamp_millis(trade.trade_time)
+                        match serde_json::from_str::<BinanceTrade>(&text) {
+                            Ok(trade) => {
+                                let price: f64 = trade.price.parse().map_err(|e| {
+                                    ForgeError::Deserialization(format!("invalid trade price: {e}"))
+                                })?;
+                                let quantity: f64 = trade.quantity.parse().map_err(|e| {
+                                    ForgeError::Deserialization(format!(
+                                        "invalid trade quantity: {e}"
+                                    ))
+                                })?;
+                                let trade_time = chrono::DateTime::from_timestamp_millis(
+                                    trade.trade_time,
+                                )
                                 .unwrap_or_else(Utc::now);
 
-                            sqlx::query!(
-                                "INSERT INTO trades (id, symbol, price, quantity, trade_time, is_buyer_maker, created_at) \
-                                 VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, NOW())",
-                                &trade.symbol,
-                                price,
-                                quantity,
-                                trade_time,
-                                trade.is_buyer_maker
-                            )
-                            .execute(ctx.db())
-                            .await
-                            .ok();
+                                sqlx::query!(
+                                    "INSERT INTO trades (id, symbol, price, quantity, trade_time, is_buyer_maker, created_at) \
+                                     VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, NOW())",
+                                    &trade.symbol,
+                                    price,
+                                    quantity,
+                                    trade_time,
+                                    trade.is_buyer_maker
+                                )
+                                .execute(ctx.db())
+                                .await?;
+                            }
+                            Err(e) => {
+                                tracing::warn!("Skipping unparsable trade message: {e}");
+                            }
                         }
                     }
                     Some(Ok(Message::Close(_))) => {
-                        tracing::warn!("WebSocket closed by server");
-                        break;
+                        return Err(ForgeError::internal(
+                            "Binance WebSocket closed by server; daemon will restart",
+                        ));
                     }
                     Some(Err(e)) => {
-                        tracing::error!("WebSocket error: {}", e);
-                        break;
+                        return Err(ForgeError::internal(format!(
+                            "Binance WebSocket error: {e}"
+                        )));
                     }
-                    None => break,
+                    None => {
+                        return Err(ForgeError::internal(
+                            "Binance WebSocket stream ended; daemon will restart",
+                        ));
+                    }
                     _ => {}
                 }
             }
