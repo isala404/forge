@@ -222,7 +222,7 @@ pub async fn harness_get_counter(ctx: &QueryContext, name: String) -> Result<Opt
 
 /// Upsert a counter, incrementing its value. Triggers reactivity on
 /// `harness_counters`.
-#[forge::mutation(auth = "none")]
+#[forge::mutation(auth = "none", tables("harness_counters"), scope = "global")]
 pub async fn harness_bump_counter(ctx: &MutationContext, input: BumpInput) -> Result<Counter> {
     let mut conn = ctx.conn().await?;
     sqlx::query_as::<_, Counter>(
@@ -239,7 +239,7 @@ pub async fn harness_bump_counter(ctx: &MutationContext, input: BumpInput) -> Re
 
 /// Insert a widget row. Touches `harness_widgets` only — used to prove a
 /// mutation on an unrelated table does NOT invalidate a counter subscription.
-#[forge::mutation(auth = "none")]
+#[forge::mutation(auth = "none", tables("harness_widgets"), scope = "global")]
 pub async fn harness_add_widget(ctx: &MutationContext, name: String) -> Result<Uuid> {
     let mut conn = ctx.conn().await?;
     let row: (Uuid,) =
@@ -248,6 +248,26 @@ pub async fn harness_add_widget(ctx: &MutationContext, name: String) -> Result<U
             .fetch_one(&mut conn)
             .await?;
     Ok(row.0)
+}
+
+/// Insert a widget, dispatch a job, then error — all on the implicit
+/// transaction. Both the data row and the buffered job row (dispatched on the
+/// tx via the outbox path) must roll back. Mutations are transactional by
+/// default, so the `dispatch_job` lands on the same tx that the error unwinds.
+#[forge::mutation(auth = "none", tables("harness_widgets"), scope = "global")]
+pub async fn harness_tx_rollback(ctx: &MutationContext, name: String) -> Result<Uuid> {
+    let mut conn = ctx.conn().await?;
+    let _: (Uuid,) = sqlx::query_as("INSERT INTO harness_widgets (name) VALUES ($1) RETURNING id")
+        .bind(&name)
+        .fetch_one(&mut conn)
+        .await?;
+    // Release the tx connection before dispatch_job re-acquires it.
+    drop(conn);
+    ctx.dispatch_job("harness_run_job", RunJobInput { steps: 1 })
+        .await?;
+    Err(ForgeError::internal(
+        "harness_tx_rollback fails after dispatch by design — widget and job must roll back",
+    ))
 }
 
 /// RPC dispatch result for a job: the gateway returns `{"job_id": "..."}`
@@ -294,6 +314,44 @@ pub async fn harness_failing_job(_ctx: &JobContext, input: RunJobInput) -> Resul
         "harness_failing_job fails by design (steps={})",
         input.steps,
     )))
+}
+
+/// Output of [`harness_retry_job`]: proves the second attempt observed the
+/// retry state rather than just "the handler ran twice".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryJobOutput {
+    pub was_retry: bool,
+    pub attempt: u32,
+}
+
+/// Fails its first attempt by design, succeeds on the retry. `max_attempts = 2`
+/// with a fixed (~1s) backoff exercises retry-then-succeed: the attempt counter
+/// must advance and `ctx.is_retry()` must be true on the second run. The audit
+/// found this path had no coverage at any layer.
+#[forge::job(auth = "none", retry(max_attempts = 2, backoff = "fixed"))]
+pub async fn harness_retry_job(ctx: &JobContext, _input: RunJobInput) -> Result<RetryJobOutput> {
+    if !ctx.is_retry() {
+        return Err(ForgeError::internal(
+            "harness_retry_job fails the first attempt by design",
+        ));
+    }
+    Ok(RetryJobOutput {
+        was_retry: ctx.is_retry(),
+        attempt: ctx.attempt,
+    })
+}
+
+/// Always fails. With `max_attempts = 2` it fails attempt 1 (retry scheduled),
+/// fails attempt 2 (attempts == max), and must land in `dead_letter` — proving
+/// the dead-letter routing terminates rather than retrying forever.
+#[forge::job(auth = "none", retry(max_attempts = 2, backoff = "fixed"))]
+pub async fn harness_dead_letter_job(
+    _ctx: &JobContext,
+    _input: RunJobInput,
+) -> Result<RunJobOutput> {
+    Err(ForgeError::internal(
+        "harness_dead_letter_job always fails by design",
+    ))
 }
 
 /// RPC dispatch result for a workflow: the gateway returns
@@ -382,7 +440,7 @@ pub async fn harness_gated(ctx: &WorkflowContext, input: PipelineInput) -> Resul
 /// Fire the `harness_gate_opened` event that unblocks a waiting
 /// [`harness_gated`] run. `workflow_id` is the run id the workflow's RPC
 /// dispatch returned; it is the event's correlation id.
-#[forge::mutation(auth = "none")]
+#[forge::mutation(auth = "none", tables("forge_workflow_events"), scope = "global")]
 pub async fn harness_open_gate(ctx: &MutationContext, workflow_id: String) -> Result<bool> {
     sqlx::query(
         "INSERT INTO forge_workflow_events (id, event_name, correlation_id, payload)
@@ -409,7 +467,7 @@ pub struct Note {
 /// call form keeps that WHERE clause invisible to the macro's structural scope
 /// lint, so `scope = "global"` opts out — runtime isolation via `ctx.user_id()`
 /// is real and is exactly what the auth scenarios assert.
-#[forge::query(scope = "global", tables("harness_notes"))]
+#[forge::query(tables("harness_notes"), scope = "global")]
 pub async fn harness_my_notes(ctx: &QueryContext) -> Result<Vec<Note>> {
     let owner = ctx.user_id()?;
     sqlx::query_as::<_, Note>(
@@ -426,7 +484,7 @@ pub async fn harness_my_notes(ctx: &QueryContext) -> Result<Vec<Note>> {
 /// A bare INSERT has no WHERE clause for the macro's structural scope lint to
 /// inspect, so `scope = "global"` opts out — the row is still scoped at
 /// runtime by stamping `owner_id` with `ctx.user_id()`.
-#[forge::mutation(scope = "global", tables("harness_notes"))]
+#[forge::mutation(tables("harness_notes"), scope = "global")]
 pub async fn harness_create_note(ctx: &MutationContext, body: String) -> Result<Note> {
     let owner = ctx.user_id()?;
     let mut conn = ctx.conn().await?;

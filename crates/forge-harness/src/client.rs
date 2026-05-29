@@ -76,9 +76,9 @@ impl HarnessClient {
         A: serde::Serialize,
         R: DeserializeOwned,
     {
-        let envelope = self.call_raw(function, args).await?;
+        let (status, envelope) = self.call_raw_with_status(function, args).await?;
         if !envelope.success {
-            return Err(envelope_to_error(envelope));
+            return Err(envelope_to_error(envelope, status));
         }
         let data = envelope.data.unwrap_or(serde_json::Value::Null);
         Ok(serde_json::from_value(data)?)
@@ -89,6 +89,21 @@ impl HarnessClient {
     /// in `RpcEnvelope.error.code` and the response status code is folded in
     /// when the envelope is missing (e.g. middleware rejection).
     pub async fn call_raw<A>(&self, function: &str, args: A) -> Result<RpcEnvelope, HarnessError>
+    where
+        A: serde::Serialize,
+    {
+        let (_status, envelope) = self.call_raw_with_status(function, args).await?;
+        Ok(envelope)
+    }
+
+    /// Same as [`call_raw`] but also returns the HTTP status code. Used
+    /// internally so error envelopes can carry the real status (401 vs 403 vs
+    /// 500) instead of collapsing to 0.
+    pub async fn call_raw_with_status<A>(
+        &self,
+        function: &str,
+        args: A,
+    ) -> Result<(u16, RpcEnvelope), HarnessError>
     where
         A: serde::Serialize,
     {
@@ -112,17 +127,20 @@ impl HarnessClient {
         // Empty body with non-2xx status: synthesize an envelope so callers
         // get a uniform error type rather than a serde failure on `null`.
         if bytes.is_empty() && !status.is_success() {
-            return Ok(RpcEnvelope {
-                success: false,
-                data: None,
-                error: Some(RpcEnvelopeError {
-                    code: format!("HTTP_{}", status.as_u16()),
-                    message: status.canonical_reason().unwrap_or("unknown").to_string(),
-                    retry_after_secs: None,
-                    details: None,
-                }),
-                request_id: None,
-            });
+            return Ok((
+                status.as_u16(),
+                RpcEnvelope {
+                    success: false,
+                    data: None,
+                    error: Some(RpcEnvelopeError {
+                        code: format!("HTTP_{}", status.as_u16()),
+                        message: status.canonical_reason().unwrap_or("unknown").to_string(),
+                        retry_after_secs: None,
+                        details: None,
+                    }),
+                    request_id: None,
+                },
+            ));
         }
 
         let envelope: RpcEnvelope =
@@ -135,7 +153,7 @@ impl HarnessClient {
                 ),
                 status: status.as_u16(),
             })?;
-        Ok(envelope)
+        Ok((status.as_u16(), envelope))
     }
 
     /// Invoke an RPC and assert that it failed. Returns the error envelope
@@ -148,7 +166,7 @@ impl HarnessClient {
     where
         A: serde::Serialize,
     {
-        let envelope = self.call_raw(function, args).await?;
+        let (status, envelope) = self.call_raw_with_status(function, args).await?;
         if envelope.success {
             return Err(HarnessError::Rpc {
                 code: "UNEXPECTED_SUCCESS".to_string(),
@@ -156,28 +174,28 @@ impl HarnessClient {
                     "expected {function} to fail, got success: {:?}",
                     envelope.data
                 ),
-                status: 200,
+                status,
             });
         }
         envelope.error.ok_or_else(|| HarnessError::Rpc {
             code: "MALFORMED_RESPONSE".to_string(),
             message: "error envelope without `error` field".to_string(),
-            status: 0,
+            status,
         })
     }
 }
 
-fn envelope_to_error(envelope: RpcEnvelope) -> HarnessError {
+fn envelope_to_error(envelope: RpcEnvelope, status: u16) -> HarnessError {
     match envelope.error {
         Some(err) => HarnessError::Rpc {
             code: err.code,
             message: err.message,
-            status: 0,
+            status,
         },
         None => HarnessError::Rpc {
             code: "MALFORMED_RESPONSE".to_string(),
             message: "success=false but no error".to_string(),
-            status: 0,
+            status,
         },
     }
 }

@@ -1,4 +1,3 @@
-#![cfg(feature = "testcontainers")]
 //! Workflow scenarios.
 //!
 //! A workflow dispatched over RPC must run on the worker, stream its state
@@ -9,20 +8,39 @@
 //! finish": same gateway, same executor, same scheduler, same `wf:` SSE wire
 //! frames a browser client would consume.
 
+/// Sentinel test so `cargo test -p forge-harness` (without `--features
+/// testcontainers`) doesn't silently report "0 tests passed" and lull a
+/// contributor into thinking they ran the scenario suite. Always passes;
+/// its job is to print the hint.
+#[test]
+fn ensure_testcontainers_feature_enabled() {
+    eprintln!(
+        "forge-harness workflow scenarios are gated on `--features testcontainers`. \
+         Re-run with `cargo test -p forge-harness --features testcontainers` \
+         to exercise the workflow executor against a real Postgres."
+    );
+}
+
+#[cfg(feature = "testcontainers")]
+#[path = "common/mod.rs"]
 mod common;
 
+#[cfg(feature = "testcontainers")]
 use std::time::Duration;
 
+#[cfg(feature = "testcontainers")]
 use common::{PipelineInput, PipelineOutput, WorkflowHandle, await_workflow_status, start_app};
 
 /// Worker poll (50ms) + workflow scheduler poll (100ms) + step persistence, a
 /// 400ms durable sleep, and reactor round-trips. Generous enough to absorb CI
 /// scheduling noise without masking a hang.
+#[cfg(feature = "testcontainers")]
 const WF_BUDGET: Duration = Duration::from_secs(15);
 
 /// The straight-line case: dispatch a three-step workflow, subscribe, and watch
 /// the executor carry it to `completed` — with every step recorded, in
 /// declaration order, and the input label round-tripped onto the output.
+#[cfg(feature = "testcontainers")]
 #[tokio::test]
 async fn linear_workflow_runs_all_steps_to_completion() {
     let app = start_app("workflows_linear").await;
@@ -100,6 +118,7 @@ async fn linear_workflow_runs_all_steps_to_completion() {
 /// The durable case: a workflow that blocks on `wait_for_event` must suspend in
 /// `waiting`, naming the event it needs — and stay there until something fires
 /// that event. Firing it from a separate RPC must resume the run to completion.
+#[cfg(feature = "testcontainers")]
 #[tokio::test]
 async fn gated_workflow_blocks_on_event_then_resumes() {
     let app = start_app("workflows_gated").await;
@@ -183,6 +202,7 @@ async fn gated_workflow_blocks_on_event_then_resumes() {
 
 /// `subscribe-workflow` hands back the workflow's current state synchronously,
 /// at subscribe time — the equivalent of a store's first value.
+#[cfg(feature = "testcontainers")]
 #[tokio::test]
 async fn subscribe_workflow_returns_initial_snapshot() {
     let app = start_app("workflows_snapshot").await;
