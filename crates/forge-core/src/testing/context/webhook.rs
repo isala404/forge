@@ -77,6 +77,8 @@ pub struct TestWebhookContextBuilder {
     env_vars: HashMap<String, String>,
 }
 
+impl_test_env_builder!(TestWebhookContextBuilder);
+
 impl TestWebhookContextBuilder {
     pub fn new(webhook_name: impl Into<String>) -> Self {
         Self {
@@ -113,12 +115,6 @@ impl TestWebhookContextBuilder {
         }
         self
     }
-
-    pub fn with_pool(mut self, pool: PgPool) -> Self {
-        self.pool = Some(pool);
-        self
-    }
-
     pub fn mock_http<F>(self, pattern: &str, handler: F) -> Self
     where
         F: Fn(&MockRequest) -> MockResponse + Send + Sync + 'static,
@@ -136,17 +132,6 @@ impl TestWebhookContextBuilder {
         self.job_dispatch = dispatch;
         self
     }
-
-    pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.env_vars.insert(key.into(), value.into());
-        self
-    }
-
-    pub fn with_envs(mut self, vars: HashMap<String, String>) -> Self {
-        self.env_vars.extend(vars);
-        self
-    }
-
     pub fn build(self) -> TestWebhookContext {
         TestWebhookContext {
             webhook_name: self.webhook_name,
