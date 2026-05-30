@@ -4,10 +4,7 @@ on:
   issue_comment:
     types: [created]
 
-permissions:
-  contents: write
-  pull-requests: write
-  issues: write
+permissions: {}
 
 jobs:
   parse:
@@ -16,6 +13,9 @@ jobs:
       github.event.issue.pull_request &&
       startsWith(github.event.comment.body, '/')
     runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: read
     outputs:
       cmd: ${{ steps.parse.outputs.cmd }}
       matrix: ${{ steps.parse.outputs.matrix }}
@@ -25,10 +25,23 @@ jobs:
       - name: Gate on author association
         env:
           ASSOC: ${{ github.event.comment.author_association }}
+          BODY: ${{ github.event.comment.body }}
         run: |
-          case "$ASSOC" in
-            OWNER|MEMBER|COLLABORATOR) ;;
-            *) echo "::error::author_association=$ASSOC not allowed"; exit 1 ;;
+          first_line=$(printf '%s' "$BODY" | head -n1)
+          cmd=$(printf '%s' "$first_line" | awk '{print $1}')
+          case "$cmd" in
+            /squash-merge)
+              case "$ASSOC" in
+                OWNER|MEMBER) ;;
+                *) echo "::error::author_association=$ASSOC not allowed for /squash-merge"; exit 1 ;;
+              esac
+              ;;
+            *)
+              case "$ASSOC" in
+                OWNER|MEMBER|COLLABORATOR) ;;
+                *) echo "::error::author_association=$ASSOC not allowed"; exit 1 ;;
+              esac
+              ;;
           esac
 
       - name: Parse
@@ -66,7 +79,7 @@ jobs:
 
       - name: Resolve PR head
         id: pr
-        uses: actions/github-script@v7
+        uses: actions/github-script@v7.0.1
         with:
           script: |
             const pr = await github.rest.pulls.get({
@@ -78,7 +91,7 @@ jobs:
             core.setOutput('ref', pr.data.head.ref);
 
       - name: React to comment
-        uses: actions/github-script@v7
+        uses: actions/github-script@v7.0.1
         with:
           script: |
             await github.rest.reactions.createForIssueComment({
@@ -107,6 +120,10 @@ jobs:
     if: needs.parse.outputs.cmd == '/squash-merge'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
     steps:
       - name: Enable auto-merge
         env:
@@ -117,7 +134,7 @@ jobs:
 
       - name: Comment
         if: always()
-        uses: actions/github-script@v7
+        uses: actions/github-script@v7.0.1
         with:
           script: |
             const result = '${{ job.status }}';
@@ -137,8 +154,10 @@ jobs:
     needs: [parse, test-template]
     if: always() && needs.parse.result == 'success' && needs.parse.outputs.cmd == '/test-template'
     runs-on: ubuntu-latest
+    permissions:
+      issues: write
     steps:
-      - uses: actions/github-script@v7
+      - uses: actions/github-script@v7.0.1
         with:
           script: |
             const result = '${{ needs.test-template.result }}';
@@ -149,4 +168,23 @@ jobs:
               repo: context.repo.repo,
               issue_number: context.issue.number,
               body: `${emoji} \`/test-template\` ${result} — [run](${runUrl})`,
+            });
+
+  report-error:
+    name: Report parse error
+    needs: parse
+    if: always() && needs.parse.result != 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@v7.0.1
+        with:
+          script: |
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `❌ command rejected (gate or parse failed) — [run](${runUrl})`,
             });

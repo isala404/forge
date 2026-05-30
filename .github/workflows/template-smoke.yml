@@ -36,21 +36,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
         with:
           ref: ${{ inputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.7.7
         with:
           shared-key: template-build
           workspaces: . -> target
-      - uses: oven-sh/setup-bun@v2
+          save-if: ${{ (inputs.ref == '' && github.ref == 'refs/heads/main') }}
+      - uses: oven-sh/setup-bun@v2.0.2
 
       - name: Build forge CLI
         run: cargo build -p forgex
 
       - if: startsWith(inputs.template, 'with-dioxus/')
-        uses: cargo-bins/cargo-binstall@main
+        uses: cargo-bins/cargo-binstall@v1.10.20
       - if: startsWith(inputs.template, 'with-dioxus/')
         run: cargo binstall dioxus-cli@0.7.5 --no-confirm
 
@@ -59,7 +60,7 @@ jobs:
       - if: failure()
         run: echo "ARTIFACT_SLUG=$(echo '${{ inputs.template }}' | tr '/' '-')" >> "$GITHUB_ENV"
       - if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.4.3
         with:
           name: playwright-${{ env.ARTIFACT_SLUG }}
           path: /tmp/forge-test-artifacts/**

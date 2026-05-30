@@ -36,14 +36,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.7.7
         with:
           shared-key: ci
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: fmt
         run: cargo fmt --all --check
@@ -64,9 +65,9 @@ jobs:
       matrix:
         preset: [worker, api, minimal]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.7.7
         with:
           shared-key: ci
           save-if: "false"
@@ -79,12 +80,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - uses: dtolnay/rust-toolchain@1.92
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.7.7
         with:
           shared-key: msrv
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: scripts/ci/create-env-stubs.sh
       - run: cargo check --workspace --all-features
 
@@ -93,16 +95,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.7.7
         with:
           shared-key: ci
           save-if: "false"
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.49.10
         with:
-          tool: cargo-deny,cargo-audit
+          # Pin exact versions: an unpinned cargo-deny drifted to a release that
+          # rejects deny.toml's `unmaintained = "workspace"` key, failing the job
+          # while local (0.19.5) passed. These are the versions verified locally.
+          tool: cargo-deny@0.19.5,cargo-audit@0.22.1
 
       - name: cargo deny
         run: cargo deny check
@@ -129,14 +134,14 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.7.7
         with:
           shared-key: ci
           save-if: "false"
       - name: Install sqlx-cli
-        run: cargo install sqlx-cli --no-default-features --features rustls,postgres
+        run: cargo install sqlx-cli --locked --version 0.8.6 --no-default-features --features rustls,postgres
       - name: Apply system migrations
         run: |
           for f in crates/forge-runtime/migrations/system/v*.sql; do
@@ -174,13 +179,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.7.7
         with:
           shared-key: ci
           save-if: "false"
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@v2.0.2
       - run: scripts/ci/create-env-stubs.sh
       - name: Typecheck generated frontend bindings
         run: scripts/ci/typecheck-codegen.sh
@@ -191,7 +196,7 @@ jobs:
     name: Workspace integration
     needs: [validate, guardrails]
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:18
@@ -209,9 +214,9 @@ jobs:
     env:
       TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/forge_ci
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.7.7
         with:
           shared-key: ci
           save-if: "false"
@@ -219,6 +224,15 @@ jobs:
       - run: cargo test -p todo --features testcontainers
       - run: cargo test -p todo-dioxus --features testcontainers
       - run: cargo test -p forge-harness --features testcontainers
+      # forge-runtime's own integration suite (jobs queue, change_log, leader
+      # election, migration runner, signals, KV) — previously never run in CI,
+      # so it had rotted. Two non-obvious requirements:
+      #   * `full` — every subsystem is #[cfg(feature)]-gated; bare
+      #     `testcontainers` compiles and runs ZERO subsystem tests (silent no-op).
+      #   * `--test-threads=1` — these tests exercise PG instance-global state
+      #     (advisory locks, pg_terminate_backend, leader election) that cannot
+      #     run concurrently against one shared database without interfering.
+      - run: cargo test -p forge-runtime --features "full,testcontainers" -- --test-threads=1
 
   pr-smoke:
     name: PR Smoke

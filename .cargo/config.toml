@@ -20,7 +20,3 @@ SQLX_OFFLINE = "true"
 #   export RUSTC_WRAPPER=sccache
 #
 # Documented here so contributors can find the levers without grepping CI.
-
-[build]
-# The default `target/` location is fine. Override with CARGO_TARGET_DIR if you
-# need a separate cache per branch (useful when bisecting feature flags).

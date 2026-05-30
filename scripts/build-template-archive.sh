@@ -34,9 +34,7 @@ copy_template() {
     --exclude='.forge-dev-integration.log' \
     --exclude='skills/' \
     --exclude='package-lock.json' \
-    --exclude='bun.lock' \
-    --exclude='Cargo.lock' \
-    --exclude='frontend/Cargo.lock' \
+    --exclude='.env' \
     --exclude='frontend/target/' \
     "${src}/" "${dest}/"
 }
@@ -78,10 +76,16 @@ for cargo in "${STAGING_DIR}"/with-*/*/frontend/Cargo.toml; do
   sed -i "s|forge-dioxus = { path = \"[^\"]*\" }|forge-dioxus = { version = \"=${VERSION}\" }|g" "$cargo"
 done
 
-# Rewrite otel service: local build context -> published image
+# Rewrite otel service: local build context -> published GHCR image with
+# Forge's pre-provisioned dashboards. The version is read from the Dockerfile
+# so it stays in sync with what docker-otel-lgtm.yml publishes; falling back
+# to the upstream image would lose the dashboards.
+OTEL_VERSION=$(grep -oE 'FROM grafana/otel-lgtm:[^\s]+' docker/otel-lgtm/Dockerfile \
+  | head -n1 | sed 's|FROM grafana/otel-lgtm:||')
+OTEL_IMAGE="ghcr.io/isala404/forge/otel-lgtm:${OTEL_VERSION:-latest}"
 for compose in "${STAGING_DIR}"/with-*/*/docker-compose.yml; do
   [ -f "$compose" ] || continue
-  sed -i "s|build: ../../../docker/otel-lgtm|image: grafana/otel-lgtm:${VERSION_OTEL:-0.22.1}|g" "$compose"
+  sed -i "s|build: ../../../docker/otel-lgtm|image: ${OTEL_IMAGE}|g" "$compose"
 done
 
 # Ensure frontend .env files exist in templates

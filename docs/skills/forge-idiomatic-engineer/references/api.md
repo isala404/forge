@@ -68,7 +68,7 @@ Defines a task that runs on a recurring schedule. Execution is guaranteed to hap
 | `schedule = "0 9 * * *"` | Named form of the positional cron expression. |
 | `every = "5m"` | Sugar for simple interval schedules. Converts to a cron expression internally. |
 | `daily_at = "03:00"` | Sugar for daily schedules at a specific time. |
-| `timezone = "UTC"` | Sets the schedule's timezone. |
+| `timezone = "UTC"` | Sets the schedule's timezone. Compile-time validated against the IANA tz database (`chrono_tz`). An unknown value fails with `Invalid timezone: "X". Must be an IANA tz database name (e.g., "UTC", "America/New_York").` |
 | `group = "default"` | Groups crons for concurrency management. |
 | `timeout = "1h"` | Sets the maximum allowed execution time. |
 | `catch_up` | Executes missed intervals if the system was offline. **Default limit: 10 catch-up executions**. |
@@ -216,6 +216,11 @@ jwt_audience = "https://api.example.com"  # required by default (audience_requir
 # secret = "${OLD_JWT_SECRET}"
 # valid_until = "2026-06-01T00:00:00Z"
 
+# Browser clients store refresh tokens in an HttpOnly Secure cookie by default
+# (XSS cannot read them). Set false only when the refresh endpoint cannot share
+# a registrable domain with the frontend, or for legacy non-browser clients.
+# refresh_cookie = true
+
 # AuthConfig::dev_mode() / AuthMiddleware::permissive() return Result and refuse
 # construction when FORGE_ENV=production. Don't ship dev-mode auth to prod.
 
@@ -279,6 +284,7 @@ batch_size = 100              # events per batch INSERT
 flush_interval_ms = 5000      # max milliseconds between flushes
 excluded_functions = []       # function names to skip from auto-capture
 bot_detection = true          # tag bot traffic via UA patterns
+rate_limit_per_minute = 600   # per-IP cap on /signal in a rolling 60s window
 # GeoIP: embedded DB-IP Country Lite resolves IPs to country codes automatically (zero config)
 geoip_db_path = ""            # optional: path to MaxMind GeoLite2-City.mmdb for city-level resolution
 
@@ -299,7 +305,7 @@ key_path = "${GATEWAY_TLS_KEY_PATH}"
 
 ### Signal Endpoint
 
-A single `POST /_api/signal` endpoint accepts a discriminated payload via the top-level `type` field. The server short-circuits `event` and `view` payloads when the request carries `DNT: 1` or `Sec-GPC: 1`. Crash reports (`type: "report"`) still land so production errors from DNT users don't disappear.
+A single `POST /_api/signal` endpoint accepts a discriminated payload via the top-level `type` field. The server short-circuits `event` and `view` payloads when the request carries `DNT: 1` or `Sec-GPC: 1`. Crash reports (`type: "report"`) still land so production errors from DNT users don't disappear. When signals are disabled (the default) the endpoint still returns `204 No Content` and drops the body, so the always-on client trackers (web vitals, page views) never produce console errors against a missing route.
 
 | `type` | Payload | Purpose |
 |---|---|---|
@@ -367,6 +373,7 @@ All `/_api/admin/*` routes require the `admin` role on `AuthContext`. Every stat
 | `POST` | `/_api/admin/queues/{name}/resume` | Remove the queue from `forge_paused_queues`. |
 | `GET`  | `/_api/admin/nodes` | List `forge_nodes` rows with status, heartbeat, load metrics. |
 | `GET`  | `/_api/admin/leaders` | Current advisory-lock holders per leader role. |
+| `POST` | `/_api/admin/sessions/{session_id}/revoke` | Server-side auth revocation: drops cached `AuthContext` on the reactor and evicts the SSE connection. Body: `{ "reason": "..." }`. Wire to identity-system revocation events (demotion, tenant move, force-logout). |
 
 State-changing routes accept an optional `reason` string; pass it — the audit log is searched after incidents.
 
@@ -430,7 +437,17 @@ builder.custom_routes(|pool| {
 - Returned router is merged into the gateway's `/_api` namespace, so `/export/csv` is reachable at `/_api/export/csv`.
 - Full middleware applies automatically: JWT auth, CORS, tracing, concurrency limits, request timeouts.
 - Handlers read `Extension<AuthContext>` to access the authenticated user. Unauthenticated requests still arrive with an unauthenticated context — check `auth.user_id()` if login is required.
-- Avoid paths that conflict with built-ins: `/health`, `/ready`, `/rpc`, `/rpc/*`, `/events`, `/subscribe`, `/unsubscribe`, `/subscribe-job`, `/subscribe-workflow`, `/signal`, `/webhooks/*`, `/mcp`, `/oauth/*`. Conflicts panic at startup.
+- Avoid paths that conflict with built-ins: `/health`, `/ready`, `/rpc`, `/rpc/*`, `/events`, `/events/ticket`, `/subscribe`, `/unsubscribe`, `/subscribe-job`, `/subscribe-workflow`, `/signal`, `/webhooks/*`, `/mcp`, `/oauth/*`. Conflicts panic at startup.
+
+## SSE Authentication
+
+Authenticated SSE streams use one-shot tickets so the JWT never appears in the URL:
+
+1. Client `POST /_api/events/ticket` with `Authorization: Bearer <jwt>`.
+2. Server returns `{ "ticket": "<uuid>", "expires_in_secs": 30 }`.
+3. Client opens `GET /_api/events?ticket=<uuid>`.
+
+Tickets are single-use, expire after 30s, are bound to the resolved client IP, and live only in process memory (no DB row). A `Authorization` header on `GET /_api/events` is also accepted for clients that can set headers (native, server-to-server). Anonymous SSE connects without any ticket. The generated TypeScript and Dioxus clients perform the ticket fetch automatically.
 
 ## API Versioning
 
