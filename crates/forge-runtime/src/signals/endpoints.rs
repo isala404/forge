@@ -32,6 +32,15 @@ use super::visitor;
 /// Maximum events per batch request.
 const MAX_BATCH_SIZE: usize = 50;
 
+/// Maximum serialized byte size of a single event's free-form `properties`
+/// JSON. Larger payloads are rejected. Prevents apps from dumping request
+/// bodies / PII into analytics rows.
+const MAX_PROPERTY_BYTES: usize = 4096;
+
+/// Maximum serialized byte size of a single event envelope (event name +
+/// properties + correlation_id). Larger batch entries are rejected.
+const MAX_EVENT_BYTES: usize = 8192;
+
 /// Check the client's Do-Not-Track header. We honor DNT: 1 by short-circuiting
 /// signal ingestion -- the browser has explicitly opted out of tracking.
 /// Sec-GPC (Global Privacy Control) is also respected.
@@ -125,6 +134,14 @@ async fn handle_event(
     if batch.events.len() > MAX_BATCH_SIZE {
         return rate_limited_response();
     }
+    for event in &batch.events {
+        if !event_within_limits(event) {
+            return Json(SignalResponse {
+                ok: false,
+                session_id: None,
+            });
+        }
+    }
 
     let ctx = extract_request_ctx(
         headers,
@@ -133,28 +150,22 @@ async fn handle_event(
         &state.server_secret,
         state.anonymize_ip,
         state.geoip.as_ref(),
-    );
-    let session_id =
-        resolve_session_id(batch.context.as_ref().and_then(|c| c.session_id.as_deref()));
-    let page_url = batch.context.as_ref().and_then(|c| c.page_url.clone());
-
-    let session_id = session::upsert_session(
-        &state.pool,
-        session_id,
-        &ctx.visitor_id,
-        ctx.user_id,
-        ctx.tenant_id,
-        page_url.as_deref(),
-        batch.context.as_ref().and_then(|c| c.referrer.as_deref()),
-        ctx.user_agent.as_deref(),
-        ctx.client_ip.as_deref(),
-        ctx.is_bot,
-        "track",
-        ctx.device_type.as_deref(),
-        ctx.browser.as_deref(),
-        ctx.os.as_deref(),
     )
     .await;
+    let supplied_session_id =
+        resolve_session_id(batch.context.as_ref().and_then(|c| c.session_id.as_deref()));
+    let session_id = Some(supplied_session_id.unwrap_or_else(Uuid::new_v4));
+    let page_url = batch.context.as_ref().and_then(|c| c.page_url.clone());
+
+    let referrer = batch.context.as_ref().and_then(|c| c.referrer.clone());
+    spawn_session_upsert(
+        state.pool.clone(),
+        session_id,
+        &ctx,
+        page_url.clone(),
+        referrer,
+        "track",
+    );
 
     for event in batch.events {
         let signal = SignalEvent {
@@ -216,27 +227,20 @@ async fn handle_view(
         &state.server_secret,
         state.anonymize_ip,
         state.geoip.as_ref(),
-    );
-    let session_id_header = extract_header(headers, "x-session-id");
-    let session_id = resolve_session_id(session_id_header.as_deref());
-
-    let session_id = session::upsert_session(
-        &state.pool,
-        session_id,
-        &ctx.visitor_id,
-        ctx.user_id,
-        ctx.tenant_id,
-        Some(&payload.url),
-        payload.referrer.as_deref(),
-        ctx.user_agent.as_deref(),
-        ctx.client_ip.as_deref(),
-        ctx.is_bot,
-        "page_view",
-        ctx.device_type.as_deref(),
-        ctx.browser.as_deref(),
-        ctx.os.as_deref(),
     )
     .await;
+    let session_id_header = extract_header(headers, "x-session-id");
+    let supplied_session_id = resolve_session_id(session_id_header.as_deref());
+    let session_id = Some(supplied_session_id.unwrap_or_else(Uuid::new_v4));
+
+    spawn_session_upsert(
+        state.pool.clone(),
+        session_id,
+        &ctx,
+        Some(payload.url.clone()),
+        payload.referrer.clone(),
+        "page_view",
+    );
 
     let utm = if payload.utm_source.is_some()
         || payload.utm_medium.is_some()
@@ -314,28 +318,13 @@ async fn handle_report(
         &state.server_secret,
         state.anonymize_ip,
         state.geoip.as_ref(),
-    );
+    )
+    .await;
     let session_id_header = extract_header(headers, "x-session-id");
     let session_id = resolve_session_id(session_id_header.as_deref());
 
-    if let Some(sid) = session_id {
-        session::upsert_session(
-            &state.pool,
-            Some(sid),
-            &ctx.visitor_id,
-            ctx.user_id,
-            ctx.tenant_id,
-            None,
-            None,
-            ctx.user_agent.as_deref(),
-            ctx.client_ip.as_deref(),
-            ctx.is_bot,
-            "error",
-            ctx.device_type.as_deref(),
-            ctx.browser.as_deref(),
-            ctx.os.as_deref(),
-        )
-        .await;
+    if session_id.is_some() {
+        spawn_session_upsert(state.pool.clone(), session_id, &ctx, None, None, "error");
     }
 
     for err in report.errors {
@@ -392,7 +381,7 @@ struct RequestCtx {
     os: Option<String>,
 }
 
-fn extract_request_ctx(
+async fn extract_request_ctx(
     headers: &HeaderMap,
     resolved_ip: Option<String>,
     auth: &Option<axum::Extension<AuthContext>>,
@@ -413,12 +402,26 @@ fn extract_request_ctx(
     let user_id = auth.as_ref().and_then(|a| a.user_id());
     let tenant_id = auth.as_ref().and_then(|a| a.tenant_id());
     let device_info = device::parse_lowered(platform_header.as_deref(), &ua_lower);
-    let geo = geoip
-        .zip(raw_ip.as_deref())
-        .map(|(g, ip)| g.lookup(ip))
-        .unwrap_or_default();
+    let geo = match (geoip, raw_ip.clone()) {
+        (Some(g), Some(ip)) => {
+            // MMDB lookups can be CPU-blocking on cold pages; offload so the
+            // request thread keeps feeding the collector.
+            let g = g.clone();
+            tokio::task::spawn_blocking(move || g.lookup(&ip))
+                .await
+                .unwrap_or_default()
+        }
+        _ => super::geoip::GeoInfo::default(),
+    };
     // anonymize_ip drops the raw IP after visitor_id + geo are derived; GDPR-friendly default.
     let client_ip = if anonymize_ip { None } else { raw_ip };
+    // When IP is anonymized, also strip the UA major-version so the combo of
+    // UA + country + city can't be used to re-fingerprint the visitor.
+    let user_agent = if anonymize_ip {
+        user_agent.as_deref().map(anonymize_ua)
+    } else {
+        user_agent
+    };
     RequestCtx {
         user_agent,
         client_ip,
@@ -436,6 +439,76 @@ fn extract_request_ctx(
 
 fn extract_header(headers: &HeaderMap, name: &str) -> Option<String> {
     crate::gateway::extract_header(headers, name)
+}
+
+/// Strip the major version off a UA so a per-version identifier can't be
+/// derived. Recognizes the most common browser family tokens; falls back to
+/// the broad family when the UA doesn't match any known prefix.
+fn anonymize_ua(ua: &str) -> String {
+    const FAMILIES: &[&str] = &["Chrome/", "Firefox/", "Safari/", "Edg/", "Opera/"];
+    for family in FAMILIES {
+        if ua.contains(family) {
+            return (*family).to_string();
+        }
+    }
+    "Other".to_string()
+}
+
+/// Per-event size guard. Rejects events whose serialized properties / event
+/// envelope exceed configured limits.
+fn event_within_limits(event: &forge_core::signals::ClientEvent) -> bool {
+    let props_bytes = match serde_json::to_vec(&event.properties) {
+        Ok(b) => b.len(),
+        Err(_) => return false,
+    };
+    if props_bytes > MAX_PROPERTY_BYTES {
+        return false;
+    }
+    let total = event.event.len()
+        + props_bytes
+        + event.correlation_id.as_deref().map(str::len).unwrap_or(0);
+    total <= MAX_EVENT_BYTES
+}
+
+/// Fire-and-forget the session upsert so the request thread doesn't block on
+/// a PG round-trip. We mint the session ID synchronously upstream so the
+/// response can return it before the row is persisted.
+fn spawn_session_upsert(
+    pool: PgPool,
+    session_id: Option<Uuid>,
+    ctx: &RequestCtx,
+    page_url: Option<String>,
+    referrer: Option<String>,
+    event_type: &'static str,
+) {
+    let visitor_id = ctx.visitor_id.clone();
+    let user_id = ctx.user_id;
+    let tenant_id = ctx.tenant_id;
+    let user_agent = ctx.user_agent.clone();
+    let client_ip = ctx.client_ip.clone();
+    let device_type = ctx.device_type.clone();
+    let browser = ctx.browser.clone();
+    let os = ctx.os.clone();
+    let is_bot = ctx.is_bot;
+    tokio::spawn(async move {
+        session::upsert_session(
+            &pool,
+            session_id,
+            &visitor_id,
+            user_id,
+            tenant_id,
+            page_url.as_deref(),
+            referrer.as_deref(),
+            user_agent.as_deref(),
+            client_ip.as_deref(),
+            is_bot,
+            event_type,
+            device_type.as_deref(),
+            browser.as_deref(),
+            os.as_deref(),
+        )
+        .await;
+    });
 }
 
 fn resolve_session_id(raw: Option<&str>) -> Option<Uuid> {

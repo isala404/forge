@@ -2,7 +2,8 @@ use opentelemetry::{
     KeyValue, global,
     metrics::{Counter, Gauge, Histogram, UpDownCounter},
 };
-use std::sync::OnceLock;
+use std::collections::HashSet;
+use std::sync::{OnceLock, RwLock};
 
 const METER_NAME: &str = "forge-runtime";
 
@@ -43,15 +44,79 @@ impl HttpMetrics {
     }
 
     pub fn record(&self, method: &str, path: &str, status: u16, duration_secs: f64) {
+        let normalized = normalize_path_for_metrics(path);
         let attributes = [
             KeyValue::new("method", method.to_string()),
-            KeyValue::new("path", path.to_string()),
+            KeyValue::new("path", normalized),
             KeyValue::new("status", i64::from(status)),
         ];
 
         self.requests_total.add(1, &attributes);
         self.request_duration.record(duration_secs, &attributes);
     }
+}
+
+/// Soft cap on the number of distinct dynamic label values we'll let through
+/// before collapsing the rest to `<other>`. Keeps the OTel cardinality
+/// bounded even if a poorly-controlled handler name leaks into the metric.
+const MAX_DYNAMIC_LABELS: usize = 1000;
+
+static FN_LABELS_SEEN: OnceLock<RwLock<HashSet<String>>> = OnceLock::new();
+static JOB_LABELS_SEEN: OnceLock<RwLock<HashSet<String>>> = OnceLock::new();
+
+fn capped_label(seen: &OnceLock<RwLock<HashSet<String>>>, name: &str) -> String {
+    let set = seen.get_or_init(|| RwLock::new(HashSet::new()));
+    if let Ok(guard) = set.read()
+        && guard.contains(name)
+    {
+        return name.to_string();
+    }
+    if let Ok(mut guard) = set.write() {
+        if guard.contains(name) {
+            return name.to_string();
+        }
+        if guard.len() >= MAX_DYNAMIC_LABELS {
+            return "<other>".to_string();
+        }
+        guard.insert(name.to_string());
+        return name.to_string();
+    }
+    name.to_string()
+}
+
+/// Map a concrete request path to a stable route template. Without route
+/// info from the router, we apply heuristics: replace UUIDs and all-numeric
+/// path segments with `:id`. Anything we don't recognize stays as-is so
+/// known fixed routes (e.g. `/_api/health`) keep their identity.
+pub fn normalize_path_for_metrics(path: &str) -> String {
+    fn is_dynamic(seg: &str) -> bool {
+        !seg.is_empty() && (looks_like_uuid(seg) || seg.chars().all(|c| c.is_ascii_digit()))
+    }
+    // The common case is a fixed route with nothing to rewrite — return it in a
+    // single allocation rather than rebuilding it segment by segment.
+    if !path.split('/').any(is_dynamic) {
+        return path.to_string();
+    }
+    let mut out = String::with_capacity(path.len());
+    for (i, seg) in path.split('/').enumerate() {
+        if i > 0 {
+            out.push('/');
+        }
+        if is_dynamic(seg) {
+            out.push_str(":id");
+        } else {
+            out.push_str(seg);
+        }
+    }
+    out
+}
+
+fn looks_like_uuid(s: &str) -> bool {
+    s.len() == 36
+        && s.as_bytes().iter().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => *b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
 }
 
 pub struct FnMetrics {
@@ -91,7 +156,7 @@ impl FnMetrics {
     ) {
         let status = if success { "ok" } else { "error" };
         let attributes = [
-            KeyValue::new("function", function.to_string()),
+            KeyValue::new("function", capped_label(&FN_LABELS_SEEN, function)),
             KeyValue::new("kind", kind.to_string()),
             KeyValue::new("status", status),
             KeyValue::new("cached", cached),
@@ -130,7 +195,10 @@ impl FnCacheMetrics {
     }
 
     pub fn record(&self, function: &str, hit: bool) {
-        let attributes = [KeyValue::new("function", function.to_string())];
+        let attributes = [KeyValue::new(
+            "function",
+            capped_label(&FN_LABELS_SEEN, function),
+        )];
         if hit {
             self.hits_total.add(1, &attributes);
         } else {
@@ -181,7 +249,7 @@ impl JobMetrics {
 
     pub fn record(&self, job_type: &str, status: &'static str, duration_secs: f64) {
         let attributes = [
-            KeyValue::new("job_type", job_type.to_string()),
+            KeyValue::new("job_type", capped_label(&JOB_LABELS_SEEN, job_type)),
             KeyValue::new("status", status),
         ];
 
@@ -190,8 +258,13 @@ impl JobMetrics {
     }
 
     pub fn record_lost_claim(&self, job_type: &str) {
-        self.lost_claim_total
-            .add(1, &[KeyValue::new("job_type", job_type.to_string())]);
+        self.lost_claim_total.add(
+            1,
+            &[KeyValue::new(
+                "job_type",
+                capped_label(&JOB_LABELS_SEEN, job_type),
+            )],
+        );
     }
 }
 
@@ -425,32 +498,67 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_http_metrics_creation() {
-        let _metrics = HttpMetrics::new();
+    fn normalize_path_rewrites_uuid_segments() {
+        assert_eq!(
+            normalize_path_for_metrics("/_api/rpc/get_user/550e8400-e29b-41d4-a716-446655440000"),
+            "/_api/rpc/get_user/:id"
+        );
     }
 
     #[test]
-    fn test_job_metrics_creation() {
-        let _metrics = JobMetrics::new();
+    fn normalize_path_rewrites_all_digit_segments() {
+        assert_eq!(normalize_path_for_metrics("/users/12345"), "/users/:id");
+        assert_eq!(normalize_path_for_metrics("/a/1/b/2"), "/a/:id/b/:id");
     }
 
     #[test]
-    fn test_connections_gauge_creation() {
-        let _gauge = ActiveConnectionsGauge::new();
+    fn normalize_path_leaves_fixed_routes_untouched() {
+        // No dynamic segment => returned verbatim (single-allocation fast path).
+        for fixed in ["/_api/health", "/_api/ready", "/_api/rpc/list_users", "/"] {
+            assert_eq!(normalize_path_for_metrics(fixed), fixed);
+        }
     }
 
     #[test]
-    fn test_notify_metrics_creation() {
-        let _metrics = NotifyMetrics::new();
+    fn normalize_path_preserves_trailing_slash_shape() {
+        // A trailing slash makes an empty final segment, which is_dynamic
+        // treats as non-dynamic, so it is preserved.
+        assert_eq!(normalize_path_for_metrics("/users/12345/"), "/users/:id/");
+        assert_eq!(normalize_path_for_metrics("/_api/health/"), "/_api/health/");
     }
 
     #[test]
-    fn test_subscription_metrics_creation() {
-        let _metrics = SubscriptionMetrics::new();
+    fn normalize_path_does_not_rewrite_alphanumeric_or_short_hex() {
+        // 32-char hex (not a 36-char dashed UUID) and mixed alnum stay as-is.
+        assert_eq!(normalize_path_for_metrics("/items/abc123"), "/items/abc123");
+        assert_eq!(
+            normalize_path_for_metrics("/x/0123456789abcdef0123456789abcdef"),
+            "/x/0123456789abcdef0123456789abcdef"
+        );
     }
 
     #[test]
-    fn test_workflow_scheduler_metrics_creation() {
-        let _metrics = WorkflowSchedulerMetrics::new();
+    fn capped_label_passes_known_names_through_until_cap() {
+        // Use a fresh, test-local OnceLock so the global label sets aren't
+        // perturbed and the cap is exercised deterministically.
+        let seen: OnceLock<RwLock<HashSet<String>>> = OnceLock::new();
+        for i in 0..MAX_DYNAMIC_LABELS {
+            let name = format!("fn_{i}");
+            assert_eq!(capped_label(&seen, &name), name);
+        }
+        // The set is now full; a brand-new name collapses to the other-bucket.
+        assert_eq!(capped_label(&seen, "fn_overflow"), "<other>");
+        // An already-seen name still passes through after the cap is hit.
+        assert_eq!(capped_label(&seen, "fn_0"), "fn_0");
+    }
+
+    #[test]
+    fn capped_label_is_idempotent_for_repeated_names() {
+        let seen: OnceLock<RwLock<HashSet<String>>> = OnceLock::new();
+        assert_eq!(capped_label(&seen, "get_user"), "get_user");
+        assert_eq!(capped_label(&seen, "get_user"), "get_user");
+        // Only one slot consumed for the repeated name.
+        let guard = seen.get().expect("init").read().expect("read lock");
+        assert_eq!(guard.len(), 1);
     }
 }

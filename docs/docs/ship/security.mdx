@@ -104,6 +104,38 @@ Two backends are available via `[rate_limit]` in `forge.toml`:
 
 Auth failures and rate-limit rejections are captured as signals events (`auth.failed`, `rate_limit.exceeded`) so Grafana dashboards surface attack patterns automatically.
 
+## SSE authentication
+
+Browsers' `EventSource` API cannot set custom headers, so authenticated SSE streams use one-shot **tickets** instead of putting the JWT in the URL. Query strings leak into access logs, browser history, and `Referer` headers — tickets bound those leaks to a 30-second, single-use, IP-pinned token that grants nothing else.
+
+The generated TypeScript and Dioxus clients handle this automatically:
+
+1. Client `POST /_api/events/ticket` with `Authorization: Bearer <jwt>`.
+2. Server returns `{ ticket, expires_in_secs }`. Ticket is held in process memory only.
+3. Client opens `GET /_api/events?ticket=<ticket>`. The server consumes the ticket atomically and rejects on IP mismatch.
+
+Native (non-browser) clients can still send `Authorization` directly on the `GET /_api/events` request and skip the ticket fetch. Anonymous SSE connects without any credential.
+
+## Refresh tokens in browsers
+
+Set `[auth] refresh_cookie = true` (default) and serve the refresh from an `HttpOnly; Secure; SameSite=Strict` cookie. JS-reachable storage (localStorage, sessionStorage) is XSS-stealable: any third-party script can read it and mint long-lived access tokens out-of-band. Your `refresh` mutation owns the cookie lifecycle:
+
+```rust
+#[forge::mutation]
+pub async fn refresh(ctx: &MutationContext) -> Result<TokenPair> {
+    // Read refresh token from the request cookie (the framework's auth
+    // middleware does not parse this cookie — it's specific to your endpoint).
+    let refresh = ctx.request.cookie("forge_refresh")
+        .ok_or_else(|| ForgeError::unauthorized("missing refresh token"))?;
+    let pair = ctx.issue_token_pair(/* ... */).await?;
+    // Set the new HttpOnly cookie on the response. Cookie helpers live in
+    // your handler; the framework does not bake a refresh endpoint in.
+    Ok(pair)
+}
+```
+
+Disable `refresh_cookie` (`= false`) only if the refresh endpoint cannot share a registrable domain with the frontend, or for native clients that talk to the API across origins. In that case, persist the refresh token in OS-keyring-equivalent storage (forge-dioxus native uses `dirs::data_local_dir()`).
+
 ## CORS
 
 CORS is opt-in. Enable it and list allowed origins in `forge.toml`:

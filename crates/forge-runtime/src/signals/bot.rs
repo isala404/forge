@@ -61,10 +61,14 @@ const BOT_PATTERNS: &[&str] = &[
     "curl/",
     "libwww",
     "apache-httpclient",
-    "okhttp",
-    "node-fetch",
-    "axios",
-    "postman",
+    // Patterns below match the format these libraries actually emit in a UA
+    // (token + "/version"). Bare substrings like "axios" or "okhttp" flagged
+    // legitimate mobile apps and react-native clients that ship those names
+    // embedded inside larger UAs.
+    "okhttp/",
+    "node-fetch/",
+    "axios/",
+    "postmanruntime/",
 ];
 
 /// Pre-compiled Aho-Corasick automaton for bot detection.

@@ -7,6 +7,10 @@ use serde::{Deserialize, Serialize};
 use super::default_true;
 use super::types::DurationStr;
 
+fn default_false() -> bool {
+    false
+}
+
 /// Signals configuration for built-in product analytics and frontend diagnostics.
 ///
 /// Captures user behavior, acquisition channels, feature usage, and frontend
@@ -15,7 +19,10 @@ use super::types::DurationStr;
 #[non_exhaustive]
 pub struct SignalsConfig {
     /// Enable the signals pipeline (event ingestion, auto-capture, dashboards).
-    #[serde(default = "default_true")]
+    ///
+    /// Off by default so new projects ship without product analytics enabled.
+    /// Set `signals.enabled = true` in forge.toml to opt in.
+    #[serde(default = "default_false")]
     pub enabled: bool,
 
     /// Auto-capture RPC calls as events without user code.
@@ -68,12 +75,19 @@ pub struct SignalsConfig {
     /// database provides country-level resolution with zero configuration.
     #[serde(default)]
     pub geoip_db_path: Option<String>,
+
+    /// Per-IP request ceiling for the `/signal` endpoint, measured over a
+    /// rolling 60-second window. Generous enough to absorb legitimate bursts
+    /// (page view + web-vital flush + a handful of tracked events on a
+    /// navigation) while still capping runaway clients.
+    #[serde(default = "default_rate_limit_per_minute")]
+    pub rate_limit_per_minute: u32,
 }
 
 impl Default for SignalsConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             auto_capture: true,
             diagnostics: true,
             session_timeout: default_session_timeout(),
@@ -85,8 +99,13 @@ impl Default for SignalsConfig {
             excluded_functions: Vec::new(),
             bot_detection: true,
             geoip_db_path: None,
+            rate_limit_per_minute: default_rate_limit_per_minute(),
         }
     }
+}
+
+fn default_rate_limit_per_minute() -> u32 {
+    600
 }
 
 fn default_session_timeout() -> DurationStr {
@@ -117,7 +136,7 @@ mod tests {
     #[tokio::test]
     async fn default_config_has_correct_values() {
         let config = SignalsConfig::default();
-        assert!(config.enabled);
+        assert!(!config.enabled);
         assert!(config.auto_capture);
         assert!(config.diagnostics);
         assert_eq!(config.session_timeout.as_secs(), 1800);
@@ -141,7 +160,7 @@ mod tests {
         let from_table: Wrapper = toml::from_str("[signals]").unwrap();
 
         for config in [from_empty, from_table.signals] {
-            assert!(config.enabled);
+            assert!(!config.enabled);
             assert!(config.auto_capture);
             assert!(config.diagnostics);
             assert_eq!(config.session_timeout.as_secs(), 1800);

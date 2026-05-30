@@ -189,6 +189,7 @@ openssl rand -base64 32
 | `jwt_leeway`          | string   | `"60s"`          | Clock-skew tolerance for `exp`/`nbf` validation                                 |
 | `access_token_ttl`    | string   | `"1h"`           | Access token lifetime                                                           |
 | `refresh_token_ttl`   | string   | `"30d"`          | Refresh token lifetime                                                          |
+| `refresh_cookie`      | bool     | `true`           | Browser clients keep the refresh token in an `HttpOnly; Secure; SameSite=Strict` cookie. See [SSE & refresh-token security](./security#sse-authentication). |
 | `session_ttl`         | string   | `"7d"`           | Session TTL                                                                     |
 
 `jwt_secret` must be at least 32 bytes when HMAC algorithms are used. Generate a suitable value with `openssl rand -base64 32`.
@@ -472,6 +473,7 @@ Built-in product analytics and frontend diagnostics. Enabled by default. See [Si
 | `flush_interval_ms`    | u64      | `5000`  | Max milliseconds between event buffer flushes    |
 | `excluded_functions`   | string[] | `[]`    | Function names to skip in auto-capture           |
 | `bot_detection`        | bool     | `true`  | Tag bot traffic via User-Agent pattern matching  |
+| `rate_limit_per_minute`| u32      | `600`   | Per-IP cap on `/signal` requests in a 60s window |
 
 ```toml
 [signals]

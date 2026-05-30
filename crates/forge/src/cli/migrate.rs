@@ -33,7 +33,16 @@ pub enum MigrateAction {
     Status,
 
     /// Generate .sqlx/ offline cache for compile-time query checking.
-    Prepare,
+    Prepare {
+        /// Apply pending migrations before generating the cache. Without this,
+        /// prepare refuses to mutate a non-local DATABASE_URL unattended.
+        #[arg(long)]
+        with_up: bool,
+
+        /// Skip the interactive confirmation prompt.
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
 }
 
 impl MigrateCommand {
@@ -84,10 +93,39 @@ impl MigrateCommand {
                 println!();
             }
 
-            MigrateAction::Prepare => {
+            MigrateAction::Prepare { with_up, yes } => {
                 ui::section("FORGE Prepare");
 
-                if !available.is_empty() {
+                let database_url_for_check = config.database.url().to_string();
+                let is_local = database_url_is_local(&database_url_for_check);
+
+                let pending = runner.status(&available).await?.pending;
+
+                if !pending.is_empty() {
+                    if !with_up {
+                        let masked = mask_database_url(&database_url_for_check);
+                        println!(
+                            "  {} {} pending migration(s) detected.",
+                            ui::warn(),
+                            pending.len()
+                        );
+                        println!("    Target DATABASE_URL: {masked}");
+                        if !is_local && !yes {
+                            anyhow::bail!(
+                                "Refusing to run pending migrations against a non-local database \
+                                 without explicit consent.\n\n  \
+                                 Re-run with `--with-up` to apply, or `--yes` to acknowledge the \
+                                 target. Set DATABASE_URL to a localhost instance for unattended \
+                                 use."
+                            );
+                        }
+                        if !yes {
+                            anyhow::bail!(
+                                "Refusing to auto-run migrations from `forge migrate prepare`.\n  \
+                                 Pass `--with-up` to apply, or run `forge migrate up` separately."
+                            );
+                        }
+                    }
                     println!("  {} Running pending migrations...", ui::step());
                     runner.run(available).await?;
                     println!("  {} Migrations complete", ui::ok());
@@ -188,5 +226,80 @@ impl MigrateCommand {
         }
 
         Ok(())
+    }
+}
+
+/// True when the URL clearly targets a developer-local Postgres (no risk of
+/// stomping a shared environment by accident).
+fn database_url_is_local(url: &str) -> bool {
+    let rest = match url
+        .strip_prefix("postgres://")
+        .or_else(|| url.strip_prefix("postgresql://"))
+    {
+        Some(r) => r,
+        None => return false,
+    };
+    let host_section = rest.rsplit_once('@').map(|(_, r)| r).unwrap_or(rest);
+    let host_port = host_section
+        .split(['/', '?'])
+        .next()
+        .unwrap_or(host_section);
+    const LOCAL: &[&str] = &["localhost", "127.0.0.1", "::1", "0.0.0.0"];
+    if LOCAL.contains(&host_port) {
+        return true;
+    }
+    // Strip trailing :port only when the suffix is all-digits and the
+    // remaining host has no `:` (rules out IPv6 host without brackets).
+    let host = match host_port.rsplit_once(':') {
+        Some((h, p))
+            if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) && !h.contains(':') =>
+        {
+            h
+        }
+        _ => host_port,
+    };
+    LOCAL.contains(&host)
+}
+
+/// Replace the password in a `postgres[ql]://user:password@host…` URL with `***`.
+fn mask_database_url(url: &str) -> String {
+    let (scheme, rest) = match url.split_once("://") {
+        Some(pair) => pair,
+        None => return url.to_string(),
+    };
+    let Some((userinfo, host)) = rest.rsplit_once('@') else {
+        return url.to_string();
+    };
+    let masked_userinfo = match userinfo.split_once(':') {
+        Some((user, _pw)) => format!("{user}:***"),
+        None => userinfo.to_string(),
+    };
+    format!("{scheme}://{masked_userinfo}@{host}")
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn database_url_is_local_basic() {
+        assert!(database_url_is_local("postgres://u:p@localhost:5432/db"));
+        assert!(database_url_is_local("postgres://u:p@127.0.0.1/db"));
+        assert!(database_url_is_local("postgresql://u@::1/db"));
+        assert!(!database_url_is_local("postgres://u:p@db.prod:5432/db"));
+        assert!(!database_url_is_local("not-a-url"));
+    }
+
+    #[test]
+    fn mask_database_url_basic() {
+        assert_eq!(
+            mask_database_url("postgres://u:secret@host:5432/db"),
+            "postgres://u:***@host:5432/db"
+        );
+        assert_eq!(
+            mask_database_url("postgres://host/db"),
+            "postgres://host/db"
+        );
     }
 }

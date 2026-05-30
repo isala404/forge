@@ -47,7 +47,7 @@ pub async fn iss_location(ctx: &CronContext) -> Result<()> {
 
     let response = ctx
         .http()
-        .get("http://api.open-notify.org/iss-now.json")
+        .get("https://api.open-notify.org/iss-now.json")
         .send()
         .await
         .map_err(|e| ForgeError::internal(format!("HTTP request failed: {}", e)))?;
@@ -69,8 +69,16 @@ pub async fn iss_location(ctx: &CronContext) -> Result<()> {
         tracing::warn!(message = %data.message, "ISS API non-success");
     }
 
-    let latitude: f64 = data.iss_position.latitude.parse().unwrap_or(0.0);
-    let longitude: f64 = data.iss_position.longitude.parse().unwrap_or(0.0);
+    let latitude: f64 = data
+        .iss_position
+        .latitude
+        .parse()
+        .map_err(|e| ForgeError::Deserialization(format!("invalid latitude: {e}")))?;
+    let longitude: f64 = data
+        .iss_position
+        .longitude
+        .parse()
+        .map_err(|e| ForgeError::Deserialization(format!("invalid longitude: {e}")))?;
 
     sqlx::query!(
         "INSERT INTO iss_location (id, latitude, longitude, api_timestamp, created_at) \

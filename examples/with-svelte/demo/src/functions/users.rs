@@ -1,9 +1,11 @@
 use crate::schema::{User, UserRole};
 use forge::prelude::*;
 
-/// List all users with reactive subscription support
-#[forge::query(cache = "30s", auth = "none")]
+/// List all users with reactive subscription support.
+/// Reading the global user list requires an authenticated session.
+#[forge::query(cache = "30s", unscoped)]
 pub async fn get_users(ctx: &QueryContext) -> Result<Vec<User>> {
+    let _ = ctx.user_id()?;
     sqlx::query_as!(
         User,
         r#"
@@ -24,9 +26,10 @@ pub async fn get_users(ctx: &QueryContext) -> Result<Vec<User>> {
     .map_err(Into::into)
 }
 
-/// Get single user by ID
-#[forge::query(timeout = "10s", auth = "none")]
+/// Get single user by ID. Requires an authenticated session.
+#[forge::query(timeout = "10s", unscoped)]
 pub async fn get_user(ctx: &QueryContext, id: Uuid) -> Result<Option<User>> {
+    let _ = ctx.user_id()?;
     sqlx::query_as!(
         User,
         r#"
@@ -48,14 +51,15 @@ pub async fn get_user(ctx: &QueryContext, id: Uuid) -> Result<Option<User>> {
     .map_err(Into::into)
 }
 
-/// Create a new user
-#[forge::mutation(auth = "none")]
+/// Create a new user. Requires the `admin` role.
+#[forge::mutation(scope = "global")]
 pub async fn create_user(
     ctx: &MutationContext,
     email: String,
     name: String,
     role: Option<UserRole>,
 ) -> Result<User> {
+    ctx.auth.require_role("admin")?;
     let id = Uuid::new_v4();
     let now = Utc::now();
     let role = role.unwrap_or_default();
@@ -87,8 +91,8 @@ pub async fn create_user(
     .map_err(Into::into)
 }
 
-/// Update user with partial fields
-#[forge::mutation(timeout = "30s", auth = "none")]
+/// Update user with partial fields. Requires the `admin` role.
+#[forge::mutation(timeout = "30s", scope = "global")]
 pub async fn update_user(
     ctx: &MutationContext,
     id: Uuid,
@@ -96,6 +100,7 @@ pub async fn update_user(
     name: Option<String>,
     role: Option<UserRole>,
 ) -> Result<User> {
+    ctx.auth.require_role("admin")?;
     let mut conn = ctx.conn().await.map_err(ForgeError::Database)?;
     sqlx::query_as!(
         User,
@@ -126,9 +131,10 @@ pub async fn update_user(
     .map_err(Into::into)
 }
 
-/// Delete user by ID
-#[forge::mutation(auth = "none")]
+/// Delete user by ID. Requires the `admin` role.
+#[forge::mutation(scope = "global")]
 pub async fn delete_user(ctx: &MutationContext, id: Uuid) -> Result<bool> {
+    ctx.auth.require_role("admin")?;
     let mut conn = ctx.conn().await.map_err(ForgeError::Database)?;
     let result = sqlx::query!("DELETE FROM users WHERE id = $1", id)
         .execute(&mut conn)
@@ -152,20 +158,16 @@ mod tests {
         db
     }
 
+    fn admin_auth() -> AuthContext {
+        AuthContext::authenticated(Uuid::new_v4(), vec!["admin".into()], Default::default())
+    }
+
     fn query_ctx(pool: sqlx::PgPool) -> QueryContext {
-        QueryContext::new(
-            pool,
-            AuthContext::unauthenticated(),
-            RequestMetadata::default(),
-        )
+        QueryContext::new(pool, admin_auth(), RequestMetadata::default())
     }
 
     fn mutation_ctx(pool: sqlx::PgPool) -> MutationContext {
-        MutationContext::new(
-            pool,
-            AuthContext::unauthenticated(),
-            RequestMetadata::default(),
-        )
+        MutationContext::new(pool, admin_auth(), RequestMetadata::default())
     }
 
     #[tokio::test]
@@ -198,6 +200,24 @@ mod tests {
         .unwrap();
 
         assert_eq!(user.role, UserRole::Admin);
+        db.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_create_user_requires_admin_role() {
+        let db = setup_db().await;
+        let ctx = MutationContext::new(
+            db.pool().clone(),
+            AuthContext::authenticated(Uuid::new_v4(), vec!["member".into()], Default::default()),
+            RequestMetadata::default(),
+        );
+
+        let result = create_user(&ctx, "nope@example.com".into(), "No Admin".into(), None).await;
+
+        assert!(
+            matches!(result, Err(ForgeError::Forbidden(_))),
+            "non-admin must be rejected with Forbidden, got {result:?}"
+        );
         db.cleanup().await.unwrap();
     }
 

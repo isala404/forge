@@ -167,6 +167,7 @@ fn parse_signature_from_meta(attr_args: &[NestedMeta]) -> Result<WebhookSignatur
 }
 
 pub fn webhook_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let forge = crate::utils::forge_path();
     let input = parse_macro_input!(item as ItemFn);
 
     let attr_args = match NestedMeta::parse_meta_list(attr.into()) {
@@ -279,24 +280,24 @@ pub fn webhook_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     ) {
         let alg_token = match alg {
             WebhookSignatureAlgorithm::HmacSha256 => {
-                quote! { forge::forge_core::webhook::SignatureAlgorithm::HmacSha256 }
+                quote! { #forge::forge_core::webhook::SignatureAlgorithm::HmacSha256 }
             }
             WebhookSignatureAlgorithm::StripeWebhooks => {
-                quote! { forge::forge_core::webhook::SignatureAlgorithm::StripeWebhooks }
+                quote! { #forge::forge_core::webhook::SignatureAlgorithm::StripeWebhooks }
             }
             WebhookSignatureAlgorithm::HmacSha256Base64 => {
-                quote! { forge::forge_core::webhook::SignatureAlgorithm::HmacSha256Base64 }
+                quote! { #forge::forge_core::webhook::SignatureAlgorithm::HmacSha256Base64 }
             }
             WebhookSignatureAlgorithm::Ed25519 => {
-                quote! { forge::forge_core::webhook::SignatureAlgorithm::Ed25519 }
+                quote! { #forge::forge_core::webhook::SignatureAlgorithm::Ed25519 }
             }
         };
         let replay_window_tokens = match attrs.replay_window_secs {
             Some(secs) => quote! { #secs },
-            None => quote! { forge::forge_core::webhook::DEFAULT_REPLAY_WINDOW_SECS },
+            None => quote! { #forge::forge_core::webhook::DEFAULT_REPLAY_WINDOW_SECS },
         };
         quote! {
-            Some(forge::forge_core::webhook::SignatureConfig {
+            Some(#forge::forge_core::webhook::SignatureConfig {
                 algorithm: #alg_token,
                 header_name: #header,
                 secret_env: #secret_env,
@@ -312,15 +313,15 @@ pub fn webhook_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             match prefix {
                 "header" => {
                     quote! {
-                        Some(forge::forge_core::webhook::IdempotencyConfig::new(
-                            forge::forge_core::webhook::IdempotencySource::Header(#value)
+                        Some(#forge::forge_core::webhook::IdempotencyConfig::new(
+                            #forge::forge_core::webhook::IdempotencySource::Header(#value)
                         ))
                     }
                 }
                 "body" => {
                     quote! {
-                        Some(forge::forge_core::webhook::IdempotencyConfig::new(
-                            forge::forge_core::webhook::IdempotencySource::Body(#value)
+                        Some(#forge::forge_core::webhook::IdempotencyConfig::new(
+                            #forge::forge_core::webhook::IdempotencySource::Body(#value)
                         ))
                     }
                 }
@@ -337,10 +338,10 @@ pub fn webhook_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let registration = if attrs.register {
         quote! {
-            forge::inventory::submit!(forge::AutoHandler(|registries| {
+            #forge::inventory::submit!(#forge::AutoHandler(|registries| {
                 registries.webhooks.register::<#struct_name>();
                 registries.functions.register_webhook_info(
-                    forge::forge_core::FunctionInfo::from(&#struct_name::info())
+                    #forge::forge_core::FunctionInfo::from(&#struct_name::info())
                 );
             }));
         }
@@ -357,13 +358,13 @@ pub fn webhook_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             #(#other_attrs)*
             pub struct #struct_name;
 
-            impl forge::forge_core::__sealed::Sealed for #struct_name {}
+            impl #forge::forge_core::__sealed::Sealed for #struct_name {}
 
-            impl forge::forge_core::webhook::ForgeWebhook for #struct_name {
+            impl #forge::forge_core::webhook::ForgeWebhook for #struct_name {
                 type Payload = #payload_type;
 
-                fn info() -> forge::forge_core::webhook::WebhookInfo {
-                    forge::forge_core::webhook::WebhookInfo {
+                fn info() -> #forge::forge_core::webhook::WebhookInfo {
+                    #forge::forge_core::webhook::WebhookInfo {
                         name: #rpc_name,
                         description: #description_tokens,
                         path: #path,
@@ -376,9 +377,9 @@ pub fn webhook_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
 
                 fn execute(
-                    ctx: &forge::forge_core::webhook::WebhookContext,
+                    ctx: &#forge::forge_core::webhook::WebhookContext,
                     payload: #payload_type,
-                ) -> std::pin::Pin<Box<dyn std::future::Future<Output = forge::forge_core::Result<forge::forge_core::webhook::WebhookResult>> + Send + '_>> {
+                ) -> std::pin::Pin<Box<dyn std::future::Future<Output = #forge::forge_core::Result<#forge::forge_core::webhook::WebhookResult>> + Send + '_>> {
                     Box::pin(async move #block)
                 }
             }

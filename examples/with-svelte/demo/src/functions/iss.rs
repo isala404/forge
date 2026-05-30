@@ -30,12 +30,22 @@ struct ParsedIssSnapshot {
     timestamp: i64,
 }
 
-fn parse_iss_snapshot(data: IssApiResponse) -> ParsedIssSnapshot {
-    ParsedIssSnapshot {
-        latitude: data.iss_position.latitude.parse().unwrap_or(0.0),
-        longitude: data.iss_position.longitude.parse().unwrap_or(0.0),
+fn parse_iss_snapshot(data: IssApiResponse) -> Result<ParsedIssSnapshot> {
+    let latitude = data
+        .iss_position
+        .latitude
+        .parse::<f64>()
+        .map_err(|e| ForgeError::Deserialization(format!("invalid latitude: {e}")))?;
+    let longitude = data
+        .iss_position
+        .longitude
+        .parse::<f64>()
+        .map_err(|e| ForgeError::Deserialization(format!("invalid longitude: {e}")))?;
+    Ok(ParsedIssSnapshot {
+        latitude,
+        longitude,
         timestamp: data.timestamp,
-    }
+    })
 }
 
 /// Get the latest ISS location from database
@@ -62,7 +72,7 @@ pub async fn iss_location(ctx: &CronContext) -> Result<()> {
 
     let response = ctx
         .http()
-        .get("http://api.open-notify.org/iss-now.json")
+        .get("https://api.open-notify.org/iss-now.json")
         .send()
         .await
         .map_err(|e| ForgeError::internal(format!("HTTP request failed: {}", e)))?;
@@ -84,7 +94,7 @@ pub async fn iss_location(ctx: &CronContext) -> Result<()> {
         tracing::warn!(message = %data.message, "ISS API non-success");
     }
 
-    let snapshot = parse_iss_snapshot(data);
+    let snapshot = parse_iss_snapshot(data)?;
 
     sqlx::query!(
         "INSERT INTO iss_location (id, latitude, longitude, api_timestamp, created_at) \
@@ -118,7 +128,8 @@ mod tests {
             },
             timestamp: 1_700_000_000,
             message: "success".into(),
-        });
+        })
+        .expect("valid coordinates parse");
 
         assert_eq!(
             snapshot,
@@ -131,18 +142,17 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_iss_snapshot_falls_back_for_invalid_coordinates() {
-        let snapshot = parse_iss_snapshot(IssApiResponse {
+    fn test_parse_iss_snapshot_rejects_invalid_coordinates() {
+        let err = parse_iss_snapshot(IssApiResponse {
             iss_position: IssPosition {
                 latitude: "north".into(),
                 longitude: "east".into(),
             },
             timestamp: 42,
             message: "failure".into(),
-        });
+        })
+        .unwrap_err();
 
-        assert_eq!(snapshot.latitude, 0.0);
-        assert_eq!(snapshot.longitude, 0.0);
-        assert_eq!(snapshot.timestamp, 42);
+        assert!(matches!(err, ForgeError::Deserialization(_)));
     }
 }

@@ -273,7 +273,8 @@ pub fn init_telemetry(
                 )
             }
             Err(e) => {
-                eprintln!("WARNING: OTLP trace exporter init failed, traces disabled: {e}");
+                tracing::error!(error = %e, "OTLP trace exporter init failed; traces disabled");
+                record_otel_export_initialized("traces", false);
                 None
             }
         }
@@ -306,7 +307,8 @@ pub fn init_telemetry(
                 Some(log_layer)
             }
             Err(e) => {
-                eprintln!("WARNING: OTLP log exporter init failed, log bridge disabled: {e}");
+                tracing::error!(error = %e, "OTLP log exporter init failed; log bridge disabled");
+                record_otel_export_initialized("logs", false);
                 None
             }
         }
@@ -335,9 +337,20 @@ pub fn init_telemetry(
                 global::set_meter_provider(meter_provider);
             }
             Err(e) => {
-                eprintln!("WARNING: OTLP metric exporter init failed, metrics disabled: {e}");
+                tracing::error!(error = %e, "OTLP metric exporter init failed; metrics disabled");
+                record_otel_export_initialized("metrics", false);
             }
         }
+    }
+
+    if config.enable_traces {
+        record_otel_export_initialized("traces", TRACER_PROVIDER.get().is_some());
+    }
+    if config.enable_logs {
+        record_otel_export_initialized("logs", LOGGER_PROVIDER.get().is_some());
+    }
+    if config.enable_metrics {
+        record_otel_export_initialized("metrics", METER_PROVIDER.get().is_some());
     }
 
     tracing::info!(
@@ -351,6 +364,26 @@ pub fn init_telemetry(
     );
 
     Ok(true)
+}
+
+/// Health gauge that flips to 1 when an OTLP exporter initialized
+/// successfully and 0 when it failed at startup. Lets operators alert on
+/// missing telemetry without parsing log lines.
+fn record_otel_export_initialized(signal: &'static str, initialized: bool) {
+    use opentelemetry::metrics::Gauge;
+    static GAUGE: OnceLock<Gauge<u64>> = OnceLock::new();
+    let gauge = GAUGE.get_or_init(|| {
+        global::meter("forge-runtime")
+            .u64_gauge("otel_export_initialized")
+            .with_description(
+                "1 if the OTLP exporter for this signal initialized at startup, 0 if it failed.",
+            )
+            .build()
+    });
+    gauge.record(
+        if initialized { 1 } else { 0 },
+        &[KeyValue::new("signal", signal)],
+    );
 }
 
 pub fn shutdown_telemetry() {

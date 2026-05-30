@@ -86,17 +86,27 @@ export function forge_install_web_vitals(baseUrl, getSessionId) {
                             timestamp: new Date().toISOString(),
                         }],
                         context: {
-                            page_url: location.href,
+                            page_url: location.pathname,
                             session_id: getSessionId() || null,
                         }
                     }
                 });
                 const url = baseUrl + '/_api/signal';
-                const headers = { 'Content-Type': 'application/json', 'x-forge-platform': 'web' };
+                // sendBeacon can't set custom headers, but wrapping the body in a
+                // typed Blob makes the browser send Content-Type: application/json
+                // (a bare string defaults to text/plain, which the endpoint rejects
+                // with 415). Cookies are still inherited so identified users
+                // attribute correctly. The fetch fallback adds credentials +
+                // X-Forge-CSRF for CORS-gated cross-origin.
+                const headers = {
+                    'Content-Type': 'application/json',
+                    'x-forge-platform': 'web',
+                    'X-Forge-CSRF': '1',
+                };
                 if (navigator.sendBeacon) {
-                    navigator.sendBeacon(url, body);
+                    navigator.sendBeacon(url, new Blob([body], { type: 'application/json' }));
                 } else {
-                    fetch(url, { method: 'POST', headers: headers, body: body, keepalive: true });
+                    fetch(url, { method: 'POST', headers: headers, body: body, keepalive: true, credentials: 'include' });
                 }
             } catch (_) {}
         }
@@ -575,11 +585,24 @@ impl ForgeSignals {
     }
 
     pub async fn page(&self, url_path: &str) {
-        let (base_url, session_id, utm) = {
+        let (base_url, session_id, token, utm) = {
             let mut inner = self.inner.borrow_mut();
             if !inner.config.enabled { return; }
+            // Re-extract UTM on each navigation so SPA route changes that carry
+            // new utm_* params still propagate, but fall back to the landing
+            // params captured at construction: the deferred initial page view
+            // fires after the router has normalized the URL and dropped the
+            // query string, so a live re-extract would return nothing.
+            if let Some(fresh) = extract_utm() {
+                inner.utm_params = Some(fresh);
+            }
             let utm = inner.utm_params.take();
-            (inner.client.get_url().to_string(), inner.session_id.clone(), utm)
+            (
+                inner.client.get_url().to_string(),
+                inner.session_id.clone(),
+                inner.client.auth_token(),
+                utm,
+            )
         };
 
         let mut payload = json!({ "url": url_path });
@@ -592,7 +615,7 @@ impl ForgeSignals {
         }
 
         let wrapped = json!({ "type": "view", "payload": payload });
-        if let Ok(resp) = post_signal(&base_url, "signal", &wrapped, session_id.as_deref()).await
+        if let Ok(resp) = post_signal(&base_url, "signal", &wrapped, session_id.as_deref(), token.as_deref()).await
             && let Some(sid) = resp.get("session_id").and_then(|v| v.as_str())
         {
             self.inner.borrow_mut().session_id = Some(sid.to_string());
@@ -613,12 +636,13 @@ impl ForgeSignals {
     }
 
     async fn report_error(&self, error: SignalError, context: Option<Value>) {
-        let (url, session_id, correlation_id, breadcrumbs, page_url) = {
+        let (url, session_id, token, correlation_id, breadcrumbs, page_url) = {
             let inner = self.inner.borrow();
             if !inner.config.enabled { return; }
             (
                 inner.client.get_url().to_string(),
                 inner.session_id.clone(),
+                inner.client.auth_token(),
                 inner.last_correlation_id.clone(),
                 inner.breadcrumbs.clone(),
                 current_page_url(),
@@ -643,7 +667,7 @@ impl ForgeSignals {
             }
         };
         let wrapped = json!({ "type": "report", "payload": payload });
-        let _ = post_signal(&url, "signal", &wrapped, session_id.as_deref()).await;
+        let _ = post_signal(&url, "signal", &wrapped, session_id.as_deref(), token.as_deref()).await;
     }
 
     /// Add a breadcrumb for error reproduction context.
@@ -672,13 +696,18 @@ impl ForgeSignals {
     }
 
     pub async fn flush(&self) {
-        let (url, mut events, session_id) = {
+        let (url, mut events, session_id, token) = {
             let mut inner = self.inner.borrow_mut();
             if inner.queue.is_empty() { return; }
             let max = inner.config.max_batch_size;
             let count = inner.queue.len().min(max);
             let events: Vec<_> = inner.queue.drain(..count).collect();
-            (inner.client.get_url().to_string(), events, inner.session_id.clone())
+            (
+                inner.client.get_url().to_string(),
+                events,
+                inner.session_id.clone(),
+                inner.client.auth_token(),
+            )
         };
 
         let batch = EventBatch {
@@ -703,7 +732,7 @@ impl ForgeSignals {
             }
         };
         let wrapped = json!({ "type": "event", "payload": payload });
-        match post_signal(&url, "signal", &wrapped, session_id.as_deref()).await
+        match post_signal(&url, "signal", &wrapped, session_id.as_deref(), token.as_deref()).await
         {
             Ok(resp) => {
                 if let Some(sid) = resp.get("session_id").and_then(|v| v.as_str()) {
@@ -797,11 +826,13 @@ fn flush_beacon(signals: &ForgeSignals) {
     }
 }
 
+/// Capture just the path (no querystring) so URL-borne secrets like
+/// `?reset_token=…` or `?ssoToken=…` never reach the analytics store.
 fn current_page_url() -> Option<String> {
     #[cfg(target_arch = "wasm32")]
     {
         web_sys::window()
-            .and_then(|w| w.location().href().ok())
+            .and_then(|w| w.location().pathname().ok())
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -862,15 +893,23 @@ async fn post_signal(
     path: &str,
     body: &Value,
     session_id: Option<&str>,
+    token: Option<&str>,
 ) -> Result<Value, ()> {
     #[cfg(target_arch = "wasm32")]
     {
         use gloo_net::http::Request;
+        // X-Forge-CSRF forces a CORS preflight on cross-origin POSTs, gating
+        // credentialed cross-site requests via the server's CORS allowlist.
         let mut req = Request::post(&format!("{base_url}/_api/{path}"))
             .header("Content-Type", "application/json")
-            .header("x-forge-platform", platform_tag());
+            .header("x-forge-platform", platform_tag())
+            .header("X-Forge-CSRF", "1")
+            .credentials(web_sys::RequestCredentials::Include);
         if let Some(sid) = session_id {
             req = req.header("x-session-id", sid);
+        }
+        if let Some(t) = token {
+            req = req.header("Authorization", &format!("Bearer {t}"));
         }
         let resp = req.body(body.to_string()).map_err(|_| ())?.send().await.map_err(|_| ())?;
         resp.json().await.map_err(|_| ())
@@ -881,9 +920,13 @@ async fn post_signal(
         let mut req = Client::new()
             .post(format!("{base_url}/_api/{path}"))
             .header("x-forge-platform", platform_tag())
+            .header("X-Forge-CSRF", "1")
             .json(body);
         if let Some(sid) = session_id {
             req = req.header("x-session-id", sid);
+        }
+        if let Some(t) = token {
+            req = req.bearer_auth(t);
         }
         let resp = req.send().await.map_err(|_| ())?;
         resp.json().await.map_err(|_| ())
@@ -894,6 +937,14 @@ pub fn use_signals() -> ForgeSignals {
     use_context::<ForgeSignals>()
 }
 
+/// LIMITATION: this function intentionally leaks each `Closure` it passes
+/// to `addEventListener` via `.forget()`. Dioxus's WASM lifecycle does not
+/// expose a "provider unmounted" hook we can wire teardown into, and these
+/// listeners must outlive the borrowed `ForgeSignals`. The leak is one-shot
+/// per `ForgeAuthProvider` mount (i.e. typically once per page lifetime),
+/// not per render. If a future Dioxus version exposes a drop hook for
+/// context providers, switch to storing `Closure`s in a guard struct and
+/// removing the listeners on drop.
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn setup_auto_capture(signals: ForgeSignals) {
     use wasm_bindgen::closure::Closure;

@@ -25,8 +25,9 @@ pub use response::{RpcError, RpcResponse};
 pub use rpc::RpcHandler;
 pub use server::{GatewayConfig, GatewayServer, TrustedProxies};
 pub use sse::{
-    SseConfig, SsePayload, SseQuery, SseState, sse_handler, sse_job_subscribe_handler,
-    sse_subscribe_handler, sse_unsubscribe_handler, sse_workflow_subscribe_handler,
+    SseConfig, SsePayload, SseQuery, SseState, SseTicketResponse, sse_handler,
+    sse_job_subscribe_handler, sse_subscribe_handler, sse_ticket_handler, sse_unsubscribe_handler,
+    sse_workflow_subscribe_handler,
 };
 pub use tls::{
     GatewayConn, GatewayListener, PeerAddr, TlsListenConfig, bind_listener, load_rustls_config,

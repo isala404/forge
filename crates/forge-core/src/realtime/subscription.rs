@@ -77,6 +77,11 @@ pub struct AuthScope {
     pub tenant_id: Option<String>,
     /// Hash of the sorted roles for this auth context.
     pub role_hash: u64,
+    /// Admin status is part of the dedup key: `check_owner_access` treats
+    /// admins as having implicit access to every owner's data, so an admin
+    /// must never share a group with a non-admin even when principal/tenant/
+    /// roles coincide.
+    pub is_admin: bool,
 }
 
 impl PartialEq for AuthScope {
@@ -84,6 +89,7 @@ impl PartialEq for AuthScope {
         self.principal_id == other.principal_id
             && self.tenant_id == other.tenant_id
             && self.role_hash == other.role_hash
+            && self.is_admin == other.is_admin
     }
 }
 
@@ -94,6 +100,7 @@ impl std::hash::Hash for AuthScope {
         self.principal_id.hash(state);
         self.tenant_id.hash(state);
         self.role_hash.hash(state);
+        self.is_admin.hash(state);
     }
 }
 
@@ -114,6 +121,7 @@ impl AuthScope {
                 .and_then(|v| v.as_str())
                 .map(ToString::to_string),
             role_hash,
+            is_admin: auth.is_admin(),
         }
     }
 }
@@ -186,14 +194,37 @@ impl QueryGroup {
         use std::hash::Hash;
         match value {
             serde_json::Value::Object(map) => {
+                hasher.write_u8(b'o');
                 let mut keys: Vec<&String> = map.keys().collect();
                 keys.sort();
                 for key in keys {
                     key.hash(hasher);
                     Self::hash_json_canonical(&map[key], hasher);
                 }
+                hasher.write_u8(b'e');
             }
-            other => other.to_string().hash(hasher),
+            serde_json::Value::Array(items) => {
+                hasher.write_u8(b'a');
+                for item in items {
+                    Self::hash_json_canonical(item, hasher);
+                }
+                hasher.write_u8(b'e');
+            }
+            serde_json::Value::Null => {
+                hasher.write_u8(b'0');
+            }
+            serde_json::Value::Bool(b) => {
+                hasher.write_u8(b'b');
+                b.hash(hasher);
+            }
+            serde_json::Value::Number(n) => {
+                hasher.write_u8(b'n');
+                n.to_string().hash(hasher);
+            }
+            serde_json::Value::String(s) => {
+                hasher.write_u8(b's');
+                s.hash(hasher);
+            }
         }
     }
 
@@ -221,8 +252,11 @@ impl QueryGroup {
     /// Uses the runtime read set when populated, otherwise falls back to the
     /// compile-time table dependencies from macro extraction.
     pub fn should_invalidate(&self, change: &super::readset::Change) -> bool {
+        let in_compile_deps = self.table_deps.iter().any(|t| *t == change.table);
+        let in_runtime_set = self.read_set.tables.iter().any(|t| t == &change.table);
+
         let table_matches = if self.read_set.tables.is_empty() {
-            self.table_deps.iter().any(|t| *t == change.table)
+            in_compile_deps
         } else {
             change.invalidates(&self.read_set)
         };
@@ -231,7 +265,14 @@ impl QueryGroup {
             return false;
         }
 
-        if !change.invalidates_columns(self.selected_cols) {
+        // `selected_cols` is captured at compile time for the macro-declared
+        // tables. Runtime-discovered tables (added by the manager when the
+        // read_set widens after execution) don't have a per-table column
+        // map, so applying the compile-time column filter to them would
+        // wrongly suppress real changes. Fall back to "always invalidate"
+        // for those, and only apply the column filter when the change came
+        // through a compile-time-declared table.
+        if in_compile_deps && !in_runtime_set && !change.invalidates_columns(self.selected_cols) {
             return false;
         }
 
@@ -385,6 +426,7 @@ mod tests {
             principal_id: Some("user-1".to_string()),
             tenant_id: None,
             role_hash: 0,
+            is_admin: false,
         };
         let key1 = QueryGroup::compute_lookup_key(
             "get_projects",
@@ -402,6 +444,7 @@ mod tests {
             principal_id: Some("user-2".to_string()),
             tenant_id: None,
             role_hash: 0,
+            is_admin: false,
         };
         let key3 = QueryGroup::compute_lookup_key(
             "get_projects",
@@ -417,6 +460,7 @@ mod tests {
             principal_id: Some("u1".to_string()),
             tenant_id: None,
             role_hash: 0,
+            is_admin: false,
         };
         let key =
             QueryGroup::compute_lookup_key("get_items", &serde_json::json!({"id": "42"}), &scope);
@@ -433,6 +477,7 @@ mod tests {
             principal_id: None,
             tenant_id: None,
             role_hash: 0,
+            is_admin: false,
         };
         let key_ab =
             QueryGroup::compute_lookup_key("q", &serde_json::json!({"a": 1, "b": 2}), &scope);

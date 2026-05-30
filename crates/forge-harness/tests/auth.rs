@@ -1,4 +1,3 @@
-#![cfg(feature = "testcontainers")]
 //! Authentication and authorization scenarios.
 //!
 //! Every frontend client is one of three callers: anonymous, an authenticated
@@ -9,14 +8,32 @@
 //! hit a 403 on the admin page": same gateway, same JWT verification, same
 //! `require_auth` path, same RPC envelope a browser client would consume.
 
+/// Sentinel test so `cargo test -p forge-harness` (without `--features
+/// testcontainers`) doesn't silently report "0 tests passed" and lull a
+/// contributor into thinking they ran the scenario suite. Always passes;
+/// its job is to print the hint.
+#[test]
+fn ensure_testcontainers_feature_enabled() {
+    eprintln!(
+        "forge-harness auth scenarios are gated on `--features testcontainers`. \
+         Re-run with `cargo test -p forge-harness --features testcontainers` \
+         to exercise authentication paths against a real Postgres."
+    );
+}
+
+#[cfg(feature = "testcontainers")]
+#[path = "common/mod.rs"]
 mod common;
 
+#[cfg(feature = "testcontainers")]
 use common::{Note, start_app};
+#[cfg(feature = "testcontainers")]
 use uuid::Uuid;
 
 /// A private query must reject an anonymous caller at the gateway — before the
 /// handler body runs — with the `UNAUTHORIZED` envelope a client turns into a
 /// 401. If this regressed to a success the whole private surface would leak.
+#[cfg(feature = "testcontainers")]
 #[tokio::test]
 async fn private_query_rejects_anonymous_caller() {
     let app = start_app("auth_anon_query").await;
@@ -37,6 +54,7 @@ async fn private_query_rejects_anonymous_caller() {
 
 /// The same gate applies to a private mutation: an anonymous caller is turned
 /// away before any write is attempted.
+#[cfg(feature = "testcontainers")]
 #[tokio::test]
 async fn private_mutation_rejects_anonymous_caller() {
     let app = start_app("auth_anon_mutation").await;
@@ -63,6 +81,7 @@ async fn private_mutation_rejects_anonymous_caller() {
 /// stamps `owner_id` from the JWT subject, and the query filters by it — so a
 /// regression on either side (a dropped `WHERE`, a mis-read subject claim)
 /// surfaces as one user seeing the other's rows.
+#[cfg(feature = "testcontainers")]
 #[tokio::test]
 async fn notes_stay_isolated_between_users() {
     let app = start_app("auth_user_isolation").await;
@@ -135,6 +154,7 @@ async fn notes_stay_isolated_between_users() {
 /// A role-gated handler must reject an authenticated caller who lacks the
 /// role with `FORBIDDEN` — distinct from the `UNAUTHORIZED` an anonymous
 /// caller gets. Authentication alone is not authorization.
+#[cfg(feature = "testcontainers")]
 #[tokio::test]
 async fn role_gated_query_rejects_missing_role() {
     let app = start_app("auth_role_missing").await;
@@ -155,9 +175,92 @@ async fn role_gated_query_rejects_missing_role() {
     app.shutdown().await.expect("shutdown");
 }
 
+/// An expired JWT must be rejected with `UNAUTHORIZED` before the handler
+/// runs. If this regressed to a success the gateway would honor any token
+/// whose signature happens to verify, regardless of `exp`.
+#[cfg(feature = "testcontainers")]
+#[tokio::test]
+async fn expired_token_is_rejected_as_unauthorized() {
+    let app = start_app("auth_expired_token").await;
+
+    // duration_secs(-3600) issues a token whose `exp` is one hour in the past.
+    let user_id = Uuid::new_v4();
+    let expired = app
+        .issue_token_with_claims(|b| b.user_id(user_id).duration_secs(-3600))
+        .expect("issue expired token");
+
+    let client = app.client().with_token(expired);
+    let error = client
+        .expect_error("harness_my_notes", ())
+        .await
+        .expect("a call with an expired token must fail, not succeed");
+    assert_eq!(
+        error.code, "UNAUTHORIZED",
+        "expired tokens must carry UNAUTHORIZED, saw: {error:?}",
+    );
+
+    app.shutdown().await.expect("shutdown");
+}
+
+/// A malformed bearer token (not even three dotted segments) must be rejected
+/// at the gateway, not silently treated as anonymous.
+#[cfg(feature = "testcontainers")]
+#[tokio::test]
+async fn malformed_token_is_rejected_as_unauthorized() {
+    let app = start_app("auth_malformed_token").await;
+
+    let client = app.client().with_token("this-is-not-a-jwt");
+    let error = client
+        .expect_error("harness_my_notes", ())
+        .await
+        .expect("a call with a malformed token must fail, not succeed");
+    assert_eq!(
+        error.code, "UNAUTHORIZED",
+        "malformed tokens must carry UNAUTHORIZED, saw: {error:?}",
+    );
+
+    app.shutdown().await.expect("shutdown");
+}
+
+/// A token signed with a different secret must be rejected. This is the
+/// signature-verification path: a regression that disabled verify would let
+/// any attacker mint tokens against any deployment.
+#[cfg(feature = "testcontainers")]
+#[tokio::test]
+async fn wrong_secret_token_is_rejected_as_unauthorized() {
+    use forge_core::TokenIssuer;
+    use forge_runtime::gateway::HmacTokenIssuer;
+    let app = start_app("auth_wrong_secret").await;
+
+    // Mint a token using an unrelated secret. Same shape as the harness's
+    // tokens; only the HMAC over header+payload differs.
+    let attacker_secret = "totally-different-secret-not-used-by-the-harness-instance";
+    let attacker_cfg = forge_runtime::gateway::AuthConfig::with_secret(attacker_secret.to_string());
+    let attacker_issuer = HmacTokenIssuer::from_config(&attacker_cfg).expect("issuer");
+    let claims = forge_core::Claims::builder()
+        .user_id(Uuid::new_v4())
+        .duration_secs(3600)
+        .build()
+        .expect("claims");
+    let forged = attacker_issuer.sign(&claims).expect("sign");
+
+    let client = app.client().with_token(forged);
+    let error = client
+        .expect_error("harness_my_notes", ())
+        .await
+        .expect("a call with a wrong-secret token must fail, not succeed");
+    assert_eq!(
+        error.code, "UNAUTHORIZED",
+        "wrong-secret tokens must carry UNAUTHORIZED, saw: {error:?}",
+    );
+
+    app.shutdown().await.expect("shutdown");
+}
+
 /// The other half of the role gate: a caller holding the role passes, and the
 /// handler runs. The count reflects a note the same caller just created, which
 /// proves the request reached the body rather than short-circuiting.
+#[cfg(feature = "testcontainers")]
 #[tokio::test]
 async fn role_gated_query_admits_present_role() {
     let app = start_app("auth_role_present").await;

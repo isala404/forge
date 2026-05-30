@@ -17,12 +17,14 @@ use tracing::debug;
 use super::jwks::JwksClient;
 
 /// Derive a stable, opaque key id from an HMAC secret. We take the first
-/// 8 hex chars of `SHA-256(secret_bytes)` — short enough to keep token
-/// headers small, deterministic so the same secret always produces the
-/// same kid, and one-way so it leaks nothing useful about the secret.
+/// 16 hex chars (8 bytes / 64 bits) of `SHA-256(secret_bytes)` — small
+/// enough to keep token headers compact while large enough to make kid
+/// collisions across rotated secrets infeasible. Deterministic so the
+/// same secret always produces the same kid, and one-way so it leaks
+/// nothing useful about the secret.
 fn secret_kid(secret: &[u8]) -> String {
     let hash = Sha256::digest(secret);
-    let prefix = hash.as_slice().get(..4).unwrap_or(&[]);
+    let prefix = hash.as_slice().get(..8).unwrap_or(&[]);
     let mut out = String::with_capacity(prefix.len() * 2);
     for byte in prefix {
         use std::fmt::Write;
@@ -346,6 +348,11 @@ pub struct AuthMiddleware {
     /// (Claims, expiry). The 256-bit key makes collisions cryptographically
     /// infeasible, so a hit unambiguously identifies the same token.
     token_cache: Arc<dashmap::DashMap<[u8; 32], (Claims, std::time::Instant)>>,
+    /// Monotonic instant (seconds since process start) of the last cache
+    /// sweep. Stored as `AtomicU64` so eviction is lock-free on the hot path.
+    last_cache_sweep_secs: Arc<std::sync::atomic::AtomicU64>,
+    /// Process-start anchor for `last_cache_sweep_secs`.
+    cache_sweep_epoch: std::time::Instant,
 }
 
 impl std::fmt::Debug for AuthMiddleware {
@@ -409,6 +416,8 @@ impl AuthMiddleware {
             hmac_kid,
             legacy_hmac_keys,
             token_cache: Arc::new(dashmap::DashMap::new()),
+            last_cache_sweep_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            cache_sweep_epoch: std::time::Instant::now(),
         }
     }
 
@@ -475,22 +484,52 @@ impl AuthMiddleware {
         const MAX_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
         let exp = claims.exp();
         let now = chrono::Utc::now().timestamp();
-        let remaining = if exp > now {
-            std::time::Duration::from_secs((exp - now) as u64)
-        } else {
-            std::time::Duration::ZERO
-        };
-        remaining.min(MAX_CACHE_TTL)
+        // `exp` is i64 (JWT spec); guard against negative remaining so a
+        // platform with a 32-bit `time_t` or skewed clock can't underflow
+        // into an absurdly large u64 TTL.
+        let remaining_secs = u64::try_from(exp.saturating_sub(now)).unwrap_or(0);
+        std::time::Duration::from_secs(remaining_secs).min(MAX_CACHE_TTL)
     }
 
     /// Periodically evict expired entries to prevent unbounded growth.
+    /// Sweeps when either (a) the cache exceeds `MAX_CACHE_SIZE` entries, or
+    /// (b) `SWEEP_INTERVAL` has elapsed since the last sweep. The time-based
+    /// trigger matters under low traffic with many short-lived tokens — the
+    /// size trigger alone would let stale entries accumulate indefinitely.
     fn evict_expired_cache_entries(&self) {
+        use std::sync::atomic::Ordering;
         const MAX_CACHE_SIZE: usize = 10_000;
-        if self.token_cache.len() > MAX_CACHE_SIZE {
-            let now = std::time::Instant::now();
-            self.token_cache
-                .retain(|_, (_, expires_at)| *expires_at > now);
+        const SWEEP_INTERVAL_SECS: u64 = 60;
+
+        let now_instant = std::time::Instant::now();
+        let elapsed_since_start = now_instant
+            .saturating_duration_since(self.cache_sweep_epoch)
+            .as_secs();
+        let last = self.last_cache_sweep_secs.load(Ordering::Relaxed);
+        let time_due = elapsed_since_start.saturating_sub(last) >= SWEEP_INTERVAL_SECS;
+        let size_due = self.token_cache.len() > MAX_CACHE_SIZE;
+
+        if !(size_due || time_due) {
+            return;
         }
+
+        // Race-free claim: only the caller that successfully advances the
+        // sweep timestamp performs the scan; concurrent callers skip.
+        if self
+            .last_cache_sweep_secs
+            .compare_exchange(
+                last,
+                elapsed_since_start,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            return;
+        }
+
+        self.token_cache
+            .retain(|_, (_, expires_at)| *expires_at > now_instant);
     }
 
     /// Validate HMAC-signed token. Uses the token's `kid` header to look up
@@ -541,21 +580,42 @@ impl AuthMiddleware {
         let safe_kid = header.kid.as_deref().map(sanitize_for_log);
         debug!(kid = ?safe_kid, alg = ?header.alg, "Validating RSA token");
 
-        let key = if let Some(kid) = header.kid {
-            jwks.get_key(&kid).await.map_err(|e| {
+        if let Some(kid) = header.kid {
+            let key = jwks.get_key(&kid).await.map_err(|e| {
                 AuthError::InvalidToken(format!("Failed to get key '{}': {}", kid, e))
-            })?
-        } else if self.config.jwks_require_kid {
+            })?;
+            return self.decode_and_validate(token, &key);
+        }
+
+        if self.config.jwks_require_kid {
             return Err(AuthError::InvalidToken(
                 "RS256 token missing kid header; set auth.jwks_require_kid = false to allow kidless tokens".to_string(),
             ));
-        } else {
-            jwks.get_any_key()
-                .await
-                .map_err(|e| AuthError::InvalidToken(format!("Failed to get JWKS key: {}", e)))?
-        };
+        }
 
-        self.decode_and_validate(token, &key)
+        // No kid: try every kidless key. A signature mismatch under one key
+        // does not imply the token is invalid — providers that publish multiple
+        // kidless keys (during rotation) require us to attempt each.
+        let candidates = jwks
+            .kidless_keys()
+            .await
+            .map_err(|e| AuthError::InvalidToken(format!("Failed to get JWKS key: {}", e)))?;
+        if candidates.is_empty() {
+            return Err(AuthError::InvalidToken(
+                "No kidless JWKS keys available for kidless token".to_string(),
+            ));
+        }
+
+        let mut last_err: Option<AuthError> = None;
+        for key in &candidates {
+            match self.decode_and_validate(token, key) {
+                Ok(claims) => return Ok(claims),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| {
+            AuthError::InvalidToken("Kidless token did not validate against any key".to_string())
+        }))
     }
 
     /// Decode and validate token with the given key.
@@ -627,6 +687,10 @@ impl AuthMiddleware {
     }
 
     /// Decode JWT token without signature verification (DEV MODE ONLY).
+    /// Still enforces `exp` so that a missing or zero expiry — which prod
+    /// validation rejects via `required_claims` — also fails here. Matching
+    /// the prod rule shrinks the downgrade-attack surface when a dev-built
+    /// token accidentally reaches a prod-config gateway.
     fn decode_without_verification(&self, token: &str) -> Result<Claims, AuthError> {
         let token_data =
             dangerous::insecure_decode::<Claims>(token).map_err(|e| match e.kind() {
@@ -635,6 +699,14 @@ impl AuthMiddleware {
                 }
                 _ => AuthError::InvalidToken(e.to_string()),
             })?;
+
+        // `exp == 0` (epoch) would deserialize fine since `i64` has no default
+        // guard against it. Treat as missing.
+        if token_data.claims.exp() <= 0 {
+            return Err(AuthError::InvalidToken(
+                "Token missing required `exp` claim".to_string(),
+            ));
+        }
 
         if token_data.claims.is_expired() {
             return Err(AuthError::TokenExpired);
@@ -810,12 +882,22 @@ pub async fn auth_middleware(
     let should_set_cookie =
         auth_context.is_authenticated() && middleware.config.jwt_secret.is_some();
 
-    // Skip cookie if one already exists (avoids resigning on every request)
+    // Skip cookie if one already exists (avoids resigning on every request).
+    // Parse the Cookie header strictly: split on ';', trim whitespace, and
+    // match name exactly so substrings like `xforge_session` don't trigger.
     let has_session_cookie = req
         .headers()
         .get(header::COOKIE)
         .and_then(|v| v.to_str().ok())
-        .map(|c| c.contains("forge_session="))
+        .map(|c| {
+            c.split(';').any(|pair| {
+                let trimmed = pair.trim_start();
+                trimmed
+                    .split_once('=')
+                    .map(|(name, _)| name == "forge_session")
+                    .unwrap_or(false)
+            })
+        })
         .unwrap_or(false);
 
     let should_set_cookie = should_set_cookie && !has_session_cookie;
@@ -851,8 +933,12 @@ pub async fn auth_middleware(
         // browsers refuse to send `Secure` cookies over HTTP, which surfaces
         // misconfigured deployments as a clean failure rather than silently
         // weakening the session.
+        // Path=/ ensures the browser sends the cookie on every request, so the
+        // resign-skip check above actually fires. With a narrower path the
+        // cookie would only be visible to /_api/oauth/* and every other request
+        // would re-sign it.
         let cookie = format!(
-            "forge_session={cookie_value}; Path=/_api/oauth/; HttpOnly; SameSite=Lax; Secure; Max-Age={cookie_ttl}"
+            "forge_session={cookie_value}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age={cookie_ttl}"
         );
         if let Ok(val) = axum::http::HeaderValue::from_str(&cookie) {
             response.headers_mut().append(header::SET_COOKIE, val);
@@ -1555,7 +1641,7 @@ mod tests {
         let kid_a = secret_kid(b"some-secret");
         let kid_b = secret_kid(b"some-secret");
         assert_eq!(kid_a, kid_b);
-        assert_eq!(kid_a.len(), 8, "kid should be 8 hex chars (4 bytes)");
+        assert_eq!(kid_a.len(), 16, "kid should be 16 hex chars (8 bytes)");
         assert_ne!(kid_a, secret_kid(b"different-secret"));
     }
 
@@ -1667,7 +1753,7 @@ mod tests {
         let config = AuthConfig {
             algorithm: JwtAlgorithm::RS256,
             jwks_client: Some(Arc::new(
-                JwksClient::new("http://example.invalid".into(), 3600).unwrap(),
+                JwksClient::new("https://example.invalid".into(), 3600).unwrap(),
             )),
             jwks_require_kid: true,
             ..AuthConfig::default()

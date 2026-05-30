@@ -398,10 +398,12 @@ pub async fn oauth_register(
             )
                 .into_response();
         }
-        // Check scheme and host
-        let is_localhost = uri.starts_with("http://localhost")
-            || uri.starts_with("http://127.0.0.1")
-            || uri.starts_with("http://[::1]");
+        // Check scheme and host. `starts_with("http://localhost")` would also
+        // pass `http://localhost.evil.com/cb`, letting an attacker register a
+        // non-loopback redirect over plain HTTP. Extract the hostname and
+        // compare exactly.
+        let is_localhost =
+            forge_core::util::http_hostname(uri).is_some_and(forge_core::util::is_loopback_host);
         let is_https = uri.starts_with("https://");
         if !is_localhost && !is_https {
             return (
@@ -661,10 +663,20 @@ pub async fn oauth_authorize_post(
             .into_response();
     }
 
-    // Rate limit login failures (T7). PG-backed key so the budget is shared
-    // across cluster nodes.
+    // Rate limit every authorize POST branch (T7). Applied before branch
+    // dispatch so token and session-cookie flows can't bypass the budget —
+    // each branch exercises crypto-heavy paths (JWT validate, cookie HMAC,
+    // argon2id) that are otherwise free abuse amplifiers.
     let ip = resolved_ip.0.as_deref().unwrap_or("unknown");
     let rate_key = format!("oauth:login:{ip}");
+    if !state.rate_check(&rate_key, LOGIN_FAIL_RATE_LIMIT).await {
+        return authorize_error_redirect(
+            &form.redirect_uri,
+            form.state.as_deref(),
+            "access_denied",
+            "Too many authorization attempts. Please try again later.",
+        );
+    }
 
     // Validate client and redirect_uri again (form could be tampered)
     let client = sqlx::query!(
@@ -714,16 +726,22 @@ pub async fn oauth_authorize_post(
     });
 
     if let Some(subject) = session_subject {
-        // Session cookie flow: user identified by signed cookie from previous API calls.
-        // Subject may be a UUID (HMAC auth) or an external provider ID (Firebase, Clerk).
-        user_id = subject.parse::<Uuid>().unwrap_or_else(|_| {
-            // Non-UUID subject (Firebase UID, etc.): deterministic UUID from subject hash.
-            use sha2::Digest;
-            let hash: [u8; 32] = sha2::Sha256::digest(subject.as_bytes()).into();
-            let mut bytes = [0u8; 16];
-            bytes.copy_from_slice(&hash[..16]);
-            Uuid::from_bytes(bytes)
-        });
+        // Session cookie flow: subject must already be a real users.id UUID.
+        // Hashing an external provider subject into a fake UUID would forge a
+        // FK to a row that does not exist, and two different external subjects
+        // could collide on the same 128-bit prefix. External-provider users
+        // must complete the bearer-token branch instead.
+        match subject.parse::<Uuid>() {
+            Ok(uid) => user_id = uid,
+            Err(_) => {
+                return authorize_error_redirect(
+                    &form.redirect_uri,
+                    form.state.as_deref(),
+                    "access_denied",
+                    "Session subject is not a Forge user id. Sign in with a bearer token.",
+                );
+            }
+        }
     } else if let Some(token) = &form.token {
         // Consent flow: validate existing JWT
         match state.auth_middleware.validate_token_async(token).await {
@@ -759,15 +777,6 @@ pub async fn oauth_authorize_post(
                 form.state.as_deref(),
                 "access_denied",
                 "Direct login not supported with external auth provider",
-            );
-        }
-
-        if !state.rate_check(&rate_key, LOGIN_FAIL_RATE_LIMIT).await {
-            return authorize_error_redirect(
-                &form.redirect_uri,
-                form.state.as_deref(),
-                "access_denied",
-                "Too many login attempts. Please try again later.",
             );
         }
 
@@ -1156,14 +1165,16 @@ fn base_url_from_headers(headers: &HeaderMap) -> String {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("localhost:9081");
 
+    // Parse host name (drop port and IPv6 brackets) and compare exactly. A
+    // `starts_with` test would match `localhost.evil.com`, causing the metadata
+    // to advertise an attacker-controlled http:// URL.
+    let hostname = forge_core::util::hostname_from_authority(host);
+    let is_loopback = forge_core::util::is_loopback_host(hostname);
+
     // Do not trust x-forwarded-proto: OAuth routes bypass the trusted-proxy
     // middleware, so any client can spoof the header. Default to "https" for
-    // production safety; localhost gets "http" for local development.
-    let scheme = if host.starts_with("localhost") || host.starts_with("127.0.0.1") {
-        "http"
-    } else {
-        "https"
-    };
+    // production safety; loopback gets "http" for local development.
+    let scheme = if is_loopback { "http" } else { "https" };
 
     format!("{scheme}://{host}")
 }

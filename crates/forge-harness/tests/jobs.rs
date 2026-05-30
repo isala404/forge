@@ -1,4 +1,3 @@
-#![cfg(feature = "testcontainers")]
 //! Background-job scenarios.
 //!
 //! A job dispatched over RPC must land on the worker, run to a terminal
@@ -7,19 +6,38 @@
 //! export, watch the progress bar fill, see it finish": same gateway, same
 //! worker, same `job:` SSE wire frames a browser client would consume.
 
+/// Sentinel test so `cargo test -p forge-harness` (without `--features
+/// testcontainers`) doesn't silently report "0 tests passed" and lull a
+/// contributor into thinking they ran the scenario suite. Always passes;
+/// its job is to print the hint.
+#[test]
+fn ensure_testcontainers_feature_enabled() {
+    eprintln!(
+        "forge-harness job scenarios are gated on `--features testcontainers`. \
+         Re-run with `cargo test -p forge-harness --features testcontainers` \
+         to exercise the worker against a real Postgres."
+    );
+}
+
+#[cfg(feature = "testcontainers")]
+#[path = "common/mod.rs"]
 mod common;
 
+#[cfg(feature = "testcontainers")]
 use std::time::Duration;
 
+#[cfg(feature = "testcontainers")]
 use common::{JobHandle, RunJobInput, drain_job_updates, start_app};
 
 /// Worker poll (50ms) + a few hundred ms of job work + reactor round-trips.
 /// Generous enough to absorb CI scheduling noise without masking a hang.
+#[cfg(feature = "testcontainers")]
 const JOB_BUDGET: Duration = Duration::from_secs(10);
 
 /// The core loop: dispatch a job, subscribe, and watch the worker stream it
 /// from a non-terminal state through to `completed`, carrying the handler's
 /// output on the final frame.
+#[cfg(feature = "testcontainers")]
 #[tokio::test]
 async fn job_runs_and_streams_lifecycle() {
     let app = start_app("jobs_lifecycle").await;
@@ -82,6 +100,7 @@ async fn job_runs_and_streams_lifecycle() {
 
 /// A handler that returns `Err` must drive the job to a terminal failure
 /// state and stream the error message — not silently vanish.
+#[cfg(feature = "testcontainers")]
 #[tokio::test]
 async fn failing_job_streams_terminal_failure() {
     let app = start_app("jobs_failure").await;
@@ -125,6 +144,7 @@ async fn failing_job_streams_terminal_failure() {
 
 /// `subscribe-job` hands back the job's current state synchronously, at
 /// subscribe time — the equivalent of a store's first value.
+#[cfg(feature = "testcontainers")]
 #[tokio::test]
 async fn subscribe_job_returns_initial_snapshot() {
     let app = start_app("jobs_snapshot").await;

@@ -52,7 +52,7 @@ echo "=== Auto-format generated code ==="
 cargo fmt || true
 find "$DIR/frontend" -name '*.rs' -exec rustfmt --edition 2024 {} + || true
 if [ -d "$DIR/frontend" ] && [ -f "$DIR/frontend/package.json" ]; then
-  cd "$DIR/frontend" && bun install --no-save && bunx prettier --write . || true && cd "$DIR"
+  ( cd "$DIR/frontend" && bun install --no-save && { bunx prettier --write . || true; } )
 fi
 
 echo "=== Forge check ==="

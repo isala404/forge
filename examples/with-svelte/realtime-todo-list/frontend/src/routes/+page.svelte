@@ -1,60 +1,58 @@
 <script lang="ts">
-  import { listTodos$, createTodo, updateTodo, deleteTodo } from "$lib/forge";
+  import {
+    listTodos$,
+    createTodo,
+    updateTodo,
+    deleteTodo,
+    register,
+    login,
+  } from "$lib/forge";
   import type { ForgeError } from "$lib/forge";
+  import { auth } from "$lib/forge/auth.svelte";
   import { getForgeSignals } from "@forge-rs/svelte";
 
   const signals = getForgeSignals();
-  const todos = listTodos$();
+
+  let mode: "login" | "register" = $state("login");
+  let email = $state("");
+  let name = $state("");
+  let password = $state("");
+  let authError: string | null = $state(null);
+  let authSubmitting = $state(false);
 
   let newTitle: string = $state("");
   let error: ForgeError | null = $state(null);
   let adding: boolean = $state(false);
 
-  let remainingCount = $derived(
-    todos.data?.filter((t) => !t.completed).length ?? 0,
-  );
+  const isAuthed = $derived(auth.isAuthenticated);
 
-  async function handleAdd() {
-    if (!newTitle.trim()) return;
-    adding = true;
-    error = null;
-    signals.breadcrumb("Adding todo", { title: newTitle.trim() });
+  async function handleAuth(e: Event) {
+    e.preventDefault();
+    authError = null;
+    authSubmitting = true;
     try {
-      await createTodo({ title: newTitle.trim() });
-      signals.track("todo_created", { title: newTitle.trim() });
-      newTitle = "";
-    } catch (e) {
-      error = e as ForgeError;
-      signals.track("todo_create_error", { error: (e as ForgeError).message });
+      const res =
+        mode === "register"
+          ? await register({ email, name, password })
+          : await login({ email, password });
+      auth.setAuth(res.access_token, res.refresh_token, {
+        id: res.user.id,
+        email: res.user.email,
+        name: res.user.name,
+      });
+      email = "";
+      name = "";
+      password = "";
+    } catch (err) {
+      authError = (err as ForgeError).message;
     } finally {
-      adding = false;
+      authSubmitting = false;
     }
   }
 
-  async function handleToggle(id: string, completed: boolean) {
-    signals.track("todo_toggled", { id, completed: !completed });
-    try {
-      await updateTodo({ id, completed: !completed });
-    } catch (e) {
-      error = e as ForgeError;
-      signals.track("todo_toggle_error", { error: (e as ForgeError).message });
-    }
-  }
-
-  async function handleDelete(id: string) {
-    signals.breadcrumb("Deleting todo", { id });
-    try {
-      await deleteTodo({ id });
-      signals.track("todo_deleted", { id });
-    } catch (e) {
-      error = e as ForgeError;
-      signals.track("todo_delete_error", { error: (e as ForgeError).message });
-    }
-  }
-
-  function handleKeydown(e: KeyboardEvent) {
-    signals.breadcrumb("Enter key pressed in todo input");
-    if (e.key === "Enter") handleAdd();
+  function handleLogout() {
+    signals.breadcrumb("Logout");
+    auth.clearAuth();
   }
 </script>
 
@@ -62,65 +60,168 @@
   <div class="shell">
     <header class="hero">
       <h1>Todos</h1>
-    </header>
-
-    <section class="input-panel">
-      <div class="input-row">
-        <input
-          type="text"
-          placeholder="What needs to be done?"
-          bind:value={newTitle}
-          onkeydown={handleKeydown}
-          disabled={adding}
-        />
-        <button onclick={handleAdd} disabled={adding || !newTitle.trim()}>
-          {adding ? "Adding..." : "Add"}
-        </button>
-      </div>
-
-      {#if error}
-        <p class="error">{error.message}</p>
-      {/if}
-    </section>
-
-    <section class="list-panel">
-      {#if todos.data && todos.data.length > 0}
-        <div class="list-head">
-          <span class="summary">{remainingCount} remaining</span>
+      {#if isAuthed}
+        <div class="user-row">
+          <span class="user">{auth.user?.name ?? auth.user?.email}</span>
+          <button class="logout" onclick={handleLogout}>Sign out</button>
         </div>
       {/if}
+    </header>
 
-      {#if todos.loading}
-        <p class="status">Loading...</p>
-      {:else if todos.error}
-        <p class="error">{todos.error.message}</p>
-      {:else if todos.data}
-        {#if todos.data.length === 0}
-          <p class="status">No todos yet. Add one above!</p>
-        {:else}
-          <ul>
-            {#each todos.data as todo (todo.id)}
-              <li class:completed={todo.completed}>
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={todo.completed}
-                    onchange={() => handleToggle(todo.id, todo.completed)}
-                  />
-                  <span class="title">{todo.title}</span>
-                </label>
-                <button class="delete" onclick={() => handleDelete(todo.id)}>
-                  Delete
-                </button>
-              </li>
-            {/each}
-          </ul>
-          <p class="count">
-            {remainingCount} remaining
-          </p>
+    {#if !isAuthed}
+      <section class="auth-panel">
+        <div class="tabs">
+          <button
+            class:active={mode === "login"}
+            onclick={() => (mode = "login")}>Sign in</button
+          >
+          <button
+            class:active={mode === "register"}
+            onclick={() => (mode = "register")}>Sign up</button
+          >
+        </div>
+        <form onsubmit={handleAuth}>
+          {#if mode === "register"}
+            <input
+              type="text"
+              placeholder="Name"
+              bind:value={name}
+              required
+            />
+          {/if}
+          <input
+            type="email"
+            placeholder="Email"
+            bind:value={email}
+            required
+          />
+          <input
+            type="password"
+            placeholder="Password (min 8 chars)"
+            bind:value={password}
+            minlength="8"
+            required
+          />
+          <button type="submit" disabled={authSubmitting}>
+            {authSubmitting ? "..." : mode === "login" ? "Sign in" : "Sign up"}
+          </button>
+        </form>
+        {#if authError}
+          <p class="error">{authError}</p>
         {/if}
-      {/if}
-    </section>
+      </section>
+    {:else}
+      {@const todos = listTodos$()}
+      {@const remainingCount =
+        todos.data?.filter((t) => !t.completed).length ?? 0}
+
+      <section class="input-panel">
+        <div class="input-row">
+          <input
+            type="text"
+            placeholder="What needs to be done?"
+            bind:value={newTitle}
+            onkeydown={(e) => {
+              if (e.key === "Enter") {
+                (async () => {
+                  if (!newTitle.trim()) return;
+                  adding = true;
+                  error = null;
+                  try {
+                    await createTodo({ title: newTitle.trim() });
+                    newTitle = "";
+                  } catch (e) {
+                    error = e as ForgeError;
+                  } finally {
+                    adding = false;
+                  }
+                })();
+              }
+            }}
+            disabled={adding}
+          />
+          <button
+            onclick={async () => {
+              if (!newTitle.trim()) return;
+              adding = true;
+              error = null;
+              try {
+                await createTodo({ title: newTitle.trim() });
+                newTitle = "";
+              } catch (e) {
+                error = e as ForgeError;
+              } finally {
+                adding = false;
+              }
+            }}
+            disabled={adding || !newTitle.trim()}
+          >
+            {adding ? "Adding..." : "Add"}
+          </button>
+        </div>
+
+        {#if error}
+          <p class="error">{error.message}</p>
+        {/if}
+      </section>
+
+      <section class="list-panel">
+        {#if todos.data && todos.data.length > 0}
+          <div class="list-head">
+            <span class="summary">{remainingCount} remaining</span>
+          </div>
+        {/if}
+
+        {#if todos.loading}
+          <p class="status">Loading...</p>
+        {:else if todos.error}
+          <p class="error">{todos.error.message}</p>
+        {:else if todos.data}
+          {#if todos.data.length === 0}
+            <p class="status">No todos yet. Add one above!</p>
+          {:else}
+            <ul>
+              {#each todos.data as todo (todo.id)}
+                <li class:completed={todo.completed}>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={todo.completed}
+                      onchange={async () => {
+                        try {
+                          await updateTodo({
+                            id: todo.id,
+                            completed: !todo.completed,
+                          });
+                        } catch (e) {
+                          error = e as ForgeError;
+                        }
+                      }}
+                    />
+                    <span class="title">{todo.title}</span>
+                  </label>
+                  <button
+                    class="delete"
+                    onclick={async () => {
+                      try {
+                        await deleteTodo({ id: todo.id });
+                      } catch (e) {
+                        error = e as ForgeError;
+                      }
+                    }}
+                  >
+                    Delete
+                  </button>
+                </li>
+              {/each}
+            </ul>
+            <p class="count">
+              {remainingCount} remaining
+            </p>
+          {/if}
+        {/if}
+      </section>
+    {/if}
   </div>
 </main>
 
@@ -148,6 +249,9 @@
     padding: 0 0 0.75rem;
     border-bottom: 1px solid #e5e5e5;
     margin-bottom: 1rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
   }
 
   h1 {
@@ -155,6 +259,98 @@
     font-weight: 600;
     font-size: 1.5rem;
     color: #111;
+  }
+
+  .user-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    font-size: 0.85rem;
+  }
+
+  .user {
+    color: #555;
+  }
+
+  .logout {
+    padding: 0.3rem 0.6rem;
+    font-size: 0.78rem;
+    background: #fff;
+    color: #555;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+
+  .logout:hover {
+    background: #f5f5f5;
+  }
+
+  .auth-panel {
+    margin-bottom: 1.5rem;
+  }
+
+  .tabs {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .tabs button {
+    flex: 1;
+    padding: 0.4rem;
+    font-size: 0.85rem;
+    background: #f7f7f7;
+    color: #444;
+    border: 1px solid #e0e0e0;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+
+  .tabs button.active {
+    background: #111;
+    color: #fff;
+    border-color: #111;
+  }
+
+  .auth-panel form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .auth-panel input,
+  .auth-panel button[type="submit"] {
+    padding: 0.5rem 0.75rem;
+    font-size: 0.9rem;
+    border-radius: 4px;
+    font-family: inherit;
+  }
+
+  .auth-panel input {
+    border: 1px solid #ccc;
+    background: #fff;
+    color: #222;
+  }
+
+  .auth-panel input:focus {
+    border-color: #888;
+    outline: none;
+  }
+
+  .auth-panel button[type="submit"] {
+    background: #111;
+    color: #fff;
+    border: none;
+    cursor: pointer;
+    font-weight: 500;
+  }
+
+  .auth-panel button[type="submit"]:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
   }
 
   .input-panel {

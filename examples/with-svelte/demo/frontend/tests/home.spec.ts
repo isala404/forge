@@ -6,6 +6,32 @@ import {
   uniqueId,
   trackConsoleErrors,
 } from "./fixtures";
+import type { Page } from "@playwright/test";
+
+// User CRUD requires the `admin` role, `confirm_verification` and
+// `trigger_demo_webhook` require an authenticated session. The seeded
+// `demo@example.com` user is an admin (see migrations/0001_initial.sql).
+// Prefill is dev-only, so production-built bundles need explicit credentials.
+async function loginAsAdmin(page: Page) {
+  const auth = page.locator("section", {
+    has: page.getByText("refresh tokens"),
+  });
+  await auth.getByPlaceholder("Email").fill("demo@example.com");
+  await auth.getByPlaceholder(/Password/).fill("password123");
+  // Logging in rotates the token; the client tears down the anonymous SSE
+  // stream and re-subscribes every query over a fresh authenticated one. Wait
+  // for that re-subscription so reactive reads (and job/webhook push updates)
+  // reflect the authenticated session before the test interacts.
+  const resubscribed = page.waitForResponse(
+    (res) => res.url().includes("/_api/subscribe") && res.status() === 200,
+    { timeout: ACTION_TIMEOUT * 3 },
+  );
+  await auth.locator('button[type="submit"]').click();
+  await expect(auth.getByText("Logged in as")).toBeVisible({
+    timeout: ACTION_TIMEOUT,
+  });
+  await resubscribed;
+}
 
 async function signDemoWebhook(body: string): Promise<string> {
   const encoder = new TextEncoder();
@@ -32,6 +58,7 @@ test("users CRUD stays reactive through create, edit, and delete", async ({
   const updatedName = uniqueId("Edited");
 
   await gotoReady();
+  await loginAsAdmin(page);
 
   const section = page.locator("section", {
     has: page.getByRole("heading", { name: /users/i }),
@@ -67,6 +94,8 @@ test("export job and verification workflow complete from the UI", async ({
   gotoReady,
 }) => {
   await gotoReady();
+  // `confirm_verification` requires an authenticated session.
+  await loginAsAdmin(page);
 
   const exportSection = page.locator("section", {
     has: page.getByText("Export Job"),
@@ -110,6 +139,9 @@ test("auth flow logs in, refreshes, and logs out cleanly", async ({
     has: page.getByText("refresh tokens"),
   });
 
+  // Prefill is dev-only; the production bundle ships empty fields.
+  await section.getByPlaceholder("Email").fill("demo@example.com");
+  await section.getByPlaceholder(/Password/).fill("password123");
   await section.locator('button[type="submit"]').click();
   await expect(section.getByText("Logged in as")).toBeVisible({
     timeout: ACTION_TIMEOUT,
@@ -159,6 +191,8 @@ test("webhook endpoint rejects bad signatures and surfaces accepted events", asy
   expect(accepted.ok()).toBeTruthy();
 
   await gotoReady();
+  // `trigger_demo_webhook` (the "Send" button) requires an authenticated session.
+  await loginAsAdmin(page);
   const section = page.locator("section", {
     has: page.getByText("Webhook"),
   });

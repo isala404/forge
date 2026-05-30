@@ -15,7 +15,7 @@ url = "${DATABASE_URL}"
 [gateway]
 port = 9081
 cors_enabled = true
-cors_origins = ["http://localhost:9080", "http://127.0.0.1:9080"]
+cors_origins = ["${CORS_ORIGIN-http://localhost:9080}", "http://127.0.0.1:9080"]
 # request_timeout = "30s"
 # max_body_size = "10mb"
 # quiet_paths = ["/_api/health", "/_api/ready"]  # Routes excluded from traces/metrics/logs
@@ -39,7 +39,12 @@ otlp_endpoint = "http://localhost:4318"
 # job_timeout = "5m"
 # poll_interval = "1s"
 
-# [auth]
+[auth]
+jwt_algorithm = "HS256"
+jwt_secret = "${JWT_SECRET}"
+jwt_audience = "${JWT_AUDIENCE}"
+
+# Legacy template values below kept for reference.
 # jwt_algorithm = "HS256"           # HS256, HS384, HS512, RS256, RS384, RS512
 #
 # --- HMAC (HS256/HS384/HS512) - symmetric, use for self-issued tokens ---
@@ -48,9 +53,12 @@ otlp_endpoint = "http://localhost:4318"
 # --- RSA (RS256/RS384/RS512) - asymmetric, use for external providers ---
 # jwks_url = ""                     # Provider JWKS URLs: see auth reference docs
 
-# [rate_limit]
-# mode = "local"            # local, distributed
-# max_local_buckets = 10000
+[rate_limit]
+# hybrid: per-node DashMap fast path (DDoS-grade). strict: PG round-trip (billing-grade).
+mode = "hybrid"
+max_local_buckets = 10000
+# Per-handler quotas live on the function macros, e.g.
+#   #[forge::mutation(rate_limit_requests = 10, rate_limit_per_secs = 60, rate_limit_key = "ip")]
 
 # [cluster]
 # name = "node-1"            # auto-generated if omitted

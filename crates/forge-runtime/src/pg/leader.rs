@@ -12,6 +12,14 @@ use crate::pg::notify_bus::PgNotifyBus;
 /// Payload is the role string; subscribers filter by their own role.
 pub const LEADER_RELEASED_CHANNEL: &str = "forge_leader_released";
 
+/// Number of times to retry `pg_try_advisory_lock` after terminating a zombie
+/// leader's backend. PostgreSQL releases the dead backend's advisory locks
+/// asynchronously, so the first retry can race the teardown.
+const PREEMPT_RETRY_ATTEMPTS: u32 = 10;
+
+/// Backoff between post-termination lock-acquisition retries.
+const PREEMPT_RETRY_BACKOFF: Duration = Duration::from_millis(25);
+
 /// Leader election configuration.
 #[derive(Debug, Clone)]
 pub struct LeaderConfig {
@@ -130,6 +138,19 @@ impl LeaderElection {
 
     pub fn is_leader(&self) -> bool {
         self.is_leader.load(Ordering::SeqCst)
+    }
+
+    /// Subscribe to leader-released NOTIFY events for this role, if a notify
+    /// bus is attached. Returns `None` when no bus is configured (single-node
+    /// or test setups), in which case callers should fall back to polling.
+    ///
+    /// Standby polling loops use this to wake immediately when the current
+    /// leader voluntarily releases, instead of sleeping for the full
+    /// `check_interval`.
+    pub fn subscribe_release_notify(&self) -> Option<tokio::sync::broadcast::Receiver<String>> {
+        self.notify_bus
+            .as_ref()
+            .and_then(|bus| bus.subscribe(LEADER_RELEASED_CHANNEL))
     }
 
     /// How often the leader validates the advisory lock is still held.
@@ -307,6 +328,38 @@ impl LeaderElection {
             }
         };
 
+        // Verify the lock-holding backend belongs to a forge process before
+        // terminating it: two unrelated apps sharing this DB can hash to the
+        // same advisory lock ID, and we must not evict the other app's session.
+        // Connections without an application_name are assumed non-forge and
+        // skipped — operators can set `application_name=forge-<role>` to opt in.
+        // Untyped query: `pg_stat_activity` rows can come and go between
+        // statements (the holder may have exited), so the macro's static row
+        // shape buys nothing here. Allow the lint locally.
+        #[allow(clippy::disallowed_methods)]
+        let app_name: Option<String> = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT application_name FROM pg_stat_activity WHERE pid = $1",
+        )
+        .bind(pid)
+        .fetch_optional(&mut **conn)
+        .await
+        .map_err(forge_core::ForgeError::Database)?
+        .flatten();
+
+        match app_name.as_deref() {
+            Some(name) if name.starts_with("forge") => {}
+            other => {
+                tracing::warn!(
+                    role = self.role.as_str(),
+                    zombie_pid = pid,
+                    application_name = ?other,
+                    "Refusing to terminate backend whose application_name does not start with 'forge'; \
+                     another app may share this database. Set application_name=forge-<role> to allow preemption."
+                );
+                return Ok(false);
+            }
+        }
+
         // pg_terminate_backend returns false when permission is denied or the backend is already gone.
         let terminated =
             sqlx::query_scalar!(r#"SELECT pg_terminate_backend($1) AS "terminated!""#, pid,)
@@ -332,18 +385,31 @@ impl LeaderElection {
             "Terminated zombie leader backend with expired lease; retrying lock acquisition"
         );
 
-        // Yield to let PG process the termination before retrying the lock.
-        tokio::task::yield_now().await;
+        // pg_terminate_backend only *signals* the backend; PostgreSQL releases
+        // its advisory locks asynchronously as that backend tears down. A single
+        // immediate retry races that teardown and usually loses, so we poll
+        // pg_try_advisory_lock a few times with a short backoff. The window is
+        // small (PG processes the signal in milliseconds) but a bare yield is
+        // not enough.
+        for attempt in 0..PREEMPT_RETRY_ATTEMPTS {
+            let acquired = sqlx::query_scalar!(
+                r#"SELECT pg_try_advisory_lock($1) AS "acquired!""#,
+                self.role.lock_id(),
+            )
+            .fetch_one(&mut **conn)
+            .await
+            .map_err(forge_core::ForgeError::Database)?;
 
-        let acquired = sqlx::query_scalar!(
-            r#"SELECT pg_try_advisory_lock($1) AS "acquired!""#,
-            self.role.lock_id(),
-        )
-        .fetch_one(&mut **conn)
-        .await
-        .map_err(forge_core::ForgeError::Database)?;
+            if acquired {
+                return Ok(true);
+            }
 
-        Ok(acquired)
+            if attempt + 1 < PREEMPT_RETRY_ATTEMPTS {
+                tokio::time::sleep(PREEMPT_RETRY_BACKOFF).await;
+            }
+        }
+
+        Ok(false)
     }
 
     /// Confirm the advisory lock is still held on the lock-owning connection.
@@ -567,24 +633,9 @@ impl LeaderElection {
         // resolved by the lock being gone).
         let mut lock_connection = self.lock_connection.lock().await;
         if let Some(mut conn) = lock_connection.take() {
-            // Emit NOTIFY before unlock so standbys wake only when the lock is
-            // genuinely about to be free. Failure is non-fatal: standbys fall
-            // back to their normal check_interval timer.
-            if let Err(e) = sqlx::query!(
-                "SELECT pg_notify($1, $2)",
-                LEADER_RELEASED_CHANNEL,
-                self.role.as_str(),
-            )
-            .execute(&mut *conn)
-            .await
-            {
-                tracing::warn!(
-                    role = self.role.as_str(),
-                    error = %e,
-                    "Failed to emit leader-released NOTIFY; standbys will wait for next check tick",
-                );
-            }
-
+            // Unlock first, then NOTIFY only if we actually held the lock.
+            // Notifying when the lock wasn't held wakes standbys to race for
+            // a slot we never owned in the first place — pure noise.
             let released = sqlx::query_scalar!(
                 "SELECT pg_advisory_unlock($1) as \"released!\"",
                 self.role.lock_id()
@@ -593,11 +644,26 @@ impl LeaderElection {
             .await
             .map_err(forge_core::ForgeError::Database)?;
 
-            if !released {
+            if released {
+                if let Err(e) = sqlx::query!(
+                    "SELECT pg_notify($1, $2)",
+                    LEADER_RELEASED_CHANNEL,
+                    self.role.as_str(),
+                )
+                .execute(&mut *conn)
+                .await
+                {
+                    tracing::warn!(
+                        role = self.role.as_str(),
+                        error = %e,
+                        "Failed to emit leader-released NOTIFY; standbys will wait for next check tick",
+                    );
+                }
+            } else {
                 tracing::warn!(
                     role = self.role.as_str(),
                     "pg_advisory_unlock returned false during release; \
-                     lock was not held by this session"
+                     lock was not held by this session; skipping NOTIFY"
                 );
             }
 
@@ -1081,6 +1147,20 @@ mod integration_tests {
         );
         assert!(zombie.try_become_leader().await.unwrap());
         assert!(zombie.is_leader());
+
+        // Tag the zombie's lock-holding backend with a forge-prefixed
+        // application_name, matching what the connection pool now sets in
+        // production (`forge-<project>`). The preemption guard only terminates
+        // backends whose application_name starts with `forge`; without this the
+        // simulated zombie reports an empty name and would never be evicted.
+        {
+            let mut conn_guard = zombie.lock_connection.lock().await;
+            let conn = conn_guard.as_mut().expect("lock connection present");
+            sqlx::query("SET application_name = 'forge-demo'")
+                .execute(&mut **conn)
+                .await
+                .unwrap();
+        }
 
         // Artificially expire the lease so standbys see a stale leader.
         #[allow(clippy::disallowed_methods)]

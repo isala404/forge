@@ -34,7 +34,7 @@ use super::multipart::{MultipartConfig, rpc_multipart_handler};
 use super::response::{RpcError, RpcResponse};
 use super::rpc::{RpcHandler, rpc_function_handler, rpc_handler};
 use super::sse::{
-    SseState, sse_handler, sse_job_subscribe_handler, sse_subscribe_handler,
+    SseState, sse_handler, sse_job_subscribe_handler, sse_subscribe_handler, sse_ticket_handler,
     sse_unsubscribe_handler, sse_workflow_subscribe_handler,
 };
 use super::tls::{TlsListenConfig, bind_listener};
@@ -48,19 +48,12 @@ const DEFAULT_MAX_JSON_BODY_SIZE: usize = 1024 * 1024;
 const DEFAULT_MAX_MULTIPART_BODY_SIZE: usize = 20 * 1024 * 1024;
 const DEFAULT_MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
 const MAX_MULTIPART_CONCURRENCY: usize = 32;
-/// Fallback for visitor ID hashing when no JWT secret is configured (dev only).
-const DEFAULT_SIGNAL_SECRET: &str = "forge-default-signal-secret";
-
-/// Resolve the visitor-ID hashing secret, falling back to a stable dev value
-/// with a one-time warning when no JWT secret is configured.
-fn signal_visitor_secret(jwt_secret: &Option<String>) -> String {
-    jwt_secret.clone().unwrap_or_else(|| {
-        tracing::warn!(
-            "No jwt_secret configured; using default signal secret for visitor ID hashing. \
-             Visitor IDs will be predictable. Set [auth] jwt_secret in forge.toml."
-        );
-        DEFAULT_SIGNAL_SECRET.to_string()
-    })
+/// Resolve the visitor-ID hashing secret. Returns `None` when no JWT secret
+/// is configured — callers must skip signals collection rather than fall
+/// back to a constant, which would let any attacker predict visitor IDs and
+/// correlate sessions across users.
+fn signal_visitor_secret(jwt_secret: &Option<String>) -> Option<String> {
+    jwt_secret.clone().filter(|s| !s.is_empty())
 }
 
 /// Gateway server configuration.
@@ -218,6 +211,7 @@ pub struct GatewayServer {
     signals_collector: Option<crate::signals::SignalsCollector>,
     signals_anonymize_ip: bool,
     signals_geoip: Option<crate::signals::geoip::GeoIpResolver>,
+    signals_rate_limit_per_minute: Option<u32>,
     custom_routes: Option<Router>,
     rate_limiter: Option<Arc<dyn forge_core::rate_limit::RateLimiterBackend>>,
     role_resolver: Option<forge_core::SharedRoleResolver>,
@@ -255,6 +249,7 @@ impl GatewayServer {
             signals_collector: None,
             signals_anonymize_ip: false,
             signals_geoip: None,
+            signals_rate_limit_per_minute: None,
             custom_routes: None,
             rate_limiter: None,
             role_resolver: None,
@@ -330,6 +325,12 @@ impl GatewayServer {
     }
 
     /// Set the GeoIP resolver for country code lookups from client IPs.
+    /// Override the default per-IP `/signal` rate limit (requests per minute).
+    pub fn with_signals_rate_limit_per_minute(mut self, max: u32) -> Self {
+        self.signals_rate_limit_per_minute = Some(max);
+        self
+    }
+
     pub fn with_signals_geoip(mut self, resolver: crate::signals::geoip::GeoIpResolver) -> Self {
         self.signals_geoip = Some(resolver);
         self
@@ -424,8 +425,14 @@ impl GatewayServer {
             rpc.set_role_resolver(resolver.clone());
         }
         if let Some(collector) = &self.signals_collector {
-            let secret = signal_visitor_secret(&self.config.auth.jwt_secret);
-            rpc.set_signals_collector(collector.clone(), secret);
+            match signal_visitor_secret(&self.config.auth.jwt_secret) {
+                Some(secret) => rpc.set_signals_collector(collector.clone(), secret),
+                None => tracing::error!(
+                    "Signals collector configured but `[auth] jwt_secret` is unset. \
+                     Signals are disabled to avoid predictable visitor IDs. Configure \
+                     a jwt_secret in forge.toml to enable signals."
+                ),
+            }
         }
         let rpc_handler_state = Arc::new(rpc);
 
@@ -446,21 +453,40 @@ impl GatewayServer {
         // with credentials per the CORS spec, so we enumerate them.
         let cors = if self.config.cors_enabled {
             if self.config.cors_origins.iter().any(|o| o == "*") {
-                // Wildcard origin can't use credentials. Loud at startup so
-                // operators don't ship `cors_origins = ["*"]` to production
-                // by accident — credentialed requests will silently fail
-                // (no `Access-Control-Allow-Credentials`) and there's no
-                // origin allowlist limiting cross-site abuse of the gateway.
-                tracing::warn!(
-                    "CORS wildcard (`cors_origins = [\"*\"]`) is enabled. \
-                     Credentialed requests will fail and any origin can \
-                     reach the gateway. Set explicit origins for \
-                     production deployments."
-                );
-                CorsLayer::new()
-                    .allow_origin(Any)
-                    .allow_methods(Any)
-                    .allow_headers(Any)
+                let is_production = std::env::var("FORGE_ENV")
+                    .ok()
+                    .as_deref()
+                    .map(|s| s.eq_ignore_ascii_case("production") || s.eq_ignore_ascii_case("prod"))
+                    .unwrap_or(false);
+                if is_production {
+                    // In production a wildcard origin opens the gateway to any
+                    // site. Refuse the wildcard outright: CORS is disabled and
+                    // every cross-origin request will fail at the browser. The
+                    // alternative — silently accepting every Origin — would let
+                    // a malicious site issue same-credentials requests.
+                    tracing::error!(
+                        "CORS wildcard (`cors_origins = [\"*\"]`) is forbidden when \
+                         FORGE_ENV=production. CORS will be disabled. Configure \
+                         explicit origins to re-enable cross-origin access."
+                    );
+                    CorsLayer::new()
+                } else {
+                    // Wildcard origin can't use credentials. Loud at startup so
+                    // operators don't ship `cors_origins = ["*"]` to production
+                    // by accident — credentialed requests will silently fail
+                    // (no `Access-Control-Allow-Credentials`) and there's no
+                    // origin allowlist limiting cross-site abuse of the gateway.
+                    tracing::warn!(
+                        "CORS wildcard (`cors_origins = [\"*\"]`) is enabled. \
+                         Credentialed requests will fail and any origin can \
+                         reach the gateway. Set explicit origins for \
+                         production deployments."
+                    );
+                    CorsLayer::new()
+                        .allow_origin(Any)
+                        .allow_methods(Any)
+                        .allow_headers(Any)
+                }
             } else {
                 use axum::http::Method;
                 let origins: Vec<_> = self
@@ -501,7 +527,6 @@ impl GatewayServer {
 
         let sse_state = Arc::new(SseState::with_config(
             self.reactor.clone(),
-            auth_middleware_state.clone(),
             super::sse::SseConfig {
                 max_sessions: self.config.sse_max_sessions,
                 max_subscriptions_per_session: self
@@ -569,6 +594,7 @@ impl GatewayServer {
 
         let sse_router = Router::new()
             .route("/events", get(sse_handler))
+            .route("/events/ticket", post(sse_ticket_handler))
             .route("/subscribe", post(sse_subscribe_handler))
             .route("/unsubscribe", post(sse_unsubscribe_handler))
             .route("/subscribe-job", post(sse_job_subscribe_handler))
@@ -598,23 +624,60 @@ impl GatewayServer {
             );
         }
 
-        let mut signals_router = Router::new();
-        if let Some(collector) = &self.signals_collector {
+        // The real collector only mounts when we have a visitor-ID secret: a
+        // constant fallback secret would make visitor IDs predictable, letting
+        // an attacker forge cross-user correlations. When it can't mount we
+        // still answer POST /signal with a 204 no-op (the else branch) instead
+        // of leaving the path to the SPA fallback, which 405s every beacon.
+        let signal_secret = signal_visitor_secret(&self.config.auth.jwt_secret);
+        if signal_secret.is_none() && self.signals_collector.is_some() {
+            tracing::error!(
+                "Signals collector configured but `[auth] jwt_secret` is unset. \
+                 Signal collection is disabled to avoid predictable visitor IDs."
+            );
+        }
+        let signals_router = if let (Some(collector), Some(server_secret)) =
+            (&self.signals_collector, signal_secret)
+        {
             let signals_state = Arc::new(crate::signals::endpoints::SignalsState {
                 collector: collector.clone(),
                 pool: self.db.primary().clone(),
-                server_secret: signal_visitor_secret(&self.config.auth.jwt_secret),
+                server_secret,
                 anonymize_ip: self.signals_anonymize_ip,
                 geoip: self.signals_geoip.clone(),
-                rate_limiter: Arc::new(crate::signals::rate_limit::SignalRateLimiter::new()),
+                rate_limiter: Arc::new(match self.signals_rate_limit_per_minute {
+                    Some(max) => crate::signals::rate_limit::SignalRateLimiter::with_limit(max),
+                    None => crate::signals::rate_limit::SignalRateLimiter::new(),
+                }),
             });
-            signals_router = Router::new()
+            // Tighter body cap for the signal endpoint specifically. The
+            // batch + per-event size caps in signals/endpoints.rs would
+            // otherwise sit behind the 1 MB JSON default; clamping the
+            // request body to MAX_BATCH_SIZE * MAX_EVENT_BYTES + slack stops
+            // unauthenticated clients from forcing us to deserialize multi-
+            // MB JSON before validation runs.
+            const MAX_SIGNAL_BODY_BYTES: usize = 512 * 1024;
+            Router::new()
                 .route("/signal", post(crate::signals::endpoints::signal_handler))
-                .with_state(signals_state);
-        }
+                .layer(DefaultBodyLimit::max(MAX_SIGNAL_BODY_BYTES))
+                .with_state(signals_state)
+        } else {
+            // Signals are disabled (or `[auth] jwt_secret` is unset). Clients
+            // enable web-vitals and page-view tracking by default and POST to
+            // /signal regardless. Without a route here the request falls through
+            // to the SPA static fallback, which rejects non-GET with a 405 the
+            // browser logs as a console error. Accept and drop it: a 204 stores
+            // nothing and mints no visitor ID, so it doesn't reintroduce the
+            // predictable-ID risk the real handler guards against.
+            Router::new().route(
+                "/signal",
+                post(|| async { axum::http::StatusCode::NO_CONTENT }),
+            )
+        };
 
         let admin_router = admin_router(AdminState {
             db_pool: self.db.primary().clone(),
+            reactor: Some(self.reactor.clone()),
         });
 
         main_router = main_router
@@ -688,6 +751,23 @@ impl GatewayServer {
             .await
             .map_err(|e| std::io::Error::other(format!("Failed to start reactor: {}", e)))?;
         tracing::info!("Reactor started for real-time updates");
+
+        // Surface the trusted-proxy posture at startup. The XFF chain is only
+        // honored when the immediate peer is in `trusted_proxies` — if the
+        // operator forgot to add the proxy CIDR, every request silently falls
+        // back to the peer IP and rate limits / geo signals get pinned to the
+        // proxy. A loud one-shot log keeps that misconfiguration visible.
+        if !self.config.trusted_proxies.is_empty() {
+            tracing::info!(
+                ranges = self.config.trusted_proxies.len(),
+                "Trusted proxies configured; X-Forwarded-For honored only from peers in these CIDRs"
+            );
+        } else {
+            tracing::info!(
+                "No trusted_proxies configured; X-Forwarded-For headers are ignored and \
+                 client IPs come from the immediate peer"
+            );
+        }
 
         tracing::info!("Gateway server listening on {}", addr);
 
@@ -806,10 +886,15 @@ async fn readiness_handler(
 }
 
 async fn handle_middleware_error(err: BoxError) -> axum::response::Response {
+    // Distinguish error categories so clients can react correctly. Timeout
+    // signals "retry later"; anything else gets surfaced as 500 so it shows
+    // up in error budgets rather than masquerading as a transient 503 that
+    // hides genuine middleware bugs.
     let rpc_err = if err.is::<tower::timeout::error::Elapsed>() {
         RpcError::new("REQUEST_TIMEOUT", "Request timed out")
     } else {
-        RpcError::new("SERVICE_UNAVAILABLE", "Server overloaded")
+        tracing::error!(error = %err, "Unexpected middleware error");
+        RpcError::new("INTERNAL_ERROR", "Internal server error")
     };
     RpcResponse::error(rpc_err).into_response()
 }
@@ -919,7 +1004,7 @@ async fn api_version_middleware(
     let is_rpc = req.uri().path().starts_with("/rpc");
     if is_rpc && let Some(accept) = req.headers().get(axum::http::header::ACCEPT) {
         let accept_str = accept.to_str().unwrap_or("");
-        if accept_str != "*/*" && !accept_str.is_empty() && !accept_str.contains(FORGE_API_V1) {
+        if !accept_str.is_empty() && !accept_allows_v1(accept_str) {
             return RpcResponse::error(RpcError::new(
                 "UNSUPPORTED_API_VERSION",
                 format!(
@@ -931,6 +1016,39 @@ async fn api_version_middleware(
         }
     }
     next.run(req).await
+}
+
+/// Returns true if the `Accept` header value tolerates the v1 forge media
+/// type. Each comma-separated media range is checked individually so that
+/// `Accept: application/json, application/vnd.forge.v1+json` matches even
+/// though `contains` would also have matched a misleading substring. Quality
+/// values (`;q=0`) explicitly disable the match.
+fn accept_allows_v1(accept: &str) -> bool {
+    for raw in accept.split(',') {
+        let mut parts = raw.split(';').map(str::trim);
+        let Some(media) = parts.next() else { continue };
+        if media.is_empty() {
+            continue;
+        }
+        let mut q = 1.0_f32;
+        for param in parts {
+            if let Some(qv) = param.strip_prefix("q=")
+                && let Ok(parsed) = qv.parse::<f32>()
+            {
+                q = parsed;
+            }
+        }
+        if q <= 0.0 {
+            continue;
+        }
+        if media.eq_ignore_ascii_case(FORGE_API_V1)
+            || media == "*/*"
+            || media.eq_ignore_ascii_case("application/*")
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Wraps each request in a span with HTTP semantics and OpenTelemetry
@@ -1117,9 +1235,10 @@ struct JsonDepthConfig {
 }
 
 /// Middleware that rejects request bodies whose JSON nesting depth exceeds
-/// `max_depth`. Runs on all POST requests regardless of Content-Type, because
-/// serde_json will parse the body downstream even if the client lies about
-/// the content type.
+/// `max_depth`. Runs on every method that can carry a body (POST/PUT/PATCH/
+/// DELETE) regardless of Content-Type, because serde_json will parse the
+/// body downstream even if the client lies about the content type. GET and
+/// HEAD are skipped because Axum drops their bodies.
 ///
 /// The body is buffered, inspected, and re-inserted into the request so that
 /// downstream handlers see the original bytes.
@@ -1129,8 +1248,13 @@ async fn json_depth_check_middleware(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     use axum::body::Body;
+    use axum::http::Method;
 
-    if req.method() != axum::http::Method::POST || config.max_depth == 0 {
+    let method_has_body = matches!(
+        *req.method(),
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    );
+    if !method_has_body || config.max_depth == 0 {
         return next.run(req).await;
     }
 
@@ -1237,12 +1361,18 @@ mod tests {
     #[test]
     fn signal_visitor_secret_uses_jwt_secret_when_present() {
         let secret = Some("my-jwt-secret".to_string());
-        assert_eq!(signal_visitor_secret(&secret), "my-jwt-secret");
+        assert_eq!(
+            signal_visitor_secret(&secret),
+            Some("my-jwt-secret".to_string())
+        );
     }
 
     #[test]
-    fn signal_visitor_secret_falls_back_to_default_when_absent() {
-        assert_eq!(signal_visitor_secret(&None), DEFAULT_SIGNAL_SECRET);
+    fn signal_visitor_secret_is_none_when_jwt_secret_absent() {
+        // Refuse to mint a constant fallback — predictable visitor IDs would
+        // let an attacker correlate sessions across users.
+        assert_eq!(signal_visitor_secret(&None), None);
+        assert_eq!(signal_visitor_secret(&Some(String::new())), None);
     }
 
     #[test]

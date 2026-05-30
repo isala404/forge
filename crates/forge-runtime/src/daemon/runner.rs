@@ -110,6 +110,7 @@ impl DaemonRunner {
             tracing::info!(count = self.registry.len(), "Daemon runner starting");
 
             let mut daemon_handles: HashMap<String, DaemonHandle> = HashMap::new();
+            let mut join_handles: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
 
             for (name, entry) in self.registry.daemons() {
                 let info = &entry.info;
@@ -160,7 +161,7 @@ impl DaemonRunner {
                     None
                 };
 
-                tokio::spawn(async move {
+                let jh = tokio::spawn(async move {
                     run_daemon_loop(
                         daemon_name,
                         daemon_entry,
@@ -180,6 +181,7 @@ impl DaemonRunner {
                     .await
                 });
 
+                join_handles.insert(name.to_string(), jh);
                 daemon_handles.insert(name.to_string(), handle);
             }
 
@@ -191,7 +193,37 @@ impl DaemonRunner {
                 let _ = handle.shutdown_tx.send(true);
             }
 
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            // Cap the drain at 10 s but exit early when all daemons have
+            // signalled they observed the shutdown. The previous fixed 2 s
+            // recorded `status='stopped'` while slow daemons were still
+            // draining; the cap keeps shutdown bounded for the same reason
+            // a strict block would not (a wedged daemon must not stall the
+            // node forever).
+            const MAX_DRAIN: Duration = Duration::from_secs(10);
+            let drain_deadline = tokio::time::Instant::now() + MAX_DRAIN;
+
+            // Await each daemon's task with a bounded deadline so
+            // `record_daemon_stop` never races ahead of the lease-refresher
+            // and lock-validator tasks the loop spawned per iteration.
+            // Abort any task that exceeds the deadline so shutdown stays
+            // bounded.
+            for (name, jh) in join_handles.drain() {
+                let remaining =
+                    drain_deadline.saturating_duration_since(tokio::time::Instant::now());
+                match tokio::time::timeout(remaining, jh).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        tracing::warn!(daemon = %name, error = %e, "Daemon task join failed");
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            daemon = %name,
+                            "Daemon drain exceeded {:?}; aborting task to keep shutdown bounded",
+                            MAX_DRAIN,
+                        );
+                    }
+                }
+            }
 
             for (name, handle) in &daemon_handles {
                 if let Err(e) = self.record_daemon_stop(handle).await {
@@ -326,8 +358,35 @@ async fn run_daemon_loop(
                     }
                     Ok(false) => {
                         tracing::debug!("Waiting for leadership");
+                        // If the election has a notify-bus attached, wake on
+                        // the leader-released NOTIFY so a standby takes over
+                        // immediately on voluntary release. Otherwise fall
+                        // back to the 5 s poll. Filter for our own role so
+                        // unrelated NOTIFYs don't trigger spurious wakeups.
+                        let mut release_rx = election.subscribe_release_notify();
+                        // Payload is `LeaderRole::as_str()`; for Daemon variants this is
+                        // the daemon name verbatim.
+                        let role_str = name.clone();
+                        let wait = async {
+                            if let Some(rx) = release_rx.as_mut() {
+                                loop {
+                                    match rx.recv().await {
+                                        Ok(payload) if payload == role_str => return,
+                                        Ok(_) => continue,
+                                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => return,
+                                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                            // Bus is down; fall back to sleep.
+                                            tokio::time::sleep(Duration::from_secs(5)).await;
+                                            return;
+                                        }
+                                    }
+                                }
+                            } else {
+                                tokio::time::sleep(Duration::from_secs(5)).await;
+                            }
+                        };
                         tokio::select! {
-                            _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                            _ = wait => {}
                             _ = shutdown_rx.changed() => {
                                 tracing::debug!("Shutdown while waiting for leadership");
                                 Span::current().record("daemon.final_status", "shutdown_waiting_leadership");
@@ -592,7 +651,36 @@ async fn run_daemon_loop(
         if let Some(ref election) = election
             && let Err(e) = election.release_leadership().await
         {
-            tracing::debug!(daemon = %name, error = %e, "Failed to release leadership");
+            tracing::error!(
+                daemon = %name,
+                error = %e,
+                "Failed to release leadership; clearing forge_leaders row so standbys can take over without waiting for the full lease"
+            );
+            // Force-clear the leader row scoped to this node. Standbys would
+            // otherwise wait the full lease_duration (60 s) before
+            // preempting. WHERE node_id = $2 ensures we never wipe a row
+            // another node has already taken.
+            // forge_leaders is a runtime-owned system table; offline .sqlx
+            // cache doesn't always include it.
+            #[allow(clippy::disallowed_methods)]
+            let force_clear = sqlx::query(
+                r#"
+                DELETE FROM forge_leaders
+                WHERE role = $1 AND node_id = $2
+                "#,
+            )
+            .bind(name.as_str())
+            .bind(node_id)
+            .execute(&pool)
+            .await;
+            if let Err(e2) = force_clear
+            {
+                tracing::error!(
+                    daemon = %name,
+                    error = %e2,
+                    "Failed to clear forge_leaders row after release failure; standbys will wait for lease expiry"
+                );
+            }
         }
 
         tracing::info!(

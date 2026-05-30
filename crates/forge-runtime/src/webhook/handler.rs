@@ -13,6 +13,7 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose};
 use forge_core::CircuitBreakerClient;
 use forge_core::function::{JobDispatch, KvHandle, WorkflowDispatch};
+use forge_core::rate_limit::{RateLimitConfig, RateLimitKey};
 use forge_core::webhook::{
     IdempotencySource, REPLAY_TIMESTAMP_HEADER, SignatureAlgorithm, WebhookContext,
 };
@@ -21,11 +22,30 @@ use ring::signature::{self, UnparsedPublicKey};
 use serde_json::{Value, json};
 use sha2::Sha256;
 use sqlx::PgPool;
+use std::time::Duration;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use super::registry::WebhookRegistry;
-use crate::gateway::RpcError;
+use crate::gateway::{ResolvedClientIp, RpcError};
+use crate::rate_limit::HybridRateLimiter;
+
+/// Hard cap on the inbound webhook body, also bounding the bytes persisted to
+/// `forge_webhook_events.raw_body`. Without this cap a misbehaving sender can
+/// fill the events table with multi-MB payloads, and unsigned webhooks have no
+/// other guard at all.
+const MAX_WEBHOOK_BODY_BYTES: usize = 1024 * 1024;
+
+/// Cap the number of comma-separated rotation secrets we will HMAC per request
+/// to bound the work an attacker spraying invalid signatures can force.
+const MAX_WEBHOOK_SECRETS: usize = 4;
+
+/// Default cap on unsigned webhook deliveries per source IP per minute.
+///
+/// `allow_unsigned = true` opts out of signature validation; without flow
+/// control any caller reaching the URL can spray dispatches and pollute the
+/// idempotency table. The DDoS cost of unsigned endpoints is bounded here.
+const UNSIGNED_RATE_LIMIT_PER_MINUTE: u32 = 60;
 
 /// State for webhook handler.
 #[derive(Clone)]
@@ -36,10 +56,12 @@ pub struct WebhookState {
     job_dispatcher: Option<Arc<dyn JobDispatch>>,
     workflow_dispatcher: Option<Arc<dyn WorkflowDispatch>>,
     kv: Option<Arc<dyn KvHandle>>,
+    unsigned_rate_limiter: Arc<HybridRateLimiter>,
 }
 
 impl WebhookState {
     pub fn new(registry: Arc<WebhookRegistry>, pool: PgPool) -> Self {
+        let unsigned_rate_limiter = Arc::new(HybridRateLimiter::new(pool.clone()));
         Self {
             registry,
             pool,
@@ -47,6 +69,7 @@ impl WebhookState {
             job_dispatcher: None,
             workflow_dispatcher: None,
             kv: None,
+            unsigned_rate_limiter,
         }
     }
 
@@ -70,11 +93,28 @@ impl WebhookState {
 pub async fn webhook_handler(
     State(state): State<Arc<WebhookState>>,
     Path(path): Path<String>,
+    axum::extract::Extension(client_ip): axum::extract::Extension<ResolvedClientIp>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let full_path = format!("/webhooks/{}", path);
     let request_id = Uuid::new_v4().to_string();
+
+    if body.len() > MAX_WEBHOOK_BODY_BYTES {
+        warn!(
+            path = %full_path,
+            body_size = body.len(),
+            "Webhook body exceeds maximum size"
+        );
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(RpcError::new(
+                "PAYLOAD_TOO_LARGE",
+                "Webhook payload exceeds maximum size",
+            )),
+        )
+            .into_response();
+    }
 
     let entry = match state.registry.get_by_path(&full_path) {
         Some(e) => e,
@@ -106,6 +146,50 @@ pub async fn webhook_handler(
             Json(RpcError::unauthorized("Webhook signature is required")),
         )
             .into_response();
+    }
+
+    // Flow-control for unsigned webhooks: signature validation is what bounds
+    // the cost of an attacker spraying requests against the dispatch + idempotency
+    // path. When `allow_unsigned = true` we still need a per-IP ceiling to keep
+    // the endpoint from being a free amplification vector.
+    if info.signature.is_none() && info.allow_unsigned {
+        let ip_key = client_ip.0.as_deref().unwrap_or("unknown").to_string();
+        let bucket = format!("webhook:unsigned:{}:{}", info.name, ip_key);
+        let config = RateLimitConfig::new(UNSIGNED_RATE_LIMIT_PER_MINUTE, Duration::from_secs(60))
+            .with_key(RateLimitKey::Ip);
+        match state.unsigned_rate_limiter.check(&bucket, &config).await {
+            Ok(result) if !result.allowed => {
+                let retry_after = result
+                    .retry_after
+                    .unwrap_or(Duration::from_secs(1))
+                    .as_secs()
+                    .max(1);
+                warn!(
+                    webhook = info.name,
+                    ip = %ip_key,
+                    "Unsigned webhook rate-limited"
+                );
+                let mut resp = (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(RpcError::new(
+                        "RATE_LIMITED",
+                        "Too many unsigned webhook deliveries from this client",
+                    )),
+                )
+                    .into_response();
+                if let Ok(val) = axum::http::HeaderValue::from_str(&retry_after.to_string()) {
+                    resp.headers_mut().insert("Retry-After", val);
+                }
+                return resp;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                // Failing closed on the rate limit would make a transient PG
+                // hiccup take the webhook endpoint down; failing open keeps the
+                // already-cheap unsigned path serving, with a loud log.
+                warn!(webhook = info.name, error = %e, "Unsigned webhook rate-limit check failed; allowing");
+            }
+        }
     }
 
     if let Some(ref sig_config) = info.signature {
@@ -141,10 +225,14 @@ pub async fn webhook_handler(
             }
         };
 
+        // Cap secrets considered per request so an attacker spraying invalid
+        // signatures can't force unbounded HMACs when many rotation secrets
+        // are configured.
         let secrets: Vec<&str> = secrets_raw
             .split(',')
             .map(str::trim)
             .filter(|s| !s.is_empty())
+            .take(MAX_WEBHOOK_SECRETS)
             .collect();
         let signature_valid = secrets.iter().any(|secret| {
             validate_signature(
@@ -167,7 +255,7 @@ pub async fn webhook_handler(
     }
 
     let idempotency_key = if let Some(ref idem_config) = info.idempotency {
-        match &idem_config.source {
+        let extracted = match &idem_config.source {
             IdempotencySource::Header(header_name) => headers
                 .get(*header_name)
                 .and_then(|v| v.to_str().ok())
@@ -181,7 +269,23 @@ pub async fn webhook_handler(
             }
             // Future IdempotencySource variants: skip key extraction.
             _ => None,
+        };
+        // Idempotency was opted into; missing/malformed keys must fail closed
+        // rather than silently running the handler without replay protection.
+        if extracted.is_none() {
+            warn!(
+                webhook = info.name,
+                "Idempotency configured but key could not be extracted"
+            );
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(RpcError::validation(
+                    "Required idempotency key is missing or malformed",
+                )),
+            )
+                .into_response();
         }
+        extracted
     } else {
         None
     };
@@ -595,10 +699,15 @@ fn validate_stripe_webhooks(
         Ok(n) => n,
         Err(_) => return false,
     };
-    if replay_window_secs > 0
-        && (chrono::Utc::now().timestamp() - ts).unsigned_abs() > replay_window_secs
-    {
-        return false;
+    if replay_window_secs > 0 {
+        let now = chrono::Utc::now().timestamp();
+        let window = i64::try_from(replay_window_secs).unwrap_or(i64::MAX);
+        let age = now.saturating_sub(ts);
+        // Reject future timestamps (age < 0) and stale ones uniformly with the
+        // generic replay window check.
+        if !(0..=window).contains(&age) {
+            return false;
+        }
     }
 
     let mut signed = Vec::with_capacity(timestamp.len() + 1 + body.len());

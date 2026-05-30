@@ -29,6 +29,17 @@ pub fn use_list_todos() -> QueryState<Vec<Todo>> {
 pub fn use_list_todos_subscription() -> SubscriptionState<Vec<Todo>> {
     use_forge_subscription("list_todos", ())
 }
+pub async fn me(client: &ForgeClient) -> Result<UserPublic, ForgeClientError> {
+    client.call("me", ()).await
+}
+
+pub fn use_me() -> QueryState<UserPublic> {
+    use_forge_query("me", ())
+}
+
+pub fn use_me_subscription() -> SubscriptionState<UserPublic> {
+    use_forge_subscription("me", ())
+}
 pub async fn create_todo(
     client: &ForgeClient,
     args: CreateTodoInput,
@@ -58,6 +69,36 @@ pub async fn delete_todo(
 
 pub fn use_delete_todo() -> Mutation<DeleteTodoParams, bool> {
     use_forge_mutation("delete_todo")
+}
+pub async fn login(
+    client: &ForgeClient,
+    args: LoginInput,
+) -> Result<AuthResponse, ForgeClientError> {
+    client.call("login", args).await
+}
+
+pub fn use_login() -> Mutation<LoginInput, AuthResponse> {
+    use_forge_mutation("login")
+}
+pub async fn refresh_token(
+    client: &ForgeClient,
+    args: RefreshInput,
+) -> Result<TokenPair, ForgeClientError> {
+    client.call("refresh_token", args).await
+}
+
+pub fn use_refresh_token() -> Mutation<RefreshInput, TokenPair> {
+    use_forge_mutation("refresh_token")
+}
+pub async fn register(
+    client: &ForgeClient,
+    args: RegisterInput,
+) -> Result<AuthResponse, ForgeClientError> {
+    client.call("register", args).await
+}
+
+pub fn use_register() -> Mutation<RegisterInput, AuthResponse> {
+    use_forge_mutation("register")
 }
 pub async fn update_todo(
     client: &ForgeClient,

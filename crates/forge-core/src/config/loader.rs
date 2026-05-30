@@ -48,13 +48,19 @@ pub fn substitute_env_vars(content: &str) -> String {
 /// Parse `VAR-default` or `VAR:-default` into (name, optional default).
 /// Both forms behave identically (fallback when unset). `:-` is checked
 /// first so its `-` doesn't get matched by the plain `-` branch.
+///
+/// For the bare `-` form, the split is taken at the LAST `-` so that
+/// `${MY-NAMESPACE-VAR-fallback}` parses to name `MY-NAMESPACE-VAR`
+/// (which then fails `is_valid_env_var_name` and the literal is
+/// preserved) rather than silently substituting `$MY` with default
+/// `NAMESPACE-VAR-fallback`.
 #[allow(clippy::indexing_slicing)] // All indices from str::find(); guaranteed valid.
 fn parse_var_with_default(inner: &str) -> (&str, Option<&str>) {
     if let Some(pos) = inner.find(":-") {
         return (&inner[..pos], Some(&inner[pos + 2..]));
     }
-    if let Some(pos) = inner.find('-') {
-        return (&inner[..pos], Some(&inner[pos + 1..]));
+    if let Some((name, default)) = inner.rsplit_once('-') {
+        return (name, Some(default));
     }
     (inner, None)
 }
@@ -120,5 +126,97 @@ mod tests {
         let input = r#"val = "${TEST_FORGE_EMPTY_DEFAULT-}""#;
         let result = substitute_env_vars(input);
         assert_eq!(result, r#"val = """#);
+    }
+
+    #[test]
+    fn plain_braced_var_substituted_when_set() {
+        // `${VAR}` with no default, variable present -> raw value.
+        unsafe { std::env::set_var("TEST_FORGE_PLAIN_SET", "postgres://db") };
+
+        let input = r#"url = "${TEST_FORGE_PLAIN_SET}""#;
+        let result = substitute_env_vars(input);
+        assert_eq!(result, r#"url = "postgres://db""#);
+
+        unsafe { std::env::remove_var("TEST_FORGE_PLAIN_SET") };
+    }
+
+    #[test]
+    fn set_var_wins_over_dash_default() {
+        unsafe { std::env::set_var("TEST_FORGE_DASH_SET", "real") };
+
+        let input = r#"x = "${TEST_FORGE_DASH_SET-fallback}""#;
+        let result = substitute_env_vars(input);
+        assert_eq!(result, r#"x = "real""#);
+
+        unsafe { std::env::remove_var("TEST_FORGE_DASH_SET") };
+    }
+
+    #[test]
+    fn dash_split_takes_last_dash() {
+        // `parse_var_with_default` splits on the LAST `-`, so the name here is
+        // "TEST_FORGE_NS_VAR" and the default is "tail". Name is valid and unset,
+        // so the default wins.
+        unsafe { std::env::remove_var("TEST_FORGE_NS_VAR") };
+
+        let input = r#"v = "${TEST_FORGE_NS_VAR-tail}""#;
+        let result = substitute_env_vars(input);
+        assert_eq!(result, r#"v = "tail""#);
+    }
+
+    #[test]
+    fn invalid_var_name_from_multi_dash_preserves_literal() {
+        // Last-dash split yields name "MY-NAMESPACE-VAR", which fails
+        // `is_valid_env_var_name` (contains '-'). The whole `${...}` is kept
+        // verbatim rather than silently substituting a partial match.
+        unsafe { std::env::remove_var("MY") };
+
+        let input = r#"v = "${MY-NAMESPACE-VAR-fallback}""#;
+        let result = substitute_env_vars(input);
+        assert_eq!(result, r#"v = "${MY-NAMESPACE-VAR-fallback}""#);
+    }
+
+    #[test]
+    fn lowercase_var_name_is_invalid_and_preserved() {
+        // Env var names must be uppercase/underscore-led; a lowercase name is
+        // not treated as a variable.
+        let input = r#"v = "${lowercase}""#;
+        let result = substitute_env_vars(input);
+        assert_eq!(result, r#"v = "${lowercase}""#);
+    }
+
+    #[test]
+    fn unterminated_brace_kept_verbatim() {
+        // No closing `}` -> the remainder is emitted as-is, no panic.
+        let input = r#"v = "${TEST_FORGE_UNTERMINATED"#;
+        let result = substitute_env_vars(input);
+        assert_eq!(result, r#"v = "${TEST_FORGE_UNTERMINATED"#);
+    }
+
+    #[test]
+    fn colon_dash_split_is_preferred_over_plain_dash() {
+        // `:-` is checked before plain `-`, so the name is the part before `:-`
+        // and the `-` inside the default is left intact.
+        unsafe { std::env::remove_var("TEST_FORGE_CDASH") };
+
+        let input = r#"v = "${TEST_FORGE_CDASH:-a-b-c}""#;
+        let result = substitute_env_vars(input);
+        assert_eq!(result, r#"v = "a-b-c""#);
+    }
+
+    #[test]
+    fn parse_var_with_default_forms() {
+        assert_eq!(parse_var_with_default("VAR"), ("VAR", None));
+        assert_eq!(
+            parse_var_with_default("VAR-default"),
+            ("VAR", Some("default"))
+        );
+        assert_eq!(
+            parse_var_with_default("VAR:-default"),
+            ("VAR", Some("default"))
+        );
+        // Last-dash split.
+        assert_eq!(parse_var_with_default("A-B-C"), ("A-B", Some("C")));
+        // Colon-dash beats plain dash and keeps trailing dashes in the default.
+        assert_eq!(parse_var_with_default("V:-a-b"), ("V", Some("a-b")));
     }
 }

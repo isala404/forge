@@ -6,7 +6,7 @@ services:
       target: dev
     working_dir: /workspace/examples/with-dioxus/demo
     ports:
-      - "9081:9081"
+      - "127.0.0.1:9081:9081"
     env_file:
       - .env
     environment:
@@ -44,7 +44,7 @@ services:
   otel:
     build: ../../../docker/otel-lgtm
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     env_file:
       - .env
     environment:

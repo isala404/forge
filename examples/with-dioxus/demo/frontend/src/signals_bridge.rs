@@ -124,11 +124,12 @@ fn install_window_bridge(signals: forge_dioxus::ForgeSignals) {
                         obj.insert("stack".to_string(), serde_json::Value::String(stack));
                     }
                 }
-                let context = if ctx_val.is_object() && ctx_val.as_object().is_some_and(|o| !o.is_empty()) {
-                    Some(ctx_val)
-                } else {
-                    None
-                };
+                let context =
+                    if ctx_val.is_object() && ctx_val.as_object().is_some_and(|o| !o.is_empty()) {
+                        Some(ctx_val)
+                    } else {
+                        None
+                    };
                 signals.capture_error(&*message, context);
             },
         )

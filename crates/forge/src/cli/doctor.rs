@@ -87,7 +87,6 @@ impl DoctorCommand {
         if let Some(ref root) = root {
             check_forge_toml(&mut report, root);
             check_sqlx_cache_freshness(&mut report, root);
-            check_latest_migration_markers(&mut report, root);
         }
 
         println!();
@@ -348,61 +347,6 @@ fn check_sqlx_cache_freshness(report: &mut Report, root: &Path) {
     }
 }
 
-fn check_latest_migration_markers(report: &mut Report, root: &Path) {
-    let dir = root.join("migrations");
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(_) => {
-            report.record(CheckStatus::Skip, "migrations/", "no migrations/ dir", None);
-            return;
-        }
-    };
-    let mut latest: Option<std::path::PathBuf> = None;
-    for entry in entries.flatten() {
-        let p = entry.path();
-        if p.extension().and_then(|s| s.to_str()) == Some("sql")
-            && latest.as_ref().map(|l| p > *l).unwrap_or(true)
-        {
-            latest = Some(p);
-        }
-    }
-    let Some(path) = latest else {
-        report.record(CheckStatus::Skip, "migrations/", "empty", None);
-        return;
-    };
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(e) => {
-            report.record(
-                CheckStatus::Fail,
-                "migrations/",
-                &format!("read error: {e}"),
-                None,
-            );
-            return;
-        }
-    };
-    let name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("(unknown)");
-    if content.contains("-- @up") || !content.trim().is_empty() {
-        report.record(
-            CheckStatus::Ok,
-            "latest migration",
-            &format!("{name} present"),
-            None,
-        );
-    } else {
-        report.record(
-            CheckStatus::Fail,
-            "latest migration",
-            &format!("{name} is empty"),
-            Some("Migration file must contain SQL"),
-        );
-    }
-}
-
 fn parse_pg_host_port(url: &str) -> Option<(String, u16)> {
     let rest = url
         .strip_prefix("postgres://")
@@ -445,7 +389,16 @@ fn required_rust_version(root: Option<&Path>) -> String {
 
 fn version_meets(found: &str, required: &str) -> bool {
     fn parts(s: &str) -> Vec<u32> {
-        s.split('.').filter_map(|x| x.parse().ok()).collect()
+        s.split('.')
+            .map(|x| {
+                // Strip prerelease/build suffixes ("1.93.0-beta", "1.93+abc")
+                // by truncating at the first non-digit character per component.
+                let digits: String = x.chars().take_while(|c| c.is_ascii_digit()).collect();
+                digits.parse::<u32>().ok()
+            })
+            .take_while(|p| p.is_some())
+            .flatten()
+            .collect()
     }
     let f = parts(found);
     let r = parts(required);
@@ -558,14 +511,12 @@ mod tests {
     }
 
     #[test]
-    fn version_meets_handles_trailing_garbage_after_full_match() {
-        // Dotted segments that don't parse are dropped, so any trailing tag
-        // attached to a later segment gets truncated. As long as enough
-        // numeric components match before the bad one, the comparison passes.
+    fn version_meets_strips_prerelease_suffixes() {
+        // Per-component digit truncation handles standard suffixes.
         assert!(version_meets("1.92.0-nightly", "1.92"));
-        // But if the bad token replaces a required component, the missing
-        // component is treated as 0 and the comparison fails.
-        assert!(!version_meets("1.93-beta", "1.92"));
+        assert!(version_meets("1.93-beta", "1.92"));
+        assert!(version_meets("1.93.0+build.5", "1.92"));
+        assert!(!version_meets("1.91.0-stable", "1.92"));
     }
 
     #[test]

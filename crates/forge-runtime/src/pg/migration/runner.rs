@@ -322,11 +322,15 @@ impl MigrationRunner {
         &self,
         conn: &mut sqlx::pool::PoolConnection<Postgres>,
     ) -> Result<()> {
-        sqlx::query_scalar!("SELECT pg_advisory_unlock($1)", MIGRATION_LOCK_ID)
-            .fetch_one(&mut **conn)
-            .await
-            .map_err(|e| ForgeError::internal_with("Failed to release migration lock", e))?;
-        debug!("Migration lock released");
+        let released: Option<bool> =
+            sqlx::query_scalar!("SELECT pg_advisory_unlock($1)", MIGRATION_LOCK_ID)
+                .fetch_one(&mut **conn)
+                .await
+                .map_err(|e| ForgeError::internal_with("Failed to release migration lock", e))?;
+        // `false` means this session didn't hold the lock — useful diagnostic
+        // for connection-pooler scenarios where the lock-holding backend was
+        // reused before release. Log it instead of silently dropping.
+        debug!(released = ?released, "Migration lock released");
         Ok(())
     }
 
@@ -444,15 +448,24 @@ impl MigrationRunner {
     /// `ALTER TYPE ... ADD VALUE`, `VACUUM`, and `REINDEX CONCURRENTLY`
     /// inside a transaction block, so opt-in migrations skip the BEGIN.
     ///
-    /// Tradeoffs the migration author must accept:
-    /// - A partial failure leaves the schema half-applied and the
-    ///   bookkeeping row missing, so the next run will retry from the top.
-    /// - Even if all DDL succeeds, the bookkeeping `INSERT` runs on a
-    ///   *fresh* pool connection — if that insert fails, the migration is
-    ///   re-run on the next startup despite already having taken effect.
+    /// Inherent risk window: DDL commits as each statement runs, but the
+    /// bookkeeping `INSERT` into `forge_system_migrations` is a separate
+    /// statement. If the process or the connection dies between the last
+    /// DDL statement and the INSERT, the schema is migrated but no row is
+    /// recorded, and the next boot will try to re-apply the migration.
     ///
-    /// Migrations using this mode must be authored idempotently
-    /// (`IF NOT EXISTS`, `ADD VALUE IF NOT EXISTS`, and so on).
+    /// To shrink (but not close) that window, the DDL and the bookkeeping
+    /// INSERT run on the **same** pooled connection — we never hand the
+    /// connection back to the pool between them, so a healthy connection
+    /// stays healthy across both steps. A mid-run crash or network drop
+    /// is still possible; this is the price of skipping the transaction.
+    ///
+    /// Migrations using this mode **must** be authored idempotently
+    /// (`CREATE INDEX CONCURRENTLY IF NOT EXISTS`, `ADD VALUE IF NOT
+    /// EXISTS`, and so on) so a retry on the next boot is a no-op against
+    /// already-applied schema. A future improvement could detect "schema
+    /// applied but row missing" at boot and back-fill the bookkeeping row
+    /// instead of re-running the SQL.
     async fn apply_non_transactional(&self, migration: &Migration) -> Result<()> {
         info!(
             "Applying non-transactional migration: {}",
@@ -502,6 +515,30 @@ impl MigrationRunner {
         }
         .await;
 
+        // Record bookkeeping on the SAME connection used for the DDL. A
+        // fresh pool connection here would widen the failure window — if
+        // the new acquire failed, the schema would already be migrated
+        // with no row to prove it.
+        let record_result: Result<()> = if exec_result.is_ok() {
+            let checksum = crate::stable_hash::sha256_hex(migration.up_sql.as_bytes());
+            sqlx::query!(
+                "INSERT INTO forge_system_migrations (version, checksum) VALUES ($1, $2)",
+                migration.version,
+                checksum,
+            )
+            .execute(&mut *conn)
+            .await
+            .map(|_| ())
+            .map_err(|e| {
+                ForgeError::internal_with(
+                    format!("Failed to record migration '{}'", migration.version),
+                    e,
+                )
+            })
+        } else {
+            Ok(())
+        };
+
         // Always reset before returning the connection to the pool — even on
         // failure. A failed RESET is rare but operators need visibility into it.
         if let Err(e) = sqlx::query("RESET lock_timeout").execute(&mut *conn).await {
@@ -516,21 +553,7 @@ impl MigrationRunner {
         drop(conn);
 
         exec_result?;
-
-        let checksum = crate::stable_hash::sha256_hex(migration.up_sql.as_bytes());
-        sqlx::query!(
-            "INSERT INTO forge_system_migrations (version, checksum) VALUES ($1, $2)",
-            migration.version,
-            checksum,
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(|e| {
-            ForgeError::internal_with(
-                format!("Failed to record migration '{}'", migration.version),
-                e,
-            )
-        })?;
+        record_result?;
 
         info!(
             "Non-transactional migration applied: {} ({:?})",
@@ -1286,10 +1309,20 @@ mod integration_tests {
         assert!(concurrent.transactional);
 
         let err = runner.run(vec![setup, concurrent]).await.unwrap_err();
-        let msg = err.to_string();
+        // The wrapping ForgeError's Display shows only its context ("Failed to
+        // apply migration ..."); PG's actual reason ("cannot run inside a
+        // transaction block") lives in the source chain. Walk it so we assert on
+        // the real rejection — and prove the runner carries the cause, not drops it.
+        let mut chain = err.to_string();
+        let mut source = std::error::Error::source(&err);
+        while let Some(cause) = source {
+            chain.push_str(": ");
+            chain.push_str(&cause.to_string());
+            source = cause.source();
+        }
         assert!(
-            msg.contains("CONCURRENTLY") || msg.to_lowercase().contains("transaction"),
-            "expected PG to reject concurrent index in tx, got: {msg}"
+            chain.contains("CONCURRENTLY") || chain.to_lowercase().contains("transaction"),
+            "expected PG to reject concurrent index in tx, got chain: {chain}"
         );
     }
 

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                    UPDATE forge_cron_runs\n                    SET status = 'completed', completed_at = NOW(), error = NULL\n                    WHERE id = $1 AND status = 'running'\n                    ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9a81d60e030f76bb21d7de9679748a2e4f8543cd5bdc163fc9998a0dbbc18dd8"
+}

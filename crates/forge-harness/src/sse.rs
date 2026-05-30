@@ -1,3 +1,4 @@
+use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 use eventsource_stream::Eventsource;
@@ -44,6 +45,17 @@ pub struct HarnessSession {
     session_id: String,
     session_secret: String,
     events: Mutex<EventStream>,
+    /// Per-target backlog so events the test doesn't currently care about
+    /// aren't silently dropped. Keys are the wire-level targets ("sub:foo",
+    /// "job:abc", "wf:xyz"). A test that waits on "job:a" first and then
+    /// "wf:b" sees the "wf:b" push even if it arrived during the "job:a" wait.
+    buffered: Mutex<HashMap<String, VecDeque<BufferedEvent>>>,
+}
+
+#[derive(Debug, Clone)]
+enum BufferedEvent {
+    Update(serde_json::Value),
+    Error { code: String, message: String },
 }
 
 type EventStream =
@@ -57,17 +69,15 @@ impl HarnessSession {
         base_url: String,
         token: Option<String>,
     ) -> Result<Self, HarnessError> {
-        let url = if let Some(t) = &token {
-            format!("{base_url}/_api/events?token={t}")
-        } else {
-            format!("{base_url}/_api/events")
-        };
-
-        let resp = http
-            .get(&url)
-            .header("Accept", "text/event-stream")
-            .send()
-            .await?;
+        // Auth via Authorization header rather than ?token=…, so a regression
+        // that closes the query-string loophole on the server side doesn't
+        // falsely fail every harness session test.
+        let url = format!("{base_url}/_api/events");
+        let mut req = http.get(&url).header("Accept", "text/event-stream");
+        if let Some(t) = &token {
+            req = req.bearer_auth(t);
+        }
+        let resp = req.send().await?;
         if !resp.status().is_success() {
             return Err(HarnessError::sse(format!(
                 "SSE connect failed: status={}",
@@ -107,6 +117,7 @@ impl HarnessSession {
             session_id,
             session_secret,
             events: Mutex::new(events),
+            buffered: Mutex::new(HashMap::new()),
         })
     }
 
@@ -247,10 +258,32 @@ impl HarnessSession {
         Ok(body.get("data").cloned().unwrap_or(serde_json::Value::Null))
     }
 
-    /// Read the next SSE event from the stream within the given budget.
-    pub async fn next_event(&self, within: Duration) -> Result<SseEvent, HarnessError> {
+    /// Explicitly close the SSE stream, releasing the reqwest connection and
+    /// signaling the gateway to drop the session.
+    ///
+    /// Called automatically by `Drop`, but tests that open many sessions per
+    /// test can invoke this proactively to keep the gateway's session table
+    /// small. Idempotent — safe to call multiple times.
+    pub async fn close(&self) {
+        // Replacing the stream with an empty one drops the underlying reqwest
+        // body and the gateway sees the TCP connection close. We don't await
+        // the gateway's cleanup; the SessionServer evicts the row on disconnect.
         let mut events = self.events.lock().await;
-        match timeout(within, events.next()).await {
+        *events = Box::pin(futures_util::stream::empty());
+    }
+
+    /// Read the next SSE event from the stream within the given budget.
+    ///
+    /// The lock is released between events rather than held for the full
+    /// timeout, so concurrent tasks sharing a session can make progress.
+    pub async fn next_event(&self, within: Duration) -> Result<SseEvent, HarnessError> {
+        // Lock just long enough to poll the stream once; releasing it
+        // between polls lets another task interleave.
+        let poll = {
+            let mut events = self.events.lock().await;
+            timeout(within, events.next()).await
+        };
+        match poll {
             Ok(Some(Ok(ev))) => Ok(ev),
             Ok(Some(Err(e))) => Err(e),
             Ok(None) => Err(HarnessError::sse("SSE stream ended")),
@@ -258,34 +291,63 @@ impl HarnessSession {
         }
     }
 
-    /// Read events until we see an `Update` for the given target. Other
-    /// events are buffered in the stream order is preserved on the next
-    /// `next_event` call (we drop them). Use this in tests that only care
-    /// about a specific subscription's payload.
+    /// Read events until we see an `Update` for the given target. Events for
+    /// other targets are buffered (per-target FIFO) so a subsequent call for
+    /// a different target still sees pushes that arrived during this wait.
     pub async fn next_update_for(
         &self,
         target: &str,
         within: Duration,
     ) -> Result<serde_json::Value, HarnessError> {
+        // First, drain any buffered event for this target.
+        if let Some(ev) = self.pop_buffered(target).await {
+            return match ev {
+                BufferedEvent::Update(p) => Ok(p),
+                BufferedEvent::Error { code, message } => Err(HarnessError::sse(format!(
+                    "error for target {target}: {code} {message}"
+                ))),
+            };
+        }
+
         let deadline = tokio::time::Instant::now() + within;
         loop {
             let remaining = deadline
                 .checked_duration_since(tokio::time::Instant::now())
                 .ok_or_else(|| HarnessError::timeout(format!("update for {target}")))?;
             match self.next_event(remaining).await? {
-                SseEvent::Update { target: t, payload } if t == target => return Ok(payload),
+                SseEvent::Update { target: t, payload } => {
+                    if t == target {
+                        return Ok(payload);
+                    }
+                    self.push_buffered(t, BufferedEvent::Update(payload)).await;
+                }
                 SseEvent::Error {
                     target: t,
                     code,
                     message,
-                } if t == target => {
-                    return Err(HarnessError::sse(format!(
-                        "error for target {t}: {code} {message}"
-                    )));
+                } => {
+                    if t == target {
+                        return Err(HarnessError::sse(format!(
+                            "error for target {t}: {code} {message}"
+                        )));
+                    }
+                    self.push_buffered(t, BufferedEvent::Error { code, message })
+                        .await;
                 }
                 _ => continue,
             }
         }
+    }
+
+    async fn pop_buffered(&self, target: &str) -> Option<BufferedEvent> {
+        let mut buf = self.buffered.lock().await;
+        let q = buf.get_mut(target)?;
+        q.pop_front()
+    }
+
+    async fn push_buffered(&self, target: String, ev: BufferedEvent) {
+        let mut buf = self.buffered.lock().await;
+        buf.entry(target).or_default().push_back(ev);
     }
 
     /// Wait for a reactor push to the query subscription `id` — the id passed
@@ -317,6 +379,20 @@ impl HarnessSession {
         within: Duration,
     ) -> Result<serde_json::Value, HarnessError> {
         self.next_update_for(&format!("wf:{id}"), within).await
+    }
+}
+
+impl Drop for HarnessSession {
+    /// Best-effort close: replace the stream with an empty one so the
+    /// reqwest body and underlying TCP connection are dropped synchronously.
+    /// The gateway's SessionServer reaps the row on the next cleanup pass.
+    fn drop(&mut self) {
+        // Drain a blocking try_lock if available; if a task still holds the
+        // events mutex, the stream will be dropped when that task releases
+        // it. We don't .await here — Drop is sync.
+        if let Ok(mut events) = self.events.try_lock() {
+            *events = Box::pin(futures_util::stream::empty());
+        }
     }
 }
 

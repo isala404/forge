@@ -38,7 +38,15 @@ impl CronRegistry {
     }
 
     pub fn register<C: ForgeCron>(&mut self) {
-        let entry = CronEntry::new::<C>();
+        self.register_entry(CronEntry::new::<C>());
+    }
+
+    /// Insert a pre-built [`CronEntry`], keyed by its `info.name`.
+    ///
+    /// `register::<C>` is the public path; this primitive exists so in-crate
+    /// tests can register a handler without a `ForgeCron` impl (the trait is
+    /// sealed and cannot be implemented outside `forge-core`).
+    pub(crate) fn register_entry(&mut self, entry: CronEntry) {
         self.crons.insert(entry.info.name.to_string(), entry);
     }
 

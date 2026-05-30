@@ -61,9 +61,21 @@ export function createConnectionStore(): ConnectionStatusStore {
 
 type RejectEmptyObject<T> = T extends Record<string, never> ? never : T;
 
+/** Optional runtime validator for store payloads. Return null to surface a
+ *  schema mismatch as an error instead of letting the UI deref garbage. */
+export interface StoreOptions<T> {
+  validate?: (data: unknown) => T | null;
+}
+
+const VALIDATION_ERROR: ForgeError = new ForgeClientError(
+  "VALIDATION_ERROR",
+  "Response failed runtime validation",
+);
+
 export function createQueryStore<TArgs, TResult>(
   functionName: string,
-  args: RejectEmptyObject<TArgs>
+  args: RejectEmptyObject<TArgs>,
+  options?: StoreOptions<TResult>,
 ): QueryStore<TResult> {
   const client = getForgeClient();
   const subscribers = new Set<(value: QueryResult<TResult>) => void>();
@@ -80,8 +92,13 @@ export function createQueryStore<TArgs, TResult>(
     notify();
 
     try {
-      const data = await client.call<TResult>(functionName, args);
-      state = { loading: false, data, error: null };
+      const raw = await client.call<unknown>(functionName, args);
+      const data = options?.validate ? options.validate(raw) : (raw as TResult);
+      if (data === null && options?.validate) {
+        state = { loading: false, data: null, error: VALIDATION_ERROR };
+      } else {
+        state = { loading: false, data: data as TResult, error: null };
+      }
     } catch (e) {
       state = { loading: false, data: null, error: e as ForgeError };
     }
@@ -106,7 +123,8 @@ export function createQueryStore<TArgs, TResult>(
 
 export function createSubscriptionStore<TArgs, TResult>(
   functionName: string,
-  args: RejectEmptyObject<TArgs>
+  args: RejectEmptyObject<TArgs>,
+  options?: StoreOptions<TResult>,
 ): SubscriptionStore<TResult> {
   const client = getForgeClient();
   const subscribers = new Set<(value: SubscriptionResult<TResult>) => void>();
@@ -135,14 +153,31 @@ export function createSubscriptionStore<TArgs, TResult>(
 
     try {
       subscriptionId = crypto.randomUUID();
-      const initialData = await client._registerQuery(subscriptionId, functionName, args);
-      state = { loading: false, data: initialData as TResult, error: null, stale: false };
-      notify();
 
-      unsubscribeFn = client._subscribe(`sub:${subscriptionId}`, (data: unknown) => {
-        state = { loading: false, data: data as TResult, error: null, stale: false };
+      // Register the update callback BEFORE the fallible initial registration.
+      // If the first registration fails — e.g. an auth-required query subscribed
+      // while still anonymous returns 401 — the callback must already be wired so
+      // that once a later reconnect re-registers the subscription (after login),
+      // reactor pushes are delivered and the store recovers. Wiring it only after
+      // a successful registration left such subscriptions permanently dead.
+      unsubscribeFn = client._subscribe(`sub:${subscriptionId}`, (raw: unknown) => {
+        const data = options?.validate ? options.validate(raw) : (raw as TResult);
+        if (data === null && options?.validate) {
+          state = { loading: false, data: null, error: VALIDATION_ERROR, stale: false };
+        } else {
+          state = { loading: false, data: data as TResult, error: null, stale: false };
+        }
         notify();
       });
+
+      const initialRaw = await client._registerQuery(subscriptionId, functionName, args);
+      const initial = options?.validate ? options.validate(initialRaw) : (initialRaw as TResult);
+      if (initial === null && options?.validate) {
+        state = { loading: false, data: null, error: VALIDATION_ERROR, stale: false };
+      } else {
+        state = { loading: false, data: initial as TResult, error: null, stale: false };
+      }
+      notify();
     } catch (e) {
       state = { loading: false, data: null, error: e as ForgeError, stale: false };
       notify();
@@ -186,6 +221,16 @@ export function createSubscriptionStore<TArgs, TResult>(
 
 const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+const JOB_STATUSES = new Set([
+  "pending", "claimed", "running", "completed", "failed",
+  "retry", "dead_letter", "cancel_requested", "cancelled",
+]);
+
+const WORKFLOW_STATUSES = new Set([
+  "pending", "running", "sleeping", "waiting", "completed", "failed",
+  "blocked_missing_version", "blocked_signature_mismatch", "blocked_missing_handler",
+]);
+
 function asValidRecord(
   data: unknown,
   ...requiredStringFields: string[]
@@ -205,6 +250,7 @@ export function createJobStore<TArgs, TOutput>(
   const client = getForgeClient();
   const subscribers = new Set<(value: JobState<TOutput> & { loading: boolean }) => void>();
   let unsubscribeFn: (() => void) | null = null;
+  let clientSubId: string | null = null;
   let state: JobState<TOutput> & { loading: boolean } = {
     jobId: "",
     status: "pending",
@@ -229,12 +275,9 @@ export function createJobStore<TArgs, TOutput>(
       state = { ...state, jobId, loading: false };
       notify();
 
-      const clientSubId = crypto.randomUUID();
-      const initialData = await client._registerJob(clientSubId, jobId);
-
       const applyJobData = (data: unknown) => {
         const jobData = asValidRecord(data, "job_id", "status");
-        if (!jobData) {
+        if (!jobData || !JOB_STATUSES.has(jobData.status as string)) {
           state = { ...state, status: "failed", error: "Invalid job update", loading: false };
           notify();
           return;
@@ -251,9 +294,13 @@ export function createJobStore<TArgs, TOutput>(
         notify();
       };
 
-      if (initialData) applyJobData(initialData);
-
+      clientSubId = crypto.randomUUID();
+      // Register the update callback before the server registration so the
+      // subscription survives a reconnect-driven re-registration (the client
+      // re-registers job subs whose callback is still present).
       unsubscribeFn = client._subscribe(`job:${clientSubId}`, applyJobData);
+      const initialData = await client._registerJob(clientSubId, jobId);
+      if (initialData) applyJobData(initialData);
     } catch (e) {
       state = {
         ...state,
@@ -273,16 +320,20 @@ export function createJobStore<TArgs, TOutput>(
       run(state);
       return () => {
         subscribers.delete(run);
-        if (subscribers.size === 0 && unsubscribeFn) {
-          unsubscribeFn();
+        if (subscribers.size === 0) {
           unsubscribeFn = null;
+          if (clientSubId) {
+            client._unregisterJob(clientSubId);
+            clientSubId = null;
+          }
         }
       };
     },
     unsubscribe: () => {
-      if (unsubscribeFn) {
-        unsubscribeFn();
-        unsubscribeFn = null;
+      unsubscribeFn = null;
+      if (clientSubId) {
+        client._unregisterJob(clientSubId);
+        clientSubId = null;
       }
     },
   };
@@ -295,6 +346,7 @@ export function createWorkflowStore<TArgs, TOutput>(
   const client = getForgeClient();
   const subscribers = new Set<(value: WorkflowState<TOutput> & { loading: boolean }) => void>();
   let unsubscribeFn: (() => void) | null = null;
+  let clientSubId: string | null = null;
   let state: WorkflowState<TOutput> & { loading: boolean } = {
     workflowId: "",
     status: "pending",
@@ -320,12 +372,9 @@ export function createWorkflowStore<TArgs, TOutput>(
       state = { ...state, workflowId, loading: false };
       notify();
 
-      const clientSubId = crypto.randomUUID();
-      const initialData = await client._registerWorkflow(clientSubId, workflowId);
-
       const applyWorkflowData = (data: unknown) => {
         const wfData = asValidRecord(data, "workflow_id", "status");
-        if (!wfData) {
+        if (!wfData || !WORKFLOW_STATUSES.has(wfData.status as string)) {
           state = { ...state, status: "failed", error: "Invalid workflow update", loading: false };
           notify();
           return;
@@ -351,9 +400,12 @@ export function createWorkflowStore<TArgs, TOutput>(
         notify();
       };
 
-      if (initialData) applyWorkflowData(initialData);
-
+      clientSubId = crypto.randomUUID();
+      // Register the callback before the server registration so the subscription
+      // survives a reconnect-driven re-registration.
       unsubscribeFn = client._subscribe(`wf:${clientSubId}`, applyWorkflowData);
+      const initialData = await client._registerWorkflow(clientSubId, workflowId);
+      if (initialData) applyWorkflowData(initialData);
     } catch (e) {
       state = {
         ...state,
@@ -373,16 +425,20 @@ export function createWorkflowStore<TArgs, TOutput>(
       run(state);
       return () => {
         subscribers.delete(run);
-        if (subscribers.size === 0 && unsubscribeFn) {
-          unsubscribeFn();
+        if (subscribers.size === 0) {
           unsubscribeFn = null;
+          if (clientSubId) {
+            client._unregisterWorkflow(clientSubId);
+            clientSubId = null;
+          }
         }
       };
     },
     unsubscribe: () => {
-      if (unsubscribeFn) {
-        unsubscribeFn();
-        unsubscribeFn = null;
+      unsubscribeFn = null;
+      if (clientSubId) {
+        client._unregisterWorkflow(clientSubId);
+        clientSubId = null;
       }
     },
   };

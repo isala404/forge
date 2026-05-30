@@ -116,13 +116,41 @@ pub(super) fn file_uses_sqlx_macros(content: &str) -> bool {
         "sqlx::query_file!(",
         "sqlx::query_file_as!(",
     ];
-    content.lines().any(|line| {
+    let stripped = strip_comments(content);
+    stripped.lines().any(|line| {
         let code = match line.split_once("//") {
             Some((before, _)) => before,
             None => line,
         };
         NEEDLES.iter().any(|needle| code.contains(needle))
     })
+}
+
+/// Replace `/* ... */` block comments with whitespace of the same length so
+/// line/column offsets are preserved. Nested comments are not supported (Rust
+/// allows them but they are vanishingly rare and don't affect the heuristic).
+#[allow(clippy::indexing_slicing)]
+fn strip_comments(content: &str) -> String {
+    let bytes = content.as_bytes();
+    let mut out = String::with_capacity(content.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            // Skip block comment, preserving newlines so line-comment stripping later still works.
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                if bytes[i] == b'\n' {
+                    out.push('\n');
+                }
+                i += 1;
+            }
+            i = (i + 2).min(bytes.len());
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    out
 }
 
 pub(super) fn inspect_sqlx_cache(sqlx_dir: &Path) -> Result<SqlxCacheCheck> {

@@ -5,7 +5,7 @@ pub use builder::ForgeBuilder;
 
 #[cfg(feature = "gateway")]
 use std::future::Future;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 #[cfg(feature = "gateway")]
 use std::pin::Pin;
@@ -47,7 +47,7 @@ use forge_runtime::pg::{LeaderConfig, LeaderElection, PgNotifyBus};
 use forge_core::CircuitBreakerClient;
 #[cfg(feature = "gateway")]
 use forge_runtime::gateway::{
-    AuthConfig, GatewayConfig as RuntimeGatewayConfig, GatewayServer, TlsListenConfig,
+    AuthConfig, GatewayConfig as RuntimeGatewayConfig, GatewayServer, PeerAddr, TlsListenConfig,
     bind_listener,
 };
 #[cfg(feature = "jobs")]
@@ -282,9 +282,9 @@ impl Forge {
 
         // HOST env var overrides bind address; PORT env var overrides config port.
         let ip_address: IpAddr = std::env::var("HOST")
-            .unwrap_or_else(|_| "0.0.0.0".to_string())
-            .parse()
-            .unwrap_or_else(|_| "0.0.0.0".parse().expect("valid IP literal"));
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
 
         if let Ok(port_str) = std::env::var("PORT")
             && let Ok(port) = port_str.parse::<u16>()
@@ -873,7 +873,8 @@ impl Forge {
                 gateway = gateway
                     .with_signals_collector(collector)
                     .with_signals_anonymize_ip(self.config.signals.anonymize_ip)
-                    .with_signals_geoip(geoip);
+                    .with_signals_geoip(geoip)
+                    .with_signals_rate_limit_per_minute(self.config.signals.rate_limit_per_minute);
 
                 forge_runtime::signals::session::spawn_session_reaper(
                     signals_pool.clone(),
@@ -1054,7 +1055,17 @@ impl Forge {
                         return;
                     }
                 };
-                let serve = axum::serve(listener, router).with_graceful_shutdown(async move {
+                // Serve with per-connection peer address so downstream
+                // middleware can resolve the real client IP. Without this the
+                // router's default `into_make_service` omits `ConnectInfo`,
+                // leaving every client IP unresolved — which collapses per-IP
+                // rate-limit buckets, blanks signal visitor IDs, and breaks the
+                // IP-bound SSE auth ticket. Mirrors `GatewayServer::run`.
+                let serve = axum::serve(
+                    listener,
+                    router.into_make_service_with_connect_info::<PeerAddr>(),
+                )
+                .with_graceful_shutdown(async move {
                     let _ = gateway_shutdown_rx.wait_for(|v| *v).await;
                     tracing::debug!("Gateway draining in-flight requests");
                 });

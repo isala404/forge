@@ -114,7 +114,11 @@ impl Stream for McpReceiverStream {
 /// Clients use this to receive notifications and asynchronous responses
 /// from the MCP server. The stream starts with an `endpoint` event
 /// containing the session ID, then sends keepalive pings every 30 seconds.
-pub async fn mcp_get_handler(State(state): State<Arc<McpState>>, headers: HeaderMap) -> Response {
+pub async fn mcp_get_handler(
+    State(state): State<Arc<McpState>>,
+    Extension(auth): Extension<AuthContext>,
+    headers: HeaderMap,
+) -> Response {
     if let Err(resp) = validate_origin(&headers, &state.config) {
         return *resp;
     }
@@ -128,6 +132,28 @@ pub async fn mcp_get_handler(State(state): State<Arc<McpState>>, headers: Header
         Ok(v) => v,
         Err(resp) => return resp,
     };
+
+    // Bind the SSE stream to the principal that initialized the session.
+    // Otherwise any caller with a leaked session id can attach to that
+    // session's stream and impersonate it.
+    {
+        let sessions = state.sessions.read().await;
+        if let Some(session) = sessions.get(&session_id) {
+            let current = auth.principal_id();
+            if session.principal_id != current {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json_rpc_error(
+                        None,
+                        -32001,
+                        "Session principal mismatch",
+                        None,
+                    )),
+                )
+                    .into_response();
+            }
+        }
+    }
 
     state.touch_session(&session_id).await;
 

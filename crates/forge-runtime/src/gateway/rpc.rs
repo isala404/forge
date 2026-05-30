@@ -214,12 +214,18 @@ pub struct RpcFunctionBody {
 
 /// Validate that a function name contains only safe characters.
 /// Prevents log injection and unexpected behavior from special characters.
+/// Leading `.` (including `..`) is rejected: dotted segments are reserved
+/// for module paths and a leading dot looks like a path-traversal attempt
+/// — neither maps to a real handler, so failing loud beats a 404 later.
 fn is_valid_function_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 256
-        && name
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == ':' || c == '-')
+    if name.is_empty() || name.len() > 256 {
+        return false;
+    }
+    if name.starts_with('.') {
+        return false;
+    }
+    name.chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == ':' || c == '-')
 }
 
 /// Axum handler for POST /rpc/:function (REST-style).
@@ -312,6 +318,15 @@ mod tests {
         assert!(!is_valid_function_name("semi;colon"));
         assert!(!is_valid_function_name("newline\nin"));
         assert!(!is_valid_function_name("question?"));
+    }
+
+    #[test]
+    fn function_name_rejects_leading_dot() {
+        // Leading dot (or `..`) reads as a path-traversal attempt and never
+        // maps to a real handler.
+        assert!(!is_valid_function_name(".hidden"));
+        assert!(!is_valid_function_name("..parent"));
+        assert!(!is_valid_function_name("."));
     }
 
     #[test]

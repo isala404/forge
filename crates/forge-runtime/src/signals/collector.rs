@@ -12,6 +12,12 @@ use sqlx::PgPool;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{debug, error, warn};
 
+/// Hard ceiling on the total in-buffer byte size before we force a flush.
+/// Caps PG memory pressure when a single UNNEST batch would otherwise grow
+/// into hundreds of MB. Tracked alongside `batch_size` (whichever fires
+/// first wins).
+const MAX_BUFFER_BYTES: usize = 16 * 1024 * 1024;
+
 /// Buffered signal event collector.
 ///
 /// Clone-friendly (shares the mpsc sender). Send events from any async
@@ -110,6 +116,7 @@ async fn flush_loop(
     mut shutdown_rx: oneshot::Receiver<oneshot::Sender<()>>,
 ) {
     let mut buffer: Vec<SignalEvent> = Vec::with_capacity(batch_size);
+    let mut buffer_bytes: usize = 0;
     let mut interval = tokio::time::interval(flush_interval);
     interval.tick().await;
 
@@ -118,6 +125,7 @@ async fn flush_loop(
             biased;
             ack = &mut shutdown_rx => {
                 while let Ok(event) = rx.try_recv() {
+                    buffer_bytes = buffer_bytes.saturating_add(estimate_event_bytes(&event));
                     buffer.push(event);
                 }
                 if !buffer.is_empty() {
@@ -132,9 +140,11 @@ async fn flush_loop(
             event = rx.recv() => {
                 match event {
                     Some(e) => {
+                        buffer_bytes = buffer_bytes.saturating_add(estimate_event_bytes(&e));
                         buffer.push(e);
-                        if buffer.len() >= batch_size {
+                        if buffer.len() >= batch_size || buffer_bytes >= MAX_BUFFER_BYTES {
                             flush_batch(&pool, &mut buffer).await;
+                            buffer_bytes = 0;
                         }
                     }
                     None => {
@@ -149,10 +159,47 @@ async fn flush_loop(
             _ = interval.tick() => {
                 if !buffer.is_empty() {
                     flush_batch(&pool, &mut buffer).await;
+                    buffer_bytes = 0;
                 }
             }
         }
     }
+}
+
+/// Cheap byte estimate dominated by the variable-size fields. Avoids
+/// re-serializing the properties JSON for every accounting update — we just
+/// take the length of its serde repr where it's a string/object/array, and
+/// fall back to a fixed overhead.
+fn estimate_event_bytes(event: &SignalEvent) -> usize {
+    fn opt_len(s: &Option<String>) -> usize {
+        s.as_deref().map(str::len).unwrap_or(0)
+    }
+    let props = serde_json::to_vec(&event.properties)
+        .map(|v| v.len())
+        .unwrap_or(0);
+    let ctx = serde_json::to_vec(&event.error_context)
+        .map(|v| v.len())
+        .unwrap_or(0);
+    // 256 = fixed-size column overhead (uuids, ints, timestamps, bools).
+    256 + props
+        + ctx
+        + opt_len(&event.event_name)
+        + opt_len(&event.correlation_id)
+        + opt_len(&event.visitor_id)
+        + opt_len(&event.page_url)
+        + opt_len(&event.referrer)
+        + opt_len(&event.function_name)
+        + opt_len(&event.function_kind)
+        + opt_len(&event.status)
+        + opt_len(&event.error_message)
+        + opt_len(&event.error_stack)
+        + opt_len(&event.client_ip)
+        + opt_len(&event.country)
+        + opt_len(&event.city)
+        + opt_len(&event.user_agent)
+        + opt_len(&event.device_type)
+        + opt_len(&event.browser)
+        + opt_len(&event.os)
 }
 
 /// Flush a batch of events into PostgreSQL using UNNEST for single-roundtrip INSERT.

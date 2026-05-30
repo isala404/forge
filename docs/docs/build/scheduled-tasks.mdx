@@ -47,7 +47,7 @@ Coordination relies on PostgreSQL advisory locks and unique constraints rather t
 | Attribute | Type | Default | Description |
 |-----------|------|---------|-------------|
 | Schedule | `"cron expression"` | required | Standard cron (5-part: `m h d M w`) or extended (6-part with seconds) |
-| `timezone` | `"tz"` | `"UTC"` | IANA timezone (e.g., `"America/New_York"`, `"Europe/London"`) |
+| `timezone` | `"tz"` | `"UTC"` | IANA timezone (e.g., `"America/New_York"`, `"Europe/London"`). Validated at compile time; an unknown tz fails with `Invalid timezone: "X". Must be an IANA tz database name (e.g., "UTC", "America/New_York").` |
 | `timeout` | `"duration"` | `"1h"` | Maximum execution time (`"30s"`, `"5m"`, `"1h"`) |
 | `catch_up` | flag | `false` | Run missed executions after downtime |
 | `catch_up_limit` | `u32` | `10` | Maximum catch-up runs per tick |

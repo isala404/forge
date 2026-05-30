@@ -1,4 +1,3 @@
-#![cfg(feature = "testcontainers")]
 //! Reactivity scenarios.
 //!
 //! A write to a reactive table must fan out to every SSE subscriber whose
@@ -7,23 +6,43 @@
 //! browserless proxy for "open the app in two tabs, change a row, watch both
 //! update": same gateway, same reactor, same SSE wire format.
 
+/// Sentinel test so `cargo test -p forge-harness` (without `--features
+/// testcontainers`) doesn't silently report "0 tests passed" and lull a
+/// contributor into thinking they ran the scenario suite. Always passes;
+/// its job is to print the hint.
+#[test]
+fn ensure_testcontainers_feature_enabled() {
+    eprintln!(
+        "forge-harness reactivity scenarios are gated on `--features testcontainers`. \
+         Re-run with `cargo test -p forge-harness --features testcontainers` \
+         to exercise the reactor against a real Postgres."
+    );
+}
+
+#[cfg(feature = "testcontainers")]
+#[path = "common/mod.rs"]
 mod common;
 
+#[cfg(feature = "testcontainers")]
 use std::time::Duration;
 
+#[cfg(feature = "testcontainers")]
 use common::{BumpInput, Counter, collect_updates, start_app};
 
 /// Generous budget for one reactor round-trip: NOTIFY -> invalidate (<=200ms
 /// debounce) -> re-execute -> SSE push. Real latency is tens of ms; the slack
 /// only absorbs CI scheduling noise.
+#[cfg(feature = "testcontainers")]
 const PUSH_BUDGET: Duration = Duration::from_secs(5);
 
 /// Window to watch for a push that must NOT happen. Comfortably past the
 /// 200ms max debounce, short enough to keep the suite quick.
+#[cfg(feature = "testcontainers")]
 const SILENCE_WINDOW: Duration = Duration::from_millis(1200);
 
 /// A fresh subscription hands back the current rows synchronously, at
 /// subscribe time — the equivalent of a SvelteKit store's first value.
+#[cfg(feature = "testcontainers")]
 #[tokio::test]
 async fn subscribe_returns_initial_snapshot() {
     let app = start_app("reactivity_initial_snapshot").await;
@@ -60,6 +79,7 @@ async fn subscribe_returns_initial_snapshot() {
 
 /// The core loop: subscribe, mutate over RPC, observe the reactor push the
 /// fresh result down the SSE stream.
+#[cfg(feature = "testcontainers")]
 #[tokio::test]
 async fn single_client_sees_invalidation() {
     let app = start_app("reactivity_single_client").await;
@@ -106,6 +126,7 @@ async fn single_client_sees_invalidation() {
 /// Two independent SSE sessions subscribed to the same query collapse into a
 /// single reactor group (dedup by query + args + auth scope), yet one mutation
 /// still fans out to both. This is the "two browser tabs" scenario.
+#[cfg(feature = "testcontainers")]
 #[tokio::test]
 async fn two_clients_both_receive_invalidation() {
     let app = start_app("reactivity_two_clients").await;
@@ -160,6 +181,7 @@ async fn two_clients_both_receive_invalidation() {
 /// A mutation to a different reactive table must not wake a counter
 /// subscription. To rule out a false pass from a dead stream, we then issue a
 /// real counter write and confirm that push *does* arrive.
+#[cfg(feature = "testcontainers")]
 #[tokio::test]
 async fn unrelated_table_mutation_does_not_push() {
     let app = start_app("reactivity_unrelated_table").await;
@@ -218,6 +240,7 @@ async fn unrelated_table_mutation_does_not_push() {
 /// changes only one arg-set's result must push to that subscription alone:
 /// the table invalidation re-executes both, but hash comparison suppresses the
 /// push for the one whose result did not change.
+#[cfg(feature = "testcontainers")]
 #[tokio::test]
 async fn subscriptions_isolated_by_args() {
     let app = start_app("reactivity_args_isolation").await;

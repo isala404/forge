@@ -17,7 +17,7 @@ pub enum HarnessError {
     #[error("sqlx error: {0}")]
     Sqlx(#[from] sqlx::Error),
 
-    #[error("rpc call failed: code={code} message={message}")]
+    #[error("rpc call failed: status={status} code={code} message={message}")]
     Rpc {
         code: String,
         message: String,

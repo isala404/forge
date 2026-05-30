@@ -67,7 +67,21 @@ fn format_generated_rust_bindings(output_dir: &Path) -> Result<()> {
         rustfmt.arg(file);
     }
 
-    let _ = rustfmt.status();
+    match rustfmt.status() {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            eprintln!(
+                "warning: rustfmt exited with status {} while formatting generated Dioxus bindings; output left unformatted",
+                status
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "warning: could not run rustfmt to format generated Dioxus bindings: {} (install rustfmt or run 'rustup component add rustfmt')",
+                e
+            );
+        }
+    }
     Ok(())
 }
 

@@ -13,6 +13,6 @@ pub use migration::{
     AppliedMigration, DriftStatus, Migration, MigrationRunner, MigrationStatus,
     load_migrations_from_dir,
 };
-pub use notify::{MAX_PAYLOAD_BYTES, NotifyChannel};
+pub use notify::{MAX_PAYLOAD_BYTES, NotifyChannel, NotifyStreamError};
 pub use notify_bus::PgNotifyBus;
 pub use pool::Database;

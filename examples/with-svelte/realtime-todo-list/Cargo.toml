@@ -18,6 +18,8 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "uuid", "macros", "derive"] }
 dotenvy = "0.15"
+argon2 = "0.5"
+password-hash = "0.5"
 rust-embed = { version = "8", optional = true }
 
 [build-dependencies]

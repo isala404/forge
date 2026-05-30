@@ -56,6 +56,10 @@ pub struct JsonWebKey {
 struct CachedJwks {
     /// Map of key ID to decoding key.
     keys: HashMap<String, DecodingKey>,
+    /// Keys served by the provider without a `kid`. Stored separately so a
+    /// rotation that ships multiple kidless keys does not silently lose every
+    /// one but the last.
+    kidless_keys: Vec<DecodingKey>,
     /// When the cache was last refreshed.
     fetched_at: Instant,
 }
@@ -113,6 +117,15 @@ impl JwksClient {
     /// * `url` - The JWKS endpoint URL
     /// * `cache_ttl_secs` - How long to cache keys (in seconds)
     pub fn new(url: String, cache_ttl_secs: u64) -> Result<Self, JwksError> {
+        // Reject plain-HTTP JWKS endpoints: an on-path attacker can swap keys
+        // and mint arbitrary RS256 tokens. Loopback is permitted for local
+        // identity-provider stubs in tests and development.
+        let insecure = forge_core::util::http_hostname(&url)
+            .is_some_and(|host| !forge_core::util::is_loopback_host(host));
+        if insecure {
+            return Err(JwksError::InsecureUrl(url));
+        }
+
         let http_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
@@ -206,15 +219,22 @@ impl JwksClient {
     /// Some providers don't include a key ID in tokens. This method
     /// returns the first available key from the JWKS.
     pub async fn get_any_key(&self) -> Result<DecodingKey, JwksError> {
-        // Try to get from cache first
+        // Try to get from cache first. Kidless keys are preferred for
+        // kidless-token fallback so a provider rotation that ships multiple
+        // kidless keys still has every entry reachable here.
         {
             let cache = self.cache.read().await;
             if let Some(ref cached) = *cache
                 && cached.fetched_at.elapsed() < self.cache_ttl
-                && let Some(key) = cached.keys.values().next()
             {
-                debug!("Using first cached JWKS key (no kid specified)");
-                return Ok(key.clone());
+                if let Some(key) = cached.kidless_keys.first() {
+                    debug!("Using first cached kidless JWKS key");
+                    return Ok(key.clone());
+                }
+                if let Some(key) = cached.keys.values().next() {
+                    debug!("Using first cached JWKS key (no kid specified)");
+                    return Ok(key.clone());
+                }
             }
         }
 
@@ -224,6 +244,9 @@ impl JwksClient {
 
         let cache = self.cache.read().await;
         if let Some(ref cached) = *cache {
+            if let Some(key) = cached.kidless_keys.first().cloned() {
+                return Ok(key);
+            }
             cached
                 .keys
                 .values()
@@ -232,6 +255,29 @@ impl JwksClient {
                 .ok_or(JwksError::NoKeysAvailable)
         } else {
             Err(JwksError::FetchFailed("No keys in JWKS".to_string()))
+        }
+    }
+
+    /// Try every cached kidless key in turn. Used by RSA validation when the
+    /// incoming token carries no `kid` header — without this, a kidless-key
+    /// rotation silently fails for tokens signed by the second key.
+    pub async fn kidless_keys(&self) -> Result<Vec<DecodingKey>, JwksError> {
+        {
+            let cache = self.cache.read().await;
+            if let Some(ref cached) = *cache
+                && cached.fetched_at.elapsed() < self.cache_ttl
+                && !cached.kidless_keys.is_empty()
+            {
+                return Ok(cached.kidless_keys.clone());
+            }
+        }
+        self.refresh_if_needed().await?;
+        let cache = self.cache.read().await;
+        match *cache {
+            Some(ref cached) => Ok(cached.kidless_keys.clone()),
+            None => Err(JwksError::FetchFailed(
+                "Cache empty after refresh".to_string(),
+            )),
         }
     }
 
@@ -261,6 +307,7 @@ impl JwksClient {
             .map_err(|e| JwksError::ParseFailed(e.to_string()))?;
 
         let mut keys = HashMap::new();
+        let mut kidless_keys = Vec::new();
 
         for jwk in jwks.keys {
             // Skip non-signature keys
@@ -270,27 +317,36 @@ impl JwksClient {
                 continue;
             }
 
-            let kid = jwk.kid.clone().unwrap_or_else(|| "default".to_string());
+            let kid_for_log = jwk.kid.as_deref().unwrap_or("<none>").to_string();
 
             match self.parse_jwk(&jwk) {
                 Ok(Some(key)) => {
-                    debug!(kid = %kid, kty = %jwk.kty, "Parsed JWKS key");
-                    keys.insert(kid, key);
+                    debug!(kid = %kid_for_log, kty = %jwk.kty, "Parsed JWKS key");
+                    match jwk.kid {
+                        Some(k) => {
+                            keys.insert(k, key);
+                        }
+                        None => kidless_keys.push(key),
+                    }
                 }
                 Ok(None) => {
-                    debug!(kid = %kid, kty = %jwk.kty, "Skipping unsupported key type");
+                    debug!(kid = %kid_for_log, kty = %jwk.kty, "Skipping unsupported key type");
                 }
                 Err(e) => {
-                    warn!(kid = %kid, error = %e, "Failed to parse JWKS key");
+                    warn!(kid = %kid_for_log, error = %e, "Failed to parse JWKS key");
                 }
             }
         }
 
-        if keys.is_empty() {
+        if keys.is_empty() && kidless_keys.is_empty() {
             return Err(JwksError::NoKeysAvailable);
         }
 
-        debug!(count = keys.len(), "Cached JWKS keys");
+        debug!(
+            count = keys.len(),
+            kidless = kidless_keys.len(),
+            "Cached JWKS keys"
+        );
 
         // Drop negative-cache entries for any kid that's now present, so a
         // rotation that hands us a previously-missing kid takes effect
@@ -302,6 +358,7 @@ impl JwksClient {
         let mut cache = self.cache.write().await;
         *cache = Some(CachedJwks {
             keys,
+            kidless_keys,
             fetched_at: Instant::now(),
         });
 
@@ -374,6 +431,10 @@ pub enum JwksError {
     /// Failed to create HTTP client.
     #[error("Failed to create HTTP client: {0}")]
     HttpClientError(String),
+
+    /// JWKS URL uses an insecure scheme (plain http) outside loopback.
+    #[error("JWKS URL '{0}' must use https:// (plain http is only allowed for loopback hosts)")]
+    InsecureUrl(String),
 }
 
 #[cfg(test)]
@@ -383,7 +444,7 @@ mod tests {
 
     #[test]
     fn test_parse_jwk_with_n_e() {
-        let client = JwksClient::new("http://example.com".to_string(), 3600).unwrap();
+        let client = JwksClient::new("https://example.com".to_string(), 3600).unwrap();
 
         // Example RSA public key components (minimal test)
         let jwk = JsonWebKey {
@@ -404,7 +465,7 @@ mod tests {
 
     #[test]
     fn test_parse_jwk_unsupported_type() {
-        let client = JwksClient::new("http://example.com".to_string(), 3600).unwrap();
+        let client = JwksClient::new("https://example.com".to_string(), 3600).unwrap();
 
         let jwk = JsonWebKey {
             kid: Some("test-key".to_string()),
@@ -423,7 +484,7 @@ mod tests {
 
     #[test]
     fn test_parse_jwk_missing_components() {
-        let client = JwksClient::new("http://example.com".to_string(), 3600).unwrap();
+        let client = JwksClient::new("https://example.com".to_string(), 3600).unwrap();
 
         let jwk = JsonWebKey {
             kid: Some("test-key".to_string()),
@@ -452,7 +513,7 @@ mod tests {
         // "oct" (symmetric) keys can't be used for asymmetric verification; we
         // skip them silently rather than erroring, so the caller can keep
         // processing the rest of the JWKS.
-        let client = JwksClient::new("http://example.com".into(), 60).unwrap();
+        let client = JwksClient::new("https://example.com".into(), 60).unwrap();
         let jwk = JsonWebKey {
             kid: Some("sym".into()),
             kty: "oct".into(),
@@ -468,7 +529,7 @@ mod tests {
     #[test]
     fn parse_jwk_returns_none_when_only_modulus_present() {
         // RSA with `n` but no `e` is malformed; we drop it rather than crashing.
-        let client = JwksClient::new("http://example.com".into(), 60).unwrap();
+        let client = JwksClient::new("https://example.com".into(), 60).unwrap();
         let jwk = JsonWebKey {
             kid: Some("partial".into()),
             kty: "RSA".into(),
@@ -486,7 +547,7 @@ mod tests {
         // When x5c is present, the implementation uses it first. A garbage
         // cert string therefore surfaces as KeyParseFailed, not silent
         // fallthrough to the n/e branch (which would otherwise succeed).
-        let client = JwksClient::new("http://example.com".into(), 60).unwrap();
+        let client = JwksClient::new("https://example.com".into(), 60).unwrap();
         let jwk = JsonWebKey {
             kid: Some("bad-x5c".into()),
             kty: "RSA".into(),
@@ -536,12 +597,13 @@ mod tests {
     async fn get_key_returns_cached_match_without_network() {
         // Pre-populate the cache so the read path is exercised without
         // touching the JWKS endpoint. Verifies the cached-key fast path.
-        let client = JwksClient::new("http://example.invalid".into(), 3600).unwrap();
+        let client = JwksClient::new("https://example.invalid".into(), 3600).unwrap();
         let key = DecodingKey::from_secret(b"placeholder");
         let mut keys = HashMap::new();
         keys.insert("kid-1".to_string(), key);
         *client.cache.write().await = Some(CachedJwks {
             keys,
+            kidless_keys: Vec::new(),
             fetched_at: Instant::now(),
         });
 
@@ -554,11 +616,12 @@ mod tests {
     async fn get_any_key_returns_first_cached_when_kid_absent() {
         // Some providers issue tokens without a `kid` header; the fallback
         // must return whichever key is cached.
-        let client = JwksClient::new("http://example.invalid".into(), 3600).unwrap();
+        let client = JwksClient::new("https://example.invalid".into(), 3600).unwrap();
         let mut keys = HashMap::new();
         keys.insert("only".into(), DecodingKey::from_secret(b"placeholder"));
         *client.cache.write().await = Some(CachedJwks {
             keys,
+            kidless_keys: Vec::new(),
             fetched_at: Instant::now(),
         });
 

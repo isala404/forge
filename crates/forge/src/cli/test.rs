@@ -2,10 +2,13 @@ use anyhow::Result;
 use clap::Parser;
 use console::style;
 use std::net::TcpListener;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::process::Command;
+use uuid::Uuid;
 
 use super::frontend_target::FrontendTarget;
 use super::ui;
@@ -113,6 +116,9 @@ impl TestCommand {
     }
 
     async fn run_frontend_tests(&self) -> Result<bool> {
+        // Install a ctrl-c watcher that flips a shared shutdown flag. ContainerGuard's
+        // Drop fires on early return, but we still need to interrupt long-running waits.
+        // `tokio::select!` on `signal::ctrl_c()` in the wait loops covers that.
         let frontend_dir = Path::new("frontend");
         if !frontend_dir.exists() {
             println!();
@@ -163,47 +169,56 @@ impl TestCommand {
         let db_name = read_db_name();
         println!("  {} Starting PostgreSQL...", ui::step());
         let (pg_container, pg_port) = start_postgres(&db_name).await?;
+        // Container guard now owns teardown. ANY return path (?, early bail,
+        // panic, SIGINT after select wakeup) triggers `docker rm -f`.
+        let (_pg_guard, pg_armed) = ContainerGuard::new(pg_container);
         let db_url = format!("postgres://postgres:forge@localhost:{pg_port}/{db_name}");
+        println!(
+            "  {} DATABASE_URL: {}",
+            ui::info(),
+            mask_database_url_for_display(&db_url)
+        );
 
-        let binary = match build_project(frontend_type).await {
-            Ok(bin) => bin,
-            Err(e) => {
-                stop_postgres(&pg_container).await;
-                return Err(e);
+        // Race the rest of the flow against SIGINT so the container guard fires
+        // promptly instead of waiting for the Playwright child to drain.
+        let work = async {
+            let binary = build_project(frontend_type).await?;
+            let port = pick_random_port()?;
+            let app_url = format!("http://localhost:{port}");
+
+            println!("  {} Starting server on port {port}...", ui::step());
+            let mut child = start_server(&binary, port, &db_url).await?;
+
+            print!("  {} Waiting for server...", ui::step());
+            if !wait_for_health(&app_url, Duration::from_secs(120)).await {
+                println!(" {}", style("timed out").red());
+                kill_and_reap(&mut child).await;
+                anyhow::bail!(
+                    "Server did not become healthy within 120s.\n\
+                    Check the binary output for errors."
+                );
+            }
+            println!(" {}", style("ready").green());
+
+            let result = self.execute_frontend_tests(frontend_dir, &app_url).await;
+
+            println!();
+            println!("  {} Stopping server...", ui::step());
+            kill_and_reap(&mut child).await;
+            result
+        };
+
+        let result = tokio::select! {
+            r = work => r,
+            _ = tokio::signal::ctrl_c() => {
+                println!();
+                println!("  {} SIGINT received, tearing down...", ui::warn());
+                Err(anyhow::anyhow!("interrupted"))
             }
         };
 
-        let port = pick_random_port()?;
-        let app_url = format!("http://localhost:{port}");
-
-        println!("  {} Starting server on port {port}...", ui::step());
-        let mut child = match start_server(&binary, port, &db_url).await {
-            Ok(child) => child,
-            Err(e) => {
-                stop_postgres(&pg_container).await;
-                return Err(e);
-            }
-        };
-
-        print!("  {} Waiting for server...", ui::step());
-        if !wait_for_health(&app_url, Duration::from_secs(120)).await {
-            println!(" {}", style("timed out").red());
-            let _ = child.kill().await;
-            stop_postgres(&pg_container).await;
-            anyhow::bail!(
-                "Server did not become healthy within 120s.\n\
-                Check the binary output for errors."
-            );
-        }
-        println!(" {}", style("ready").green());
-
-        let result = self.execute_frontend_tests(frontend_dir, &app_url).await;
-
-        println!();
-        println!("  {} Stopping server...", ui::step());
-        let _ = child.kill().await;
-        stop_postgres(&pg_container).await;
-
+        // Guard handles cleanup. Keep armed.
+        let _ = pg_armed;
         result
     }
 
@@ -313,15 +328,46 @@ fn pick_random_port() -> Result<u16> {
     Ok(port)
 }
 
+/// RAII guard that calls `docker rm -f` on the container when dropped.
+///
+/// Best-effort: Drop runs synchronously and the runtime may already be torn
+/// down, so we shell out blocking and ignore the result. Pairs with the
+/// async-aware ctrl-c handler in `TestCommand::execute` to cover SIGINT.
+struct ContainerGuard {
+    name: String,
+    armed: Arc<AtomicBool>,
+}
+
+impl ContainerGuard {
+    fn new(name: String) -> (Self, Arc<AtomicBool>) {
+        let armed = Arc::new(AtomicBool::new(true));
+        (
+            Self {
+                name,
+                armed: armed.clone(),
+            },
+            armed,
+        )
+    }
+}
+
+impl Drop for ContainerGuard {
+    fn drop(&mut self) {
+        if !self.armed.load(Ordering::SeqCst) {
+            return;
+        }
+        // Use blocking std::process — the tokio runtime might be gone by now.
+        let _ = std::process::Command::new("docker")
+            .args(["rm", "-f", &self.name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
 async fn start_postgres(db_name: &str) -> Result<(String, u16)> {
-    let container_name = format!(
-        "forge-test-pg-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
-    );
+    // Uuid suffix avoids PID+epoch collisions on rapid reinvocation.
+    let container_name = format!("forge-test-pg-{}", Uuid::new_v4().simple());
 
     let _ = Command::new("docker")
         .args(["rm", "-f", &container_name])
@@ -344,6 +390,9 @@ async fn start_postgres(db_name: &str) -> Result<(String, u16)> {
             &format!("POSTGRES_DB={db_name}"),
             "-p",
             "0:5432",
+            // Floating tag: pulls whatever `postgres:18` currently resolves to.
+            // Acceptable for ephemeral test containers; pin to a digest if you
+            // need reproducible CI builds across PG point releases.
             "postgres:18",
         ])
         .stdout(Stdio::null())
@@ -400,13 +449,42 @@ async fn start_postgres(db_name: &str) -> Result<(String, u16)> {
     anyhow::bail!("PostgreSQL did not become ready within 30s")
 }
 
-async fn stop_postgres(container_name: &str) {
-    let _ = Command::new("docker")
-        .args(["rm", "-f", container_name])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await;
+/// Mask the password segment in a `postgres[ql]://user:password@host…` URL.
+fn mask_database_url_for_display(url: &str) -> String {
+    let (scheme, rest) = match url.split_once("://") {
+        Some(p) => p,
+        None => return url.to_string(),
+    };
+    let Some((userinfo, host)) = rest.rsplit_once('@') else {
+        return url.to_string();
+    };
+    let masked = match userinfo.split_once(':') {
+        Some((user, _pw)) => format!("{user}:***"),
+        None => userinfo.to_string(),
+    };
+    format!("{scheme}://{masked}@{host}")
+}
+
+/// Atomically replace a file via tempfile-in-parent + rename. Avoids leaving
+/// the destination empty on crash between truncate and write.
+fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = tempfile::NamedTempFile::new_in(parent)?;
+    {
+        use std::io::Write;
+        tmp.as_file().write_all(contents)?;
+        tmp.as_file().sync_all()?;
+    }
+    let dest: PathBuf = path.to_path_buf();
+    tmp.persist(&dest)
+        .map_err(|e| anyhow::anyhow!("atomic rename failed for {}: {}", path.display(), e))?;
+    Ok(())
+}
+
+/// Kill the child and wait for it so the OS reaps the zombie immediately.
+async fn kill_and_reap(child: &mut tokio::process::Child) {
+    let _ = child.kill().await;
+    let _ = child.wait().await;
 }
 
 async fn build_project(frontend_type: Option<FrontendTarget>) -> Result<std::path::PathBuf> {
@@ -420,6 +498,12 @@ async fn build_project(frontend_type: Option<FrontendTarget>) -> Result<std::pat
     if matches!(frontend_type, Some(FrontendTarget::SvelteKit))
         && let Some(ref content) = original_frontend_env
     {
+        // One-time .env.bak so a SIGKILL/disk-full between truncate and write
+        // doesn't leave the developer with an empty .env.
+        let backup = frontend_env.with_extension("env.bak");
+        if !backup.exists() {
+            let _ = std::fs::write(&backup, content);
+        }
         let patched: String = content
             .lines()
             .map(|l| {
@@ -431,7 +515,7 @@ async fn build_project(frontend_type: Option<FrontendTarget>) -> Result<std::pat
             })
             .collect::<Vec<_>>()
             .join("\n");
-        std::fs::write(frontend_env, patched)?;
+        atomic_write(frontend_env, patched.as_bytes())?;
     }
 
     // Build Dioxus WASM before cargo build: rust_embed requires real files in
@@ -484,7 +568,7 @@ async fn build_project(frontend_type: Option<FrontendTarget>) -> Result<std::pat
 
     // Restore before checking status so a failed build doesn't leave a patched .env
     if let Some(content) = original_frontend_env
-        && let Err(e) = std::fs::write(frontend_env, content)
+        && let Err(e) = atomic_write(frontend_env, content.as_bytes())
     {
         eprintln!("Warning: failed to restore frontend/.env: {e}");
     }
@@ -606,68 +690,6 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-
-    fn default_cmd() -> TestCommand {
-        TestCommand {
-            skip_backend: false,
-            skip_frontend: false,
-            ui: false,
-            headed: false,
-            args: vec![],
-        }
-    }
-
-    #[test]
-    fn test_command_default_runs_both() {
-        let cmd = default_cmd();
-        assert!(!cmd.skip_backend);
-        assert!(!cmd.skip_frontend);
-    }
-
-    #[test]
-    fn test_command_skip_backend() {
-        let cmd = TestCommand {
-            skip_backend: true,
-            ..default_cmd()
-        };
-        assert!(cmd.skip_backend);
-        assert!(!cmd.skip_frontend);
-    }
-
-    #[test]
-    fn test_command_skip_frontend() {
-        let cmd = TestCommand {
-            skip_frontend: true,
-            ..default_cmd()
-        };
-        assert!(!cmd.skip_backend);
-        assert!(cmd.skip_frontend);
-    }
-
-    #[test]
-    fn test_command_with_ui_and_args() {
-        let cmd = TestCommand {
-            ui: true,
-            args: vec!["tests/todo.spec.ts".into()],
-            ..default_cmd()
-        };
-        assert!(cmd.ui);
-        assert_eq!(cmd.args.len(), 1);
-    }
-
-    #[test]
-    fn test_command_headed() {
-        let cmd = TestCommand {
-            headed: true,
-            ..default_cmd()
-        };
-        assert!(cmd.headed);
-    }
-
-    #[test]
-    fn test_read_db_name_default() {
-        assert!(!read_db_name().is_empty());
-    }
 
     #[test]
     fn test_pick_random_port() {

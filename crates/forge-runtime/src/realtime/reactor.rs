@@ -186,10 +186,13 @@ impl Reactor {
         self.session_server.remove_connection(session_id);
 
         // Clean up job subscriptions using reverse index for O(1) lookup
+        // Lock order: subscriptions map BEFORE session reverse-index.
+        // Matches the cleanup task and `unsubscribe_job`/`unsubscribe_workflow`
+        // to remove the deadlock window where opposite orders could meet.
         {
+            let mut job_subs = self.job_subscriptions.write().await;
             let job_ids = self.session_job_ids.write().await.remove(&session_id);
             if let Some(ids) = job_ids {
-                let mut job_subs = self.job_subscriptions.write().await;
                 for id in ids {
                     if let Some(subscribers) = job_subs.get_mut(&id) {
                         subscribers.retain(|s| s.session_id != session_id);
@@ -203,9 +206,9 @@ impl Reactor {
 
         // Clean up workflow subscriptions using reverse index for O(1) lookup
         {
+            let mut workflow_subs = self.workflow_subscriptions.write().await;
             let wf_ids = self.session_workflow_ids.write().await.remove(&session_id);
             if let Some(ids) = wf_ids {
-                let mut workflow_subs = self.workflow_subscriptions.write().await;
                 for id in ids {
                     if let Some(subscribers) = workflow_subs.get_mut(&id) {
                         subscribers.retain(|s| s.session_id != session_id);
@@ -265,7 +268,23 @@ impl Reactor {
                 }
             };
 
-            let (result_hash, serialized_len) = Self::compute_hash(&data);
+            // A subscription with no observable table dependencies could
+            // never be invalidated, so it would sit live forever and never
+            // re-execute. Reject up front instead of silently going dark.
+            if table_deps.is_empty() && read_set.tables.is_empty() {
+                self.unsubscribe(subscription_id);
+                return Err(forge_core::ForgeError::Validation(format!(
+                    "Query '{}' has no table dependencies and cannot be subscribed to",
+                    query_name
+                )));
+            }
+
+            let Some((result_hash, serialized_len)) = Self::compute_hash(&data) else {
+                self.unsubscribe(subscription_id);
+                return Err(forge_core::ForgeError::internal(
+                    "Failed to serialize query result for change detection",
+                ));
+            };
 
             tracing::trace!(
                 ?group_id,
@@ -349,26 +368,33 @@ impl Reactor {
     }
 
     /// Unsubscribe from job updates.
-    pub async fn unsubscribe_job(&self, session_id: SessionId, client_sub_id: &str) {
-        let mut subs = self.job_subscriptions.write().await;
-        let mut removed_ids = Vec::new();
-        for (job_id, subscribers) in subs.iter_mut() {
-            let before = subscribers.len();
-            subscribers
-                .retain(|s| !(s.session_id == session_id && s.client_sub_id == client_sub_id));
-            if subscribers.len() < before {
-                removed_ids.push(*job_id);
+    ///
+    /// Requires `job_id` so this is O(subscribers for one job) instead of
+    /// walking every job entry. Callers always know it: it's the id they
+    /// passed to `subscribe_job`.
+    ///
+    /// Lock order: `job_subscriptions` -> `session_job_ids`. Matches
+    /// `remove_session` to prevent deadlocks under adversarial scheduling.
+    pub async fn unsubscribe_job(&self, session_id: SessionId, job_id: Uuid, client_sub_id: &str) {
+        let removed = {
+            let mut subs = self.job_subscriptions.write().await;
+            let mut removed = false;
+            if let Some(subscribers) = subs.get_mut(&job_id) {
+                let before = subscribers.len();
+                subscribers
+                    .retain(|s| !(s.session_id == session_id && s.client_sub_id == client_sub_id));
+                removed = subscribers.len() < before;
+                if subscribers.is_empty() {
+                    subs.remove(&job_id);
+                }
             }
-        }
-        subs.retain(|_, v| !v.is_empty());
-        drop(subs);
+            removed
+        };
 
-        if !removed_ids.is_empty() {
+        if removed {
             let mut session_jobs = self.session_job_ids.write().await;
             if let Some(ids) = session_jobs.get_mut(&session_id) {
-                for id in &removed_ids {
-                    ids.remove(id);
-                }
+                ids.remove(&job_id);
                 if ids.is_empty() {
                     session_jobs.remove(&session_id);
                 }
@@ -410,27 +436,33 @@ impl Reactor {
         Ok(workflow_data)
     }
 
-    /// Unsubscribe from workflow updates.
-    pub async fn unsubscribe_workflow(&self, session_id: SessionId, client_sub_id: &str) {
-        let mut subs = self.workflow_subscriptions.write().await;
-        let mut removed_ids = Vec::new();
-        for (wf_id, subscribers) in subs.iter_mut() {
-            let before = subscribers.len();
-            subscribers
-                .retain(|s| !(s.session_id == session_id && s.client_sub_id == client_sub_id));
-            if subscribers.len() < before {
-                removed_ids.push(*wf_id);
+    /// Unsubscribe from workflow updates. See [`unsubscribe_job`] for the
+    /// rationale on requiring the `workflow_id`.
+    pub async fn unsubscribe_workflow(
+        &self,
+        session_id: SessionId,
+        workflow_id: Uuid,
+        client_sub_id: &str,
+    ) {
+        let removed = {
+            let mut subs = self.workflow_subscriptions.write().await;
+            let mut removed = false;
+            if let Some(subscribers) = subs.get_mut(&workflow_id) {
+                let before = subscribers.len();
+                subscribers
+                    .retain(|s| !(s.session_id == session_id && s.client_sub_id == client_sub_id));
+                removed = subscribers.len() < before;
+                if subscribers.is_empty() {
+                    subs.remove(&workflow_id);
+                }
             }
-        }
-        subs.retain(|_, v| !v.is_empty());
-        drop(subs);
+            removed
+        };
 
-        if !removed_ids.is_empty() {
+        if removed {
             let mut session_wfs = self.session_workflow_ids.write().await;
             if let Some(ids) = session_wfs.get_mut(&session_id) {
-                for id in &removed_ids {
-                    ids.remove(id);
-                }
+                ids.remove(&workflow_id);
                 if ids.is_empty() {
                     session_wfs.remove(&session_id);
                 }
@@ -465,14 +497,13 @@ impl Reactor {
     }
 
     /// Content hash for change detection; returns `(hash, byte_count)`.
-    fn compute_hash(data: &serde_json::Value) -> (String, usize) {
-        match serde_json::to_vec(data) {
-            Ok(bytes) => {
-                let len = bytes.len();
-                (crate::stable_hash::sha256_hex(&bytes), len)
-            }
-            Err(_) => ("!serialization_failed!".to_string(), usize::MAX),
-        }
+    /// `None` if serialization fails — callers MUST skip the update so a
+    /// failure sentinel isn't cached and used to suppress later, legitimate
+    /// "still broken" notifications or emit spurious data on recovery.
+    fn compute_hash(data: &serde_json::Value) -> Option<(String, usize)> {
+        let bytes = serde_json::to_vec(data).ok()?;
+        let len = bytes.len();
+        Some((crate::stable_hash::sha256_hex(&bytes), len))
     }
 
     /// Flush pending invalidations with bounded concurrent re-execution.
@@ -549,7 +580,59 @@ impl Reactor {
         .await;
     }
 
+    /// Drop every subscription for a session (query, job, workflow) and close
+    /// its SSE channel after a final `AuthFailed` notification. Intended as an
+    /// admin escape hatch for server-side auth revocation: cached
+    /// `AuthContext` on `QueryGroup` is captured at subscribe time and only
+    /// re-validated on JWT expiry, so demotions/tenant moves that happen
+    /// before `exp` cannot be detected by the reactor itself. Operators wire
+    /// this up to their identity system's revocation event; after the call
+    /// the client must reconnect and re-subscribe with a fresh token.
+    pub async fn revoke_session_auth(&self, session_id: SessionId, reason: &str) {
+        self.subscription_manager
+            .remove_session_subscriptions(session_id);
+        self.session_server.revoke_session(session_id, reason);
+
+        {
+            let mut job_subs = self.job_subscriptions.write().await;
+            let job_ids = self.session_job_ids.write().await.remove(&session_id);
+            if let Some(ids) = job_ids {
+                for id in ids {
+                    if let Some(subscribers) = job_subs.get_mut(&id) {
+                        subscribers.retain(|s| s.session_id != session_id);
+                        if subscribers.is_empty() {
+                            job_subs.remove(&id);
+                        }
+                    }
+                }
+            }
+        }
+
+        {
+            let mut workflow_subs = self.workflow_subscriptions.write().await;
+            let wf_ids = self.session_workflow_ids.write().await.remove(&session_id);
+            if let Some(ids) = wf_ids {
+                for id in ids {
+                    if let Some(subscribers) = workflow_subs.get_mut(&id) {
+                        subscribers.retain(|s| s.session_id != session_id);
+                        if subscribers.is_empty() {
+                            workflow_subs.remove(&id);
+                        }
+                    }
+                }
+            }
+        }
+
+        tracing::info!(?session_id, %reason, "Session auth revoked");
+    }
+
     /// Re-run queries for groups, pushing to subscribers on hash change.
+    ///
+    /// Note: re-execution uses the `AuthContext` captured at subscribe time.
+    /// Authorization is checked at subscribe time and only re-checked on
+    /// token expiry. Server-side role/tenant changes before `exp` are not
+    /// detected here; callers must invoke [`revoke_session_auth`] to evict
+    /// affected sessions explicitly.
     async fn reexecute_groups(
         group_ids: &[forge_core::realtime::QueryGroupId],
         subscription_manager: &Arc<SubscriptionManager>,
@@ -638,7 +721,13 @@ impl Reactor {
             };
             match result {
                 Ok((new_data, read_set)) => {
-                    let (new_hash, serialized_len) = Self::compute_hash(&new_data);
+                    let Some((new_hash, serialized_len)) = Self::compute_hash(&new_data) else {
+                        tracing::warn!(
+                            ?group_id,
+                            "Skipping group update: result failed to serialize"
+                        );
+                        continue;
+                    };
 
                     if last_hash.as_ref() != Some(&new_hash) {
                         let data_arc = std::sync::Arc::new(new_data);
@@ -715,6 +804,7 @@ impl Reactor {
             tracing::debug!("Reactor listening for changes");
 
             let mut restart_count: u32 = 0;
+            let mut consecutive_lags: u32 = 0;
             let (listener_error_tx, mut listener_error_rx) = mpsc::channel::<String>(1);
 
             // Start initial listener
@@ -757,6 +847,11 @@ impl Reactor {
                                 // again; reset so a long-lived process can absorb more
                                 // transient failures over its lifetime.
                                 restart_count = 0;
+                                consecutive_lags = 0;
+                                // A successful change proves the new listener
+                                // is healthy; flush stale errors so they
+                                // can't be misattributed to it later.
+                                while listener_error_rx.try_recv().is_ok() {}
                                 Self::handle_change(
                                     &change,
                                     &invalidation_engine,
@@ -767,10 +862,20 @@ impl Reactor {
                                 ).await;
                             }
                             Err(broadcast::error::RecvError::Lagged(n)) => {
+                                // Back off exponentially on consecutive lags so a
+                                // sustained event rate above the broadcast buffer
+                                // doesn't pin us in a resync-storm.
+                                let backoff_ms = 100u64
+                                    .saturating_mul(1u64 << consecutive_lags.min(6));
+                                consecutive_lags = consecutive_lags.saturating_add(1);
                                 tracing::warn!(
                                     missed = n,
-                                    "Reactor lagged; scheduling full resync"
+                                    consecutive_lags,
+                                    backoff_ms,
+                                    "Reactor lagged; backing off before scheduling full resync"
                                 );
+                                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms))
+                                    .await;
                                 listener.set_needs_resync();
                             }
                             Err(broadcast::error::RecvError::Closed) => {
@@ -889,6 +994,14 @@ impl Reactor {
                         if let Some(handle) = listener_handle.take() {
                             handle.abort();
                         }
+                        // Drain any further error messages that piled up
+                        // while we were sleeping the backoff: the aborted
+                        // listener may have queued additional failures, and
+                        // the new listener must not be debited for them
+                        // (each stale message would otherwise bump
+                        // restart_count toward max_restarts on phantom
+                        // restarts and emit a false "permanently failed").
+                        while listener_error_rx.try_recv().is_ok() {}
                         change_rx = listener.subscribe();
                         listener_handle = Some(tokio::spawn(async move {
                             if let Err(e) = listener_clone.run(&bus_clone).await {
@@ -1299,18 +1412,12 @@ impl Reactor {
 
                 let mut read_set = ReadSet::new();
 
-                if info.table_dependencies.is_empty() {
-                    let table_name = Self::extract_table_name(query_name);
-                    read_set.add_table(&table_name);
-                    tracing::trace!(
-                        query = %query_name,
-                        fallback_table = %table_name,
-                        "Using naming convention fallback for table dependency"
-                    );
-                } else {
-                    for table in info.table_dependencies {
-                        read_set.add_table(*table);
-                    }
+                // No naming-convention fallback: a fake "table" equal to
+                // the query name would never appear in real change events,
+                // so the subscription would silently never re-execute.
+                // Callers reject empty-deps subscriptions at subscribe time.
+                for table in info.table_dependencies {
+                    read_set.add_table(*table);
                 }
 
                 Ok((data, read_set))
@@ -1320,10 +1427,6 @@ impl Reactor {
                 query_name
             ))),
         }
-    }
-
-    fn extract_table_name(query_name: &str) -> String {
-        query_name.to_string()
     }
 
     /// Auth check for re-execution (authentication only, roles checked at subscribe time).
@@ -1461,9 +1564,9 @@ mod tests {
         let data2 = serde_json::json!({"name": "test"});
         let data3 = serde_json::json!({"name": "different"});
 
-        let (hash1, len1) = Reactor::compute_hash(&data1);
-        let (hash2, _) = Reactor::compute_hash(&data2);
-        let (hash3, _) = Reactor::compute_hash(&data3);
+        let (hash1, len1) = Reactor::compute_hash(&data1).expect("hash data1");
+        let (hash2, _) = Reactor::compute_hash(&data2).expect("hash data2");
+        let (hash3, _) = Reactor::compute_hash(&data3).expect("hash data3");
 
         assert_eq!(hash1, hash2);
         assert_ne!(hash1, hash3);

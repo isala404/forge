@@ -37,6 +37,28 @@ pub fn register_workflow_bridge(executor: Arc<WorkflowExecutor>, job_registry: &
             let cancel: bool = args.get("cancel").and_then(Value::as_bool).unwrap_or(false);
 
             if cancel {
+                // Only the scheduler (`enqueue_cancel`) sets `resume_reason ==
+                // "cancel"`. An external caller dispatching `$workflow_resume`
+                // via `JobDispatcher::dispatch_by_name` with `{cancel: true}`
+                // would NOT set this marker, so we reject — defense in depth
+                // against a compromised internal caller cancelling arbitrary
+                // runs (#11 in issues doc). The `$` prefix on the job_type is
+                // convention; this guard is enforcement.
+                let scheduler_marker = args
+                    .get("resume_reason")
+                    .and_then(Value::as_str)
+                    .map(|s| s == "cancel")
+                    .unwrap_or(false);
+                if !scheduler_marker {
+                    tracing::error!(
+                        workflow_run_id = %run_id,
+                        "Rejected $workflow_resume cancel without scheduler marker; \
+                         only WorkflowScheduler may dispatch cancel jobs"
+                    );
+                    return Err(forge_core::ForgeError::Forbidden(
+                        "cancel jobs may only be dispatched by the workflow scheduler".to_string(),
+                    ));
+                }
                 let reason = args
                     .get("reason")
                     .and_then(Value::as_str)

@@ -7,11 +7,11 @@ export interface AuthResponse {
 }
 
 export interface BinanceTrade {
-  symbol: string;
-  price: string;
-  quantity: string;
-  trade_time: number;
-  is_buyer_maker: boolean;
+  s: string;
+  p: string;
+  q: string;
+  T: number;
+  m: boolean;
 }
 
 export interface ConfirmVerificationInput {
@@ -90,6 +90,10 @@ export interface Trade {
   created_at: string;
 }
 
+export interface TriggerDemoWebhookInput {
+  idempotency_key: string;
+}
+
 export interface User {
   id: string;
   email: string;
@@ -97,7 +101,6 @@ export interface User {
   role: UserRole;
   created_at: string;
   updated_at: string;
-  password_hash?: string;
 }
 
 export interface UserPublic {

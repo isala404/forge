@@ -15,6 +15,24 @@
 //! old per-subsystem listeners had, except now there is exactly one
 //! reconnect path to maintain).
 //!
+//! # Replay backing per channel
+//!
+//! Not every channel survives a reconnect gap equally well. Subscribers must
+//! pair the bus with channel-specific recovery:
+//!
+//! - `forge_changes`: backed by `forge_change_log`. Subscribers replay missed
+//!   rows by `last_seen_seq` after a `subscribe_reconnects` tick.
+//! - `forge_workflow_wakeup`: idempotent — the workflow executor's normal
+//!   timer poll catches missed wakeups within its tick interval.
+//! - `forge_leader_released`: a missed event delays standby acquisition by at
+//!   most one `LeaderConfig::check_interval`.
+//! - `forge_jobs_available`: **no replay backing**. A missed NOTIFY leaves
+//!   jobs unclaimed until the next worker poll (`poll_interval`, default
+//!   5 s). Workers must keep their independent poll cadence even when this
+//!   channel is connected; do not extend `poll_interval` past acceptable
+//!   tail latency on the assumption that NOTIFY will always be timely.
+//! - `forge_schema_changed`: advisory only; reconnect re-fetches schema.
+//!
 //! # Payload semantics
 //!
 //! The bus forwards the raw `notification.payload()` string. Channels that
@@ -32,7 +50,12 @@ use tokio::sync::{broadcast, watch};
 /// Per-channel broadcast buffer size. Subscribers that fall behind by more
 /// than this many messages will see `RecvError::Lagged` and can decide
 /// whether to catch up or resync.
-const CHANNEL_BUFFER_SIZE: usize = 256;
+///
+/// Sized for bursty `forge_changes` workloads where a single transaction can
+/// emit hundreds of notifications. Every direct subscriber MUST handle
+/// `broadcast::error::RecvError::Lagged` — drop-and-resync is the only
+/// correct response since the bus does not back-pressure publishers.
+const CHANNEL_BUFFER_SIZE: usize = 4096;
 
 /// Initial reconnection delay after a `PgListener` disconnect.
 const INITIAL_BACKOFF: Duration = Duration::from_millis(500);

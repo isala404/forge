@@ -13,9 +13,23 @@ pub fn AuthCard() -> Element {
     let signals = use_signals();
 
     let mut mode = use_signal(|| "login".to_string());
-    let mut auth_email = use_signal(|| "demo@example.com".to_string());
-    let mut auth_password = use_signal(|| "password123".to_string());
-    let mut auth_name = use_signal(|| String::new());
+    // Prefill credentials only in debug builds. Release WASM ships empty fields so a
+    // public demo is not a one-click login when combined with the seeded admin user.
+    let mut auth_email = use_signal(|| {
+        if cfg!(debug_assertions) {
+            "demo@example.com".to_string()
+        } else {
+            String::new()
+        }
+    });
+    let mut auth_password = use_signal(|| {
+        if cfg!(debug_assertions) {
+            "password123".to_string()
+        } else {
+            String::new()
+        }
+    });
+    let mut auth_name = use_signal(String::new);
     let mut auth_error = use_signal(|| None::<String>);
     let mut loading = use_signal(|| false);
 
@@ -99,7 +113,10 @@ pub fn AuthCard() -> Element {
                     auth_error.set(None);
                     match refresh_mut.call(RefreshInput::new(&rt)).await {
                         Ok(pair) => {
-                            signals.track_with_properties("token_refresh", json!({"count": refresh_count() + 1}));
+                            signals.track_with_properties(
+                                "token_refresh",
+                                json!({"count": refresh_count() + 1}),
+                            );
                             let claims = parse_jwt_claims(&pair.access_token);
                             token_claims.set(Some(claims));
                             auth.update_tokens(
@@ -134,13 +151,14 @@ pub fn AuthCard() -> Element {
 
     // Restore viewer on mount (persisted in localStorage by ForgeAuthProvider)
     use_effect(move || {
-        if auth.is_authenticated() && auth_user.read().is_none() {
-            if let Some(viewer) = auth.viewer::<UserPublic>() {
-                if let Some(token) = auth.access_token() {
-                    token_claims.set(Some(parse_jwt_claims(&token)));
-                }
-                auth_user.set(Some(viewer));
+        if auth.is_authenticated()
+            && auth_user.read().is_none()
+            && let Some(viewer) = auth.viewer::<UserPublic>()
+        {
+            if let Some(token) = auth.access_token() {
+                token_claims.set(Some(parse_jwt_claims(&token)));
             }
+            auth_user.set(Some(viewer));
         }
     });
 

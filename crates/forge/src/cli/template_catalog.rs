@@ -169,11 +169,17 @@ fn collect_directories(dir: &Dir<'_>, prefix: &Path, directories: &mut Vec<PathB
     }
 }
 
+/// Matches `entry` against `path` as a relative-path prefix.
+///
+/// Exact match wins. Otherwise, `entry` is treated as a path prefix anchored
+/// at the relative root (e.g. `node_modules` matches `node_modules/foo` but
+/// not `frontend/node_modules`). Matching any component anywhere in the path
+/// was too aggressive and silently excluded unrelated files.
 fn path_matches(path: &Path, entry: &str) -> bool {
-    if path == Path::new(entry) {
+    let entry_path = Path::new(entry);
+    if path == entry_path {
         return true;
     }
 
-    path.components()
-        .any(|component| component.as_os_str() == entry)
+    path.starts_with(entry_path)
 }

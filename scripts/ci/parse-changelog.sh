@@ -13,9 +13,19 @@ if [ -z "$VERSION" ]; then
   exit 1
 fi
 
-if git rev-parse "v$VERSION" >/dev/null 2>&1; then
-  echo "::error::Tag v$VERSION already exists"
-  exit 1
+# Tag-existence check happens later in release.yml via `git ls-remote`; a local
+# `git rev-parse` would silently no-op under the workflow's shallow clone
+# (actions/checkout defaults to fetch-depth: 1 with no tags fetched).
+
+# Cross-check against the workspace Cargo.toml version
+if command -v cargo >/dev/null 2>&1; then
+  CARGO_VERSION=$(cargo metadata --format-version 1 --no-deps 2>/dev/null \
+    | python3 -c "import json,sys; m=json.load(sys.stdin); pkgs=[p for p in m['packages'] if p['name']=='forgex']; print(pkgs[0]['version'] if pkgs else '')" \
+    2>/dev/null || true)
+  if [ -n "$CARGO_VERSION" ] && [ "$CARGO_VERSION" != "$VERSION" ]; then
+    echo "::error::CHANGELOG version $VERSION does not match Cargo workspace version $CARGO_VERSION"
+    exit 1
+  fi
 fi
 
 VERSION_LINE=$(grep -E "^\#\# \[$VERSION\]" CHANGELOG.md)
@@ -26,7 +36,7 @@ fi
 
 RELEASE_DATE=$(echo "$VERSION_LINE" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}$')
 
-UNRELEASED_CONTENT=$(awk '/^\#\# \[Unreleased\]/,/^\#\# \[/ {print}' CHANGELOG.md | tail -n +2 | head -n -1 | grep -v '^$' || true)
+UNRELEASED_CONTENT=$(awk '/^\#\# \[Unreleased\]/,/^\#\# \[/ {print}' CHANGELOG.md | tail -n +2 | sed '$d' | grep -v '^$' || true)
 if [ -n "$UNRELEASED_CONTENT" ]; then
   echo "::warning::Unreleased section has content"
 fi
@@ -51,10 +61,11 @@ echo "$VERSION" | grep -qE '(alpha|beta|rc)' && IS_PRERELEASE="true"
 echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 echo "release_date=$RELEASE_DATE" >> "$GITHUB_OUTPUT"
 echo "is_prerelease=$IS_PRERELEASE" >> "$GITHUB_OUTPUT"
+DELIM="EOF_$(openssl rand -hex 16)"
 {
-  echo "release_notes<<RELEASE_NOTES_EOF"
+  echo "release_notes<<$DELIM"
   echo "$RELEASE_NOTES"
-  echo "RELEASE_NOTES_EOF"
+  echo "$DELIM"
 } >> "$GITHUB_OUTPUT"
 
 echo "Version: $VERSION | Date: $RELEASE_DATE | Prerelease: $IS_PRERELEASE"

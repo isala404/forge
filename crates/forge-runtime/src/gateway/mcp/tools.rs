@@ -484,23 +484,68 @@ pub(super) async fn handle_proxied_function_call(
     }
 }
 
+/// Hard cap on serialized MCP tool output. Past this size we drop
+/// `structuredContent` (avoiding the double-encoded blow-up for objects) and
+/// truncate the textual representation. Picked to leave generous headroom
+/// while preventing a single tool call from buffering tens of MB twice.
+const MAX_TOOL_OUTPUT_BYTES: usize = 256 * 1024;
+
 pub(super) fn tool_success_result(output: Value) -> Value {
     match output {
-        Value::Object(_) => serde_json::json!({
-            "content": [{
-                "type": "text",
-                "text": serde_json::to_string(&output).unwrap_or_else(|_| "{}".to_string())
-            }],
-            "structuredContent": output
-        }),
-        Value::String(text) => serde_json::json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
-        other => serde_json::json!({
-            "content": [{
-                "type": "text",
-                "text": serde_json::to_string(&other).unwrap_or_else(|_| "null".to_string())
-            }]
-        }),
+        Value::Object(_) => {
+            let text = serde_json::to_string(&output).unwrap_or_else(|_| "{}".to_string());
+            if text.len() > MAX_TOOL_OUTPUT_BYTES {
+                // Avoid embedding the object twice once it exceeds the cap.
+                let truncated = truncate_at_char_boundary(&text, MAX_TOOL_OUTPUT_BYTES);
+                serde_json::json!({
+                    "content": [{
+                        "type": "text",
+                        "text": truncated
+                    }],
+                    "isError": false,
+                    "_truncated": true
+                })
+            } else {
+                serde_json::json!({
+                    "content": [{ "type": "text", "text": text }],
+                    "structuredContent": output
+                })
+            }
+        }
+        Value::String(text) => {
+            let text = if text.len() > MAX_TOOL_OUTPUT_BYTES {
+                truncate_at_char_boundary(&text, MAX_TOOL_OUTPUT_BYTES)
+            } else {
+                text
+            };
+            serde_json::json!({
+                "content": [{ "type": "text", "text": text }]
+            })
+        }
+        other => {
+            let text = serde_json::to_string(&other).unwrap_or_else(|_| "null".to_string());
+            let text = if text.len() > MAX_TOOL_OUTPUT_BYTES {
+                truncate_at_char_boundary(&text, MAX_TOOL_OUTPUT_BYTES)
+            } else {
+                text
+            };
+            serde_json::json!({
+                "content": [{ "type": "text", "text": text }]
+            })
+        }
     }
+}
+
+fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = String::with_capacity(end + 16);
+    out.push_str(s.get(..end).unwrap_or(""));
+    out.push_str("…[truncated]");
+    out
 }

@@ -7,6 +7,8 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use futures_channel::oneshot;
+
 use dioxus::prelude::{Signal, WritableExt, dioxus_core::Task};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -58,8 +60,6 @@ struct SseManager {
     connect_waiters: Vec<ConnectWaiter>,
 }
 
-const MAX_RECONNECT_ATTEMPTS: u32 = 10;
-
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct ForgeClientConfig {
@@ -89,9 +89,12 @@ impl ForgeClientConfig {
     }
 
     /// Register an async callback invoked when an RPC call returns UNAUTHORIZED.
-    /// The callback should refresh the access token and return the new one. If
-    /// it returns `Some`, the original call is retried once with the new token.
-    /// If it returns `None`, the call fails normally.
+    /// The callback must refresh the access token AND persist it where the
+    /// `get_token` provider reads from (typically a `Signal`) before
+    /// resolving. The returned `Option<String>` is treated as success/failure;
+    /// the client does not inject it directly. On `Some` the original call is
+    /// retried once (which calls `get_token` again). On `None` the call fails.
+    /// Concurrent 401s are coalesced into a single refresh attempt.
     pub fn with_refresh_token_provider<F, Fut>(mut self, provider: F) -> Self
     where
         F: Fn() -> Fut + 'static,
@@ -138,6 +141,9 @@ struct ForgeClientInner {
     connection_state: Option<Signal<ConnectionState>>,
     sse: RefCell<SseManager>,
     signals: RefCell<Option<ForgeSignals>>,
+    /// Coalesces concurrent 401 refresh attempts. While `Some`, in-flight
+    /// callers should subscribe via oneshot instead of firing another refresh.
+    refresh_waiters: RefCell<Option<Vec<oneshot::Sender<bool>>>>,
 }
 
 impl ForgeClient {
@@ -152,6 +158,7 @@ impl ForgeClient {
                 connection_state: config.connection_state,
                 sse: RefCell::new(SseManager::default()),
                 signals: RefCell::new(None),
+                refresh_waiters: RefCell::new(None),
             }),
         }
     }
@@ -206,7 +213,44 @@ impl ForgeClient {
         let Some(provider) = self.inner.refresh_token.clone() else {
             return false;
         };
-        provider().await.is_some()
+
+        // Coalesce: if a refresh is already in flight, wait for its result
+        // instead of rotating the refresh token again.
+        let (rx, leader) = {
+            let mut slot = self.inner.refresh_waiters.borrow_mut();
+            match slot.as_mut() {
+                Some(waiters) => {
+                    let (tx, rx) = oneshot::channel();
+                    waiters.push(tx);
+                    (Some(rx), false)
+                }
+                None => {
+                    *slot = Some(Vec::new());
+                    (None, true)
+                }
+            }
+        };
+
+        if !leader {
+            return rx
+                .expect("follower must have a receiver")
+                .await
+                .unwrap_or(false);
+        }
+
+        // The provider's `Option<String>` return signals success/failure only.
+        // The provider closure MUST install the new token via its own state
+        // (e.g. updating a Signal that backs `get_token`) before resolving,
+        // since `get_token` is read again on the retry. Returning `Some`
+        // without persisting the token will cause the retry to use the
+        // stale token.
+        let success = provider().await.is_some();
+
+        let waiters = self.inner.refresh_waiters.borrow_mut().take().unwrap_or_default();
+        for w in waiters {
+            let _ = w.send(success);
+        }
+        success
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -637,16 +681,17 @@ impl ForgeClient {
         }
     }
 
+    /// Returns the current attempt count for backoff calculation. Retries
+    /// indefinitely while there are listeners — long-lived apps need an
+    /// always-on SSE pipe, not a hard 10-attempt giveup. Backoff is capped
+    /// by the caller via `attempts.min(N)`.
     fn should_reconnect(&self) -> Option<u32> {
         let mut sse = self.inner.sse.borrow_mut();
         if sse.listeners.is_empty() {
             return None;
         }
         let attempts = sse.reconnect_attempts;
-        if attempts >= MAX_RECONNECT_ATTEMPTS {
-            return None;
-        }
-        sse.reconnect_attempts = attempts + 1;
+        sse.reconnect_attempts = attempts.saturating_add(1);
         Some(attempts)
     }
 
@@ -656,6 +701,12 @@ impl ForgeClient {
             .as_ref()
             .and_then(|provider| provider())
             .filter(|t| !t.is_empty())
+    }
+
+    /// Crate-internal accessor for the current access token, used by signals
+    /// so analytics calls carry the user's identity.
+    pub(crate) fn auth_token(&self) -> Option<String> {
+        self.get_token()
     }
 
     fn decode_envelope<TResult>(
@@ -806,10 +857,14 @@ mod platform {
         body: serde_json::Value,
         correlation_id: Option<&str>,
     ) -> Result<RpcEnvelopeRaw, ForgeClientError> {
+        // X-Forge-CSRF: custom header forces a CORS preflight on cross-origin
+        // POSTs so the server's CORS allowlist gates cross-site requests
+        // despite `credentials: include`.
         let mut request = Request::post(url)
             .header("Content-Type", "application/json")
             .header("Accept", "application/vnd.forge.v1+json")
             .header("x-forge-platform", platform_tag())
+            .header("X-Forge-CSRF", "1")
             .credentials(web_sys::RequestCredentials::Include);
         if let Some(token) = client.get_token() {
             request = request.header("Authorization", &format!("Bearer {token}"));
@@ -836,6 +891,7 @@ mod platform {
     ) -> Result<RpcEnvelopeRaw, ForgeClientError> {
         let mut request = Request::post(url)
             .header("x-forge-platform", platform_tag())
+            .header("X-Forge-CSRF", "1")
             .credentials(web_sys::RequestCredentials::Include);
         if let Some(token) = client.get_token() {
             request = request.header("Authorization", &format!("Bearer {token}"));
@@ -864,14 +920,32 @@ mod platform {
         })
     }
 
-    fn events_url(client: &ForgeClient) -> String {
-        match client.get_token() {
-            Some(token) => format!(
-                "{}/_api/events?token={}",
-                client.inner.url,
-                encode_uri_component(&token)
-            ),
-            None => format!("{}/_api/events", client.inner.url),
+    /// Build the SSE URL. When a bearer token is present, mint a short-lived
+    /// single-use ticket via `POST /_api/events/ticket` and put it in the
+    /// query string. The JWT itself never appears in the URL — query
+    /// strings leak into access logs, browser history, and Referer headers.
+    /// Anonymous connections skip the ticket fetch.
+    async fn events_url(client: &ForgeClient) -> String {
+        let base = format!("{}/_api/events", client.inner.url);
+        let Some(token) = client.get_token() else {
+            return base;
+        };
+        let ticket_url = format!("{}/ticket", base);
+        let request = Request::post(&ticket_url).header("Authorization", &format!("Bearer {token}"));
+        let response = match request.send().await {
+            Ok(r) => r,
+            Err(_) => return base,
+        };
+        if !response.ok() {
+            return base;
+        }
+        #[derive(serde::Deserialize)]
+        struct TicketResponse {
+            ticket: String,
+        }
+        match response.json::<TicketResponse>().await {
+            Ok(body) => format!("{}?ticket={}", base, encode_uri_component(&body.ticket)),
+            Err(_) => base,
         }
     }
 
@@ -914,7 +988,8 @@ mod platform {
 
     /// Returns `true` if the connection was established at some point.
     async fn run_event_loop(client: &ForgeClient) -> bool {
-        let mut event_source = match EventSource::new(&events_url(client)) {
+        let url = events_url(client).await;
+        let mut event_source = match EventSource::new(&url) {
             Ok(source) => source,
             Err(_) => {
                 return false;
@@ -1030,6 +1105,7 @@ mod platform {
             .post(url)
             .header("Accept", "application/vnd.forge.v1+json")
             .header("x-forge-platform", platform_tag())
+            .header("X-Forge-CSRF", "1")
             .json(&body);
         if let Some(token) = client.get_token() {
             request = request.bearer_auth(token);
@@ -1056,6 +1132,7 @@ mod platform {
         let mut request = Client::new()
             .post(url)
             .header("x-forge-platform", platform_tag())
+            .header("X-Forge-CSRF", "1")
             .multipart(form);
         if let Some(token) = client.get_token() {
             request = request.bearer_auth(token);
@@ -1096,7 +1173,13 @@ mod platform {
 
             if let Some(attempts) = client_for_task.should_reconnect() {
                 let delay = 1000 * (1u64 << attempts.min(4));
-                sleep(std::time::Duration::from_millis(delay)).await;
+                // Cheap jitter from wall-clock subnanos so two desktop apps
+                // started off the same restart cycle don't synchronize retries.
+                let jitter = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| (d.subsec_nanos() as u64) % 500)
+                    .unwrap_or(0);
+                sleep(std::time::Duration::from_millis(delay + jitter)).await;
 
                 client_for_task.inner.sse.borrow_mut().state = super::SseState::Connecting;
                 start_event_loop(client_for_task);

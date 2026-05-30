@@ -22,7 +22,6 @@ use forge_core::schema::{
 use forge_core::util::to_snake_case;
 use std::collections::BTreeMap;
 
-use quote::ToTokens;
 use syn::{Attribute, Expr, Fields, FnArg, Lit, Meta, Pat, ReturnType};
 
 use crate::Error;
@@ -151,10 +150,11 @@ pub fn find_duplicate_handlers(src_dir: &Path) -> Result<BTreeMap<String, Vec<Pa
         };
         for item in &file.items {
             if let syn::Item::Fn(item_fn) = item
-                && let Some(func) = parse_function(item_fn)
+                && let Ok(Some(func)) = parse_function(item_fn)
             {
-                let key = format!("{}:{}", func.kind.as_str(), func.name);
-                occurrences.entry(key).or_default().push(path.clone());
+                // Key by name only so collisions across kinds (e.g. a query
+                // and a mutation both named `foo`) surface as duplicates.
+                occurrences.entry(func.name).or_default().push(path.clone());
             }
         }
     }
@@ -175,25 +175,19 @@ fn parse_file(content: &str, registry: &SchemaRegistry) -> Result<(), Error> {
         match item {
             syn::Item::Struct(item_struct) => {
                 if has_forge_attr(&item_struct.attrs, "model") {
-                    if let Some(table) = parse_model(&item_struct) {
-                        registry.register_table(table);
-                    }
-                } else if has_serde_derive(&item_struct.attrs)
-                    && let Some(table) = parse_dto_struct(&item_struct)
-                {
-                    registry.register_table(table);
+                    registry.register_table(parse_model(&item_struct)?);
+                } else if has_serde_derive(&item_struct.attrs) {
+                    registry.register_table(parse_dto_struct(&item_struct)?);
                 }
             }
-            syn::Item::Enum(item_enum) => {
-                if (has_forge_enum_attr(&item_enum.attrs) || has_serde_derive(&item_enum.attrs))
-                    && let Some(enum_def) = parse_enum(&item_enum)
-                {
-                    registry.register_enum(enum_def);
-                }
+            syn::Item::Enum(item_enum)
+                if has_forge_enum_attr(&item_enum.attrs) || has_serde_derive(&item_enum.attrs) =>
+            {
+                registry.register_enum(parse_enum(&item_enum)?);
             }
             syn::Item::Fn(item_fn) => {
-                if let Some(func) = parse_function(&item_fn) {
-                    registry.register_function(func);
+                if let Some(func) = parse_function(&item_fn)? {
+                    register_function_checked(registry, func)?;
                 }
             }
             _ => {}
@@ -203,65 +197,98 @@ fn parse_file(content: &str, registry: &SchemaRegistry) -> Result<(), Error> {
     Ok(())
 }
 
-/// Check if attributes contain `#[forge::name]` or `#[name]`.
+fn register_function_checked(registry: &SchemaRegistry, func: FunctionDef) -> Result<(), Error> {
+    if let Some(existing) = registry.get_function(&func.name)
+        && existing.kind != func.kind
+    {
+        return Err(Error::Parse {
+            file: String::new(),
+            message: format!(
+                "handler name collision: `{}` is registered as both {:?} and {:?}",
+                func.name, existing.kind, func.kind
+            ),
+        });
+    }
+    registry.register_function(func);
+    Ok(())
+}
+
+/// Check if attributes contain `#[name]` or any `#[…::name]` re-import.
+///
+/// Matches by last segment so `#[forge::query]`, `#[forge_macros::query]`,
+/// and `#[crate::query]` all count.
 fn has_forge_attr(attrs: &[Attribute], name: &str) -> bool {
     attrs.iter().any(|attr| {
-        let path = attr.path();
-        path.is_ident(name)
-            || matches!(
-                (path.segments.first(), path.segments.get(1), path.segments.get(2)),
-                (Some(first), Some(second), None)
-                    if first.ident == "forge" && second.ident == name
-            )
+        attr.path()
+            .segments
+            .last()
+            .is_some_and(|seg| seg.ident == name)
     })
 }
 
-/// Check if attributes contain `#[forge_enum]`, `#[enum_type]`, or `#[forge::enum_type]`.
+/// Check if attributes contain `#[forge_enum]`, `#[enum_type]`, or any
+/// `#[…::forge_enum]` / `#[…::enum_type]` re-import.
 fn has_forge_enum_attr(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|attr| {
-        let path = attr.path();
-        path.is_ident("forge_enum")
-            || path.is_ident("enum_type")
-            || matches!(
-                (path.segments.first(), path.segments.get(1), path.segments.get(2)),
-                (Some(first), Some(second), None)
-                    if first.ident == "forge"
-                        && (second.ident == "enum_type" || second.ident == "forge_enum")
-            )
+        attr.path()
+            .segments
+            .last()
+            .is_some_and(|seg| seg.ident == "forge_enum" || seg.ident == "enum_type")
     })
 }
 
+/// True iff a `#[derive(...)]` attribute names `Serialize` or `Deserialize`
+/// as a path segment (not as part of a longer identifier like `MySerialize`).
 fn has_serde_derive(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|attr| {
         if !attr.path().is_ident("derive") {
             return false;
         }
-        let tokens = attr.meta.to_token_stream().to_string();
-        tokens.contains("Serialize") || tokens.contains("Deserialize")
+        let Meta::List(list) = &attr.meta else {
+            return false;
+        };
+        let mut found = false;
+        let _ = list.parse_nested_meta(|meta| {
+            if let Some(seg) = meta.path.segments.last()
+                && (seg.ident == "Serialize" || seg.ident == "Deserialize")
+            {
+                found = true;
+            }
+            Ok(())
+        });
+        found
     })
 }
 
-fn parse_dto_struct(item: &syn::ItemStruct) -> Option<TableDef> {
+fn parse_dto_struct(item: &syn::ItemStruct) -> Result<TableDef, Error> {
     let struct_name = item.ident.to_string();
+    reject_unsupported_struct_serde_attrs(&struct_name, &item.attrs)?;
+
     let mut table = TableDef::new(&struct_name, &struct_name);
     table.is_dto = true;
     table.doc = get_doc_comment(&item.attrs);
 
-    if let Fields::Named(fields) = &item.fields {
-        for field in &fields.named {
-            if let Some(field_name) = &field.ident {
-                table
-                    .fields
-                    .push(parse_field(field_name.to_string(), &field.ty, &field.attrs));
-            }
+    let Fields::Named(fields) = &item.fields else {
+        return Err(parse_err(format!(
+            "DTO struct `{struct_name}` must use named fields; tuple and unit structs are not supported by codegen"
+        )));
+    };
+
+    for field in &fields.named {
+        if let Some(field_name) = &field.ident
+            && let Some(parsed) = parse_field(field_name.to_string(), &field.ty, &field.attrs)?
+        {
+            table.fields.push(parsed);
         }
     }
 
-    Some(table)
+    Ok(table)
 }
 
-fn parse_model(item: &syn::ItemStruct) -> Option<TableDef> {
+fn parse_model(item: &syn::ItemStruct) -> Result<TableDef, Error> {
     let struct_name = item.ident.to_string();
+    reject_unsupported_struct_serde_attrs(&struct_name, &item.attrs)?;
+
     let table_name = get_table_name_from_attrs(&item.attrs).unwrap_or_else(|| {
         let snake = to_snake_case(&struct_name);
         pluralize(&snake)
@@ -270,33 +297,139 @@ fn parse_model(item: &syn::ItemStruct) -> Option<TableDef> {
     let mut table = TableDef::new(&table_name, &struct_name);
     table.doc = get_doc_comment(&item.attrs);
 
-    if let Fields::Named(fields) = &item.fields {
-        for field in &fields.named {
-            if let Some(field_name) = &field.ident {
-                table
-                    .fields
-                    .push(parse_field(field_name.to_string(), &field.ty, &field.attrs));
-            }
+    let Fields::Named(fields) = &item.fields else {
+        return Err(parse_err(format!(
+            "model `{struct_name}` must use named fields; tuple and unit structs are not supported by codegen"
+        )));
+    };
+
+    for field in &fields.named {
+        if let Some(field_name) = &field.ident
+            && let Some(parsed) = parse_field(field_name.to_string(), &field.ty, &field.attrs)?
+        {
+            table.fields.push(parsed);
         }
     }
 
-    Some(table)
+    Ok(table)
 }
 
-fn parse_field(name: String, ty: &syn::Type, attrs: &[Attribute]) -> FieldDef {
-    let rust_type = type_to_rust_type(ty);
-    let mut field = FieldDef::new(&name, rust_type);
-    field.column_name = to_snake_case(&name);
+fn parse_field(
+    name: String,
+    ty: &syn::Type,
+    attrs: &[Attribute],
+) -> Result<Option<FieldDef>, Error> {
+    let serde = parse_field_serde(&name, attrs)?;
+    // A serde-skipped field never appears in the JSON wire shape, so it must not
+    // appear in the generated type. Returning None (rather than erroring) lets a
+    // struct keep server-only fields like `password_hash` without breaking the
+    // whole file's bindings.
+    if serde.skip {
+        return Ok(None);
+    }
+    let rust_type = type_to_rust_type(ty)?;
+    let final_name = serde.rename.unwrap_or(name.clone());
+    let mut field = FieldDef::new(&final_name, rust_type);
+    field.column_name = to_snake_case(&final_name);
     field.doc = get_doc_comment(attrs);
-    field
+    let _ = sanitize_reserved(&name); // surface reserved-word handling at field site
+    Ok(Some(field))
 }
 
-fn parse_enum(item: &syn::ItemEnum) -> Option<EnumDef> {
+#[derive(Default)]
+struct FieldSerdeAttrs {
+    rename: Option<String>,
+    /// `#[serde(skip)]` / `skip_serializing` / `skip_deserializing` — the field
+    /// is absent from the JSON wire shape, so it must be omitted from the
+    /// generated type rather than failing the whole file.
+    skip: bool,
+}
+
+/// Parse `#[serde(...)]` directives on a field. Errors on directives codegen
+/// cannot honor; honors `rename` and tolerates `default`.
+fn parse_field_serde(field_name: &str, attrs: &[Attribute]) -> Result<FieldSerdeAttrs, Error> {
+    let mut out = FieldSerdeAttrs::default();
+    for attr in attrs {
+        if !attr.path().is_ident("serde") {
+            continue;
+        }
+        let Meta::List(list) = &attr.meta else {
+            continue;
+        };
+        let mut err: Option<Error> = None;
+        let _ = list.parse_nested_meta(|meta| {
+            let Some(seg) = meta.path.segments.last() else {
+                return Ok(());
+            };
+            match seg.ident.to_string().as_str() {
+                "rename" => {
+                    if let Ok(value) = meta.value()
+                        && let Ok(lit) = value.parse::<syn::LitStr>()
+                    {
+                        out.rename = Some(lit.value());
+                    }
+                }
+                "default" => {}
+                "skip" | "skip_serializing" | "skip_deserializing" => {
+                    out.skip = true;
+                }
+                "flatten" => {
+                    err = Some(parse_err(format!(
+                        "field `{field_name}`: `#[serde(flatten)]` is not supported by codegen"
+                    )));
+                }
+                _ => {}
+            }
+            Ok(())
+        });
+        if let Some(e) = err {
+            return Err(e);
+        }
+    }
+    Ok(out)
+}
+
+/// Reject struct-level serde directives that codegen cannot faithfully honor.
+fn reject_unsupported_struct_serde_attrs(name: &str, attrs: &[Attribute]) -> Result<(), Error> {
+    for attr in attrs {
+        if !attr.path().is_ident("serde") {
+            continue;
+        }
+        let Meta::List(list) = &attr.meta else {
+            continue;
+        };
+        let mut err: Option<Error> = None;
+        let _ = list.parse_nested_meta(|meta| {
+            if let Some(seg) = meta.path.segments.last()
+                && (seg.ident == "rename_all" || seg.ident == "tag" || seg.ident == "untagged")
+            {
+                err = Some(parse_err(format!(
+                    "struct `{name}`: `#[serde({})]` is not supported by codegen",
+                    seg.ident
+                )));
+            }
+            Ok(())
+        });
+        if let Some(e) = err {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+fn parse_enum(item: &syn::ItemEnum) -> Result<EnumDef, Error> {
     let enum_name = item.ident.to_string();
     let mut enum_def = EnumDef::new(&enum_name);
     enum_def.doc = get_doc_comment(&item.attrs);
 
     for variant in &item.variants {
+        if !matches!(variant.fields, Fields::Unit) {
+            return Err(parse_err(format!(
+                "enum `{}` variant `{}`: non-unit variants are not yet supported by codegen",
+                enum_name, variant.ident
+            )));
+        }
+
         let variant_name = variant.ident.to_string();
         let mut enum_variant = EnumVariant::new(&variant_name);
         enum_variant.doc = get_doc_comment(&variant.attrs);
@@ -311,16 +444,62 @@ fn parse_enum(item: &syn::ItemEnum) -> Option<EnumDef> {
         enum_def.variants.push(enum_variant);
     }
 
-    Some(enum_def)
+    Ok(enum_def)
 }
 
-fn parse_function(item: &syn::ItemFn) -> Option<FunctionDef> {
-    let kind = get_function_kind(&item.attrs)?;
+fn parse_err(message: String) -> Error {
+    Error::Parse {
+        file: String::new(),
+        message,
+    }
+}
+
+/// TS and Rust reserved words that survive verbatim through codegen.
+/// Returning `None` means the name is fine; `Some(_)` returns a sanitized form
+/// (currently used only to provoke a parser-level warning at the call site).
+fn sanitize_reserved(name: &str) -> Option<String> {
+    const RESERVED: &[&str] = &[
+        // TS
+        "type",
+        "class",
+        "interface",
+        "enum",
+        "default",
+        "import",
+        "export",
+        "function",
+        "var",
+        "let",
+        "const",
+        "new",
+        "delete",
+        // Rust (subset that round-trips into emitted Rust)
+        "match",
+        "mod",
+        "pub",
+        "fn",
+        "impl",
+        "trait",
+        "use",
+        "ref",
+        "move",
+    ];
+    if RESERVED.contains(&name) {
+        Some(format!("{name}_"))
+    } else {
+        None
+    }
+}
+
+fn parse_function(item: &syn::ItemFn) -> Result<Option<FunctionDef>, Error> {
+    let Some(kind) = get_function_kind(&item.attrs) else {
+        return Ok(None);
+    };
     let func_name = item.sig.ident.to_string();
 
     let return_type = match &item.sig.output {
         ReturnType::Default => RustType::Custom("()".to_string()),
-        ReturnType::Type(_, ty) => extract_result_type(ty),
+        ReturnType::Type(_, ty) => extract_result_type(ty)?,
     };
 
     let mut func = FunctionDef::new(&func_name, kind, return_type);
@@ -339,13 +518,18 @@ fn parse_function(item: &syn::ItemFn) -> Option<FunctionDef> {
 
             if let Pat::Ident(pat_ident) = &*pat_type.pat {
                 let arg_name = pat_ident.ident.to_string();
-                let arg_type = type_to_rust_type(&pat_type.ty);
+                if sanitize_reserved(&arg_name).is_some() {
+                    return Err(parse_err(format!(
+                        "handler `{func_name}` argument `{arg_name}` is a reserved word in TS/Rust; rename it"
+                    )));
+                }
+                let arg_type = type_to_rust_type(&pat_type.ty)?;
                 func.args.push(FunctionArg::new(arg_name, arg_type));
             }
         }
     }
 
-    Some(func)
+    Ok(Some(func))
 }
 
 /// Known Forge context types. Only these are skipped as the first parameter.
@@ -362,7 +546,13 @@ const KNOWN_CONTEXT_TYPES: &[&str] = &[
 ];
 
 /// Check if a type is a known Forge context type.
-/// Walks `&T`/`&mut T` references and checks the final path segment.
+///
+/// Walks `&T`/`&mut T` references. To avoid false positives on user-defined
+/// types named `QueryContext`, requires either a bare path
+/// (`QueryContext`) — which is the conventional `use forge::prelude::*`
+/// case — or a qualified path beginning with `forge`, `forge_core`, or
+/// `crate`. Any other prefix (e.g. `myapp::QueryContext`) is treated as
+/// a user type and is NOT stripped from the RPC signature.
 fn is_context_type(ty: &syn::Type) -> bool {
     let mut inner = ty;
     while let syn::Type::Reference(r) = inner {
@@ -374,7 +564,16 @@ fn is_context_type(ty: &syn::Type) -> bool {
     let Some(last) = type_path.path.segments.last() else {
         return false;
     };
-    KNOWN_CONTEXT_TYPES.contains(&last.ident.to_string().as_str())
+    if !KNOWN_CONTEXT_TYPES.contains(&last.ident.to_string().as_str()) {
+        return false;
+    }
+    let segments = &type_path.path.segments;
+    if segments.len() == 1 {
+        return true;
+    }
+    segments
+        .first()
+        .is_some_and(|s| s.ident == "forge" || s.ident == "forge_core" || s.ident == "crate")
 }
 
 fn get_function_kind(attrs: &[Attribute]) -> Option<FunctionKind> {
@@ -403,7 +602,7 @@ fn get_function_kind(attrs: &[Attribute]) -> Option<FunctionKind> {
 }
 
 /// Extract the inner `T` from `Result<T, E>`.
-fn extract_result_type(ty: &syn::Type) -> RustType {
+fn extract_result_type(ty: &syn::Type) -> Result<RustType, Error> {
     if let syn::Type::Path(type_path) = ty
         && let Some(seg) = type_path.path.segments.last()
         && seg.ident == "Result"
@@ -416,21 +615,21 @@ fn extract_result_type(ty: &syn::Type) -> RustType {
     type_to_rust_type(ty)
 }
 
-fn type_to_rust_type(ty: &syn::Type) -> RustType {
+fn type_to_rust_type(ty: &syn::Type) -> Result<RustType, Error> {
     match ty {
         syn::Type::Reference(r) => type_to_rust_type(&r.elem),
         syn::Type::Path(tp) => path_to_rust_type(tp),
-        _ => RustType::Custom(quote::quote!(#ty).to_string()),
+        _ => Ok(RustType::Custom(quote::quote!(#ty).to_string())),
     }
 }
 
-fn path_to_rust_type(tp: &syn::TypePath) -> RustType {
+fn path_to_rust_type(tp: &syn::TypePath) -> Result<RustType, Error> {
     let Some(last) = tp.path.segments.last() else {
-        return RustType::Custom(quote::quote!(#tp).to_string());
+        return Ok(RustType::Custom(quote::quote!(#tp).to_string()));
     };
     let ident = last.ident.to_string();
 
-    match ident.as_str() {
+    Ok(match ident.as_str() {
         "String" | "str" => RustType::String,
         "i32" => RustType::I32,
         "i64" => RustType::I64,
@@ -443,18 +642,45 @@ fn path_to_rust_type(tp: &syn::TypePath) -> RustType {
         "NaiveTime" => RustType::LocalTime,
         "Value" => RustType::Json,
         "Option" => {
-            let inner = first_generic_arg(last);
+            let inner = first_generic_arg(last, "Option")?;
             RustType::Option(Box::new(inner))
         }
         "Vec" => {
             if is_vec_u8(last) {
-                return RustType::Bytes;
+                return Ok(RustType::Bytes);
             }
-            let inner = first_generic_arg(last);
+            let inner = first_generic_arg(last, "Vec")?;
             RustType::Vec(Box::new(inner))
         }
+        // `HashMap<K, V>` / `BTreeMap<K, V>` are preserved as their full
+        // textual form so the TS/Dioxus emitters can route through their
+        // `Custom("HashMap<…>")` branches. Bare `HashMap`/`BTreeMap` is a
+        // parse error to mirror bare `Vec`/`Option`.
+        "HashMap" | "BTreeMap" => map_to_rust_type(last, &ident)?,
         _ => RustType::Custom(ident),
-    }
+    })
+}
+
+fn map_to_rust_type(seg: &syn::PathSegment, name: &str) -> Result<RustType, Error> {
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return Err(parse_err(format!(
+            "bare `{name}` is not a valid type; expected `{name}<K, V>`"
+        )));
+    };
+    let mut iter = args.args.iter().filter_map(|a| match a {
+        syn::GenericArgument::Type(t) => Some(t),
+        _ => None,
+    });
+    let (Some(key), Some(value)) = (iter.next(), iter.next()) else {
+        return Err(parse_err(format!(
+            "`{name}` requires two type parameters `<K, V>`"
+        )));
+    };
+    let key_str = quote::quote!(#key).to_string().replace(' ', "");
+    let value_str = quote::quote!(#value).to_string().replace(' ', "");
+    // Always normalize to `HashMap<…>` so the emitters' existing
+    // string-prefix branches fire for both `HashMap` and `BTreeMap`.
+    Ok(RustType::Custom(format!("HashMap<{key_str}, {value_str}>")))
 }
 
 fn is_vec_u8(seg: &syn::PathSegment) -> bool {
@@ -467,13 +693,15 @@ fn is_vec_u8(seg: &syn::PathSegment) -> bool {
     false
 }
 
-fn first_generic_arg(seg: &syn::PathSegment) -> RustType {
+fn first_generic_arg(seg: &syn::PathSegment, container: &str) -> Result<RustType, Error> {
     if let syn::PathArguments::AngleBracketed(args) = &seg.arguments
         && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first()
     {
         return type_to_rust_type(inner_ty);
     }
-    RustType::Custom(seg.ident.to_string())
+    Err(parse_err(format!(
+        "bare `{container}` is not a valid type; expected `{container}<T>`"
+    )))
 }
 
 /// Get `#[table(name = "...")]` value from attributes.
@@ -571,6 +799,38 @@ mod tests {
             .expect("users table should be registered");
         assert_eq!(table.struct_name, "User");
         assert_eq!(table.fields.len(), 4);
+    }
+
+    #[test]
+    fn serde_skip_fields_are_omitted_not_rejected() {
+        // A field that serde never serializes isn't in the JSON wire shape, so
+        // it must be dropped from the generated type — and crucially must NOT
+        // fail the whole file (which would orphan every other type defined in
+        // it, e.g. a UserPublic next to a password-bearing User model).
+        let source = r#"
+            #[derive(serde::Serialize, serde::Deserialize)]
+            struct UserPublic {
+                id: Uuid,
+                email: String,
+                #[serde(skip_serializing)]
+                password_hash: Option<String>,
+                #[serde(skip)]
+                internal: String,
+            }
+        "#;
+
+        let registry = SchemaRegistry::new();
+        parse_file(source, &registry).expect("skip fields must not fail the file");
+
+        let table = registry
+            .get_table("UserPublic")
+            .expect("UserPublic should still be registered");
+        let names: Vec<&str> = table.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["id", "email"],
+            "serde-skipped fields must be omitted from the generated type",
+        );
     }
 
     #[test]
@@ -969,7 +1229,7 @@ mod tests {
 
     fn parse_type(s: &str) -> RustType {
         let ty: syn::Type = syn::parse_str(s).expect("valid type");
-        type_to_rust_type(&ty)
+        type_to_rust_type(&ty).expect("valid type maps to RustType")
     }
 
     #[test]

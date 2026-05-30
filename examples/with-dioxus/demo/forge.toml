@@ -15,7 +15,7 @@ url = "${DATABASE_URL}"
 [gateway]
 port = 9081
 cors_enabled = true
-cors_origins = ["http://localhost:9080", "http://127.0.0.1:9080"]
+cors_origins = ["${CORS_ORIGIN-http://localhost:9080}", "http://127.0.0.1:9080"]
 # request_timeout = "30s"
 # max_body_size = "10mb"
 # quiet_paths = ["/_api/health", "/_api/ready"]  # Routes excluded from traces/metrics/logs
@@ -42,7 +42,7 @@ otlp_endpoint = "http://localhost:4318"
 [auth]
 jwt_algorithm = "HS256"
 jwt_secret = "${JWT_SECRET}"
-jwt_audience = "${JWT_AUDIENCE-https://api.forge-demo.local}"
+jwt_audience = "${JWT_AUDIENCE}"
 
 [mcp]
 enabled = true
@@ -52,9 +52,13 @@ session_ttl = "1h"
 allowed_origins = ["http://localhost:9080", "http://127.0.0.1:9080"]
 require_protocol_version_header = true
 
-# [rate_limit]
-# mode = "local"            # local, distributed
-# max_local_buckets = 10000
+[rate_limit]
+# hybrid: per-node DashMap fast path, PG fallback for global keys (DDoS-grade).
+# strict: every check round-trips to PG (cluster-wide correct, billing-grade).
+mode = "hybrid"
+max_local_buckets = 10000
+# Per-handler quotas live on the function macros, e.g.
+#   #[forge::mutation(rate_limit_requests = 10, rate_limit_per_secs = 60, rate_limit_key = "ip")]
 
 # [cluster]
 # name = "node-1"            # auto-generated if omitted
@@ -66,3 +70,8 @@ require_protocol_version_header = true
 # [node]
 # roles = ["gateway", "function", "worker", "scheduler"]
 # worker_capabilities = ["general"]  # general, gpu, high_cpu
+
+[signals]
+# Product analytics + diagnostics are off by default; this demo opts in to
+# exercise the /_api/signal endpoint and the client SDK.
+enabled = true

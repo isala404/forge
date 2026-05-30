@@ -43,6 +43,31 @@ Errors from admin endpoints use a flat envelope, not the RPC envelope:
 | `POST` | `/_api/admin/queues/{name}/resume` | Resume a paused queue |
 | `GET` | `/_api/admin/nodes` | List cluster nodes |
 | `GET` | `/_api/admin/leaders` | List current leader elections |
+| `POST` | `/_api/admin/sessions/{session_id}/revoke` | Revoke a session's cached auth and evict its SSE connection |
+
+---
+
+## Sessions
+
+### Revoke a session
+
+```http
+POST /_api/admin/sessions/{session_id}/revoke
+Authorization: Bearer <jwt-with-admin-role>
+Content-Type: application/json
+
+{ "reason": "user role demoted" }
+```
+
+The reactor caches the `AuthContext` at subscribe time and re-runs subscribed queries until the JWT's `exp`. Server-side changes that happen before `exp` — role demotion, tenant move, force-logout from another device — are otherwise invisible. Calling this endpoint drops the reactor's cached context for the session, evicts the live SSE connection, and unsubscribes all queries, jobs, and workflows tied to that session. The client must reconnect and re-subscribe with a fresh token.
+
+Response:
+
+```json
+{ "status": "revoked" }
+```
+
+Returns `503 reactor_unavailable` if the reactor isn't running on this node (e.g. headless migrate-only invocations).
 
 ---
 

@@ -3,24 +3,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use forge_core::util::normalize_handler_args as normalize_args;
 use forge_core::{ForgeMcpTool, McpToolContext, McpToolInfo, Result};
 use serde_json::Value;
-
-fn normalize_args(args: Value) -> Value {
-    let unwrapped = match args {
-        Value::Object(map) if map.len() == 1 => map
-            .get("args")
-            .or_else(|| map.get("input"))
-            .cloned()
-            .unwrap_or(Value::Object(map)),
-        other => other,
-    };
-
-    match unwrapped {
-        Value::Null => Value::Object(serde_json::Map::new()),
-        other => other,
-    }
-}
 
 pub type BoxedMcpToolFn = Arc<
     dyn Fn(&McpToolContext, Value) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + '_>>

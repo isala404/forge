@@ -47,24 +47,25 @@ impl CheckCommand {
                 };
                 let filename = file_name.to_string_lossy();
 
-                let name_valid = filename
-                    .split('_')
-                    .next()
-                    .map(|prefix| prefix.chars().all(|c| c.is_ascii_digit()))
-                    .unwrap_or(false);
+                // Require `<prefix>_<tail>.sql` with both sides non-empty.
+                // Empty prefix (`_initial.sql`) or empty tail (`0001_.sql`)
+                // pass naive splits and sort surprisingly at runtime.
+                let stem = filename.strip_suffix(".sql").unwrap_or(&filename);
+                let name_valid = match stem.split_once('_') {
+                    Some((prefix, tail)) => {
+                        !prefix.is_empty()
+                            && !tail.is_empty()
+                            && prefix.chars().all(|c| c.is_ascii_digit())
+                    }
+                    None => false,
+                };
 
                 if !name_valid {
                     issues.push(format!("{} - should be NNNN_name.sql", filename));
                     continue;
                 }
 
-                // Check for @up marker
-                let content = std::fs::read_to_string(&path)?;
-                if content.contains("-- @up") {
-                    valid_count += 1;
-                } else {
-                    issues.push(format!("{} - missing '-- @up' marker", filename));
-                }
+                valid_count += 1;
             }
         }
 
@@ -82,7 +83,7 @@ impl CheckCommand {
                     issues.len(),
                     migration_count
                 ),
-                "Fix migration file naming or add '-- @up' marker",
+                "Use NNNN_name.sql with a numeric prefix and a non-empty name",
             );
             for issue in issues.iter().take(3) {
                 result.info(issue);

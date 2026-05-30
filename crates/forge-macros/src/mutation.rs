@@ -215,6 +215,7 @@ fn convert_mutation_attrs(darling: DarlingMutationAttrs) -> Result<MutationAttrs
 }
 
 fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<TokenStream2> {
+    let forge = crate::utils::forge_path();
     let fn_name = &input.sig.ident;
     let fn_name_str = fn_name.to_string();
     let rpc_name = attrs.name.as_deref().unwrap_or(&fn_name_str).to_string();
@@ -250,53 +251,27 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         }
     });
 
+    // Detect any method call literally named `dispatch_job` or
+    // `start_workflow` anywhere in the body. We intentionally don't gate on
+    // the receiver: rebinding (`let c = ctx; c.dispatch_job(...)`), helper
+    // closures, and re-exported call sites all need to trip the lint. False
+    // positives are acceptable — they prompt the user to set
+    // `transactional` explicitly, which is the right default for any
+    // mutation that touches the outbox.
     let has_dispatch = {
         struct DispatchCallVisitor {
-            ctx_ident: Option<syn::Ident>,
             found: bool,
-        }
-        impl DispatchCallVisitor {
-            fn receiver_root_ident(mut expr: &syn::Expr) -> Option<&syn::Ident> {
-                loop {
-                    match expr {
-                        syn::Expr::MethodCall(inner) => expr = &inner.receiver,
-                        syn::Expr::Try(inner) => expr = &inner.expr,
-                        syn::Expr::Await(inner) => expr = &inner.base,
-                        syn::Expr::Paren(inner) => expr = &inner.expr,
-                        syn::Expr::Reference(inner) => expr = &inner.expr,
-                        syn::Expr::Path(path) => {
-                            if path.qself.is_none() && path.path.segments.len() == 1 {
-                                return path.path.segments.first().map(|s| &s.ident);
-                            }
-                            return None;
-                        }
-                        _ => return None,
-                    }
-                }
-            }
-
-            fn receiver_is_ctx(&self, receiver: &syn::Expr) -> bool {
-                let Some(ref ctx) = self.ctx_ident else {
-                    return true;
-                };
-                Self::receiver_root_ident(receiver).is_some_and(|root| root == ctx)
-            }
         }
         impl<'ast> syn::visit::Visit<'ast> for DispatchCallVisitor {
             fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
                 let method = node.method.to_string();
-                if (method == "dispatch_job" || method == "start_workflow")
-                    && self.receiver_is_ctx(&node.receiver)
-                {
+                if method == "dispatch_job" || method == "start_workflow" {
                     self.found = true;
                 }
                 syn::visit::visit_expr_method_call(self, node);
             }
         }
-        let mut visitor = DispatchCallVisitor {
-            ctx_ident: mutation_ctx_ident.clone(),
-            found: false,
-        };
+        let mut visitor = DispatchCallVisitor { found: false };
         syn::visit::visit_block(&mut visitor, fn_block);
         visitor.found
     };
@@ -323,17 +298,50 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
     // there are fine.
     if attrs.transactional && !attrs.allow_http {
         struct HttpCallVisitor {
+            ctx_ident: Option<syn::Ident>,
             found: bool,
+        }
+        impl HttpCallVisitor {
+            fn receiver_root_ident(mut expr: &syn::Expr) -> Option<&syn::Ident> {
+                loop {
+                    match expr {
+                        syn::Expr::MethodCall(inner) => expr = &inner.receiver,
+                        syn::Expr::Try(inner) => expr = &inner.expr,
+                        syn::Expr::Await(inner) => expr = &inner.base,
+                        syn::Expr::Paren(inner) => expr = &inner.expr,
+                        syn::Expr::Reference(inner) => expr = &inner.expr,
+                        syn::Expr::Path(path) => {
+                            if path.qself.is_none() && path.path.segments.len() == 1 {
+                                return path.path.segments.first().map(|s| &s.ident);
+                            }
+                            return None;
+                        }
+                        _ => return None,
+                    }
+                }
+            }
+            fn receiver_is_ctx(&self, receiver: &syn::Expr) -> bool {
+                let Some(ref ctx) = self.ctx_ident else {
+                    return true;
+                };
+                Self::receiver_root_ident(receiver).is_some_and(|root| root == ctx)
+            }
         }
         impl<'ast> syn::visit::Visit<'ast> for HttpCallVisitor {
             fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-                if node.method == "http" {
+                // Gate on the receiver root resolving to the mutation context
+                // binding. Without this, any builder method named `.http()`
+                // on an unrelated type would trip the lint.
+                if node.method == "http" && self.receiver_is_ctx(&node.receiver) {
                     self.found = true;
                 }
                 syn::visit::visit_expr_method_call(self, node);
             }
         }
-        let mut visitor = HttpCallVisitor { found: false };
+        let mut visitor = HttpCallVisitor {
+            ctx_ident: mutation_ctx_ident.clone(),
+            found: false,
+        };
         syn::visit::visit_block(&mut visitor, fn_block);
         if visitor.found {
             return Err(syn::Error::new_spanned(
@@ -388,8 +396,7 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         }
     };
 
-    let type_str = quote! { #ctx_type }.to_string();
-    let is_ref = type_str.starts_with('&');
+    let is_ref = matches!(ctx_type, syn::Type::Reference(_));
 
     let arg_params: Vec<_> = params.iter().skip(1).cloned().collect();
 
@@ -479,16 +486,18 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
     let rate_limit_key = match &attrs.rate_limit_key {
         Some(k) => {
             let key_tokens = match k.as_str() {
-                "user" => quote! { forge::forge_core::rate_limit::RateLimitKey::User },
-                "ip" => quote! { forge::forge_core::rate_limit::RateLimitKey::Ip },
-                "tenant" => quote! { forge::forge_core::rate_limit::RateLimitKey::Tenant },
-                "user_action" => quote! { forge::forge_core::rate_limit::RateLimitKey::UserAction },
-                "global" => quote! { forge::forge_core::rate_limit::RateLimitKey::Global },
+                "user" => quote! { #forge::forge_core::rate_limit::RateLimitKey::User },
+                "ip" => quote! { #forge::forge_core::rate_limit::RateLimitKey::Ip },
+                "tenant" => quote! { #forge::forge_core::rate_limit::RateLimitKey::Tenant },
+                "user_action" => {
+                    quote! { #forge::forge_core::rate_limit::RateLimitKey::UserAction }
+                }
+                "global" => quote! { #forge::forge_core::rate_limit::RateLimitKey::Global },
                 _ if k.starts_with("custom:") => {
                     let claim = k.trim_start_matches("custom:");
-                    quote! { forge::forge_core::rate_limit::RateLimitKey::Custom(#claim.to_string()) }
+                    quote! { #forge::forge_core::rate_limit::RateLimitKey::Custom(#claim.to_string()) }
                 }
-                _ => quote! { forge::forge_core::rate_limit::RateLimitKey::User },
+                _ => quote! { #forge::forge_core::rate_limit::RateLimitKey::User },
             };
             quote! { Some(#key_tokens) }
         }
@@ -498,13 +507,13 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
     let log_level = match &attrs.log_level {
         Some(l) => {
             let level_tokens = match l.as_str() {
-                "trace" => quote! { forge::forge_core::LogLevel::Trace },
-                "debug" => quote! { forge::forge_core::LogLevel::Debug },
-                "info" => quote! { forge::forge_core::LogLevel::Info },
-                "warn" => quote! { forge::forge_core::LogLevel::Warn },
-                "error" => quote! { forge::forge_core::LogLevel::Error },
-                "off" => quote! { forge::forge_core::LogLevel::Off },
-                _ => quote! { forge::forge_core::LogLevel::Trace },
+                "trace" => quote! { #forge::forge_core::LogLevel::Trace },
+                "debug" => quote! { #forge::forge_core::LogLevel::Debug },
+                "info" => quote! { #forge::forge_core::LogLevel::Info },
+                "warn" => quote! { #forge::forge_core::LogLevel::Warn },
+                "error" => quote! { #forge::forge_core::LogLevel::Error },
+                "off" => quote! { #forge::forge_core::LogLevel::Off },
+                _ => quote! { #forge::forge_core::LogLevel::Trace },
             };
             quote! { Some(#level_tokens) }
         }
@@ -523,6 +532,12 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
     let table_dependencies: Vec<String> = if let Some(ref tables) = attrs.tables {
         tables.clone()
     } else {
+        if let Some(issue) = extractor.issues.first() {
+            return Err(syn::Error::new_spanned(
+                &input.sig.ident,
+                issue.describe(&fn_name_str, "mutation"),
+            ));
+        }
         match extract_tables_from_sql(&extractor.sql_strings) {
             TableExtractionResult::Ok(tables) => {
                 let mut sorted: Vec<String> = tables.into_iter().collect();
@@ -671,29 +686,29 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
         if arg_names.is_empty() {
             quote! {
                 #(#fn_attrs)*
-                #vis async fn #fn_name(#ctx_name: #ctx_type) -> forge::forge_core::Result<#output_type> #fn_block
+                #vis async fn #fn_name(#ctx_name: #ctx_type) -> #forge::forge_core::Result<#output_type> #fn_block
             }
         } else {
             quote! {
                 #(#fn_attrs)*
-                #vis async fn #fn_name(#ctx_name: #ctx_type, #(#arg_params),*) -> forge::forge_core::Result<#output_type> #fn_block
+                #vis async fn #fn_name(#ctx_name: #ctx_type, #(#arg_params),*) -> #forge::forge_core::Result<#output_type> #fn_block
             }
         }
     } else if arg_names.is_empty() {
         quote! {
             #(#fn_attrs)*
-            #vis async fn #fn_name(#ctx_name: &#ctx_type) -> forge::forge_core::Result<#output_type> #fn_block
+            #vis async fn #fn_name(#ctx_name: &#ctx_type) -> #forge::forge_core::Result<#output_type> #fn_block
         }
     } else {
         quote! {
             #(#fn_attrs)*
-            #vis async fn #fn_name(#ctx_name: &#ctx_type, #(#arg_params),*) -> forge::forge_core::Result<#output_type> #fn_block
+            #vis async fn #fn_name(#ctx_name: &#ctx_type, #(#arg_params),*) -> #forge::forge_core::Result<#output_type> #fn_block
         }
     };
 
     let registration = if attrs.register {
         quote! {
-            forge::inventory::submit!(forge::AutoHandler(|registries| {
+            #forge::inventory::submit!(#forge::AutoHandler(|registries| {
                 registries.functions.register_mutation::<#struct_name>();
             }));
         }
@@ -711,17 +726,17 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
 
             #module_struct_defs
 
-            impl forge::forge_core::__sealed::Sealed for #struct_name {}
+            impl #forge::forge_core::__sealed::Sealed for #struct_name {}
 
-            impl forge::forge_core::ForgeMutation for #struct_name {
+            impl #forge::forge_core::ForgeMutation for #struct_name {
                 type Args = #args_type;
                 type Output = #output_type;
 
-                fn info() -> forge::forge_core::FunctionInfo {
-                    forge::forge_core::FunctionInfo {
+                fn info() -> #forge::forge_core::FunctionInfo {
+                    #forge::forge_core::FunctionInfo {
                         name: #rpc_name,
                         description: #description,
-                        kind: forge::forge_core::FunctionKind::Mutation,
+                        kind: #forge::forge_core::FunctionKind::Mutation,
                         required_role: #required_role,
                         is_public: #is_public,
                         cache_ttl: None,
@@ -742,9 +757,9 @@ fn expand_mutation_impl(input: ItemFn, attrs: MutationAttrs) -> syn::Result<Toke
                 }
 
                 fn execute(
-                    ctx: &forge::forge_core::MutationContext,
+                    ctx: &#forge::forge_core::MutationContext,
                     args: Self::Args,
-                ) -> std::pin::Pin<Box<dyn std::future::Future<Output = forge::forge_core::Result<Self::Output>> + Send + '_>> {
+                ) -> std::pin::Pin<Box<dyn std::future::Future<Output = #forge::forge_core::Result<Self::Output>> + Send + '_>> {
                     Box::pin(async move {
                         #execute_call
                     })

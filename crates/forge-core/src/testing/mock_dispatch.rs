@@ -87,18 +87,21 @@ impl MockJobDispatch {
             cancel_reason: None,
         };
 
-        self.jobs.write().expect("jobs lock poisoned").push(job);
+        self.jobs
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(job);
         Ok(id)
     }
 
     pub fn dispatched_jobs(&self) -> Vec<DispatchedJob> {
-        self.jobs.read().expect("jobs lock poisoned").clone()
+        self.jobs.read().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     pub fn jobs_of_type(&self, job_type: &str) -> Vec<DispatchedJob> {
         self.jobs
             .read()
-            .expect("jobs lock poisoned")
+            .unwrap_or_else(|p| p.into_inner())
             .iter()
             .filter(|j| j.job_type == job_type)
             .cloned()
@@ -106,7 +109,7 @@ impl MockJobDispatch {
     }
 
     pub fn assert_dispatched(&self, job_type: &str) {
-        let jobs = self.jobs.read().expect("jobs lock poisoned");
+        let jobs = self.jobs.read().unwrap_or_else(|p| p.into_inner());
         let found = jobs.iter().any(|j| j.job_type == job_type);
         assert!(
             found,
@@ -116,11 +119,13 @@ impl MockJobDispatch {
         );
     }
 
+    /// Lenient: passes when *any* dispatched job with this name matches
+    /// the predicate. Other unrelated dispatches are ignored.
     pub fn assert_dispatched_with<F>(&self, job_type: &str, predicate: F)
     where
         F: Fn(&serde_json::Value) -> bool,
     {
-        let jobs = self.jobs.read().expect("jobs lock poisoned");
+        let jobs = self.jobs.read().unwrap_or_else(|p| p.into_inner());
         let found = jobs
             .iter()
             .any(|j| j.job_type == job_type && predicate(&j.args));
@@ -131,8 +136,37 @@ impl MockJobDispatch {
         );
     }
 
+    /// Strict: passes only when *every* dispatched job with this name
+    /// matches the predicate (and at least one such dispatch exists).
+    /// Use to assert a precise audience, e.g. "the email job ran for
+    /// user 5 and nobody else."
+    pub fn assert_dispatched_with_exact<F>(&self, job_type: &str, predicate: F)
+    where
+        F: Fn(&serde_json::Value) -> bool,
+    {
+        let jobs = self.jobs.read().unwrap_or_else(|p| p.into_inner());
+        let matching: Vec<&DispatchedJob> =
+            jobs.iter().filter(|j| j.job_type == job_type).collect();
+        assert!(
+            !matching.is_empty(),
+            "Expected at least one dispatch of '{}', but none were recorded",
+            job_type
+        );
+        let mismatches: Vec<&serde_json::Value> = matching
+            .iter()
+            .filter(|j| !predicate(&j.args))
+            .map(|j| &j.args)
+            .collect();
+        assert!(
+            mismatches.is_empty(),
+            "Expected every dispatch of '{}' to match predicate; mismatched args: {:?}",
+            job_type,
+            mismatches
+        );
+    }
+
     pub fn assert_not_dispatched(&self, job_type: &str) {
-        let jobs = self.jobs.read().expect("jobs lock poisoned");
+        let jobs = self.jobs.read().unwrap_or_else(|p| p.into_inner());
         let found = jobs.iter().any(|j| j.job_type == job_type);
         assert!(
             !found,
@@ -142,7 +176,7 @@ impl MockJobDispatch {
     }
 
     pub fn assert_dispatch_count(&self, job_type: &str, expected: usize) {
-        let jobs = self.jobs.read().expect("jobs lock poisoned");
+        let jobs = self.jobs.read().unwrap_or_else(|p| p.into_inner());
         let count = jobs.iter().filter(|j| j.job_type == job_type).count();
         assert_eq!(
             count, expected,
@@ -152,28 +186,34 @@ impl MockJobDispatch {
     }
 
     pub fn clear(&self) {
-        self.jobs.write().expect("jobs lock poisoned").clear();
+        self.jobs.write().unwrap_or_else(|p| p.into_inner()).clear();
     }
 
     pub fn complete_job(&self, job_id: Uuid) {
-        let mut jobs = self.jobs.write().expect("jobs lock poisoned");
+        let mut jobs = self.jobs.write().unwrap_or_else(|p| p.into_inner());
         if let Some(job) = jobs.iter_mut().find(|j| j.id == job_id) {
             job.status = JobStatus::Completed;
         }
     }
 
     pub fn fail_job(&self, job_id: Uuid) {
-        let mut jobs = self.jobs.write().expect("jobs lock poisoned");
+        let mut jobs = self.jobs.write().unwrap_or_else(|p| p.into_inner());
         if let Some(job) = jobs.iter_mut().find(|j| j.id == job_id) {
             job.status = JobStatus::Failed;
         }
     }
 
-    pub fn cancel_job(&self, job_id: Uuid, reason: Option<String>) {
-        let mut jobs = self.jobs.write().expect("jobs lock poisoned");
+    /// Returns `true` when a matching dispatched job was found and marked
+    /// cancelled, `false` otherwise. Mirrors production semantics so tests
+    /// can assert cancel-of-unknown-id behaviour.
+    pub fn cancel_job(&self, job_id: Uuid, reason: Option<String>) -> bool {
+        let mut jobs = self.jobs.write().unwrap_or_else(|p| p.into_inner());
         if let Some(job) = jobs.iter_mut().find(|j| j.id == job_id) {
             job.status = JobStatus::Cancelled;
             job.cancel_reason = reason;
+            true
+        } else {
+            false
         }
     }
 }
@@ -252,10 +292,7 @@ impl crate::function::JobDispatch for MockJobDispatch {
         job_id: Uuid,
         reason: Option<String>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send + '_>> {
-        Box::pin(async move {
-            self.cancel_job(job_id, reason);
-            Ok(true)
-        })
+        Box::pin(async move { Ok(self.cancel_job(job_id, reason)) })
     }
 }
 
@@ -286,7 +323,7 @@ impl MockWorkflowDispatch {
 
         self.workflows
             .write()
-            .expect("workflows lock poisoned")
+            .unwrap_or_else(|p| p.into_inner())
             .push(workflow);
         Ok(run_id)
     }
@@ -294,14 +331,14 @@ impl MockWorkflowDispatch {
     pub fn started_workflows(&self) -> Vec<StartedWorkflow> {
         self.workflows
             .read()
-            .expect("workflows lock poisoned")
+            .unwrap_or_else(|p| p.into_inner())
             .clone()
     }
 
     pub fn workflows_named(&self, name: &str) -> Vec<StartedWorkflow> {
         self.workflows
             .read()
-            .expect("workflows lock poisoned")
+            .unwrap_or_else(|p| p.into_inner())
             .iter()
             .filter(|w| w.workflow_name == name)
             .cloned()
@@ -309,7 +346,7 @@ impl MockWorkflowDispatch {
     }
 
     pub fn assert_started(&self, workflow_name: &str) {
-        let workflows = self.workflows.read().expect("workflows lock poisoned");
+        let workflows = self.workflows.read().unwrap_or_else(|p| p.into_inner());
         let found = workflows.iter().any(|w| w.workflow_name == workflow_name);
         assert!(
             found,
@@ -326,7 +363,7 @@ impl MockWorkflowDispatch {
     where
         F: Fn(&serde_json::Value) -> bool,
     {
-        let workflows = self.workflows.read().expect("workflows lock poisoned");
+        let workflows = self.workflows.read().unwrap_or_else(|p| p.into_inner());
         let found = workflows
             .iter()
             .any(|w| w.workflow_name == workflow_name && predicate(&w.input));
@@ -338,7 +375,7 @@ impl MockWorkflowDispatch {
     }
 
     pub fn assert_not_started(&self, workflow_name: &str) {
-        let workflows = self.workflows.read().expect("workflows lock poisoned");
+        let workflows = self.workflows.read().unwrap_or_else(|p| p.into_inner());
         let found = workflows.iter().any(|w| w.workflow_name == workflow_name);
         assert!(
             !found,
@@ -348,7 +385,7 @@ impl MockWorkflowDispatch {
     }
 
     pub fn assert_start_count(&self, workflow_name: &str, expected: usize) {
-        let workflows = self.workflows.read().expect("workflows lock poisoned");
+        let workflows = self.workflows.read().unwrap_or_else(|p| p.into_inner());
         let count = workflows
             .iter()
             .filter(|w| w.workflow_name == workflow_name)
@@ -363,19 +400,19 @@ impl MockWorkflowDispatch {
     pub fn clear(&self) {
         self.workflows
             .write()
-            .expect("workflows lock poisoned")
+            .unwrap_or_else(|p| p.into_inner())
             .clear();
     }
 
     pub fn complete_workflow(&self, run_id: Uuid) {
-        let mut workflows = self.workflows.write().expect("workflows lock poisoned");
+        let mut workflows = self.workflows.write().unwrap_or_else(|p| p.into_inner());
         if let Some(workflow) = workflows.iter_mut().find(|w| w.run_id == run_id) {
             workflow.status = WorkflowStatus::Completed;
         }
     }
 
     pub fn fail_workflow(&self, run_id: Uuid) {
-        let mut workflows = self.workflows.write().expect("workflows lock poisoned");
+        let mut workflows = self.workflows.write().unwrap_or_else(|p| p.into_inner());
         if let Some(workflow) = workflows.iter_mut().find(|w| w.run_id == run_id) {
             workflow.status = WorkflowStatus::Failed;
         }

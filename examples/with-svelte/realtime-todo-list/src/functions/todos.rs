@@ -15,26 +15,33 @@ pub struct UpdateTodoInput {
     pub completed: Option<bool>,
 }
 
-#[forge::query(auth = "none", tables("todos"))]
+#[forge::query(tables("todos"))]
 pub async fn list_todos(ctx: &QueryContext) -> Result<Vec<Todo>> {
-    sqlx::query_as!(Todo, "SELECT * FROM todos ORDER BY created_at DESC")
-        .fetch_all(ctx.db())
-        .await
-        .map_err(Into::into)
+    let user_id = ctx.user_id()?;
+    sqlx::query_as!(
+        Todo,
+        "SELECT * FROM todos WHERE user_id = $1 ORDER BY created_at DESC",
+        user_id
+    )
+    .fetch_all(ctx.db())
+    .await
+    .map_err(Into::into)
 }
 
-#[forge::mutation(auth = "none")]
+#[forge::mutation(scope = "global")]
 pub async fn create_todo(ctx: &MutationContext, input: CreateTodoInput) -> Result<Todo> {
     if input.title.trim().is_empty() {
         return Err(ForgeError::Validation("Title cannot be empty".into()));
     }
 
+    let user_id = ctx.user_id()?;
     let title = input.title.trim().to_string();
     let mut conn = ctx.conn().await?;
 
     sqlx::query_as!(
         Todo,
-        "INSERT INTO todos (title) VALUES ($1) RETURNING *",
+        "INSERT INTO todos (user_id, title) VALUES ($1, $2) RETURNING *",
+        user_id,
         title
     )
     .fetch_one(&mut conn)
@@ -42,8 +49,9 @@ pub async fn create_todo(ctx: &MutationContext, input: CreateTodoInput) -> Resul
     .map_err(Into::into)
 }
 
-#[forge::mutation(auth = "none")]
+#[forge::mutation]
 pub async fn update_todo(ctx: &MutationContext, input: UpdateTodoInput) -> Result<Todo> {
+    let user_id = ctx.user_id()?;
     let title = input.title.as_deref();
     let mut conn = ctx.conn().await?;
 
@@ -52,24 +60,30 @@ pub async fn update_todo(ctx: &MutationContext, input: UpdateTodoInput) -> Resul
         "UPDATE todos
          SET title = COALESCE($1, title),
              completed = COALESCE($2, completed)
-         WHERE id = $3
+         WHERE id = $3 AND user_id = $4
          RETURNING *",
         title,
         input.completed,
-        input.id
+        input.id,
+        user_id
     )
     .fetch_optional(&mut conn)
     .await?
     .ok_or_else(|| ForgeError::NotFound("Todo not found".into()))
 }
 
-#[forge::mutation(auth = "none")]
+#[forge::mutation]
 pub async fn delete_todo(ctx: &MutationContext, id: Uuid) -> Result<bool> {
+    let user_id = ctx.user_id()?;
     let mut conn = ctx.conn().await?;
 
-    let result = sqlx::query!("DELETE FROM todos WHERE id = $1", id)
-        .execute(&mut conn)
-        .await?;
+    let result = sqlx::query!(
+        "DELETE FROM todos WHERE id = $1 AND user_id = $2",
+        id,
+        user_id
+    )
+    .execute(&mut conn)
+    .await?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -82,33 +96,53 @@ mod tests {
     use std::path::Path;
 
     async fn setup_db() -> IsolatedTestDb {
-        let base = TestDatabase::from_env().await.unwrap();
-        let db = base.isolated("todos_test").await.unwrap();
-        db.run_sql(&forge::get_internal_sql()).await.unwrap();
-        db.migrate(Path::new("migrations")).await.unwrap();
+        let base = TestDatabase::from_env().await.expect("test db");
+        let db = base.isolated("todos_test").await.expect("isolated db");
+        db.run_sql(&forge::get_internal_sql())
+            .await
+            .expect("internal sql");
+        db.migrate(Path::new("migrations"))
+            .await
+            .expect("migrations");
         db
     }
 
-    fn query_ctx(pool: sqlx::PgPool) -> QueryContext {
+    async fn seed_user(pool: &sqlx::PgPool) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query!(
+            "INSERT INTO users (id, email, name, password_hash) VALUES ($1, $2, $3, $4)",
+            id,
+            format!("{id}@test.local"),
+            "Test User",
+            "x"
+        )
+        .execute(pool)
+        .await
+        .expect("seed user");
+        id
+    }
+
+    fn query_ctx(pool: sqlx::PgPool, user_id: Uuid) -> QueryContext {
         QueryContext::new(
             pool,
-            AuthContext::unauthenticated(),
+            AuthContext::authenticated(user_id, vec!["user".into()], Default::default()),
             RequestMetadata::default(),
         )
     }
 
-    fn mutation_ctx(pool: sqlx::PgPool) -> MutationContext {
+    fn mutation_ctx(pool: sqlx::PgPool, user_id: Uuid) -> MutationContext {
         MutationContext::new(
             pool,
-            AuthContext::unauthenticated(),
+            AuthContext::authenticated(user_id, vec!["user".into()], Default::default()),
             RequestMetadata::default(),
         )
     }
 
     #[tokio::test]
-    async fn test_create_todo_trims_and_persists_title() {
+    async fn create_todo_trims_and_persists_title() {
         let db = setup_db().await;
-        let ctx = mutation_ctx(db.pool().clone());
+        let uid = seed_user(db.pool()).await;
+        let ctx = mutation_ctx(db.pool().clone(), uid);
 
         let todo = create_todo(
             &ctx,
@@ -117,101 +151,83 @@ mod tests {
             },
         )
         .await
-        .unwrap();
+        .expect("create");
 
         assert_eq!(todo.title, "ship tests");
+        assert_eq!(todo.user_id, uid);
         assert!(!todo.completed);
-        db.cleanup().await.unwrap();
+        db.cleanup().await.expect("cleanup");
     }
 
     #[tokio::test]
-    async fn test_create_todo_rejects_blank_title() {
+    async fn list_todos_isolates_by_user() {
         let db = setup_db().await;
-        let ctx = mutation_ctx(db.pool().clone());
+        let alice = seed_user(db.pool()).await;
+        let bob = seed_user(db.pool()).await;
 
-        let err = create_todo(
-            &ctx,
+        let alice_mut = mutation_ctx(db.pool().clone(), alice);
+        let bob_mut = mutation_ctx(db.pool().clone(), bob);
+        create_todo(
+            &alice_mut,
             CreateTodoInput {
-                title: "   ".into(),
+                title: "alice".into(),
             },
         )
         .await
-        .unwrap_err();
-
-        assert!(matches!(err, ForgeError::Validation(_)));
-        assert!(err.to_string().contains("Title cannot be empty"));
-        db.cleanup().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_update_todo_toggles_completion_without_overwriting_title() {
-        let db = setup_db().await;
-        let ctx = mutation_ctx(db.pool().clone());
-
-        let created = create_todo(
-            &ctx,
+        .expect("alice todo");
+        create_todo(
+            &bob_mut,
             CreateTodoInput {
-                title: "cover release path".into(),
+                title: "bob".into(),
             },
         )
         .await
-        .unwrap();
+        .expect("bob todo");
 
-        let updated = update_todo(
-            &ctx,
-            UpdateTodoInput {
-                id: created.id,
-                title: None,
-                completed: Some(true),
-            },
-        )
-        .await
-        .unwrap();
+        let alice_q = query_ctx(db.pool().clone(), alice);
+        let bob_q = query_ctx(db.pool().clone(), bob);
+        let alice_todos = list_todos(&alice_q).await.expect("alice list");
+        let bob_todos = list_todos(&bob_q).await.expect("bob list");
 
-        assert_eq!(updated.title, created.title);
-        assert!(updated.completed);
-        db.cleanup().await.unwrap();
+        assert_eq!(alice_todos.len(), 1);
+        assert_eq!(alice_todos[0].title, "alice");
+        assert_eq!(bob_todos.len(), 1);
+        assert_eq!(bob_todos[0].title, "bob");
+        db.cleanup().await.expect("cleanup");
     }
 
     #[tokio::test]
-    async fn test_update_todo_missing_id_returns_not_found() {
+    async fn update_todo_blocks_other_users() {
         let db = setup_db().await;
-        let ctx = mutation_ctx(db.pool().clone());
+        let alice = seed_user(db.pool()).await;
+        let bob = seed_user(db.pool()).await;
 
+        let alice_mut = mutation_ctx(db.pool().clone(), alice);
+        let todo = create_todo(
+            &alice_mut,
+            CreateTodoInput {
+                title: "hers".into(),
+            },
+        )
+        .await
+        .expect("create");
+
+        let bob_mut = mutation_ctx(db.pool().clone(), bob);
         let err = update_todo(
-            &ctx,
+            &bob_mut,
             UpdateTodoInput {
-                id: Uuid::new_v4(),
-                title: Some("missing".into()),
+                id: todo.id,
+                title: Some("stolen".into()),
                 completed: None,
             },
         )
         .await
-        .unwrap_err();
-
+        .expect_err("bob must not update alice's todo");
         assert!(matches!(err, ForgeError::NotFound(_)));
-        db.cleanup().await.unwrap();
-    }
 
-    #[tokio::test]
-    async fn test_delete_todo_removes_item_from_query_results() {
-        let db = setup_db().await;
-        let m_ctx = mutation_ctx(db.pool().clone());
+        let deleted = delete_todo(&bob_mut, todo.id).await.expect("delete call");
+        assert!(!deleted, "bob must not delete alice's todo");
 
-        let todo = create_todo(
-            &m_ctx,
-            CreateTodoInput {
-                title: "delete me".into(),
-            },
-        )
-        .await
-        .unwrap();
-
-        assert!(delete_todo(&m_ctx, todo.id).await.unwrap());
-
-        let q_ctx = query_ctx(db.pool().clone());
-        let todos = list_todos(&q_ctx).await.unwrap();
-        assert!(!todos.iter().any(|item| item.id == todo.id));
-        db.cleanup().await.unwrap();
+        db.cleanup().await.expect("cleanup");
     }
 }

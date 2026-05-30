@@ -1,10 +1,9 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use forge_core::function::JobDispatch;
-use forge_core::job::{ForgeJob, JobInfo, JobPriority};
+use forge_core::job::JobInfo;
 use uuid::Uuid;
 
 use super::queue::{JobQueue, JobRecord};
@@ -21,93 +20,6 @@ impl JobDispatcher {
         Self { queue, registry }
     }
 
-    pub async fn dispatch<J: ForgeJob>(
-        &self,
-        args: J::Args,
-        owner_subject: Option<String>,
-    ) -> Result<Uuid, forge_core::ForgeError>
-    where
-        J::Args: serde::Serialize,
-    {
-        let info = J::info();
-        self.dispatch_with_info(&info, serde_json::to_value(args)?, owner_subject)
-            .await
-    }
-
-    pub async fn dispatch_in<J: ForgeJob>(
-        &self,
-        delay: Duration,
-        args: J::Args,
-        owner_subject: Option<String>,
-    ) -> Result<Uuid, forge_core::ForgeError>
-    where
-        J::Args: serde::Serialize,
-    {
-        let info = J::info();
-        let scheduled_at = Utc::now()
-            + chrono::Duration::from_std(delay)
-                .map_err(|_| forge_core::ForgeError::InvalidArgument("delay too large".into()))?;
-        self.dispatch_at_with_info(
-            &info,
-            serde_json::to_value(args)?,
-            scheduled_at,
-            owner_subject,
-        )
-        .await
-    }
-
-    pub async fn dispatch_at<J: ForgeJob>(
-        &self,
-        at: DateTime<Utc>,
-        args: J::Args,
-        owner_subject: Option<String>,
-    ) -> Result<Uuid, forge_core::ForgeError>
-    where
-        J::Args: serde::Serialize,
-    {
-        let info = J::info();
-        self.dispatch_at_with_info(&info, serde_json::to_value(args)?, at, owner_subject)
-            .await
-    }
-
-    pub async fn dispatch_by_name(
-        &self,
-        job_type: &str,
-        args: serde_json::Value,
-        owner_subject: Option<String>,
-    ) -> Result<Uuid, forge_core::ForgeError> {
-        let entry = self.registry.get(job_type).ok_or_else(|| {
-            forge_core::ForgeError::NotFound(format!("Job type '{}' not found", job_type))
-        })?;
-
-        self.dispatch_with_info(&entry.info, args, owner_subject)
-            .await
-    }
-
-    async fn dispatch_with_info(
-        &self,
-        info: &JobInfo,
-        args: serde_json::Value,
-        owner_subject: Option<String>,
-    ) -> Result<Uuid, forge_core::ForgeError> {
-        let mut job = JobRecord::new(
-            info.name,
-            args,
-            info.priority,
-            info.retry.max_attempts as i32,
-        )
-        .with_owner_subject(owner_subject);
-
-        if let Some(cap) = info.worker_capability {
-            job = job.with_capability(cap);
-        }
-
-        self.queue
-            .enqueue(job)
-            .await
-            .map_err(forge_core::ForgeError::Database)
-    }
-
     /// Request cancellation for a job.
     ///
     /// If `caller_subject` is provided, the cancellation will only succeed if
@@ -120,32 +32,6 @@ impl JobDispatcher {
     ) -> Result<bool, forge_core::ForgeError> {
         self.queue
             .request_cancel(job_id, reason, caller_subject)
-            .await
-            .map_err(forge_core::ForgeError::Database)
-    }
-
-    async fn dispatch_at_with_info(
-        &self,
-        info: &JobInfo,
-        args: serde_json::Value,
-        scheduled_at: DateTime<Utc>,
-        owner_subject: Option<String>,
-    ) -> Result<Uuid, forge_core::ForgeError> {
-        let mut job = JobRecord::new(
-            info.name,
-            args,
-            info.priority,
-            info.retry.max_attempts as i32,
-        )
-        .with_scheduled_at(scheduled_at)
-        .with_owner_subject(owner_subject);
-
-        if let Some(cap) = info.worker_capability {
-            job = job.with_capability(cap);
-        }
-
-        self.queue
-            .enqueue(job)
             .await
             .map_err(forge_core::ForgeError::Database)
     }
@@ -193,63 +79,6 @@ impl JobDispatcher {
         .with_scheduled_at(scheduled_at)
         .with_owner_subject(owner_subject)
         .with_tenant_id(tenant_id);
-
-        if let Some(cap) = info.worker_capability {
-            job = job.with_capability(cap);
-        }
-
-        self.queue
-            .enqueue(job)
-            .await
-            .map_err(forge_core::ForgeError::Database)
-    }
-
-    pub async fn dispatch_idempotent<J: ForgeJob>(
-        &self,
-        idempotency_key: impl Into<String>,
-        args: J::Args,
-        owner_subject: Option<String>,
-    ) -> Result<Uuid, forge_core::ForgeError>
-    where
-        J::Args: serde::Serialize,
-    {
-        let info = J::info();
-        let mut job = JobRecord::new(
-            info.name,
-            serde_json::to_value(args)?,
-            info.priority,
-            info.retry.max_attempts as i32,
-        )
-        .with_idempotency_key(idempotency_key)
-        .with_owner_subject(owner_subject);
-
-        if let Some(cap) = info.worker_capability {
-            job = job.with_capability(cap);
-        }
-
-        self.queue
-            .enqueue(job)
-            .await
-            .map_err(forge_core::ForgeError::Database)
-    }
-
-    pub async fn dispatch_with_priority<J: ForgeJob>(
-        &self,
-        priority: JobPriority,
-        args: J::Args,
-        owner_subject: Option<String>,
-    ) -> Result<Uuid, forge_core::ForgeError>
-    where
-        J::Args: serde::Serialize,
-    {
-        let info = J::info();
-        let mut job = JobRecord::new(
-            info.name,
-            serde_json::to_value(args)?,
-            priority,
-            info.retry.max_attempts as i32,
-        )
-        .with_owner_subject(owner_subject);
 
         if let Some(cap) = info.worker_capability {
             job = job.with_capability(cap);
@@ -442,7 +271,7 @@ mod integration_tests {
         let dispatcher = dispatcher_with_registry(db.pool().clone(), |_| {});
 
         let err = dispatcher
-            .dispatch_by_name("ghost", serde_json::json!({}), None)
+            .dispatch_by_name("ghost", serde_json::json!({}), None, None)
             .await
             .expect_err("unknown job must error");
 
@@ -470,6 +299,7 @@ mod integration_tests {
                 "ship",
                 serde_json::json!({"to": "warehouse"}),
                 Some("u-1".into()),
+                None,
             )
             .await
             .unwrap();
@@ -614,7 +444,7 @@ mod integration_tests {
         });
 
         let job_id = dispatcher
-            .dispatch_by_name("ship", serde_json::json!({}), Some("alice".into()))
+            .dispatch_by_name("ship", serde_json::json!({}), Some("alice".into()), None)
             .await
             .unwrap();
 
@@ -636,7 +466,7 @@ mod integration_tests {
         });
 
         let job_id = dispatcher
-            .dispatch_by_name("ship", serde_json::json!({}), Some("alice".into()))
+            .dispatch_by_name("ship", serde_json::json!({}), Some("alice".into()), None)
             .await
             .unwrap();
 

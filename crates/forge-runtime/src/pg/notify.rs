@@ -84,6 +84,13 @@ where
     /// - `ForgeError::Serialization` if `serde_json::to_string(payload)` fails.
     /// - `ForgeError::InvalidArgument` if the serialized payload exceeds
     ///   [`MAX_PAYLOAD_BYTES`]. Use the change-log fallback for larger bodies.
+    ///
+    /// **Note**: this cap only applies to publishers that route through this
+    /// method. Server-side triggers that build their own payloads in PL/pgSQL
+    /// bypass the check entirely. Exceeding the 8 KiB PostgreSQL limit there
+    /// aborts the trigger's wrapping transaction (typically the user mutation
+    /// that caused the trigger to fire). Trigger authors must enforce their
+    /// own bounds.
     /// - `ForgeError::Database` if the underlying `SELECT pg_notify(...)`
     ///   fails (transaction rolled back, connection dropped, etc.).
     pub async fn publish<'e, E>(&self, executor: E, payload: &T) -> Result<()>
@@ -110,6 +117,29 @@ where
     }
 }
 
+/// Reason a [`NotifyChannel`] subscription terminated mid-stream.
+///
+/// Previously the stream simply ended via `take_while(is_ok)`, leaving the
+/// caller with no way to distinguish a deliberate close from a PG-side error.
+/// Items now carry `Result<T, NotifyStreamError>` so consumers can decide
+/// whether to reconnect, surface the error, or treat it as fatal.
+#[derive(Debug)]
+pub enum NotifyStreamError {
+    /// The underlying `PgListener::recv` returned an error. Typically a
+    /// dropped backend connection — callers should reconnect.
+    Recv(sqlx::Error),
+}
+
+impl std::fmt::Display for NotifyStreamError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Recv(e) => write!(f, "PgListener recv failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for NotifyStreamError {}
+
 impl<T> NotifyChannel<T>
 where
     T: DeserializeOwned + Send + 'static,
@@ -118,38 +148,53 @@ where
     ///
     /// `listener` is consumed; the caller surrenders the connection to the
     /// stream for the duration of the subscription. Notifications whose
-    /// payload fails JSON decoding are logged and skipped, so a malformed
-    /// publish from one peer cannot tear down a long-running subscriber.
-    /// Errors from the underlying `recv` (connection dropped, etc.) end the
-    /// stream; the caller decides whether to reconnect.
-    pub async fn subscribe(&self, mut listener: PgListener) -> Result<impl Stream<Item = T>> {
+    /// payload fails JSON decoding are logged and skipped (a malformed
+    /// publish from one peer cannot tear down a long-running subscriber).
+    ///
+    /// Recv errors (connection dropped, etc.) are surfaced as
+    /// `Err(NotifyStreamError::Recv)` so the caller can distinguish a
+    /// graceful close (stream ends naturally) from a fault that requires
+    /// reconnect. After yielding an error the stream terminates.
+    pub async fn subscribe(
+        &self,
+        mut listener: PgListener,
+    ) -> Result<impl Stream<Item = std::result::Result<T, NotifyStreamError>>> {
         listener
             .listen(self.name)
             .await
             .map_err(ForgeError::Database)?;
         let channel_name = self.name;
         let raw = listener.into_stream();
+        // Pass recv errors through (mapped to NotifyStreamError) and drop
+        // malformed payloads silently — the latter would otherwise look like
+        // a fault to subscribers when it's just a bad publish.
         let stream = raw
-            .take_while(|res| {
-                let cont = res.is_ok();
-                async move { cont }
+            .scan(false, |ended, res| {
+                let done = *ended;
+                let next = match res {
+                    Ok(n) => Some(Ok(n)),
+                    Err(e) => {
+                        *ended = true;
+                        Some(Err(NotifyStreamError::Recv(e)))
+                    }
+                };
+                async move { if done { None } else { next } }
             })
             .filter_map(move |res| async move {
-                let notification = match res {
-                    Ok(n) => n,
-                    Err(_) => return None,
-                };
-                match serde_json::from_str::<T>(notification.payload()) {
-                    Ok(value) => Some(value),
-                    Err(e) => {
-                        tracing::debug!(
-                            channel = channel_name,
-                            error = %e,
-                            payload = notification.payload(),
-                            "NotifyChannel: dropping malformed payload",
-                        );
-                        None
-                    }
+                match res {
+                    Err(e) => Some(Err(e)),
+                    Ok(notification) => match serde_json::from_str::<T>(notification.payload()) {
+                        Ok(value) => Some(Ok(value)),
+                        Err(e) => {
+                            tracing::debug!(
+                                channel = channel_name,
+                                error = %e,
+                                payload = notification.payload(),
+                                "NotifyChannel: dropping malformed payload",
+                            );
+                            None
+                        }
+                    },
                 }
             });
         Ok(stream)
@@ -239,7 +284,8 @@ mod integration_tests {
         let received = tokio::time::timeout(Duration::from_secs(5), stream.next())
             .await
             .expect("stream did not yield within 5s")
-            .expect("stream ended before yielding");
+            .expect("stream ended before yielding")
+            .expect("recv ok");
         assert_eq!(received, payload);
     }
 
@@ -285,7 +331,8 @@ mod integration_tests {
         let received = tokio::time::timeout(Duration::from_secs(5), stream.next())
             .await
             .expect("stream did not yield within 5s")
-            .expect("stream ended before yielding");
+            .expect("stream ended before yielding")
+            .expect("recv ok");
         assert_eq!(received, payload);
     }
 }

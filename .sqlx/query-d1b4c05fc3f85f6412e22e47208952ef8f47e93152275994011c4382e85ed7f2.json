@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "UPDATE todos\n         SET title = COALESCE($1, title),\n             completed = COALESCE($2, completed)\n         WHERE id = $3\n         RETURNING *",
+  "query": "UPDATE todos\n         SET title = COALESCE($1, title),\n             completed = COALESCE($2, completed)\n         WHERE id = $3 AND user_id = $4\n         RETURNING *",
   "describe": {
     "columns": [
       {
@@ -10,16 +10,21 @@
       },
       {
         "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
         "name": "title",
         "type_info": "Text"
       },
       {
-        "ordinal": 2,
+        "ordinal": 3,
         "name": "completed",
         "type_info": "Bool"
       },
       {
-        "ordinal": 3,
+        "ordinal": 4,
         "name": "created_at",
         "type_info": "Timestamptz"
       }
@@ -28,6 +33,7 @@
       "Left": [
         "Text",
         "Bool",
+        "Uuid",
         "Uuid"
       ]
     },
@@ -35,8 +41,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "c2eda736e5f6342831005dfbd5281fbeb29cb84e74ff483828f9e3ee0fcc517f"
+  "hash": "d1b4c05fc3f85f6412e22e47208952ef8f47e93152275994011c4382e85ed7f2"
 }

@@ -1300,11 +1300,14 @@ dependencies = [
  "dotenvy",
  "forgex",
  "futures-util",
+ "hex",
+ "hmac",
  "password-hash",
  "reqwest",
  "rust-embed",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tokio",
  "tokio-tungstenite 0.26.2",
@@ -1356,8 +1359,10 @@ name = "forge-macros"
 version = "0.10.2"
 dependencies = [
  "blake3",
+ "chrono-tz",
  "cron",
  "darling 0.20.11",
+ "proc-macro-crate",
  "proc-macro2",
  "quote",
  "sqlparser",
@@ -1427,11 +1432,14 @@ dependencies = [
  "dotenvy",
  "forgex",
  "futures-util",
+ "hex",
+ "hmac",
  "password-hash",
  "reqwest",
  "rust-embed",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tokio",
  "tokio-tungstenite 0.26.2",
@@ -2925,6 +2933,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "proc-macro-crate"
+version = "3.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e67ba7e9b2b56446f1d419b1d807906278ffa1a658a8a5d8a39dcb1f5a78614f"
+dependencies = [
+ "toml_edit",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4353,9 +4370,11 @@ dependencies = [
 name = "todo"
 version = "0.10.2"
 dependencies = [
+ "argon2",
  "chrono",
  "dotenvy",
  "forgex",
+ "password-hash",
  "rust-embed",
  "serde",
  "sqlx",
@@ -4368,9 +4387,11 @@ dependencies = [
 name = "todo-dioxus"
 version = "0.10.2"
 dependencies = [
+ "argon2",
  "chrono",
  "dotenvy",
  "forgex",
+ "password-hash",
  "rust-embed",
  "serde",
  "sqlx",
@@ -4526,6 +4547,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3165f65f62e28e0115a00b2ebdd37eb6f3b641855f9d636d3cd4103767159ad7"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "toml_edit"
+version = "0.25.12+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2153edc6955a6c354fad8f5efd38b6a8769bdccf9fe50f8e1329f81b0baa5d7"
+dependencies = [
+ "indexmap 2.14.0",
+ "toml_datetime 1.1.1+spec-1.1.0",
+ "toml_parser",
+ "winnow 1.0.2",
 ]
 
 [[package]]
@@ -5518,6 +5551,9 @@ name = "winnow"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ee1708bef14716a11bae175f579062d4554d95be2c6829f518df847b7b3fdd0"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "winsafe"

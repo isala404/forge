@@ -26,8 +26,16 @@ use crate::error::HarnessError;
 use crate::sse::HarnessSession;
 use crate::{Result, sse};
 
-/// Minimum bytes for an HMAC JWT secret (matches the framework's startup validator).
-const TEST_JWT_SECRET: &str = "forge-harness-test-jwt-secret-please-rotate-32b";
+/// Generate a fresh 64-hex-char (256-bit) JWT secret for this harness instance.
+/// A new secret per `HarnessAppBuilder::new` avoids token reuse between
+/// independently-running tests and removes any constant a downstream consumer
+/// could lean on.
+fn random_jwt_secret() -> String {
+    let mut s = String::with_capacity(64);
+    s.push_str(&Uuid::new_v4().simple().to_string());
+    s.push_str(&Uuid::new_v4().simple().to_string());
+    s
+}
 
 /// Builder for the in-process harness app. Use this to override defaults
 /// before starting; the simple path is `HarnessApp::start(test_name)`.
@@ -37,6 +45,8 @@ pub struct HarnessAppBuilder {
     jwt_secret: String,
     extra_internal_sql: Vec<String>,
     cors_enabled: bool,
+    rate_limiter: Option<Arc<dyn forge_core::rate_limit::RateLimiterBackend>>,
+    auth_config: Option<AuthConfig>,
 }
 
 impl HarnessAppBuilder {
@@ -46,9 +56,11 @@ impl HarnessAppBuilder {
         Self {
             test_name: test_name.into(),
             migrations_dir: None,
-            jwt_secret: TEST_JWT_SECRET.to_string(),
+            jwt_secret: random_jwt_secret(),
             extra_internal_sql: Vec::new(),
             cors_enabled: false,
+            rate_limiter: None,
+            auth_config: None,
         }
     }
 
@@ -76,6 +88,32 @@ impl HarnessAppBuilder {
     /// tests don't go through a browser.
     pub fn cors(mut self, enabled: bool) -> Self {
         self.cors_enabled = enabled;
+        self
+    }
+
+    /// Install a rate limiter backend. By default the harness wires a
+    /// [`forge_runtime::StrictRateLimiter`] backed by the test database so the
+    /// gateway's RPC/signal/login throttle paths are exercised in tests. Pass
+    /// a custom backend (or pass [`Self::no_rate_limiter`]) to override.
+    pub fn with_rate_limiter(
+        mut self,
+        rate_limiter: Arc<dyn forge_core::rate_limit::RateLimiterBackend>,
+    ) -> Self {
+        self.rate_limiter = Some(rate_limiter);
+        self
+    }
+
+    /// Replace the gateway's `AuthConfig`. Tests that need to exercise the
+    /// RS256/JWKS path, legacy secret rotation, or `required_claims` overrides
+    /// can supply a fully-formed config here. The default builds an HS256
+    /// config with the harness's auto-generated secret.
+    ///
+    /// When this is set, [`HarnessApp::issue_token`] will only work if the
+    /// supplied config still has an HMAC secret on it (because `HmacTokenIssuer`
+    /// needs one). For pure-JWKS test paths, mint tokens via your own helper
+    /// and call them on the harness via `client.with_token(...)`.
+    pub fn with_auth_config(mut self, auth_config: AuthConfig) -> Self {
+        self.auth_config = Some(auth_config);
         self
     }
 
@@ -118,17 +156,25 @@ impl HarnessApp {
             .migrations_dir
             .unwrap_or_else(|| PathBuf::from(".harness-no-user-migrations"));
 
-        let db = forge_core::testing::IsolatedTestDb::setup(
-            &builder.test_name,
-            &internal_sql,
-            &migrations_dir,
-        )
-        .await
-        .map_err(HarnessError::Forge)?;
-
+        // Order matches the documented contract: system schema -> extra_sql
+        // (test fixture rows) -> user migrations. Doing it manually rather
+        // than via `IsolatedTestDb::setup` keeps that ordering explicit.
+        let base = forge_core::testing::TestDatabase::from_env()
+            .await
+            .map_err(HarnessError::Forge)?;
+        let db = base
+            .isolated(&builder.test_name)
+            .await
+            .map_err(HarnessError::Forge)?;
+        db.run_sql(&internal_sql)
+            .await
+            .map_err(HarnessError::Forge)?;
         for sql in &builder.extra_internal_sql {
             db.run_sql(sql).await.map_err(HarnessError::Forge)?;
         }
+        db.migrate(&migrations_dir)
+            .await
+            .map_err(HarnessError::Forge)?;
 
         let pool = db.pool().clone();
         let database = Database::from_pool(pool.clone());
@@ -143,7 +189,8 @@ impl HarnessApp {
             webhooks: WebhookRegistry::new(),
             mcp_tools: McpToolRegistry::new(),
         };
-        forge::auto_register_all(&mut registries);
+        forge::auto_register_all(&mut registries)
+            .map_err(|e| HarnessError::Setup(format!("auto_register_all failed: {e}")))?;
 
         // Workflow runs refuse to start unless the (name, version, signature) row
         // exists. Same upsert logic the production runtime runs at boot.
@@ -191,11 +238,20 @@ impl HarnessApp {
         );
         let workflow_dispatcher: Arc<dyn WorkflowDispatch> = workflow_executor.clone();
 
-        let auth_config = AuthConfig::with_secret(builder.jwt_secret.clone());
+        let auth_config = builder
+            .auth_config
+            .clone()
+            .unwrap_or_else(|| AuthConfig::with_secret(builder.jwt_secret.clone()));
+        // Issuing tokens via `issue_token` requires an HMAC secret. If the
+        // operator overrode `AuthConfig` to point at JWKS only, mint your own
+        // tokens and attach via `client.with_token(...)`; the issuer below is
+        // optional and lazily evaluated.
         let token_issuer: Arc<dyn TokenIssuer> =
             Arc::new(HmacTokenIssuer::from_config(&auth_config).ok_or_else(|| {
                 HarnessError::setup(
-                    "HmacTokenIssuer::from_config returned None; JWT secret missing or empty",
+                    "HmacTokenIssuer::from_config returned None; \
+                     either set jwt_secret on the AuthConfig or skip issue_token() and \
+                     attach pre-minted tokens via client.with_token()",
                 )
             })?);
 
@@ -203,10 +259,17 @@ impl HarnessApp {
             port: 0,
             auth: auth_config.clone(),
             cors_enabled: builder.cors_enabled,
-            security_headers: false,
+            security_headers: true,
             request_timeout_secs: 30,
             ..GatewayConfig::default()
         };
+
+        // Default rate limiter: the strict PG-backed token bucket. Production
+        // parity is the point — tests that regress the rate-limit path now
+        // fail rather than silently pass.
+        let rate_limiter: Arc<dyn forge_core::rate_limit::RateLimiterBackend> = builder
+            .rate_limiter
+            .unwrap_or_else(|| Arc::new(forge_runtime::StrictRateLimiter::new(pool.clone())));
 
         let gateway = GatewayServer::new(
             gateway_config.clone(),
@@ -215,7 +278,8 @@ impl HarnessApp {
             notify_bus.clone(),
         )
         .with_job_dispatcher(job_dispatcher.clone())
-        .with_workflow_dispatcher(workflow_dispatcher.clone());
+        .with_workflow_dispatcher(workflow_dispatcher.clone())
+        .with_rate_limiter(rate_limiter);
 
         let reactor = gateway.reactor();
         reactor
@@ -412,6 +476,28 @@ impl HarnessApp {
         self.token_issuer.sign(&claims).map_err(HarnessError::Forge)
     }
 
+    /// Issue a JWT after letting the caller mutate the `Claims::builder`. Use
+    /// this for tests that need expired tokens (`duration_secs(-1)`), custom
+    /// claims (`tenant_id`, custom roles), or wrong-secret tokens (via
+    /// `with_auth_config` paired with a token signed by the test).
+    ///
+    /// Example:
+    /// ```ignore
+    /// let expired = app.issue_token_with_claims(|b| {
+    ///     b.user_id(user_id).duration_secs(-3600)
+    /// })?;
+    /// ```
+    pub fn issue_token_with_claims<F>(&self, build: F) -> Result<String>
+    where
+        F: FnOnce(forge_core::ClaimsBuilder) -> forge_core::ClaimsBuilder,
+    {
+        let builder = build(forge_core::Claims::builder());
+        let claims = builder
+            .build()
+            .map_err(|e| HarnessError::setup(format!("build claims: {e}")))?;
+        self.token_issuer.sign(&claims).map_err(HarnessError::Forge)
+    }
+
     /// Open a long-lived SSE session for the given token (or anonymous). The
     /// returned session lets you subscribe to functions and read updates as
     /// the reactor pushes them.
@@ -442,7 +528,16 @@ impl HarnessApp {
 
 impl Drop for HarnessApp {
     fn drop(&mut self) {
+        // Notify cooperative shutdown first so well-behaved tasks (gateway,
+        // worker, scheduler, notify bus) exit on their own.
         self.signal_shutdown();
+        // Then abort any handle that's still alive so they stop touching the
+        // pool before `IsolatedTestDb`'s own Drop fires `DROP DATABASE`. If
+        // we left them running, a worker mid-poll would race the drop and
+        // either panic on a closed pool or block the database termination.
+        for handle in self.handles.drain(..) {
+            handle.abort();
+        }
     }
 }
 

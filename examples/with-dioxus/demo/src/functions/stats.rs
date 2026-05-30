@@ -3,6 +3,8 @@ use forge::prelude::*;
 
 #[forge::query(cache = "10s", auth = "none")]
 pub async fn get_demo_stats(ctx: &QueryContext) -> Result<DemoStats> {
+    // Simulated work to make the `cache = "10s"` demo visible to a human watching the UI.
+    // Real handlers must not call sleep — it pins a worker thread for no useful work.
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     let row = sqlx::query!(

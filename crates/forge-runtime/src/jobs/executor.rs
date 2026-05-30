@@ -10,6 +10,11 @@ use super::queue::{JobQueue, JobRecord};
 use super::registry::{JobEntry, JobRegistry};
 use crate::observability;
 
+/// How often to poll the progress channel between updates from the running job.
+/// Short enough that progress propagates to subscribers within one frame; long
+/// enough that an idle job doesn't burn CPU on the polling task.
+const PROGRESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
 /// Executes jobs with timeout and retry handling.
 pub struct JobExecutor {
     queue: JobQueue,
@@ -139,7 +144,7 @@ impl JobExecutor {
                         }
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => {
-                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        tokio::time::sleep(PROGRESS_POLL_INTERVAL).await;
                     }
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         break;
@@ -171,6 +176,24 @@ impl JobExecutor {
             c
         };
         if let Some(ref subject) = job.owner_subject {
+            // Defense in depth: the job row stores `tenant_id` and
+            // `owner_subject` independently. We trust the dispatcher to pair
+            // them correctly, but if a stale/forged dispatch slipped a
+            // mismatched pair through, the handler would execute cross-tenant
+            // (#6 in issues doc). There's no system `users` table to consult,
+            // so the framework can't reject the row authoritatively here. Warn
+            // when an owner principal is present without a tenant — the shape
+            // most likely to indicate a dispatch path that lost tenancy. (Single-
+            // tenant apps legitimately dispatch with no tenant_id, so this is a
+            // warning, not an assertion.)
+            if job.tenant_id.is_none() && uuid::Uuid::parse_str(subject).is_ok() {
+                tracing::warn!(
+                    job_id = %job.id,
+                    job_type = %job.job_type,
+                    owner_subject = %subject,
+                    "Job has UUID owner_subject but no tenant_id; if the app is multi-tenant this is a dispatch-side bug — the handler will run with empty tenant scope"
+                );
+            }
             let mut claims = std::collections::HashMap::new();
             if let Some(tid) = job.tenant_id {
                 claims.insert(
@@ -240,13 +263,40 @@ impl JobExecutor {
             }
         });
 
+        // Drop guard: ensures the heartbeat task is aborted even if `execute`
+        // is cancelled (e.g. `drain_jobs` calling `abort_all` on shutdown).
+        // Without this the task would keep refreshing `last_heartbeat` for up
+        // to 30s, blocking `release_stale` from requeueing the row (#9 in
+        // issues doc).
+        struct HeartbeatGuard {
+            stop: tokio::sync::watch::Sender<bool>,
+            handle: Option<tokio::task::JoinHandle<()>>,
+        }
+        impl Drop for HeartbeatGuard {
+            fn drop(&mut self) {
+                let _ = self.stop.send(true);
+                if let Some(h) = self.handle.take() {
+                    h.abort();
+                }
+            }
+        }
+        let mut heartbeat_guard = HeartbeatGuard {
+            stop: heartbeat_stop_tx,
+            handle: Some(heartbeat_task),
+        };
+
         let job_timeout = entry.info.timeout;
         let exec_start = std::time::Instant::now();
         let result = timeout(job_timeout, self.run_handler(&entry, &ctx, &job.input)).await;
         let exec_duration_ms = exec_start.elapsed().as_millis() as i32;
 
-        let _ = heartbeat_stop_tx.send(true);
-        let _ = heartbeat_task.await;
+        // Happy path: signal the heartbeat task and await it cleanly. The
+        // guard will still run on early return, abort() is a no-op on a
+        // joined handle.
+        let _ = heartbeat_guard.stop.send(true);
+        if let Some(h) = heartbeat_guard.handle.take() {
+            let _ = h.await;
+        }
 
         let ttl = entry.info.ttl;
 
@@ -326,8 +376,14 @@ impl JobExecutor {
                 let error_msg = format!("Job timed out after {:?}", job_timeout);
                 let should_retry = job.attempts < job.max_attempts;
 
+                // Mirror the failure path: honor the job's configured backoff
+                // strategy rather than hardcoding 60s (#13 in issues doc).
                 let retry_delay = if should_retry {
-                    Some(chrono::Duration::seconds(60))
+                    let std_delay = entry.info.retry.calculate_backoff(job.attempts as u32);
+                    Some(
+                        chrono::Duration::from_std(std_delay)
+                            .unwrap_or(chrono::Duration::seconds(60)),
+                    )
                 } else {
                     None
                 };

@@ -18,6 +18,7 @@ import type {
   RegisterInput,
   TokenPair,
   Trade,
+  TriggerDemoWebhookInput,
   User,
   UserRole,
   VerificationInput,
@@ -70,6 +71,9 @@ export const refreshToken = (args: RefreshInput): Promise<TokenPair> =>
   getForgeClient().call("refresh_token", args);
 export const register = (args: RegisterInput): Promise<AuthResponse> =>
   getForgeClient().call("register", args);
+export const triggerDemoWebhook = (
+  args: TriggerDemoWebhookInput,
+): Promise<boolean> => getForgeClient().call("trigger_demo_webhook", args);
 export const updateUser = (args: {
   id: string;
   email: string | null;

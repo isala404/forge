@@ -49,6 +49,9 @@
       }
       authState.loading = false;
     }).catch(() => {
+      // Tear down so the client doesn't sit in a half-initialized state with
+      // queued subscriptionMeta ready to fire stale registrations on remount.
+      try { client.disconnect(); } catch { /* idempotent */ }
       authState.loading = false;
     });
 

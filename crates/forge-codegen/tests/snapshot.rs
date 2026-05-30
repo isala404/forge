@@ -78,6 +78,59 @@ fn output_is_deterministic() {
     assert_eq!(first, second, "codegen output must be deterministic");
 }
 
+/// Negative coverage: a `#[forge::model]` on a tuple struct must produce a
+/// parser diagnostic with a clear message, not silently emit an empty
+/// interface. A regression that drops the named-fields guard would otherwise
+/// let downstream tests pass with an empty `Wrapper {}` interface.
+#[test]
+fn tuple_struct_model_is_rejected_with_clear_diagnostic() {
+    let src = r#"
+        #[forge::model]
+        pub struct Wrapper(pub String);
+    "#;
+    let src_dir = TempDir::new().expect("tempdir");
+    fs::write(src_dir.path().join("handlers.rs"), src).expect("write fixture");
+
+    let outcome = parse_project(src_dir.path()).expect("parse_project");
+    assert!(
+        !outcome.parse_failures.is_empty(),
+        "tuple struct must be rejected by the parser, got no failures"
+    );
+    let (_, msg) = outcome
+        .parse_failures
+        .first()
+        .expect("at least one failure");
+    assert!(
+        msg.contains("named fields"),
+        "diagnostic must explain the constraint, got: {msg}"
+    );
+}
+
+/// Same guard for unit structs marked as DTOs (serde derive).
+#[test]
+fn unit_struct_dto_is_rejected_with_clear_diagnostic() {
+    let src = r#"
+        #[derive(serde::Serialize, serde::Deserialize)]
+        pub struct Marker;
+    "#;
+    let src_dir = TempDir::new().expect("tempdir");
+    fs::write(src_dir.path().join("handlers.rs"), src).expect("write fixture");
+
+    let outcome = parse_project(src_dir.path()).expect("parse_project");
+    assert!(
+        !outcome.parse_failures.is_empty(),
+        "unit struct DTO must be rejected by the parser, got no failures"
+    );
+    let (_, msg) = outcome
+        .parse_failures
+        .first()
+        .expect("at least one failure");
+    assert!(
+        msg.contains("named fields"),
+        "diagnostic must explain the constraint, got: {msg}"
+    );
+}
+
 fn run_fixture(source: &str, generate_auth: bool) -> String {
     let src_dir = TempDir::new().expect("tempdir");
     fs::write(src_dir.path().join("handlers.rs"), source).expect("write fixture");

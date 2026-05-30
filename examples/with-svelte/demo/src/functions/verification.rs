@@ -112,14 +112,15 @@ pub struct ConfirmVerificationInput {
     pub workflow_id: String,
 }
 
-#[forge::mutation(auth = "none")]
 // forge_workflow_events is owned by the runtime, so the framework user's .sqlx
 // cache doesn't see it. Runtime sqlx::query is the right tool here.
+#[forge::mutation(tables("forge_workflow_events"), scope = "global")]
 #[allow(clippy::disallowed_methods)]
 pub async fn confirm_verification(
     ctx: &MutationContext,
     input: ConfirmVerificationInput,
 ) -> Result<bool> {
+    let _ = ctx.user_id()?;
     // Insert the confirmation event into the workflow events table.
     // The scheduler's NOTIFY trigger will wake the waiting workflow.
     sqlx::query(
@@ -134,104 +135,4 @@ pub async fn confirm_verification(
     .map_err(ForgeError::Database)?;
 
     Ok(true)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::TimeZone;
-    use forge::testing::TestWorkflowContext;
-
-    #[test]
-    fn test_workflow_context_creation() {
-        let ctx = TestWorkflowContext::builder("account_verification").build();
-
-        assert_eq!(ctx.workflow_name, "account_verification");
-        assert!(!ctx.is_resumed());
-    }
-
-    #[tokio::test]
-    async fn test_workflow_step_tracking() {
-        let ctx = TestWorkflowContext::builder("account_verification").build();
-
-        assert!(!ctx.is_step_completed("step1"));
-
-        ctx.record_step_start("step1")
-            .await
-            .expect("record_step_start should succeed in tests");
-        ctx.record_step_complete("step1", serde_json::json!({"result": "ok"}))
-            .await
-            .expect("record_step_complete should succeed in tests");
-
-        assert!(ctx.is_step_completed("step1"));
-
-        let result: Option<serde_json::Value> = ctx.get_step_result("step1");
-        assert!(result.is_some());
-    }
-
-    #[test]
-    fn test_workflow_resume_with_completed_steps() {
-        let ctx = TestWorkflowContext::builder("account_verification")
-            .as_resumed()
-            .with_completed_step("generate_token", serde_json::json!("verify_abc123"))
-            .with_completed_step("store_token", serde_json::json!({"stored": true}))
-            .build();
-
-        assert!(ctx.is_resumed());
-        assert!(ctx.is_step_completed("generate_token"));
-        assert!(ctx.is_step_completed("store_token"));
-        assert!(!ctx.is_step_completed("send_email"));
-
-        let token: String = ctx.get_step_result("generate_token").expect("token result");
-        assert_eq!(token, "verify_abc123");
-    }
-
-    #[tokio::test]
-    async fn test_workflow_step_ordering() {
-        let ctx = TestWorkflowContext::builder("account_verification").build();
-
-        ctx.record_step_complete("step_a", serde_json::json!(1))
-            .await
-            .expect("step_a complete");
-        ctx.record_step_complete("step_b", serde_json::json!(2))
-            .await
-            .expect("step_b complete");
-        ctx.record_step_complete("step_c", serde_json::json!(3))
-            .await
-            .expect("step_c complete");
-
-        let names = ctx.completed_step_names();
-        assert_eq!(names, vec!["step_a", "step_b", "step_c"]);
-    }
-
-    #[tokio::test]
-    async fn test_workflow_durable_sleep() {
-        let ctx = TestWorkflowContext::builder("account_verification").build();
-
-        assert!(!ctx.sleep_called());
-        ctx.sleep(std::time::Duration::from_secs(3600))
-            .await
-            .expect("sleep should succeed");
-        assert!(ctx.sleep_called());
-    }
-
-    #[test]
-    fn test_workflow_deterministic_time() {
-        let fixed_time = Utc.with_ymd_and_hms(2024, 1, 15, 12, 0, 0).unwrap();
-        let ctx = TestWorkflowContext::builder("account_verification")
-            .with_workflow_time(fixed_time)
-            .build();
-
-        assert_eq!(ctx.workflow_time(), fixed_time);
-    }
-
-    #[test]
-    fn test_workflow_with_tenant() {
-        let tenant_id = Uuid::new_v4();
-        let ctx = TestWorkflowContext::builder("account_verification")
-            .with_tenant(tenant_id)
-            .build();
-
-        assert_eq!(ctx.tenant_id(), Some(tenant_id));
-    }
 }

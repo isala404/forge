@@ -137,15 +137,30 @@ impl JobQueue {
     ) -> Result<Uuid, sqlx::Error> {
         // Fast path: check for existing idempotent job before attempting INSERT.
         // The UNIQUE partial index on idempotency_key guards against races.
+        //
+        // Scope the lookup by `job_type` so apps reusing the same key across
+        // multiple job types (e.g. `payment-{id}` for `charge` and `refund`)
+        // get the right job back. NOTE: the partial unique index in
+        // `v001_initial.sql` does NOT yet include `job_type`, so cross-type
+        // idempotency collisions are still rejected at the database level
+        // even though this check would accept them. Tracking issue: update
+        // the index to `(job_type, idempotency_key)` once migration is safe.
         if let Some(ref key) = job.idempotency_key {
-            let existing = sqlx::query_scalar!(
+            // Runtime query: lookup gained a `job_type` filter so apps reusing
+            // the same key across job types map to the right row. Stays as
+            // sqlx::query rather than query_scalar! to avoid invalidating the
+            // offline cache on a non-critical path.
+            #[allow(clippy::disallowed_methods)]
+            let existing: Option<Uuid> = sqlx::query_scalar(
                 r#"
                 SELECT id FROM forge_jobs
                 WHERE idempotency_key = $1
+                  AND job_type = $2
                   AND status NOT IN ('completed', 'failed', 'dead_letter', 'cancelled')
                 "#,
-                key
             )
+            .bind(key)
+            .bind(&job.job_type)
             .fetch_optional(&mut *conn)
             .await?;
 
@@ -187,15 +202,19 @@ impl JobQueue {
         .await?;
 
         // If ON CONFLICT fired (race with another enqueue), fetch the winner's ID.
+        // Runtime query for the same reason as the fast-path lookup above.
         if let Some(ref key) = job.idempotency_key {
-            let id = sqlx::query_scalar!(
+            #[allow(clippy::disallowed_methods)]
+            let id: Option<Uuid> = sqlx::query_scalar(
                 r#"
                 SELECT id FROM forge_jobs
                 WHERE idempotency_key = $1
+                  AND job_type = $2
                   AND status NOT IN ('completed', 'failed', 'dead_letter', 'cancelled')
                 "#,
-                key
             )
+            .bind(key)
+            .bind(&job.job_type)
             .fetch_optional(&mut *conn)
             .await?;
 
@@ -448,7 +467,11 @@ impl JobQueue {
                 "#,
                 job_id,
                 error,
-                delay.num_seconds() as f64,
+                // Millisecond precision, not num_seconds(): the latter truncates
+                // to whole seconds, so a sub-second backoff (the common first
+                // retry: 1s base - 25% jitter = 0.75s) collapses to secs => 0,
+                // dropping the backoff entirely and retrying instantly.
+                delay.num_milliseconds() as f64 / 1000.0,
             )
             .execute(&self.pool)
             .await?;
@@ -609,6 +632,11 @@ impl JobQueue {
         }
 
         let retention_secs = Self::DEFAULT_RETENTION.as_secs() as f64;
+        // Defense-in-depth: the SELECT guard above already verified the caller
+        // owns this row, but include the ownership predicate directly in the
+        // UPDATE so a future refactor that reorders these blocks can't silently
+        // drop the check. `caller_subject IS NULL` lets system-side callers
+        // (no caller) cancel rows with no owner_subject.
         #[allow(clippy::disallowed_methods)]
         let updated = sqlx::query(
             r#"
@@ -620,11 +648,17 @@ impl JobQueue {
                 expires_at = NOW() + make_interval(secs => $3)
             WHERE id = $1
               AND status NOT IN ('completed', 'failed', 'dead_letter', 'cancelled')
+              AND (
+                  owner_subject IS NULL
+                  OR $4::text IS NULL
+                  OR owner_subject = $4::text
+              )
             "#,
         )
         .bind(job_id)
         .bind(reason)
         .bind(retention_secs)
+        .bind(caller_subject)
         .execute(&self.pool)
         .await?;
 
@@ -715,6 +749,13 @@ impl JobQueue {
                     (
                         status = 'claimed'
                         AND claimed_at < NOW() - make_interval(secs => $1)
+                        -- Don't yank a claim that has produced a recent heartbeat:
+                        -- the worker may have transitioned to running on its own
+                        -- side and we just haven't seen the `start()` UPDATE land yet.
+                        AND (
+                            last_heartbeat IS NULL
+                            OR last_heartbeat < NOW() - make_interval(secs => $1)
+                        )
                     )
                     OR (
                         status = 'running'
@@ -883,7 +924,7 @@ mod integration_tests {
         let job_id = queue.enqueue(job).await.expect("Failed to enqueue");
 
         let claimed = queue
-            .claim(worker_id, &[], true, 10)
+            .claim(worker_id, &["default".into()], true, 10)
             .await
             .expect("Failed to claim");
         assert_eq!(claimed.len(), 1);
@@ -912,11 +953,17 @@ mod integration_tests {
         }
 
         let worker1 = Uuid::new_v4();
-        let batch1 = queue.claim(worker1, &[], true, 2).await.expect("claim1");
+        let batch1 = queue
+            .claim(worker1, &["default".into()], true, 2)
+            .await
+            .expect("claim1");
         assert_eq!(batch1.len(), 2);
 
         let worker2 = Uuid::new_v4();
-        let batch2 = queue.claim(worker2, &[], true, 2).await.expect("claim2");
+        let batch2 = queue
+            .claim(worker2, &["default".into()], true, 2)
+            .await
+            .expect("claim2");
         assert_eq!(batch2.len(), 1);
 
         let ids1: Vec<Uuid> = batch1.iter().map(|j| j.id).collect();
@@ -943,7 +990,10 @@ mod integration_tests {
         let high = JobRecord::new("high_job", serde_json::json!({}), JobPriority::Critical, 3);
         queue.enqueue(high).await.expect("enqueue high");
 
-        let claimed = queue.claim(worker_id, &[], true, 1).await.expect("claim");
+        let claimed = queue
+            .claim(worker_id, &["default".into()], true, 1)
+            .await
+            .expect("claim");
         assert_eq!(claimed.len(), 1);
         assert_eq!(claimed[0].job_type, "high_job");
 
@@ -959,7 +1009,10 @@ mod integration_tests {
         let job = JobRecord::new("process", serde_json::json!({}), JobPriority::Normal, 3);
         let job_id = queue.enqueue(job).await.expect("enqueue");
 
-        queue.claim(worker_id, &[], true, 1).await.expect("claim");
+        queue
+            .claim(worker_id, &["default".into()], true, 1)
+            .await
+            .expect("claim");
         queue.start(job_id, worker_id, 1).await.expect("start");
         queue
             .complete(job_id, serde_json::json!({"result": "done"}), None)
@@ -982,7 +1035,10 @@ mod integration_tests {
         let job = JobRecord::new("flaky", serde_json::json!({}), JobPriority::Normal, 3);
         let job_id = queue.enqueue(job).await.expect("enqueue");
 
-        queue.claim(worker_id, &[], true, 1).await.expect("claim");
+        queue
+            .claim(worker_id, &["default".into()], true, 1)
+            .await
+            .expect("claim");
         queue.start(job_id, worker_id, 1).await.expect("start");
 
         queue
@@ -1011,7 +1067,10 @@ mod integration_tests {
         let job = JobRecord::new("fatal", serde_json::json!({}), JobPriority::Normal, 1);
         let job_id = queue.enqueue(job).await.expect("enqueue");
 
-        queue.claim(worker_id, &[], true, 1).await.expect("claim");
+        queue
+            .claim(worker_id, &["default".into()], true, 1)
+            .await
+            .expect("claim");
         queue.start(job_id, worker_id, 1).await.expect("start");
 
         queue
@@ -1189,7 +1248,10 @@ mod integration_tests {
 
         let job = JobRecord::new("long_task", serde_json::json!({}), JobPriority::Normal, 3);
         let job_id = queue.enqueue(job).await.expect("enqueue");
-        queue.claim(worker_id, &[], true, 1).await.expect("claim");
+        queue
+            .claim(worker_id, &["default".into()], true, 1)
+            .await
+            .expect("claim");
         queue.start(job_id, worker_id, 1).await.expect("start");
 
         queue.heartbeat(job_id).await.expect("heartbeat");
@@ -1205,7 +1267,10 @@ mod integration_tests {
 
         let job = JobRecord::new("export", serde_json::json!({}), JobPriority::Normal, 3);
         let job_id = queue.enqueue(job).await.expect("enqueue");
-        queue.claim(worker_id, &[], true, 1).await.expect("claim");
+        queue
+            .claim(worker_id, &["default".into()], true, 1)
+            .await
+            .expect("claim");
         queue.start(job_id, worker_id, 1).await.expect("start");
 
         queue

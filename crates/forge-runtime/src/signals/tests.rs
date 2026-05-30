@@ -732,3 +732,103 @@ async fn test_partition_ensure() {
 
     db.cleanup().await.unwrap();
 }
+
+// ── Privacy short-circuit ───────────────────────────────────────────────────
+
+/// `DNT: 1` opts the visitor out of analytics. The endpoint must return
+/// `ok: true` (so the client doesn't keep retrying) without persisting any
+/// event row. A regression that drops the short-circuit would silently
+/// re-enable tracking for opted-out users.
+#[tokio::test]
+async fn dnt_header_short_circuits_event_storage() {
+    let db = setup("dnt_short_circuit").await;
+    let state = make_signals_state(db.pool());
+
+    let batch = SignalEventBatch {
+        events: vec![ClientEvent {
+            event: "dnt_should_not_persist".to_string(),
+            properties: serde_json::json!({}),
+            correlation_id: None,
+            timestamp: None,
+        }],
+        context: None,
+    };
+
+    let mut headers = make_headers();
+    headers.insert("dnt", HeaderValue::from_static("1"));
+
+    let response = endpoints::signal_handler(
+        State(state.clone()),
+        None,
+        None,
+        headers,
+        Json(SignalPayload::Event(batch)),
+    )
+    .await
+    .into_response();
+
+    let body: serde_json::Value = axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .map(|b| serde_json::from_slice(&b).unwrap())
+        .unwrap();
+    assert_eq!(
+        body["ok"], true,
+        "DNT must return ok so clients stop retrying"
+    );
+
+    // Give the collector a chance to flush — if anything was queued it would
+    // land in this window. We assert nothing was stored.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM forge_signals_events WHERE event_name = 'dnt_should_not_persist'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(count.0, 0, "DNT events must not be persisted");
+
+    db.cleanup().await.unwrap();
+}
+
+/// `Sec-GPC: 1` (Global Privacy Control) is the modern equivalent of DNT
+/// and must short-circuit the same way.
+#[tokio::test]
+async fn sec_gpc_header_short_circuits_event_storage() {
+    let db = setup("gpc_short_circuit").await;
+    let state = make_signals_state(db.pool());
+
+    let batch = SignalEventBatch {
+        events: vec![ClientEvent {
+            event: "gpc_should_not_persist".to_string(),
+            properties: serde_json::json!({}),
+            correlation_id: None,
+            timestamp: None,
+        }],
+        context: None,
+    };
+
+    let mut headers = make_headers();
+    headers.insert("sec-gpc", HeaderValue::from_static("1"));
+
+    let _ = endpoints::signal_handler(
+        State(state.clone()),
+        None,
+        None,
+        headers,
+        Json(SignalPayload::Event(batch)),
+    )
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM forge_signals_events WHERE event_name = 'gpc_should_not_persist'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(count.0, 0, "Sec-GPC events must not be persisted");
+
+    db.cleanup().await.unwrap();
+}

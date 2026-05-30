@@ -129,6 +129,7 @@ struct JobAttrs {
 }
 
 pub fn job_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let forge = crate::utils::forge_path();
     let input = parse_macro_input!(item as ItemFn);
 
     let attr_args = match NestedMeta::parse_meta_list(attr.into()) {
@@ -167,7 +168,18 @@ pub fn job_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut args_type = quote! { () };
     let mut args_ident = format_ident!("_args");
 
-    for input_arg in input.sig.inputs.iter().skip(1) {
+    let user_args: Vec<_> = input.sig.inputs.iter().skip(1).collect();
+    if user_args.len() > 1 {
+        return TokenStream::from(
+            syn::Error::new_spanned(
+                user_args[1],
+                "jobs may take at most one user argument (besides the JobContext). \
+                 Wrap multiple values in a single struct that derives Serialize/Deserialize.",
+            )
+            .into_compile_error(),
+        );
+    }
+    for input_arg in user_args {
         if let syn::FnArg::Typed(pat_type) = input_arg {
             if let syn::Pat::Ident(ident) = pat_type.pat.as_ref() {
                 args_ident = ident.ident.clone();
@@ -224,27 +236,27 @@ pub fn job_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let priority = if let Some(ref p) = attrs.priority {
         let p_lower = p.to_lowercase();
         match p_lower.as_str() {
-            "background" => quote! { forge::forge_core::job::JobPriority::Background },
-            "low" => quote! { forge::forge_core::job::JobPriority::Low },
-            "normal" => quote! { forge::forge_core::job::JobPriority::Normal },
-            "high" => quote! { forge::forge_core::job::JobPriority::High },
-            "critical" => quote! { forge::forge_core::job::JobPriority::Critical },
-            _ => quote! { forge::forge_core::job::JobPriority::Normal },
+            "background" => quote! { #forge::forge_core::job::JobPriority::Background },
+            "low" => quote! { #forge::forge_core::job::JobPriority::Low },
+            "normal" => quote! { #forge::forge_core::job::JobPriority::Normal },
+            "high" => quote! { #forge::forge_core::job::JobPriority::High },
+            "critical" => quote! { #forge::forge_core::job::JobPriority::Critical },
+            _ => quote! { #forge::forge_core::job::JobPriority::Normal },
         }
     } else {
-        quote! { forge::forge_core::job::JobPriority::Normal }
+        quote! { #forge::forge_core::job::JobPriority::Normal }
     };
 
     let max_attempts = attrs.max_attempts.unwrap_or(3);
     let backoff = if let Some(ref b) = attrs.backoff {
         match b.as_str() {
-            "fixed" => quote! { forge::forge_core::job::BackoffStrategy::Fixed },
-            "linear" => quote! { forge::forge_core::job::BackoffStrategy::Linear },
-            "exponential" => quote! { forge::forge_core::job::BackoffStrategy::Exponential },
-            _ => quote! { forge::forge_core::job::BackoffStrategy::Exponential },
+            "fixed" => quote! { #forge::forge_core::job::BackoffStrategy::Fixed },
+            "linear" => quote! { #forge::forge_core::job::BackoffStrategy::Linear },
+            "exponential" => quote! { #forge::forge_core::job::BackoffStrategy::Exponential },
+            _ => quote! { #forge::forge_core::job::BackoffStrategy::Exponential },
         }
     } else {
-        quote! { forge::forge_core::job::BackoffStrategy::Exponential }
+        quote! { #forge::forge_core::job::BackoffStrategy::Exponential }
     };
 
     let max_backoff = if let Some(ref mb) = attrs.max_backoff {
@@ -285,10 +297,10 @@ pub fn job_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         let compensation_args_ident = format_ident!("_comp_args");
         quote! {
             fn compensate(
-                ctx: &forge::forge_core::job::JobContext,
+                ctx: &#forge::forge_core::job::JobContext,
                 #compensation_args_ident: Self::Args,
                 reason: &str,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = forge::forge_core::Result<()>> + Send + '_>> {
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = #forge::forge_core::Result<()>> + Send + '_>> {
                 Box::pin(async move { #handler_ident(ctx, #compensation_args_ident, reason).await })
             }
         }
@@ -300,7 +312,7 @@ pub fn job_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let registration = if attrs.register {
         quote! {
-            forge::inventory::submit!(forge::AutoHandler(|registries| {
+            #forge::inventory::submit!(#forge::AutoHandler(|registries| {
                 registries.jobs.register::<#struct_name>();
             }));
         }
@@ -317,20 +329,20 @@ pub fn job_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             #(#other_attrs)*
             pub struct #struct_name;
 
-            impl forge::forge_core::__sealed::Sealed for #struct_name {}
+            impl #forge::forge_core::__sealed::Sealed for #struct_name {}
 
-            impl forge::forge_core::job::ForgeJob for #struct_name {
+            impl #forge::forge_core::job::ForgeJob for #struct_name {
                 type Args = #args_type;
                 type Output = #output_type;
 
-                fn info() -> forge::forge_core::job::JobInfo {
-                    forge::forge_core::job::JobInfo {
+                fn info() -> #forge::forge_core::job::JobInfo {
+                    #forge::forge_core::job::JobInfo {
                         name: #fn_name_str,
                         description: #description_tokens,
                         timeout: #timeout,
                         http_timeout: #http_timeout,
                         priority: #priority,
-                        retry: forge::forge_core::job::RetryConfig {
+                        retry: #forge::forge_core::job::RetryConfig {
                             max_attempts: #max_attempts,
                             backoff: #backoff,
                             max_backoff: #max_backoff,
@@ -346,9 +358,9 @@ pub fn job_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
 
                 fn execute(
-                    ctx: &forge::forge_core::job::JobContext,
+                    ctx: &#forge::forge_core::job::JobContext,
                     #args_ident: Self::Args,
-                ) -> std::pin::Pin<Box<dyn std::future::Future<Output = forge::forge_core::Result<Self::Output>> + Send + '_>> {
+                ) -> std::pin::Pin<Box<dyn std::future::Future<Output = #forge::forge_core::Result<Self::Output>> + Send + '_>> {
                     Box::pin(async move #block)
                 }
 

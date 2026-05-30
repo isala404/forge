@@ -22,7 +22,10 @@ impl Default for HeartbeatConfig {
             interval: Duration::from_secs(5),
             dead_threshold: Duration::from_secs(15),
             mark_dead_nodes: true,
-            max_interval: Duration::from_secs(60),
+            // Capped at 30 s (was 60 s). Combined with the 3x dead_threshold
+            // ceiling below, worst-case detection lag drops from ~180 s to
+            // ~90 s for a crash during the stable phase.
+            max_interval: Duration::from_secs(30),
         }
     }
 }
@@ -59,7 +62,9 @@ impl HeartbeatConfig {
             interval: *cluster.heartbeat_interval,
             dead_threshold: *cluster.dead_threshold,
             mark_dead_nodes: true,
-            max_interval: Duration::from_secs(cluster.heartbeat_interval.as_secs() * 12),
+            // Adaptive ceiling: 6x base (was 12x). Caps stable-phase interval
+            // at a tighter bound so dead-node detection stays under 90 s.
+            max_interval: Duration::from_secs(cluster.heartbeat_interval.as_secs() * 6),
         }
     }
 }
@@ -76,6 +81,12 @@ pub struct HeartbeatLoop {
     stable_count: AtomicU32,
     last_active_count: AtomicU32,
     /// Dedicated connection held outside the shared pool for liveness safety.
+    ///
+    /// **Persistent-connection budget**: this connection counts as the
+    /// 5th persistent slot alongside the 4 listed in `pg/pool.rs` (notify
+    /// bus listener, leader lock-owning connection, change-log listener,
+    /// signals writer). Pool sizing must allow `min_connections >= 5` plus
+    /// burst headroom or normal RPC workload contends for the remaining slots.
     heartbeat_conn: Mutex<sqlx::pool::PoolConnection<sqlx::Postgres>>,
 }
 
@@ -194,12 +205,17 @@ impl HeartbeatLoop {
         let mut guard = self.heartbeat_conn.lock().await;
         if guard.ping().await.is_err() {
             tracing::debug!("Heartbeat connection lost; reconnecting");
+            // Acquire the replacement first, then swap. If acquire fails we
+            // keep the (broken) old handle so we don't permanently lose the
+            // slot — next call retries. Explicitly drop the prior handle so
+            // its slot is returned to the pool before we hold the new one.
             let new_conn = self
                 .pool
                 .acquire()
                 .await
                 .map_err(forge_core::ForgeError::Database)?;
-            *guard = new_conn;
+            let old = std::mem::replace(&mut *guard, new_conn);
+            drop(old);
         }
         Ok(guard)
     }
@@ -319,7 +335,7 @@ mod tests {
         assert_eq!(config.interval, Duration::from_secs(5));
         assert_eq!(config.dead_threshold, Duration::from_secs(15));
         assert!(config.mark_dead_nodes);
-        assert_eq!(config.max_interval, Duration::from_secs(60));
+        assert_eq!(config.max_interval, Duration::from_secs(30));
     }
 
     #[test]
@@ -332,8 +348,8 @@ mod tests {
         assert_eq!(config.interval, Duration::from_secs(10));
         assert_eq!(config.dead_threshold, Duration::from_secs(30));
         assert!(config.mark_dead_nodes);
-        // max_interval = heartbeat_interval * 12
-        assert_eq!(config.max_interval, Duration::from_secs(120));
+        // max_interval = heartbeat_interval * 6
+        assert_eq!(config.max_interval, Duration::from_secs(60));
     }
 
     #[test]

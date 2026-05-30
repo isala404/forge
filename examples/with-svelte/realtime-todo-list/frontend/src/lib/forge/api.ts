@@ -2,23 +2,39 @@
 
 import { getForgeClient, createSubscriptionStore } from "@forge-rs/svelte";
 import type {
+  AuthResponse,
   CreateTodoInput,
+  LoginInput,
+  RefreshInput,
+  RegisterInput,
   Todo,
+  TokenPair,
   UpdateTodoInput,
+  UserPublic,
 } from "./types";
 
 // Queries
 export const listTodos = (): Promise<Todo[]> =>
   getForgeClient().call("list_todos", null);
+export const me = (): Promise<UserPublic> =>
+  getForgeClient().call("me", null);
 
 // Subscriptions
 export const listTodosStore$ = () =>
   createSubscriptionStore<null, Todo[]>("list_todos", null);
+export const meStore$ = () =>
+  createSubscriptionStore<null, UserPublic>("me", null);
 
 // Mutations
 export const createTodo = (args: CreateTodoInput): Promise<Todo> =>
   getForgeClient().call("create_todo", args);
 export const deleteTodo = (args: { id: string }): Promise<boolean> =>
   getForgeClient().call("delete_todo", args);
+export const login = (args: LoginInput): Promise<AuthResponse> =>
+  getForgeClient().call("login", args);
+export const refreshToken = (args: RefreshInput): Promise<TokenPair> =>
+  getForgeClient().call("refresh_token", args);
+export const register = (args: RegisterInput): Promise<AuthResponse> =>
+  getForgeClient().call("register", args);
 export const updateTodo = (args: UpdateTodoInput): Promise<Todo> =>
   getForgeClient().call("update_todo", args);

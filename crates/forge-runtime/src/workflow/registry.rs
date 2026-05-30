@@ -7,32 +7,10 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use forge_core::ForgeError;
 use forge_core::config::SignatureCheckMode;
+use forge_core::util::normalize_handler_args as normalize_args;
 use forge_core::workflow::{ForgeWorkflow, WorkflowContext, WorkflowInfo};
-use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
-
-// Converts null to {} so unit () and empty structs deserialize correctly.
-// Unwraps one-level "args"/"input" envelopes (callers may use either format).
-fn normalize_args(args: Value) -> Value {
-    let unwrapped = match &args {
-        Value::Object(map) if map.len() == 1 => {
-            if map.contains_key("args") {
-                map.get("args").cloned().unwrap_or(Value::Null)
-            } else if map.contains_key("input") {
-                map.get("input").cloned().unwrap_or(Value::Null)
-            } else {
-                args
-            }
-        }
-        _ => args,
-    };
-
-    match &unwrapped {
-        Value::Null => Value::Object(serde_json::Map::new()),
-        _ => unwrapped,
-    }
-}
 
 pub type BoxedWorkflowHandler = Arc<
     dyn Fn(
@@ -199,56 +177,50 @@ impl WorkflowRegistry {
     /// failing if a previously-registered name+version row has a different
     /// signature (the contract changed without a version bump). New rows are
     /// inserted, existing matching rows get their `status` refreshed.
+    ///
+    /// Each definition is upserted in a single transaction with
+    /// `INSERT ... ON CONFLICT DO UPDATE ... RETURNING workflow_signature`
+    /// so two nodes booting concurrently can't produce a generic
+    /// unique-violation in place of the helpful signature-mismatch message
+    /// (#16 in issues doc).
     pub async fn persist_definitions(&self, pool: &PgPool) -> forge_core::Result<()> {
         for info in self.definitions() {
             let status = info.status.as_str();
 
-            let existing = sqlx::query!(
+            let mut tx = pool.begin().await.map_err(ForgeError::Database)?;
+
+            // Atomic upsert: only the status is updated on conflict; signature
+            // is preserved so we can compare it to the incoming one without
+            // a separate SELECT round-trip.
+            #[allow(clippy::disallowed_methods)]
+            let returned: (String,) = sqlx::query_as(
                 r#"
-                SELECT workflow_signature FROM forge_workflow_definitions
-                WHERE workflow_name = $1 AND workflow_version = $2
+                INSERT INTO forge_workflow_definitions (workflow_name, workflow_version, workflow_signature, status)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (workflow_name, workflow_version) DO UPDATE SET status = EXCLUDED.status
+                RETURNING workflow_signature
                 "#,
-                info.name,
-                info.version,
             )
-            .fetch_optional(pool)
+            .bind(info.name)
+            .bind(info.version)
+            .bind(info.signature)
+            .bind(status)
+            .fetch_one(&mut *tx)
             .await
             .map_err(ForgeError::Database)?;
 
-            if let Some(row) = existing {
-                if row.workflow_signature != info.signature {
-                    return Err(ForgeError::config(format!(
-                        "Workflow '{}' version '{}' has a different signature than previously registered. \
-                         Persisted contract changed under the same version. \
-                         Expected signature: {}, got: {}. \
-                         Create a new version instead of modifying the existing one.",
-                        info.name, info.version, row.workflow_signature, info.signature
-                    )));
-                }
-                sqlx::query!(
-                    "UPDATE forge_workflow_definitions SET status = $3 WHERE workflow_name = $1 AND workflow_version = $2",
-                    info.name,
-                    info.version,
-                    status,
-                )
-                .execute(pool)
-                .await
-                .map_err(ForgeError::Database)?;
-            } else {
-                sqlx::query!(
-                    r#"
-                    INSERT INTO forge_workflow_definitions (workflow_name, workflow_version, workflow_signature, status)
-                    VALUES ($1, $2, $3, $4)
-                    "#,
-                    info.name,
-                    info.version,
-                    info.signature,
-                    status,
-                )
-                .execute(pool)
-                .await
-                .map_err(ForgeError::Database)?;
+            if returned.0 != info.signature {
+                tx.rollback().await.map_err(ForgeError::Database)?;
+                return Err(ForgeError::config(format!(
+                    "Workflow '{}' version '{}' has a different signature than previously registered. \
+                     Persisted contract changed under the same version. \
+                     Expected signature: {}, got: {}. \
+                     Create a new version instead of modifying the existing one.",
+                    info.name, info.version, returned.0, info.signature
+                )));
             }
+
+            tx.commit().await.map_err(ForgeError::Database)?;
 
             tracing::debug!(
                 workflow = info.name,
@@ -377,51 +349,11 @@ impl Clone for WorkflowRegistry {
 mod tests {
     use super::*;
     use forge_core::workflow::WorkflowDefStatus;
-    use serde_json::json;
 
-    // --- normalize_args mirrors the jobs/registry contract: null collapses
-    // to {} (so empty-struct inputs deserialize) and one-level `args`/`input`
-    // envelopes are unwrapped. Other shapes pass through unchanged.
+    use serde_json::Value;
 
-    #[test]
-    fn normalize_args_converts_null_to_empty_object() {
-        assert_eq!(normalize_args(json!(null)), json!({}));
-    }
-
-    #[test]
-    fn normalize_args_keeps_empty_object_intact() {
-        assert_eq!(normalize_args(json!({})), json!({}));
-    }
-
-    #[test]
-    fn normalize_args_unwraps_args_envelope() {
-        assert_eq!(normalize_args(json!({"args": {"x": 1}})), json!({"x": 1}));
-        // null inside the envelope still collapses to {}.
-        assert_eq!(normalize_args(json!({"args": null})), json!({}));
-    }
-
-    #[test]
-    fn normalize_args_unwraps_input_envelope() {
-        assert_eq!(normalize_args(json!({"input": [9, 8]})), json!([9, 8]));
-    }
-
-    #[test]
-    fn normalize_args_keeps_other_single_key_objects_intact() {
-        assert_eq!(normalize_args(json!({"id": 7})), json!({"id": 7}));
-    }
-
-    #[test]
-    fn normalize_args_keeps_multi_key_objects_intact() {
-        let v = json!({"a": 1, "b": 2});
-        assert_eq!(normalize_args(v.clone()), v);
-    }
-
-    #[test]
-    fn normalize_args_keeps_scalars_intact() {
-        assert_eq!(normalize_args(json!(42)), json!(42));
-        assert_eq!(normalize_args(json!("ok")), json!("ok"));
-        assert_eq!(normalize_args(json!(true)), json!(true));
-    }
+    // normalize_args contract is exercised via `forge_core::util` tests; this
+    // file now delegates to the shared helper to keep the two registries in sync.
 
     // ForgeWorkflow is sealed, so tests build entries directly through pub fields
     // with noop handlers — same insertion shape as register::<W>.
