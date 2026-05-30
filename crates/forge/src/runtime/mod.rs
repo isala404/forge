@@ -225,8 +225,10 @@ impl Forge {
         self.workflow_registry.persist_definitions(pool).await
     }
 
-    /// Start the runtime. Blocks until a ctrl-c or `Forge::shutdown()` is called.
-    pub async fn run(mut self) -> Result<()> {
+    /// Install the telemetry/tracing subscriber from the configured observability
+    /// settings. Best-effort: a failure is reported but does not abort startup
+    /// (it falls back to `eprintln!` since tracing macros would be dropped).
+    fn init_telemetry_subsystem(&self) {
         let telemetry_config = forge_runtime::TelemetryConfig::from_observability_config(
             &self.config.observability,
             &self.config.project.name,
@@ -248,10 +250,31 @@ impl Forge {
                     "Telemetry initialized"
                 );
             }
-            // init_telemetry failed before a subscriber could be installed; tracing
-            // macros would be silently dropped, so fall back to eprintln!.
             Err(e) => eprintln!("forge: failed to initialize telemetry: {e}"),
         }
+    }
+
+    /// Run user migrations, then persist workflow definitions if any are registered.
+    async fn apply_migrations(&self, pool: &sqlx::PgPool) -> Result<()> {
+        let runner = MigrationRunner::new(pool.clone());
+
+        let mut user_migrations = load_migrations_from_dir(&self.migrations_dir)?;
+        user_migrations.extend(self.extra_migrations.clone());
+
+        runner.run(user_migrations).await?;
+        tracing::debug!("Migrations applied");
+
+        #[cfg(feature = "workflows")]
+        if !self.workflow_registry.is_empty() {
+            self.persist_workflow_definitions(pool).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Start the runtime. Blocks until a ctrl-c or `Forge::shutdown()` is called.
+    pub async fn run(mut self) -> Result<()> {
+        self.init_telemetry_subsystem();
 
         tracing::debug!("Connecting to database");
 
@@ -265,18 +288,7 @@ impl Forge {
 
         tracing::debug!("Database connected");
 
-        let runner = MigrationRunner::new(pool.clone());
-
-        let mut user_migrations = load_migrations_from_dir(&self.migrations_dir)?;
-        user_migrations.extend(self.extra_migrations.clone());
-
-        runner.run(user_migrations).await?;
-        tracing::debug!("Migrations applied");
-
-        #[cfg(feature = "workflows")]
-        if !self.workflow_registry.is_empty() {
-            self.persist_workflow_definitions(&pool).await?;
-        }
+        self.apply_migrations(&pool).await?;
 
         let hostname = get_hostname();
 
@@ -286,11 +298,13 @@ impl Forge {
             .and_then(|s| s.parse().ok())
             .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
 
-        if let Ok(port_str) = std::env::var("PORT")
-            && let Ok(port) = port_str.parse::<u16>()
-        {
-            self.config.gateway.port = port;
-        }
+        // PORT env var overrides the configured port. Resolve it into a local
+        // rather than mutating the config in place — `run()` should not leave
+        // the owned config in a different state than it was constructed with.
+        let effective_port: u16 = std::env::var("PORT")
+            .ok()
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(self.config.gateway.port);
 
         let roles: Vec<NodeRole> = self
             .config
@@ -303,7 +317,7 @@ impl Forge {
         let node_info = NodeInfo::new_local(
             hostname,
             ip_address,
-            self.config.gateway.port,
+            effective_port,
             self.config.gateway.grpc_port,
             roles.clone(),
             self.config.node.worker_capabilities.clone(),
@@ -731,7 +745,7 @@ impl Forge {
             }
 
             let gateway_config = RuntimeGatewayConfig {
-                port: self.config.gateway.port,
+                port: effective_port,
                 max_connections: self.config.gateway.max_connections,
                 sse_max_sessions: self.config.realtime.sse_max_sessions,
                 request_timeout_secs: self.config.gateway.request_timeout.as_secs(),
@@ -1130,7 +1144,7 @@ impl Forge {
             version = env!("CARGO_PKG_VERSION"),
             roles = ?role_names,
             worker_capabilities = ?capabilities,
-            port = self.config.gateway.port,
+            port = effective_port,
             db_pool_size = self.config.database.pool_size,
             cluster_discovery = ?self.config.cluster.discovery,
             observability = self.config.observability.enabled,
