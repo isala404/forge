@@ -72,21 +72,33 @@ pub trait AuthenticatedContext: HandlerContext {
     fn tenant_id(&self) -> Option<Uuid>;
 }
 
-impl HandlerContext for crate::function::QueryContext {
-    fn db(&self) -> ForgeDb {
-        self.db()
-    }
-
-    fn db_conn(&self) -> DbConn<'_> {
-        self.db_conn()
-    }
+/// Forward [`HandlerContext`] to each context type's inherent `db()`/`db_conn()`.
+macro_rules! impl_handler_context {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl HandlerContext for $ty {
+                fn db(&self) -> ForgeDb { self.db() }
+                fn db_conn(&self) -> DbConn<'_> { self.db_conn() }
+            }
+        )+
+    };
 }
 
+impl_handler_context!(
+    crate::function::QueryContext,
+    crate::job::JobContext,
+    crate::cron::CronContext,
+    crate::daemon::DaemonContext,
+    crate::webhook::WebhookContext,
+    crate::workflow::WorkflowContext,
+    crate::mcp::McpToolContext,
+);
+
+// MutationContext is the one exception: its inherent `db()` returns a
+// transaction-bound handle, so the trait impl exposes the pool-backed view
+// that intentionally bypasses the active transaction.
 impl HandlerContext for crate::function::MutationContext {
     fn db(&self) -> ForgeDb {
-        // MutationContext::tx() returns DbConn, not ForgeDb.
-        // For HandlerContext we expose the pool-backed ForgeDb view, which
-        // intentionally bypasses the active transaction.
         crate::function::ForgeDb::from_pool(self.pool_outside_transaction())
     }
 
@@ -95,101 +107,37 @@ impl HandlerContext for crate::function::MutationContext {
     }
 }
 
-impl HandlerContext for crate::job::JobContext {
-    fn db(&self) -> ForgeDb {
-        self.db()
-    }
-
-    fn db_conn(&self) -> DbConn<'_> {
-        self.db_conn()
-    }
+/// Forward [`AuthenticatedContext`] to each context type's inherent accessors.
+macro_rules! impl_authenticated_context {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl AuthenticatedContext for $ty {
+                fn user_id(&self) -> crate::error::Result<Uuid> { self.user_id() }
+                fn tenant_id(&self) -> Option<Uuid> { self.tenant_id() }
+            }
+        )+
+    };
 }
 
-impl HandlerContext for crate::cron::CronContext {
-    fn db(&self) -> ForgeDb {
-        self.db()
-    }
+impl_authenticated_context!(
+    crate::function::QueryContext,
+    crate::function::MutationContext,
+    crate::mcp::McpToolContext,
+);
 
-    fn db_conn(&self) -> DbConn<'_> {
-        self.db_conn()
-    }
+macro_rules! impl_sealed {
+    ($($ty:ty),+ $(,)?) => {
+        $( impl Sealed for $ty {} )+
+    };
 }
 
-impl HandlerContext for crate::daemon::DaemonContext {
-    fn db(&self) -> ForgeDb {
-        self.db()
-    }
-
-    fn db_conn(&self) -> DbConn<'_> {
-        self.db_conn()
-    }
-}
-
-impl HandlerContext for crate::webhook::WebhookContext {
-    fn db(&self) -> ForgeDb {
-        self.db()
-    }
-
-    fn db_conn(&self) -> DbConn<'_> {
-        self.db_conn()
-    }
-}
-
-impl HandlerContext for crate::workflow::WorkflowContext {
-    fn db(&self) -> ForgeDb {
-        self.db()
-    }
-
-    fn db_conn(&self) -> DbConn<'_> {
-        self.db_conn()
-    }
-}
-
-impl HandlerContext for crate::mcp::McpToolContext {
-    fn db(&self) -> ForgeDb {
-        self.db()
-    }
-
-    fn db_conn(&self) -> DbConn<'_> {
-        self.db_conn()
-    }
-}
-
-impl AuthenticatedContext for crate::function::QueryContext {
-    fn user_id(&self) -> crate::error::Result<Uuid> {
-        self.user_id()
-    }
-
-    fn tenant_id(&self) -> Option<Uuid> {
-        self.tenant_id()
-    }
-}
-
-impl AuthenticatedContext for crate::function::MutationContext {
-    fn user_id(&self) -> crate::error::Result<Uuid> {
-        self.user_id()
-    }
-
-    fn tenant_id(&self) -> Option<Uuid> {
-        self.tenant_id()
-    }
-}
-
-impl AuthenticatedContext for crate::mcp::McpToolContext {
-    fn user_id(&self) -> crate::error::Result<Uuid> {
-        self.user_id()
-    }
-
-    fn tenant_id(&self) -> Option<Uuid> {
-        self.tenant_id()
-    }
-}
-
-impl Sealed for crate::function::QueryContext {}
-impl Sealed for crate::function::MutationContext {}
-impl Sealed for crate::job::JobContext {}
-impl Sealed for crate::cron::CronContext {}
-impl Sealed for crate::daemon::DaemonContext {}
-impl Sealed for crate::webhook::WebhookContext {}
-impl Sealed for crate::workflow::WorkflowContext {}
-impl Sealed for crate::mcp::McpToolContext {}
+impl_sealed!(
+    crate::function::QueryContext,
+    crate::function::MutationContext,
+    crate::job::JobContext,
+    crate::cron::CronContext,
+    crate::daemon::DaemonContext,
+    crate::webhook::WebhookContext,
+    crate::workflow::WorkflowContext,
+    crate::mcp::McpToolContext,
+);
