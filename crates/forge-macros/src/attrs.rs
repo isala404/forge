@@ -5,10 +5,56 @@
 //! converts from the darling struct to its internal representation.
 
 use darling::FromMeta;
+use darling::ast::NestedMeta;
+use proc_macro::TokenStream;
 
 /// Default value function for darling `#[darling(default = "default_true")]`.
 pub fn default_true() -> bool {
     true
+}
+
+/// Parse raw macro-attribute tokens into a darling attribute struct.
+///
+/// Centralizes the parse-then-`from_list` dance every attribute macro performs.
+/// On failure it returns the compile-error `TokenStream` so callers can simply
+/// `return` it from their `expand_*` entry point.
+pub fn parse_attrs<T: FromMeta>(attr: TokenStream) -> Result<T, TokenStream> {
+    let nested = NestedMeta::parse_meta_list(attr.into())
+        .map_err(|e| TokenStream::from(e.into_compile_error()))?;
+    T::from_list(&nested).map_err(|e| TokenStream::from(e.write_errors()))
+}
+
+/// Parse an optional duration attribute (e.g. `cache`, `timeout`) into seconds.
+///
+/// `label` names the attribute in the error message (e.g. "timeout" or
+/// "cache duration"). Bare integers without a unit suffix are rejected.
+pub fn parse_optional_duration(value: &Option<String>, label: &str) -> syn::Result<Option<u64>> {
+    match value {
+        Some(s) => crate::utils::parse_duration_secs(s).map(Some).ok_or_else(|| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!(
+                    "invalid {label} \"{s}\": use a duration string like \"30s\", \"5m\", or \"1h\""
+                ),
+            )
+        }),
+        None => Ok(None),
+    }
+}
+
+/// Validate an optional `rate_limit(...)` attribute and extract the
+/// `(requests, per_secs, key)` triple. Returns all-`None` when absent.
+pub fn extract_rate_limit(
+    rate_limit: &Option<RateLimitMeta>,
+) -> syn::Result<(Option<u32>, Option<u64>, Option<String>)> {
+    match rate_limit {
+        Some(rl) => {
+            validate_rate_limit(rl)?;
+            let per = parse_rate_limit_per(rl)?;
+            Ok((rl.requests, per, rl.key.clone()))
+        }
+        None => Ok((None, None, None)),
+    }
 }
 
 /// Rate limit configuration shared between query, mutation, and mcp_tool macros.

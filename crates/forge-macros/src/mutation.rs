@@ -5,18 +5,14 @@ use syn::visit::Visit;
 use syn::{FnArg, ItemFn, Pat, ReturnType, Type, parse_macro_input};
 
 use darling::FromMeta;
-use darling::ast::NestedMeta;
 
-use crate::attrs::{
-    RateLimitMeta, RequireRole, TablesList, default_true, parse_rate_limit_per, reject_reserved,
-    validate_rate_limit,
-};
+use crate::attrs::{RateLimitMeta, RequireRole, TablesList, default_true, reject_reserved};
 use crate::sql_extractor::{
     DbDelegationDetector, ScopeCheckResult, SqlStringExtractor, TableExtractionResult,
     extract_changed_columns_from_sql, extract_tables_from_sql, sql_references_identity_scope,
     sql_scope_requires_tenant,
 };
-use crate::utils::{parse_duration_secs, parse_size_bytes, to_pascal_case};
+use crate::utils::{parse_size_bytes, to_pascal_case};
 
 /// Attribute keys whose names are reserved for upcoming mutation-coalescing
 /// support (cursor positions, autosave, etc). Using one today is a hard
@@ -154,14 +150,9 @@ impl Default for MutationAttrs {
 pub fn expand_mutation(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
 
-    let attr_args = match NestedMeta::parse_meta_list(attr.into()) {
+    let darling_attrs = match crate::attrs::parse_attrs::<DarlingMutationAttrs>(attr) {
         Ok(v) => v,
-        Err(e) => return TokenStream::from(e.into_compile_error()),
-    };
-
-    let darling_attrs = match DarlingMutationAttrs::from_list(&attr_args) {
-        Ok(v) => v,
-        Err(e) => return TokenStream::from(e.write_errors()),
+        Err(ts) => return ts,
     };
 
     let attrs = match convert_mutation_attrs(darling_attrs) {
@@ -175,25 +166,9 @@ pub fn expand_mutation(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 fn convert_mutation_attrs(darling: DarlingMutationAttrs) -> Result<MutationAttrs, syn::Error> {
-    let timeout = match darling.timeout {
-        Some(ref s) => Some(parse_duration_secs(s).ok_or_else(|| {
-            syn::Error::new(
-                proc_macro2::Span::call_site(),
-                format!(
-                    "invalid timeout \"{s}\": use a duration string like \"30s\", \"5m\", or \"1h\""
-                ),
-            )
-        })?),
-        None => None,
-    };
-
+    let timeout = crate::attrs::parse_optional_duration(&darling.timeout, "timeout")?;
     let (rate_limit_requests, rate_limit_per_secs, rate_limit_key) =
-        if let Some(ref rl) = darling.rate_limit {
-            validate_rate_limit(rl)?;
-            (rl.requests, parse_rate_limit_per(rl)?, rl.key.clone())
-        } else {
-            (None, None, None)
-        };
+        crate::attrs::extract_rate_limit(&darling.rate_limit)?;
 
     Ok(MutationAttrs {
         name: darling.name,

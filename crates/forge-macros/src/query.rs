@@ -5,18 +5,14 @@ use syn::visit::Visit;
 use syn::{FnArg, ItemFn, Pat, ReturnType, Type, parse_macro_input};
 
 use darling::FromMeta;
-use darling::ast::NestedMeta;
 
-use crate::attrs::{
-    RateLimitMeta, RequireRole, TablesList, default_true, parse_rate_limit_per, reject_reserved,
-    validate_rate_limit,
-};
+use crate::attrs::{RateLimitMeta, RequireRole, TablesList, default_true, reject_reserved};
 use crate::sql_extractor::{
     DbDelegationDetector, ScopeCheckResult, SqlStringExtractor, TableExtractionResult,
     extract_columns_from_sql, extract_tables_from_sql, sql_references_identity_scope,
     sql_scope_requires_tenant,
 };
-use crate::utils::{parse_duration_secs, to_pascal_case};
+use crate::utils::to_pascal_case;
 
 /// Attribute keys whose names are reserved for upcoming reactor and
 /// result-guardrail features. Using one today is a hard compile error
@@ -139,14 +135,9 @@ struct QueryAttrs {
 pub fn expand_query(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
 
-    let attr_args = match NestedMeta::parse_meta_list(attr.into()) {
+    let darling_attrs = match crate::attrs::parse_attrs::<DarlingQueryAttrs>(attr) {
         Ok(v) => v,
-        Err(e) => return TokenStream::from(e.into_compile_error()),
-    };
-
-    let darling_attrs = match DarlingQueryAttrs::from_list(&attr_args) {
-        Ok(v) => v,
-        Err(e) => return TokenStream::from(e.write_errors()),
+        Err(ts) => return ts,
     };
 
     let attrs = match convert_query_attrs(darling_attrs) {
@@ -160,35 +151,10 @@ pub fn expand_query(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 fn convert_query_attrs(darling: DarlingQueryAttrs) -> Result<QueryAttrs, syn::Error> {
-    let cache_ttl = match darling.cache {
-        Some(ref s) => Some(parse_duration_secs(s).ok_or_else(|| {
-            syn::Error::new(
-                proc_macro2::Span::call_site(),
-                format!("invalid cache duration \"{s}\": use a duration string like \"30s\", \"5m\", or \"1h\""),
-            )
-        })?),
-        None => None,
-    };
-
-    let timeout = match darling.timeout {
-        Some(ref s) => Some(parse_duration_secs(s).ok_or_else(|| {
-            syn::Error::new(
-                proc_macro2::Span::call_site(),
-                format!(
-                    "invalid timeout \"{s}\": use a duration string like \"30s\", \"5m\", or \"1h\""
-                ),
-            )
-        })?),
-        None => None,
-    };
-
+    let cache_ttl = crate::attrs::parse_optional_duration(&darling.cache, "cache duration")?;
+    let timeout = crate::attrs::parse_optional_duration(&darling.timeout, "timeout")?;
     let (rate_limit_requests, rate_limit_per_secs, rate_limit_key) =
-        if let Some(ref rl) = darling.rate_limit {
-            validate_rate_limit(rl)?;
-            (rl.requests, parse_rate_limit_per(rl)?, rl.key.clone())
-        } else {
-            (None, None, None)
-        };
+        crate::attrs::extract_rate_limit(&darling.rate_limit)?;
 
     Ok(QueryAttrs {
         name: darling.name,

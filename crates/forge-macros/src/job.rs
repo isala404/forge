@@ -3,7 +3,6 @@ use quote::{format_ident, quote};
 use syn::{ItemFn, parse_macro_input};
 
 use darling::FromMeta;
-use darling::ast::NestedMeta;
 
 use crate::attrs::{IdempotentMeta, RequireRole, RetryMeta, default_true, reject_reserved};
 use crate::utils::{parse_duration_tokens, to_pascal_case};
@@ -132,14 +131,9 @@ pub fn job_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let forge = crate::utils::forge_path();
     let input = parse_macro_input!(item as ItemFn);
 
-    let attr_args = match NestedMeta::parse_meta_list(attr.into()) {
+    let darling_attrs = match crate::attrs::parse_attrs::<DarlingJobAttrs>(attr) {
         Ok(v) => v,
-        Err(e) => return TokenStream::from(e.into_compile_error()),
-    };
-
-    let darling_attrs = match DarlingJobAttrs::from_list(&attr_args) {
-        Ok(v) => v,
-        Err(e) => return TokenStream::from(e.write_errors()),
+        Err(ts) => return ts,
     };
 
     let attrs = convert_job_attrs(darling_attrs);

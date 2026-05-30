@@ -4,13 +4,9 @@ use quote::quote;
 use syn::{FnArg, ItemFn, Pat, ReturnType, Type, parse_macro_input};
 
 use darling::FromMeta;
-use darling::ast::NestedMeta;
 
-use crate::attrs::{
-    RateLimitMeta, RequireRole, default_true, parse_rate_limit_per, validate_rate_limit,
-    validate_rate_limit_key,
-};
-use crate::utils::{parse_duration_secs, to_pascal_case};
+use crate::attrs::{RateLimitMeta, RequireRole, default_true};
+use crate::utils::to_pascal_case;
 
 /// Darling-parsed MCP tool attributes.
 #[derive(Debug, FromMeta)]
@@ -45,14 +41,9 @@ struct DarlingMcpToolAttrs {
 pub fn expand_mcp_tool(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
 
-    let attr_args = match NestedMeta::parse_meta_list(attr.into()) {
+    let darling_attrs = match crate::attrs::parse_attrs::<DarlingMcpToolAttrs>(attr) {
         Ok(v) => v,
-        Err(e) => return TokenStream::from(e.into_compile_error()),
-    };
-
-    let darling_attrs = match DarlingMcpToolAttrs::from_list(&attr_args) {
-        Ok(v) => v,
-        Err(e) => return TokenStream::from(e.write_errors()),
+        Err(ts) => return ts,
     };
 
     let attrs = match convert_mcp_tool_attrs(darling_attrs) {
@@ -84,37 +75,9 @@ struct McpToolAttrs {
 }
 
 fn convert_mcp_tool_attrs(darling: DarlingMcpToolAttrs) -> Result<McpToolAttrs, syn::Error> {
-    // Require a unit suffix on timeouts to match every other macro. Bare
-    // integers like `timeout = "30"` are ambiguous (seconds? milliseconds?)
-    // and were only accepted here historically.
-    let timeout = match darling.timeout {
-        Some(ref s) => match parse_duration_secs(s) {
-            Some(t) => Some(t),
-            None => {
-                return Err(syn::Error::new(
-                    proc_macro2::Span::call_site(),
-                    format!(
-                        "invalid timeout \"{s}\": use a duration string like \"30s\", \"5m\", or \"1h\""
-                    ),
-                ));
-            }
-        },
-        None => None,
-    };
-
+    let timeout = crate::attrs::parse_optional_duration(&darling.timeout, "timeout")?;
     let (rate_limit_requests, rate_limit_per_secs, rate_limit_key) =
-        if let Some(ref rl) = darling.rate_limit {
-            validate_rate_limit(rl)?;
-            let per = parse_rate_limit_per(rl)?;
-            if let Some(ref key) = rl.key
-                && let Err(msg) = validate_rate_limit_key(key)
-            {
-                return Err(syn::Error::new(proc_macro2::Span::call_site(), msg));
-            }
-            (rl.requests, per, rl.key.clone())
-        } else {
-            (None, None, None)
-        };
+        crate::attrs::extract_rate_limit(&darling.rate_limit)?;
 
     Ok(McpToolAttrs {
         name: darling.name,
