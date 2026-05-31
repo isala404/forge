@@ -581,7 +581,8 @@ Subsystems are feature-gated; default is `full`. Opt out with `default-features 
 | `cron` | yes | Leader-only cron scheduler | — |
 | `daemons` | yes | Long-running daemon runner | — |
 | `mcp-oauth` | yes | OAuth 2.1 + PKCE for MCP (req. `gateway`) | — |
-| `geoip` | yes | IP→country enrichment for signals (req. `gateway`) | db_ip (build-time download), maxminddb |
+| `geoip` | yes (in `full`) | Runtime MaxMind MMDB reader for signals; offline-safe (req. `gateway`) | maxminddb |
+| `geoip-embedded` | no | Bundled DB-IP country DB baked in (req. `geoip`); build-time download | db_ip |
 | `otel` | yes | OTel trace/metric/log exporters | opentelemetry ×5, protobuf stubs |
 | `testcontainers` | no | Test context helpers that spin up a real PG container | testcontainers |
 | `embedded-frontend` | no | Embeds compiled frontend into binary at build time | rust-embed |
@@ -590,7 +591,7 @@ Subsystems are feature-gated; default is `full`. Opt out with `default-features 
 forgex = { version = "0.10.2", default-features = false, features = ["worker"] }
 ```
 
-`#[forge::job/cron/workflow/daemon/webhook/mcp_tool]` without the matching feature errors at the generated `forge::AutoHandler` reference. Without `otel`, `tracing-subscriber` still logs to stderr. `geoip` fetches a ~10 MB DB at compile time — disable for air-gapped builds or when not using signals.
+`#[forge::job/cron/workflow/daemon/webhook/mcp_tool]` without the matching feature errors at the generated `forge::AutoHandler` reference. Without `otel`, `tracing-subscriber` still logs to stderr. `geoip` (in `full`) is offline-safe — it only adds the runtime MMDB reader; set `signals.geoip_db_path` to a GeoLite2-City MMDB for enrichment. Only `geoip-embedded` fetches a ~10 MB DB at compile time, so keep it off for air-gapped builds.
 
 ## Build Profiles
 

@@ -36,7 +36,8 @@ If the presets don't fit, compose your own from primitives:
 | `workflows` | Durable workflow executor                           |
 | `cron`      | Cron scheduler (leader-elected)                     |
 | `daemons`   | Long-running daemon runner                          |
-| `geoip`     | Bundled IP-to-country DB + MaxMind reader (heavy)   |
+| `geoip`     | Runtime MaxMind MMDB reader (offline-safe; in `full`) |
+| `geoip-embedded` | Bundled IP-to-country DB baked into the binary (build-time download) |
 | `otel`      | OpenTelemetry trace/metric/log exporters            |
 
 Example:
@@ -58,18 +59,22 @@ on a clean checkout:
 | `minimal`           | -65%         | -75%           |
 
 The biggest individual savings come from disabling `otel` (skips ~5 OTel
-crates + protobuf) and `geoip` (skips a build-time database download — also
-unblocks builds in air-gapped environments).
+crates + protobuf). `geoip` itself is offline-safe (pure-Rust MaxMind reader);
+only the opt-in `geoip-embedded` triggers a build-time download.
 
 ## Air-gapped / offline builds
 
-The `db_ip` crate behind the `geoip` feature downloads its database at
-build time. If your CI lacks network access, disable `geoip`:
+The default `full` preset is offline-safe. Only `geoip-embedded` needs network
+at build time — the `db_ip` crate behind it downloads its bundled IP-to-country
+database during the build. Don't enable `geoip-embedded` in air-gapped CI; use
+the runtime `geoip` MMDB path instead (set `signals.geoip_db_path`). If you've
+opted into it, drop it:
 
 ```toml
-forge = { version = "0.10.2", default-features = false, features = [
-    "gateway", "jobs", "workflows", "cron", "daemons", "otel"
-] }
+# offline-safe: runtime geoip is included in `full`
+forge = { version = "0.10.2" }
+# only this needs build-time network:
+# forge = { version = "0.10.2", features = ["geoip-embedded"] }
 ```
 
 ## Compile-time errors when a macro doesn't match the feature set

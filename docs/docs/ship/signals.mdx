@@ -62,13 +62,21 @@ excluded_functions = []     # function names to skip (exact match)
 bot_detection = true        # tag bot traffic via UA patterns
 ```
 
-Forge ships with an embedded [DB-IP](https://db-ip.com) Country Lite database for IP-to-country resolution. Every signal event is automatically enriched with an ISO 3166-1 alpha-2 country code in the `country` column. No configuration or external files needed.
+GeoIP enrichment has two backends, selected by cargo feature:
 
-For city-level resolution, point `geoip_db_path` at a MaxMind GeoLite2-City MMDB file (free with a [MaxMind account](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data)). This populates the `city` column alongside `country`. A bad path fails startup — if you explicitly ask for city-level data, Forge doesn't silently downgrade.
+- **`geoip`** (offline-safe, included in the default `full` preset): a runtime MaxMind MMDB reader. Point `geoip_db_path` at a GeoLite2-City MMDB file (free with a [MaxMind account](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data)) to populate both the `country` and `city` columns. Without a path, no enrichment happens. A bad path fails startup — if you explicitly ask for city-level data, Forge doesn't silently downgrade.
+- **`geoip-embedded`** (opt-in): additionally bakes a [DB-IP](https://db-ip.com) Country Lite database into the binary for zero-config `country` enrichment with no external file. This is the only geoip option that needs network at build time (the `db_ip` database is downloaded during the build), so it's excluded from `full`.
 
 ```toml
 [signals]
+# city-level: requires the `geoip` feature (default) + an MMDB file
 geoip_db_path = "/etc/forge/GeoLite2-City.mmdb"
+```
+
+For zero-config country data without an MMDB file, build with `geoip-embedded`:
+
+```toml
+forge = { version = "0.10.2", features = ["geoip-embedded"] }
 ```
 
 To disable signals entirely:
@@ -358,12 +366,13 @@ a tenant-scoped layer.
 
 ### GeoIP attribution
 
-The default build embeds the **DB-IP IP-to-Country Lite** database. If
-you ship a binary that uses the embedded data (i.e., you don't override
-`signals.geoip_db_path`), include the DB-IP attribution required by
-their CC BY 4.0 license: *"IP geolocation by [DB-IP](https://db-ip.com)"*.
-Setting `geoip_db_path` to a MaxMind MMDB file uses your own licensed
-data instead and removes the attribution requirement.
+Building with the `geoip-embedded` feature bakes in the **DB-IP IP-to-Country
+Lite** database. If you ship such a binary and rely on its embedded data (no
+`signals.geoip_db_path` set), include the DB-IP attribution required by their
+CC BY 4.0 license: *"IP geolocation by [DB-IP](https://db-ip.com)"*. The
+default build (runtime `geoip` only) carries no embedded data; pointing
+`geoip_db_path` at a MaxMind MMDB file uses your own licensed data and removes
+the attribution requirement.
 
 ## Limitations
 

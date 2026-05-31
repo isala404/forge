@@ -100,8 +100,13 @@ daemons = ["forge-runtime/daemons"]
 # OAuth 2.1 + PKCE for MCP authentication.
 mcp-oauth = ["gateway", "forge-runtime/mcp-oauth"]
 
-# GeoIP enrichment for signals (heavy build-time download).
+# GeoIP enrichment for signals. Offline-safe: runtime MaxMind MMDB reader.
+# Point `signals.geoip_db_path` at a GeoLite2-City MMDB for city-level data.
 geoip = ["gateway", "forge-runtime/geoip"]
+
+# Zero-config bundled country DB. The ONLY geoip option needing a build-time
+# network fetch; opt in with `--features forgex/geoip-embedded`.
+geoip-embedded = ["geoip", "forge-runtime/geoip-embedded"]
 
 # OpenTelemetry exporters (heavy crate deps).
 otel = [
@@ -114,10 +119,10 @@ otel = [
 
 # --- Bundle presets ---
 
-# Everything except geoip. `geoip` requires a build-time network fetch for the
-# bundled IP-to-country DB and is excluded from the default preset so that
-# `cargo build` succeeds in offline/CI environments. Enable it explicitly with
-# `--features forgex/geoip` when needed.
+# Everything except geoip-embedded. The offline-safe `geoip` (runtime MMDB) is
+# included; only `geoip-embedded` is excluded, since its bundled country DB
+# needs a build-time network fetch (so `cargo build` stays offline/CI friendly).
+# Enable it explicitly with `--features forgex/geoip-embedded` when needed.
 full = [
     "gateway",
     "mcp-oauth",
@@ -125,6 +130,7 @@ full = [
     "workflows",
     "cron",
     "daemons",
+    "geoip",
     "otel",
 ]
 
