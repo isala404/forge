@@ -4,6 +4,11 @@
 
 Queries, mutations, background jobs, cron, durable workflows, real-time subscriptions, webhooks, and MCP tools — all written as plain Rust functions, all served from a single process, all backed by the database you already know.
 
+> [!IMPORTANT]
+> **Forge is changing direction.** The full-stack framework described below is no longer where the project is headed. Forge is being rebuilt as a *standard library for agent-built SaaS*: one crate, one Postgres connection, and a small frozen set of hardened infrastructure primitives — `kv`, `queue`, `schedule`, `blob`, `config`/flags, `ratelimit`, `auth`, and `llm` — that an AI agent targets once and reuses everywhere, with pluggable backends (Postgres by default) behind a stable interface.
+>
+> Active development now happens on the [`rewrite`](../../tree/rewrite) branch. This `main` branch stays available but is no longer maintained.
+
 ```bash
 curl -fsSL https://tryforge.dev/install.sh | sh  # or: cargo install forgex
 forge new my-app --template with-svelte/minimal && cd my-app
