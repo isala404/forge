@@ -121,10 +121,16 @@ daemons = []
 # only JWT bearer auth (token passed directly in the request).
 mcp-oauth = ["gateway"]
 
-# GeoIP enrichment (sub-feature of `gateway` since signals lives there).
-# Bundles a ~10MB IP-to-country database; pulls a build-time download for
-# `db_ip`. Skip if you don't run signals or want offline builds.
-geoip = ["gateway", "dep:db_ip", "dep:maxminddb"]
+# GeoIP enrichment for signals. `geoip` is offline-safe: it pulls only the
+# pure-Rust MaxMind MMDB reader (`maxminddb`), which loads a city-level database
+# from a file at runtime (point `signals.geoip_db_path` at a GeoLite2-City MMDB).
+geoip = ["gateway", "dep:maxminddb"]
+
+# Zero-config country resolution via a bundled DB-IP Country Lite database baked
+# into the binary. This is the ONLY geoip option that needs network at build
+# time (the `db_ip` build script downloads the ~10MB database). Opt in when you
+# want country enrichment without supplying an MMDB file and have build network.
+geoip-embedded = ["geoip", "dep:db_ip"]
 
 # OpenTelemetry trace/metric/log exporters. Disable to skip 5+ OTel crates,
 # protobuf stubs, and reqwest-otlp.
@@ -139,11 +145,10 @@ otel = [
 
 # --- Bundle features (composition shortcuts) ---
 
-# Everything except testcontainers and geoip. What `forgex` activates by default.
-# `geoip` is intentionally excluded: it requires a build-time network fetch to
-# download the bundled IP-to-country DB. Enable it explicitly with
-# `--features forge-runtime/geoip` when you need IP enrichment and have network
-# access at build time.
+# Everything except testcontainers and geoip-embedded. What `forgex` activates
+# by default. The offline-safe `geoip` (runtime MMDB) is included; only
+# `geoip-embedded` is excluded, since its bundled DB needs a build-time network
+# fetch. Enable it explicitly with `--features forge-runtime/geoip-embedded`.
 full = [
     "gateway",
     "mcp-oauth",
@@ -151,6 +156,7 @@ full = [
     "workflows",
     "cron",
     "daemons",
+    "geoip",
     "otel",
 ]
 

@@ -210,44 +210,10 @@ impl Default for TestMutationContextBuilder {
     }
 }
 
+impl_test_auth_builder!(TestMutationContextBuilder);
+impl_test_env_builder!(TestMutationContextBuilder);
+
 impl TestMutationContextBuilder {
-    /// Set the authenticated user with a UUID.
-    pub fn as_user(mut self, id: Uuid) -> Self {
-        self.user_id = Some(id);
-        self
-    }
-
-    /// For non-UUID auth providers (Firebase, Clerk, etc.).
-    pub fn as_subject(mut self, subject: impl Into<String>) -> Self {
-        self.claims
-            .insert("sub".to_string(), serde_json::json!(subject.into()));
-        self
-    }
-
-    /// Add a role.
-    pub fn with_role(mut self, role: impl Into<String>) -> Self {
-        self.roles.push(role.into());
-        self
-    }
-
-    /// Add multiple roles.
-    pub fn with_roles(mut self, roles: Vec<String>) -> Self {
-        self.roles.extend(roles);
-        self
-    }
-
-    /// Add a custom claim.
-    pub fn with_claim(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
-        self.claims.insert(key.into(), value);
-        self
-    }
-
-    /// Set the database pool.
-    pub fn with_pool(mut self, pool: PgPool) -> Self {
-        self.pool = Some(pool);
-        self
-    }
-
     /// Add an HTTP mock with a custom handler.
     pub fn mock_http<F>(self, pattern: &str, handler: F) -> Self
     where
@@ -274,19 +240,6 @@ impl TestMutationContextBuilder {
         self.workflow_dispatch = dispatch;
         self
     }
-
-    /// Set a single environment variable.
-    pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.env_vars.insert(key.into(), value.into());
-        self
-    }
-
-    /// Set multiple environment variables.
-    pub fn with_envs(mut self, vars: HashMap<String, String>) -> Self {
-        self.env_vars.extend(vars);
-        self
-    }
-
     /// Build the test context.
     pub fn build(self) -> TestMutationContext {
         TestMutationContext {

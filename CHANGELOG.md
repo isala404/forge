@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **GeoIP feature split for offline-safe builds.** The `geoip` cargo feature now pulls only the pure-Rust runtime MaxMind MMDB reader (`maxminddb`) and is included in the default `full` preset — no build-time network fetch. The bundled DB-IP Country Lite database (and its build-time download) moved to a new opt-in `geoip-embedded` feature. **Breaking:** zero-config `country` enrichment now requires building with `--features geoip-embedded`; the default build enriches `country`/`city` only when `signals.geoip_db_path` points at a GeoLite2-City MMDB. This makes the default preset build cleanly in air-gapped/offline environments.
+
+### Internal
+
+- Removed duplication across the codebase: shared attribute parsing in `forge-macros`, declarative macros for the sealed handler-context impls and the eight test-context builders in `forge-core`, a shared store core in `@forge-rs/svelte`, and a smaller `Forge::run()` that no longer mutates its config in place. No public API change.
+
 ## [0.10.2] - 2026-05-22
 
 ### Changed

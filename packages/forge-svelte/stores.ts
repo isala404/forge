@@ -37,25 +37,48 @@ export interface WorkflowStore<TOutput> extends Readable<WorkflowState<TOutput> 
   unsubscribe: () => void;
 }
 
+/** Shared subscriber bookkeeping for every store: holds the current value,
+ *  notifies subscribers on change, and fires `onLastUnsubscribe` when the final
+ *  subscriber detaches (so stores can release server-side subscriptions). */
+interface StoreCore<T> {
+  get(): T;
+  set(value: T): void;
+  update(fn: (prev: T) => T): void;
+  subscribe(run: (value: T) => void, onLastUnsubscribe?: () => void): () => void;
+}
+
+function createStoreCore<T>(initial: T): StoreCore<T> {
+  const subscribers = new Set<(value: T) => void>();
+  let state = initial;
+  const notify = () => subscribers.forEach((run) => run(state));
+  return {
+    get: () => state,
+    set(value) {
+      state = value;
+      notify();
+    },
+    update(fn) {
+      state = fn(state);
+      notify();
+    },
+    subscribe(run, onLastUnsubscribe) {
+      subscribers.add(run);
+      run(state);
+      return () => {
+        subscribers.delete(run);
+        if (subscribers.size === 0) onLastUnsubscribe?.();
+      };
+    },
+  };
+}
+
 export function createConnectionStore(): ConnectionStatusStore {
   const client = getForgeClient();
-  const subscribers = new Set<(value: ConnectionState) => void>();
-  let currentState: ConnectionState = client.getConnectionState();
-
-  client.onConnectionStateChange((state: ConnectionState) => {
-    currentState = state;
-    subscribers.forEach((run) => run(state));
-  });
-
+  const core = createStoreCore<ConnectionState>(client.getConnectionState());
+  client.onConnectionStateChange((state) => core.set(state));
   return {
-    subscribe(run) {
-      subscribers.add(run);
-      run(currentState);
-      return () => subscribers.delete(run);
-    },
-    get() {
-      return currentState;
-    },
+    subscribe: (run) => core.subscribe(run),
+    get: () => core.get(),
   };
 }
 
@@ -78,46 +101,34 @@ export function createQueryStore<TArgs, TResult>(
   options?: StoreOptions<TResult>,
 ): QueryStore<TResult> {
   const client = getForgeClient();
-  const subscribers = new Set<(value: QueryResult<TResult>) => void>();
-  let state: QueryResult<TResult> = {
+  const core = createStoreCore<QueryResult<TResult>>({
     loading: true,
     data: null,
     error: null,
-  };
-
-  const notify = () => subscribers.forEach((run) => run(state));
+  });
 
   const fetchData = async () => {
-    state = { ...state, loading: true, error: null };
-    notify();
+    core.set({ ...core.get(), loading: true, error: null });
 
     try {
       const raw = await client.call<unknown>(functionName, args);
       const data = options?.validate ? options.validate(raw) : (raw as TResult);
       if (data === null && options?.validate) {
-        state = { loading: false, data: null, error: VALIDATION_ERROR };
+        core.set({ loading: false, data: null, error: VALIDATION_ERROR });
       } else {
-        state = { loading: false, data: data as TResult, error: null };
+        core.set({ loading: false, data: data as TResult, error: null });
       }
     } catch (e) {
-      state = { loading: false, data: null, error: e as ForgeError };
+      core.set({ loading: false, data: null, error: e as ForgeError });
     }
-    notify();
   };
 
   fetchData();
 
   return {
-    subscribe(run) {
-      subscribers.add(run);
-      run(state);
-      return () => subscribers.delete(run);
-    },
+    subscribe: (run) => core.subscribe(run),
     refetch: fetchData,
-    reset: () => {
-      state = { loading: true, data: null, error: null };
-      notify();
-    },
+    reset: () => core.set({ loading: true, data: null, error: null }),
   };
 }
 
@@ -127,17 +138,14 @@ export function createSubscriptionStore<TArgs, TResult>(
   options?: StoreOptions<TResult>,
 ): SubscriptionStore<TResult> {
   const client = getForgeClient();
-  const subscribers = new Set<(value: SubscriptionResult<TResult>) => void>();
-  let unsubscribeFn: (() => void) | null = null;
-  let subscriptionId: string | null = null;
-  let state: SubscriptionResult<TResult> = {
+  const core = createStoreCore<SubscriptionResult<TResult>>({
     loading: true,
     data: null,
     error: null,
     stale: false,
-  };
-
-  const notify = () => subscribers.forEach((run) => run(state));
+  });
+  let unsubscribeFn: (() => void) | null = null;
+  let subscriptionId: string | null = null;
 
   const startSubscription = async () => {
     if (unsubscribeFn) {
@@ -148,8 +156,7 @@ export function createSubscriptionStore<TArgs, TResult>(
       client._unregisterQuery(subscriptionId);
     }
 
-    state = { ...state, loading: true, error: null, stale: false };
-    notify();
+    core.set({ ...core.get(), loading: true, error: null, stale: false });
 
     try {
       subscriptionId = crypto.randomUUID();
@@ -163,44 +170,37 @@ export function createSubscriptionStore<TArgs, TResult>(
       unsubscribeFn = client._subscribe(`sub:${subscriptionId}`, (raw: unknown) => {
         const data = options?.validate ? options.validate(raw) : (raw as TResult);
         if (data === null && options?.validate) {
-          state = { loading: false, data: null, error: VALIDATION_ERROR, stale: false };
+          core.set({ loading: false, data: null, error: VALIDATION_ERROR, stale: false });
         } else {
-          state = { loading: false, data: data as TResult, error: null, stale: false };
+          core.set({ loading: false, data: data as TResult, error: null, stale: false });
         }
-        notify();
       });
 
       const initialRaw = await client._registerQuery(subscriptionId, functionName, args);
       const initial = options?.validate ? options.validate(initialRaw) : (initialRaw as TResult);
       if (initial === null && options?.validate) {
-        state = { loading: false, data: null, error: VALIDATION_ERROR, stale: false };
+        core.set({ loading: false, data: null, error: VALIDATION_ERROR, stale: false });
       } else {
-        state = { loading: false, data: initial as TResult, error: null, stale: false };
+        core.set({ loading: false, data: initial as TResult, error: null, stale: false });
       }
-      notify();
     } catch (e) {
-      state = { loading: false, data: null, error: e as ForgeError, stale: false };
-      notify();
+      core.set({ loading: false, data: null, error: e as ForgeError, stale: false });
     }
   };
 
   startSubscription();
 
   return {
-    subscribe(run) {
-      subscribers.add(run);
-      run(state);
-      return () => {
-        subscribers.delete(run);
-        if (subscribers.size === 0 && unsubscribeFn) {
+    subscribe: (run) =>
+      core.subscribe(run, () => {
+        if (unsubscribeFn) {
           unsubscribeFn();
           unsubscribeFn = null;
           if (subscriptionId) {
             client._unregisterQuery(subscriptionId);
           }
         }
-      };
-    },
+      }),
     refetch: startSubscription,
     unsubscribe: () => {
       if (unsubscribeFn) {
@@ -212,10 +212,7 @@ export function createSubscriptionStore<TArgs, TResult>(
         subscriptionId = null;
       }
     },
-    reset: () => {
-      state = { loading: true, data: null, error: null, stale: false };
-      notify();
-    },
+    reset: () => core.set({ loading: true, data: null, error: null, stale: false }),
   };
 }
 
@@ -248,10 +245,7 @@ export function createJobStore<TArgs, TOutput>(
   args: RejectEmptyObject<TArgs>
 ): JobStore<TOutput> {
   const client = getForgeClient();
-  const subscribers = new Set<(value: JobState<TOutput> & { loading: boolean }) => void>();
-  let unsubscribeFn: (() => void) | null = null;
-  let clientSubId: string | null = null;
-  let state: JobState<TOutput> & { loading: boolean } = {
+  const core = createStoreCore<JobState<TOutput> & { loading: boolean }>({
     jobId: "",
     status: "pending",
     progress: null,
@@ -259,9 +253,9 @@ export function createJobStore<TArgs, TOutput>(
     output: null,
     error: null,
     loading: true,
-  };
-
-  const notify = () => subscribers.forEach((run) => run(state));
+  });
+  let unsubscribeFn: (() => void) | null = null;
+  let clientSubId: string | null = null;
 
   const startJob = async () => {
     try {
@@ -272,17 +266,15 @@ export function createJobStore<TArgs, TOutput>(
         throw new Error("Invalid job ID returned from server");
       }
 
-      state = { ...state, jobId, loading: false };
-      notify();
+      core.update((s) => ({ ...s, jobId, loading: false }));
 
       const applyJobData = (data: unknown) => {
         const jobData = asValidRecord(data, "job_id", "status");
         if (!jobData || !JOB_STATUSES.has(jobData.status as string)) {
-          state = { ...state, status: "failed", error: "Invalid job update", loading: false };
-          notify();
+          core.update((s) => ({ ...s, status: "failed", error: "Invalid job update", loading: false }));
           return;
         }
-        state = {
+        core.set({
           jobId: jobData.job_id as string,
           status: jobData.status as JobState<TOutput>["status"],
           progress: typeof jobData.progress === "number" ? jobData.progress : null,
@@ -290,8 +282,7 @@ export function createJobStore<TArgs, TOutput>(
           output: (jobData.output ?? null) as TOutput | null,
           error: typeof jobData.error === "string" ? jobData.error : null,
           loading: false,
-        };
-        notify();
+        });
       };
 
       clientSubId = crypto.randomUUID();
@@ -302,40 +293,23 @@ export function createJobStore<TArgs, TOutput>(
       const initialData = await client._registerJob(clientSubId, jobId);
       if (initialData) applyJobData(initialData);
     } catch (e) {
-      state = {
-        ...state,
-        status: "failed",
-        error: (e as Error).message,
-        loading: false,
-      };
-      notify();
+      core.update((s) => ({ ...s, status: "failed", error: (e as Error).message, loading: false }));
     }
   };
 
   startJob();
 
+  const release = () => {
+    unsubscribeFn = null;
+    if (clientSubId) {
+      client._unregisterJob(clientSubId);
+      clientSubId = null;
+    }
+  };
+
   return {
-    subscribe(run) {
-      subscribers.add(run);
-      run(state);
-      return () => {
-        subscribers.delete(run);
-        if (subscribers.size === 0) {
-          unsubscribeFn = null;
-          if (clientSubId) {
-            client._unregisterJob(clientSubId);
-            clientSubId = null;
-          }
-        }
-      };
-    },
-    unsubscribe: () => {
-      unsubscribeFn = null;
-      if (clientSubId) {
-        client._unregisterJob(clientSubId);
-        clientSubId = null;
-      }
-    },
+    subscribe: (run) => core.subscribe(run, release),
+    unsubscribe: release,
   };
 }
 
@@ -344,10 +318,7 @@ export function createWorkflowStore<TArgs, TOutput>(
   args: RejectEmptyObject<TArgs>,
 ): WorkflowStore<TOutput> {
   const client = getForgeClient();
-  const subscribers = new Set<(value: WorkflowState<TOutput> & { loading: boolean }) => void>();
-  let unsubscribeFn: (() => void) | null = null;
-  let clientSubId: string | null = null;
-  let state: WorkflowState<TOutput> & { loading: boolean } = {
+  const core = createStoreCore<WorkflowState<TOutput> & { loading: boolean }>({
     workflowId: "",
     status: "pending",
     step: null,
@@ -356,9 +327,9 @@ export function createWorkflowStore<TArgs, TOutput>(
     output: null,
     error: null,
     loading: true,
-  };
-
-  const notify = () => subscribers.forEach((run) => run(state));
+  });
+  let unsubscribeFn: (() => void) | null = null;
+  let clientSubId: string | null = null;
 
   const startWorkflow = async () => {
     try {
@@ -369,18 +340,16 @@ export function createWorkflowStore<TArgs, TOutput>(
         throw new Error("Invalid workflow ID returned from server");
       }
 
-      state = { ...state, workflowId, loading: false };
-      notify();
+      core.update((s) => ({ ...s, workflowId, loading: false }));
 
       const applyWorkflowData = (data: unknown) => {
         const wfData = asValidRecord(data, "workflow_id", "status");
         if (!wfData || !WORKFLOW_STATUSES.has(wfData.status as string)) {
-          state = { ...state, status: "failed", error: "Invalid workflow update", loading: false };
-          notify();
+          core.update((s) => ({ ...s, status: "failed", error: "Invalid workflow update", loading: false }));
           return;
         }
         const rawSteps = Array.isArray(wfData.steps) ? wfData.steps : [];
-        state = {
+        core.set({
           workflowId: wfData.workflow_id as string,
           status: wfData.status as WorkflowState<TOutput>["status"],
           step: typeof wfData.step === "string" ? wfData.step : null,
@@ -396,8 +365,7 @@ export function createWorkflowStore<TArgs, TOutput>(
           output: (wfData.output ?? null) as TOutput | null,
           error: typeof wfData.error === "string" ? wfData.error : null,
           loading: false,
-        };
-        notify();
+        });
       };
 
       clientSubId = crypto.randomUUID();
@@ -407,40 +375,23 @@ export function createWorkflowStore<TArgs, TOutput>(
       const initialData = await client._registerWorkflow(clientSubId, workflowId);
       if (initialData) applyWorkflowData(initialData);
     } catch (e) {
-      state = {
-        ...state,
-        status: "failed",
-        error: (e as Error).message,
-        loading: false,
-      };
-      notify();
+      core.update((s) => ({ ...s, status: "failed", error: (e as Error).message, loading: false }));
     }
   };
 
   startWorkflow();
 
+  const release = () => {
+    unsubscribeFn = null;
+    if (clientSubId) {
+      client._unregisterWorkflow(clientSubId);
+      clientSubId = null;
+    }
+  };
+
   return {
-    subscribe(run) {
-      subscribers.add(run);
-      run(state);
-      return () => {
-        subscribers.delete(run);
-        if (subscribers.size === 0) {
-          unsubscribeFn = null;
-          if (clientSubId) {
-            client._unregisterWorkflow(clientSubId);
-            clientSubId = null;
-          }
-        }
-      };
-    },
-    unsubscribe: () => {
-      unsubscribeFn = null;
-      if (clientSubId) {
-        client._unregisterWorkflow(clientSubId);
-        clientSubId = null;
-      }
-    },
+    subscribe: (run) => core.subscribe(run, release),
+    unsubscribe: release,
   };
 }
 
@@ -478,13 +429,10 @@ export function createOptimisticMutation<TArgs, TResult, TData>(
 ): OptimisticMutationStore<TArgs, TData> {
   const ttlMs = options?.ttlMs ?? 3000;
   const client = getForgeClient();
-  const subscribers = new Set<(value: TData | null) => void>();
-  let currentView: TData | null = null;
+  const core = createStoreCore<TData | null>(null);
   let latestSubData: TData | null = null;
   let pendingGeneration = 0;
   let ttlTimer: ReturnType<typeof setTimeout> | null = null;
-
-  const notify = () => subscribers.forEach((run) => run(currentView));
 
   const unsubscribeSub = subscription.subscribe((result) => {
     latestSubData = result.data;
@@ -496,30 +444,22 @@ export function createOptimisticMutation<TArgs, TResult, TData>(
         ttlTimer = null;
       }
     }
-    currentView = result.data;
-    notify();
+    core.set(result.data);
   });
 
   const data: Readable<TData | null> = {
-    subscribe(run) {
-      subscribers.add(run);
-      run(currentView);
-      return () => {
-        subscribers.delete(run);
-        if (subscribers.size === 0) {
-          unsubscribeSub();
-          if (ttlTimer) clearTimeout(ttlTimer);
-        }
-      };
-    },
+    subscribe: (run) =>
+      core.subscribe(run, () => {
+        unsubscribeSub();
+        if (ttlTimer) clearTimeout(ttlTimer);
+      }),
   };
 
   function fire(args: TArgs): void {
-    const snapshot = currentView;
+    const snapshot = core.get();
 
-    if (currentView !== null) {
-      currentView = apply(currentView, args);
-      notify();
+    if (snapshot !== null) {
+      core.set(apply(snapshot, args));
     }
 
     const generation = ++pendingGeneration;
@@ -528,8 +468,7 @@ export function createOptimisticMutation<TArgs, TResult, TData>(
     ttlTimer = setTimeout(() => {
       if (pendingGeneration === generation) {
         pendingGeneration = 0;
-        currentView = latestSubData;
-        notify();
+        core.set(latestSubData);
       }
     }, ttlMs);
 
@@ -540,8 +479,7 @@ export function createOptimisticMutation<TArgs, TResult, TData>(
           clearTimeout(ttlTimer);
           ttlTimer = null;
         }
-        currentView = snapshot;
-        notify();
+        core.set(snapshot);
       }
       const error =
         err instanceof ForgeClientError

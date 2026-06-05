@@ -126,7 +126,7 @@ Daily-rotating hashed visitor IDs, no cookies. Set `anonymize_ip = true` in `[si
 
 ### GeoIP
 
-Country resolution is automatic. Forge ships an embedded DB-IP Country Lite database that resolves client IPs to ISO 3166-1 alpha-2 country codes stored in the `country` column of `forge_signals_events`. No configuration needed. For city-level resolution, set `geoip_db_path` in `[signals]` to a MaxMind GeoLite2-City MMDB file.
+GeoIP has two backends. The default build (`geoip` feature, in `full`) is a runtime MaxMind MMDB reader: set `geoip_db_path` in `[signals]` to a GeoLite2-City MMDB to populate the `country` and `city` columns of `forge_signals_events`. For zero-config country resolution with no MMDB file, build with the `geoip-embedded` feature, which bakes in a DB-IP Country Lite database (the only geoip option needing a build-time download).
 
 ### Client config
 
