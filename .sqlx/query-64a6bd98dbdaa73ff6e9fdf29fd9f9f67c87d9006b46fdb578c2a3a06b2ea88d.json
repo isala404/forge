@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE forge_kv SET value = $2, expires_at = NULL WHERE key = $1 AND value = $3 AND (expires_at IS NULL OR expires_at > now()) RETURNING key",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "key",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bytea",
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "64a6bd98dbdaa73ff6e9fdf29fd9f9f67c87d9006b46fdb578c2a3a06b2ea88d"
+}

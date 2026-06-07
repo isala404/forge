@@ -1,5 +1,0 @@
-error: Private query `list_everything` does not filter by user_id, owner_id, or tenant_id on table(s) [secrets] (structural lint, not a security boundary — a column literally named user_id will pass; real isolation belongs in Postgres RLS). Add a WHERE clause scoped to the authenticated user, or use #[query(scope = "global")] (alias for `unscoped`) if this is intentional.
- --> tests/ui/fail/private_query_without_scope.rs:9:14
-  |
-9 | pub async fn list_everything(_ctx: &QueryContext) -> Result<Vec<String>> {
-  |              ^^^^^^^^^^^^^^^

@@ -1,0 +1,59 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH claimed AS (\n                   SELECT id FROM forge_jobs\n                   WHERE queue = $1 AND status = 'available' AND available_at <= now()\n                   ORDER BY available_at\n                   FOR UPDATE SKIP LOCKED\n                   LIMIT 1\n               )\n               UPDATE forge_jobs j\n               SET status = 'leased',\n                   leased_until = now() + make_interval(secs => $2),\n                   lease_token = gen_random_uuid(),\n                   lease_secs = $2\n               FROM claimed\n               WHERE j.id = claimed.id\n               RETURNING j.id AS \"id!\", j.queue AS \"queue!\", j.payload AS \"payload!\",\n                         j.attempts AS \"attempts!\", j.max_attempts AS \"max_attempts!\",\n                         j.leased_until AS \"leased_until!\", j.lease_token AS \"lease_token!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "queue!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "payload!",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 3,
+        "name": "attempts!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "max_attempts!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "leased_until!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "lease_token!",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Float8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "3229defdfd7f32961f29701bfc35d9293257f8a0b5b15cadcd8bd822ead85987"
+}

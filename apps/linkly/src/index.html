@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Linkly — tiny URL shortener</title>
+    <script src="/axios.min.js"></script>
+    <style>
+      :root {
+        --bg: #0f1117;
+        --card: #181b24;
+        --line: #262b37;
+        --fg: #e7e9ee;
+        --muted: #8b93a7;
+        --accent: #6ea8fe;
+        --accent2: #7ee787;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font:
+          15px/1.5 ui-sans-serif,
+          system-ui,
+          -apple-system,
+          Segoe UI,
+          Roboto,
+          sans-serif;
+        background: radial-gradient(
+          1200px 600px at 50% -10%,
+          #1b2030,
+          var(--bg)
+        );
+        color: var(--fg);
+        min-height: 100vh;
+      }
+      main {
+        max-width: 760px;
+        margin: 0 auto;
+        padding: 48px 20px 80px;
+      }
+      h1 {
+        font-size: 28px;
+        margin: 0 0 4px;
+      }
+      .sub {
+        color: var(--muted);
+        margin: 0 0 28px;
+      }
+      .sub strong {
+        color: var(--accent2);
+      }
+      form {
+        display: flex;
+        gap: 10px;
+        margin-bottom: 14px;
+      }
+      input {
+        flex: 1;
+        padding: 12px 14px;
+        border-radius: 10px;
+        border: 1px solid var(--line);
+        background: var(--card);
+        color: var(--fg);
+        font-size: 15px;
+      }
+      input:focus {
+        outline: none;
+        border-color: var(--accent);
+      }
+      button {
+        padding: 12px 20px;
+        border: 0;
+        border-radius: 10px;
+        cursor: pointer;
+        background: var(--accent);
+        color: #0a0d14;
+        font-weight: 600;
+        font-size: 15px;
+      }
+      button:hover {
+        filter: brightness(1.08);
+      }
+      .result {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 12px 14px;
+        margin-bottom: 22px;
+        color: var(--accent2);
+      }
+      .hidden {
+        display: none;
+      }
+      .stats {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        margin: 26px 0 12px;
+        color: var(--muted);
+      }
+      .stats #total {
+        font-size: 30px;
+        font-weight: 700;
+        color: var(--fg);
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 11px 12px;
+        border-bottom: 1px solid var(--line);
+      }
+      th {
+        color: var(--muted);
+        font-weight: 600;
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      td.dest {
+        color: var(--muted);
+        max-width: 380px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      td.clicks {
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+        font-weight: 600;
+      }
+      a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+      a:hover {
+        text-decoration: underline;
+      }
+      .empty {
+        color: var(--muted);
+        text-align: center;
+        padding: 26px;
+      }
+      footer {
+        margin-top: 30px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>🔗 Linkly</h1>
+      <p class="sub">
+        A tiny URL shortener on <strong>Forge</strong> — <code>kv</code> for
+        storage, <code>queue</code> for async click analytics.
+      </p>
+
+      <form id="form">
+        <input
+          id="url"
+          type="url"
+          placeholder="https://example.com/a/very/long/link"
+          required
+          autocomplete="off"
+        />
+        <button type="submit">Shorten</button>
+      </form>
+      <div id="result" class="result hidden"></div>
+
+      <div class="stats">
+        <span id="total">0</span
+        ><span>clicks processed (async, via the queue)</span>
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Short link</th>
+            <th>Destination</th>
+            <th>Clicks</th>
+          </tr>
+        </thead>
+        <tbody id="links"></tbody>
+      </table>
+
+      <footer>
+        Click a short link to open it — the redirect enqueues an event that the
+        background worker counts a beat later.
+      </footer>
+    </main>
+
+    <script>
+      const api = axios.create({ baseURL: "/" });
+
+      function escapeHtml(s) {
+        return String(s).replace(
+          /[&<>"']/g,
+          (c) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            })[c],
+        );
+      }
+
+      async function refresh() {
+        try {
+          const [links, stats] = await Promise.all([
+            api.get("api/links"),
+            api.get("api/stats"),
+          ]);
+          document.getElementById("total").textContent =
+            stats.data.total_clicks;
+          const rows = links.data
+            .map(
+              (l) => `
+                <tr>
+                  <td><a href="/r/${encodeURIComponent(l.code)}" target="_blank" rel="noopener">/r/${escapeHtml(l.code)}</a></td>
+                  <td class="dest" title="${escapeHtml(l.url)}">${escapeHtml(l.url)}</td>
+                  <td class="clicks">${l.clicks}</td>
+                </tr>`,
+            )
+            .join("");
+          document.getElementById("links").innerHTML =
+            rows ||
+            '<tr><td colspan="3" class="empty">No links yet — shorten one above.</td></tr>';
+        } catch (e) {
+          /* transient; the interval will retry */
+        }
+      }
+
+      document.getElementById("form").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const input = document.getElementById("url");
+        try {
+          const { data } = await api.post("api/links", { url: input.value });
+          const r = document.getElementById("result");
+          r.classList.remove("hidden");
+          r.innerHTML = `Created <a href="${data.short_url}" target="_blank" rel="noopener">${location.origin}${data.short_url}</a> &rarr; opens your link`;
+          input.value = "";
+          refresh();
+        } catch (err) {
+          alert(
+            (err.response && err.response.data) || "Could not shorten that URL",
+          );
+        }
+      });
+
+      refresh();
+      setInterval(refresh, 1500);
+    </script>
+  </body>
+</html>

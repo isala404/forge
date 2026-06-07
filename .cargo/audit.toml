@@ -1,24 +1,10 @@
+# cargo-audit configuration.
 [advisories]
-# Ignored advisories. CI runs `cargo audit --deny warnings` so anything not
-# listed here that turns up will fail the build. Each entry must have a clear
-# reason and ideally a removal condition.
 ignore = [
-    # RUSTSEC-2023-0071 — Marvin Attack on `rsa` 0.x. No fixed upstream version
-    # exists. Reaches us only via `sqlx-mysql` (transitive of sqlx-macros; we
-    # do not enable the mysql feature anywhere) and `jsonwebtoken`. Neither
-    # path uses RSA decryption with a remotely-supplied ciphertext, so the
-    # timing sidechannel is not exploitable in our stack. Revisit when `rsa`
-    # ships a constant-time fix or when sqlx removes the unconditional
-    # mysql-backend dep on rsa.
+    # RUSTSEC-2023-0071 (rsa "Marvin Attack" timing sidechannel). Pulled in only
+    # transitively through `sqlx-mysql`, which sqlx's macro crate compiles for all
+    # drivers. Forge is Postgres-only and never executes the MySQL/`rsa` path, so
+    # the vulnerable code is unreachable. No fixed `rsa` release exists yet; revisit
+    # when one ships or when sqlx stops pulling unused drivers into the macro build.
     "RUSTSEC-2023-0071",
-
-    # RUSTSEC-2025-0141 — `bincode` 1.x is unmaintained. Reaches us only via
-    # `db_ip` (the embedded country DB used by the `geoip` feature). Bincode 2
-    # is the maintained replacement; we drop this once `db_ip` upgrades.
-    "RUSTSEC-2025-0141",
-
-    # RUSTSEC-2025-0134 — `rustls-pemfile` is unmaintained. We use it for
-    # gateway TLS cert loading. The replacement is `rustls-pki-types`
-    # `PemObject` API. Tracked as cleanup; not exploitable on its own.
-    "RUSTSEC-2025-0134",
 ]

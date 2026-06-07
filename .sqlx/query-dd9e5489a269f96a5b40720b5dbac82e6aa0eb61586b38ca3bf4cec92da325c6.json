@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT attempts AS \"attempts!\", max_attempts AS \"max_attempts!\",\n                          backoff AS \"backoff!: Json<Backoff>\"\n                   FROM forge_jobs\n                   WHERE id = $1 AND lease_token = $2 AND status = 'leased'\n                   FOR UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "attempts!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "max_attempts!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "backoff!: Json<Backoff>",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "dd9e5489a269f96a5b40720b5dbac82e6aa0eb61586b38ca3bf4cec92da325c6"
+}

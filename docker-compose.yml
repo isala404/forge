@@ -10,21 +10,23 @@ services:
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      # postgres:18+ stores data in a major-version subdir; mount the parent, not /data.
+      - postgres_data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d forge_dev"]
       interval: 5s
       timeout: 5s
       retries: 5
 
+  # Optional local OTLP sink for the `otel` feature: `docker compose --profile observability up -d`
   otel-lgtm:
     image: grafana/otel-lgtm:latest
     profiles:
       - observability
     ports:
-      - "127.0.0.1:3000:3000"   # Grafana UI
-      - "127.0.0.1:4317:4317"   # OTLP gRPC
-      - "127.0.0.1:4318:4318"   # OTLP HTTP
+      - "127.0.0.1:3000:3000" # Grafana UI
+      - "127.0.0.1:4317:4317" # OTLP gRPC
+      - "127.0.0.1:4318:4318" # OTLP HTTP
     restart: unless-stopped
 
 volumes:

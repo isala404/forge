@@ -1,0 +1,14 @@
+[package]
+name = "linkly"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "A tiny URL shortener — a real SaaS app built on Forge (kv + queue)"
+
+# Standalone demo app: not a member of the forge workspace, so the framework's
+# dependency surface / supply-chain gates stay clean. Build it from this dir.
+[dependencies]
+forge = { package = "forge-rs", path = "../.." }
+tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "net", "signal"] }
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }

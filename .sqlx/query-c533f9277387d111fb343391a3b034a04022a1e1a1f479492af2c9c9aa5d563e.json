@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE forge_jobs SET queue = queue || '.dlq', status = 'available', attempts = 0, available_at = now(), lease_token = NULL, leased_until = NULL, lease_secs = NULL WHERE queue = $1 AND status = 'leased' AND leased_until <= now() AND attempts + 1 >= max_attempts",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c533f9277387d111fb343391a3b034a04022a1e1a1f479492af2c9c9aa5d563e"
+}

@@ -1,5 +1,0 @@
-error: Invalid cron schedule: "this is not a cron expression"
- --> tests/ui/fail/cron_invalid_expr.rs:8:14
-  |
-8 | pub async fn broken(_ctx: &CronContext) -> Result<()> {
-  |              ^^^^^^

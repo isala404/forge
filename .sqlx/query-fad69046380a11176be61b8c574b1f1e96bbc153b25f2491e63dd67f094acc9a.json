@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE forge_kv SET value = $2, expires_at = CASE WHEN $3::double precision IS NULL THEN NULL ELSE now() + make_interval(secs => $3) END WHERE key = $1 AND (expires_at IS NULL OR expires_at > now()) RETURNING key",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "key",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bytea",
+        "Float8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "fad69046380a11176be61b8c574b1f1e96bbc153b25f2491e63dd67f094acc9a"
+}

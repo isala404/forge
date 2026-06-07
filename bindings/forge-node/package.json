@@ -1,0 +1,20 @@
+{
+  "name": "forge-node",
+  "version": "0.1.0",
+  "description": "Node.js bindings for Forge (kv + queue) via napi-rs",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "napi": {
+    "name": "forge-node"
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.4"
+  },
+  "engines": {
+    "node": ">=14"
+  }
+}

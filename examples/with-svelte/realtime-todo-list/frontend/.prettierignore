@@ -1,7 +1,0 @@
-build/
-.svelte-kit/
-dist/
-src/lib/forge/
-node_modules/
-playwright-report/
-test-results/

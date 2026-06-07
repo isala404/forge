@@ -1,173 +1,96 @@
-[workspace]
-resolver = "3"
-members = [
-    "crates/forge",
-    "crates/forge-core",
-    "crates/forge-macros",
-    "crates/forge-runtime",
-    "crates/forge-codegen",
-    "crates/forge-harness",
-    "examples/with-svelte/minimal",
-    "examples/with-svelte/demo",
-    "examples/with-svelte/realtime-todo-list",
-    "examples/with-dioxus/minimal",
-    "examples/with-dioxus/demo",
-    "examples/with-dioxus/realtime-todo-list",
-    "benchmarks/app",
-]
-exclude = [
-    "packages/forge-dioxus",
-]
-
-[workspace.package]
-version = "0.10.2"
+[package]
+name = "forge-rs"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT"
 repository = "https://github.com/isala404/forge"
-description = "Full-stack framework with PostgreSQL as the only infrastructure dependency"
-keywords = ["framework", "postgresql", "full-stack", "backend", "web"]
-categories = ["web-programming", "database"]
+description = "The standard library for agent-built SaaS: hardened infra primitives on Postgres"
+keywords = ["postgres", "queue", "kv", "primitives", "backend"]
+categories = ["database", "asynchronous"]
 
-[workspace.dependencies]
-# FORGE packages (use these for examples and internal crates)
-# Note: The package is named "forgex" but the library is "forge" for cleaner imports
-forge = { package = "forgex", path = "crates/forge" }
-forge-core = { path = "crates/forge-core" }
-forge-macros = { path = "crates/forge-macros" }
-forge-runtime = { path = "crates/forge-runtime" }
-forge-codegen = { path = "crates/forge-codegen" }
-forge-harness = { path = "crates/forge-harness" }
+# The library is `forge` even though the package is `forge-rs`, for clean `use forge::...`.
+[lib]
+name = "forge"
+path = "src/lib.rs"
 
-# Async runtime
-tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "process", "io-util", "fs"] }
+[features]
+default = ["postgres"]
+# The Postgres backend implements every primitive. It is the only backend in v0.1;
+# the feature exists so future backends (redis, s3) slot in behind the same structure.
+postgres = []
+# One-line OTLP export wiring for traces. Without it, spans still flow to whatever
+# `tracing` subscriber the app installs.
+otel = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+    "dep:tracing-subscriber",
+]
+# Enables the `forge::testing` harness (per-test isolated databases) and gates the
+# DB-backed integration tests. A sentinel test fails loudly if TEST_DATABASE_URL is unset,
+# so "0 tests ran" cannot masquerade as a pass.
+pg-tests = []
+
+[dependencies]
+# Async + runtime
+tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
+async-trait = "0.1"
 
 # Database
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "chrono", "json", "macros"] }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "postgres",
+    "uuid",
+    "chrono",
+    "json",
+    "macros",
+] }
 
-# Serialization
+# Values + serialization
+bytes = "1.10"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.9"
-# Pinned: schemars 1.x is a breaking rewrite; stay on 0.8.x until we can migrate JsonSchema derives.
-schemars = { version = "=0.8.22", features = ["chrono", "uuid1"] }
-jsonschema = "0.28"
-
-# HTTP/WebSocket
-axum = { version = "0.8", features = ["ws", "multipart"] }
-tower = { version = "0.5", features = ["limit", "timeout", "util"] }
-tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-
-# Utilities
 uuid = { version = "1.19", features = ["v4", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
-chrono-tz = "0.10"
-bytes = "1.10"
-futures-core = "0.3"
-cron = "0.15"
+chrono = { version = "0.4", default-features = false, features = ["serde", "std", "clock"] }
+
+# Errors
 thiserror = "2.0"
-# CLI-only; do not use in library crates
-anyhow = "1.0"
-subtle = "2"
-ahash = "0.8"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
-tracing-opentelemetry = "0.28"
 
-# Pinned: OTel 0.27 is the latest stable release as of Rust edition 2024.
-opentelemetry = { version = "0.27", features = ["trace", "metrics", "logs"] }
-opentelemetry_sdk = { version = "0.27", features = ["rt-tokio", "trace", "metrics", "logs"] }
-opentelemetry-otlp = { version = "0.27", default-features = false, features = ["http-json", "reqwest-rustls", "trace", "metrics", "logs", "internal-logs"] }
-opentelemetry-semantic-conventions = "0.27"
-opentelemetry-appender-tracing = "0.27"
-
-# Proc macros
-syn = { version = "2.0", features = ["full", "visit"] }
-darling = { version = "0.20" }
-quote = "1.0"
-proc-macro-crate = "3"
-inventory = "0.3"
+# Hashing (migration checksums, key hashing in spans)
 sha2 = "0.10"
-blake3 = "1"
-proc-macro2 = "1.0"
-base64 = "0.22"
-futures-util = "0.3"
-tokio-util = "0.7"
-tempfile = "3"
 
-# SQL parsing
-sqlparser = "0.54"
+# Observability — always-on spans + metrics facade; no exporter required.
+tracing = "0.1"
+metrics = "0.24"
 
-# Networking
-ipnet = "2"
+# OTLP export (feature = "otel")
+opentelemetry = { version = "0.27", optional = true, features = ["trace"] }
+opentelemetry_sdk = { version = "0.27", optional = true, features = ["rt-tokio", "trace"] }
+opentelemetry-otlp = { version = "0.27", optional = true, default-features = false, features = ["http-json", "reqwest-rustls", "trace"] }
+tracing-opentelemetry = { version = "0.28", optional = true }
+tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter", "fmt"] }
 
-# Concurrent data structures
-dashmap = "6"
+[dev-dependencies]
+tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "test-util"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Testing
-tokio-test = "0.4"
-testcontainers = "0.27"
-testcontainers-modules = { version = "0.15", features = ["postgres"] }
-insta = { version = "1.41", default-features = false }
-trybuild = "1.0"
-eventsource-stream = "0.2"
+[lints.rust]
+unsafe_code = "forbid"
 
-# Example dependencies
-dotenvy = "0.15"
-argon2 = "0.5"
-password-hash = "0.5"
-jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto", "use_pem"] }
-rust-embed = "8"
-mime_guess = "2"
-which = "7"
-
-[workspace.lints.rust]
-unsafe_code = "deny"
-dead_code = "deny"
-
-[workspace.lints.clippy]
+[lints.clippy]
 panic = "deny"
-unimplemented = "deny"
-todo = "deny"
 unwrap_used = "deny"
 indexing_slicing = "deny"
 disallowed_methods = "deny"
+todo = "deny"
+unimplemented = "deny"
 
 [profile.dev]
-# Smaller debug info keeps incremental builds and target/ size in check.
-# `line-tables-only` is enough for backtraces and panic locations.
 debug = "line-tables-only"
-split-debuginfo = "unpacked"
-incremental = true
-codegen-units = 256
-
-[profile.dev.package."*"]
-# Dependencies rarely need debug info for app development. Trims target/
-# substantially without affecting workspace iteration.
-debug = false
-
-[profile.test]
-debug = "line-tables-only"
-incremental = true
-codegen-units = 256
 
 [profile.release]
 lto = true
 codegen-units = 1
-strip = "debuginfo"
-
-# Ad-hoc release builds (smoke tests, local benchmarks) don't need full LTO.
-# Use with `cargo build --profile release-fast` to skip the LTO link stall.
-[profile.release-fast]
-inherits = "release"
-lto = false
-codegen-units = 16
-strip = "debuginfo"
-
-[patch.crates-io]
-forgex = { path = "crates/forge" }
-forge-core = { path = "crates/forge-core" }
-forge-macros = { path = "crates/forge-macros" }
-forge-runtime = { path = "crates/forge-runtime" }
-forge-codegen = { path = "crates/forge-codegen" }
+strip = true

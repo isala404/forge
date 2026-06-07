@@ -4,6 +4,4 @@ node_modules
 .env
 !examples/**/.env
 .agents/
-crates/forge/generated/
-forge.schema.json
 **/test-results/**
