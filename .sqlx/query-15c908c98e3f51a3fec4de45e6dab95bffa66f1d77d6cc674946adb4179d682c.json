@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO forge_flags (key, rule) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET rule = EXCLUDED.rule",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "15c908c98e3f51a3fec4de45e6dab95bffa66f1d77d6cc674946adb4179d682c"
+}

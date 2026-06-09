@@ -32,6 +32,9 @@ otel = [
 # DB-backed integration tests. A sentinel test fails loudly if TEST_DATABASE_URL is unset,
 # so "0 tests ran" cannot masquerade as a pass.
 pg-tests = []
+# The optional axum router that serves presigned blob URLs against the Postgres
+# backend (`forge.blob_router()`). Off by default; presign signing works without it.
+blob-router = ["dep:axum"]
 
 [dependencies]
 # Async + runtime
@@ -50,6 +53,8 @@ sqlx = { version = "0.8", default-features = false, features = [
 
 # Values + serialization
 bytes = "1.10"
+# Streams: the pubsub primitive returns a boxed Stream of LISTEN/NOTIFY messages.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 uuid = { version = "1.19", features = ["v4", "serde"] }
@@ -60,6 +65,14 @@ thiserror = "2.0"
 
 # Hashing (migration checksums, key hashing in spans)
 sha2 = "0.10"
+
+# Blob presigned URLs: HMAC-SHA256 signing + percent-encoding the key into the URL.
+hmac = "0.12"
+percent-encoding = "2.3"
+
+# Auth: argon2id password hashing (PHC strings) + a CSPRNG for salts and tokens.
+argon2 = "0.5"
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 # Observability — always-on spans + metrics facade; no exporter required.
 tracing = "0.1"
@@ -72,9 +85,13 @@ opentelemetry-otlp = { version = "0.27", optional = true, default-features = fal
 tracing-opentelemetry = { version = "0.28", optional = true }
 tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter", "fmt"] }
 
+# Blob presign router (feature = "blob-router")
+axum = { version = "0.8", optional = true, default-features = false, features = ["tokio", "http1", "query"] }
+
 [dev-dependencies]
 tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 [lints.rust]
 unsafe_code = "forbid"

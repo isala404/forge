@@ -28,6 +28,16 @@ pub struct ForgeConfig {
     /// How long completed (`done`) jobs are retained before the maintenance
     /// sweep purges them. Default 7 days.
     pub queue_retention: Duration,
+    /// Whether `ratelimit().check` fails open (allow + warn) on a backend error.
+    /// Default true; set false for abuse- or payment-sensitive buckets.
+    pub ratelimit_fail_open: bool,
+    /// HMAC secret for presigned blob URLs. `None` leaves presigning unconfigured
+    /// (the blob CRUD surface still works); set it to enable `presign_*` and the
+    /// `blob-router`. Fill from `FORGE_BLOB_SIGNING_SECRET`.
+    pub blob_signing_secret: Option<String>,
+    /// URL prefix the blob router is mounted at; presigned URLs point here.
+    /// Default `/_forge/blob`.
+    pub blob_base_url: String,
 }
 
 impl Default for ForgeConfig {
@@ -40,6 +50,9 @@ impl Default for ForgeConfig {
             kv_namespace: String::new(),
             queue_dedup_window: Duration::from_secs(5 * 60),
             queue_retention: Duration::from_secs(7 * 24 * 60 * 60),
+            ratelimit_fail_open: true,
+            blob_signing_secret: None,
+            blob_base_url: "/_forge/blob".to_string(),
         }
     }
 }
@@ -68,6 +81,12 @@ impl ForgeConfig {
         }
         if let Ok(v) = std::env::var("FORGE_KV_NAMESPACE") {
             cfg.kv_namespace = v;
+        }
+        if let Ok(v) = std::env::var("FORGE_BLOB_SIGNING_SECRET") {
+            cfg.blob_signing_secret = Some(v);
+        }
+        if let Ok(v) = std::env::var("FORGE_BLOB_BASE_URL") {
+            cfg.blob_base_url = v;
         }
         Ok(cfg)
     }
@@ -105,6 +124,24 @@ impl ForgeConfig {
     /// Set how long completed jobs are retained before the maintenance sweep purges them.
     pub fn with_queue_retention(mut self, d: Duration) -> Self {
         self.queue_retention = d;
+        self
+    }
+
+    /// Set the ratelimit failure mode (`true` = fail-open, the default).
+    pub fn with_ratelimit_fail_open(mut self, fail_open: bool) -> Self {
+        self.ratelimit_fail_open = fail_open;
+        self
+    }
+
+    /// Set the HMAC secret for presigned blob URLs (enables `presign_*`).
+    pub fn with_blob_signing_secret(mut self, secret: impl Into<String>) -> Self {
+        self.blob_signing_secret = Some(secret.into());
+        self
+    }
+
+    /// Set the URL prefix the blob router is mounted at.
+    pub fn with_blob_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.blob_base_url = base_url.into();
         self
     }
 
@@ -146,6 +183,12 @@ impl std::fmt::Debug for ForgeConfig {
             .field("kv_namespace", &self.kv_namespace)
             .field("queue_dedup_window", &self.queue_dedup_window)
             .field("queue_retention", &self.queue_retention)
+            .field("ratelimit_fail_open", &self.ratelimit_fail_open)
+            .field(
+                "blob_signing_secret",
+                &self.blob_signing_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .field("blob_base_url", &self.blob_base_url)
             .finish()
     }
 }

@@ -1,0 +1,58 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT name, kind, cron_expr, target_queue, payload, job_id,\n                          EXTRACT(EPOCH FROM (now() - next_run))::float8 AS \"lateness!\"\n                   FROM forge_schedules\n                   WHERE next_run <= now()\n                   ORDER BY next_run\n                   FOR UPDATE SKIP LOCKED\n                   LIMIT $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "kind",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "cron_expr",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "target_queue",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "payload",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 5,
+        "name": "job_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 6,
+        "name": "lateness!",
+        "type_info": "Float8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "2d46c4b8c5edac7f695e3c73189c11097efe8dd8c804cc15c5d6e764af05448d"
+}

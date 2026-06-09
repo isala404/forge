@@ -1,0 +1,50 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT name, kind, cron_expr, target_queue, next_run, last_run FROM forge_schedules ORDER BY name",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "kind",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "cron_expr",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "target_queue",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "next_run",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 5,
+        "name": "last_run",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "8cbde844c810fc0696c25b5e7a1dde4daee1bc7ce812495bdf6e610f2bede197"
+}

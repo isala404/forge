@@ -4,10 +4,14 @@ use sha2::{Digest, Sha256};
 
 /// SHA-256 of `bytes` as a lowercase hex string. Stable across binaries/deploys (unlike `DefaultHasher`), so safe for migration checksums.
 pub fn sha256_hex(bytes: &[u8]) -> String {
+    hex(Sha256::digest(bytes).as_slice())
+}
+
+/// Lowercase hex encoding of `bytes`. Used for random token rendering and HMAC tags.
+pub fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write;
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(digest.len() * 2);
-    for b in digest {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
         let _ = write!(out, "{b:02x}");
     }
     out

@@ -9,13 +9,28 @@ export interface JsJob {
   payload: string
   attempt: number
 }
+/** A rate-limit decision (maps onto the IETF RateLimit header fields). */
+export interface JsDecision {
+  allowed: boolean
+  limit: number
+  remaining: number
+  retryAfterSeconds?: number
+}
+/** A freshly minted API key. `secret` is shown exactly once. */
+export interface JsApiKey {
+  id: string
+  secret: string
+}
 /**
  * A Forge client: one Postgres pool, every primitive. Construct with
  * `ForgeClient.connect(url)`.
  */
 export declare class ForgeClient {
-  /** Connect, run migrations, and ping — mirrors `Forge::init`. */
-  static connect(postgresUrl: string): Promise<ForgeClient>
+  /**
+   * Connect, run migrations, and ping — mirrors `Forge::init`. Pass
+   * `signingSecret` to enable presigned blob URLs.
+   */
+  static connect(postgresUrl: string, signingSecret?: string | undefined | null): Promise<ForgeClient>
   /** `GET key` → the value as a UTF-8 string, or `null`. */
   kvGet(key: string): Promise<string | null>
   /**
@@ -38,4 +53,64 @@ export declare class ForgeClient {
   queueAck(id: string): Promise<void>
   /** Nack a leased job by id; optional `retrySeconds` delays the redelivery. */
   queueNack(id: string, retrySeconds?: number | undefined | null): Promise<void>
+  /** Store a config value (`set_raw`). */
+  configSet(key: string, value: string): Promise<void>
+  /** Resolve a config value (env `FORGE_CFG_<KEY>` > store > `null`). */
+  configGet(key: string): Promise<string | null>
+  /** Set a percentage-rollout flag (`0..=100`). */
+  setFlagPercent(key: string, percent: number): Promise<void>
+  /**
+   * Evaluate a boolean flag for `targetingKey`. Never throws — resolves to
+   * `defaultValue` on any failure.
+   */
+  flag(key: string, defaultValue: boolean, targetingKey?: string | undefined | null): Promise<boolean>
+  /** Atomic check-and-consume: `max` per `perSeconds` (token bucket). */
+  rateLimitCheck(bucket: string, key: string, max: number, perSeconds: number): Promise<JsDecision>
+  /** Store an object (string body). */
+  blobPut(key: string, data: string, contentType?: string | undefined | null): Promise<void>
+  /** Fetch an object as a UTF-8 string, or `null`. */
+  blobGet(key: string): Promise<string | null>
+  /** A presigned download URL (needs a `signingSecret` at connect). */
+  blobPresignDownload(key: string, expiresSeconds: number): Promise<string>
+  /** A presigned upload (PUT) URL, capped at `maxBytes` (needs a `signingSecret`). */
+  blobPresignUpload(key: string, expiresSeconds: number, maxBytes: number): Promise<string>
+  /** The stored content type for an object, or `null` if it does not exist. */
+  blobContentType(key: string): Promise<string | null>
+  /** Delete an object; returns whether it existed. */
+  blobDelete(key: string): Promise<boolean>
+  /** argon2id hash of `plain` (a PHC string), to store in your users table. */
+  hashPassword(plain: string): Promise<string>
+  /** Constant-time verify of `plain` against a stored PHC `hash`. */
+  verifyPassword(plain: string, hash: string): Promise<boolean>
+  /**
+   * Create a session for `userId`; returns the opaque token (shown once).
+   * Optional sliding `idleSeconds` and hard `absoluteSeconds` deadlines.
+   */
+  createSession(userId: string, idleSeconds?: number | undefined | null, absoluteSeconds?: number | undefined | null): Promise<string>
+  /** Validate a session token; returns the `userId`, or `null`. */
+  validateSession(token: string): Promise<string | null>
+  /** Revoke a single session by token (log out this device). Idempotent. */
+  revokeSession(token: string): Promise<void>
+  /** Revoke every session for `userId` (log out everywhere). Returns the count. */
+  revokeAllSessions(userId: string): Promise<number>
+  /** Mint an `fk_` API key for `ownerId`; the `secret` is shown once. */
+  createApiKey(ownerId: string, label: string): Promise<JsApiKey>
+  /** Verify an API key; returns the `ownerId`, or `null`. */
+  verifyApiKey(key: string): Promise<string | null>
+  /** Schedule a one-shot enqueue at `whenEpochMs`; returns the future JobId. */
+  scheduleAt(whenEpochMs: number, queue: string, payload: string): Promise<string>
+  /** Upsert a recurring cron schedule by name. */
+  scheduleCron(name: string, expr: string, queue: string, payload: string): Promise<void>
+  /**
+   * Fire all due schedules once; returns how many jobs were enqueued. Run on an
+   * interval (e.g. every 30s) to drive the scheduler from Node.
+   */
+  runSchedulerOnce(): Promise<number>
+  /** Publish a payload to a realtime topic (fire-and-forget). */
+  pubsubPublish(topic: string, payload: string): Promise<void>
+  /**
+   * The Postgres `LISTEN`/`NOTIFY` channel a topic maps to. `LISTEN` on this with
+   * a native Postgres client to receive what `pubsub_publish(topic, …)` sends.
+   */
+  pubsubChannel(topic: string): string
 }

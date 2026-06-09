@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE forge_ratelimit SET window_start = $3, cur_count = $4, prev_count = $5, updated_at = now() WHERE bucket = $1 AND subject = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Float8",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8f54ab30a68a3eac87741f729627d66c016e951c78b79308ec3b589af4c20adc"
+}

@@ -1,0 +1,54 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT key, content_type, etag, size,\n                          metadata AS \"metadata: Json<Meta>\", last_modified\n                   FROM forge_blobs\n                   WHERE key LIKE $1 ESCAPE '\\' AND ($2::text IS NULL OR key > $2)\n                   ORDER BY key LIMIT $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "content_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "etag",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "size",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "metadata: Json<Meta>",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 5,
+        "name": "last_modified",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "7aaa77c65ebc86490e1ad67d05731818f35a4132ce0d2b3029bd56f63f6a6d7a"
+}

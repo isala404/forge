@@ -1,0 +1,22 @@
+[package]
+name = "forge-py"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Python (pyo3) bindings for Forge — a representative slice of every primitive"
+
+# Build with maturin: `maturin develop` (dev) or `maturin build --release`.
+[lib]
+name = "forge_py"
+crate-type = ["cdylib"]
+
+[dependencies]
+forge = { package = "forge-rs", path = "../.." }
+# abi3-py39: build against the stable ABI so one wheel runs on CPython >= 3.9
+# (including newer interpreters than this pyo3 release knows about).
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+
+[profile.release]
+lto = true
+strip = "symbols"

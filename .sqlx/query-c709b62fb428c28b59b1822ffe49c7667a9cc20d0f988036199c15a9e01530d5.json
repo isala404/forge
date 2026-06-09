@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO forge_schedules (name, kind, cron_expr, target_queue, payload, job_id, next_run) VALUES ($1, 'cron', $2, $3, $4, NULL, $5) ON CONFLICT (name) DO UPDATE SET kind = 'cron', cron_expr = EXCLUDED.cron_expr, target_queue = EXCLUDED.target_queue, payload = EXCLUDED.payload, job_id = NULL, next_run = EXCLUDED.next_run, last_run = NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Bytea",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c709b62fb428c28b59b1822ffe49c7667a9cc20d0f988036199c15a9e01530d5"
+}

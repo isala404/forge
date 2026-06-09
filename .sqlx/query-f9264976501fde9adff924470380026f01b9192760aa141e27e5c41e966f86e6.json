@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM forge_sessions WHERE idle_deadline <= now() OR abs_deadline <= now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "f9264976501fde9adff924470380026f01b9192760aa141e27e5c41e966f86e6"
+}

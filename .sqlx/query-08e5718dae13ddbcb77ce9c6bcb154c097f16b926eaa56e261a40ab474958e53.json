@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE forge_sessions\n                   SET idle_deadline = LEAST(now() + make_interval(secs => idle_secs), abs_deadline)\n                   WHERE token_hash = $1 AND idle_deadline > now() AND abs_deadline > now()\n                   RETURNING user_id, created_at, idle_deadline AS expires_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 2,
+        "name": "expires_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "08e5718dae13ddbcb77ce9c6bcb154c097f16b926eaa56e261a40ab474958e53"
+}

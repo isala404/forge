@@ -18,6 +18,10 @@ Each primitive mirrors a design the industry (and every agent's training data) a
 
 Postgres backs every primitive by default, with zero extra infrastructure. Dedicated backends (Redis, S3, and so on) plug in later behind the same interface, without changing application code.
 
+## Examples & bindings
+
+The same guided tour of **every** primitive — auth, config + flags, rate limiting, blob storage with a presigned URL, and a scheduled job — runs end to end in three languages under [`examples/`](examples/): Rust (`cargo run --example full_tour`), JavaScript (via the [`forge-node`](bindings/forge-node) napi binding), and Python (via the [`forge-py`](bindings/forge-py) pyo3 binding). Each primitive's semantic contract lives in [`docs/contracts/`](docs/contracts/).
+
 **Status:** pre-v1, under active rewrite. The previous full-stack framework remains in this repository's git history. The public surface freezes at 1.0; until then it changes freely.
 
 MIT.
