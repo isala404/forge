@@ -48,8 +48,10 @@ pub use error::{ForgeError, Result};
 pub use kv::{Kv, KvExt, SetMode, SetOpts};
 pub use pubsub::{Pubsub, Subscription};
 pub use queue::worker::WorkerBuilder;
-pub use queue::{Backoff, DequeueOpts, EnqueueOpts, Job, JobId, NackOpts, Queue, QueueExt};
-pub use ratelimit::{Algo, Decision, Limit, RateLimit};
+pub use queue::{
+    Backoff, DequeueOpts, EnqueueOpts, Job, JobId, NackOpts, Queue, QueueDepth, QueueExt,
+};
+pub use ratelimit::{Algo, Decision, FailMode, Limit, RateLimit};
 pub use schedule::{Schedule, ScheduleInfo, ScheduleKind};
 pub use types::Cursor;
 
@@ -76,6 +78,8 @@ struct ForgeInner {
     auth: Arc<auth::PgAuth>,
     schedule: Arc<schedule::PgSchedule>,
     pubsub: Arc<pubsub::PgPubsub>,
+    #[cfg(feature = "postgres")]
+    pool: sqlx::PgPool,
 }
 
 impl Forge {
@@ -113,7 +117,7 @@ impl Forge {
         ));
         let auth = Arc::new(auth::PgAuth::new(pool.clone()));
         let pubsub = Arc::new(pubsub::PgPubsub::new(pool.clone(), cfg.postgres.clone()));
-        let schedule = Arc::new(schedule::PgSchedule::new(pool));
+        let schedule = Arc::new(schedule::PgSchedule::new(pool.clone()));
 
         Ok(Self {
             inner: Arc::new(ForgeInner {
@@ -125,8 +129,20 @@ impl Forge {
                 auth,
                 schedule,
                 pubsub,
+                pool,
             }),
         })
+    }
+
+    /// The underlying Postgres pool that backs every primitive. Exposed as an
+    /// escape hatch so an application can run its *own* domain SQL on the same pool
+    /// Forge already manages, rather than opening a second pool to the same database.
+    ///
+    /// Using it ties the application to Forge's `sqlx` major version; that is the
+    /// price of sharing the connection pool, and it is opt-in.
+    #[cfg(feature = "postgres")]
+    pub fn pool(&self) -> &sqlx::PgPool {
+        &self.inner.pool
     }
 
     /// The key/value store. Lineage: Redis. See `docs/contracts/kv.md`.
@@ -191,9 +207,22 @@ impl Forge {
     }
 
     /// Like [`Forge::run_scheduler`] but stops when `shutdown` resolves (for tests or
-    /// custom lifecycle management).
+    /// custom lifecycle management). Ticks every 30s.
     pub async fn run_scheduler_until<S: std::future::Future<Output = ()> + Send>(
         &self,
+        shutdown: S,
+    ) {
+        self.run_scheduler_with(std::time::Duration::from_secs(30), shutdown)
+            .await;
+    }
+
+    /// Like [`Forge::run_scheduler_until`] but with a caller-chosen tick `interval`
+    /// instead of the fixed 30s — so an app needn't hand-roll its own
+    /// `process_due` loop just to change the cadence (e.g. a short tick in tests).
+    /// Each tick enqueues every due schedule exactly once; safe across replicas.
+    pub async fn run_scheduler_with<S: std::future::Future<Output = ()> + Send>(
+        &self,
+        interval: std::time::Duration,
         shutdown: S,
     ) {
         let mut shutdown = std::pin::pin!(shutdown);
@@ -202,7 +231,7 @@ impl Forge {
                 tracing::warn!(error = %e, "scheduler tick failed; will retry");
             }
             tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {},
+                _ = tokio::time::sleep(interval) => {},
                 _ = &mut shutdown => break,
             }
         }

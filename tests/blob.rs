@@ -118,6 +118,76 @@ async fn presign_requires_secret_and_signs() {
 }
 
 #[tokio::test]
+async fn verify_presigned_matches_what_presign_mints() {
+    let db = TestDatabase::new().await.unwrap();
+    let forge = Forge::init(ForgeConfig::new(db.url()).with_blob_signing_secret("test-secret"))
+        .await
+        .unwrap();
+    let b = forge.blob();
+
+    // Mint an upload URL, then pull the signed params back off it.
+    let url = b
+        .presign_upload("media/x.bin", Duration::from_secs(600), 4096)
+        .await
+        .unwrap();
+    let q = url.split_once('?').unwrap().1;
+    let mut key = String::new();
+    let (mut expires, mut max_bytes) = (0i64, 0u64);
+    let mut sig = String::new();
+    for kv in q.split('&') {
+        let (k, v) = kv.split_once('=').unwrap();
+        match k {
+            // value is percent-encoded; the only escape here is for the path, which
+            // verify reconstructs from the same key we pass, so decode minimally.
+            "key" => key = v.replace("%2F", "/").replace("%2E", "."),
+            "expires" => expires = v.parse().unwrap(),
+            "max_bytes" => max_bytes = v.parse().unwrap(),
+            "sig" => sig = v.to_string(),
+            _ => {}
+        }
+    }
+    assert_eq!(key, "media/x.bin");
+
+    // A faithful PUT verification passes; the matching GET (different method) fails.
+    assert!(
+        b.verify_presigned("PUT", &key, expires, max_bytes, &sig)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !b.verify_presigned("GET", &key, expires, max_bytes, &sig)
+            .await
+            .unwrap()
+    );
+    // Tampered size, expired URL, and bad method are all rejected.
+    assert!(
+        !b.verify_presigned("PUT", &key, expires, max_bytes + 1, &sig)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !b.verify_presigned("PUT", &key, 1, max_bytes, &sig)
+            .await
+            .unwrap()
+    );
+    assert!(matches!(
+        b.verify_presigned("PATCH", &key, expires, max_bytes, &sig)
+            .await,
+        Err(ForgeError::Invalid(_))
+    ));
+
+    // No signing secret => Config error.
+    let plain = db.forge().await.unwrap();
+    assert!(matches!(
+        plain
+            .blob()
+            .verify_presigned("PUT", "k", expires, 0, "deadbeef")
+            .await,
+        Err(ForgeError::Config(_))
+    ));
+}
+
+#[tokio::test]
 async fn limits_are_enforced() {
     let db = TestDatabase::new().await.unwrap();
     let forge = db.forge().await.unwrap();

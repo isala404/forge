@@ -1,0 +1,171 @@
+/* Design tokens. One accent (teal), one radius scale, one neutral ramp. Light is
+   the default; dark mirrors every token under prefers-color-scheme so hierarchy and
+   contrast survive the switch. No pure black or pure white. */
+:root {
+  color-scheme: light dark;
+
+  --accent: #0f9d76;
+  --accent-strong: #0c7d5e;
+  --accent-contrast: #ffffff;
+  --accent-soft: rgba(15, 157, 118, 0.12);
+
+  --bg: #f3f5f7;
+  --bg-panel: #ffffff;
+  --bg-elevated: #ffffff;
+  --bg-sunken: #eceff2;
+  --bg-bubble-in: #ffffff;
+  --bg-bubble-out: #d6f4e4;
+  --bg-hover: rgba(15, 23, 32, 0.04);
+  --bg-active: rgba(15, 157, 118, 0.1);
+
+  --text: #131b22;
+  --text-muted: #5a6b78;
+  --text-faint: #8b9aa6;
+  --text-on-accent: #ffffff;
+
+  --border: #e2e7eb;
+  --border-strong: #cfd6dc;
+
+  --danger: #d1453b;
+  --danger-soft: rgba(209, 69, 59, 0.12);
+  --online: #18b66b;
+
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 18px;
+  --radius-pill: 999px;
+
+  --shadow-sm: 0 1px 2px rgba(20, 33, 43, 0.08);
+  --shadow-md: 0 6px 24px rgba(20, 33, 43, 0.1);
+  --shadow-lg: 0 18px 50px rgba(20, 33, 43, 0.16);
+
+  --font: 'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
+    Helvetica, Arial, sans-serif;
+  --font-mono: 'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
+
+  font-family: var(--font);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --accent: #1fc28f;
+    --accent-strong: #25d39c;
+    --accent-contrast: #06231a;
+    --accent-soft: rgba(31, 194, 143, 0.16);
+
+    --bg: #0b141a;
+    --bg-panel: #111b21;
+    --bg-elevated: #1c282f;
+    --bg-sunken: #0a1117;
+    --bg-bubble-in: #1f2c33;
+    --bg-bubble-out: #144d3a;
+    --bg-hover: rgba(255, 255, 255, 0.05);
+    --bg-active: rgba(31, 194, 143, 0.14);
+
+    --text: #e7edf0;
+    --text-muted: #97a6b0;
+    --text-faint: #6b7d88;
+    --text-on-accent: #06231a;
+
+    --border: #21323b;
+    --border-strong: #2c4049;
+
+    --danger: #f0625a;
+    --danger-soft: rgba(240, 98, 90, 0.16);
+    --online: #2ee37e;
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+    --shadow-md: 0 6px 24px rgba(0, 0, 0, 0.45);
+    --shadow-lg: 0 18px 50px rgba(0, 0, 0, 0.55);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+input,
+textarea,
+select {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+}
+
+a {
+  color: var(--accent);
+}
+
+::selection {
+  background: var(--accent-soft);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+@keyframes pulse-dot {
+  0%,
+  60%,
+  100% {
+    opacity: 0.35;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

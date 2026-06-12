@@ -19,7 +19,6 @@ async fn at_fires_a_due_one_shot_into_the_queue() {
 
     assert_eq!(forge.run_scheduler_once().await.unwrap(), 1);
 
-    // The enqueued job carries the JobId that `at` returned.
     let job = forge
         .queue()
         .dequeue("reports", DequeueOpts::new().with_wait(Duration::ZERO))
@@ -30,7 +29,6 @@ async fn at_fires_a_due_one_shot_into_the_queue() {
     assert_eq!(job.payload, Bytes::from_static(b"r1"));
     forge.queue().ack(&job).await.unwrap();
 
-    // The one-shot is consumed.
     assert!(forge.schedule().list().await.unwrap().is_empty());
 }
 
@@ -74,7 +72,6 @@ async fn cron_upserts_lists_and_cancels() {
         Some(ScheduleKind::Cron(_))
     ));
 
-    // Re-registering the same name upserts (still one).
     s.cron(
         "nightly",
         "30 0 * * *",

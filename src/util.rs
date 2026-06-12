@@ -30,7 +30,6 @@ mod tests {
 
     #[test]
     fn sha256_hex_matches_known_vector() {
-        // SHA-256("") well-known digest.
         assert_eq!(
             sha256_hex(b""),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"

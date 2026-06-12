@@ -86,7 +86,7 @@ impl WorkerBuilder {
 
         let mut shutdown = std::pin::pin!(shutdown);
         loop {
-            // Acquire a permit before claiming a job; bounds in-flight work.
+            // Acquire before dequeue: avoids pulling a job we can't run yet.
             let permit = {
                 let acquire = Arc::clone(&permits).acquire_owned();
                 tokio::select! {
@@ -127,7 +127,6 @@ impl WorkerBuilder {
                 .in_current_span(),
             );
 
-            // Reap finished supervisors without blocking the dequeue loop.
             while let Some(res) = in_flight.try_join_next() {
                 if let Err(e) = res {
                     warn!(error = %e, "worker supervisor task failed");
@@ -135,7 +134,6 @@ impl WorkerBuilder {
             }
         }
 
-        // Drain in-flight handlers, bounded by grace so a hung handler can't block exit.
         warn!(queue = %self.name, in_flight = in_flight.len(), grace = ?self.grace, "worker shutting down; draining");
         let drain = async { while in_flight.join_next().await.is_some() {} };
         if tokio::time::timeout(self.grace, drain).await.is_err() {
@@ -218,7 +216,7 @@ where
             }
         }
         Some(Err(join_err)) => {
-            // Handler panic or cancellation; nack so it redelivers.
+            // JoinError covers both panic and cancellation; nack either way.
             warn!(error = %join_err, job.id = %job.id, "handler panicked; nacking");
             if let Err(e) = queue.nack(&job, NackOpts::default()).await {
                 warn!(error = %e, job.id = %job.id, "nack failed");

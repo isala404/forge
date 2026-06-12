@@ -46,7 +46,6 @@ pub struct PutOpts {
 }
 
 impl PutOpts {
-    /// Default options.
     pub fn new() -> Self {
         Self::default()
     }
@@ -119,4 +118,22 @@ pub trait Blob: Send + Sync {
 
     /// An HMAC-signed, single-key, time-bound download URL.
     async fn presign_download(&self, key: &str, expires: Duration) -> Result<String>;
+
+    /// Verify the parameters of a presigned URL against the configured signing
+    /// secret. Returns `Ok(true)` only if the signature matches *and* the URL has not
+    /// expired; `Ok(false)` for a bad signature or an expired URL; `Err(Config)` if no
+    /// signing secret is set, `Err(Invalid)` if `method` is not `GET`/`PUT`.
+    ///
+    /// This is the same check the built-in [`crate::Forge::blob_router`] performs,
+    /// exposed so a host app (or a language binding) that serves the presigned URLs
+    /// itself can enforce it instead of trusting the key blindly. `expires_epoch`,
+    /// `max_bytes`, and `sig` come straight off the URL's query params.
+    async fn verify_presigned(
+        &self,
+        method: &str,
+        key: &str,
+        expires_epoch: i64,
+        max_bytes: u64,
+        sig: &str,
+    ) -> Result<bool>;
 }

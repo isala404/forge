@@ -314,7 +314,6 @@ impl Blob for PgBlob {
             error.variant = Empty,
         );
         obs::instrument("blob", "list", span, async move {
-            // One query covers both the first page (cursor NULL) and resumption.
             let rows = sqlx::query!(
                 r#"SELECT key, content_type, etag, size,
                           metadata AS "metadata: Json<Meta>", last_modified
@@ -384,6 +383,43 @@ impl Blob for PgBlob {
             self.build_presigned(Method::Get, key, expires, 0)
         })
         .await
+    }
+
+    async fn verify_presigned(
+        &self,
+        method: &str,
+        key: &str,
+        expires_epoch: i64,
+        max_bytes: u64,
+        sig: &str,
+    ) -> Result<bool> {
+        let secret = self.secret.as_deref().ok_or_else(|| {
+            ForgeError::config(
+                "blob signing secret is not configured (set ForgeConfig.blob_signing_secret)",
+            )
+        })?;
+        let method = match method.to_ascii_uppercase().as_str() {
+            "GET" => Method::Get,
+            "PUT" => Method::Put,
+            other => {
+                return Err(ForgeError::invalid(format!(
+                    "presign method must be GET or PUT, got {other:?}"
+                )));
+            }
+        };
+        // Expired URLs fail verification (matching the router's expiry check) before
+        // the constant-time signature compare.
+        if expires_epoch <= unix_secs(SystemTime::now()) {
+            return Ok(false);
+        }
+        Ok(sign::verify(
+            secret,
+            method,
+            key,
+            expires_epoch,
+            max_bytes,
+            sig,
+        ))
     }
 }
 

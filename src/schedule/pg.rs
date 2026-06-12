@@ -85,8 +85,8 @@ impl PgSchedule {
                     );
                 }
 
-                // Advance a cron to its next fire; drop a one-shot (and any cron whose
-                // expression somehow no longer parses / never fires again).
+                // A cron whose expression no longer parses or never fires again is
+                // silently dropped here rather than erroring — same path as a one-shot.
                 let next = if row.kind == "cron" {
                     row.cron_expr
                         .as_deref()

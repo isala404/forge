@@ -21,6 +21,12 @@ export interface JsApiKey {
   id: string
   secret: string
 }
+/** Approximate queue depth (SQS `ApproximateNumberOfMessages{,NotVisible,Delayed}`). */
+export interface JsQueueDepth {
+  visible: number
+  inFlight: number
+  delayed: number
+}
 /**
  * A Forge client: one Postgres pool, every primitive. Construct with
  * `ForgeClient.connect(url)`.
@@ -34,6 +40,11 @@ export declare class ForgeClient {
   /** `GET key` → the value as a UTF-8 string, or `null`. */
   kvGet(key: string): Promise<string | null>
   /**
+   * `MGET keys` → each value as a UTF-8 string (or `null` if missing/expired), in
+   * input order. One round-trip — use instead of a per-key `kvGet` loop.
+   */
+  kvMget(keys: Array<string>): Promise<Array<string | undefined | null>>
+  /**
    * `SET key value`. `ttlSeconds > 0` sets a TTL; `ifNotExists` does `SET NX`.
    * Returns whether the write happened.
    */
@@ -42,8 +53,12 @@ export declare class ForgeClient {
   kvIncr(key: string, by: number): Promise<number>
   /** `SCAN prefix*` (first page) → up to `limit` matching keys. */
   kvScan(prefix: string, limit: number): Promise<Array<string>>
+  /** `DEL key`. Returns whether the key existed. */
+  kvDelete(key: string): Promise<boolean>
+  /** `EXISTS key`. Returns whether the key is present (and unexpired). */
+  kvExists(key: string): Promise<boolean>
   /** Enqueue a job (string payload). Returns the job id. */
-  queueEnqueue(queue: string, payload: string, maxAttempts?: number | undefined | null): Promise<string>
+  queueEnqueue(queue: string, payload: string, maxAttempts?: number | undefined | null, dedupId?: string | undefined | null): Promise<string>
   /**
    * Lease one job for `visibilitySeconds`, long-polling up to `waitSeconds`.
    * `null` if none arrived. `ack`/`nack` it by the returned `id`.
@@ -53,6 +68,19 @@ export declare class ForgeClient {
   queueAck(id: string): Promise<void>
   /** Nack a leased job by id; optional `retrySeconds` delays the redelivery. */
   queueNack(id: string, retrySeconds?: number | undefined | null): Promise<void>
+  /**
+   * Extend the lease on a job leased by this client (SQS ChangeMessageVisibility /
+   * beanstalkd touch) by one visibility timeout. Call before `leased_until` for a
+   * handler that may outlive its visibility window, so the job is not redelivered
+   * mid-flight. No-op if this client does not hold the lease.
+   */
+  queueHeartbeat(id: string): Promise<void>
+  /**
+   * Approximate `{visible, inFlight, delayed}` counts for a queue (SQS
+   * `GetQueueAttributes`). Pass `"<queue>.dlq"` to gauge a dead-letter backlog
+   * without leasing its jobs (no side effects, unlike dequeue-to-count).
+   */
+  queueDepth(queue: string): Promise<JsQueueDepth>
   /** Store a config value (`set_raw`). */
   configSet(key: string, value: string): Promise<void>
   /** Resolve a config value (env `FORGE_CFG_<KEY>` > store > `null`). */
@@ -64,16 +92,30 @@ export declare class ForgeClient {
    * `defaultValue` on any failure.
    */
   flag(key: string, defaultValue: boolean, targetingKey?: string | undefined | null): Promise<boolean>
-  /** Atomic check-and-consume: `max` per `perSeconds` (token bucket). */
-  rateLimitCheck(bucket: string, key: string, max: number, perSeconds: number): Promise<JsDecision>
+  /**
+   * Atomic check-and-consume: `max` per `perSeconds` (token bucket).
+   * `failOpen` overrides what happens on a backend error: omit for the instance
+   * default, `true` to allow, `false` to deny.
+   */
+  rateLimitCheck(bucket: string, key: string, max: number, perSeconds: number, failOpen?: boolean | undefined | null): Promise<JsDecision>
   /** Store an object (string body). */
   blobPut(key: string, data: string, contentType?: string | undefined | null): Promise<void>
+  /** Store an object (binary body). */
+  blobPutBytes(key: string, data: Buffer, contentType?: string | undefined | null): Promise<void>
   /** Fetch an object as a UTF-8 string, or `null`. */
   blobGet(key: string): Promise<string | null>
+  /** Fetch an object as raw bytes, or `null`. */
+  blobGetBytes(key: string): Promise<Buffer | null>
   /** A presigned download URL (needs a `signingSecret` at connect). */
   blobPresignDownload(key: string, expiresSeconds: number): Promise<string>
   /** A presigned upload (PUT) URL, capped at `maxBytes` (needs a `signingSecret`). */
   blobPresignUpload(key: string, expiresSeconds: number, maxBytes: number): Promise<string>
+  /**
+   * Verify a presigned URL's query params (needs a `signingSecret`). Returns
+   * `true` iff the signature is valid and the URL has not expired; `false` for a
+   * bad signature or an expired URL. Throws on no signing secret or a bad method.
+   */
+  blobVerifyPresign(method: string, key: string, expiresEpoch: number, maxBytes: number, sig: string): Promise<boolean>
   /** The stored content type for an object, or `null` if it does not exist. */
   blobContentType(key: string): Promise<string | null>
   /** Delete an object; returns whether it existed. */
@@ -82,6 +124,12 @@ export declare class ForgeClient {
   hashPassword(plain: string): Promise<string>
   /** Constant-time verify of `plain` against a stored PHC `hash`. */
   verifyPassword(plain: string, hash: string): Promise<boolean>
+  /**
+   * Whether a stored PHC `hash` should be re-hashed (its argon2id params are below
+   * the current Forge baseline). Call after a successful `verifyPassword`; if `true`,
+   * re-hash the plaintext and persist it — transparent upgrade, no forced reset.
+   */
+  needsRehash(hash: string): boolean
   /**
    * Create a session for `userId`; returns the opaque token (shown once).
    * Optional sliding `idleSeconds` and hard `absoluteSeconds` deadlines.
@@ -106,11 +154,32 @@ export declare class ForgeClient {
    * interval (e.g. every 30s) to drive the scheduler from Node.
    */
   runSchedulerOnce(): Promise<number>
+  /**
+   * Run periodic housekeeping once: sweep expired kv keys, settled/dead queue
+   * jobs, stale ratelimit buckets, and expired sessions. Call on an interval
+   * alongside `runSchedulerOnce` (mirrors the Rust `Forge::maintain` loop).
+   */
+  maintain(): Promise<void>
   /** Publish a payload to a realtime topic (fire-and-forget). */
   pubsubPublish(topic: string, payload: string): Promise<void>
+  /**
+   * Subscribe to a realtime topic, returning a handle whose `next()` yields each
+   * payload published *after* this resolves (or `null` when the stream ends). The
+   * subscription holds a dedicated Postgres connection until the handle is dropped.
+   */
+  pubsubSubscribe(topic: string): Promise<JsSubscription>
   /**
    * The Postgres `LISTEN`/`NOTIFY` channel a topic maps to. `LISTEN` on this with
    * a native Postgres client to receive what `pubsub_publish(topic, …)` sends.
    */
   pubsubChannel(topic: string): string
+}
+/**
+ * A live pubsub subscription handle. Drive it as a JS async iterator: call `next()`
+ * in a loop until it resolves to `null` (the stream ended). Dropping the handle
+ * unsubscribes and releases the dedicated Postgres connection.
+ */
+export declare class JsSubscription {
+  /** The next published payload as raw bytes, or `null` when the stream ends. */
+  next(): Promise<Buffer | null>
 }

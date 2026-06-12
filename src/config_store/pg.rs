@@ -303,7 +303,7 @@ mod tests {
             "same inputs => same bucket"
         );
         assert!(a < 100);
-        // Different flag keys bucket the same user independently (very likely differ).
+        // Namespacing: different flag keys must produce independent buckets for the same user.
         assert_ne!(
             stable_bucket("flag_a", "user-1"),
             stable_bucket("flag_b", "user-1")

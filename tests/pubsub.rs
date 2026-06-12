@@ -43,9 +43,7 @@ async fn topics_are_isolated() {
         .await
         .unwrap();
 
-    // chat2 gets it...
     assert_eq!(recv(&mut chat2).await, Some(Bytes::from_static(b"for-two")));
-    // ...and chat1 does not (no message within the timeout window).
     let nothing = tokio::time::timeout(Duration::from_millis(500), chat1.next()).await;
     assert!(nothing.is_err(), "chat:1 must not receive chat:2's message");
 }
@@ -68,6 +66,25 @@ async fn message_published_before_subscribe_is_not_delivered() {
         nothing.is_err(),
         "a connected-only subscriber must not see messages published before it subscribed"
     );
+}
+
+#[tokio::test]
+async fn fans_out_to_every_subscriber_on_one_topic() {
+    // The multiplexed broker shares one LISTEN connection; a publish must still reach
+    // every independent subscriber of the same topic.
+    let db = TestDatabase::new().await.unwrap();
+    let forge = db.forge().await.unwrap();
+
+    let mut a = forge.pubsub().subscribe("chat:7").await.unwrap();
+    let mut b = forge.pubsub().subscribe("chat:7").await.unwrap();
+    forge
+        .pubsub()
+        .publish("chat:7", Bytes::from_static(b"broadcast"))
+        .await
+        .unwrap();
+
+    assert_eq!(recv(&mut a).await, Some(Bytes::from_static(b"broadcast")));
+    assert_eq!(recv(&mut b).await, Some(Bytes::from_static(b"broadcast")));
 }
 
 #[tokio::test]

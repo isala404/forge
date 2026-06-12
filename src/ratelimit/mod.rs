@@ -29,6 +29,23 @@ pub enum Algo {
     SlidingWindow,
 }
 
+/// Per-check override of what happens when the limiter *backend* errors (not when a
+/// request is merely denied — that is always `Ok(Decision { allowed: false })`).
+/// A backend outage should fail-open for a high-volume best-effort bucket (sending a
+/// chat message) but fail-closed for an abuse- or payment-sensitive one (login, OTP).
+/// Lets one `RateLimit` mix both without a global flag or a hand-rolled `unwrap_or`.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FailMode {
+    /// Use the Forge-instance default (`ForgeConfig.ratelimit_fail_open`).
+    #[default]
+    Default,
+    /// On a soft/transient backend error, allow the request (and warn).
+    Open,
+    /// On any backend error, surface it (deny by erroring).
+    Closed,
+}
+
 /// A rate-limit policy, passed per `check`. Policy lives in caller code, not server
 /// config; the stored row tracks only consumption.
 #[non_exhaustive]
@@ -87,5 +104,19 @@ pub trait RateLimit: Send + Sync {
     /// namespace `bucket`. A *denied* request is `Ok(Decision { allowed: false, .. })`,
     /// never an `Err`. On a backend error the configured failure mode applies
     /// (fail-open by default — returns a synthetic allow and logs a warning).
-    async fn check(&self, bucket: &str, key: &str, limit: Limit) -> Result<Decision>;
+    async fn check(&self, bucket: &str, key: &str, limit: Limit) -> Result<Decision> {
+        self.check_with(bucket, key, limit, FailMode::Default).await
+    }
+
+    /// Like [`RateLimit::check`] but with a per-call [`FailMode`] overriding the
+    /// instance default for what happens on a backend error. Only soft/transient
+    /// errors are ever swallowed by fail-open; caller bugs (`Invalid`/`Limit`)
+    /// always surface regardless of mode.
+    async fn check_with(
+        &self,
+        bucket: &str,
+        key: &str,
+        limit: Limit,
+        fail: FailMode,
+    ) -> Result<Decision>;
 }

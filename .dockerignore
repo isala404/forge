@@ -1,0 +1,16 @@
+# Keep build contexts small and reproducible: never ship build outputs or local junk
+# into the Docker build (the images rebuild everything from source).
+**/target
+**/node_modules
+**/.svelte-kit
+**/build
+**/dist
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+**/*.node
+e2e/test-results
+e2e/screenshots
+test-results
+.git

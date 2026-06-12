@@ -1,0 +1,146 @@
+name: examples (chatapp)
+
+on:
+  pull_request:
+    paths:
+      - "examples/chatapp/**"
+      - "bindings/**"
+      - ".github/workflows/examples.yml"
+  push:
+    branches: [main, rewrite]
+    paths:
+      - "examples/chatapp/**"
+      - "bindings/**"
+      - ".github/workflows/examples.yml"
+
+concurrency:
+  group: examples-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-be:
+    name: rust-be (fmt · clippy · build · test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: forge
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    defaults:
+      run:
+        working-directory: examples/chatapp/rust-be
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: examples/chatapp/rust-be
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo build
+      # The integration suite boots the real binary against the postgres service
+      # (it creates/drops its own uniquely-named database).
+      - run: cargo test
+
+  node-be:
+    name: node-be (codegen · tsc · lint · vitest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: forge
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings/forge-node
+      - name: Build forge-node binding
+        working-directory: bindings/forge-node
+        run: npm install && npm run build
+      - name: Install
+        working-directory: examples/chatapp/node-be
+        run: bun install
+      - name: Codegen
+        working-directory: examples/chatapp/node-be
+        run: bun run codegen
+      - name: Type-check
+        working-directory: examples/chatapp/node-be
+        run: bun run typecheck
+      - name: Lint
+        working-directory: examples/chatapp/node-be
+        run: bun run lint
+      - name: Test
+        working-directory: examples/chatapp/node-be
+        run: bun run test
+
+  python-be:
+    name: python-be (ruff · sdl · pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: forge
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    defaults:
+      run:
+        working-directory: examples/chatapp/python-be
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings/forge-py
+      - uses: astral-sh/setup-uv@v6
+      - name: Sync (builds the forge-py wheel)
+        run: uv sync
+      - run: uv run ruff check
+      - run: uv run pytest -q
+
+  react-fe:
+    name: react-fe (codegen · tsc · build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: examples/chatapp/react-fe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - run: bun run codegen
+      - run: bun run build

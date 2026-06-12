@@ -15,12 +15,13 @@ Each primitive mirrors a design the industry (and every agent's training data) a
 | `config` / flags | 12-factor + OpenFeature               |
 | `ratelimit`      | token bucket + IETF RateLimit headers |
 | `auth`           | OWASP + PHC                           |
+| `pubsub`         | Postgres LISTEN/NOTIFY + Redis pub/sub |
 
 Postgres backs every primitive by default, with zero extra infrastructure. Dedicated backends (Redis, S3, and so on) plug in later behind the same interface, without changing application code.
 
 ## Examples & bindings
 
-The same guided tour of **every** primitive — auth, config + flags, rate limiting, blob storage with a presigned URL, and a scheduled job — runs end to end in three languages under [`examples/`](examples/): Rust (`cargo run --example full_tour`), JavaScript (via the [`forge-node`](bindings/forge-node) napi binding), and Python (via the [`forge-py`](bindings/forge-py) pyo3 binding). Each primitive's semantic contract lives in [`docs/contracts/`](docs/contracts/).
+Three self-contained, individually-runnable chat apps live under [`examples/`](examples/) — **Rust/axum** ([`rs-chatapp`](examples/rs-chatapp)), **TypeScript/SvelteKit** ([`ts-chatapp`](examples/ts-chatapp)), and **Python/FastAPI** ([`py-chatapp`](examples/py-chatapp)). Each is a full chat backend on Forge + GraphQL that exercises **every** primitive: opaque multi-device sessions (`auth`), direct-to-storage media (`blob`), presence/typing/unread (`kv`), off-request fan-out (`queue`), abuse limits (`ratelimit`), send-later + disappearing messages (`schedule`), feature flags (`config`), and live GraphQL subscriptions over `pubsub` (Postgres LISTEN/NOTIFY). The Rust app uses the `forge` crate directly; the others go through the [`forge-node`](bindings/forge-node) and [`forge-py`](bindings/forge-py) bindings. One Playwright suite in [`e2e/`](e2e/) runs against all three and proves they behave identically. Each primitive's semantic contract lives in [`docs/contracts/`](docs/contracts/).
 
 **Status:** pre-v1, under active rewrite. The previous full-stack framework remains in this repository's git history. The public surface freezes at 1.0; until then it changes freely.
 

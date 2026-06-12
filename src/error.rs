@@ -112,8 +112,8 @@ impl ForgeError {
     /// Classify a [`sqlx::Error`] into the taxonomy without leaking its text.
     pub fn from_sqlx(err: sqlx::Error) -> Self {
         if is_transient_sqlx_error(&err) {
-            // Drop the raw error (may name constraints/schemas); a transient
-            // failure carries no useful detail for the caller beyond "retry".
+            // Raw error omitted: it may name constraints/schemas, and the caller
+            // gains nothing from it beyond the retryable signal.
             Self::Unavailable("database temporarily unavailable".to_string())
         } else {
             Self::Backend {
@@ -184,7 +184,6 @@ mod tests {
     fn backend_display_hides_source() {
         let secret = std::io::Error::other("table forge_secret_tokens constraint uq_x");
         let err = ForgeError::backend_with("database error", false, secret);
-        // Display must not contain the secret text, but source preserves it.
         assert_eq!(err.to_string(), "backend error: database error");
         assert!(err.source().is_some());
         assert!(

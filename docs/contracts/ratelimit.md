@@ -152,11 +152,16 @@ On a transient/backend error inside `check`, the per-call policy is **configurab
   (`Unavailable` / `Backend` per the taxonomy below), and the caller decides (typically
   reject with 503/429).
 
-The mode is set once at init for the limiter. The default is **fail-open** because a
-broken limiter blocking all traffic is usually worse than briefly unlimited traffic;
-flip to fail-closed for buckets where over-admission is the greater harm (e.g. payment
-or abuse-sensitive paths). `Invalid` (caller bug) is **never** subject to the failure
-mode — a bad `Limit` always returns `Err` regardless of mode.
+The instance default comes from `ForgeConfig.ratelimit_fail_open`. **Per call**,
+`check_with(bucket, key, limit, FailMode)` overrides it: `FailMode::Open` allows on a
+soft error, `FailMode::Closed` surfaces it, `FailMode::Default` uses the instance
+default (`check(...)` == `check_with(..., FailMode::Default)`). This lets ONE limiter
+mix a fail-closed login bucket with a fail-open send bucket without a second instance
+or a hand-rolled `unwrap_or(true)`. The default is **fail-open** because a broken
+limiter blocking all traffic is usually worse than briefly unlimited traffic; choose
+fail-closed for buckets where over-admission is the greater harm (payment, abuse). Only
+soft/transient errors are ever swallowed; `Invalid` (caller bug) **always** returns
+`Err` regardless of mode.
 
 ## Limits
 

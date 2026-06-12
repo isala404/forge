@@ -45,6 +45,18 @@ async fn subscribe(&self, topic: &str) -> Result<Subscription>; // Subscription 
 emits a `forge_ops_total{op="subscribe"}` counter when a subscription is
 established (it returns a long-lived stream, not a single completing op).
 
+## Implementation: one shared listener
+
+`subscribe` does not open a connection per call. A single per-process `PgListener`
+multiplexes every topic: `subscribe(topic)` registers the channel on that shared
+connection, **awaits the `LISTEN` before resolving** (so a `publish` can never race
+ahead of its own subscription), and returns a stream over an in-process broadcast.
+The listener reconnects and re-`LISTEN`s every active channel if its connection drops;
+channels with no remaining subscribers are released. Delivery is still at-most-once and
+connected-only — a notification published during a reconnect gap is lost by design. A
+subscriber that falls more than the broadcast buffer behind skips the dropped messages
+(logged) rather than erroring the stream.
+
 ## Non-goals
 
 Durability, replay, queue semantics, message acknowledgement, or wildcard/pattern

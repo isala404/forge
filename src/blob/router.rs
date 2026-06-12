@@ -12,9 +12,9 @@
 
 use super::pg::PgBlob;
 use super::sign::{self, Method};
-use super::{Blob, PutOpts};
+use super::{Blob, MAX_OBJECT_BYTES, PutOpts};
 use axum::body::Bytes;
-use axum::extract::{Query, State};
+use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -37,6 +37,9 @@ struct Params {
 pub(crate) fn router(blob: Arc<PgBlob>) -> axum::Router {
     axum::Router::new()
         .route("/", get(download).put(upload))
+        // axum's default body limit is 2 MiB; raise it to the object cap so uploads up
+        // to MAX_OBJECT_BYTES go through (the signed `max_bytes` still fences each PUT).
+        .layer(DefaultBodyLimit::max(MAX_OBJECT_BYTES))
         .with_state(blob)
 }
 
@@ -75,7 +78,20 @@ async fn download(State(blob): State<Arc<PgBlob>>, Query(p): Query<Params>) -> R
                 .flatten()
                 .map(|i| i.content_type)
                 .unwrap_or_else(|| super::DEFAULT_CONTENT_TYPE.to_string());
-            (StatusCode::OK, [(header::CONTENT_TYPE, ct)], bytes).into_response()
+            // Objects are caller-supplied bytes served from the app's own origin, so
+            // never let the browser render them inline or sniff a different type — that
+            // turns a stored HTML/SVG payload into stored XSS. `attachment` + `nosniff`
+            // still allow `<img>`/`<video>` subresource loads, which ignore Content-Disposition.
+            (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, ct),
+                    (header::CONTENT_DISPOSITION, "attachment".to_string()),
+                    (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+                ],
+                bytes,
+            )
+                .into_response()
         }
         Ok(None) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),

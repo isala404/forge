@@ -252,3 +252,59 @@ async fn concurrent_consumers_never_double_deliver() {
     );
     assert_eq!(unique.len(), N, "every job was delivered exactly once");
 }
+
+#[tokio::test]
+async fn depth_reports_visible_in_flight_and_delayed() {
+    let db = TestDatabase::new().await.unwrap();
+    let forge = db.forge().await.unwrap();
+    let q = forge.queue();
+
+    q.enqueue("d", payload("a"), EnqueueOpts::new())
+        .await
+        .unwrap();
+    q.enqueue("d", payload("b"), EnqueueOpts::new())
+        .await
+        .unwrap();
+    q.enqueue(
+        "d",
+        payload("c"),
+        EnqueueOpts::new().with_delay(Duration::from_secs(300)),
+    )
+    .await
+    .unwrap();
+
+    let d = q.depth("d").await.unwrap();
+    assert_eq!((d.visible, d.in_flight, d.delayed), (2, 0, 1));
+    assert_eq!(d.total(), 3);
+
+    // Leasing one moves it visible -> in_flight.
+    let job = q.dequeue("d", vis(120)).await.unwrap().expect("a job");
+    let d = q.depth("d").await.unwrap();
+    assert_eq!((d.visible, d.in_flight, d.delayed), (1, 1, 1));
+
+    // Acking drops it from every count.
+    q.ack(&job).await.unwrap();
+    let d = q.depth("d").await.unwrap();
+    assert_eq!((d.visible, d.in_flight, d.delayed), (1, 0, 1));
+    assert_eq!(d.total(), 2);
+}
+
+#[tokio::test]
+async fn depth_counts_dead_letter_backlog() {
+    let db = TestDatabase::new().await.unwrap();
+    let forge = db.forge().await.unwrap();
+    let q = forge.queue();
+
+    q.enqueue("j", payload("x"), EnqueueOpts::new().with_max_attempts(1))
+        .await
+        .unwrap();
+    let job = q.dequeue("j", vis(30)).await.unwrap().expect("a job");
+    q.nack(&job, NackOpts::default()).await.unwrap(); // exhausted -> dead-letter
+
+    assert_eq!(q.depth("j").await.unwrap().total(), 0, "source drained");
+    assert_eq!(
+        q.depth("j.dlq").await.unwrap().visible,
+        1,
+        "one job dead-lettered"
+    );
+}

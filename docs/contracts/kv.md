@@ -17,6 +17,7 @@ relational store, not a message bus.
 #[async_trait]
 pub trait Kv: Send + Sync {
     async fn get(&self, key: &str) -> Result<Option<Bytes>>;                 // GET
+    async fn mget(&self, keys: &[&str]) -> Result<Vec<Option<Bytes>>>;       // MGET
     async fn set(&self, key: &str, value: Bytes, opts: SetOpts) -> Result<bool>; // SET / NX / XX
     async fn delete(&self, key: &str) -> Result<bool>;                       // DEL
     async fn exists(&self, key: &str) -> Result<bool>;                       // EXISTS
@@ -46,6 +47,7 @@ pub struct Cursor(/* opaque, backend-owned */);
 | op | behavior |
 |----|----------|
 | `get` | Returns `Some(value)` if present and unexpired, else `None`. Expired key returns `None`, guaranteed (see TTL). |
+| `mget` | Batch `GET` in one round-trip. Returns a vec with **one slot per input key, in input order**: `Some(value)` for a live key, `None` for an absent/expired one (same per-key rule as `get`). Duplicate input keys repeat their value at each position; empty input → empty vec. Not a transaction — the keys are read in one statement but carry no cross-key snapshot guarantee (see Delivery). Avoids the N-round-trip loop a per-key `get` fan-out costs. |
 | `set(Always)` | Unconditional write; overwrites value and replaces TTL with `opts.ttl` (or clears it if `None`). Returns `true` always. |
 | `set(IfNotExists)` | Writes only if key absent or expired. Returns `true` if written, `false` if a live key blocked it. (Redis `SET NX`.) |
 | `set(IfExists)` | Writes only if a live key exists. Returns `true` if written, `false` if absent/expired. (Redis `SET XX`.) |

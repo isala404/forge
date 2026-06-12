@@ -220,6 +220,31 @@ impl NackOpts {
     }
 }
 
+/// Approximate message counts for a queue, mirroring the SQS CloudWatch
+/// `ApproximateNumberOfMessages*` metrics. All three are point-in-time estimates
+/// taken without locking, so a concurrent enqueue/lease may not be reflected yet.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct QueueDepth {
+    /// Available for immediate delivery (SQS `ApproximateNumberOfMessagesVisible`).
+    /// Counts jobs whose lease has lapsed but not yet been reclaimed, since the next
+    /// `dequeue` will hand them out.
+    pub visible: u64,
+    /// Leased and not past the visibility deadline (SQS `…MessagesNotVisible`).
+    pub in_flight: u64,
+    /// Enqueued with a delay and not yet due (SQS `…MessagesDelayed`).
+    pub delayed: u64,
+}
+
+impl QueueDepth {
+    /// Total non-terminal messages: `visible + in_flight + delayed` (saturating).
+    pub fn total(&self) -> u64 {
+        self.visible
+            .saturating_add(self.in_flight)
+            .saturating_add(self.delayed)
+    }
+}
+
 /// A leased unit of work returned by [`Queue::dequeue`].
 #[non_exhaustive]
 #[derive(Debug, Clone)]
@@ -279,6 +304,11 @@ pub trait Queue: Send + Sync {
     /// Extend the lease (beanstalkd `touch`). [`crate::ForgeError::Precondition`]
     /// if the lease was already lost to another worker — stop work on this job.
     async fn heartbeat(&self, job: &Job) -> Result<()>;
+
+    /// SQS `GetQueueAttributes`: approximate visible / in-flight / delayed counts
+    /// for `queue` ([`QueueDepth`]). Non-locking and point-in-time. Pass a
+    /// `"<queue>.dlq"` name to gauge a dead-letter backlog without leasing its jobs.
+    async fn depth(&self, queue: &str) -> Result<QueueDepth>;
 }
 
 /// JSON convenience helper over [`Queue`]. Blanket-implemented, so it works on

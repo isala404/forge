@@ -13,7 +13,7 @@
 
 use super::{
     Backoff, DequeueOpts, EnqueueOpts, Job, JobId, MAX_PAYLOAD_BYTES, MAX_VISIBILITY_TIMEOUT,
-    MAX_WAIT, NackOpts, Queue,
+    MAX_WAIT, NackOpts, Queue, QueueDepth,
 };
 use crate::error::{ForgeError, Result};
 use crate::obs;
@@ -206,8 +206,8 @@ impl Queue for PgQueue {
                 return Ok(JobId(id));
             };
 
-            // Atomically claim the (queue, dedup_id) slot, then insert the job
-            // under the same id. A live slot => return the existing id.
+            // ON CONFLICT only updates (and returns) when the existing slot has expired;
+            // if the slot is still live it returns nothing, and we fall to the None arm.
             let new_id = Uuid::new_v4();
             let mut tx = self.pool.begin().await?;
             let claimed = sqlx::query_scalar!(
@@ -358,7 +358,7 @@ impl Queue for PgQueue {
 
             let new_attempts = u32::try_from(row.attempts).unwrap_or(0).saturating_add(1);
             if new_attempts >= u32::try_from(row.max_attempts).unwrap_or(u32::MAX) {
-                // Exhausted — re-home to the DLQ as a fresh available job.
+                // Exhausted — re-home to DLQ with attempts reset so DLQ consumers see a clean slate.
                 sqlx::query!(
                     "UPDATE forge_jobs \
                      SET queue = queue || '.dlq', status = 'available', attempts = 0, \
@@ -420,6 +420,37 @@ impl Queue for PgQueue {
                 return Err(self.lease_lost_error(id).await);
             }
             Ok(())
+        })
+        .await
+    }
+
+    async fn depth(&self, queue: &str) -> Result<QueueDepth> {
+        let span = tracing::info_span!(
+            "forge.queue.depth",
+            queue = %queue,
+            outcome = Empty,
+            error.variant = Empty,
+        );
+        obs::instrument("queue", "depth", span, async move {
+            // Allow `.dlq` names: gauging a dead-letter backlog is the headline use.
+            check_queue_name(queue, true)?;
+            let row = sqlx::query!(
+                r#"SELECT
+                     count(*) FILTER (WHERE status = 'available' AND available_at <= now()
+                                         OR status = 'leased'    AND leased_until <= now()) AS "visible!",
+                     count(*) FILTER (WHERE status = 'leased'    AND leased_until > now())  AS "in_flight!",
+                     count(*) FILTER (WHERE status = 'available' AND available_at > now())   AS "delayed!"
+                   FROM forge_jobs
+                   WHERE queue = $1"#,
+                queue,
+            )
+            .fetch_one(&self.pool)
+            .await?;
+            Ok(QueueDepth {
+                visible: u64::try_from(row.visible).unwrap_or(0),
+                in_flight: u64::try_from(row.in_flight).unwrap_or(0),
+                delayed: u64::try_from(row.delayed).unwrap_or(0),
+            })
         })
         .await
     }

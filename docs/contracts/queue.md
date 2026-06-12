@@ -44,9 +44,24 @@ pub trait Queue: Send + Sync {
     /// the lease is already lost.
     async fn heartbeat(&self, job: &Job) -> Result<(), ForgeError>;
 
+    /// SQS GetQueueAttributes: approximate message counts for `queue`. Non-locking,
+    /// point-in-time. Accepts a `"<queue>.dlq"` name for dead-letter backlogs.
+    async fn depth(&self, queue: &str) -> Result<QueueDepth, ForgeError>;
+
     /// Managed consume loop: bounded concurrency, auto-heartbeat, graceful
     /// shutdown, panic => nack. See Worker.
     fn worker(&self, queue: &str) -> WorkerBuilder;
+}
+
+/// SQS ApproximateNumberOfMessages{,NotVisible,Delayed}. Estimates, not snapshots.
+#[non_exhaustive]
+pub struct QueueDepth {
+    /// Available for immediate delivery, incl. lapsed-but-unreclaimed leases.
+    pub visible: u64,
+    /// Leased and not past the visibility deadline.
+    pub in_flight: u64,
+    /// Enqueued with a delay and not yet due.
+    pub delayed: u64,
 }
 
 #[non_exhaustive]
@@ -110,6 +125,7 @@ incrementing `attempts`; when the failed delivery's count reaches `max_attempts`
 | `ack` | **leased -> done.** Removes the job from the working set. Idempotent: acking a job whose lease already expired and was reclaimed by another worker is **not** an error (returns `Ok(())`); the reclaiming worker's later `ack` wins. This is the at-least-once seam — `ack` does **not** mean "no one else ran this." Idempotent consumers make that safe. |
 | `nack` | Marks the current delivery failed. `retry_in = None` -> **leased -> available** immediately (`ChangeMessageVisibility(0)`). `retry_in = Some(d)` -> available at `now + d`. The redelivery **increments `attempts`**; if the incremented count reaches `max_attempts`, the job goes to the dead-letter queue instead of available (see Visibility / leasing / retry / DLQ). |
 | `heartbeat` | Extends the lease to `now + visibility_timeout`. Fenced by `(worker_id, attempts)`: if the lease was already lost (expired and reclaimed), returns `Precondition` — stop work, another worker owns it now. beanstalkd `touch` semantics. |
+| `depth` | Returns approximate `{visible, in_flight, delayed}` counts for the queue in one query, excluding terminal (`done`) jobs. **No locking, no leasing** — unlike polling the queue, it never makes a job invisible or bumps `attempts`, so it is the correct way to gauge a DLQ backlog (`depth("orders.dlq")`). Counts are estimates: a concurrent enqueue/lease may not be reflected. A lapsed-but-unreclaimed lease counts as `visible` (the next `dequeue` will hand it out). |
 | `worker` | Returns a `WorkerBuilder`. The built worker runs a managed loop: dequeues up to `concurrency` jobs, runs the handler, **auto-heartbeats** at ~`visibility_timeout / 3` while the handler runs, `ack`s on `Ok`, `nack`s on `Err`, and **`nack`s on panic** (caught at the task boundary, never crashes the loop). On shutdown it stops dequeuing and waits (bounded by a grace period) for in-flight handlers, heartbeating them until they finish or the grace expires. |
 
 ### Backoff (port of `forge-core::RetryConfig::calculate_backoff`)

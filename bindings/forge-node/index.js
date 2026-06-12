@@ -310,6 +310,7 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { ForgeClient } = nativeBinding
+const { ForgeClient, JsSubscription } = nativeBinding
 
 module.exports.ForgeClient = ForgeClient
+module.exports.JsSubscription = JsSubscription

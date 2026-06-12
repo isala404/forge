@@ -6,6 +6,7 @@
 //! `nack`: leased jobs are held Rust-side in a map and referenced from JS by id, so
 //! the opaque lease fence never crosses the boundary.
 
+use futures_util::StreamExt;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use std::collections::HashMap;
@@ -13,8 +14,22 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
+/// A stable, machine-readable code for each `ForgeError` variant, so JS callers can
+/// branch on the failure class (prefixed onto the error message in [`err`]).
+fn code_of(e: &forge::ForgeError) -> &'static str {
+    match e {
+        forge::ForgeError::NotFound => "NOT_FOUND",
+        forge::ForgeError::Invalid(_) => "INVALID",
+        forge::ForgeError::Limit(_) => "LIMIT",
+        forge::ForgeError::Precondition(_) => "PRECONDITION",
+        forge::ForgeError::Unavailable(_) => "UNAVAILABLE",
+        forge::ForgeError::Config(_) => "CONFIG",
+        _ => "BACKEND",
+    }
+}
+
 fn err(e: forge::ForgeError) -> napi::Error {
-    napi::Error::from_reason(e.to_string())
+    napi::Error::from_reason(format!("{}: {}", code_of(&e), e))
 }
 
 /// A leased job handed to JavaScript. `ack`/`nack` it by `id`.
@@ -39,6 +54,14 @@ pub struct JsDecision {
 pub struct JsApiKey {
     pub id: String,
     pub secret: String,
+}
+
+/// Approximate queue depth (SQS `ApproximateNumberOfMessages{,NotVisible,Delayed}`).
+#[napi(object)]
+pub struct JsQueueDepth {
+    pub visible: u32,
+    pub in_flight: u32,
+    pub delayed: u32,
 }
 
 /// A Forge client: one Postgres pool, every primitive. Construct with
@@ -80,6 +103,18 @@ impl ForgeClient {
     pub async fn kv_get(&self, key: String) -> Result<Option<String>> {
         let v = self.forge.kv().get(&key).await.map_err(err)?;
         Ok(v.map(|b| String::from_utf8_lossy(&b).into_owned()))
+    }
+
+    /// `MGET keys` → each value as a UTF-8 string (or `null` if missing/expired), in
+    /// input order. One round-trip — use instead of a per-key `kvGet` loop.
+    #[napi]
+    pub async fn kv_mget(&self, keys: Vec<String>) -> Result<Vec<Option<String>>> {
+        let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+        let vals = self.forge.kv().mget(&refs).await.map_err(err)?;
+        Ok(vals
+            .into_iter()
+            .map(|o| o.map(|b| String::from_utf8_lossy(&b).into_owned()))
+            .collect())
     }
 
     /// `SET key value`. `ttlSeconds > 0` sets a TTL; `ifNotExists` does `SET NX`.
@@ -132,6 +167,18 @@ impl ForgeClient {
         Ok(keys)
     }
 
+    /// `DEL key`. Returns whether the key existed.
+    #[napi]
+    pub async fn kv_delete(&self, key: String) -> Result<bool> {
+        self.forge.kv().delete(&key).await.map_err(err)
+    }
+
+    /// `EXISTS key`. Returns whether the key is present (and unexpired).
+    #[napi]
+    pub async fn kv_exists(&self, key: String) -> Result<bool> {
+        self.forge.kv().exists(&key).await.map_err(err)
+    }
+
     /// Enqueue a job (string payload). Returns the job id.
     #[napi]
     pub async fn queue_enqueue(
@@ -139,10 +186,14 @@ impl ForgeClient {
         queue: String,
         payload: String,
         max_attempts: Option<u32>,
+        dedup_id: Option<String>,
     ) -> Result<String> {
         let mut opts = forge::EnqueueOpts::new();
         if let Some(m) = max_attempts {
             opts = opts.with_max_attempts(m);
+        }
+        if let Some(d) = dedup_id {
+            opts = opts.with_dedup_id(d);
         }
         let id = self
             .forge
@@ -214,7 +265,31 @@ impl ForgeClient {
         Ok(())
     }
 
-    // ---- config + flags ------------------------------------------------------
+    /// Extend the lease on a job leased by this client (SQS ChangeMessageVisibility /
+    /// beanstalkd touch) by one visibility timeout. Call before `leased_until` for a
+    /// handler that may outlive its visibility window, so the job is not redelivered
+    /// mid-flight. No-op if this client does not hold the lease.
+    #[napi]
+    pub async fn queue_heartbeat(&self, id: String) -> Result<()> {
+        let job = self.leased.lock().await.get(&id).cloned();
+        if let Some(job) = job {
+            self.forge.queue().heartbeat(&job).await.map_err(err)?;
+        }
+        Ok(())
+    }
+
+    /// Approximate `{visible, inFlight, delayed}` counts for a queue (SQS
+    /// `GetQueueAttributes`). Pass `"<queue>.dlq"` to gauge a dead-letter backlog
+    /// without leasing its jobs (no side effects, unlike dequeue-to-count).
+    #[napi]
+    pub async fn queue_depth(&self, queue: String) -> Result<JsQueueDepth> {
+        let d = self.forge.queue().depth(&queue).await.map_err(err)?;
+        Ok(JsQueueDepth {
+            visible: u32::try_from(d.visible).unwrap_or(u32::MAX),
+            in_flight: u32::try_from(d.in_flight).unwrap_or(u32::MAX),
+            delayed: u32::try_from(d.delayed).unwrap_or(u32::MAX),
+        })
+    }
 
     /// Store a config value (`set_raw`).
     #[napi]
@@ -254,9 +329,9 @@ impl ForgeClient {
         self.forge.config().flag(&key, default_value, &ctx).await
     }
 
-    // ---- ratelimit -----------------------------------------------------------
-
     /// Atomic check-and-consume: `max` per `perSeconds` (token bucket).
+    /// `failOpen` overrides what happens on a backend error: omit for the instance
+    /// default, `true` to allow, `false` to deny.
     #[napi]
     pub async fn rate_limit_check(
         &self,
@@ -264,12 +339,18 @@ impl ForgeClient {
         key: String,
         max: u32,
         per_seconds: f64,
+        fail_open: Option<bool>,
     ) -> Result<JsDecision> {
         let limit = forge::Limit::per_duration(max, Duration::from_secs_f64(per_seconds.max(1.0)));
+        let fm = match fail_open {
+            None => forge::FailMode::Default,
+            Some(true) => forge::FailMode::Open,
+            Some(false) => forge::FailMode::Closed,
+        };
         let d = self
             .forge
             .ratelimit()
-            .check(&bucket, &key, limit)
+            .check_with(&bucket, &key, limit, fm)
             .await
             .map_err(err)?;
         Ok(JsDecision {
@@ -279,8 +360,6 @@ impl ForgeClient {
             retry_after_seconds: d.retry_after.map(|x| x.as_secs_f64()),
         })
     }
-
-    // ---- blob ----------------------------------------------------------------
 
     /// Store an object (string body).
     #[napi]
@@ -301,11 +380,37 @@ impl ForgeClient {
             .map_err(err)
     }
 
+    /// Store an object (binary body).
+    #[napi]
+    pub async fn blob_put_bytes(
+        &self,
+        key: String,
+        data: Buffer,
+        content_type: Option<String>,
+    ) -> Result<()> {
+        let mut opts = forge::PutOpts::new();
+        if let Some(ct) = content_type {
+            opts = opts.with_content_type(ct);
+        }
+        self.forge
+            .blob()
+            .put(&key, forge::Bytes::from(data.to_vec()), opts)
+            .await
+            .map_err(err)
+    }
+
     /// Fetch an object as a UTF-8 string, or `null`.
     #[napi]
     pub async fn blob_get(&self, key: String) -> Result<Option<String>> {
         let v = self.forge.blob().get(&key).await.map_err(err)?;
         Ok(v.map(|b| String::from_utf8_lossy(&b).into_owned()))
+    }
+
+    /// Fetch an object as raw bytes, or `null`.
+    #[napi]
+    pub async fn blob_get_bytes(&self, key: String) -> Result<Option<Buffer>> {
+        let v = self.forge.blob().get(&key).await.map_err(err)?;
+        Ok(v.map(|b| Buffer::from(b.to_vec())))
     }
 
     /// A presigned download URL (needs a `signingSecret` at connect).
@@ -337,6 +442,31 @@ impl ForgeClient {
             .map_err(err)
     }
 
+    /// Verify a presigned URL's query params (needs a `signingSecret`). Returns
+    /// `true` iff the signature is valid and the URL has not expired; `false` for a
+    /// bad signature or an expired URL. Throws on no signing secret or a bad method.
+    #[napi]
+    pub async fn blob_verify_presign(
+        &self,
+        method: String,
+        key: String,
+        expires_epoch: f64,
+        max_bytes: f64,
+        sig: String,
+    ) -> Result<bool> {
+        self.forge
+            .blob()
+            .verify_presigned(
+                &method,
+                &key,
+                expires_epoch as i64,
+                max_bytes.max(0.0) as u64,
+                &sig,
+            )
+            .await
+            .map_err(err)
+    }
+
     /// The stored content type for an object, or `null` if it does not exist.
     #[napi]
     pub async fn blob_content_type(&self, key: String) -> Result<Option<String>> {
@@ -355,8 +485,6 @@ impl ForgeClient {
         self.forge.blob().delete(&key).await.map_err(err)
     }
 
-    // ---- auth ----------------------------------------------------------------
-
     /// argon2id hash of `plain` (a PHC string), to store in your users table.
     #[napi]
     pub async fn hash_password(&self, plain: String) -> Result<String> {
@@ -372,6 +500,14 @@ impl ForgeClient {
             .verify_password(&plain, &forge::PhcString::new(hash))
             .await
             .map_err(err)
+    }
+
+    /// Whether a stored PHC `hash` should be re-hashed (its argon2id params are below
+    /// the current Forge baseline). Call after a successful `verifyPassword`; if `true`,
+    /// re-hash the plaintext and persist it — transparent upgrade, no forced reset.
+    #[napi]
+    pub fn needs_rehash(&self, hash: String) -> bool {
+        self.forge.auth().needs_rehash(&forge::PhcString::new(hash))
     }
 
     /// Create a session for `userId`; returns the opaque token (shown once).
@@ -456,8 +592,6 @@ impl ForgeClient {
             .map(|i| i.owner_id))
     }
 
-    // ---- schedule ------------------------------------------------------------
-
     /// Schedule a one-shot enqueue at `whenEpochMs`; returns the future JobId.
     #[napi]
     pub async fn schedule_at(
@@ -500,7 +634,13 @@ impl ForgeClient {
         Ok(u32::try_from(n).unwrap_or(u32::MAX))
     }
 
-    // ---- pubsub --------------------------------------------------------------
+    /// Run periodic housekeeping once: sweep expired kv keys, settled/dead queue
+    /// jobs, stale ratelimit buckets, and expired sessions. Call on an interval
+    /// alongside `runSchedulerOnce` (mirrors the Rust `Forge::maintain` loop).
+    #[napi]
+    pub async fn maintain(&self) -> Result<()> {
+        self.forge.maintain().await.map_err(err)
+    }
 
     /// Publish a payload to a realtime topic (fire-and-forget).
     #[napi]
@@ -512,10 +652,43 @@ impl ForgeClient {
             .map_err(err)
     }
 
+    /// Subscribe to a realtime topic, returning a handle whose `next()` yields each
+    /// payload published *after* this resolves (or `null` when the stream ends). The
+    /// subscription holds a dedicated Postgres connection until the handle is dropped.
+    #[napi]
+    pub async fn pubsub_subscribe(&self, topic: String) -> Result<JsSubscription> {
+        let sub = self.forge.pubsub().subscribe(&topic).await.map_err(err)?;
+        Ok(JsSubscription {
+            inner: Arc::new(Mutex::new(sub)),
+        })
+    }
+
     /// The Postgres `LISTEN`/`NOTIFY` channel a topic maps to. `LISTEN` on this with
     /// a native Postgres client to receive what `pubsub_publish(topic, …)` sends.
     #[napi]
     pub fn pubsub_channel(&self, topic: String) -> String {
         forge::pubsub::channel_for(&topic)
+    }
+}
+
+/// A live pubsub subscription handle. Drive it as a JS async iterator: call `next()`
+/// in a loop until it resolves to `null` (the stream ended). Dropping the handle
+/// unsubscribes and releases the dedicated Postgres connection.
+#[napi]
+pub struct JsSubscription {
+    inner: Arc<Mutex<forge::Subscription>>,
+}
+
+#[napi]
+impl JsSubscription {
+    /// The next published payload as raw bytes, or `null` when the stream ends.
+    #[napi]
+    pub async fn next(&self) -> Result<Option<Buffer>> {
+        let mut inner = self.inner.lock().await;
+        match inner.next().await {
+            Some(Ok(b)) => Ok(Some(Buffer::from(b.to_vec()))),
+            Some(Err(e)) => Err(err(e)),
+            None => Ok(None),
+        }
     }
 }

@@ -6,7 +6,7 @@
 //! one key serialize and never double-spend. The math is pure (see `*_step`), so it is
 //! unit-tested without a database.
 
-use super::{Algo, Decision, Limit, MAX_BUCKET_BYTES, MAX_KEY_BYTES, RateLimit};
+use super::{Algo, Decision, FailMode, Limit, MAX_BUCKET_BYTES, MAX_KEY_BYTES, RateLimit};
 use crate::error::{ForgeError, Result};
 use crate::obs;
 use crate::util::key_hash;
@@ -144,7 +144,18 @@ impl PgRateLimit {
 
 #[async_trait]
 impl RateLimit for PgRateLimit {
-    async fn check(&self, bucket: &str, key: &str, limit: Limit) -> Result<Decision> {
+    async fn check_with(
+        &self,
+        bucket: &str,
+        key: &str,
+        limit: Limit,
+        fail: FailMode,
+    ) -> Result<Decision> {
+        let fail_open = match fail {
+            FailMode::Default => self.fail_open,
+            FailMode::Open => true,
+            FailMode::Closed => false,
+        };
         let span = tracing::info_span!(
             "forge.ratelimit.check",
             ratelimit.bucket = %bucket,
@@ -171,8 +182,7 @@ impl RateLimit for PgRateLimit {
             };
             let decision = match result {
                 Ok(d) => d,
-                // Fail-open: a limiter outage should not take the endpoint down.
-                Err(e) if self.fail_open && is_soft_error(&e) => {
+                Err(e) if fail_open && is_soft_error(&e) => {
                     tracing::warn!(error = %e, "ratelimit backend error; failing open (allowing)");
                     tracing::Span::current().record("ratelimit.fail_open", true);
                     synthetic_allow(limit)
@@ -361,7 +371,6 @@ mod tests {
     #[test]
     fn token_bucket_consumes_then_denies_when_empty() {
         let limit = tb(3, 60);
-        // fresh full bucket: 3 allowed in a row with no time passing
         let (t1, d1) = token_bucket_step(None, 0.0, limit);
         assert!(d1.allowed && d1.remaining == 2);
         let (t2, d2) = token_bucket_step(Some(t1), 0.0, limit);
@@ -375,8 +384,7 @@ mod tests {
 
     #[test]
     fn token_bucket_refills_over_time() {
-        let limit = tb(60, 60); // 1 token/sec
-        // empty bucket, 5s elapsed => ~5 tokens, consume one
+        let limit = tb(60, 60);
         let (_t, d) = token_bucket_step(Some(0.0), 5.0, limit);
         assert!(d.allowed);
         assert_eq!(d.remaining, 4);
@@ -385,7 +393,7 @@ mod tests {
     #[test]
     fn sliding_window_caps_per_window() {
         let limit = tb(2, 100).with_algo(Algo::SlidingWindow);
-        let t = 1_000_000.0; // mid-window
+        let t = 1_000_000.0;
         let (s1, d1) = sliding_step(None, t, limit);
         assert!(d1.allowed);
         let (s2, d2) = sliding_step(Some(s1), t, limit);

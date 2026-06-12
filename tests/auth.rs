@@ -49,7 +49,6 @@ async fn sessions_create_validate_revoke() {
         .create_session("user-1", SessionOpts::new())
         .await
         .unwrap();
-    // The token's Debug is redacted.
     assert!(!format!("{token:?}").contains(token.as_str()));
 
     let s = a.validate_session(token.as_str()).await.unwrap().unwrap();
@@ -60,7 +59,6 @@ async fn sessions_create_validate_revoke() {
 
     a.revoke_session(token.as_str()).await.unwrap();
     assert!(a.validate_session(token.as_str()).await.unwrap().is_none());
-    // Idempotent.
     a.revoke_session(token.as_str()).await.unwrap();
 }
 

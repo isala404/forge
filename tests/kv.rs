@@ -271,7 +271,46 @@ async fn namespaces_isolate_keys() {
     assert_eq!(a.kv().get("shared").await.unwrap(), Some(b("from-a")));
     assert_eq!(bb.kv().get("shared").await.unwrap(), Some(b("from-b")));
 
-    // scan returns logical keys with the namespace stripped.
     let (keys, _) = a.kv().scan("", None, 100).await.unwrap();
     assert_eq!(keys, vec!["shared".to_string()]);
+}
+
+#[tokio::test]
+async fn mget_returns_values_in_input_order_with_holes() {
+    let db = TestDatabase::new().await.unwrap();
+    let forge = db.forge().await.unwrap();
+    let kv = forge.kv();
+
+    kv.set("a", b("1"), SetOpts::new()).await.unwrap();
+    kv.set("c", b("3"), SetOpts::new()).await.unwrap();
+    // "b" is never set; an expired key must read as a hole too.
+    kv.set("d", b("4"), SetOpts::new().with_ttl(Duration::from_secs(1)))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+
+    // Order preserved, misses are None, and a duplicate key repeats its value.
+    let got = kv.mget(&["a", "b", "c", "d", "a"]).await.unwrap();
+    assert_eq!(
+        got,
+        vec![Some(b("1")), None, Some(b("3")), None, Some(b("1"))]
+    );
+
+    assert_eq!(kv.mget(&[]).await.unwrap(), Vec::<Option<Bytes>>::new());
+}
+
+#[tokio::test]
+async fn mget_respects_namespaces() {
+    let db = TestDatabase::new().await.unwrap();
+    let a = forge::Forge::init(ForgeConfig::new(db.url()).with_kv_namespace("ns_a"))
+        .await
+        .unwrap();
+    let bb = forge::Forge::init(ForgeConfig::new(db.url()).with_kv_namespace("ns_b"))
+        .await
+        .unwrap();
+    a.kv().set("k", b("from-a"), SetOpts::new()).await.unwrap();
+    bb.kv().set("k", b("from-b"), SetOpts::new()).await.unwrap();
+
+    assert_eq!(a.kv().mget(&["k"]).await.unwrap(), vec![Some(b("from-a"))]);
+    assert_eq!(bb.kv().mget(&["k"]).await.unwrap(), vec![Some(b("from-b"))]);
 }

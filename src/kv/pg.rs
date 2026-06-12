@@ -146,6 +146,46 @@ impl Kv for PgKv {
         .await
     }
 
+    async fn mget(&self, keys: &[&str]) -> Result<Vec<Option<Bytes>>> {
+        let span = tracing::info_span!(
+            "forge.kv.mget",
+            kv.keys = keys.len(),
+            kv.hits = Empty,
+            outcome = Empty,
+            error.variant = Empty,
+        );
+        obs::instrument("kv", "mget", span, async move {
+            if keys.is_empty() {
+                return Ok(Vec::new());
+            }
+            for k in keys {
+                Self::check_key(k)?;
+            }
+            let physical: Vec<String> = keys.iter().map(|k| self.physical(k)).collect();
+            // One round-trip; dedup is implicit (the map collapses repeats), and we
+            // re-expand to every input position below to honor order + duplicates.
+            let rows = sqlx::query!(
+                "SELECT key, value FROM forge_kv \
+                 WHERE key = ANY($1) AND (expires_at IS NULL OR expires_at > now())",
+                &physical,
+            )
+            .fetch_all(&self.pool)
+            .await?;
+            let mut found: std::collections::HashMap<&str, &[u8]> =
+                std::collections::HashMap::with_capacity(rows.len());
+            for r in &rows {
+                found.insert(r.key.as_str(), r.value.as_slice());
+            }
+            let out: Vec<Option<Bytes>> = physical
+                .iter()
+                .map(|pk| found.get(pk.as_str()).map(|v| Bytes::copy_from_slice(v)))
+                .collect();
+            tracing::Span::current().record("kv.hits", out.iter().filter(|v| v.is_some()).count());
+            Ok(out)
+        })
+        .await
+    }
+
     async fn set(&self, key: &str, value: Bytes, opts: SetOpts) -> Result<bool> {
         let span = tracing::info_span!(
             "forge.kv.set",
@@ -399,7 +439,6 @@ impl Kv for PgKv {
         limit: u32,
     ) -> Result<(Vec<String>, Option<Cursor>)> {
         let physical_prefix = self.physical(prefix);
-        // LIKE pattern matches the physical prefix literally.
         let pattern = format!("{}%", like_escape(&physical_prefix));
         let limit_i = i64::from(limit.clamp(1, 10_000));
         let span = tracing::info_span!(

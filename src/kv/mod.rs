@@ -65,6 +65,11 @@ pub trait Kv: Send + Sync {
     /// `GET`. `Some(value)` if present and unexpired, else `None`. An expired key returns `None`, guaranteed.
     async fn get(&self, key: &str) -> Result<Option<Bytes>>;
 
+    /// `MGET`. One slot per input key, in the same order: `Some(value)` for a live key,
+    /// `None` for an absent/expired one. Duplicate keys repeat their value. Empty input
+    /// returns an empty vec. One round-trip regardless of key count.
+    async fn mget(&self, keys: &[&str]) -> Result<Vec<Option<Bytes>>>;
+
     /// `SET` / `SET NX` / `SET XX` per `opts.mode`. Returns whether the write happened.
     async fn set(&self, key: &str, value: Bytes, opts: SetOpts) -> Result<bool>;
 

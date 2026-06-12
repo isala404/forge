@@ -127,12 +127,29 @@ relationship across distinct keys for `put`/`delete` beyond per-key linearizabil
   expiry, the key scope, and (on upload) the `max_bytes` cap, then performs the
   equivalent `get`/`put` against `forge_blobs`. Signing and verification are identical
   to the S3 path, so swapping to S3 changes nothing in app code — only the URL host.
+- **Downloads are served defensively.** The router answers a presigned `GET` with the
+  stored `content_type` but also `Content-Disposition: attachment` and
+  `X-Content-Type-Options: nosniff`. Objects are caller-supplied bytes served from the
+  app's own origin, so a stored HTML/SVG payload must never be rendered inline or
+  sniffed into an active type — that would be stored XSS. Subresource loads (`<img>`,
+  `<video>`) ignore `Content-Disposition`, so legitimate inline media still works; only
+  top-level navigation to the URL is forced to download. A binding that serves presigned
+  URLs itself (e.g. `forge-py`) must set the same two headers.
 - **Signature scope.** Each URL is bound to one `key`, one method (`GET` xor `PUT`),
   one expiry, and (upload) one `max_bytes`. A URL cannot be replayed against a
   different key, method, or a larger body. Expiry is at seconds precision (`TIMESTAMPTZ`).
 - **No snapshot semantics.** A presigned download serves the object's bytes **at fetch
   time**, not at sign time. If the object is overwritten or deleted between signing and
   fetching, the fetch reflects the current state (current bytes, or `404`).
+- **Verifying a presign yourself.** `verify_presigned(method, key, expires_epoch,
+  max_bytes, sig)` returns `Ok(true)` only when the signature matches the configured
+  secret AND the URL has not expired (`Ok(false)` otherwise; `Err(Config)` with no
+  secret; `Err(Invalid)` for a non-`GET`/`PUT` method). It is the exact check the
+  built-in router performs, exposed so an app or a language binding that serves the
+  presigned URLs itself enforces them rather than trusting the key. The built-in
+  `blob_router` also raises axum's default 2 MiB request-body limit to the 50 MiB
+  object cap, so uploads up to the cap go through (the signed `max_bytes` still fences
+  each `PUT`).
 
 ## Limits
 

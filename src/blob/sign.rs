@@ -55,8 +55,7 @@ pub(crate) fn sign(
 
 /// Constant-time verification of a hex signature against the canonical string.
 /// A malformed (non-hex) signature, or any mismatch, returns `false` — never panics.
-/// Only the `blob-router` consumes this; the test suite exercises it regardless.
-#[cfg_attr(not(feature = "blob-router"), allow(dead_code))]
+/// Consumed by `Blob::verify_presigned` and the `blob-router`.
 pub(crate) fn verify(
     secret: &[u8],
     method: Method,
@@ -75,7 +74,6 @@ pub(crate) fn verify(
     mac.verify_slice(&provided).is_ok()
 }
 
-#[cfg_attr(not(feature = "blob-router"), allow(dead_code))]
 fn from_hex(s: &str) -> Option<Vec<u8>> {
     if !s.len().is_multiple_of(2) {
         return None;
@@ -108,7 +106,6 @@ mod tests {
     fn verification_rejects_tampering() {
         let secret = b"super-secret";
         let sig = sign(secret, Method::Put, "k", 1_000, 1024).unwrap();
-        // Wrong method, key, expiry, size, or signature all fail.
         assert!(!verify(secret, Method::Get, "k", 1_000, 1024, &sig));
         assert!(!verify(secret, Method::Put, "other", 1_000, 1024, &sig));
         assert!(!verify(secret, Method::Put, "k", 2_000, 1024, &sig));
