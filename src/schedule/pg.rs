@@ -7,7 +7,7 @@
 //! is the synchronization point) and never loses a tick to a crash between the two.
 
 use super::cron::Cron;
-use super::{MAX_NAME_BYTES, Schedule, ScheduleInfo, ScheduleKind};
+use super::{MAX_AT_HORIZON_DAYS, MAX_NAME_BYTES, Schedule, ScheduleInfo, ScheduleKind};
 use crate::error::{ForgeError, Result};
 use crate::obs;
 use crate::queue::{Backoff, JobId, MAX_PAYLOAD_BYTES};
@@ -39,7 +39,7 @@ impl PgSchedule {
 
     /// Fire every due schedule once. Returns how many jobs were enqueued. Idempotent
     /// and safe to run concurrently on many replicas (per-row claim).
-    pub(crate) async fn process_due(&self) -> Result<u64> {
+    async fn process_due_inner(&self) -> Result<u64> {
         let span = tracing::info_span!(
             "forge.schedule.tick",
             schedule.fired = Empty,
@@ -217,6 +217,12 @@ impl Schedule for PgSchedule {
             check_queue(queue)?;
             check_payload(&payload)?;
             let when_dt: DateTime<Utc> = when.into();
+            // A past/now `when` is allowed (it fires on the next tick within grace);
+            // only an absurdly-far-future `when` is rejected, matching the contract's
+            // ~100-year ceiling so every backend agrees on the horizon.
+            if when_dt > Utc::now() + chrono::Duration::days(MAX_AT_HORIZON_DAYS) {
+                return Err(ForgeError::limit("at `when` exceeds the ~100-year ceiling"));
+            }
             sqlx::query!(
                 "INSERT INTO forge_schedules \
                    (name, kind, cron_expr, target_queue, payload, job_id, next_run) \
@@ -286,5 +292,9 @@ impl Schedule for PgSchedule {
             Ok(items)
         })
         .await
+    }
+
+    async fn process_due(&self) -> Result<u64> {
+        self.process_due_inner().await
     }
 }

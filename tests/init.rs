@@ -59,6 +59,33 @@ async fn bad_connection_string_fails_at_init() {
 }
 
 #[tokio::test]
+async fn incompatible_preexisting_table_fails_structural_check() {
+    let db = TestDatabase::new().await.unwrap();
+
+    // Simulate a user who already had a `forge_kv` table with an incompatible shape:
+    // the `value` column is TEXT, not BYTEA. The `CREATE TABLE IF NOT EXISTS` migration
+    // leaves it untouched and records itself as applied, so only the structural check
+    // can catch the mismatch.
+    db.execute_raw(
+        "CREATE TABLE forge_kv (key TEXT PRIMARY KEY, value TEXT, expires_at TIMESTAMPTZ)",
+    )
+    .await
+    .unwrap();
+
+    let res = Forge::init(ForgeConfig::new(db.url())).await;
+    match res {
+        Err(ForgeError::Config(msg)) => {
+            assert!(
+                msg.contains("forge_kv") && msg.contains("value"),
+                "expected a precise column-type mismatch message, got: {msg}"
+            );
+        }
+        Err(other) => panic!("expected Config error for incompatible forge_kv, got {other:?}"),
+        Ok(_) => panic!("expected Config error for incompatible forge_kv, got Ok"),
+    }
+}
+
+#[tokio::test]
 async fn maintain_runs_cleanly() {
     let db = TestDatabase::new().await.unwrap();
     let forge = db.forge().await.unwrap();
@@ -68,4 +95,21 @@ async fn maintain_runs_cleanly() {
         .await
         .unwrap();
     forge.maintain().await.unwrap();
+}
+
+#[tokio::test]
+async fn default_backend_report_is_all_postgres() {
+    let db = TestDatabase::new().await.unwrap();
+    let forge = db.forge().await.unwrap();
+    let report = forge.backend_report();
+    assert_eq!(report.backends.len(), 8, "one entry per primitive");
+    assert!(
+        report.backends.iter().all(|b| b.provider == "postgres"),
+        "default config powers every primitive with Postgres"
+    );
+    assert!(report.backends.iter().all(|b| b.durable));
+    // Display renders one line per primitive plus a header.
+    let rendered = report.to_string();
+    assert!(rendered.contains("forge backend report:"));
+    assert!(rendered.contains("blob"));
 }

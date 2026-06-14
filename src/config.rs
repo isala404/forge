@@ -2,7 +2,29 @@
 //! bearing fields can be filled from `FORGE_*` env vars via [`ForgeConfig::from_env`].
 
 use crate::error::{ForgeError, Result};
+use std::path::PathBuf;
 use std::time::Duration;
+
+/// Which backend stores blob bytes. Metadata always lives in Postgres; this only
+/// chooses where the object *body* goes.
+///
+/// This is an `enum` so a later S3/R2/GCS backend is a non-breaking variant add. v1
+/// ships two variants: `BYTEA` in Postgres (the default, atomic with surrounding app
+/// SQL) and a local filesystem directory (keeps large objects out of the WAL, at the
+/// cost of `put` no longer being atomic with app SQL and needing a shared mount for
+/// multi-replica deploys).
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum BlobBackendConfig {
+    /// Object bytes in the `forge_blobs.data` `BYTEA` column.
+    #[default]
+    Postgres,
+    /// Object bytes on a local filesystem directory; metadata stays in Postgres.
+    Filesystem {
+        /// Directory the bytes are written under. Created if missing.
+        root: PathBuf,
+    },
+}
 
 /// Everything `Forge::init` needs. The only required field is `postgres`.
 ///
@@ -38,6 +60,8 @@ pub struct ForgeConfig {
     /// URL prefix the blob router is mounted at; presigned URLs point here.
     /// Default `/_forge/blob`.
     pub blob_base_url: String,
+    /// Which backend stores blob bytes. Default [`BlobBackendConfig::Postgres`].
+    pub blob_backend: BlobBackendConfig,
 }
 
 impl Default for ForgeConfig {
@@ -53,6 +77,7 @@ impl Default for ForgeConfig {
             ratelimit_fail_open: true,
             blob_signing_secret: None,
             blob_base_url: "/_forge/blob".to_string(),
+            blob_backend: BlobBackendConfig::Postgres,
         }
     }
 }
@@ -87,6 +112,26 @@ impl ForgeConfig {
         }
         if let Ok(v) = std::env::var("FORGE_BLOB_BASE_URL") {
             cfg.blob_base_url = v;
+        }
+        // Portable, binding-neutral backend selection: the same FORGE_* vars drive
+        // Rust, Node, and Python with no per-language API. `filesystem` needs a root.
+        if let Ok(v) = std::env::var("FORGE_BLOB_BACKEND") {
+            match v.to_ascii_lowercase().as_str() {
+                "postgres" | "" => {}
+                "filesystem" | "fs" => {
+                    let root = std::env::var("FORGE_BLOB_FS_ROOT").map_err(|_| {
+                        ForgeError::config(
+                            "FORGE_BLOB_BACKEND=filesystem requires FORGE_BLOB_FS_ROOT (the blob directory)",
+                        )
+                    })?;
+                    cfg.blob_backend = BlobBackendConfig::Filesystem { root: root.into() };
+                }
+                other => {
+                    return Err(ForgeError::config(format!(
+                        "FORGE_BLOB_BACKEND must be 'postgres' or 'filesystem', got {other:?}"
+                    )));
+                }
+            }
         }
         Ok(cfg)
     }
@@ -145,6 +190,18 @@ impl ForgeConfig {
         self
     }
 
+    /// Select the blob byte-storage backend.
+    pub fn with_blob_backend(mut self, backend: BlobBackendConfig) -> Self {
+        self.blob_backend = backend;
+        self
+    }
+
+    /// Store blob bytes on a local filesystem directory (metadata stays in Postgres).
+    pub fn with_filesystem_blob(mut self, root: impl Into<PathBuf>) -> Self {
+        self.blob_backend = BlobBackendConfig::Filesystem { root: root.into() };
+        self
+    }
+
     /// Validate the statically-checkable fields with a precise message;
     /// connection/migration failures surface later in `Forge::init`.
     pub(crate) fn validate(&self) -> Result<()> {
@@ -169,6 +226,13 @@ impl ForgeConfig {
                 "kv_namespace must not contain ':' (it is the reserved namespace separator)",
             ));
         }
+        if let BlobBackendConfig::Filesystem { root } = &self.blob_backend
+            && root.as_os_str().is_empty()
+        {
+            return Err(ForgeError::config(
+                "filesystem blob backend requires a non-empty root directory",
+            ));
+        }
         Ok(())
     }
 }
@@ -189,6 +253,7 @@ impl std::fmt::Debug for ForgeConfig {
                 &self.blob_signing_secret.as_ref().map(|_| "<redacted>"),
             )
             .field("blob_base_url", &self.blob_base_url)
+            .field("blob_backend", &self.blob_backend)
             .finish()
     }
 }

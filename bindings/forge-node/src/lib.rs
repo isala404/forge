@@ -64,6 +64,90 @@ pub struct JsQueueDepth {
     pub delayed: u32,
 }
 
+/// One page of `kvScanPage`: the keys plus an opaque `cursor` for the next page
+/// (`null` when iteration is complete).
+#[napi(object)]
+pub struct JsScanPage {
+    pub keys: Vec<String>,
+    pub cursor: Option<String>,
+}
+
+/// Object metadata (S3 `HeadObject`). `lastModifiedMs` is epoch milliseconds.
+#[napi(object)]
+pub struct JsBlobInfo {
+    pub key: String,
+    pub size: f64,
+    pub content_type: String,
+    pub etag: String,
+    pub last_modified_ms: f64,
+    pub metadata: HashMap<String, String>,
+}
+
+/// One page of `blobList`: the objects plus an opaque next-page `cursor`.
+#[napi(object)]
+pub struct JsBlobPage {
+    pub items: Vec<JsBlobInfo>,
+    pub cursor: Option<String>,
+}
+
+/// A registered schedule (`scheduleList`). `kind` is `"cron"` or `"at"`; `cronExpr`
+/// is set only for crons. Times are epoch milliseconds.
+#[napi(object)]
+pub struct JsScheduleInfo {
+    pub name: String,
+    pub kind: String,
+    pub cron_expr: Option<String>,
+    pub queue: String,
+    pub next_run_ms: f64,
+    pub last_run_ms: Option<f64>,
+}
+
+/// A validated session's metadata (`validateSessionInfo`). Times are epoch ms.
+#[napi(object)]
+pub struct JsSession {
+    pub user_id: String,
+    pub created_at_ms: f64,
+    pub expires_at_ms: f64,
+}
+
+/// Non-secret API-key metadata (`verifyApiKeyInfo`).
+#[napi(object)]
+pub struct JsApiKeyInfo {
+    pub id: String,
+    pub owner_id: String,
+    pub label: String,
+}
+
+/// One line of `backendReport`: which provider powers a primitive.
+#[napi(object)]
+pub struct JsBackendInfo {
+    pub primitive: String,
+    pub provider: String,
+    pub durable: bool,
+    pub caveats: String,
+}
+
+/// Connection options for `ForgeClient.connectWith` — the full per-deployment surface
+/// (every field optional; omitted fields take Forge's defaults).
+#[napi(object)]
+#[derive(Default)]
+pub struct JsConnectOptions {
+    pub signing_secret: Option<String>,
+    pub kv_namespace: Option<String>,
+    pub max_connections: Option<u32>,
+    pub run_migrations: Option<bool>,
+    pub blob_base_url: Option<String>,
+    /// Set to store blob bytes on a local directory instead of in Postgres `BYTEA`.
+    pub filesystem_blob_root: Option<String>,
+}
+
+/// Epoch milliseconds for a `SystemTime` (saturating).
+fn epoch_ms(t: SystemTime) -> f64 {
+    t.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64() * 1000.0)
+        .unwrap_or(0.0)
+}
+
 /// A Forge client: one Postgres pool, every primitive. Construct with
 /// `ForgeClient.connect(url)`.
 #[napi]
@@ -96,6 +180,55 @@ impl ForgeClient {
             forge,
             leased: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    /// Connect with the full per-deployment option surface (namespace, pool size,
+    /// migration toggle, blob backend, …) instead of just a URL + signing secret.
+    #[napi(factory)]
+    pub async fn connect_with(
+        postgres_url: String,
+        options: JsConnectOptions,
+    ) -> Result<ForgeClient> {
+        let mut cfg = forge::ForgeConfig::new(postgres_url);
+        if let Some(s) = options.signing_secret {
+            cfg = cfg.with_blob_signing_secret(s);
+        }
+        if let Some(ns) = options.kv_namespace {
+            cfg = cfg.with_kv_namespace(ns);
+        }
+        if let Some(n) = options.max_connections {
+            cfg = cfg.with_max_connections(n);
+        }
+        if options.run_migrations == Some(false) {
+            cfg = cfg.without_migrations();
+        }
+        if let Some(base) = options.blob_base_url {
+            cfg = cfg.with_blob_base_url(base);
+        }
+        if let Some(root) = options.filesystem_blob_root {
+            cfg = cfg.with_filesystem_blob(root);
+        }
+        let forge = forge::Forge::init(cfg).await.map_err(err)?;
+        Ok(ForgeClient {
+            forge,
+            leased: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
+    /// A backend report: which provider powers each primitive (for health pages/logs).
+    #[napi]
+    pub fn backend_report(&self) -> Vec<JsBackendInfo> {
+        self.forge
+            .backend_report()
+            .backends
+            .into_iter()
+            .map(|b| JsBackendInfo {
+                primitive: b.primitive.as_str().to_string(),
+                provider: b.provider.to_string(),
+                durable: b.durable,
+                caveats: b.caveats.to_string(),
+            })
+            .collect()
     }
 
     /// `GET key` → the value as a UTF-8 string, or `null`.
@@ -653,8 +786,9 @@ impl ForgeClient {
     }
 
     /// Subscribe to a realtime topic, returning a handle whose `next()` yields each
-    /// payload published *after* this resolves (or `null` when the stream ends). The
-    /// subscription holds a dedicated Postgres connection until the handle is dropped.
+    /// payload published *after* this resolves (or `null` when the stream ends).
+    /// Subscriptions share one per-process listener connection; drop the handle to
+    /// unsubscribe (the channel is released once it has no remaining subscribers).
     #[napi]
     pub async fn pubsub_subscribe(&self, topic: String) -> Result<JsSubscription> {
         let sub = self.forge.pubsub().subscribe(&topic).await.map_err(err)?;
@@ -669,11 +803,250 @@ impl ForgeClient {
     pub fn pubsub_channel(&self, topic: String) -> String {
         forge::pubsub::channel_for(&topic)
     }
+
+    // --- kv parity -----------------------------------------------------------------
+
+    /// `EXPIRE key ttlSeconds`. Sets/replaces the TTL on a live key; `false` if absent.
+    #[napi]
+    pub async fn kv_expire(&self, key: String, ttl_seconds: f64) -> Result<bool> {
+        self.forge
+            .kv()
+            .expire(&key, Duration::from_secs_f64(ttl_seconds.max(0.0)))
+            .await
+            .map_err(err)
+    }
+
+    /// Atomic compare-and-swap (string values). Writes `newValue` iff the current value
+    /// equals `old` (`old` omitted means "expected absent/expired"). Returns success.
+    #[napi]
+    pub async fn kv_compare_and_swap(
+        &self,
+        key: String,
+        old: Option<String>,
+        new_value: String,
+    ) -> Result<bool> {
+        self.forge
+            .kv()
+            .compare_and_swap(
+                &key,
+                old.map(forge::Bytes::from),
+                forge::Bytes::from(new_value),
+            )
+            .await
+            .map_err(err)
+    }
+
+    /// `SCAN prefix*` with cursor pagination. Pass `cursor` from the previous page
+    /// (omit for the first); the returned `cursor` is `null` when iteration is done.
+    #[napi]
+    pub async fn kv_scan_page(
+        &self,
+        prefix: String,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> Result<JsScanPage> {
+        let cur = cursor.map(forge::Cursor::from_token);
+        let (keys, next) = self
+            .forge
+            .kv()
+            .scan(&prefix, cur, limit)
+            .await
+            .map_err(err)?;
+        Ok(JsScanPage {
+            keys,
+            cursor: next.map(|c| c.token().to_string()),
+        })
+    }
+
+    // --- blob parity ---------------------------------------------------------------
+
+    /// `HeadObject`: full metadata (size, content type, etag, last-modified, user
+    /// metadata), or `null` if the object does not exist.
+    #[napi]
+    pub async fn blob_head(&self, key: String) -> Result<Option<JsBlobInfo>> {
+        Ok(self
+            .forge
+            .blob()
+            .head(&key)
+            .await
+            .map_err(err)?
+            .map(|i| JsBlobInfo {
+                key: i.key,
+                size: i.size as f64,
+                content_type: i.content_type,
+                etag: i.etag,
+                last_modified_ms: epoch_ms(i.last_modified),
+                metadata: i.metadata.into_iter().collect(),
+            }))
+    }
+
+    /// `ListObjectsV2`: up to `limit` objects under `prefix`, lexicographic, with cursor
+    /// pagination. Pass `cursor` from the previous page (omit for the first).
+    #[napi]
+    pub async fn blob_list(
+        &self,
+        prefix: String,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> Result<JsBlobPage> {
+        let cur = cursor.map(forge::Cursor::from_token);
+        let page = self
+            .forge
+            .blob()
+            .list(&prefix, cur, limit)
+            .await
+            .map_err(err)?;
+        Ok(JsBlobPage {
+            items: page
+                .items
+                .into_iter()
+                .map(|i| JsBlobInfo {
+                    key: i.key,
+                    size: i.size as f64,
+                    content_type: i.content_type,
+                    etag: i.etag,
+                    last_modified_ms: epoch_ms(i.last_modified),
+                    metadata: i.metadata.into_iter().collect(),
+                })
+                .collect(),
+            cursor: page.next.map(|c| c.token().to_string()),
+        })
+    }
+
+    /// Store an object (binary body) with optional content type and user metadata.
+    #[napi]
+    pub async fn blob_put_object(
+        &self,
+        key: String,
+        data: Buffer,
+        content_type: Option<String>,
+        metadata: Option<HashMap<String, String>>,
+    ) -> Result<()> {
+        let mut opts = forge::PutOpts::new();
+        if let Some(ct) = content_type {
+            opts = opts.with_content_type(ct);
+        }
+        if let Some(meta) = metadata {
+            for (k, v) in meta {
+                opts = opts.with_metadata(k, v);
+            }
+        }
+        self.forge
+            .blob()
+            .put(&key, forge::Bytes::from(data.to_vec()), opts)
+            .await
+            .map_err(err)
+    }
+
+    // --- schedule parity -----------------------------------------------------------
+
+    /// Cancel a schedule by name. `true` if one was removed, `false` if none existed.
+    #[napi]
+    pub async fn schedule_cancel(&self, name: String) -> Result<bool> {
+        self.forge.schedule().cancel(&name).await.map_err(err)
+    }
+
+    /// List every registered schedule (crons and pending one-shots).
+    #[napi]
+    pub async fn schedule_list(&self) -> Result<Vec<JsScheduleInfo>> {
+        let items = self.forge.schedule().list().await.map_err(err)?;
+        Ok(items
+            .into_iter()
+            .map(|s| {
+                let (kind, cron_expr) = match s.kind {
+                    forge::ScheduleKind::Cron(e) => ("cron".to_string(), Some(e)),
+                    _ => ("at".to_string(), None),
+                };
+                JsScheduleInfo {
+                    name: s.name,
+                    kind,
+                    cron_expr,
+                    queue: s.queue,
+                    next_run_ms: epoch_ms(s.next_run),
+                    last_run_ms: s.last_run.map(epoch_ms),
+                }
+            })
+            .collect())
+    }
+
+    // --- config flag parity --------------------------------------------------------
+
+    /// Set a flag to always-on.
+    #[napi]
+    pub async fn set_flag_on(&self, key: String) -> Result<()> {
+        self.forge
+            .config()
+            .set_flag(&key, forge::FlagRule::On)
+            .await
+            .map_err(err)
+    }
+
+    /// Set a flag to always-off.
+    #[napi]
+    pub async fn set_flag_off(&self, key: String) -> Result<()> {
+        self.forge
+            .config()
+            .set_flag(&key, forge::FlagRule::Off)
+            .await
+            .map_err(err)
+    }
+
+    /// Set a flag to an allow-list of targeting keys.
+    #[napi]
+    pub async fn set_flag_allow_list(&self, key: String, entries: Vec<String>) -> Result<()> {
+        self.forge
+            .config()
+            .set_flag(&key, forge::FlagRule::AllowList(entries))
+            .await
+            .map_err(err)
+    }
+
+    // --- auth parity ---------------------------------------------------------------
+
+    /// Validate a session token; returns full session metadata (user id + times), or
+    /// `null`. Use `validateSession` when only the user id is needed.
+    #[napi]
+    pub async fn validate_session_info(&self, token: String) -> Result<Option<JsSession>> {
+        Ok(self
+            .forge
+            .auth()
+            .validate_session(&token)
+            .await
+            .map_err(err)?
+            .map(|s| JsSession {
+                user_id: s.user_id,
+                created_at_ms: epoch_ms(s.created_at),
+                expires_at_ms: epoch_ms(s.expires_at),
+            }))
+    }
+
+    /// Verify an API key; returns full non-secret metadata (id, owner, label), or
+    /// `null`. Use `verifyApiKey` when only the owner id is needed.
+    #[napi]
+    pub async fn verify_api_key_info(&self, key: String) -> Result<Option<JsApiKeyInfo>> {
+        Ok(self
+            .forge
+            .auth()
+            .verify_api_key(&key)
+            .await
+            .map_err(err)?
+            .map(|i| JsApiKeyInfo {
+                id: i.id,
+                owner_id: i.owner_id,
+                label: i.label,
+            }))
+    }
+
+    /// Revoke an API key by its (non-secret) id. `true` if one was removed.
+    #[napi]
+    pub async fn revoke_api_key(&self, id: String) -> Result<bool> {
+        self.forge.auth().revoke_api_key(&id).await.map_err(err)
+    }
 }
 
 /// A live pubsub subscription handle. Drive it as a JS async iterator: call `next()`
 /// in a loop until it resolves to `null` (the stream ended). Dropping the handle
-/// unsubscribes and releases the dedicated Postgres connection.
+/// unsubscribes (subscriptions share one per-process listener connection).
 #[napi]
 pub struct JsSubscription {
     inner: Arc<Mutex<forge::Subscription>>,

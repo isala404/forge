@@ -80,9 +80,7 @@ class Context(BaseContext):
         Used to reject a WS connection whose token is bad, and to re-check long-lived
         subscriptions whose session may have been revoked mid-stream."""
         token = self._token()
-        self._user = (
-            await _principal(self["forge"], self["pool"], token) if token else None
-        )
+        self._user = await _principal(self["forge"], self["pool"], token) if token else None
         self._resolved = True
         return self._user
 
@@ -110,8 +108,12 @@ async def _principal(forge, pool, token: str) -> dict | None:
         return None
     r = row[0]
     # Only a session token is revocable; an API-key principal has no session to drop.
-    return {"id": r["id"], "username": r["username"], "display_name": r["display_name"],
-            "token": token if revocable else ""}
+    return {
+        "id": r["id"],
+        "username": r["username"],
+        "display_name": r["display_name"],
+        "token": token if revocable else "",
+    }
 
 
 def make_context_getter(presence_ttl: float):

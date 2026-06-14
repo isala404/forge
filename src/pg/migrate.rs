@@ -35,6 +35,10 @@ fn embedded_migrations() -> Vec<Migration> {
             "v007_schedule",
             include_str!("../migrations/v007_schedule.sql"),
         ),
+        Migration::parse(
+            "v008_blob_fs",
+            include_str!("../migrations/v008_blob_fs.sql"),
+        ),
     ]
 }
 
@@ -136,6 +140,10 @@ impl MigrationRunner {
                 missing.join(", ")
             )));
         }
+        // Even with migrations disabled, confirm the present schema is structurally
+        // what Forge expects — an out-of-band migration could have produced a
+        // different shape.
+        super::schema::verify_schema(&self.pool).await?;
         Ok(())
     }
 
@@ -153,6 +161,9 @@ impl MigrationRunner {
             }
             self.apply(migration).await?;
         }
+        // Catch a pre-existing forge_* table whose shape disagrees with what the
+        // `IF NOT EXISTS` migrations would have created (they leave it untouched).
+        super::schema::verify_schema(&self.pool).await?;
         Ok(())
     }
 

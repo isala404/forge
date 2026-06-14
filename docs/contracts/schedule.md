@@ -67,7 +67,7 @@ handed to `queue` verbatim. `JobId` is the `queue` primitive's id type.
 | `cron` | Upsert by `name`. Inserts the schedule, or replaces an existing one's `expr`/`queue`/`payload` (one atomic write — re-registering the same name does **not** create a second schedule). `expr` is parsed and validated as 5-field cron at this call; a bad expression is rejected here, never silently at tick time. `next_run` is recomputed from the new `expr`. Returns `Ok(())`. |
 | `at` | Schedules exactly one enqueue at `when`. A `when` already in the past fires on the next tick if within the missed-tick grace (below), else is skipped + logged — the same policy as a missed cron tick. Returns the `JobId` the eventual enqueue will carry, so the caller can correlate / inspect / `ack` it via `queue` once it lands. The job becomes visible in `queue` only when the tick fires, not at `at` call time (see resolution). |
 | `cancel` | Removes the recurring schedule named `name`. Returns `true` if one existed and was removed, `false` if none did. Cancelling an unknown name is **success** (`Ok(false)`), not `NotFound`. A tick already enqueued before `cancel` is **not** recalled — it lives in `queue` now and runs to completion there. `cancel` does **not** target one-shots created by `at`. |
-| `list` | Returns every registered recurring schedule with its `next_run`/`last_run`. One-shot `at` jobs are excluded — once fired they are ordinary `queue` jobs, and before firing they are not "schedules" in the cron sense. Empty vec if none. |
+| `list` | Returns every registered schedule with its `next_run`/`last_run` — recurring crons (`kind = Cron(expr)`) **and** pending one-shots (`kind = At`). A one-shot appears here only until it fires; once fired it is deleted from the schedule table and lives on solely as an ordinary `queue` job. Empty vec if none. |
 
 A scheduled enqueue is indistinguishable, once landed, from any other `queue` job: same
 payload, same retry/backoff/DLQ rules. schedule's entire job is *deciding when to call
@@ -126,7 +126,7 @@ Do not encode ordering assumptions.
 | `expr` | valid 5-field cron; UTC; min resolution 1 min | `Invalid` |
 | `queue` | a valid `queue` name (per `queue` contract) | `Invalid` |
 | `payload` | ≤ 256 KiB (the `queue` payload cap) | `Limit` |
-| `at` / `when` | strictly in the future (UTC); ≤ ~100-year ceiling | `Invalid` (past), `Limit` (over ceiling) |
+| `at` / `when` | any instant (UTC); a past/now `when` fires on the next tick if within the missed-tick grace, else skipped + logged; ≤ ~100-year ceiling | `Limit` (over ceiling) |
 | missed-tick lateness | fires only if < 1h late | skipped + logged (not an error) |
 | tick resolution | ≥ 60s | sub-minute `expr` rejected as `Invalid` |
 
@@ -142,7 +142,7 @@ century out is effectively always a bug, and a fixed ceiling keeps backends in a
 | `cancel` on an unknown name | returns `false`, not an error | — |
 | `list` with no schedules | returns empty vec, not an error | — |
 | malformed/sub-minute cron `expr`; empty `name`; invalid target queue name | `Invalid` | no — caller bug |
-| `name` over 256 B; `payload` over 256 KiB | `Limit` | no |
+| `name` over 256 B; `payload` over 256 KiB; `at.when` over the ~100-year ceiling | `Limit` | no |
 | transient backend outage (pool timeout, dropped conn, `08xxx`/`57014`) | `Unavailable` | yes |
 | failure to enqueue at tick time (queue backend unavailable) | retried by the ticker; not surfaced to a caller | — (internal retry) |
 | other vendor/SDK error | `Backend` (carries retryability flag) | per flag |

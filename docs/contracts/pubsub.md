@@ -24,7 +24,7 @@ async fn subscribe(&self, topic: &str) -> Result<Subscription>; // Subscription 
 | Fan-out | One `publish` reaches all current subscribers of the topic. Zero subscribers is success, not an error. |
 | Topic → channel | Topics are arbitrary UTF-8 (≤ `MAX_TOPIC_BYTES` = 256 B). Internally each maps to a `forge_<sha256[..32]>` Postgres channel, so any topic string is valid and distinct topics do not collide. |
 | Payload | UTF-8 text, ≤ `MAX_PAYLOAD_BYTES` = 7000 B (Postgres caps NOTIFY at 8000 B). For larger data, publish a reference (e.g. a row id) and have the subscriber read the row. |
-| Subscription lifetime | Each `subscribe` holds a dedicated Postgres connection until the stream is dropped. Dropping the stream unsubscribes and releases the connection. The stream ends (`None`) if the connection drops. |
+| Subscription lifetime | Subscriptions share one per-process `PgListener` (see "Implementation: one shared listener" below), not a connection each. `subscribe` registers the topic's channel on that shared connection and returns a stream over an in-process broadcast; dropping the stream unsubscribes, and the channel is released once it has no remaining subscribers. The stream ends (`None`) only if the shared listener cannot re-establish its connection. |
 
 ## Errors
 

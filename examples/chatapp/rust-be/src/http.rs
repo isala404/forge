@@ -88,7 +88,9 @@ async fn graphql_get(State(st): State<AppState>, req: Request) -> Response {
     }
     let headers = req.headers().clone();
     match GraphQLRequest::from_request(req, &()).await {
-        Ok(gql) => graphql_handler(State(st), headers, gql).await.into_response(),
+        Ok(gql) => graphql_handler(State(st), headers, gql)
+            .await
+            .into_response(),
         Err(rej) => rej.into_response(),
     }
 }

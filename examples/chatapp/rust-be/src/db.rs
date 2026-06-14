@@ -438,12 +438,12 @@ pub async fn delete_expired_message(pool: &PgPool, id: Uuid) -> Result<()> {
 /// Due disappearing messages (and their media keys) for the reconciliation sweep to
 /// self-heal: any reap whose post-commit enqueue was dropped. Bounded.
 pub async fn due_messages(pool: &PgPool, limit: i64) -> Result<Vec<(Uuid, Option<String>)>> {
-    Ok(sqlx::query_as(
-        "SELECT id, media_key FROM messages WHERE expires_at <= now() LIMIT $1",
+    Ok(
+        sqlx::query_as("SELECT id, media_key FROM messages WHERE expires_at <= now() LIMIT $1")
+            .bind(limit)
+            .fetch_all(pool)
+            .await?,
     )
-    .bind(limit)
-    .fetch_all(pool)
-    .await?)
 }
 
 /// Live messages with at least one never-delivered receipt, older than a grace window

@@ -227,9 +227,7 @@ class Mutation:
         chat_row = await db.chat(pool, cid)
         expires_at = None
         if chat_row and chat_row["disappearing_seconds"]:
-            expires_at = datetime.now(UTC) + timedelta(
-                seconds=chat_row["disappearing_seconds"]
-            )
+            expires_at = datetime.now(UTC) + timedelta(seconds=chat_row["disappearing_seconds"])
 
         msg_id = uuid.uuid4()
 
@@ -294,7 +292,8 @@ class Mutation:
         await require_member(info, cid, u["id"])
         # The indicator rides the pubsub 'typing' event; nothing reads a kv typing key.
         await publish_event(
-            info, chat_topic(cid),
+            info,
+            chat_topic(cid),
             {"type": "typing", "user_id": str(u["id"]), "typing": typing},
         )
         return True
@@ -311,7 +310,8 @@ class Mutation:
         updated = await db.mark_read(info.context["pool"], cid, mid, u["id"])
         if updated:
             await publish_event(
-                info, chat_topic(cid),
+                info,
+                chat_topic(cid),
                 {"type": "receipt", "message_id": str(mid), "user_id": str(u["id"])},
             )
         return True
@@ -322,7 +322,8 @@ class Mutation:
         forge = info.context["forge"]
         await forge.kv_set(f"online:{u['id']}", "1", info.context["presence_ttl"])
         await publish_event(
-            info, PRESENCE_TOPIC,
+            info,
+            PRESENCE_TOPIC,
             {"type": "presence", "user_id": str(u["id"]), "online": True},
         )
         return True

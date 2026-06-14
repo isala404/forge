@@ -4,23 +4,22 @@
 //! Presigned URLs carry the key + expiry + size cap as query params and an
 //! HMAC-SHA256 signature (see [`super::sign`]); they resolve through the optional
 //! `blob-router`, which verifies the signature and performs the equivalent get/put.
+//! Shared, backend-agnostic helpers (key checks, namespace mapping, presign/verify)
+//! live in [`super::common`].
 
-use super::sign::{self, Method};
-use super::{
-    Blob, BlobInfo, DEFAULT_CONTENT_TYPE, ListPage, MAX_CONTENT_TYPE_BYTES, MAX_KEY_BYTES,
-    MAX_METADATA_BYTES, MAX_OBJECT_BYTES, MAX_PRESIGN_EXPIRES, PutOpts,
-};
+use super::common;
+use super::sign::Method;
+use super::{Blob, BlobInfo, DEFAULT_CONTENT_TYPE, ListPage, MAX_OBJECT_BYTES, PutOpts};
 use crate::error::{ForgeError, Result};
 use crate::obs;
 use crate::types::Cursor;
 use crate::util::{key_hash, sha256_hex};
 use async_trait::async_trait;
 use bytes::Bytes;
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use sqlx::PgPool;
 use sqlx::types::Json;
 use std::collections::BTreeMap;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tracing::field::Empty;
 
 type Meta = BTreeMap<String, String>;
@@ -51,28 +50,11 @@ impl PgBlob {
     }
 
     fn physical(&self, key: &str) -> String {
-        if self.namespace.is_empty() {
-            key.to_string()
-        } else {
-            format!("{}:{}", self.namespace, key)
-        }
+        common::physical(&self.namespace, key)
     }
 
     fn logical<'a>(&self, stored: &'a str) -> &'a str {
-        if self.namespace.is_empty() {
-            stored
-        } else {
-            stored
-                .strip_prefix(&self.namespace)
-                .and_then(|s| s.strip_prefix(':'))
-                .unwrap_or(stored)
-        }
-    }
-
-    /// The HMAC signing secret, for the router's verification path.
-    #[cfg(feature = "blob-router")]
-    pub(crate) fn signing_secret(&self) -> Option<&[u8]> {
-        self.secret.as_deref()
+        common::logical(&self.namespace, stored)
     }
 
     fn build_presigned(
@@ -82,7 +64,7 @@ impl PgBlob {
         expires: Duration,
         max_bytes: u64,
     ) -> Result<String> {
-        presign_url(
+        common::presign_url(
             self.secret.as_deref(),
             &self.base_url,
             method,
@@ -91,92 +73,6 @@ impl PgBlob {
             max_bytes,
         )
     }
-}
-
-/// Build a signed URL (pool-free, so it is unit-testable without a database).
-fn presign_url(
-    secret: Option<&[u8]>,
-    base_url: &str,
-    method: Method,
-    key: &str,
-    expires: Duration,
-    max_bytes: u64,
-) -> Result<String> {
-    let secret = secret.ok_or_else(|| {
-        ForgeError::invalid(
-            "blob signing secret is not configured (set ForgeConfig.blob_signing_secret)",
-        )
-    })?;
-    if expires.is_zero() {
-        return Err(ForgeError::invalid("presign expires must be positive"));
-    }
-    if expires > MAX_PRESIGN_EXPIRES {
-        return Err(ForgeError::limit(
-            "presign expires exceeds the 7-day maximum",
-        ));
-    }
-    let expires_epoch = unix_secs(SystemTime::now() + expires);
-    let sig = sign::sign(secret, method, key, expires_epoch, max_bytes)?;
-    let enc_key = utf8_percent_encode(key, NON_ALPHANUMERIC);
-    Ok(format!(
-        "{base_url}?key={enc_key}&expires={expires_epoch}&max_bytes={max_bytes}&sig={sig}"
-    ))
-}
-
-fn check_key(key: &str) -> Result<()> {
-    if key.is_empty() {
-        return Err(ForgeError::invalid("blob key must not be empty"));
-    }
-    if key.len() > MAX_KEY_BYTES {
-        return Err(ForgeError::limit(format!(
-            "key is {} bytes; max is {MAX_KEY_BYTES}",
-            key.len()
-        )));
-    }
-    Ok(())
-}
-
-fn check_put(data: &[u8], opts: &PutOpts) -> Result<()> {
-    if data.len() > MAX_OBJECT_BYTES {
-        return Err(ForgeError::limit(format!(
-            "object is {} bytes; max is {MAX_OBJECT_BYTES}",
-            data.len()
-        )));
-    }
-    if let Some(ct) = &opts.content_type
-        && ct.len() > MAX_CONTENT_TYPE_BYTES
-    {
-        return Err(ForgeError::limit(format!(
-            "content_type is {} bytes; max is {MAX_CONTENT_TYPE_BYTES}",
-            ct.len()
-        )));
-    }
-    let meta_bytes: usize = opts.metadata.iter().map(|(k, v)| k.len() + v.len()).sum();
-    if meta_bytes > MAX_METADATA_BYTES {
-        return Err(ForgeError::limit(format!(
-            "metadata is {meta_bytes} bytes; max is {MAX_METADATA_BYTES}"
-        )));
-    }
-    Ok(())
-}
-
-/// Whole seconds since the Unix epoch (saturating; times are always future here).
-fn unix_secs(t: SystemTime) -> i64 {
-    t.duration_since(UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
-}
-
-/// Escape `LIKE` wildcards so a caller prefix matches literally.
-fn like_escape(prefix: &str) -> String {
-    let mut out = String::with_capacity(prefix.len() + 2);
-    for c in prefix.chars() {
-        if matches!(c, '%' | '_' | '\\') {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
 }
 
 #[async_trait]
@@ -192,8 +88,8 @@ impl Blob for PgBlob {
             error.variant = Empty,
         );
         obs::instrument("blob", "put", span, async move {
-            check_key(key)?;
-            check_put(&data, &opts)?;
+            common::check_key(key)?;
+            common::check_put(&data, &opts)?;
             let pk = self.physical(key);
             let etag = sha256_hex(&data);
             let content_type = opts
@@ -232,7 +128,7 @@ impl Blob for PgBlob {
             error.variant = Empty,
         );
         obs::instrument("blob", "get", span, async move {
-            check_key(key)?;
+            common::check_key(key)?;
             let pk = self.physical(key);
             let row = sqlx::query_scalar!("SELECT data FROM forge_blobs WHERE key = $1", pk)
                 .fetch_optional(&self.pool)
@@ -257,7 +153,7 @@ impl Blob for PgBlob {
             error.variant = Empty,
         );
         obs::instrument("blob", "head", span, async move {
-            check_key(key)?;
+            common::check_key(key)?;
             let pk = self.physical(key);
             let row = sqlx::query!(
                 r#"SELECT content_type, etag, size,
@@ -289,7 +185,7 @@ impl Blob for PgBlob {
             error.variant = Empty,
         );
         obs::instrument("blob", "delete", span, async move {
-            check_key(key)?;
+            common::check_key(key)?;
             let pk = self.physical(key);
             let removed =
                 sqlx::query_scalar!("DELETE FROM forge_blobs WHERE key = $1 RETURNING key", pk)
@@ -304,7 +200,7 @@ impl Blob for PgBlob {
 
     async fn list(&self, prefix: &str, cursor: Option<Cursor>, limit: u32) -> Result<ListPage> {
         let physical_prefix = self.physical(prefix);
-        let pattern = format!("{}%", like_escape(&physical_prefix));
+        let pattern = format!("{}%", common::like_escape(&physical_prefix));
         let limit_i = i64::from(limit.clamp(1, 1000));
         let after = cursor.as_ref().map(|c| c.as_str().to_string());
         let span = tracing::info_span!(
@@ -359,7 +255,7 @@ impl Blob for PgBlob {
             error.variant = Empty,
         );
         obs::instrument("blob", "presign_upload", span, async move {
-            check_key(key)?;
+            common::check_key(key)?;
             if max_bytes > MAX_OBJECT_BYTES as u64 {
                 return Err(ForgeError::limit(
                     "presign max_bytes exceeds the 50 MiB object cap",
@@ -379,7 +275,7 @@ impl Blob for PgBlob {
             error.variant = Empty,
         );
         obs::instrument("blob", "presign_download", span, async move {
-            check_key(key)?;
+            common::check_key(key)?;
             self.build_presigned(Method::Get, key, expires, 0)
         })
         .await
@@ -393,75 +289,17 @@ impl Blob for PgBlob {
         max_bytes: u64,
         sig: &str,
     ) -> Result<bool> {
-        let secret = self.secret.as_deref().ok_or_else(|| {
-            ForgeError::config(
-                "blob signing secret is not configured (set ForgeConfig.blob_signing_secret)",
-            )
-        })?;
-        let method = match method.to_ascii_uppercase().as_str() {
-            "GET" => Method::Get,
-            "PUT" => Method::Put,
-            other => {
-                return Err(ForgeError::invalid(format!(
-                    "presign method must be GET or PUT, got {other:?}"
-                )));
-            }
-        };
-        // Expired URLs fail verification (matching the router's expiry check) before
-        // the constant-time signature compare.
-        if expires_epoch <= unix_secs(SystemTime::now()) {
-            return Ok(false);
-        }
-        Ok(sign::verify(
-            secret,
+        common::verify_presigned(
+            self.secret.as_deref(),
             method,
             key,
             expires_epoch,
             max_bytes,
             sig,
-        ))
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::panic)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn like_escape_neutralizes_wildcards() {
-        assert_eq!(like_escape("a%b_c"), "a\\%b\\_c");
-    }
-
-    #[test]
-    fn presign_requires_a_secret() {
-        let err = presign_url(
-            None,
-            "/_forge/blob",
-            Method::Get,
-            "k",
-            Duration::from_secs(60),
-            0,
         )
-        .unwrap_err();
-        assert!(matches!(err, ForgeError::Invalid(_)));
     }
 
-    #[test]
-    fn presigned_url_carries_signed_params() {
-        let url = presign_url(
-            Some(b"secret"),
-            "/_forge/blob",
-            Method::Put,
-            "exports/a b.csv",
-            Duration::from_secs(60),
-            1024,
-        )
-        .unwrap();
-        assert!(url.starts_with("/_forge/blob?key="));
-        assert!(url.contains("max_bytes=1024"));
-        assert!(url.contains("sig="));
-        // The space in the key is percent-encoded (NON_ALPHANUMERIC also encodes `.`/`/`).
-        assert!(url.contains("a%20b"));
+    fn presign_ready(&self) -> bool {
+        self.secret.is_some()
     }
 }

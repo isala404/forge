@@ -51,9 +51,7 @@ async def _events(info: Info, topic: str) -> AsyncIterator[dict]:
 @strawberry.type
 class Subscription:
     @strawberry.subscription(description="New messages in a chat (live).")
-    async def message_added(
-        self, info: Info, chat_id: strawberry.ID
-    ) -> AsyncIterator[Message]:
+    async def message_added(self, info: Info, chat_id: strawberry.ID) -> AsyncIterator[Message]:
         u = await require_user(info)
         pool = info.context["pool"]
         cid = parse_id(chat_id)
@@ -83,9 +81,7 @@ class Subscription:
                 yield TypingEvent(user=user_from_row(row[0]), typing=bool(ev.get("typing")))
 
     @strawberry.subscription
-    async def receipt_changed(
-        self, info: Info, chat_id: strawberry.ID
-    ) -> AsyncIterator[Receipt]:
+    async def receipt_changed(self, info: Info, chat_id: strawberry.ID) -> AsyncIterator[Receipt]:
         u = await require_user(info)
         pool = info.context["pool"]
         cid = parse_id(chat_id)

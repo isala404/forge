@@ -4,3 +4,4 @@
 *.so
 *.pyd
 __pycache__/
+/uv.lock

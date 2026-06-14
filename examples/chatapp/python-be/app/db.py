@@ -25,28 +25,25 @@ async def create_user(pool, username, display_name, password_hash) -> uuid.UUID:
     uid = uuid.uuid4()
     await pool.execute(
         "INSERT INTO users (id, username, display_name, password_hash) VALUES ($1,$2,$3,$4)",
-        uid, username, display_name, password_hash,
+        uid,
+        username,
+        display_name,
+        password_hash,
     )
     return uid
 
 
 async def username_taken(pool, username) -> bool:
-    return await pool.fetchval(
-        "SELECT EXISTS(SELECT 1 FROM users WHERE username = $1)", username
-    )
+    return await pool.fetchval("SELECT EXISTS(SELECT 1 FROM users WHERE username = $1)", username)
 
 
 async def credentials(pool, username):
-    row = await pool.fetchrow(
-        "SELECT id, password_hash FROM users WHERE username = $1", username
-    )
+    row = await pool.fetchrow("SELECT id, password_hash FROM users WHERE username = $1", username)
     return (row["id"], row["password_hash"]) if row else None
 
 
 async def set_password_hash(pool, user_id, password_hash) -> None:
-    await pool.execute(
-        "UPDATE users SET password_hash = $2 WHERE id = $1", user_id, password_hash
-    )
+    await pool.execute("UPDATE users SET password_hash = $2 WHERE id = $1", user_id, password_hash)
 
 
 async def user_by_username(pool, username):
@@ -79,7 +76,8 @@ async def chat(pool, cid):
 async def is_member(pool, chat_id, user_id) -> bool:
     return await pool.fetchval(
         "SELECT EXISTS(SELECT 1 FROM chat_members WHERE chat_id = $1 AND user_id = $2)",
-        chat_id, user_id,
+        chat_id,
+        user_id,
     )
 
 
@@ -88,7 +86,10 @@ async def create_chat(pool, kind, title, created_by, member_ids) -> uuid.UUID:
     async with pool.acquire() as conn, conn.transaction():
         await conn.execute(
             "INSERT INTO chats (id, kind, title, created_by) VALUES ($1,$2,$3,$4)",
-            cid, kind, title, created_by,
+            cid,
+            kind,
+            title,
+            created_by,
         )
         await conn.executemany(
             "INSERT INTO chat_members (chat_id, user_id) VALUES ($1,$2) "
@@ -102,7 +103,8 @@ async def add_member(pool, chat_id, user_id) -> None:
     await pool.execute(
         "INSERT INTO chat_members (chat_id, user_id) VALUES ($1,$2) "
         "ON CONFLICT (chat_id, user_id) DO NOTHING",
-        chat_id, user_id,
+        chat_id,
+        user_id,
     )
 
 
@@ -116,11 +118,18 @@ async def insert_message_with_receipts(
             "INSERT INTO messages "
             "(id, chat_id, sender_id, body, media_key, content_type, expires_at) "
             "VALUES ($1,$2,$3,$4,$5,$6,$7)",
-            mid, chat_id, sender_id, body, media_key, content_type, expires_at,
+            mid,
+            chat_id,
+            sender_id,
+            body,
+            media_key,
+            content_type,
+            expires_at,
         )
         rows = await conn.fetch(
             "SELECT user_id FROM chat_members WHERE chat_id = $1 AND user_id <> $2",
-            chat_id, sender_id,
+            chat_id,
+            sender_id,
         )
         recipients = [r["user_id"] for r in rows]
         if recipients:
@@ -148,7 +157,9 @@ async def list_messages(pool, chat_id, before: datetime | None, limit: int):
         "  AND (expires_at IS NULL OR expires_at > now()) "
         "  AND ($2::timestamptz IS NULL OR created_at < $2) "
         "ORDER BY created_at DESC LIMIT $3",
-        chat_id, before, limit,
+        chat_id,
+        before,
+        limit,
     )
 
 
@@ -156,7 +167,8 @@ async def mark_delivered(pool, message_id, user_id) -> bool:
     status = await pool.execute(
         "UPDATE receipts SET delivered_at = now() "
         "WHERE message_id = $1 AND user_id = $2 AND delivered_at IS NULL",
-        message_id, user_id,
+        message_id,
+        user_id,
     )
     return status.rsplit(" ", 1)[-1] != "0"
 
@@ -170,7 +182,9 @@ async def mark_read(pool, chat_id, message_id, user_id) -> bool:
         "delivered_at = COALESCE(delivered_at, now()) "
         "WHERE message_id = $1 AND user_id = $2 "
         "AND EXISTS (SELECT 1 FROM messages WHERE id = $1 AND chat_id = $3)",
-        message_id, user_id, chat_id,
+        message_id,
+        user_id,
+        chat_id,
     )
     return status.rsplit(" ", 1)[-1] != "0"
 
@@ -178,15 +192,14 @@ async def mark_read(pool, chat_id, message_id, user_id) -> bool:
 async def other_member_ids(pool, chat_id, sender):
     rows = await pool.fetch(
         "SELECT user_id FROM chat_members WHERE chat_id = $1 AND user_id <> $2",
-        chat_id, sender,
+        chat_id,
+        sender,
     )
     return [r["user_id"] for r in rows]
 
 
 async def set_disappearing(pool, chat_id, seconds: int | None) -> None:
-    await pool.execute(
-        "UPDATE chats SET disappearing_seconds = $2 WHERE id = $1", chat_id, seconds
-    )
+    await pool.execute("UPDATE chats SET disappearing_seconds = $2 WHERE id = $1", chat_id, seconds)
 
 
 async def clear_pending_expirations(pool, chat_id) -> None:
@@ -202,17 +215,13 @@ async def clear_pending_expirations(pool, chat_id) -> None:
 async def message_for_reap(pool, mid):
     """Fetch (media_key, expires_at) by id with NO live filter, so the reaper can tell
     'already gone' (None) from 'recalled / not yet due' (expires_at null or future)."""
-    return await pool.fetchrow(
-        "SELECT media_key, expires_at FROM messages WHERE id = $1", mid
-    )
+    return await pool.fetchrow("SELECT media_key, expires_at FROM messages WHERE id = $1", mid)
 
 
 async def delete_expired_message(pool, mid) -> None:
     """Hard-delete a message only if it is actually due (expires_at <= now()).
     Idempotent: a recalled or already-gone message is a no-op."""
-    await pool.execute(
-        "DELETE FROM messages WHERE id = $1 AND expires_at <= now()", mid
-    )
+    await pool.execute("DELETE FROM messages WHERE id = $1 AND expires_at <= now()", mid)
 
 
 async def due_disappearing_messages(pool, limit: int):
@@ -238,6 +247,7 @@ async def undelivered_message_ids(pool, limit: int):
 
 
 # Batch loaders — each takes a list of ids and returns rows for the DataLoaders.
+
 
 async def users_by_ids(pool, ids: list[uuid.UUID]):
     return await pool.fetch(
@@ -284,5 +294,6 @@ async def unread_counts(pool, viewer_id, chat_ids: list[uuid.UUID]):
         "  AND (m.expires_at IS NULL OR m.expires_at > now()) "
         "  AND m.chat_id = ANY($2::uuid[]) "
         "GROUP BY m.chat_id",
-        viewer_id, chat_ids,
+        viewer_id,
+        chat_ids,
     )

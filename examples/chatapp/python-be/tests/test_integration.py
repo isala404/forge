@@ -175,15 +175,19 @@ async def test_presence_online_then_offline_via_kv_ttl(client):
     alice = await signup(client, "Alice")
     await gql_data(client, "mutation{heartbeat}", token=alice["token"])
     on = await gql_data(
-        client, "query($u:[ID!]!){presence(userIds:$u){id online}}",
-        {"u": [alice["id"]]}, token=alice["token"],
+        client,
+        "query($u:[ID!]!){presence(userIds:$u){id online}}",
+        {"u": [alice["id"]]},
+        token=alice["token"],
     )
     assert on["presence"][0]["online"] is True
     # APP_PRESENCE_TTL_SECS=2 in tests; wait for the key to expire.
     await asyncio.sleep(3.0)
     off = await gql_data(
-        client, "query($u:[ID!]!){presence(userIds:$u){id online}}",
-        {"u": [alice["id"]]}, token=alice["token"],
+        client,
+        "query($u:[ID!]!){presence(userIds:$u){id online}}",
+        {"u": [alice["id"]]},
+        token=alice["token"],
     )
     assert off["presence"][0]["online"] is False
 
@@ -219,7 +223,7 @@ async def test_send_empty_without_media_rejected(client):
     chat_id = await make_group(client, alice, bob)
     res = await gql(
         client,
-        "mutation($c:ID!){sendMessage(chatId:$c,body:\"   \"){id}}",
+        'mutation($c:ID!){sendMessage(chatId:$c,body:"   "){id}}',
         {"c": chat_id},
         token=alice["token"],
     )

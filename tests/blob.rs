@@ -82,14 +82,16 @@ async fn list_is_prefixed_ordered_and_paginated() {
 async fn presign_requires_secret_and_signs() {
     let db = TestDatabase::new().await.unwrap();
 
-    // No secret configured: presigning errors (CRUD still works).
+    // No secret configured: presigning errors `Config` (CRUD still works). Missing
+    // signing secret is a configuration problem, classified the same way that
+    // verify_presigned and blob_router classify it.
     let plain = db.forge().await.unwrap();
     assert!(matches!(
         plain
             .blob()
             .presign_download("k", Duration::from_secs(60))
             .await,
-        Err(ForgeError::Invalid(_))
+        Err(ForgeError::Config(_))
     ));
 
     // With a secret: presign produces signed URLs against the same database.

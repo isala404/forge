@@ -57,8 +57,8 @@ pub trait Pubsub: Send + Sync {
     async fn publish(&self, topic: &str, payload: Bytes) -> Result<()>;
 
     /// Subscribe to `topic`, returning a stream of payloads published *after* the
-    /// returned future resolves. The subscription holds a dedicated Postgres
-    /// connection for the lifetime of the stream; drop the stream to unsubscribe
-    /// and release the connection.
+    /// returned future resolves. Subscriptions share one per-process listener
+    /// connection (not a connection each); drop the stream to unsubscribe, and the
+    /// channel is released once it has no remaining subscribers.
     async fn subscribe(&self, topic: &str) -> Result<Subscription>;
 }

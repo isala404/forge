@@ -1,7 +1,9 @@
 # forge-node
 
-Node.js bindings for [Forge](../..) via [napi-rs](https://napi.rs). Exposes the
-`kv` and `queue` primitives to JavaScript/TypeScript as a native addon.
+Node.js bindings for [Forge](../..) via [napi-rs](https://napi.rs). A native addon
+exposing the full primitive surface (kv, queue, config, ratelimit, blob, auth,
+schedule, pubsub) plus `backendReport`. Async Rust methods become JS `Promise`s;
+method names are camelCased.
 
 ## Build
 
@@ -36,6 +38,30 @@ if (job) {
 }
 ```
 
-Async Rust methods become JS `Promise`s; method names are camelCased. Leased
-jobs are held Rust-side and referenced by `id`, so the opaque lease fence never
-crosses into JS. See `index.d.ts` for the full typed surface.
+Leased jobs are held Rust-side and referenced by `id`, so the opaque lease fence never
+crosses into JS. For the full per-deployment option surface (namespace, pool size,
+blob backend, …) use `ForgeClient.connectWith(url, options)`. See `index.d.ts` for the
+full typed surface.
+
+### Typed projection
+
+`forge-node/typed` binds a name + JSON codec to a type, so you enqueue a typed payload
+instead of a raw queue string + `JSON.stringify` (the Node view of the Rust
+`forge::typed` layer):
+
+```ts
+import { ForgeClient } from 'forge-node';
+import { typedQueue, forgeErrorCode } from 'forge-node/typed';
+
+interface SendEmail { to: string; template: string }
+const emails = typedQueue<SendEmail>(forge, 'emails');
+await emails.enqueue({ to: 'a@b.c', template: 'welcome' }, { maxAttempts: 3 });
+const job = await emails.dequeue({ waitSeconds: 1 });
+if (job) { handle(job.payload); await emails.ack(job.id); }
+
+// forgeErrorCode(e) -> 'INVALID' | 'LIMIT' | ... parses the code Forge prefixes
+// onto the thrown error's message.
+```
+
+Per-primitive semantics live in [`docs/contracts/`](../../docs/contracts/) and recipes in
+[`docs/cookbook/`](../../docs/cookbook/).

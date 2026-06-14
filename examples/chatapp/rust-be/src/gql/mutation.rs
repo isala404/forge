@@ -44,7 +44,10 @@ impl Mutation {
         if !d.allowed {
             return Err(err("LIMIT", "too many signup attempts; try again later"));
         }
-        if db::username_taken(&c.pool, username).await.map_err(map_db)? {
+        if db::username_taken(&c.pool, username)
+            .await
+            .map_err(map_db)?
+        {
             return Err(err("PRECONDITION", "username already taken"));
         }
         let hash = c
@@ -302,8 +305,10 @@ impl Mutation {
             if !won {
                 for _ in 0..5 {
                     if let Some(existing) = c.forge.kv().get(&key).await.map_err(map_forge)?
-                        && let Ok(existing_id) = Uuid::parse_str(&String::from_utf8_lossy(&existing))
-                        && let Some(row) = db::message(&c.pool, existing_id).await.map_err(map_db)?
+                        && let Ok(existing_id) =
+                            Uuid::parse_str(&String::from_utf8_lossy(&existing))
+                        && let Some(row) =
+                            db::message(&c.pool, existing_id).await.map_err(map_db)?
                     {
                         return Ok(GqlMessage(row));
                     }

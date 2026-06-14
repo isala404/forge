@@ -1,17 +1,16 @@
-//! Optional axum router that resolves presigned blob URLs against the Postgres
-//! backend (feature `blob-router`). Mount it under the same path the presigned URLs
-//! point at, e.g. `app.nest("/_forge/blob", forge.blob_router()?)`.
+//! Optional axum router that resolves presigned blob URLs (feature `blob-router`).
+//! Mount it under the same path the presigned URLs point at, e.g.
+//! `app.nest("/_forge/blob", forge.blob_router()?)`.
 //!
 //! Each request carries the key, expiry, size cap, and HMAC signature as query
-//! params; the router verifies the signature (same [`super::sign`] code as the
-//! signer), enforces the expiry and size cap, then performs the equivalent get/put.
+//! params; the router verifies them via [`Blob::verify_presigned`] (the same signing
+//! code as the signer, backend-agnostic) and then performs the equivalent get/put. It
+//! works over `Arc<dyn Blob>`, so it serves whichever backend powers blob.
 
 // Returning the axum `Response` in a `Result::Err` is the idiomatic short-circuit for
 // these handlers; its size is axum's, not ours to box away.
 #![allow(clippy::result_large_err)]
 
-use super::pg::PgBlob;
-use super::sign::{self, Method};
 use super::{Blob, MAX_OBJECT_BYTES, PutOpts};
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Query, State};
@@ -20,7 +19,6 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use serde::Deserialize;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The signed query parameters on every presigned request.
 #[derive(Debug, Deserialize)]
@@ -32,9 +30,8 @@ struct Params {
     sig: String,
 }
 
-/// Build the router. Returns the configured signing secret too, so the caller
-/// (`Forge::blob_router`) can fail at init if presigning is unconfigured.
-pub(crate) fn router(blob: Arc<PgBlob>) -> axum::Router {
+/// Build the router over any blob backend.
+pub(crate) fn router(blob: Arc<dyn Blob>) -> axum::Router {
     axum::Router::new()
         .route("/", get(download).put(upload))
         // axum's default body limit is 2 MiB; raise it to the object cap so uploads up
@@ -43,30 +40,24 @@ pub(crate) fn router(blob: Arc<PgBlob>) -> axum::Router {
         .with_state(blob)
 }
 
-fn now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
-}
-
 /// Verify expiry + signature for `method`. Returns `Err(response)` on any failure.
-fn check(blob: &PgBlob, method: Method, p: &Params) -> Result<(), Response> {
-    let secret = blob
-        .signing_secret()
-        .ok_or_else(|| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
-    if p.expires <= now_secs() {
-        return Err((StatusCode::FORBIDDEN, "presigned url expired").into_response());
-    }
-    if sign::verify(secret, method, &p.key, p.expires, p.max_bytes, &p.sig) {
-        Ok(())
-    } else {
-        Err((StatusCode::FORBIDDEN, "invalid signature").into_response())
+async fn check(blob: &Arc<dyn Blob>, method: &str, p: &Params) -> Result<(), Response> {
+    match blob
+        .verify_presigned(method, &p.key, p.expires, p.max_bytes, &p.sig)
+        .await
+    {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            Err((StatusCode::FORBIDDEN, "invalid or expired presigned url").into_response())
+        }
+        // No signing secret configured (Config) is a server misconfig, not a client error.
+        Err(crate::ForgeError::Config(_)) => Err(StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        Err(_) => Err((StatusCode::BAD_REQUEST, "malformed presigned url").into_response()),
     }
 }
 
-async fn download(State(blob): State<Arc<PgBlob>>, Query(p): Query<Params>) -> Response {
-    if let Err(resp) = check(&blob, Method::Get, &p) {
+async fn download(State(blob): State<Arc<dyn Blob>>, Query(p): Query<Params>) -> Response {
+    if let Err(resp) = check(&blob, "GET", &p).await {
         return resp;
     }
     match blob.get(&p.key).await {
@@ -99,12 +90,12 @@ async fn download(State(blob): State<Arc<PgBlob>>, Query(p): Query<Params>) -> R
 }
 
 async fn upload(
-    State(blob): State<Arc<PgBlob>>,
+    State(blob): State<Arc<dyn Blob>>,
     Query(p): Query<Params>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if let Err(resp) = check(&blob, Method::Put, &p) {
+    if let Err(resp) = check(&blob, "PUT", &p).await {
         return resp;
     }
     // The signed cap fences the body size (Precondition, not just a kindness).

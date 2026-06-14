@@ -62,6 +62,22 @@ impl TestDatabase {
     pub async fn forge(&self) -> Result<Forge> {
         Forge::init(ForgeConfig::new(self.url.clone())).await
     }
+
+    /// Run a raw SQL statement against this database — test setup only (e.g. seeding an
+    /// incompatible pre-existing `forge_*` table before `Forge::init` to exercise the
+    /// structural schema check).
+    pub async fn execute_raw(&self, sql: &str) -> Result<()> {
+        let mut conn = PgConnection::connect(&self.url)
+            .await
+            .map_err(|e| ForgeError::config(format!("could not connect to test database: {e}")))?;
+        let res = sqlx::query(sql)
+            .execute(&mut conn)
+            .await
+            .map_err(ForgeError::from_sqlx)
+            .map(|_| ());
+        conn.close().await.ok();
+        res
+    }
 }
 
 impl Drop for TestDatabase {

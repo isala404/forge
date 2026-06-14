@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM forge_fs_blobs WHERE key = $1 RETURNING data_ref",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "data_ref",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e314ae30f021702b72c9157f29f9c3b2547883a5bb116d4c031f2cc8d787c953"
+}

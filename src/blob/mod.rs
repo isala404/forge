@@ -11,10 +11,15 @@ use bytes::Bytes;
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
+mod common;
 mod sign;
 
 #[cfg(feature = "postgres")]
+mod fs;
+#[cfg(feature = "postgres")]
 mod pg;
+#[cfg(feature = "postgres")]
+pub(crate) use fs::FsBlob;
 #[cfg(feature = "postgres")]
 pub(crate) use pg::PgBlob;
 
@@ -136,4 +141,11 @@ pub trait Blob: Send + Sync {
         max_bytes: u64,
         sig: &str,
     ) -> Result<bool>;
+
+    /// Whether a signing secret is configured, so presigned URLs can be minted and
+    /// verified. The facade uses this to fail `blob_router()` early when presigning is
+    /// unconfigured. Defaults to `false`; backends that support presigning override it.
+    fn presign_ready(&self) -> bool {
+        false
+    }
 }

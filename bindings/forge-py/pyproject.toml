@@ -11,3 +11,6 @@ classifiers = ["Programming Language :: Rust"]
 
 [tool.maturin]
 module-name = "forge_py"
+# Mixed layout: ship the pure-Python typed projection (forge_typed) alongside the
+# compiled forge_py extension.
+python-source = "python"

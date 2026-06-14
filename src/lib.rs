@@ -16,6 +16,7 @@
 #![forbid(unsafe_code)]
 
 pub mod auth;
+pub mod backend;
 pub mod blob;
 pub mod config;
 pub mod config_store;
@@ -25,6 +26,7 @@ pub mod pubsub;
 pub mod queue;
 pub mod ratelimit;
 pub mod schedule;
+pub mod typed;
 
 mod obs;
 mod types;
@@ -41,8 +43,9 @@ use std::sync::Arc;
 pub use auth::{
     ApiKey, ApiKeyInfo, ApiKeySecret, Auth, PhcString, Session, SessionOpts, SessionToken,
 };
+pub use backend::{BackendHealth, BackendInfo, BackendLifecycle, BackendReport, Primitive};
 pub use blob::{Blob, BlobInfo, ListPage, PutOpts};
-pub use config::ForgeConfig;
+pub use config::{BlobBackendConfig, ForgeConfig};
 pub use config_store::{ConfigExt, ConfigStore, EvalCtx, FlagRule};
 pub use error::{ForgeError, Result};
 pub use kv::{Kv, KvExt, SetMode, SetOpts};
@@ -53,6 +56,10 @@ pub use queue::{
 };
 pub use ratelimit::{Algo, Decision, FailMode, Limit, RateLimit};
 pub use schedule::{Schedule, ScheduleInfo, ScheduleKind};
+pub use typed::{
+    BlobKey, ConfigKey, ConfigTyped, KvKey, KvTyped, PubsubTyped, QueueName, QueuePayload,
+    QueueTyped, RateBucket, RateSubject, Topic, TypedJob, TypedSubscription,
+};
 pub use types::Cursor;
 
 // Re-exported so callers needn't add a separate `bytes` dependency.
@@ -70,16 +77,20 @@ pub struct Forge {
 }
 
 struct ForgeInner {
-    kv: Arc<kv::PgKv>,
-    queue: Arc<queue::PgQueue>,
-    config: Arc<config_store::PgConfig>,
-    ratelimit: Arc<ratelimit::PgRateLimit>,
-    blob: Arc<blob::PgBlob>,
-    auth: Arc<auth::PgAuth>,
-    schedule: Arc<schedule::PgSchedule>,
-    pubsub: Arc<pubsub::PgPubsub>,
+    kv: Arc<dyn Kv>,
+    queue: Arc<dyn Queue>,
+    config: Arc<dyn ConfigStore>,
+    ratelimit: Arc<dyn RateLimit>,
+    blob: Arc<dyn Blob>,
+    auth: Arc<dyn Auth>,
+    schedule: Arc<dyn Schedule>,
+    pubsub: Arc<dyn Pubsub>,
+    /// One lifecycle handle per primitive, driven by `maintain`/`backend_report`.
+    lifecycle: Vec<Arc<dyn BackendLifecycle>>,
+    /// The Postgres pool, when this `Forge` was built on one (always, via `init`/the
+    /// builder; optional only through `from_parts`).
     #[cfg(feature = "postgres")]
-    pool: sqlx::PgPool,
+    pool: Option<sqlx::PgPool>,
 }
 
 impl Forge {
@@ -97,6 +108,8 @@ impl Forge {
             runner.verify_only().await?;
         }
 
+        let secret = cfg.blob_signing_secret.clone().map(String::into_bytes);
+
         let kv = Arc::new(kv::PgKv::new(pool.clone(), cfg.kv_namespace.clone()));
         let queue = Arc::new(queue::PgQueue::new(
             pool.clone(),
@@ -109,15 +122,45 @@ impl Forge {
             cfg.kv_namespace.clone(),
             cfg.ratelimit_fail_open,
         ));
-        let blob = Arc::new(blob::PgBlob::new(
-            pool.clone(),
-            cfg.kv_namespace.clone(),
-            cfg.blob_signing_secret.clone().map(String::into_bytes),
-            cfg.blob_base_url.clone(),
-        ));
         let auth = Arc::new(auth::PgAuth::new(pool.clone()));
         let pubsub = Arc::new(pubsub::PgPubsub::new(pool.clone(), cfg.postgres.clone()));
         let schedule = Arc::new(schedule::PgSchedule::new(pool.clone()));
+
+        // The one v1 backend choice: blob bytes in BYTEA, or on a filesystem directory.
+        let (blob, blob_lifecycle): (Arc<dyn Blob>, Arc<dyn BackendLifecycle>) =
+            match &cfg.blob_backend {
+                BlobBackendConfig::Postgres => {
+                    let b = Arc::new(blob::PgBlob::new(
+                        pool.clone(),
+                        cfg.kv_namespace.clone(),
+                        secret.clone(),
+                        cfg.blob_base_url.clone(),
+                    ));
+                    (b.clone() as Arc<dyn Blob>, b as Arc<dyn BackendLifecycle>)
+                }
+                BlobBackendConfig::Filesystem { root } => {
+                    let b = Arc::new(blob::FsBlob::new(
+                        pool.clone(),
+                        cfg.kv_namespace.clone(),
+                        secret.clone(),
+                        cfg.blob_base_url.clone(),
+                        root.clone(),
+                    )?);
+                    (b.clone() as Arc<dyn Blob>, b as Arc<dyn BackendLifecycle>)
+                }
+            };
+
+        // One lifecycle handle per primitive (Primitive order), for maintain + report.
+        let lifecycle: Vec<Arc<dyn BackendLifecycle>> = vec![
+            kv.clone() as Arc<dyn BackendLifecycle>,
+            queue.clone() as Arc<dyn BackendLifecycle>,
+            blob_lifecycle,
+            auth.clone() as Arc<dyn BackendLifecycle>,
+            config.clone() as Arc<dyn BackendLifecycle>,
+            ratelimit.clone() as Arc<dyn BackendLifecycle>,
+            schedule.clone() as Arc<dyn BackendLifecycle>,
+            pubsub.clone() as Arc<dyn BackendLifecycle>,
+        ];
 
         Ok(Self {
             inner: Arc::new(ForgeInner {
@@ -129,9 +172,73 @@ impl Forge {
                 auth,
                 schedule,
                 pubsub,
-                pool,
+                lifecycle,
+                pool: Some(pool),
             }),
         })
+    }
+
+    /// A builder for selecting per-primitive backends at construction. v1's one choice
+    /// is the blob backend; the same shape accepts later per-primitive backends.
+    ///
+    /// ```no_run
+    /// # async fn demo() -> forge::Result<()> {
+    /// use forge::Forge;
+    /// let forge = Forge::builder()
+    ///     .postgres("postgres://localhost/myapp")
+    ///     .filesystem_blob("/var/lib/app/blobs")
+    ///     .build()
+    ///     .await?;
+    /// # let _ = forge; Ok(())
+    /// # }
+    /// ```
+    pub fn builder() -> ForgeBuilder {
+        ForgeBuilder {
+            cfg: ForgeConfig::default(),
+        }
+    }
+
+    /// Construct a `Forge` from caller-provided primitive implementations — the escape
+    /// hatch for external provider crates that implement Forge's traits without
+    /// forking. Calls each backend's `init` lifecycle hook. Built-in deployments should
+    /// use [`Forge::init`] / [`Forge::builder`] instead.
+    pub async fn from_parts(parts: ForgeParts) -> Result<Self> {
+        for backend in &parts.lifecycle {
+            backend.init().await?;
+        }
+        Ok(Self {
+            inner: Arc::new(ForgeInner {
+                kv: parts.kv,
+                queue: parts.queue,
+                config: parts.config,
+                ratelimit: parts.ratelimit,
+                blob: parts.blob,
+                auth: parts.auth,
+                schedule: parts.schedule,
+                pubsub: parts.pubsub,
+                lifecycle: parts.lifecycle,
+                #[cfg(feature = "postgres")]
+                pool: parts.pool,
+            }),
+        })
+    }
+
+    /// A snapshot of which backend powers each primitive — for logs, health pages, and
+    /// debugging. Not needed for ordinary request handling (the provider must never
+    /// leak into app logic).
+    pub fn backend_report(&self) -> BackendReport {
+        let backends = self
+            .inner
+            .lifecycle
+            .iter()
+            .map(|b| BackendInfo {
+                primitive: b.primitive(),
+                provider: b.name(),
+                durable: b.durable(),
+                caveats: b.caveats(),
+            })
+            .collect();
+        BackendReport { backends }
     }
 
     /// The underlying Postgres pool that backs every primitive. Exposed as an
@@ -142,7 +249,10 @@ impl Forge {
     /// price of sharing the connection pool, and it is opt-in.
     #[cfg(feature = "postgres")]
     pub fn pool(&self) -> &sqlx::PgPool {
-        &self.inner.pool
+        self.inner
+            .pool
+            .as_ref()
+            .expect("Forge::pool() requires a Forge built with a Postgres pool (init/builder)")
     }
 
     /// The key/value store. Lineage: Redis. See `docs/contracts/kv.md`.
@@ -243,7 +353,7 @@ impl Forge {
     /// `ForgeConfig.blob_signing_secret`; errors with `Config` otherwise.
     #[cfg(feature = "blob-router")]
     pub fn blob_router(&self) -> Result<axum::Router> {
-        if self.inner.blob.signing_secret().is_none() {
+        if !self.inner.blob.presign_ready() {
             return Err(ForgeError::config(
                 "blob_router requires ForgeConfig.blob_signing_secret to be set",
             ));
@@ -254,17 +364,91 @@ impl Forge {
     /// A managed worker for `queue_name`: bounded concurrency, auto-heartbeat,
     /// `ack`/`nack` on completion, graceful shutdown.
     pub fn worker(&self, queue_name: impl Into<String>) -> WorkerBuilder {
-        WorkerBuilder::new(self.inner.queue.clone() as Arc<dyn Queue>, queue_name)
+        WorkerBuilder::new(self.inner.queue.clone(), queue_name)
     }
 
-    /// Run the maintenance sweep: purge expired kv rows and old completed jobs,
-    /// reclaim leases orphaned by crashed workers across all queues, and drop
-    /// stale dedup entries. Idempotent; call it on a schedule.
+    /// Run the maintenance sweep across every backend: purge expired kv rows and old
+    /// completed jobs, reclaim leases orphaned by crashed workers, drop stale dedup and
+    /// rate-limit rows, expire dead sessions, and (filesystem blob) reclaim orphaned
+    /// files. Idempotent; call it on a schedule. Drives each backend's lifecycle hook.
     pub async fn maintain(&self) -> Result<()> {
-        self.inner.kv.sweep().await?;
-        self.inner.queue.maintenance().await?;
-        self.inner.ratelimit.sweep().await?;
-        self.inner.auth.sweep().await?;
+        for backend in &self.inner.lifecycle {
+            backend.maintain().await?;
+        }
         Ok(())
     }
+}
+
+/// Builder for [`Forge`] with per-primitive backend selection. See [`Forge::builder`].
+#[derive(Debug, Clone, Default)]
+pub struct ForgeBuilder {
+    cfg: ForgeConfig,
+}
+
+impl ForgeBuilder {
+    /// Set the Postgres connection string (required).
+    pub fn postgres(mut self, url: impl Into<String>) -> Self {
+        self.cfg.postgres = url.into();
+        self
+    }
+
+    /// Select the blob byte-storage backend.
+    pub fn blob(mut self, backend: BlobBackendConfig) -> Self {
+        self.cfg.blob_backend = backend;
+        self
+    }
+
+    /// Store blob bytes on a local filesystem directory (metadata stays in Postgres).
+    pub fn filesystem_blob(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.cfg.blob_backend = BlobBackendConfig::Filesystem { root: root.into() };
+        self
+    }
+
+    /// Set the HMAC secret enabling presigned blob URLs.
+    pub fn blob_signing_secret(mut self, secret: impl Into<String>) -> Self {
+        self.cfg.blob_signing_secret = Some(secret.into());
+        self
+    }
+
+    /// Set the kv key namespace (shared by kv, ratelimit, and blob).
+    pub fn kv_namespace(mut self, ns: impl Into<String>) -> Self {
+        self.cfg.kv_namespace = ns.into();
+        self
+    }
+
+    /// Set the maximum pool size.
+    pub fn max_connections(mut self, n: u32) -> Self {
+        self.cfg.max_connections = n;
+        self
+    }
+
+    /// Replace the whole config (escape hatch for knobs without a builder method).
+    pub fn config(mut self, cfg: ForgeConfig) -> Self {
+        self.cfg = cfg;
+        self
+    }
+
+    /// Build and initialize the `Forge`.
+    pub async fn build(self) -> Result<Forge> {
+        Forge::init(self.cfg).await
+    }
+}
+
+/// Caller-provided primitive implementations for [`Forge::from_parts`]. A plain struct
+/// (constructible by external provider crates); fields are coerced trait objects so any
+/// backend that implements Forge's traits can be plugged in. `lifecycle` should carry
+/// one [`BackendLifecycle`] per primitive so `maintain`/`backend_report` see them.
+pub struct ForgeParts {
+    pub kv: Arc<dyn Kv>,
+    pub queue: Arc<dyn Queue>,
+    pub blob: Arc<dyn Blob>,
+    pub auth: Arc<dyn Auth>,
+    pub config: Arc<dyn ConfigStore>,
+    pub ratelimit: Arc<dyn RateLimit>,
+    pub schedule: Arc<dyn Schedule>,
+    pub pubsub: Arc<dyn Pubsub>,
+    pub lifecycle: Vec<Arc<dyn BackendLifecycle>>,
+    /// The Postgres pool, if any primitive is Postgres-backed (enables [`Forge::pool`]).
+    #[cfg(feature = "postgres")]
+    pub pool: Option<sqlx::PgPool>,
 }

@@ -21,6 +21,13 @@ pub(crate) use pg::PgSchedule;
 /// Largest allowed schedule name, in bytes. Over => [`crate::ForgeError::Limit`].
 pub const MAX_NAME_BYTES: usize = 256;
 
+/// Largest accepted `at` horizon: ~100 years from now, in days (365.25 × 100). A
+/// `when` past this is [`crate::ForgeError::Limit`]. An absolute time a century out is
+/// effectively always a bug, and a fixed ceiling keeps backends in agreement (same
+/// rationale as the kv TTL ceiling). A past/now `when` is *not* rejected — it fires on
+/// the next tick if within the missed-tick grace, else is skipped and logged.
+pub const MAX_AT_HORIZON_DAYS: i64 = 36525;
+
 /// What a registered schedule is.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,7 +68,9 @@ pub trait Schedule: Send + Sync {
     async fn cron(&self, name: &str, expr: &str, queue: &str, payload: Bytes) -> Result<()>;
 
     /// Schedule a one-shot enqueue at `when`. Returns the [`JobId`] the eventual
-    /// queue job will carry.
+    /// queue job will carry. A `when` already in the past (or now) is accepted and
+    /// fires on the next tick if within the missed-tick grace; a `when` more than
+    /// [`MAX_AT_HORIZON_DAYS`] out is [`crate::ForgeError::Limit`].
     async fn at(&self, when: SystemTime, queue: &str, payload: Bytes) -> Result<JobId>;
 
     /// Cancel a schedule by name. `true` if one was removed, `false` if absent.
@@ -69,4 +78,10 @@ pub trait Schedule: Send + Sync {
 
     /// List all registered schedules.
     async fn list(&self) -> Result<Vec<ScheduleInfo>>;
+
+    /// Run one scheduler pass: fire every due schedule once, returning how many jobs
+    /// were enqueued. Drive it via [`crate::Forge::run_scheduler`] /
+    /// [`crate::Forge::run_scheduler_once`]; safe to run concurrently across replicas,
+    /// since each due row is claimed exactly once.
+    async fn process_due(&self) -> Result<u64>;
 }

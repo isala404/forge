@@ -61,8 +61,9 @@ pub struct Limit {
 }
 
 impl Limit {
-    /// `max` units per `per`, token-bucket (the common default).
-    pub fn per_duration(max: u32, per: Duration) -> Self {
+    /// `max` units per `per`, token-bucket (the common default). `const` so a typed
+    /// [`crate::RateBucket`] policy can be declared as a `const`/`static`.
+    pub const fn per_duration(max: u32, per: Duration) -> Self {
         Self {
             max,
             per,
@@ -71,7 +72,7 @@ impl Limit {
     }
 
     /// Switch the algorithm.
-    pub fn with_algo(mut self, algo: Algo) -> Self {
+    pub const fn with_algo(mut self, algo: Algo) -> Self {
         self.algo = algo;
         self
     }

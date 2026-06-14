@@ -183,7 +183,8 @@ cap is on the encoded byte length, not character count.
 | router: presigned request with a bad/tampered or expired signature | `Precondition` | no — re-sign |
 | router: presigned upload body exceeds the signed `max_bytes` | `Precondition` | no — fence miss |
 | router: malformed presigned request (missing/garbled signing params) | `Invalid` | no — caller bug |
-| misconfiguration (bad DSN, missing migration, router mounted without signing secret) at `Forge::init()` | `Config` | no — init only |
+| `presign_upload` / `presign_download` / `verify_presigned` / `blob_router` invoked without a configured signing secret | `Config` | no — set `blob_signing_secret` |
+| misconfiguration (bad DSN, missing migration) at `Forge::init()` | `Config` | no — init only |
 | other vendor/SDK error | `Backend` (carries retryability flag) | per flag |
 
 `NotFound` is **never** produced by this surface. Absence on a read path is
@@ -191,10 +192,13 @@ cap is on the encoded byte length, not character count.
 (S3 returns a `404`; the trait normalizes that to `None`/`false`). A presigned request
 that fails *verification* (expired, tampered, wrong key/method, oversized upload)
 yields `Precondition` (the signed precondition no longer holds), while a *malformed*
-request (a caller that built the URL wrong) yields `Invalid`. `Config` is init-time
-only: a router mounted without a signing secret fails at `Forge::init()`, never lazily
-on first presign. Error messages never contain object bytes, key contents, metadata
-values, or signing secrets.
+request (a caller that built the URL wrong) yields `Invalid`. Presigning is **optional**:
+`Forge::init()` succeeds with no `blob_signing_secret` and the CRUD surface
+(`put`/`get`/`head`/`delete`/`list`) works fully. The secret is required only by
+`presign_upload`, `presign_download`, `verify_presigned`, and `blob_router`; calling any
+of those without a configured secret returns `Config` at that call (consistently — not a
+mix of `Config` and `Invalid`), not at init. Error messages never contain object bytes,
+key contents, metadata values, or signing secrets.
 
 ## Deviations from lineage
 

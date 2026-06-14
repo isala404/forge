@@ -3,6 +3,7 @@
 //! [`ForgeError::Config`]: misconfiguration fails loudly in `Forge::init`, never lazily on first use.
 
 mod migrate;
+mod schema;
 pub(crate) use migrate::MigrationRunner;
 
 use crate::config::ForgeConfig;

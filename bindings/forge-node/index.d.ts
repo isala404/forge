@@ -28,6 +28,72 @@ export interface JsQueueDepth {
   delayed: number
 }
 /**
+ * One page of `kvScanPage`: the keys plus an opaque `cursor` for the next page
+ * (`null` when iteration is complete).
+ */
+export interface JsScanPage {
+  keys: Array<string>
+  cursor?: string
+}
+/** Object metadata (S3 `HeadObject`). `lastModifiedMs` is epoch milliseconds. */
+export interface JsBlobInfo {
+  key: string
+  size: number
+  contentType: string
+  etag: string
+  lastModifiedMs: number
+  metadata: Record<string, string>
+}
+/** One page of `blobList`: the objects plus an opaque next-page `cursor`. */
+export interface JsBlobPage {
+  items: Array<JsBlobInfo>
+  cursor?: string
+}
+/**
+ * A registered schedule (`scheduleList`). `kind` is `"cron"` or `"at"`; `cronExpr`
+ * is set only for crons. Times are epoch milliseconds.
+ */
+export interface JsScheduleInfo {
+  name: string
+  kind: string
+  cronExpr?: string
+  queue: string
+  nextRunMs: number
+  lastRunMs?: number
+}
+/** A validated session's metadata (`validateSessionInfo`). Times are epoch ms. */
+export interface JsSession {
+  userId: string
+  createdAtMs: number
+  expiresAtMs: number
+}
+/** Non-secret API-key metadata (`verifyApiKeyInfo`). */
+export interface JsApiKeyInfo {
+  id: string
+  ownerId: string
+  label: string
+}
+/** One line of `backendReport`: which provider powers a primitive. */
+export interface JsBackendInfo {
+  primitive: string
+  provider: string
+  durable: boolean
+  caveats: string
+}
+/**
+ * Connection options for `ForgeClient.connectWith` — the full per-deployment surface
+ * (every field optional; omitted fields take Forge's defaults).
+ */
+export interface JsConnectOptions {
+  signingSecret?: string
+  kvNamespace?: string
+  maxConnections?: number
+  runMigrations?: boolean
+  blobBaseUrl?: string
+  /** Set to store blob bytes on a local directory instead of in Postgres `BYTEA`. */
+  filesystemBlobRoot?: string
+}
+/**
  * A Forge client: one Postgres pool, every primitive. Construct with
  * `ForgeClient.connect(url)`.
  */
@@ -37,6 +103,13 @@ export declare class ForgeClient {
    * `signingSecret` to enable presigned blob URLs.
    */
   static connect(postgresUrl: string, signingSecret?: string | undefined | null): Promise<ForgeClient>
+  /**
+   * Connect with the full per-deployment option surface (namespace, pool size,
+   * migration toggle, blob backend, …) instead of just a URL + signing secret.
+   */
+  static connectWith(postgresUrl: string, options: JsConnectOptions): Promise<ForgeClient>
+  /** A backend report: which provider powers each primitive (for health pages/logs). */
+  backendReport(): Array<JsBackendInfo>
   /** `GET key` → the value as a UTF-8 string, or `null`. */
   kvGet(key: string): Promise<string | null>
   /**
@@ -164,8 +237,9 @@ export declare class ForgeClient {
   pubsubPublish(topic: string, payload: string): Promise<void>
   /**
    * Subscribe to a realtime topic, returning a handle whose `next()` yields each
-   * payload published *after* this resolves (or `null` when the stream ends). The
-   * subscription holds a dedicated Postgres connection until the handle is dropped.
+   * payload published *after* this resolves (or `null` when the stream ends).
+   * Subscriptions share one per-process listener connection; drop the handle to
+   * unsubscribe (the channel is released once it has no remaining subscribers).
    */
   pubsubSubscribe(topic: string): Promise<JsSubscription>
   /**
@@ -173,11 +247,57 @@ export declare class ForgeClient {
    * a native Postgres client to receive what `pubsub_publish(topic, …)` sends.
    */
   pubsubChannel(topic: string): string
+  /** `EXPIRE key ttlSeconds`. Sets/replaces the TTL on a live key; `false` if absent. */
+  kvExpire(key: string, ttlSeconds: number): Promise<boolean>
+  /**
+   * Atomic compare-and-swap (string values). Writes `newValue` iff the current value
+   * equals `old` (`old` omitted means "expected absent/expired"). Returns success.
+   */
+  kvCompareAndSwap(key: string, old: string | undefined | null, newValue: string): Promise<boolean>
+  /**
+   * `SCAN prefix*` with cursor pagination. Pass `cursor` from the previous page
+   * (omit for the first); the returned `cursor` is `null` when iteration is done.
+   */
+  kvScanPage(prefix: string, cursor: string | undefined | null, limit: number): Promise<JsScanPage>
+  /**
+   * `HeadObject`: full metadata (size, content type, etag, last-modified, user
+   * metadata), or `null` if the object does not exist.
+   */
+  blobHead(key: string): Promise<JsBlobInfo | null>
+  /**
+   * `ListObjectsV2`: up to `limit` objects under `prefix`, lexicographic, with cursor
+   * pagination. Pass `cursor` from the previous page (omit for the first).
+   */
+  blobList(prefix: string, cursor: string | undefined | null, limit: number): Promise<JsBlobPage>
+  /** Store an object (binary body) with optional content type and user metadata. */
+  blobPutObject(key: string, data: Buffer, contentType?: string | undefined | null, metadata?: Record<string, string> | undefined | null): Promise<void>
+  /** Cancel a schedule by name. `true` if one was removed, `false` if none existed. */
+  scheduleCancel(name: string): Promise<boolean>
+  /** List every registered schedule (crons and pending one-shots). */
+  scheduleList(): Promise<Array<JsScheduleInfo>>
+  /** Set a flag to always-on. */
+  setFlagOn(key: string): Promise<void>
+  /** Set a flag to always-off. */
+  setFlagOff(key: string): Promise<void>
+  /** Set a flag to an allow-list of targeting keys. */
+  setFlagAllowList(key: string, entries: Array<string>): Promise<void>
+  /**
+   * Validate a session token; returns full session metadata (user id + times), or
+   * `null`. Use `validateSession` when only the user id is needed.
+   */
+  validateSessionInfo(token: string): Promise<JsSession | null>
+  /**
+   * Verify an API key; returns full non-secret metadata (id, owner, label), or
+   * `null`. Use `verifyApiKey` when only the owner id is needed.
+   */
+  verifyApiKeyInfo(key: string): Promise<JsApiKeyInfo | null>
+  /** Revoke an API key by its (non-secret) id. `true` if one was removed. */
+  revokeApiKey(id: string): Promise<boolean>
 }
 /**
  * A live pubsub subscription handle. Drive it as a JS async iterator: call `next()`
  * in a loop until it resolves to `null` (the stream ended). Dropping the handle
- * unsubscribes and releases the dedicated Postgres connection.
+ * unsubscribes (subscriptions share one per-process listener connection).
  */
 export declare class JsSubscription {
   /** The next published payload as raw bytes, or `null` when the stream ends. */

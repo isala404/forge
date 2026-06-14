@@ -17,7 +17,9 @@
 
 // `Limit` is intentionally NOT imported by name: the `Limit` exception type below
 // would collide with `forge::Limit`. It is referenced fully-qualified where used.
-use forge::{EvalCtx, FailMode, FlagRule, Forge, ForgeConfig, PutOpts, SessionOpts, SetMode, SetOpts};
+use forge::{
+    EvalCtx, FailMode, FlagRule, Forge, ForgeConfig, PutOpts, SessionOpts, SetMode, SetOpts,
+};
 use futures_util::StreamExt;
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyStopAsyncIteration};
@@ -29,7 +31,12 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
-create_exception!(forge_py, ForgeError, PyException, "Base class for all Forge errors.");
+create_exception!(
+    forge_py,
+    ForgeError,
+    PyException,
+    "Base class for all Forge errors."
+);
 create_exception!(forge_py, NotFound, ForgeError);
 create_exception!(forge_py, Invalid, ForgeError);
 create_exception!(forge_py, Limit, ForgeError);
@@ -52,6 +59,72 @@ fn pyerr(e: forge::ForgeError) -> PyErr {
         F::Backend { .. } => Backend::new_err(msg),
         _ => Backend::new_err(msg),
     }
+}
+
+/// Epoch milliseconds for a `SystemTime` (saturating).
+fn epoch_ms(t: SystemTime) -> f64 {
+    t.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64() * 1000.0)
+        .unwrap_or(0.0)
+}
+
+/// Object metadata (S3 `HeadObject`). `last_modified_ms` is epoch milliseconds.
+#[pyclass(get_all)]
+struct BlobInfo {
+    key: String,
+    size: u64,
+    content_type: String,
+    etag: String,
+    last_modified_ms: f64,
+    metadata: HashMap<String, String>,
+}
+
+/// A registered schedule. `kind` is `"cron"` or `"at"`; `cron_expr` is set only for
+/// crons. Times are epoch milliseconds.
+#[pyclass(get_all)]
+struct ScheduleInfo {
+    name: String,
+    kind: String,
+    cron_expr: Option<String>,
+    queue: String,
+    next_run_ms: f64,
+    last_run_ms: Option<f64>,
+}
+
+/// A validated session's metadata. Times are epoch milliseconds.
+#[pyclass(get_all)]
+struct SessionInfo {
+    user_id: String,
+    created_at_ms: f64,
+    expires_at_ms: f64,
+}
+
+/// Non-secret API-key metadata.
+#[pyclass(get_all)]
+struct ApiKeyInfo {
+    id: String,
+    owner_id: String,
+    label: String,
+}
+
+/// One line of `backend_report`: which provider powers a primitive.
+#[pyclass(get_all)]
+struct BackendInfo {
+    primitive: String,
+    provider: String,
+    durable: bool,
+    caveats: String,
+}
+
+/// A full rate-limit decision (all IETF RateLimit fields, unlike the legacy
+/// `rate_limit_check` tuple which omits `limit`/`reset_after_seconds`).
+#[pyclass(get_all)]
+struct Decision {
+    allowed: bool,
+    limit: u32,
+    remaining: u32,
+    reset_after_seconds: f64,
+    retry_after_seconds: Option<f64>,
 }
 
 /// A live subscription, usable as a Python async iterator
@@ -165,17 +238,26 @@ impl ForgeClient {
 
     fn kv_incr<'py>(&self, py: Python<'py>, key: String, by: i64) -> PyResult<Bound<'py, PyAny>> {
         let forge = self.forge.clone();
-        future_into_py(py, async move { forge.kv().incr(&key, by).await.map_err(pyerr) })
+        future_into_py(
+            py,
+            async move { forge.kv().incr(&key, by).await.map_err(pyerr) },
+        )
     }
 
     fn kv_delete<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, PyAny>> {
         let forge = self.forge.clone();
-        future_into_py(py, async move { forge.kv().delete(&key).await.map_err(pyerr) })
+        future_into_py(
+            py,
+            async move { forge.kv().delete(&key).await.map_err(pyerr) },
+        )
     }
 
     fn kv_exists<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, PyAny>> {
         let forge = self.forge.clone();
-        future_into_py(py, async move { forge.kv().exists(&key).await.map_err(pyerr) })
+        future_into_py(
+            py,
+            async move { forge.kv().exists(&key).await.map_err(pyerr) },
+        )
     }
 
     /// `SCAN prefix*` (first page) → up to `limit` matching keys.
@@ -206,7 +288,9 @@ impl ForgeClient {
 
     fn config_get<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, PyAny>> {
         let forge = self.forge.clone();
-        future_into_py(py, async move { forge.config().get_raw(&key).await.map_err(pyerr) })
+        future_into_py(py, async move {
+            forge.config().get_raw(&key).await.map_err(pyerr)
+        })
     }
 
     fn set_flag_percent<'py>(
@@ -270,7 +354,11 @@ impl ForgeClient {
                 .check_with(&bucket, &key, limit, mode)
                 .await
                 .map_err(pyerr)?;
-            Ok((d.allowed, d.remaining, d.retry_after.map(|x| x.as_secs_f64())))
+            Ok((
+                d.allowed,
+                d.remaining,
+                d.retry_after.map(|x| x.as_secs_f64()),
+            ))
         })
     }
 
@@ -354,7 +442,10 @@ impl ForgeClient {
 
     fn blob_delete<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, PyAny>> {
         let forge = self.forge.clone();
-        future_into_py(py, async move { forge.blob().delete(&key).await.map_err(pyerr) })
+        future_into_py(
+            py,
+            async move { forge.blob().delete(&key).await.map_err(pyerr) },
+        )
     }
 
     /// Verify a presigned URL's query params against the signing secret. Returns
@@ -435,11 +526,7 @@ impl ForgeClient {
         })
     }
 
-    fn validate_session<'py>(
-        &self,
-        py: Python<'py>,
-        token: String,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    fn validate_session<'py>(&self, py: Python<'py>, token: String) -> PyResult<Bound<'py, PyAny>> {
         let forge = self.forge.clone();
         future_into_py(py, async move {
             Ok(forge
@@ -465,7 +552,11 @@ impl ForgeClient {
     ) -> PyResult<Bound<'py, PyAny>> {
         let forge = self.forge.clone();
         future_into_py(py, async move {
-            forge.auth().revoke_all_sessions(&user_id).await.map_err(pyerr)
+            forge
+                .auth()
+                .revoke_all_sessions(&user_id)
+                .await
+                .map_err(pyerr)
         })
     }
 
@@ -709,6 +800,378 @@ impl ForgeClient {
     fn pubsub_channel(&self, topic: String) -> String {
         forge::pubsub::channel_for(&topic)
     }
+
+    /// Connect with the full per-deployment option surface (namespace, pool size,
+    /// migration toggle, filesystem blob backend, …). `await` the result.
+    #[staticmethod]
+    #[pyo3(signature = (postgres_url, signing_secret=None, kv_namespace=None, max_connections=None, run_migrations=None, blob_base_url=None, filesystem_blob_root=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn connect_with<'py>(
+        py: Python<'py>,
+        postgres_url: String,
+        signing_secret: Option<String>,
+        kv_namespace: Option<String>,
+        max_connections: Option<u32>,
+        run_migrations: Option<bool>,
+        blob_base_url: Option<String>,
+        filesystem_blob_root: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        future_into_py(py, async move {
+            let mut cfg = ForgeConfig::new(postgres_url);
+            if let Some(s) = signing_secret {
+                cfg = cfg.with_blob_signing_secret(s);
+            }
+            if let Some(ns) = kv_namespace {
+                cfg = cfg.with_kv_namespace(ns);
+            }
+            if let Some(n) = max_connections {
+                cfg = cfg.with_max_connections(n);
+            }
+            if run_migrations == Some(false) {
+                cfg = cfg.without_migrations();
+            }
+            if let Some(base) = blob_base_url {
+                cfg = cfg.with_blob_base_url(base);
+            }
+            if let Some(root) = filesystem_blob_root {
+                cfg = cfg.with_filesystem_blob(root);
+            }
+            let forge = Forge::init(cfg).await.map_err(pyerr)?;
+            Ok(ForgeClient {
+                forge,
+                leased: Arc::new(Mutex::new(HashMap::new())),
+            })
+        })
+    }
+
+    /// A backend report: which provider powers each primitive (for health pages/logs).
+    fn backend_report(&self) -> Vec<BackendInfo> {
+        self.forge
+            .backend_report()
+            .backends
+            .into_iter()
+            .map(|b| BackendInfo {
+                primitive: b.primitive.as_str().to_string(),
+                provider: b.provider.to_string(),
+                durable: b.durable,
+                caveats: b.caveats.to_string(),
+            })
+            .collect()
+    }
+
+    // --- kv parity -----------------------------------------------------------------
+
+    /// `EXPIRE key ttl_seconds`. Sets/replaces the TTL on a live key; `False` if absent.
+    fn kv_expire<'py>(
+        &self,
+        py: Python<'py>,
+        key: String,
+        ttl_seconds: f64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let forge = self.forge.clone();
+        future_into_py(py, async move {
+            forge
+                .kv()
+                .expire(&key, Duration::from_secs_f64(ttl_seconds.max(0.0)))
+                .await
+                .map_err(pyerr)
+        })
+    }
+
+    /// Atomic compare-and-swap (string values). Writes `new_value` iff the current value
+    /// equals `old` (`old=None` means "expected absent/expired"). Returns success.
+    #[pyo3(signature = (key, old, new_value))]
+    fn kv_compare_and_swap<'py>(
+        &self,
+        py: Python<'py>,
+        key: String,
+        old: Option<String>,
+        new_value: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let forge = self.forge.clone();
+        future_into_py(py, async move {
+            forge
+                .kv()
+                .compare_and_swap(
+                    &key,
+                    old.map(forge::Bytes::from),
+                    forge::Bytes::from(new_value),
+                )
+                .await
+                .map_err(pyerr)
+        })
+    }
+
+    /// `SCAN prefix*` with cursor pagination. Returns `(keys, cursor)`; pass `cursor`
+    /// back for the next page (`None` when iteration is done).
+    #[pyo3(signature = (prefix, cursor=None, limit=100))]
+    fn kv_scan_page<'py>(
+        &self,
+        py: Python<'py>,
+        prefix: String,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let forge = self.forge.clone();
+        future_into_py(py, async move {
+            let cur = cursor.map(forge::Cursor::from_token);
+            let (keys, next) = forge.kv().scan(&prefix, cur, limit).await.map_err(pyerr)?;
+            Ok((keys, next.map(|c| c.token().to_string())))
+        })
+    }
+
+    // --- blob parity ---------------------------------------------------------------
+
+    /// `HeadObject`: full metadata, or `None` if the object does not exist.
+    fn blob_head<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, PyAny>> {
+        let forge = self.forge.clone();
+        future_into_py(py, async move {
+            Ok(forge
+                .blob()
+                .head(&key)
+                .await
+                .map_err(pyerr)?
+                .map(|i| BlobInfo {
+                    key: i.key,
+                    size: i.size,
+                    content_type: i.content_type,
+                    etag: i.etag,
+                    last_modified_ms: epoch_ms(i.last_modified),
+                    metadata: i.metadata.into_iter().collect(),
+                }))
+        })
+    }
+
+    /// `ListObjectsV2`: up to `limit` objects under `prefix`, lexicographic, with cursor
+    /// pagination. Returns `(items, cursor)`.
+    #[pyo3(signature = (prefix, cursor=None, limit=100))]
+    fn blob_list<'py>(
+        &self,
+        py: Python<'py>,
+        prefix: String,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let forge = self.forge.clone();
+        future_into_py(py, async move {
+            let cur = cursor.map(forge::Cursor::from_token);
+            let page = forge
+                .blob()
+                .list(&prefix, cur, limit)
+                .await
+                .map_err(pyerr)?;
+            let items: Vec<BlobInfo> = page
+                .items
+                .into_iter()
+                .map(|i| BlobInfo {
+                    key: i.key,
+                    size: i.size,
+                    content_type: i.content_type,
+                    etag: i.etag,
+                    last_modified_ms: epoch_ms(i.last_modified),
+                    metadata: i.metadata.into_iter().collect(),
+                })
+                .collect();
+            Ok((items, page.next.map(|c| c.token().to_string())))
+        })
+    }
+
+    /// Store an object from raw `bytes` with optional content type and user metadata.
+    #[pyo3(signature = (key, data, content_type=None, metadata=None))]
+    fn blob_put_object<'py>(
+        &self,
+        py: Python<'py>,
+        key: String,
+        data: Bound<'py, PyBytes>,
+        content_type: Option<String>,
+        metadata: Option<HashMap<String, String>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let bytes = forge::Bytes::from(data.as_bytes().to_vec());
+        let forge = self.forge.clone();
+        future_into_py(py, async move {
+            let mut opts = PutOpts::new();
+            if let Some(ct) = content_type {
+                opts = opts.with_content_type(ct);
+            }
+            if let Some(meta) = metadata {
+                for (k, v) in meta {
+                    opts = opts.with_metadata(k, v);
+                }
+            }
+            forge.blob().put(&key, bytes, opts).await.map_err(pyerr)
+        })
+    }
+
+    // --- ratelimit parity (full Decision) ------------------------------------------
+
+    /// Atomic check-and-consume returning the FULL [`Decision`] (all IETF RateLimit
+    /// fields). Prefer this over `rate_limit_check`, whose tuple omits `limit` and
+    /// `reset_after_seconds`.
+    #[pyo3(signature = (bucket, key, max, per_seconds, fail_open=None))]
+    fn rate_limit<'py>(
+        &self,
+        py: Python<'py>,
+        bucket: String,
+        key: String,
+        max: u32,
+        per_seconds: f64,
+        fail_open: Option<bool>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let forge = self.forge.clone();
+        future_into_py(py, async move {
+            let limit =
+                forge::Limit::per_duration(max, Duration::from_secs_f64(per_seconds.max(1.0)));
+            let mode = match fail_open {
+                None => FailMode::Default,
+                Some(true) => FailMode::Open,
+                Some(false) => FailMode::Closed,
+            };
+            let d = forge
+                .ratelimit()
+                .check_with(&bucket, &key, limit, mode)
+                .await
+                .map_err(pyerr)?;
+            Ok(Decision {
+                allowed: d.allowed,
+                limit: d.limit,
+                remaining: d.remaining,
+                reset_after_seconds: d.reset_after.as_secs_f64(),
+                retry_after_seconds: d.retry_after.map(|x| x.as_secs_f64()),
+            })
+        })
+    }
+
+    // --- schedule parity -----------------------------------------------------------
+
+    /// Cancel a schedule by name. `True` if one was removed, `False` if none existed.
+    fn schedule_cancel<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
+        let forge = self.forge.clone();
+        future_into_py(py, async move {
+            forge.schedule().cancel(&name).await.map_err(pyerr)
+        })
+    }
+
+    /// List every registered schedule (crons and pending one-shots).
+    fn schedule_list<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let forge = self.forge.clone();
+        future_into_py(py, async move {
+            let items = forge.schedule().list().await.map_err(pyerr)?;
+            Ok(items
+                .into_iter()
+                .map(|s| {
+                    let (kind, cron_expr) = match s.kind {
+                        forge::ScheduleKind::Cron(e) => ("cron".to_string(), Some(e)),
+                        _ => ("at".to_string(), None),
+                    };
+                    ScheduleInfo {
+                        name: s.name,
+                        kind,
+                        cron_expr,
+                        queue: s.queue,
+                        next_run_ms: epoch_ms(s.next_run),
+                        last_run_ms: s.last_run.map(epoch_ms),
+                    }
+                })
+                .collect::<Vec<_>>())
+        })
+    }
+
+    // --- config flag parity --------------------------------------------------------
+
+    /// Set a flag to always-on.
+    fn set_flag_on<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, PyAny>> {
+        let forge = self.forge.clone();
+        future_into_py(py, async move {
+            forge
+                .config()
+                .set_flag(&key, FlagRule::On)
+                .await
+                .map_err(pyerr)
+        })
+    }
+
+    /// Set a flag to always-off.
+    fn set_flag_off<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, PyAny>> {
+        let forge = self.forge.clone();
+        future_into_py(py, async move {
+            forge
+                .config()
+                .set_flag(&key, FlagRule::Off)
+                .await
+                .map_err(pyerr)
+        })
+    }
+
+    /// Set a flag to an allow-list of targeting keys.
+    fn set_flag_allow_list<'py>(
+        &self,
+        py: Python<'py>,
+        key: String,
+        entries: Vec<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let forge = self.forge.clone();
+        future_into_py(py, async move {
+            forge
+                .config()
+                .set_flag(&key, FlagRule::AllowList(entries))
+                .await
+                .map_err(pyerr)
+        })
+    }
+
+    // --- auth parity ---------------------------------------------------------------
+
+    /// Validate a session token; returns full [`SessionInfo`] (user id + times) or
+    /// `None`. Use `validate_session` when only the user id is needed.
+    fn validate_session_info<'py>(
+        &self,
+        py: Python<'py>,
+        token: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let forge = self.forge.clone();
+        future_into_py(py, async move {
+            Ok(forge
+                .auth()
+                .validate_session(&token)
+                .await
+                .map_err(pyerr)?
+                .map(|s| SessionInfo {
+                    user_id: s.user_id,
+                    created_at_ms: epoch_ms(s.created_at),
+                    expires_at_ms: epoch_ms(s.expires_at),
+                }))
+        })
+    }
+
+    /// Verify an API key; returns full non-secret [`ApiKeyInfo`] or `None`. Use
+    /// `verify_api_key` when only the owner id is needed.
+    fn verify_api_key_info<'py>(
+        &self,
+        py: Python<'py>,
+        key: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let forge = self.forge.clone();
+        future_into_py(py, async move {
+            Ok(forge
+                .auth()
+                .verify_api_key(&key)
+                .await
+                .map_err(pyerr)?
+                .map(|i| ApiKeyInfo {
+                    id: i.id,
+                    owner_id: i.owner_id,
+                    label: i.label,
+                }))
+        })
+    }
+
+    /// Revoke an API key by its (non-secret) id. `True` if one was removed.
+    fn revoke_api_key<'py>(&self, py: Python<'py>, id: String) -> PyResult<Bound<'py, PyAny>> {
+        let forge = self.forge.clone();
+        future_into_py(py, async move {
+            forge.auth().revoke_api_key(&id).await.map_err(pyerr)
+        })
+    }
 }
 
 #[pymodule]
@@ -720,6 +1183,12 @@ fn forge_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_class::<ForgeClient>()?;
     m.add_class::<Subscription>()?;
+    m.add_class::<BlobInfo>()?;
+    m.add_class::<ScheduleInfo>()?;
+    m.add_class::<SessionInfo>()?;
+    m.add_class::<ApiKeyInfo>()?;
+    m.add_class::<BackendInfo>()?;
+    m.add_class::<Decision>()?;
 
     let py = m.py();
     m.add("ForgeError", py.get_type::<ForgeError>())?;

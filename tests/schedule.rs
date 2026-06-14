@@ -111,6 +111,42 @@ async fn concurrent_ticks_fire_each_schedule_once() {
 }
 
 #[tokio::test]
+async fn at_past_is_allowed_but_far_future_is_limited() {
+    let db = TestDatabase::new().await.unwrap();
+    let forge = db.forge().await.unwrap();
+
+    // A `when` in the past is accepted and fires on the next tick (within grace).
+    let id = forge
+        .schedule()
+        .at(
+            SystemTime::now() - Duration::from_secs(60),
+            "past",
+            Bytes::from_static(b"p"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(forge.run_scheduler_once().await.unwrap(), 1);
+    let job = forge
+        .queue()
+        .dequeue("past", DequeueOpts::new().with_wait(Duration::ZERO))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.id, id);
+    forge.queue().ack(&job).await.unwrap();
+
+    // A `when` past the ~100-year ceiling is `Limit`.
+    let far = SystemTime::now() + Duration::from_secs(200 * 365 * 24 * 60 * 60);
+    assert!(matches!(
+        forge
+            .schedule()
+            .at(far, "later", Bytes::from_static(b"x"))
+            .await,
+        Err(ForgeError::Limit(_))
+    ));
+}
+
+#[tokio::test]
 async fn invalid_cron_and_names_error() {
     let db = TestDatabase::new().await.unwrap();
     let forge = db.forge().await.unwrap();

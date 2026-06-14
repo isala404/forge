@@ -46,9 +46,7 @@ async def ws_subscribe(ws_url: str, token: str, query: str, variables: dict):
     subscription, and yield an async generator of `next` payloads."""
     async with ws_connect(ws_url, subprotocols=["graphql-transport-ws"]) as sock:
         await sock.send(
-            json.dumps(
-                {"type": "connection_init", "payload": {"authorization": f"Bearer {token}"}}
-            )
+            json.dumps({"type": "connection_init", "payload": {"authorization": f"Bearer {token}"}})
         )
         ack = json.loads(await sock.recv())
         assert ack["type"] == "connection_ack", ack
