@@ -1,0 +1,31 @@
+{
+  "primitive": "queue",
+  "scenarios": [
+    {
+      "name": "enqueue_dequeue_ack_roundtrip",
+      "steps": [
+        { "op": "queue.enqueue", "args": { "queue": "q", "payload": "hello" } },
+        { "op": "queue.dequeue", "args": { "queue": "q", "visibility_seconds": 30, "wait_seconds": 1 }, "as": "j",
+          "expect": { "shape": { "id": { "$type": "string" }, "payload": "hello", "attempt": 1 } } },
+        { "op": "queue.ack", "args": { "receipt": { "$ref": "j.id" } } },
+        { "op": "queue.depth", "args": { "queue": "q" }, "expect": { "shape": { "visible": 0, "in_flight": 0, "delayed": 0 } } }
+      ]
+    },
+    {
+      "name": "namespace_isolation",
+      "note": "Queue names are GLOBAL per database today (P1-2). A dequeue under another namespace must not see the job. Fails in all three languages until P1-2 namespaces queue names.",
+      "steps": [
+        { "op": "queue.enqueue", "args": { "queue": "q", "payload": "x" }, "namespace": "app-a" },
+        { "op": "queue.dequeue", "args": { "queue": "q", "visibility_seconds": 30, "wait_seconds": 0 }, "namespace": "app-b", "expect": { "value": null } }
+      ]
+    },
+    {
+      "name": "dequeue_zero_visibility_is_rejected",
+      "note": "visibility 0 is Invalid in the core. Node passes 0 through (gets Invalid); Python clamps to 1ms and succeeds — P0-5 gap for python.",
+      "steps": [
+        { "op": "queue.enqueue", "args": { "queue": "q", "payload": "x" } },
+        { "op": "queue.dequeue", "args": { "queue": "q", "visibility_seconds": 0, "wait_seconds": 0 }, "expect": { "error": "Invalid" } }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,68 @@
+{
+  "comment": "Each entry is a (scenario, op?, language) expected to FAIL today. CI asserts the observed failure set equals exactly this set. When a fix lands, delete its entry here so CI flips green. See conformance/README.md.",
+  "gaps": [
+    {
+      "primitive": "kv",
+      "scenario": "ttl_zero_is_rejected",
+      "languages": ["node", "python"],
+      "task": "P0-5",
+      "note": "Bindings skip TTL when ttl<=0 (`if t > 0`) and return true; core rejects as Invalid. Fix: convert + pass through, let the core validate."
+    },
+    {
+      "primitive": "kv",
+      "scenario": "binary_value_roundtrips_losslessly",
+      "languages": ["node", "python"],
+      "task": "P0-4",
+      "note": "kv_get runs bytes through from_utf8_lossy → U+FFFD. Fix: raise Invalid on non-UTF-8 and/or add kvGetBytes/kv_get_bytes returning Buffer/bytes."
+    },
+    {
+      "primitive": "ratelimit",
+      "scenario": "check_decrements_then_denies",
+      "languages": ["node"],
+      "task": "P1-6",
+      "note": "Node JsDecision omits reset_after_seconds, so a Node app cannot emit the IETF RateLimit-Reset header. Fix: add resetAfterSeconds to the Node decision."
+    },
+    {
+      "primitive": "schedule",
+      "scenario": "at_then_list_roundtrip_ms",
+      "languages": ["python"],
+      "task": "P1-6",
+      "note": "Python schedule_at takes epoch SECONDS while Node takes ms; canonical is ms. Fix: switch Python schedule_at to milliseconds."
+    },
+    {
+      "primitive": "config",
+      "scenario": "namespace_isolation",
+      "languages": ["rust", "node", "python"],
+      "task": "P1-2",
+      "note": "Config keys are global per database; the namespace only covers kv/ratelimit/blob today. Fix: namespace config keys so apps sharing a database are isolated."
+    },
+    {
+      "primitive": "queue",
+      "scenario": "namespace_isolation",
+      "languages": ["rust", "node", "python"],
+      "task": "P1-2",
+      "note": "Queue names are global per database. Fix: prefix queue names with the namespace."
+    },
+    {
+      "primitive": "queue",
+      "scenario": "dequeue_zero_visibility_is_rejected",
+      "languages": ["python"],
+      "task": "P0-5",
+      "note": "Python clamps visibility to .max(0.001) so 0 becomes a 1ms lease instead of the core's Invalid. Fix: convert + pass through, let the core validate."
+    },
+    {
+      "primitive": "auth",
+      "scenario": "api_key_returns_metadata",
+      "languages": ["node", "python"],
+      "task": "P1-6",
+      "note": "Both bindings return only {id, secret} from create_api_key, dropping label + created_at. Fix: return the full key metadata (Node object / Python class)."
+    },
+    {
+      "primitive": "auth",
+      "scenario": "session_namespace_isolation",
+      "languages": ["rust", "node", "python"],
+      "task": "P1-2",
+      "note": "Sessions are global per database; a session from one app validates in another. Fix: add an app/namespace column scoping sessions (and api keys)."
+    }
+  ]
+}

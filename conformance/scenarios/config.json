@@ -1,0 +1,32 @@
+{
+  "primitive": "config",
+  "scenarios": [
+    {
+      "name": "set_then_get_roundtrips",
+      "steps": [
+        { "op": "config.set", "args": { "key": "greeting", "value": "hello" } },
+        { "op": "config.get", "args": { "key": "greeting" }, "expect": { "value": "hello" } },
+        { "op": "config.get", "args": { "key": "missing" }, "expect": { "value": null } }
+      ]
+    },
+    {
+      "name": "flag_default_then_on_off",
+      "steps": [
+        { "op": "config.flag", "args": { "key": "f", "default": false }, "expect": { "value": false } },
+        { "op": "config.set_flag_on", "args": { "key": "f" } },
+        { "op": "config.flag", "args": { "key": "f", "default": false }, "expect": { "value": true } },
+        { "op": "config.set_flag_off", "args": { "key": "f" } },
+        { "op": "config.flag", "args": { "key": "f", "default": true }, "expect": { "value": false } }
+      ]
+    },
+    {
+      "name": "namespace_isolation",
+      "note": "Config keys are GLOBAL per database today (P1-2). A value set under one namespace must not be visible under another. Fails in all three languages until P1-2 namespaces config keys.",
+      "steps": [
+        { "op": "config.set", "args": { "key": "shared", "value": "from-a" }, "namespace": "app-a" },
+        { "op": "config.get", "args": { "key": "shared" }, "namespace": "app-b", "expect": { "value": null } },
+        { "op": "config.get", "args": { "key": "shared" }, "namespace": "app-a", "expect": { "value": "from-a" } }
+      ]
+    }
+  ]
+}

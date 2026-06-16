@@ -1,0 +1,22 @@
+{
+  "primitive": "schedule",
+  "scenarios": [
+    {
+      "name": "at_then_list_roundtrip_ms",
+      "note": "Canonical absolute time is epoch MILLISECONDS. Node's scheduleAt already takes ms; Python's schedule_at takes seconds (P1-6), so the same ms value read as seconds lands ~60000 AD, past the ~100-year horizon, and at() rejects it — registered python gap.",
+      "steps": [
+        { "op": "schedule.at", "args": { "when_epoch_ms": 4102444800000, "queue": "q", "payload": "{}" } },
+        { "op": "schedule.list", "args": {},
+          "expect": { "value": [ { "kind": "at", "next_run_ms": { "$approx": 4102444800000, "tol": 5000 } } ] } }
+      ]
+    },
+    {
+      "name": "cron_register_then_cancel",
+      "steps": [
+        { "op": "schedule.cron", "args": { "name": "c1", "expr": "0 0 * * *", "queue": "q", "payload": "{}" } },
+        { "op": "schedule.cancel", "args": { "name": "c1" }, "expect": { "value": true } },
+        { "op": "schedule.cancel", "args": { "name": "c1" }, "expect": { "value": false } }
+      ]
+    }
+  ]
+}

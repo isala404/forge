@@ -148,3 +148,44 @@ jobs:
           save-if: "false"
       - name: contract + concurrency + crash-recovery tests
         run: cargo test --features pg-tests -- --test-threads=4
+
+  conformance:
+    name: Conformance (cross-language)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    needs: [validate]
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: forge
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Each scenario creates its own throwaway database off this maintenance URL.
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/forge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          save-if: "false"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+      # Builds both bindings and runs the Rust, Node, and Python runners; each
+      # exits non-zero iff its failure set differs from conformance/known_gaps.json.
+      - name: run all conformance runners
+        run: bash conformance/run-all.sh
