@@ -32,12 +32,31 @@ fn err(e: forge::ForgeError) -> napi::Error {
     napi::Error::from_reason(format!("{}: {}", code_of(&e), e))
 }
 
-/// A leased job handed to JavaScript. `ack`/`nack` it by `id`.
+/// Convert an `f64` seconds value into a `Duration`, raising `Invalid` on a
+/// negative or non-finite input. Zero passes straight through so the core applies
+/// its own validation: bindings convert and pass through, they never clamp or
+/// silently coerce a caller's out-of-range value (P0-5).
+fn secs(field: &str, value: f64) -> Result<Duration> {
+    Duration::try_from_secs_f64(value).map_err(|_| {
+        err(forge::ForgeError::invalid(format!(
+            "{field} must be a non-negative number of seconds"
+        )))
+    })
+}
+
+/// A leased job handed to JavaScript. Settle it with `ack`/`nack`/`heartbeat`
+/// using the opaque, delivery-unique `receipt` (NOT `id`, which is stable across
+/// redeliveries and is the natural idempotency key).
 #[napi(object)]
 pub struct JsJob {
     pub id: String,
+    /// Delivery-unique handle for ack/nack/heartbeat (SQS ReceiptHandle).
+    pub receipt: String,
     pub payload: String,
     pub attempt: u32,
+    pub max_attempts: u32,
+    pub leased_until_ms: f64,
+    pub queue: String,
 }
 
 /// A rate-limit decision (maps onto the IETF RateLimit header fields).
@@ -46,6 +65,8 @@ pub struct JsDecision {
     pub allowed: bool,
     pub limit: u32,
     pub remaining: u32,
+    /// Seconds until the limit fully resets (the IETF `RateLimit-Reset` value).
+    pub reset_after_seconds: f64,
     pub retry_after_seconds: Option<f64>,
 }
 
@@ -54,6 +75,8 @@ pub struct JsDecision {
 pub struct JsApiKey {
     pub id: String,
     pub secret: String,
+    pub label: String,
+    pub created_at_ms: f64,
 }
 
 /// Approximate queue depth (SQS `ApproximateNumberOfMessages{,NotVisible,Delayed}`).
@@ -153,13 +176,25 @@ fn epoch_ms(t: SystemTime) -> f64 {
 #[napi]
 pub struct ForgeClient {
     forge: forge::Forge,
-    /// Leased-but-not-settled jobs, keyed by job id, so `ack`/`nack` can recover
-    /// the `forge::Job` (whose lease fence is not part of the public surface).
-    /// Every dequeued job MUST be settled with `queue_ack`/`queue_nack`; an
-    /// abandoned lease would otherwise linger here forever, so `queue_dequeue`
-    /// also evicts entries whose lease has already expired (the queue redelivers
-    /// them regardless).
+    /// Leased-but-not-settled jobs, keyed by a delivery-unique opaque receipt
+    /// (not the job id), so a job redelivered to this same process gets a fresh
+    /// entry instead of overwriting the in-flight one. `ack`/`nack`/`heartbeat`
+    /// recover the `forge::Job` (whose lease fence is not part of the public
+    /// surface) by receipt. Entries are evicted on settle and, as a leak backstop,
+    /// once their original lease has been expired for over 24h.
     leased: Arc<Mutex<HashMap<String, forge::Job>>>,
+    /// Monotonic counter making each dequeue's receipt unique.
+    seq: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl ForgeClient {
+    fn from_forge(forge: forge::Forge) -> Self {
+        Self {
+            forge,
+            leased: Arc::new(Mutex::new(HashMap::new())),
+            seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
 }
 
 #[napi]
@@ -176,10 +211,7 @@ impl ForgeClient {
             cfg = cfg.with_blob_signing_secret(secret);
         }
         let forge = forge::Forge::init(cfg).await.map_err(err)?;
-        Ok(ForgeClient {
-            forge,
-            leased: Arc::new(Mutex::new(HashMap::new())),
-        })
+        Ok(ForgeClient::from_forge(forge))
     }
 
     /// Connect with the full per-deployment option surface (namespace, pool size,
@@ -209,10 +241,7 @@ impl ForgeClient {
             cfg = cfg.with_filesystem_blob(root);
         }
         let forge = forge::Forge::init(cfg).await.map_err(err)?;
-        Ok(ForgeClient {
-            forge,
-            leased: Arc::new(Mutex::new(HashMap::new())),
-        })
+        Ok(ForgeClient::from_forge(forge))
     }
 
     /// A backend report: which provider powers each primitive (for health pages/logs).
@@ -231,11 +260,19 @@ impl ForgeClient {
             .collect()
     }
 
-    /// `GET key` → the value as a UTF-8 string, or `null`.
+    /// `GET key` → the value as a UTF-8 string, or `null`. The string surface is
+    /// UTF-8-only; use `kvGetBytes` for values that may hold arbitrary bytes.
     #[napi]
     pub async fn kv_get(&self, key: String) -> Result<Option<String>> {
         let v = self.forge.kv().get(&key).await.map_err(err)?;
         Ok(v.map(|b| String::from_utf8_lossy(&b).into_owned()))
+    }
+
+    /// `GET key` → the raw value bytes, or `null`. Lossless, unlike `kvGet` (P0-4).
+    #[napi]
+    pub async fn kv_get_bytes(&self, key: String) -> Result<Option<Buffer>> {
+        let v = self.forge.kv().get(&key).await.map_err(err)?;
+        Ok(v.map(|b| Buffer::from(b.to_vec())))
     }
 
     /// `MGET keys` → each value as a UTF-8 string (or `null` if missing/expired), in
@@ -262,9 +299,7 @@ impl ForgeClient {
     ) -> Result<bool> {
         let mut opts = forge::SetOpts::new();
         if let Some(t) = ttl_seconds {
-            if t > 0.0 {
-                opts = opts.with_ttl(Duration::from_secs_f64(t));
-            }
+            opts = opts.with_ttl(secs("ttlSeconds", t)?);
         }
         if if_not_exists.unwrap_or(false) {
             opts = opts.with_mode(forge::SetMode::IfNotExists);
@@ -272,6 +307,30 @@ impl ForgeClient {
         self.forge
             .kv()
             .set(&key, forge::Bytes::from(value), opts)
+            .await
+            .map_err(err)
+    }
+
+    /// `SET key` with raw value bytes (lossless, unlike `kvSet`). Returns whether
+    /// the write happened.
+    #[napi]
+    pub async fn kv_set_bytes(
+        &self,
+        key: String,
+        value: Buffer,
+        ttl_seconds: Option<f64>,
+        if_not_exists: Option<bool>,
+    ) -> Result<bool> {
+        let mut opts = forge::SetOpts::new();
+        if let Some(t) = ttl_seconds {
+            opts = opts.with_ttl(secs("ttlSeconds", t)?);
+        }
+        if if_not_exists.unwrap_or(false) {
+            opts = opts.with_mode(forge::SetMode::IfNotExists);
+        }
+        self.forge
+            .kv()
+            .set(&key, forge::Bytes::from(value.to_vec()), opts)
             .await
             .map_err(err)
     }
@@ -347,8 +406,8 @@ impl ForgeClient {
         wait_seconds: f64,
     ) -> Result<Option<JsJob>> {
         let opts = forge::DequeueOpts::new()
-            .with_visibility_timeout(Duration::from_secs_f64(visibility_seconds.max(0.0)))
-            .with_wait(Duration::from_secs_f64(wait_seconds.max(0.0)));
+            .with_visibility_timeout(secs("visibilitySeconds", visibility_seconds)?)
+            .with_wait(secs("waitSeconds", wait_seconds)?);
         match self
             .forge
             .queue()
@@ -357,58 +416,75 @@ impl ForgeClient {
             .map_err(err)?
         {
             Some(job) => {
+                let receipt = format!(
+                    "{}:{}",
+                    job.id,
+                    self.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                );
                 let js = JsJob {
                     id: job.id.to_string(),
+                    receipt: receipt.clone(),
                     payload: String::from_utf8_lossy(&job.payload).into_owned(),
                     attempt: job.attempt,
+                    max_attempts: job.max_attempts,
+                    leased_until_ms: epoch_ms(job.leased_until),
+                    queue: job.queue.clone(),
                 };
                 let mut leased = self.leased.lock().await;
-                // Drop entries for leases that already lapsed (abandoned without
-                // ack/nack) so the map can't grow without bound.
-                let now = SystemTime::now();
-                leased.retain(|_, j| j.leased_until > now);
-                leased.insert(js.id.clone(), job);
+                // Backstop against true leaks (dequeued, never settled): drop entries
+                // whose lease lapsed over 24h ago. The grace is far longer than any
+                // heartbeat window, so a heartbeated job is never evicted mid-flight.
+                let cutoff = SystemTime::now() - Duration::from_secs(24 * 60 * 60);
+                leased.retain(|_, j| j.leased_until > cutoff);
+                leased.insert(receipt, job);
                 Ok(Some(js))
             }
             None => Ok(None),
         }
     }
 
-    /// Ack a leased job by id (idempotent).
+    /// Ack a leased job by its `receipt` (idempotent: a no-op if already settled).
     #[napi]
-    pub async fn queue_ack(&self, id: String) -> Result<()> {
-        let job = self.leased.lock().await.remove(&id);
+    pub async fn queue_ack(&self, receipt: String) -> Result<()> {
+        let job = self.leased.lock().await.remove(&receipt);
         if let Some(job) = job {
             self.forge.queue().ack(&job).await.map_err(err)?;
         }
         Ok(())
     }
 
-    /// Nack a leased job by id; optional `retrySeconds` delays the redelivery.
+    /// Nack a leased job by its `receipt`; optional `retrySeconds` delays the
+    /// redelivery. Raises `PRECONDITION` if the receipt is unknown (the lease was
+    /// lost — stop working on this job).
     #[napi]
-    pub async fn queue_nack(&self, id: String, retry_seconds: Option<f64>) -> Result<()> {
-        let job = self.leased.lock().await.remove(&id);
-        if let Some(job) = job {
-            let opts = match retry_seconds {
-                Some(s) => forge::NackOpts::retry_in(Duration::from_secs_f64(s.max(0.0))),
-                None => forge::NackOpts::default(),
-            };
-            self.forge.queue().nack(&job, opts).await.map_err(err)?;
-        }
-        Ok(())
+    pub async fn queue_nack(&self, receipt: String, retry_seconds: Option<f64>) -> Result<()> {
+        let job = self.leased.lock().await.remove(&receipt);
+        let Some(job) = job else {
+            return Err(err(forge::ForgeError::precondition(
+                "unknown receipt: the lease was lost",
+            )));
+        };
+        let opts = match retry_seconds {
+            Some(s) => forge::NackOpts::retry_in(secs("retrySeconds", s)?),
+            None => forge::NackOpts::default(),
+        };
+        self.forge.queue().nack(&job, opts).await.map_err(err)
     }
 
     /// Extend the lease on a job leased by this client (SQS ChangeMessageVisibility /
-    /// beanstalkd touch) by one visibility timeout. Call before `leased_until` for a
+    /// beanstalkd touch) by one visibility timeout. Call before `leasedUntilMs` for a
     /// handler that may outlive its visibility window, so the job is not redelivered
-    /// mid-flight. No-op if this client does not hold the lease.
+    /// mid-flight. Raises `PRECONDITION` if the receipt is unknown (the lease was
+    /// lost — stop working on this job).
     #[napi]
-    pub async fn queue_heartbeat(&self, id: String) -> Result<()> {
-        let job = self.leased.lock().await.get(&id).cloned();
-        if let Some(job) = job {
-            self.forge.queue().heartbeat(&job).await.map_err(err)?;
-        }
-        Ok(())
+    pub async fn queue_heartbeat(&self, receipt: String) -> Result<()> {
+        let job = self.leased.lock().await.get(&receipt).cloned();
+        let Some(job) = job else {
+            return Err(err(forge::ForgeError::precondition(
+                "unknown receipt: the lease was lost",
+            )));
+        };
+        self.forge.queue().heartbeat(&job).await.map_err(err)
     }
 
     /// Approximate `{visible, inFlight, delayed}` counts for a queue (SQS
@@ -474,7 +550,7 @@ impl ForgeClient {
         per_seconds: f64,
         fail_open: Option<bool>,
     ) -> Result<JsDecision> {
-        let limit = forge::Limit::per_duration(max, Duration::from_secs_f64(per_seconds.max(1.0)));
+        let limit = forge::Limit::per_duration(max, secs("perSeconds", per_seconds)?);
         let fm = match fail_open {
             None => forge::FailMode::Default,
             Some(true) => forge::FailMode::Open,
@@ -490,6 +566,7 @@ impl ForgeClient {
             allowed: d.allowed,
             limit: d.limit,
             remaining: d.remaining,
+            reset_after_seconds: d.reset_after.as_secs_f64(),
             retry_after_seconds: d.retry_after.map(|x| x.as_secs_f64()),
         })
     }
@@ -551,7 +628,7 @@ impl ForgeClient {
     pub async fn blob_presign_download(&self, key: String, expires_seconds: f64) -> Result<String> {
         self.forge
             .blob()
-            .presign_download(&key, Duration::from_secs_f64(expires_seconds.max(1.0)))
+            .presign_download(&key, secs("expiresSeconds", expires_seconds)?)
             .await
             .map_err(err)
     }
@@ -568,7 +645,7 @@ impl ForgeClient {
             .blob()
             .presign_upload(
                 &key,
-                Duration::from_secs_f64(expires_seconds.max(1.0)),
+                secs("expiresSeconds", expires_seconds)?,
                 max_bytes.max(0.0) as u64,
             )
             .await
@@ -654,10 +731,10 @@ impl ForgeClient {
     ) -> Result<String> {
         let mut opts = forge::SessionOpts::new();
         if let Some(s) = idle_seconds {
-            opts = opts.with_idle_timeout(Duration::from_secs_f64(s.max(1.0)));
+            opts = opts.with_idle_timeout(secs("idleSeconds", s)?);
         }
         if let Some(s) = absolute_seconds {
-            opts = opts.with_absolute_timeout(Duration::from_secs_f64(s.max(1.0)));
+            opts = opts.with_absolute_timeout(secs("absoluteSeconds", s)?);
         }
         let t = self
             .forge
@@ -710,6 +787,8 @@ impl ForgeClient {
         Ok(JsApiKey {
             id: k.id,
             secret: k.secret.as_str().to_string(),
+            label: k.label,
+            created_at_ms: epoch_ms(k.created_at),
         })
     }
 
@@ -811,7 +890,7 @@ impl ForgeClient {
     pub async fn kv_expire(&self, key: String, ttl_seconds: f64) -> Result<bool> {
         self.forge
             .kv()
-            .expire(&key, Duration::from_secs_f64(ttl_seconds.max(0.0)))
+            .expire(&key, secs("ttlSeconds", ttl_seconds)?)
             .await
             .map_err(err)
     }

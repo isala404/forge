@@ -47,7 +47,7 @@ pub type Subscription = BoxStream<'static, Result<Bytes>>;
 /// Exact delivery semantics (at-most-once, connected-only, no persistence) are in
 /// `docs/contracts/pubsub.md`.
 #[async_trait]
-pub trait Pubsub: Send + Sync {
+pub trait Pubsub: crate::sealed::Sealed + Send + Sync {
     /// Publish `payload` to every subscriber currently listening on `topic`.
     ///
     /// Fire-and-forget: returns `Ok` even with zero subscribers, and a message

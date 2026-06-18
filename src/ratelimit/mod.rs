@@ -100,7 +100,7 @@ pub struct Decision {
 ///
 /// Exact algorithm math, failure modes, and limits: `docs/contracts/ratelimit.md`.
 #[async_trait]
-pub trait RateLimit: Send + Sync {
+pub trait RateLimit: crate::sealed::Sealed + Send + Sync {
     /// Atomic check-and-consume of one unit against `limit` for subject `key` under
     /// namespace `bucket`. A *denied* request is `Ok(Decision { allowed: false, .. })`,
     /// never an `Err`. On a backend error the configured failure mode applies

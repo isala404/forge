@@ -27,6 +27,9 @@ use uuid::Uuid;
 
 /// Longest a `dedup_id` may be (SQS limit). Over => `Limit`.
 const MAX_DEDUP_ID_LEN: usize = 128;
+/// Queue name length cap (matches the schedule name cap). Without it a 1 MB name
+/// is accepted and grows by 4 bytes per `.dlq` hop.
+const MAX_QUEUE_NAME_BYTES: usize = 256;
 /// SQS `DelaySeconds` ceiling (15 min). Out of range => `Invalid`.
 const MAX_DELAY: Duration = Duration::from_secs(15 * 60);
 /// SQS `maxReceiveCount` ceiling.
@@ -167,6 +170,8 @@ impl PgQueue {
         }
     }
 }
+
+impl crate::sealed::Sealed for PgQueue {}
 
 #[async_trait]
 impl Queue for PgQueue {
@@ -329,6 +334,9 @@ impl Queue for PgQueue {
         let id = job.id.0;
         let token = job.lease_token;
         let seed = seed_from_id(id);
+        // A job already in a *.dlq queue must not re-home into an unwatched .dlq.dlq;
+        // exhaustion there is terminal (P1-4).
+        let in_dlq = job.queue.ends_with(".dlq");
         let span = tracing::info_span!(
             "forge.queue.nack",
             queue = %job.queue,
@@ -338,6 +346,12 @@ impl Queue for PgQueue {
             error.variant = Empty,
         );
         obs::instrument("queue", "nack", span, async move {
+            if opts.retry_in.is_some_and(|d| d > MAX_VISIBILITY_TIMEOUT) {
+                return Err(ForgeError::invalid(format!(
+                    "retry_in exceeds the maximum of {}s",
+                    MAX_VISIBILITY_TIMEOUT.as_secs()
+                )));
+            }
             let mut tx = self.pool.begin().await?;
             let row = sqlx::query!(
                 r#"SELECT attempts AS "attempts!", max_attempts AS "max_attempts!",
@@ -358,6 +372,23 @@ impl Queue for PgQueue {
 
             let new_attempts = u32::try_from(row.attempts).unwrap_or(0).saturating_add(1);
             if new_attempts >= u32::try_from(row.max_attempts).unwrap_or(u32::MAX) {
+                if in_dlq {
+                    // Terminal: park as 'dead' with attempts pinned. Nothing re-homes a
+                    // dead-letter job into .dlq.dlq; a dead row is observable + queryable.
+                    sqlx::query!(
+                        "UPDATE forge_jobs \
+                         SET status = 'dead', attempts = $2, \
+                             lease_token = NULL, leased_until = NULL, lease_secs = NULL \
+                         WHERE id = $1",
+                        id,
+                        i32::try_from(new_attempts).unwrap_or(i32::MAX),
+                    )
+                    .execute(&mut *tx)
+                    .await?;
+                    tx.commit().await?;
+                    tracing::Span::current().record("outcome", "dead");
+                    return Ok(());
+                }
                 // Exhausted — re-home to DLQ with attempts reset so DLQ consumers see a clean slate.
                 sqlx::query!(
                     "UPDATE forge_jobs \
@@ -482,6 +513,12 @@ fn to_system_time(dt: chrono::DateTime<chrono::Utc>) -> SystemTime {
 fn check_queue_name(name: &str, allow_dlq: bool) -> Result<()> {
     if name.is_empty() {
         return Err(ForgeError::invalid("queue name must not be empty"));
+    }
+    if name.len() > MAX_QUEUE_NAME_BYTES {
+        return Err(ForgeError::invalid(format!(
+            "queue name is {} bytes; max is {MAX_QUEUE_NAME_BYTES}",
+            name.len()
+        )));
     }
     if !name
         .chars()

@@ -259,7 +259,7 @@ class Mutation:
 
         if expires_at is not None:
             await forge.schedule_at(
-                expires_at.timestamp(), REAP_QUEUE, json.dumps({"message_id": str(msg_id)})
+                expires_at.timestamp() * 1000, REAP_QUEUE, json.dumps({"message_id": str(msg_id)})
             )
 
         row = await db.message(pool, msg_id)
@@ -345,10 +345,10 @@ class Mutation:
         if not allowed:
             raise gqlerr("LIMIT", "too many API keys created; try again later")
         try:
-            key_id, secret = await forge.create_api_key(str(u["id"]), label)
+            key = await forge.create_api_key(str(u["id"]), label)
         except forge_py.ForgeError as e:
             raise map_forge(e) from e
-        return ApiKeyPayload(id=key_id, secret=secret)
+        return ApiKeyPayload(id=key.id, secret=key.secret)
 
     @strawberry.mutation(
         description="Set the `reactions_v2` feature-flag rollout percentage (forge config)."

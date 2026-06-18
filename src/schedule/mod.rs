@@ -61,7 +61,7 @@ pub struct ScheduleInfo {
 /// loop) or `forge.run_scheduler_once()` (one pass). Exactly one enqueue happens per
 /// tick across all replicas. Exact semantics: `docs/contracts/schedule.md`.
 #[async_trait]
-pub trait Schedule: Send + Sync {
+pub trait Schedule: crate::sealed::Sealed + Send + Sync {
     /// Upsert a recurring cron schedule by `name` (re-registering replaces it). The
     /// 5-field `expr` (UTC) is validated now; an invalid one is
     /// [`crate::ForgeError::Invalid`].

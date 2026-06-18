@@ -32,17 +32,17 @@ async def fanout_worker(forge, pool, stop: asyncio.Event) -> None:
             continue
         if job is None:
             continue
-        job_id, payload, _attempt = job
+        payload = job.payload
         try:
             mid = uuid.UUID(json.loads(payload)["message_id"])
             msg = await db.message(pool, mid)
             if msg is not None:
                 for recipient in await db.other_member_ids(pool, msg["chat_id"], msg["sender_id"]):
                     await db.mark_delivered(pool, mid, recipient)
-            await forge.queue_ack(job_id)
+            await forge.queue_ack(job.receipt)
         except Exception:
             try:
-                await forge.queue_nack(job_id, 5.0)
+                await forge.queue_nack(job.receipt, 5.0)
             except forge_py.ForgeError:
                 pass
 
@@ -56,28 +56,28 @@ async def reap_worker(forge, pool, stop: asyncio.Event) -> None:
             continue
         if job is None:
             continue
-        job_id, payload, _attempt = job
+        payload = job.payload
         try:
             mid = uuid.UUID(json.loads(payload)["message_id"])
             row = await db.message_for_reap(pool, mid)
             if row is None:
                 # Already gone (a previous reap or the reconciliation sweep handled it).
-                await forge.queue_ack(job_id)
+                await forge.queue_ack(job.receipt)
                 continue
             expires_at = row["expires_at"]
             if expires_at is None or expires_at > datetime.now(UTC):
                 # Recalled (disappearing toggled off) or not yet due: leave the row.
-                await forge.queue_ack(job_id)
+                await forge.queue_ack(job.receipt)
                 continue
             # Delete the blob first and let any failure propagate (nack): an at-least-once
             # redelivery is cheaper than orphaning the object behind a deleted row.
             if row["media_key"]:
                 await forge.blob_delete(row["media_key"])
             await db.delete_expired_message(pool, mid)
-            await forge.queue_ack(job_id)
+            await forge.queue_ack(job.receipt)
         except Exception:
             try:
-                await forge.queue_nack(job_id, 5.0)
+                await forge.queue_nack(job.receipt, 5.0)
             except forge_py.ForgeError:
                 pass
 
@@ -91,11 +91,10 @@ async def fail_worker(forge, stop: asyncio.Event) -> None:
             continue
         if job is None:
             continue
-        job_id, _payload, _attempt = job
         try:
             # Nack with retry_in=0 so it redelivers immediately and exhausts attempts
             # into `fail.dlq` quickly.
-            await forge.queue_nack(job_id, 0.0)
+            await forge.queue_nack(job.receipt, 0.0)
         except forge_py.ForgeError:
             pass
 

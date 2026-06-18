@@ -86,6 +86,10 @@ async function dispatch(client, op, args) {
       )
     case 'kv.get':
       return await client.kvGet(args.key) // string | null
+    case 'kv.set_bytes':
+      return client.kvSetBytes(args.key, Buffer.from(args.value.$bytes), args.ttl_seconds ?? null, args.if_not_exists ?? null)
+    case 'kv.get_bytes':
+      return await client.kvGetBytes(args.key) // Buffer | null
     case 'kv.exists':
       return client.kvExists(args.key)
     case 'kv.delete':
@@ -129,7 +133,7 @@ async function dispatch(client, op, args) {
       return await client.queueEnqueue(args.queue, valueToString(args.payload), args.max_attempts ?? null, args.dedup_id ?? null)
     case 'queue.dequeue': {
       const job = await client.queueDequeue(args.queue, args.visibility_seconds, args.wait_seconds)
-      return job == null ? null : { id: job.id, payload: job.payload, attempt: job.attempt }
+      return job == null ? null : { id: job.id, receipt: job.receipt, payload: job.payload, attempt: job.attempt }
     }
     case 'queue.ack':
       return client.queueAck(args.receipt)

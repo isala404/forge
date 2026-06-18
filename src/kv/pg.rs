@@ -52,13 +52,19 @@ impl PgKv {
         }
     }
 
-    /// Validate a caller key is within the byte cap. Keys may contain `:`; the
-    /// namespace prefix stays unambiguous because the namespace is colon-free.
-    fn check_key(key: &str) -> Result<()> {
-        if key.len() > MAX_KEY_BYTES {
+    /// Validate the *physical* key (namespace prefix included) is within the byte
+    /// cap, so a namespaced key can't exceed the btree-entry budget the cap exists
+    /// to protect. Keys may contain `:`; the prefix stays unambiguous because the
+    /// namespace is colon-free.
+    fn check_key(namespace: &str, key: &str) -> Result<()> {
+        let physical = if namespace.is_empty() {
+            key.len()
+        } else {
+            namespace.len() + 1 + key.len()
+        };
+        if physical > MAX_KEY_BYTES {
             return Err(ForgeError::limit(format!(
-                "key is {} bytes; max is {MAX_KEY_BYTES}",
-                key.len()
+                "key is {physical} bytes including the namespace prefix; max is {MAX_KEY_BYTES}"
             )));
         }
         Ok(())
@@ -119,6 +125,8 @@ fn like_escape(prefix: &str) -> String {
     out
 }
 
+impl crate::sealed::Sealed for PgKv {}
+
 #[async_trait]
 impl Kv for PgKv {
     async fn get(&self, key: &str) -> Result<Option<Bytes>> {
@@ -130,7 +138,7 @@ impl Kv for PgKv {
             error.variant = Empty,
         );
         obs::instrument("kv", "get", span, async move {
-            Self::check_key(key)?;
+            Self::check_key(&self.namespace, key)?;
             let pk = self.physical(key);
             let row = sqlx::query_scalar!(
                 "SELECT value FROM forge_kv \
@@ -159,7 +167,7 @@ impl Kv for PgKv {
                 return Ok(Vec::new());
             }
             for k in keys {
-                Self::check_key(k)?;
+                Self::check_key(&self.namespace, k)?;
             }
             let physical: Vec<String> = keys.iter().map(|k| self.physical(k)).collect();
             // One round-trip; dedup is implicit (the map collapses repeats), and we
@@ -196,7 +204,7 @@ impl Kv for PgKv {
             error.variant = Empty,
         );
         obs::instrument("kv", "set", span, async move {
-            Self::check_key(key)?;
+            Self::check_key(&self.namespace, key)?;
             Self::check_value(&value)?;
             let secs = opt_ttl_secs(opts.ttl)?;
             let pk = self.physical(key);
@@ -263,7 +271,7 @@ impl Kv for PgKv {
             error.variant = Empty,
         );
         obs::instrument("kv", "delete", span, async move {
-            Self::check_key(key)?;
+            Self::check_key(&self.namespace, key)?;
             let pk = self.physical(key);
             // An expired row counts as absent: excluded here, reclaimed by the sweep.
             let removed = sqlx::query_scalar!(
@@ -289,7 +297,7 @@ impl Kv for PgKv {
             error.variant = Empty,
         );
         obs::instrument("kv", "exists", span, async move {
-            Self::check_key(key)?;
+            Self::check_key(&self.namespace, key)?;
             let pk = self.physical(key);
             let present = sqlx::query_scalar!(
                 r#"SELECT EXISTS(
@@ -314,7 +322,7 @@ impl Kv for PgKv {
             error.variant = Empty,
         );
         obs::instrument("kv", "incr", span, async move {
-            Self::check_key(key)?;
+            Self::check_key(&self.namespace, key)?;
             let pk = self.physical(key);
             // Atomic: fresh/expired key starts from 0, live key adds `by` and keeps its TTL.
             // Stored as decimal ASCII so the same column round-trips through `get`.
@@ -362,7 +370,7 @@ impl Kv for PgKv {
             error.variant = Empty,
         );
         obs::instrument("kv", "expire", span, async move {
-            Self::check_key(key)?;
+            Self::check_key(&self.namespace, key)?;
             let secs = ttl_to_secs(ttl)?;
             let pk = self.physical(key);
             tracing::Span::current().record("kv.ttl_secs", secs);
@@ -390,7 +398,7 @@ impl Kv for PgKv {
             error.variant = Empty,
         );
         obs::instrument("kv", "cas", span, async move {
-            Self::check_key(key)?;
+            Self::check_key(&self.namespace, key)?;
             Self::check_value(&new)?;
             let pk = self.physical(key);
             // A successful swap clears any TTL (contract).
@@ -505,10 +513,19 @@ mod tests {
 
     #[test]
     fn check_key_allows_colon_rejects_oversize() {
-        assert!(PgKv::check_key("user:42:session").is_ok());
+        assert!(PgKv::check_key("", "user:42:session").is_ok());
         let big = "x".repeat(MAX_KEY_BYTES + 1);
-        assert!(matches!(PgKv::check_key(&big), Err(ForgeError::Limit(_))));
-        assert!(PgKv::check_key("ok").is_ok());
+        assert!(matches!(
+            PgKv::check_key("", &big),
+            Err(ForgeError::Limit(_))
+        ));
+        assert!(PgKv::check_key("", "ok").is_ok());
+        // The namespace prefix counts against the budget.
+        let near = "x".repeat(MAX_KEY_BYTES - 3);
+        assert!(matches!(
+            PgKv::check_key("app", &near),
+            Err(ForgeError::Limit(_))
+        ));
     }
 
     #[test]

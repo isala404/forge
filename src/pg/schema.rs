@@ -61,7 +61,6 @@ fn expected_tables() -> &'static [TableSpec] {
                 Col("attempts", "integer"),
                 Col("max_attempts", "integer"),
                 Col("backoff", "jsonb"),
-                Col("dedup_id", "text"),
                 Col("available_at", TSTZ),
                 Col("leased_until", TSTZ),
                 Col("lease_token", "uuid"),

@@ -165,6 +165,8 @@ fn check_payload(payload: &[u8]) -> Result<()> {
     Ok(())
 }
 
+impl crate::sealed::Sealed for PgSchedule {}
+
 #[async_trait]
 impl Schedule for PgSchedule {
     async fn cron(&self, name: &str, expr: &str, queue: &str, payload: Bytes) -> Result<()> {

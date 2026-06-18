@@ -165,7 +165,7 @@ pub struct ApiKeyInfo {
 /// Forge does NOT own the users table — `user_id`/`owner_id` are opaque app strings.
 /// Exact semantics, timeouts, and error mapping: `docs/contracts/auth.md`.
 #[async_trait]
-pub trait Auth: Send + Sync {
+pub trait Auth: crate::sealed::Sealed + Send + Sync {
     /// Hash a password with argon2id at Forge-owned current params (fresh salt).
     async fn hash_password(&self, plain: &str) -> Result<PhcString>;
 

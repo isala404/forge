@@ -162,6 +162,8 @@ fn fs_err(e: std::io::Error) -> ForgeError {
     ForgeError::backend_with("blob filesystem error", false, e)
 }
 
+impl crate::sealed::Sealed for FsBlob {}
+
 #[async_trait]
 impl Blob for FsBlob {
     async fn put(&self, key: &str, data: Bytes, opts: PutOpts) -> Result<()> {

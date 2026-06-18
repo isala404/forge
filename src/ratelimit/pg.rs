@@ -142,6 +142,8 @@ impl PgRateLimit {
     }
 }
 
+impl crate::sealed::Sealed for PgRateLimit {}
+
 #[async_trait]
 impl RateLimit for PgRateLimit {
     async fn check_with(

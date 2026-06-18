@@ -90,9 +90,16 @@ impl Backoff {
                     .min(duration_ms(*cap))
             }
         };
+        // Every backoff kind respects a global ceiling, so `Linear(1h)` at attempt
+        // 999 cannot park a job for years (the contract's "same cap rule").
+        let base_ms = base_ms.min(duration_ms(MAX_BACKOFF));
         Duration::from_millis(jitter_ms(base_ms, seed))
     }
 }
+
+/// Global ceiling on any computed backoff delay (before jitter), matching the
+/// queue's 12h visibility ceiling.
+const MAX_BACKOFF: Duration = Duration::from_secs(12 * 60 * 60);
 
 /// `Duration` to whole milliseconds, saturating into `u64`.
 fn duration_ms(d: Duration) -> u64 {
@@ -282,7 +289,7 @@ impl Job {
 /// Object-safe; the facade hands out `Arc<dyn Queue>`. Exact semantics live in
 /// `docs/contracts/queue.md`.
 #[async_trait]
-pub trait Queue: Send + Sync {
+pub trait Queue: crate::sealed::Sealed + Send + Sync {
     /// SQS `SendMessage`. Returns the assigned [`JobId`]. With `opts.dedup_id`,
     /// a hit within the window returns the existing id (success, not an error).
     async fn enqueue(&self, queue: &str, payload: Bytes, opts: EnqueueOpts) -> Result<JobId>;
@@ -351,6 +358,18 @@ mod tests {
         let far = b.delay_for_attempt(40, 7).as_millis();
         assert!(far <= 375_000, "capped at 300s + jitter, got {far}ms");
         assert!(far >= 225_000, "capped near 300s, got {far}ms");
+    }
+
+    #[test]
+    fn linear_and_fixed_backoff_respect_the_global_ceiling() {
+        // Linear(1h) at attempt 999 would be 999h without the ceiling.
+        let lin = Backoff::Linear(Duration::from_secs(3600));
+        let d = lin.delay_for_attempt(999, 7).as_millis();
+        let ceiling_ms = (MAX_BACKOFF.as_millis() as f64 * 1.25) as u128;
+        assert!(d <= ceiling_ms, "Linear capped at 12h + jitter, got {d}ms");
+        // Fixed above the ceiling is clamped too.
+        let fixed = Backoff::Fixed(Duration::from_secs(24 * 60 * 60));
+        assert!(fixed.delay_for_attempt(1, 7).as_millis() <= ceiling_ms);
     }
 
     #[test]

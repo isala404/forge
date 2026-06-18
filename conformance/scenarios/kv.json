@@ -61,10 +61,10 @@
     },
     {
       "name": "binary_value_roundtrips_losslessly",
-      "note": "Non-UTF-8 bytes must survive the FFI. Bindings today from_utf8_lossy to U+FFFD — P0-4 gap for node+python.",
+      "note": "Non-UTF-8 bytes survive the FFI via the dedicated bytes API (P0-4). The string surface (kv.set/kv.get) is UTF-8-only by contract.",
       "steps": [
-        { "op": "kv.set", "args": { "key": "bin", "value": { "$bytes": [0, 255, 0, 254] } }, "expect": { "value": true } },
-        { "op": "kv.get", "args": { "key": "bin" }, "expect": { "bytes": { "$bytes": [0, 255, 0, 254] } } }
+        { "op": "kv.set_bytes", "args": { "key": "bin", "value": { "$bytes": [0, 255, 0, 254] } }, "expect": { "value": true } },
+        { "op": "kv.get_bytes", "args": { "key": "bin" }, "expect": { "bytes": { "$bytes": [0, 255, 0, 254] } } }
       ]
     },
     {

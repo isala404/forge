@@ -80,6 +80,10 @@ async def dispatch(client, op, args):
         )
     if op == "kv.get":
         return await client.kv_get(args["key"])
+    if op == "kv.set_bytes":
+        return await client.kv_set_bytes(args["key"], bytes(args["value"]["$bytes"]), args.get("ttl_seconds"), args.get("if_not_exists"))
+    if op == "kv.get_bytes":
+        return await client.kv_get_bytes(args["key"])
     if op == "kv.exists":
         return await client.kv_exists(args["key"])
     if op == "kv.delete":
@@ -126,8 +130,7 @@ async def dispatch(client, op, args):
         job = await client.queue_dequeue(args["queue"], args["visibility_seconds"], args["wait_seconds"])
         if job is None:
             return None
-        jid, payload, attempt = job
-        return {"id": jid, "payload": payload, "attempt": attempt}
+        return {"id": job.id, "receipt": job.receipt, "payload": job.payload, "attempt": job.attempt}
     if op == "queue.ack":
         return await client.queue_ack(args["receipt"])
     if op == "queue.nack":
@@ -152,8 +155,8 @@ async def dispatch(client, op, args):
     if op == "auth.revoke_session":
         return await client.revoke_session(args["token"])
     if op == "auth.create_api_key":
-        kid, secret = await client.create_api_key(args["owner_id"], args["label"])
-        return {"id": kid, "secret": secret, "label": None, "created_at_ms": None}
+        k = await client.create_api_key(args["owner_id"], args["label"])
+        return {"id": k.id, "secret": k.secret, "label": k.label, "created_at_ms": k.created_at_ms}
     if op == "auth.verify_api_key":
         return await client.verify_api_key(args["key"])
     raise ValueError(f"python conformance runner has no dispatch for op {op}")

@@ -61,7 +61,7 @@ impl SetOpts {
 ///
 /// Object-safe (facade hands out `Arc<dyn Kv>`). Exact semantics, limits, and error mapping: `docs/contracts/kv.md`.
 #[async_trait]
-pub trait Kv: Send + Sync {
+pub trait Kv: crate::sealed::Sealed + Send + Sync {
     /// `GET`. `Some(value)` if present and unexpired, else `None`. An expired key returns `None`, guaranteed.
     async fn get(&self, key: &str) -> Result<Option<Bytes>>;
 

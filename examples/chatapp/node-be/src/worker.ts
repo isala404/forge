@@ -40,11 +40,11 @@ export function runFanoutWorker(app: AppCtx, stopped: Stopped): void {
       if (!job) continue;
       try {
         await handleFanout(app, job.payload);
-        await app.forge.queueAck(job.id);
+        await app.forge.queueAck(job.receipt);
       } catch (e) {
         console.warn("fanout handler failed:", (e as Error).message);
         try {
-          await app.forge.queueNack(job.id);
+          await app.forge.queueNack(job.receipt);
         } catch {
           /* redelivery is the queue's job */
         }
@@ -84,11 +84,11 @@ export function runReapWorker(app: AppCtx, stopped: Stopped): void {
       if (!job) continue;
       try {
         await reapMessage(app, job.payload);
-        await app.forge.queueAck(job.id);
+        await app.forge.queueAck(job.receipt);
       } catch (e) {
         console.warn("reap handler failed:", (e as Error).message);
         try {
-          await app.forge.queueNack(job.id);
+          await app.forge.queueNack(job.receipt);
         } catch {
           /* ignore */
         }
@@ -112,7 +112,7 @@ export function runFailWorker(app: AppCtx, stopped: Stopped): void {
       }
       if (!job) continue;
       try {
-        await app.forge.queueNack(job.id);
+        await app.forge.queueNack(job.receipt);
       } catch {
         /* ignore; DLQ transition is the contract's job */
       }

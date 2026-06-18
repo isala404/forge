@@ -39,6 +39,14 @@ fn embedded_migrations() -> Vec<Migration> {
             "v008_blob_fs",
             include_str!("../migrations/v008_blob_fs.sql"),
         ),
+        Migration::parse(
+            "v009_queue_index_cleanup",
+            include_str!("../migrations/v009_queue_index_cleanup.sql"),
+        ),
+        Migration::parse(
+            "v010_dead_status",
+            include_str!("../migrations/v010_dead_status.sql"),
+        ),
     ]
 }
 

@@ -80,7 +80,7 @@ pub enum FlagRule {
 ///
 /// Exact resolution order, caching, and flag evaluation: `docs/contracts/config.md`.
 #[async_trait]
-pub trait ConfigStore: Send + Sync {
+pub trait ConfigStore: crate::sealed::Sealed + Send + Sync {
     /// Resolved string value: env `FORGE_CFG_<KEY>` over the stored value over `None`.
     /// Served from the in-process cache (≤30s stale). `None` if unset at every layer.
     async fn get_raw(&self, key: &str) -> Result<Option<String>>;
@@ -97,6 +97,14 @@ pub trait ConfigStore: Send + Sync {
     /// Upsert a flag's [`FlagRule`] (last-write-wins). Visible to `flag` within the
     /// cache bound.
     async fn set_flag(&self, key: &str, rule: FlagRule) -> Result<()>;
+
+    /// Delete the stored value. `true` if a value was removed, `false` if absent.
+    /// An active `FORGE_CFG_<KEY>` env var still shadows reads afterwards.
+    async fn delete_raw(&self, key: &str) -> Result<bool>;
+
+    /// Delete a flag's rule. `true` if a rule was removed. `flag` then reverts to
+    /// returning the caller's `default` for that key.
+    async fn delete_flag(&self, key: &str) -> Result<bool>;
 }
 
 /// Typed accessor over [`ConfigStore`]. Blanket-implemented, so it works on

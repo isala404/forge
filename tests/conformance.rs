@@ -123,10 +123,8 @@ async fn run_scenario(scenario: &Value) -> Result<(), String> {
         let args = resolve(step.get("args").cloned().unwrap_or_else(|| json!({})), &captures);
         let outcome = dispatch(forge, &mut leased, op, &args).await;
 
-        if let Some(name) = step.get("as").and_then(Value::as_str) {
-            if let Ok(v) = &outcome {
-                captures.insert(name.to_string(), v.clone());
-            }
+        if let (Some(name), Ok(v)) = (step.get("as").and_then(Value::as_str), &outcome) {
+            captures.insert(name.to_string(), v.clone());
         }
 
         match step.get("expect") {
@@ -149,7 +147,7 @@ async fn dispatch(
     args: &Value,
 ) -> Result<Value, ForgeError> {
     match op {
-        "kv.set" => {
+        "kv.set" | "kv.set_bytes" => {
             let mut opts = SetOpts::new();
             if let Some(ttl) = args.get("ttl_seconds").and_then(Value::as_f64) {
                 opts = opts.with_ttl(Duration::from_secs_f64(ttl));
@@ -163,7 +161,9 @@ async fn dispatch(
                 .await
                 .map(Value::Bool)
         }
-        "kv.get" => Ok(bytes_opt_to_value(forge.kv().get(arg_str(args, "key")).await?)),
+        "kv.get" | "kv.get_bytes" => {
+            Ok(bytes_opt_to_value(forge.kv().get(arg_str(args, "key")).await?))
+        }
         "kv.exists" => forge.kv().exists(arg_str(args, "key")).await.map(Value::Bool),
         "kv.delete" => forge.kv().delete(arg_str(args, "key")).await.map(Value::Bool),
         "kv.incr" => forge
@@ -282,10 +282,13 @@ async fn dispatch(
                 None => Ok(Value::Null),
                 Some(job) => {
                     let id = job.id.to_string();
+                    // The runner is single-delivery, so receipt == id is sufficient here;
+                    // the bindings mint a delivery-unique receipt of their own.
+                    let receipt = id.clone();
                     let payload = bytes_opt_to_value(Some(job.payload.clone()));
                     let attempt = job.attempt;
-                    leased.insert(id.clone(), job);
-                    Ok(json!({ "id": id, "payload": payload, "attempt": attempt }))
+                    leased.insert(receipt.clone(), job);
+                    Ok(json!({ "id": id, "receipt": receipt, "payload": payload, "attempt": attempt }))
                 }
             }
         }
@@ -300,7 +303,8 @@ async fn dispatch(
             };
             match leased.remove(arg_str(args, "receipt")) {
                 Some(job) => forge.queue().nack(&job, opts).await.map(|()| Value::Null),
-                None => Ok(Value::Null),
+                // Mirror the bindings: an unknown receipt means the lease was lost.
+                None => Err(ForgeError::precondition("unknown receipt: the lease was lost")),
             }
         }
         "queue.depth" => {

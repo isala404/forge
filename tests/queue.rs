@@ -209,6 +209,62 @@ async fn validates_queue_names_and_limits() {
         q.enqueue("q", too_big, EnqueueOpts::new()).await,
         Err(ForgeError::Limit(_))
     ));
+
+    // Queue names are length-capped (256 bytes) like schedule names.
+    let long_name = "a".repeat(257);
+    assert!(matches!(
+        q.enqueue(&long_name, payload("x"), EnqueueOpts::new())
+            .await,
+        Err(ForgeError::Invalid(_))
+    ));
+}
+
+#[tokio::test]
+async fn dlq_job_exhaustion_parks_as_dead_not_chained() {
+    let db = TestDatabase::new().await.unwrap();
+    let forge = db.forge().await.unwrap();
+    let q = forge.queue();
+
+    // Exhaust in the main queue: the job re-homes to orders.dlq.
+    q.enqueue("orders", payload("x"), EnqueueOpts::new().with_max_attempts(1))
+        .await
+        .unwrap();
+    let j = q.dequeue("orders", vis(30)).await.unwrap().unwrap();
+    q.nack(&j, NackOpts::default()).await.unwrap();
+
+    // Consume the DLQ and exhaust it too.
+    let d = q.dequeue("orders.dlq", vis(30)).await.unwrap().unwrap();
+    assert_eq!(d.attempt, 1, "DLQ job is a fresh attempt");
+    q.nack(&d, NackOpts::default()).await.unwrap();
+
+    // It parked as 'dead': not redelivered, and no orders.dlq.dlq chain exists.
+    assert!(
+        q.dequeue("orders.dlq", vis(1)).await.unwrap().is_none(),
+        "a dead job is not redelivered"
+    );
+    let chained = q.depth("orders.dlq.dlq").await.unwrap();
+    assert_eq!(
+        chained.visible + chained.in_flight + chained.delayed,
+        0,
+        "exhaustion in a .dlq queue must not create a .dlq.dlq chain"
+    );
+}
+
+#[tokio::test]
+async fn nack_retry_in_is_bounded() {
+    let db = TestDatabase::new().await.unwrap();
+    let forge = db.forge().await.unwrap();
+    let q = forge.queue();
+
+    q.enqueue("q", payload("x"), EnqueueOpts::new())
+        .await
+        .unwrap();
+    let job = q.dequeue("q", vis(30)).await.unwrap().unwrap();
+    // A century-long park is rejected; the cap is the 12h visibility ceiling.
+    let res = q
+        .nack(&job, NackOpts::retry_in(Duration::from_secs(100 * 365 * 24 * 3600)))
+        .await;
+    assert!(matches!(res, Err(ForgeError::Invalid(_))));
 }
 
 /// N concurrent consumers each get a distinct job, exercising `FOR UPDATE SKIP LOCKED`.

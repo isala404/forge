@@ -32,19 +32,26 @@ class TypedQueue {
     const job = await this.client.queueDequeue(
       this.name,
       opts.visibilitySeconds ?? 30,
-      opts.waitSeconds ?? 1,
+      opts.waitSeconds ?? 20,
     )
     if (!job) return null
-    return { id: job.id, attempt: job.attempt, payload: JSON.parse(job.payload) }
+    return {
+      id: job.id,
+      receipt: job.receipt,
+      attempt: job.attempt,
+      maxAttempts: job.maxAttempts,
+      leasedUntilMs: job.leasedUntilMs,
+      payload: JSON.parse(job.payload),
+    }
   }
-  ack(id) {
-    return this.client.queueAck(id)
+  ack(receipt) {
+    return this.client.queueAck(receipt)
   }
-  nack(id, retrySeconds) {
-    return this.client.queueNack(id, retrySeconds ?? null)
+  nack(receipt, retrySeconds) {
+    return this.client.queueNack(receipt, retrySeconds ?? null)
   }
-  heartbeat(id) {
-    return this.client.queueHeartbeat(id)
+  heartbeat(receipt) {
+    return this.client.queueHeartbeat(receipt)
   }
   depth() {
     return this.client.queueDepth(this.name)
@@ -120,6 +127,60 @@ class TypedTopic {
   }
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+/**
+ * Run the canonical managed worker loop over a queue: dequeue, auto-heartbeat at a
+ * third of the visibility window, ack on success / nack on throw, abandon on lease
+ * loss, and drain on shutdown. This is the loop every app would otherwise re-invent
+ * with subtle bugs (no heartbeat, double-run past the visibility window).
+ *
+ *   const stop = new AbortController()
+ *   runWorker(client, "emails", async (job) => { ... }, { signal: stop.signal })
+ *
+ * `handler(job)` receives `{ id, attempt, maxAttempts, payload, signal }`; `payload`
+ * is the raw string. `signal` aborts if the lease is lost mid-flight — a cooperative
+ * handler should check it and stop. Returns a promise that resolves when `signal`
+ * (opts.signal) aborts and the in-flight job has drained.
+ */
+async function runWorker(client, queueName, handler, opts = {}) {
+  const visibility = opts.visibilitySeconds ?? 30
+  const wait = opts.waitSeconds ?? 20
+  const stop = opts.signal
+  const hbEvery = Math.max(1000, Math.floor((visibility * 1000) / 3))
+
+  while (!(stop && stop.aborted)) {
+    let job
+    try {
+      job = await client.queueDequeue(queueName, visibility, wait)
+    } catch {
+      await sleep(250) // transient backend blip; back off and retry
+      continue
+    }
+    if (!job) continue
+
+    const lease = new AbortController()
+    const beat = setInterval(() => {
+      client.queueHeartbeat(job.receipt).catch(() => lease.abort())
+    }, hbEvery)
+    try {
+      await handler({
+        id: job.id,
+        attempt: job.attempt,
+        maxAttempts: job.maxAttempts,
+        payload: job.payload,
+        signal: lease.signal,
+      })
+      clearInterval(beat)
+      if (!lease.signal.aborted) await client.queueAck(job.receipt).catch(() => {})
+    } catch {
+      clearInterval(beat)
+      // Lease already lost => the receipt is gone; nacking would just throw.
+      if (!lease.signal.aborted) await client.queueNack(job.receipt).catch(() => {})
+    }
+  }
+}
+
 const typedQueue = (client, name) => new TypedQueue(client, name)
 const typedKv = (client, key) => new TypedKvKey(client, key)
 const typedConfig = (client, key, defaultValue) => new TypedConfigKey(client, key, defaultValue)
@@ -127,6 +188,7 @@ const typedTopic = (client, topic) => new TypedTopic(client, topic)
 
 module.exports = {
   forgeErrorCode,
+  runWorker,
   TypedQueue,
   TypedKvKey,
   TypedConfigKey,

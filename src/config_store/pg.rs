@@ -179,6 +179,8 @@ fn evaluate(key: &str, rule: &FlagRule, default: bool, ctx: &EvalCtx) -> (bool, 
     }
 }
 
+impl crate::sealed::Sealed for PgConfig {}
+
 #[async_trait]
 impl ConfigStore for PgConfig {
     async fn get_raw(&self, key: &str) -> Result<Option<String>> {
@@ -284,6 +286,47 @@ impl ConfigStore for PgConfig {
             .await?;
             self.store_flag(key, Some(rule));
             Ok(())
+        })
+        .await
+    }
+
+    async fn delete_raw(&self, key: &str) -> Result<bool> {
+        let span = tracing::info_span!(
+            "forge.config.delete_raw",
+            config.key_hash = %key_hash(key),
+            outcome = Empty,
+            error.variant = Empty,
+        );
+        obs::instrument("config", "delete_raw", span, async move {
+            check_key(key)?;
+            let removed = sqlx::query!("DELETE FROM forge_config WHERE key = $1", key)
+                .execute(&self.pool)
+                .await?
+                .rows_affected()
+                > 0;
+            // Cache the absence locally; other instances converge within the cache TTL.
+            self.store_value(key, None);
+            Ok(removed)
+        })
+        .await
+    }
+
+    async fn delete_flag(&self, key: &str) -> Result<bool> {
+        let span = tracing::info_span!(
+            "forge.config.delete_flag",
+            config.key_hash = %key_hash(key),
+            outcome = Empty,
+            error.variant = Empty,
+        );
+        obs::instrument("config", "delete_flag", span, async move {
+            check_key(key)?;
+            let removed = sqlx::query!("DELETE FROM forge_flags WHERE key = $1", key)
+                .execute(&self.pool)
+                .await?
+                .rows_affected()
+                > 0;
+            self.store_flag(key, None);
+            Ok(removed)
         })
         .await
     }

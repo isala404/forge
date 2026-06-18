@@ -24,6 +24,38 @@ async fn get_set_raw_roundtrip_is_last_write_wins() {
 }
 
 #[tokio::test]
+async fn delete_raw_removes_value_and_reports_whether_present() {
+    let db = TestDatabase::new().await.unwrap();
+    let forge = db.forge().await.unwrap();
+    let c = forge.config();
+
+    c.set_raw("k", "v").await.unwrap();
+    assert!(c.delete_raw("k").await.unwrap(), "removed an existing key");
+    assert_eq!(c.get_raw("k").await.unwrap(), None);
+    assert!(
+        !c.delete_raw("k").await.unwrap(),
+        "deleting an absent key is false"
+    );
+}
+
+#[tokio::test]
+async fn delete_flag_reverts_to_default() {
+    let db = TestDatabase::new().await.unwrap();
+    let forge = db.forge().await.unwrap();
+    let c = forge.config();
+    let ctx = EvalCtx::new();
+
+    c.set_flag("f", FlagRule::On).await.unwrap();
+    assert!(c.flag("f", false, &ctx).await, "flag is on");
+    assert!(c.delete_flag("f").await.unwrap(), "removed the rule");
+    assert!(
+        !c.flag("f", false, &ctx).await,
+        "flag reverts to the caller default once deleted"
+    );
+    assert!(!c.delete_flag("f").await.unwrap(), "absent flag is false");
+}
+
+#[tokio::test]
 async fn typed_get_parses_json_and_flags_bad_values() {
     let db = TestDatabase::new().await.unwrap();
     let forge = db.forge().await.unwrap();

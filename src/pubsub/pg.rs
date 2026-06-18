@@ -175,6 +175,8 @@ async fn reconnect(url: &str, channels: &HashMap<String, broadcast::Sender<Bytes
     }
 }
 
+impl crate::sealed::Sealed for PgPubsub {}
+
 #[async_trait]
 impl Pubsub for PgPubsub {
     async fn publish(&self, topic: &str, payload: Bytes) -> Result<()> {

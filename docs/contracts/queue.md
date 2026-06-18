@@ -115,8 +115,11 @@ pub struct Job {
 
 **State machine:** `available --dequeue--> leased --ack--> done`. From `leased`, an `ack` failure
 (`nack`, or the lease lapsing without `ack`/`heartbeat`) returns the job to `available` for **redelivery**,
-incrementing `attempts`; when the failed delivery's count reaches `max_attempts` the job moves to `dead`
-(the `"<queue>.dlq"` queue) instead. `done` and `dead` are terminal.
+incrementing `attempts`; when the failed delivery's count reaches `max_attempts` the job is **re-homed**
+to the `"<queue>.dlq"` dead-letter queue as a fresh `available` job (attempts reset) — *except* a job that
+is already in a `*.dlq` queue, which instead becomes terminal **`dead`** (attempts pinned) so exhaustion
+there never chains into `.dlq.dlq`. `done` and `dead` are terminal; a `.dlq` queue is itself an ordinary,
+consumable queue (dequeue/depth accept `.dlq` names; `enqueue` rejects them).
 
 | Op | Behavior |
 |----|----------|

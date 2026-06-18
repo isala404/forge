@@ -100,7 +100,7 @@ pub struct ListPage {
 ///
 /// Exact semantics, limits, presign scheme, and error mapping: `docs/contracts/blob.md`.
 #[async_trait]
-pub trait Blob: Send + Sync {
+pub trait Blob: crate::sealed::Sealed + Send + Sync {
     /// `PutObject`. Buffered (≤ 50 MiB), last-write-wins. The new `etag` is read via
     /// [`Blob::head`].
     async fn put(&self, key: &str, data: Bytes, opts: PutOpts) -> Result<()>;

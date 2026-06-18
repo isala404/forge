@@ -25,4 +25,6 @@ One chat app, three interchangeable backends, lives under [`examples/chatapp/`](
 
 **Status:** pre-v1, under active rewrite. The previous full-stack framework remains in this repository's git history. The public surface freezes at 1.0; until then it changes freely.
 
+**Stability policy (from 1.0):** the primitive traits (`Kv`, `Queue`, `Blob`, …) are **sealed** — public to call, but implementable only inside this crate. This keeps each trait a one-way contract, so methods can be added on point releases without breaking downstream code; backends are added inside Forge (see `src/backend.rs`), and a deliberate, versioned provider SPI can come later. The semantics in [`docs/contracts/`](docs/contracts/) are normative; the shipped trait signatures are normative for shape.
+
 MIT.

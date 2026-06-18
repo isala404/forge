@@ -32,6 +32,16 @@ mod obs;
 mod types;
 mod util;
 
+/// Sealing. The primitive traits (`Kv`, `Queue`, `Blob`, …) are public to *call*
+/// but not to *implement* outside this crate: each has `sealed::Sealed` as a
+/// supertrait, and `Sealed` cannot be named (let alone implemented) by downstream
+/// crates. This keeps the traits a one-way contract, so methods can be added on
+/// point releases without breaking external code. New backends are added *inside*
+/// Forge via `backend.rs`; a deliberate, versioned provider SPI can come later.
+pub(crate) mod sealed {
+    pub trait Sealed {}
+}
+
 #[cfg(feature = "postgres")]
 mod pg;
 

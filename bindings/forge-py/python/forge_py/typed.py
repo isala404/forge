@@ -11,9 +11,10 @@ Pydantic/attrs model can plug its own (de)serialization in; the defaults use ``j
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Callable, Generic, Optional, TypeVar
+from typing import Any, AsyncIterator, Awaitable, Callable, Generic, Optional, TypeVar
 
 T = TypeVar("T")
 
@@ -33,10 +34,13 @@ def forge_error_code(exc: BaseException) -> str:
 
 @dataclass
 class TypedJob(Generic[T]):
-    """A dequeued job whose payload was decoded into ``T``. Settle by ``id``."""
+    """A dequeued job whose payload was decoded into ``T``. Settle by ``receipt``
+    (delivery-unique); ``id`` is stable across redeliveries (the idempotency key)."""
 
     id: str
+    receipt: str
     attempt: int
+    max_attempts: int
     payload: T
 
 
@@ -68,22 +72,27 @@ class TypedQueue(Generic[T]):
         )
 
     async def dequeue(
-        self, *, visibility_seconds: float = 30.0, wait_seconds: float = 1.0
+        self, *, visibility_seconds: float = 30.0, wait_seconds: float = 20.0
     ) -> Optional[TypedJob[T]]:
         job = await self._c.queue_dequeue(self._name, visibility_seconds, wait_seconds)
         if job is None:
             return None
-        jid, payload, attempt = job
-        return TypedJob(id=jid, attempt=attempt, payload=self._loads(payload))
+        return TypedJob(
+            id=job.id,
+            receipt=job.receipt,
+            attempt=job.attempt,
+            max_attempts=job.max_attempts,
+            payload=self._loads(job.payload),
+        )
 
-    async def ack(self, id: str) -> None:
-        await self._c.queue_ack(id)
+    async def ack(self, receipt: str) -> None:
+        await self._c.queue_ack(receipt)
 
-    async def nack(self, id: str, retry_seconds: Optional[float] = None) -> None:
-        await self._c.queue_nack(id, retry_seconds)
+    async def nack(self, receipt: str, retry_seconds: Optional[float] = None) -> None:
+        await self._c.queue_nack(receipt, retry_seconds)
 
-    async def heartbeat(self, id: str) -> None:
-        await self._c.queue_heartbeat(id)
+    async def heartbeat(self, receipt: str) -> None:
+        await self._c.queue_heartbeat(receipt)
 
     async def depth(self) -> Any:
         return await self._c.queue_depth(self._name)
@@ -174,7 +183,7 @@ class TypedTopic(Generic[T]):
         await self._c.pubsub_publish(self._topic, self._dumps(event))
 
     async def subscribe(self) -> AsyncIterator[T]:
-        """``async for event in await topic.subscribe():`` — each item decoded into ``T``."""
+        """``async for event in topic.subscribe():`` — each item decoded into ``T``."""
         sub = await self._c.pubsub_subscribe(self._topic)
         async for payload in sub:
             yield self._loads(
@@ -182,3 +191,70 @@ class TypedTopic(Generic[T]):
                 if isinstance(payload, (bytes, bytearray))
                 else payload
             )
+
+
+async def run_worker(
+    client: Any,
+    queue_name: str,
+    handler: Callable[[TypedJob[Any]], Awaitable[None]],
+    *,
+    visibility_seconds: float = 30.0,
+    wait_seconds: float = 20.0,
+    stop: Optional[asyncio.Event] = None,
+    loads: Loads = json.loads,
+) -> None:
+    """Run the canonical managed worker loop over a queue: dequeue, auto-heartbeat
+    at a third of the visibility window, ack on success / nack on exception, abandon
+    on lease loss, and drain on ``stop``. This is the loop every app would otherwise
+    re-invent with subtle bugs (no heartbeat, double-run past the visibility window).
+
+        stop = asyncio.Event()
+        await run_worker(client, "emails", handle, stop=stop)
+
+    ``handler(job)`` receives a :class:`TypedJob` (payload decoded via ``loads``);
+    raising nacks the job. ``stop`` shuts the loop down after the in-flight job drains.
+    """
+    hb_every = max(1.0, visibility_seconds / 3.0)
+    while not (stop is not None and stop.is_set()):
+        try:
+            raw = await client.queue_dequeue(queue_name, visibility_seconds, wait_seconds)
+        except Exception:  # transient backend blip; back off and retry  # noqa: BLE001
+            await asyncio.sleep(0.25)
+            continue
+        if raw is None:
+            continue
+        job: TypedJob[Any] = TypedJob(
+            id=raw.id,
+            receipt=raw.receipt,
+            attempt=raw.attempt,
+            max_attempts=raw.max_attempts,
+            payload=loads(raw.payload),
+        )
+        lease_lost = asyncio.Event()
+
+        async def _beat(receipt: str) -> None:
+            while not lease_lost.is_set():
+                await asyncio.sleep(hb_every)
+                try:
+                    await client.queue_heartbeat(receipt)
+                except Exception:  # lease lost — stop heartbeating  # noqa: BLE001
+                    lease_lost.set()
+                    return
+
+        beat = asyncio.create_task(_beat(job.receipt))
+        try:
+            await handler(job)
+            beat.cancel()
+            if not lease_lost.is_set():
+                try:
+                    await client.queue_ack(job.receipt)
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception:  # noqa: BLE001
+            beat.cancel()
+            # If the lease was lost the receipt is gone; nacking would just raise.
+            if not lease_lost.is_set():
+                try:
+                    await client.queue_nack(job.receipt)
+                except Exception:  # noqa: BLE001
+                    pass

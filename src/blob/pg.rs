@@ -75,6 +75,8 @@ impl PgBlob {
     }
 }
 
+impl crate::sealed::Sealed for PgBlob {}
+
 #[async_trait]
 impl Blob for PgBlob {
     async fn put(&self, key: &str, data: Bytes, opts: PutOpts) -> Result<()> {

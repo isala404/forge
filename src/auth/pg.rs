@@ -20,6 +20,25 @@ use sqlx::PgPool;
 use tracing::field::Empty;
 use uuid::Uuid;
 
+/// Forge-owned argon2id parameters (OWASP baseline as of 2026; identical to the
+/// argon2 crate's current `Params::DEFAULT`, so pinning them changes nothing today).
+/// They are pinned so a routine argon2-crate bump cannot silently change hashing
+/// cost or flip `needs_rehash` for every stored hash. Bump these deliberately.
+const ARGON2_M_COST: u32 = 19_456; // KiB (19 MiB)
+const ARGON2_T_COST: u32 = 2;
+const ARGON2_P_COST: u32 = 1;
+
+/// An argon2id hasher built from Forge's pinned parameters.
+fn forge_argon2() -> Result<Argon2<'static>> {
+    let params = Params::new(ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST, None)
+        .map_err(|e| ForgeError::backend(format!("invalid argon2 params: {e}")))?;
+    Ok(Argon2::new(
+        argon2::Algorithm::Argon2id,
+        argon2::Version::V0x13,
+        params,
+    ))
+}
+
 /// Random token entropy: 32 bytes = 256 bits.
 const TOKEN_BYTES: usize = 32;
 /// Absolute-timeout ceiling (~10 years). Over => `Limit`.
@@ -39,9 +58,10 @@ impl PgAuth {
 
     /// Delete expired sessions. Idempotent; call from `maintain`.
     pub(crate) async fn sweep(&self) -> Result<u64> {
-        let r = sqlx::query!(
-            "DELETE FROM forge_sessions WHERE idle_deadline <= now() OR abs_deadline <= now()"
-        )
+        // `idle_deadline <= abs_deadline` is an invariant (enforced at create and
+        // capped at validate), so the abs_deadline arm is redundant; dropping it lets
+        // the delete use the idle_deadline index instead of seq-scanning.
+        let r = sqlx::query!("DELETE FROM forge_sessions WHERE idle_deadline <= now()")
         .execute(&self.pool)
         .await?;
         Ok(r.rows_affected())
@@ -106,6 +126,8 @@ fn check_session_opts(opts: &SessionOpts) -> Result<()> {
     Ok(())
 }
 
+impl crate::sealed::Sealed for PgAuth {}
+
 #[async_trait]
 impl Auth for PgAuth {
     async fn hash_password(&self, plain: &str) -> Result<PhcString> {
@@ -117,10 +139,11 @@ impl Auth for PgAuth {
         obs::instrument("auth", "hash_password", span, async move {
             check_password(plain)?;
             let owned = plain.to_string();
+            let argon = forge_argon2()?;
             // argon2 is CPU-heavy; keep it off the async runtime threads.
             let phc = tokio::task::spawn_blocking(move || {
                 let salt = SaltString::generate(&mut OsRng);
-                Argon2::default()
+                argon
                     .hash_password(owned.as_bytes(), &salt)
                     .map(|h| h.to_string())
             })
@@ -146,9 +169,10 @@ impl Auth for PgAuth {
             }
             let owned = plain.to_string();
             let hash_str = hash.as_str().to_string();
+            let argon = forge_argon2()?;
             let result = tokio::task::spawn_blocking(move || {
                 let parsed = PasswordHash::new(&hash_str)?;
-                Argon2::default().verify_password(owned.as_bytes(), &parsed)
+                argon.verify_password(owned.as_bytes(), &parsed)
             })
             .await
             .map_err(|e| ForgeError::backend(format!("verify task failed: {e}")))?;
@@ -176,10 +200,9 @@ impl Auth for PgAuth {
         let Ok(params) = Params::try_from(&parsed) else {
             return true;
         };
-        let current = Params::DEFAULT;
-        params.m_cost() < current.m_cost()
-            || params.t_cost() < current.t_cost()
-            || params.p_cost() < current.p_cost()
+        params.m_cost() < ARGON2_M_COST
+            || params.t_cost() < ARGON2_T_COST
+            || params.p_cost() < ARGON2_P_COST
     }
 
     async fn create_session(&self, user_id: &str, opts: SessionOpts) -> Result<SessionToken> {

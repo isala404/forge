@@ -61,6 +61,18 @@ fn pyerr(e: forge::ForgeError) -> PyErr {
     }
 }
 
+/// Convert an `f64` seconds value into a `Duration`, raising `Invalid` on a
+/// negative or non-finite input. Zero passes straight through so the core applies
+/// its own validation: bindings convert and pass through, they never clamp or
+/// silently coerce a caller's out-of-range value (P0-5).
+fn secs(field: &str, value: f64) -> PyResult<Duration> {
+    Duration::try_from_secs_f64(value).map_err(|_| {
+        pyerr(forge::ForgeError::invalid(format!(
+            "{field} must be a non-negative number of seconds"
+        )))
+    })
+}
+
 /// Epoch milliseconds for a `SystemTime` (saturating).
 fn epoch_ms(t: SystemTime) -> f64 {
     t.duration_since(UNIX_EPOCH)
@@ -116,6 +128,29 @@ struct BackendInfo {
     caveats: String,
 }
 
+/// A freshly minted API key. `secret` is shown exactly once.
+#[pyclass(get_all)]
+struct ApiKey {
+    id: String,
+    secret: String,
+    label: String,
+    created_at_ms: f64,
+}
+
+/// A leased job. Settle it with ack/nack/heartbeat using the opaque,
+/// delivery-unique `receipt` (NOT `id`, which is stable across redeliveries and is
+/// the natural idempotency key).
+#[pyclass(get_all)]
+struct Job {
+    id: String,
+    receipt: String,
+    payload: String,
+    attempt: u32,
+    max_attempts: u32,
+    leased_until_ms: f64,
+    queue: String,
+}
+
 /// A full rate-limit decision (all IETF RateLimit fields, unlike the legacy
 /// `rate_limit_check` tuple which omits `limit`/`reset_after_seconds`).
 #[pyclass(get_all)]
@@ -158,7 +193,13 @@ impl Subscription {
 #[pyclass]
 struct ForgeClient {
     forge: Forge,
+    /// Leased-but-not-settled jobs, keyed by a delivery-unique opaque receipt (not
+    /// the job id), so a redelivered job gets a fresh entry rather than overwriting
+    /// the in-flight one. Evicted on settle and, as a leak backstop, once the
+    /// original lease has been expired for over 24h.
     leased: Arc<Mutex<HashMap<String, forge::Job>>>,
+    /// Monotonic counter making each dequeue's receipt unique.
+    seq: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[pymethods]
@@ -181,6 +222,7 @@ impl ForgeClient {
             Ok(ForgeClient {
                 forge,
                 leased: Arc::new(Mutex::new(HashMap::new())),
+                seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             })
         })
     }
@@ -198,9 +240,7 @@ impl ForgeClient {
         future_into_py(py, async move {
             let mut opts = SetOpts::new();
             if let Some(t) = ttl_seconds {
-                if t > 0.0 {
-                    opts = opts.with_ttl(Duration::from_secs_f64(t));
-                }
+                opts = opts.with_ttl(secs("ttl_seconds", t)?);
             }
             if if_not_exists == Some(true) {
                 opts = opts.with_mode(SetMode::IfNotExists);
@@ -219,6 +259,43 @@ impl ForgeClient {
         future_into_py(py, async move {
             let v = forge.kv().get(&key).await.map_err(pyerr)?;
             Ok(v.map(|b| String::from_utf8_lossy(&b).into_owned()))
+        })
+    }
+
+    /// `SET key` with raw value bytes (lossless, unlike `kv_set`). Returns whether
+    /// the write happened.
+    #[pyo3(signature = (key, value, ttl_seconds=None, if_not_exists=None))]
+    fn kv_set_bytes<'py>(
+        &self,
+        py: Python<'py>,
+        key: String,
+        value: Vec<u8>,
+        ttl_seconds: Option<f64>,
+        if_not_exists: Option<bool>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let forge = self.forge.clone();
+        future_into_py(py, async move {
+            let mut opts = SetOpts::new();
+            if let Some(t) = ttl_seconds {
+                opts = opts.with_ttl(secs("ttl_seconds", t)?);
+            }
+            if if_not_exists == Some(true) {
+                opts = opts.with_mode(SetMode::IfNotExists);
+            }
+            forge
+                .kv()
+                .set(&key, forge::Bytes::from(value), opts)
+                .await
+                .map_err(pyerr)
+        })
+    }
+
+    /// `GET key` → the raw value bytes, or `None`. Lossless, unlike `kv_get` (P0-4).
+    fn kv_get_bytes<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, PyAny>> {
+        let forge = self.forge.clone();
+        future_into_py(py, async move {
+            let v = forge.kv().get(&key).await.map_err(pyerr)?;
+            Ok(v.map(|b| Python::with_gil(|py| PyBytes::new(py, &b).unbind())))
         })
     }
 
@@ -343,7 +420,7 @@ impl ForgeClient {
         let forge = self.forge.clone();
         future_into_py(py, async move {
             let limit =
-                forge::Limit::per_duration(max, Duration::from_secs_f64(per_seconds.max(1.0)));
+                forge::Limit::per_duration(max, secs("per_seconds", per_seconds)?);
             let mode = match fail_open {
                 None => FailMode::Default,
                 Some(true) => FailMode::Open,
@@ -401,7 +478,7 @@ impl ForgeClient {
         future_into_py(py, async move {
             forge
                 .blob()
-                .presign_download(&key, Duration::from_secs_f64(expires_seconds.max(1.0)))
+                .presign_download(&key, secs("expires_seconds", expires_seconds)?)
                 .await
                 .map_err(pyerr)
         })
@@ -420,7 +497,7 @@ impl ForgeClient {
                 .blob()
                 .presign_upload(
                     &key,
-                    Duration::from_secs_f64(expires_seconds.max(1.0)),
+                    secs("expires_seconds", expires_seconds)?,
                     max_bytes,
                 )
                 .await
@@ -512,10 +589,10 @@ impl ForgeClient {
         future_into_py(py, async move {
             let mut opts = SessionOpts::new();
             if let Some(s) = idle_seconds {
-                opts = opts.with_idle_timeout(Duration::from_secs_f64(s.max(1.0)));
+                opts = opts.with_idle_timeout(secs("idle_seconds", s)?);
             }
             if let Some(s) = absolute_seconds {
-                opts = opts.with_absolute_timeout(Duration::from_secs_f64(s.max(1.0)));
+                opts = opts.with_absolute_timeout(secs("absolute_seconds", s)?);
             }
             let t = forge
                 .auth()
@@ -560,7 +637,8 @@ impl ForgeClient {
         })
     }
 
-    /// Mint an `fk_` API key. Returns `(id, secret)`; the secret is shown once.
+    /// Mint an `fk_` API key. Returns an `ApiKey` (id, secret, label,
+    /// created_at_ms); the secret is shown once.
     fn create_api_key<'py>(
         &self,
         py: Python<'py>,
@@ -574,7 +652,12 @@ impl ForgeClient {
                 .create_api_key(&owner_id, &label)
                 .await
                 .map_err(pyerr)?;
-            Ok((k.id, k.secret.as_str().to_string()))
+            Ok(ApiKey {
+                id: k.id,
+                secret: k.secret.as_str().to_string(),
+                label: k.label,
+                created_at_ms: epoch_ms(k.created_at),
+            })
         })
     }
 
@@ -590,17 +673,17 @@ impl ForgeClient {
         })
     }
 
-    /// Schedule a one-shot enqueue at `when_epoch_seconds`; returns the future JobId.
+    /// Schedule a one-shot enqueue at `when_epoch_ms`; returns the future JobId.
     fn schedule_at<'py>(
         &self,
         py: Python<'py>,
-        when_epoch_seconds: f64,
+        when_epoch_ms: f64,
         queue: String,
         payload: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let forge = self.forge.clone();
         future_into_py(py, async move {
-            let when = UNIX_EPOCH + Duration::from_secs_f64(when_epoch_seconds.max(0.0));
+            let when = UNIX_EPOCH + Duration::from_millis(when_epoch_ms.max(0.0) as u64);
             let id = forge
                 .schedule()
                 .at(when, &queue, forge::Bytes::from(payload))
@@ -681,8 +764,8 @@ impl ForgeClient {
         })
     }
 
-    /// Lease one job, long-polling up to `wait_seconds`. Returns
-    /// `(id, payload, attempt)` or `None`. Settle it with `queue_ack`.
+    /// Lease one job, long-polling up to `wait_seconds`. Returns a `Job` (settle it
+    /// with `queue_ack`/`queue_nack`/`queue_heartbeat` by `job.receipt`) or `None`.
     fn queue_dequeue<'py>(
         &self,
         py: Python<'py>,
@@ -692,36 +775,48 @@ impl ForgeClient {
     ) -> PyResult<Bound<'py, PyAny>> {
         let forge = self.forge.clone();
         let leased = self.leased.clone();
+        let seq = self.seq.clone();
         future_into_py(py, async move {
             let opts = forge::DequeueOpts::new()
-                .with_visibility_timeout(Duration::from_secs_f64(visibility_seconds.max(0.001)))
-                .with_wait(Duration::from_secs_f64(wait_seconds.max(0.0)));
+                .with_visibility_timeout(secs("visibility_seconds", visibility_seconds)?)
+                .with_wait(secs("wait_seconds", wait_seconds)?);
             let job = forge.queue().dequeue(&queue, opts).await.map_err(pyerr)?;
             match job {
                 Some(job) => {
-                    let tuple = (
-                        job.id.to_string(),
-                        String::from_utf8_lossy(&job.payload).into_owned(),
-                        job.attempt,
+                    let receipt = format!(
+                        "{}:{}",
+                        job.id,
+                        seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                     );
+                    let out = Job {
+                        id: job.id.to_string(),
+                        receipt: receipt.clone(),
+                        payload: String::from_utf8_lossy(&job.payload).into_owned(),
+                        attempt: job.attempt,
+                        max_attempts: job.max_attempts,
+                        leased_until_ms: epoch_ms(job.leased_until),
+                        queue: job.queue.clone(),
+                    };
                     let mut map = leased.lock().await;
-                    // Evict leases that already lapsed so the map cannot grow unbounded;
-                    // the queue redelivers them regardless.
-                    let now = SystemTime::now();
-                    map.retain(|_, j| j.leased_until > now);
-                    map.insert(tuple.0.clone(), job);
-                    Ok(Some(tuple))
+                    // Leak backstop: drop entries whose lease lapsed over 24h ago. The
+                    // grace far exceeds any heartbeat window, so a heartbeated job is
+                    // never evicted mid-flight.
+                    let cutoff = SystemTime::now() - Duration::from_secs(24 * 60 * 60);
+                    map.retain(|_, j| j.leased_until > cutoff);
+                    map.insert(receipt, job);
+                    Ok(Some(out))
                 }
                 None => Ok(None),
             }
         })
     }
 
-    fn queue_ack<'py>(&self, py: Python<'py>, id: String) -> PyResult<Bound<'py, PyAny>> {
+    /// Ack a leased job by its `receipt` (idempotent: a no-op if already settled).
+    fn queue_ack<'py>(&self, py: Python<'py>, receipt: String) -> PyResult<Bound<'py, PyAny>> {
         let forge = self.forge.clone();
         let leased = self.leased.clone();
         future_into_py(py, async move {
-            let job = leased.lock().await.remove(&id);
+            let job = leased.lock().await.remove(&receipt);
             if let Some(job) = job {
                 forge.queue().ack(&job).await.map_err(pyerr)?;
             }
@@ -729,40 +824,50 @@ impl ForgeClient {
         })
     }
 
-    #[pyo3(signature = (id, retry_seconds=None))]
+    /// Nack a leased job by its `receipt`. Raises `Precondition` if the receipt is
+    /// unknown (the lease was lost — stop working on this job).
+    #[pyo3(signature = (receipt, retry_seconds=None))]
     fn queue_nack<'py>(
         &self,
         py: Python<'py>,
-        id: String,
+        receipt: String,
         retry_seconds: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let forge = self.forge.clone();
         let leased = self.leased.clone();
         future_into_py(py, async move {
-            let job = leased.lock().await.remove(&id);
-            if let Some(job) = job {
-                let opts = match retry_seconds {
-                    Some(s) => forge::NackOpts::retry_in(Duration::from_secs_f64(s.max(0.0))),
-                    None => forge::NackOpts::default(),
-                };
-                forge.queue().nack(&job, opts).await.map_err(pyerr)?;
-            }
-            Ok(())
+            let job = leased.lock().await.remove(&receipt);
+            let Some(job) = job else {
+                return Err(pyerr(forge::ForgeError::precondition(
+                    "unknown receipt: the lease was lost",
+                )));
+            };
+            let opts = match retry_seconds {
+                Some(s) => forge::NackOpts::retry_in(secs("retry_seconds", s)?),
+                None => forge::NackOpts::default(),
+            };
+            forge.queue().nack(&job, opts).await.map_err(pyerr)
         })
     }
 
-    /// Extend the lease on a job leased by this client (SQS ChangeMessageVisibility /
-    /// beanstalkd touch) by one visibility timeout, so a handler that may outlive its
-    /// visibility window is not redelivered mid-flight. No-op if not leased here.
-    fn queue_heartbeat<'py>(&self, py: Python<'py>, id: String) -> PyResult<Bound<'py, PyAny>> {
+    /// Extend the lease on a job leased by this client by one visibility timeout, so a
+    /// handler that may outlive its visibility window is not redelivered mid-flight.
+    /// Raises `Precondition` if the receipt is unknown (the lease was lost).
+    fn queue_heartbeat<'py>(
+        &self,
+        py: Python<'py>,
+        receipt: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let forge = self.forge.clone();
         let leased = self.leased.clone();
         future_into_py(py, async move {
-            let job = leased.lock().await.get(&id).cloned();
-            if let Some(job) = job {
-                forge.queue().heartbeat(&job).await.map_err(pyerr)?;
-            }
-            Ok(())
+            let job = leased.lock().await.get(&receipt).cloned();
+            let Some(job) = job else {
+                return Err(pyerr(forge::ForgeError::precondition(
+                    "unknown receipt: the lease was lost",
+                )));
+            };
+            forge.queue().heartbeat(&job).await.map_err(pyerr)
         })
     }
 
@@ -840,6 +945,7 @@ impl ForgeClient {
             Ok(ForgeClient {
                 forge,
                 leased: Arc::new(Mutex::new(HashMap::new())),
+                seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             })
         })
     }
@@ -872,7 +978,7 @@ impl ForgeClient {
         future_into_py(py, async move {
             forge
                 .kv()
-                .expire(&key, Duration::from_secs_f64(ttl_seconds.max(0.0)))
+                .expire(&key, secs("ttl_seconds", ttl_seconds)?)
                 .await
                 .map_err(pyerr)
         })
@@ -1020,7 +1126,7 @@ impl ForgeClient {
         let forge = self.forge.clone();
         future_into_py(py, async move {
             let limit =
-                forge::Limit::per_duration(max, Duration::from_secs_f64(per_seconds.max(1.0)));
+                forge::Limit::per_duration(max, secs("per_seconds", per_seconds)?);
             let mode = match fail_open {
                 None => FailMode::Default,
                 Some(true) => FailMode::Open,
@@ -1188,6 +1294,8 @@ fn forge_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<SessionInfo>()?;
     m.add_class::<ApiKeyInfo>()?;
     m.add_class::<BackendInfo>()?;
+    m.add_class::<ApiKey>()?;
+    m.add_class::<Job>()?;
     m.add_class::<Decision>()?;
 
     let py = m.py();
