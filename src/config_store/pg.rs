@@ -24,10 +24,25 @@ use tracing::field::Empty;
 const CACHE_TTL: Duration = Duration::from_secs(CACHE_TTL_SECS);
 /// Largest allowed `AllowList` entry, in bytes. Over => `Limit`.
 const MAX_ALLOWLIST_ENTRY_BYTES: usize = 256;
+/// Cap on per-process cache entries, so a caller deriving config/flag keys from
+/// user input can't grow the map without bound.
+const MAX_CACHE_ENTRIES: usize = 10_000;
 
 struct Cached<T> {
     value: T,
     fetched: Instant,
+}
+
+/// Bound a cache before inserting: purge stale entries, then reset entirely if a
+/// flood of fresh distinct keys is still at the cap (it is only a cache).
+fn cap_cache<T>(cache: &mut HashMap<String, Cached<T>>) {
+    if cache.len() < MAX_CACHE_ENTRIES {
+        return;
+    }
+    cache.retain(|_, e| e.fetched.elapsed() < CACHE_TTL);
+    if cache.len() >= MAX_CACHE_ENTRIES {
+        cache.clear();
+    }
 }
 
 /// Postgres-backed [`ConfigStore`].
@@ -56,6 +71,7 @@ impl PgConfig {
 
     fn store_value(&self, key: &str, value: Option<String>) {
         if let Ok(mut cache) = self.values.lock() {
+            cap_cache(&mut cache);
             cache.insert(
                 key.to_string(),
                 Cached {
@@ -74,6 +90,7 @@ impl PgConfig {
 
     fn store_flag(&self, key: &str, rule: Option<FlagRule>) {
         if let Ok(mut cache) = self.flags.lock() {
+            cap_cache(&mut cache);
             cache.insert(
                 key.to_string(),
                 Cached {
@@ -195,6 +212,16 @@ impl ConfigStore for PgConfig {
             check_key(key)?;
             // env `FORGE_CFG_<KEY>` wins over the store, even when set to empty (12-factor).
             if let Ok(v) = std::env::var(format!("FORGE_CFG_{key}")) {
+                tracing::Span::current().record("config.source", "env");
+                return Ok(Some(v));
+            }
+            // Fall back to the uppercased name (the universal env convention), so an
+            // operator exporting FORGE_CFG_MAX_UPLOAD_MB finds a key "max_upload_mb".
+            // The verbatim name above takes precedence.
+            let upper = key.to_ascii_uppercase();
+            if upper != key
+                && let Ok(v) = std::env::var(format!("FORGE_CFG_{upper}"))
+            {
                 tracing::Span::current().record("config.source", "env");
                 return Ok(Some(v));
             }

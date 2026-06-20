@@ -39,6 +39,10 @@ impl PgSchedule {
 
     /// Fire every due schedule once. Returns how many jobs were enqueued. Idempotent
     /// and safe to run concurrently on many replicas (per-row claim).
+    // NOTE (P2-11): up to TICK_BATCH due schedules are processed in one transaction.
+    // A single failing insert rolls back and retries the whole batch on the next
+    // pass. Fine for v1; a per-row savepoint (or a smaller batch) would contain a
+    // poison row so one bad schedule can't stall the others. Revisit at scale.
     async fn process_due_inner(&self) -> Result<u64> {
         let span = tracing::info_span!(
             "forge.schedule.tick",

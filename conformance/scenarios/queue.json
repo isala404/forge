@@ -12,6 +12,15 @@
       ]
     },
     {
+      "name": "enqueue_delay_makes_the_job_delayed",
+      "note": "enqueue delay (SQS DelaySeconds) is now exposed in both bindings (P1-6 capability gap). A delayed job is not immediately dequeueable.",
+      "steps": [
+        { "op": "queue.enqueue", "args": { "queue": "d", "payload": "later", "delay_seconds": 60 } },
+        { "op": "queue.depth", "args": { "queue": "d" }, "expect": { "shape": { "visible": 0, "delayed": 1 } } },
+        { "op": "queue.dequeue", "args": { "queue": "d", "visibility_seconds": 30, "wait_seconds": 0 }, "expect": { "value": null } }
+      ]
+    },
+    {
       "name": "namespace_isolation",
       "note": "Queue names are GLOBAL per database today (P1-2). A dequeue under another namespace must not see the job. Fails in all three languages until P1-2 namespaces queue names.",
       "steps": [

@@ -73,6 +73,18 @@ fn secs(field: &str, value: f64) -> PyResult<Duration> {
     })
 }
 
+/// Run pending migrations and return — the schema step decoupled from `connect`.
+/// Operators run this once at deploy; the app then connects with
+/// `run_migrations=False` (verify-only). Idempotent and concurrency-safe. `await` it.
+#[pyfunction]
+fn migrate(py: Python<'_>, postgres_url: String) -> PyResult<Bound<'_, PyAny>> {
+    future_into_py(py, async move {
+        Forge::migrate(ForgeConfig::new(postgres_url))
+            .await
+            .map_err(pyerr)
+    })
+}
+
 /// Epoch milliseconds for a `SystemTime` (saturating).
 fn epoch_ms(t: SystemTime) -> f64 {
     t.duration_since(UNIX_EPOCH)
@@ -186,6 +198,18 @@ impl Subscription {
             }
         })
     }
+
+    /// Unsubscribe now, releasing the broadcast receiver deterministically instead
+    /// of waiting for GC. Idempotent; the iterator then stops. Call when a client's
+    /// connection closes (e.g. a GraphQL subscription's WebSocket).
+    fn aclose<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        future_into_py(py, async move {
+            let mut sub = inner.lock().await;
+            *sub = futures_util::stream::empty().boxed();
+            Ok(())
+        })
+    }
 }
 
 /// A Forge client: one Postgres pool, every primitive, driven on a shared async
@@ -227,7 +251,23 @@ impl ForgeClient {
         })
     }
 
-    #[pyo3(signature = (key, value, ttl_seconds=None, if_not_exists=None))]
+    /// Connect using the `FORGE_*` environment variables (`FORGE_POSTGRES_URL`,
+    /// `FORGE_KV_NAMESPACE`, `FORGE_BLOB_BACKEND`, …) — the same vars that drive the
+    /// Rust crate, so config is identical across all three languages. `await` it.
+    #[staticmethod]
+    fn connect_from_env(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+        future_into_py(py, async move {
+            let cfg = ForgeConfig::from_env().map_err(pyerr)?;
+            let forge = Forge::init(cfg).await.map_err(pyerr)?;
+            Ok(ForgeClient {
+                forge,
+                leased: Arc::new(Mutex::new(HashMap::new())),
+                seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            })
+        })
+    }
+
+    #[pyo3(signature = (key, value, ttl_seconds=None, if_not_exists=None, if_exists=None))]
     fn kv_set<'py>(
         &self,
         py: Python<'py>,
@@ -235,6 +275,7 @@ impl ForgeClient {
         value: String,
         ttl_seconds: Option<f64>,
         if_not_exists: Option<bool>,
+        if_exists: Option<bool>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let forge = self.forge.clone();
         future_into_py(py, async move {
@@ -242,7 +283,10 @@ impl ForgeClient {
             if let Some(t) = ttl_seconds {
                 opts = opts.with_ttl(secs("ttl_seconds", t)?);
             }
-            if if_not_exists == Some(true) {
+            // `if_exists` (XX) takes precedence over `if_not_exists` (NX) if both set.
+            if if_exists == Some(true) {
+                opts = opts.with_mode(SetMode::IfExists);
+            } else if if_not_exists == Some(true) {
                 opts = opts.with_mode(SetMode::IfNotExists);
             }
             // Returns whether the write happened (false when `if_not_exists` and the key exists).
@@ -737,7 +781,7 @@ impl ForgeClient {
         })
     }
 
-    #[pyo3(signature = (queue, payload, max_attempts=None, dedup_id=None))]
+    #[pyo3(signature = (queue, payload, max_attempts=None, dedup_id=None, delay_seconds=None))]
     fn queue_enqueue<'py>(
         &self,
         py: Python<'py>,
@@ -745,6 +789,7 @@ impl ForgeClient {
         payload: String,
         max_attempts: Option<u32>,
         dedup_id: Option<String>,
+        delay_seconds: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let forge = self.forge.clone();
         future_into_py(py, async move {
@@ -754,6 +799,9 @@ impl ForgeClient {
             }
             if let Some(d) = dedup_id {
                 opts = opts.with_dedup_id(d);
+            }
+            if let Some(s) = delay_seconds {
+                opts = opts.with_delay(secs("delay_seconds", s)?);
             }
             let id = forge
                 .queue()
@@ -1157,6 +1205,23 @@ impl ForgeClient {
         })
     }
 
+    /// Cancel a one-shot scheduled by `schedule_at`, by the JobId it returned. `True`
+    /// if it was still pending and removed, `False` otherwise. (Send-later recall.)
+    fn schedule_cancel_at<'py>(
+        &self,
+        py: Python<'py>,
+        job_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let forge = self.forge.clone();
+        future_into_py(py, async move {
+            forge
+                .schedule()
+                .cancel(&format!("at:{job_id}"))
+                .await
+                .map_err(pyerr)
+        })
+    }
+
     /// List every registered schedule (crons and pending one-shots).
     fn schedule_list<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let forge = self.forge.clone();
@@ -1297,6 +1362,7 @@ fn forge_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ApiKey>()?;
     m.add_class::<Job>()?;
     m.add_class::<Decision>()?;
+    m.add_function(wrap_pyfunction!(migrate, m)?)?;
 
     let py = m.py();
     m.add("ForgeError", py.get_type::<ForgeError>())?;

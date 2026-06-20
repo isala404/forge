@@ -14,6 +14,13 @@ function forgeErrorCode(err) {
   return m ? m[1] : 'UNKNOWN'
 }
 
+/** Whether a thrown Forge error is retryable per docs/contracts/errors.md. Only
+ *  UNAVAILABLE is retryable from the message surface; a retryable BACKEND error is
+ *  indistinguishable here (the flag is not in the message), so it reads as false. */
+function forgeErrorRetryable(err) {
+  return forgeErrorCode(err) === 'UNAVAILABLE'
+}
+
 /** A typed queue handle: name + codec bound to a payload type. */
 class TypedQueue {
   constructor(client, name) {
@@ -188,6 +195,7 @@ const typedTopic = (client, topic) => new TypedTopic(client, topic)
 
 module.exports = {
   forgeErrorCode,
+  forgeErrorRetryable,
   runWorker,
   TypedQueue,
   TypedKvKey,

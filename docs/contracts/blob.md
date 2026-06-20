@@ -15,7 +15,7 @@ implementation stays a drop-in later with no app-code change.
 Purpose: storing and serving discrete binary objects keyed by path. Not a CDN, not a
 filesystem, not a relational store, not a message bus.
 
-## Trait (Rust sketch — directional; this doc wins on conflict)
+## Trait (this doc is normative for semantics; the shipped trait signatures are normative for shape)
 
 ```rust
 #[async_trait]
@@ -39,10 +39,10 @@ pub trait Blob: Send + Sync {
 
     /// HMAC-SHA256-signed, single-key-scoped, time-bound, size-capped upload URL.
     async fn presign_upload(&self, key: &str, expires: Duration, max_bytes: u64)
-        -> Result<Url>;
+        -> Result<String>;
 
     /// HMAC-SHA256-signed, single-key-scoped, time-bound download URL.
-    async fn presign_download(&self, key: &str, expires: Duration) -> Result<Url>;
+    async fn presign_download(&self, key: &str, expires: Duration) -> Result<String>;
 }
 
 #[non_exhaustive]
@@ -72,8 +72,8 @@ pub struct Cursor(/* opaque, backend-owned */);
 ```
 
 `Bytes` is the object body (opaque, never interpreted). `Cursor` is opaque: callers
-pass back exactly what `list` returned, never construct it. `Url` is a fully-formed,
-ready-to-use URL string.
+pass back exactly what `list` returned, never construct it. The `presign_*` methods
+return a fully-formed, ready-to-use URL as a `String`.
 
 ## Semantics
 

@@ -152,7 +152,9 @@ async fn dispatch(
             if let Some(ttl) = args.get("ttl_seconds").and_then(Value::as_f64) {
                 opts = opts.with_ttl(Duration::from_secs_f64(ttl));
             }
-            if args.get("if_not_exists").and_then(Value::as_bool) == Some(true) {
+            if args.get("if_exists").and_then(Value::as_bool) == Some(true) {
+                opts = opts.with_mode(SetMode::IfExists);
+            } else if args.get("if_not_exists").and_then(Value::as_bool) == Some(true) {
                 opts = opts.with_mode(SetMode::IfNotExists);
             }
             forge
@@ -234,6 +236,11 @@ async fn dispatch(
             .cancel(arg_str(args, "name"))
             .await
             .map(Value::Bool),
+        "schedule.cancel_at" => forge
+            .schedule()
+            .cancel(&format!("at:{}", arg_str(args, "job_id")))
+            .await
+            .map(Value::Bool),
         "schedule.list" => {
             let infos = forge.schedule().list().await?;
             let arr: Vec<Value> = infos
@@ -263,6 +270,9 @@ async fn dispatch(
             }
             if let Some(d) = args.get("dedup_id").and_then(Value::as_str) {
                 opts = opts.with_dedup_id(d);
+            }
+            if let Some(s) = args.get("delay_seconds").and_then(Value::as_f64) {
+                opts = opts.with_delay(Duration::from_secs_f64(s));
             }
             forge
                 .queue()

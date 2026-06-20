@@ -5,7 +5,10 @@ Time-triggered enqueues. A thin layer over `queue`.
 ## Lineage
 
 Recurring schedules use **5-field cron** syntax (`min hour dom mon dow`), evaluated in
-**UTC** — the **Kubernetes CronJob** precedent. One-shot schedules mirror **Unix `at`**:
+**UTC** — the **Kubernetes CronJob** precedent. Three-letter month/day names
+(`JAN`–`DEC`, `SUN`–`SAT`, case-insensitive) and the `@yearly`/`@monthly`/`@weekly`/
+`@daily`/`@hourly` (and `@annually`/`@midnight`) macros are accepted and expand to the
+5-field form. One-shot schedules mirror **Unix `at`**:
 a single fire at an absolute instant. Missed-tick handling follows CronJob's
 `startingDeadlineSeconds` — a tick missed while the system was down fires once on
 recovery if it is still within the deadline, else it is skipped and logged.
@@ -20,7 +23,7 @@ at-least-once delivery — is **inherited**, not re-implemented.
 > consumer (lease expiry, worker crash, redelivery). **Your consumer MUST be
 > idempotent.** This is the queue contract showing through, not a schedule bug.
 
-## Trait (Rust sketch — directional; this doc wins on conflict)
+## Trait (this doc is normative for semantics; the shipped trait signatures are normative for shape)
 
 ```rust
 #[async_trait]
@@ -39,6 +42,10 @@ pub trait Schedule: Send + Sync {
     /// Remove a schedule by name. Returns `true` if one was removed, `false` if no
     /// schedule had that name. Not an error to cancel nothing.
     async fn cancel(&self, name: &str) -> Result<bool, ForgeError>;
+
+    /// Cancel a one-shot created by `at`, by the JobId it returned. `true` if it was
+    /// still pending and removed, `false` if it already fired or never existed.
+    async fn cancel_at(&self, job_id: JobId) -> Result<bool, ForgeError>;
 
     /// All registered schedules — recurring crons and pending one-shots (the `kind`
     /// field distinguishes them). A one-shot disappears once it has fired.
@@ -66,7 +73,8 @@ handed to `queue` verbatim. `JobId` is the `queue` primitive's id type.
 |----|----------|
 | `cron` | Upsert by `name`. Inserts the schedule, or replaces an existing one's `expr`/`queue`/`payload` (one atomic write — re-registering the same name does **not** create a second schedule). `expr` is parsed and validated as 5-field cron at this call; a bad expression is rejected here, never silently at tick time. `next_run` is recomputed from the new `expr`. Returns `Ok(())`. |
 | `at` | Schedules exactly one enqueue at `when`. A `when` already in the past fires on the next tick if within the missed-tick grace (below), else is skipped + logged — the same policy as a missed cron tick. Returns the `JobId` the eventual enqueue will carry, so the caller can correlate / inspect / `ack` it via `queue` once it lands. The job becomes visible in `queue` only when the tick fires, not at `at` call time (see resolution). |
-| `cancel` | Removes the recurring schedule named `name`. Returns `true` if one existed and was removed, `false` if none did. Cancelling an unknown name is **success** (`Ok(false)`), not `NotFound`. A tick already enqueued before `cancel` is **not** recalled — it lives in `queue` now and runs to completion there. `cancel` does **not** target one-shots created by `at`. |
+| `cancel` | Removes the recurring schedule named `name`. Returns `true` if one existed and was removed, `false` if none did. Cancelling an unknown name is **success** (`Ok(false)`), not `NotFound`. A tick already enqueued before `cancel` is **not** recalled — it lives in `queue` now and runs to completion there. `cancel` targets named (cron) schedules; recall a still-pending one-shot with `cancel_at(job_id)`. |
+| `cancel_at` | Removes a still-pending one-shot created by `at`, by the `JobId` it returned. `true` if it was pending and removed, `false` if it already fired (or never existed). Once the one-shot's tick has fired the job lives in `queue` and `cancel_at` returns `false` — recall it through `queue` if needed. |
 | `list` | Returns every registered schedule with its `next_run`/`last_run` — recurring crons (`kind = Cron(expr)`) **and** pending one-shots (`kind = At`). A one-shot appears here only until it fires; once fired it is deleted from the schedule table and lives on solely as an ordinary `queue` job. Empty vec if none. |
 
 A scheduled enqueue is indistinguishable, once landed, from any other `queue` job: same

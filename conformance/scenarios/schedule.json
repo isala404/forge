@@ -11,6 +11,15 @@
       ]
     },
     {
+      "name": "cancel_at_recalls_a_pending_oneshot",
+      "note": "One-shots created by at() can be recalled by JobId (send-later / disappearing-message cancellation) — P1-3.",
+      "steps": [
+        { "op": "schedule.at", "args": { "when_epoch_ms": 4102444800000, "queue": "q", "payload": "{}" }, "as": "jid" },
+        { "op": "schedule.cancel_at", "args": { "job_id": { "$ref": "jid" } }, "expect": { "value": true } },
+        { "op": "schedule.cancel_at", "args": { "job_id": { "$ref": "jid" } }, "expect": { "value": false } }
+      ]
+    },
+    {
       "name": "cron_register_then_cancel",
       "steps": [
         { "op": "schedule.cron", "args": { "name": "c1", "expr": "0 0 * * *", "queue": "q", "payload": "{}" } },

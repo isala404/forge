@@ -23,7 +23,10 @@ pub(crate) struct Cron {
 impl Cron {
     /// Parse a standard 5-field cron expression. Invalid syntax/range => `Invalid`.
     pub(crate) fn parse(expr: &str) -> Result<Self> {
-        let fields: Vec<&str> = expr.split_whitespace().collect();
+        // Nonstandard but ubiquitous macros (Quartz/Vixie cron); agents emit them constantly.
+        let expanded = expand_macro(expr);
+        let src = expanded.unwrap_or(expr);
+        let fields: Vec<&str> = src.split_whitespace().collect();
         if fields.len() != 5 {
             return Err(ForgeError::invalid(format!(
                 "cron expression needs exactly 5 fields, got {}",
@@ -31,11 +34,11 @@ impl Cron {
             )));
         }
         let get = |i: usize| fields.get(i).copied().unwrap_or("");
-        let (minute, _) = parse_field(get(0), 0, 59)?;
-        let (hour, _) = parse_field(get(1), 0, 23)?;
-        let (dom, dom_restricted) = parse_field(get(2), 1, 31)?;
-        let (month, _) = parse_field(get(3), 1, 12)?;
-        let (dow, dow_restricted) = parse_field(get(4), 0, 7)?;
+        let (minute, _) = parse_field(get(0), 0, 59, &[])?;
+        let (hour, _) = parse_field(get(1), 0, 23, &[])?;
+        let (dom, dom_restricted) = parse_field(get(2), 1, 31, &[])?;
+        let (month, _) = parse_field(get(3), 1, 12, MONTHS)?;
+        let (dow, dow_restricted) = parse_field(get(4), 0, 7, DAYS)?;
         Ok(Self {
             minute,
             hour,
@@ -83,7 +86,33 @@ impl Cron {
 
 /// Parse one field into a `min..=max` bitmap. Returns the bitmap and whether the
 /// field was restricted (anything other than `*`).
-fn parse_field(spec: &str, min: usize, max: usize) -> Result<(Vec<bool>, bool)> {
+/// Three-letter month names (JAN=1 … DEC=12) and day names (SUN=0 … SAT=6).
+const MONTHS: &[(&str, usize)] = &[
+    ("JAN", 1), ("FEB", 2), ("MAR", 3), ("APR", 4), ("MAY", 5), ("JUN", 6),
+    ("JUL", 7), ("AUG", 8), ("SEP", 9), ("OCT", 10), ("NOV", 11), ("DEC", 12),
+];
+const DAYS: &[(&str, usize)] = &[
+    ("SUN", 0), ("MON", 1), ("TUE", 2), ("WED", 3), ("THU", 4), ("FRI", 5), ("SAT", 6),
+];
+
+/// Expand a `@`-macro to its 5-field equivalent, or `None` if not a macro.
+fn expand_macro(expr: &str) -> Option<&'static str> {
+    match expr.trim() {
+        "@yearly" | "@annually" => Some("0 0 1 1 *"),
+        "@monthly" => Some("0 0 1 * *"),
+        "@weekly" => Some("0 0 * * 0"),
+        "@daily" | "@midnight" => Some("0 0 * * *"),
+        "@hourly" => Some("0 * * * *"),
+        _ => None,
+    }
+}
+
+fn parse_field(
+    spec: &str,
+    min: usize,
+    max: usize,
+    names: &[(&str, usize)],
+) -> Result<(Vec<bool>, bool)> {
     if spec.is_empty() {
         return Err(ForgeError::invalid("empty cron field"));
     }
@@ -105,9 +134,9 @@ fn parse_field(spec: &str, min: usize, max: usize) -> Result<(Vec<bool>, bool)> 
         let (lo, hi) = if range == "*" {
             (min, max)
         } else if let Some((a, b)) = range.split_once('-') {
-            (parse_num(a, min, max)?, parse_num(b, min, max)?)
+            (parse_num(a, min, max, names)?, parse_num(b, min, max, names)?)
         } else {
-            let v = parse_num(range, min, max)?;
+            let v = parse_num(range, min, max, names)?;
             (v, v)
         };
         if lo > hi {
@@ -126,10 +155,16 @@ fn parse_field(spec: &str, min: usize, max: usize) -> Result<(Vec<bool>, bool)> 
     Ok((set, restricted))
 }
 
-fn parse_num(s: &str, min: usize, max: usize) -> Result<usize> {
-    let n = s
-        .parse::<usize>()
-        .map_err(|_| ForgeError::invalid(format!("invalid cron number: {s:?}")))?;
+fn parse_num(s: &str, min: usize, max: usize, names: &[(&str, usize)]) -> Result<usize> {
+    let n = if let Some(&(_, v)) = names
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(s))
+    {
+        v
+    } else {
+        s.parse::<usize>()
+            .map_err(|_| ForgeError::invalid(format!("invalid cron number: {s:?}")))?
+    };
     if n < min || n > max {
         return Err(ForgeError::invalid(format!(
             "cron value {n} out of range {min}..={max}"
@@ -182,6 +217,30 @@ mod tests {
             c.next_after(at("2026-06-06T12:00:00Z")),
             Some(at("2026-06-08T09:00:00Z"))
         );
+    }
+
+    #[test]
+    fn daily_macro_equals_its_expansion() {
+        assert_eq!(
+            Cron::parse("@daily").unwrap().next_after(at("2026-06-06T10:00:00Z")),
+            Cron::parse("0 0 * * *").unwrap().next_after(at("2026-06-06T10:00:00Z"))
+        );
+        assert!(Cron::parse("@hourly").is_ok());
+        assert!(Cron::parse("@weekly").is_ok());
+        assert!(Cron::parse("@yearly").is_ok());
+    }
+
+    #[test]
+    fn named_months_and_days_parse() {
+        // MON-FRI is the same as 1-5; JAN is month 1.
+        let named = Cron::parse("0 9 * jan MON-FRI").unwrap();
+        let numeric = Cron::parse("0 9 * 1 1-5").unwrap();
+        assert_eq!(
+            named.next_after(at("2026-06-06T12:00:00Z")),
+            numeric.next_after(at("2026-06-06T12:00:00Z"))
+        );
+        // A day name is not a valid month name, so it fails to parse in the month field.
+        assert!(Cron::parse("0 9 * MON *").is_err());
     }
 
     #[test]

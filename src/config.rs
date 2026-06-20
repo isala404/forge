@@ -82,6 +82,26 @@ impl Default for ForgeConfig {
     }
 }
 
+/// Parse a `FORGE_*_SECS` env value into a `Duration`.
+fn env_secs(name: &str, v: &str) -> Result<Duration> {
+    let secs: f64 = v
+        .parse()
+        .map_err(|_| ForgeError::config(format!("{name} is not a number: {v:?}")))?;
+    Duration::try_from_secs_f64(secs)
+        .map_err(|_| ForgeError::config(format!("{name} must be a non-negative number: {v:?}")))
+}
+
+/// Parse a `FORGE_*` boolean env value (`true`/`false`/`1`/`0`, case-insensitive).
+fn env_bool(name: &str, v: &str) -> Result<bool> {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        other => Err(ForgeError::config(format!(
+            "{name} must be a boolean (true/false), got {other:?}"
+        ))),
+    }
+}
+
 impl ForgeConfig {
     /// Start from a Postgres connection string with defaults for everything else.
     pub fn new(postgres: impl Into<String>) -> Self {
@@ -112,6 +132,21 @@ impl ForgeConfig {
         }
         if let Ok(v) = std::env::var("FORGE_BLOB_BASE_URL") {
             cfg.blob_base_url = v;
+        }
+        if let Ok(v) = std::env::var("FORGE_ACQUIRE_TIMEOUT_SECS") {
+            cfg.acquire_timeout = env_secs("FORGE_ACQUIRE_TIMEOUT_SECS", &v)?;
+        }
+        if let Ok(v) = std::env::var("FORGE_QUEUE_DEDUP_WINDOW_SECS") {
+            cfg.queue_dedup_window = env_secs("FORGE_QUEUE_DEDUP_WINDOW_SECS", &v)?;
+        }
+        if let Ok(v) = std::env::var("FORGE_QUEUE_RETENTION_SECS") {
+            cfg.queue_retention = env_secs("FORGE_QUEUE_RETENTION_SECS", &v)?;
+        }
+        if let Ok(v) = std::env::var("FORGE_RUN_MIGRATIONS") {
+            cfg.run_migrations = env_bool("FORGE_RUN_MIGRATIONS", &v)?;
+        }
+        if let Ok(v) = std::env::var("FORGE_RATELIMIT_FAIL_OPEN") {
+            cfg.ratelimit_fail_open = env_bool("FORGE_RATELIMIT_FAIL_OPEN", &v)?;
         }
         // Portable, binding-neutral backend selection: the same FORGE_* vars drive
         // Rust, Node, and Python with no per-language API. `filesystem` needs a root.
@@ -275,6 +310,21 @@ mod tests {
     fn validate_rejects_empty_dsn() {
         let cfg = ForgeConfig::new("");
         assert!(matches!(cfg.validate(), Err(ForgeError::Config(_))));
+    }
+
+    #[test]
+    fn env_bool_parses_truthy_and_rejects_garbage() {
+        assert!(env_bool("X", "true").unwrap());
+        assert!(!env_bool("X", "0").unwrap());
+        assert!(env_bool("X", "ON").unwrap());
+        assert!(matches!(env_bool("X", "maybe"), Err(ForgeError::Config(_))));
+    }
+
+    #[test]
+    fn env_secs_parses_and_rejects_negative() {
+        assert_eq!(env_secs("X", "1.5").unwrap(), Duration::from_millis(1500));
+        assert!(matches!(env_secs("X", "-1"), Err(ForgeError::Config(_))));
+        assert!(matches!(env_secs("X", "abc"), Err(ForgeError::Config(_))));
     }
 
     #[test]

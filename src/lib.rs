@@ -104,6 +104,20 @@ struct ForgeInner {
 }
 
 impl Forge {
+    /// Run pending migrations and return — the schema step **decoupled from the app
+    /// lifecycle**. Operators run this once at deploy time; the app then boots with
+    /// `run_migrations = false` (verify-only, the default-recommended production
+    /// posture). Idempotent and safe to run concurrently across replicas: an advisory
+    /// lock serializes it and checksums guard immutability.
+    #[cfg(feature = "postgres")]
+    pub async fn migrate(cfg: ForgeConfig) -> Result<()> {
+        cfg.validate()?;
+        let pool = pg::connect(&cfg).await?;
+        let result = pg::MigrationRunner::new(pool.clone()).run().await;
+        pool.close().await;
+        result
+    }
+
     /// Validate config, connect, run (or verify) migrations, and construct every
     /// primitive. Misconfiguration fails here with [`ForgeError::Config`], never
     /// lazily on first use.

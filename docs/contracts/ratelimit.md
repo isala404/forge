@@ -22,7 +22,7 @@ Not a billing meter, not a job scheduler, not a global cross-region quota servic
 > consume, both pass. `check` collapses the two into one atomic step. Test and consume
 > are the same call, always.
 
-## Trait (Rust sketch — directional; this doc wins on conflict)
+## Trait (this doc is normative for semantics; the shipped trait signatures are normative for shape)
 
 ```rust
 #[async_trait]

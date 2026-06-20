@@ -24,7 +24,7 @@ is the lowest common denominator that Postgres and the lineage standards can bot
 > keys exist for one call and are never persisted, never emitted in spans, never in error messages.
 > The secret newtypes (`PhcString`, `SessionToken`, `ApiKey::secret`) have **redacted `Debug`**.
 
-## Trait (Rust sketch — directional; this doc wins on conflict)
+## Trait (this doc is normative for semantics; the shipped trait signatures are normative for shape)
 
 ```rust
 #[async_trait]
@@ -209,7 +209,6 @@ Span `forge.auth.<op>` — `hash_password`, `verify_password`, `needs_rehash`, `
 | `auth.session_valid` | `validate_session`: whether a live session was found |
 | `auth.key_valid` | `verify_api_key`: whether a live key was found |
 | `auth.verify_ok` | `verify_password`: match outcome (bool) |
-| `auth.needs_rehash` | `needs_rehash` / post-`verify_password`: whether an upgrade is due |
 | `auth.revoked_count` | `revoke_all_sessions`: number of sessions removed |
 | `auth.idle_secs`, `auth.absolute_secs` | resolved session timeouts in seconds |
 | `auth.outcome` | `ok` / error variant |

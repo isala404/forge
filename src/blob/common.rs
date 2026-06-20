@@ -115,6 +115,12 @@ pub(super) fn presign_url(
             "presign expires exceeds the 7-day maximum",
         ));
     }
+    // A 0-byte upload cap admits only empty bodies — almost certainly a caller bug.
+    if matches!(method, Method::Put) && max_bytes == 0 {
+        return Err(ForgeError::invalid(
+            "presign_upload max_bytes must be positive (0 admits only empty bodies)",
+        ));
+    }
     let expires_epoch = unix_secs(SystemTime::now() + expires);
     let sig = sign::sign(secret, method, key, expires_epoch, max_bytes)?;
     let enc_key = utf8_percent_encode(key, NON_ALPHANUMERIC);

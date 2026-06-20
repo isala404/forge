@@ -267,9 +267,16 @@ impl Blob for FsBlob {
                     s.record("blob.size_bytes", bytes.len());
                     Ok(Some(Bytes::from(bytes)))
                 }
-                // Row points at a missing file: treat as not-found per the contract.
+                // Row points at a missing file: treat as not-found per the contract,
+                // but WARN — a *live* row resolving to no file is the crash window
+                // during a put, or the tell of a multi-replica deploy without a shared
+                // mount (each replica sees only its own files).
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     s.record("blob.hit", false);
+                    tracing::warn!(
+                        data_ref = %data_ref,
+                        "blob row resolves to a missing file (crash window, or replicas without a shared mount)"
+                    );
                     Ok(None)
                 }
                 Err(e) => Err(fs_err(e)),

@@ -32,6 +32,14 @@ def forge_error_code(exc: BaseException) -> str:
     return type(exc).__name__
 
 
+def forge_error_retryable(exc: BaseException) -> bool:
+    """Whether a raised Forge error is retryable per docs/contracts/errors.md. Only
+    ``Unavailable`` is retryable from the exception class; a retryable ``Backend``
+    error is not distinguishable here (the flag is not surfaced), so it reads False.
+    """
+    return type(exc).__name__ == "Unavailable"
+
+
 @dataclass
 class TypedJob(Generic[T]):
     """A dequeued job whose payload was decoded into ``T``. Settle by ``receipt``

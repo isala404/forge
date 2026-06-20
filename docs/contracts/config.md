@@ -23,7 +23,7 @@ Postgres store and an OpenFeature-style provider can both honor.
 > doubt it returns what you passed as `default`. Design rollouts so "everyone gets the
 > default" is a safe state, never an outage.
 
-## Trait (Rust sketch — directional; this doc wins on conflict)
+## Trait (this doc is normative for semantics; the shipped trait signatures are normative for shape)
 
 The trait is `ConfigStore` (the module is `config_store`), so it never collides with
 `ForgeConfig` (the facade's init config). The facade accessor is `forge.config()`.
@@ -108,8 +108,10 @@ contract: a `set_raw` or `set_flag` is observable everywhere within the stalenes
 
 Resolution order for **`get_raw`/`get`** (highest wins):
 
-1. **Env var `FORGE_CFG_<KEY>`** — exact, case-sensitive name. If set (even to empty
-   string), it wins.
+1. **Env var `FORGE_CFG_<KEY>`** — the exact, verbatim key name first. If that is
+   unset, the **uppercased** name (`FORGE_CFG_<KEY_UPPER>`) is tried, so an operator
+   following the usual all-caps env convention finds a lowercase key. If either is
+   set (even to empty string), it wins; the verbatim name takes precedence.
 2. **Stored value** — what `set_raw` wrote.
 3. **Code default** — i.e. `None` at this surface; the caller supplies the default by
    treating `None` as "use my default".
@@ -204,7 +206,6 @@ recorded under `get_raw` plus a deserialize event). Fields:
 | `config.op` | operation name |
 | `config.key_hash` | stable hash of the key — never the raw key |
 | `config.source` | `get_raw`: `env` \| `store` \| `unset` (which layer resolved) |
-| `config.cache` | `hit` \| `miss` (whether the 30s cache served it) |
 | `config.value_bytes` | value size on `set_raw`/`get_raw` — length only, never the value |
 | `flag.result` | `flag`: the resolved `bool` |
 | `flag.reason` | `flag`: `targeting_match` \| `targeting_miss` \| `percent_in` \| `percent_out` \| `static` \| `default_no_key` \| `default_missing` \| `default_error` (OpenFeature reason) |

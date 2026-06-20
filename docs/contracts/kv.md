@@ -11,7 +11,7 @@ follows Redis `SCAN`. Byte-value and TTL handling align with **wasi-keyvalue**.
 Purpose: caching, sessions, counters, ephemeral state. Not a blob store, not a
 relational store, not a message bus.
 
-## Trait (Rust sketch — directional; this doc wins on conflict)
+## Trait (this doc is normative for semantics; the shipped trait signatures are normative for shape)
 
 ```rust
 #[async_trait]
@@ -173,9 +173,7 @@ Span `forge.kv.<op>` (e.g. `forge.kv.get`, `forge.kv.set`, `forge.kv.incr`,
 
 | field | notes |
 |-------|-------|
-| `kv.op` | operation name |
 | `kv.key_hash` | stable hash of the key — never the raw key |
-| `kv.namespace` | configured namespace prefix |
 | `kv.hit` | `get`/`exists`: whether a live value was found |
 | `kv.wrote` | `set`/`cas`: whether the write committed |
 | `kv.ttl_secs` | resolved TTL in seconds, if any |
@@ -193,5 +191,7 @@ Key bytes and value contents are **never** emitted — only hashes, sizes, and c
 - **No Redis data structures** — lists, sets, sorted sets, hashes, streams, bitmaps,
   HyperLogLog are out of scope. This is a string/counter keyspace only.
 - **No millisecond TTL precision**, no `PERSIST`-style separate API (clear TTL via
-  `set(Always, ttl: None)`).
+  `set(Always, ttl: None)`), and **no TTL-read** (`TTL`/`PTTL`): the remaining
+  lifetime of a key is not exposed. Expiry is observable only as a key becoming
+  absent. (Decided at 1.0 — a read API can be added later without breaking callers.)
 - **Not a blob store** — the 1 MiB cap is deliberate; large objects belong elsewhere.

@@ -32,6 +32,28 @@ async fn without_migrations_requires_the_schema_present() {
 }
 
 #[tokio::test]
+async fn standalone_migrate_decouples_the_schema_step() {
+    let db = TestDatabase::new().await.unwrap();
+
+    // Fresh DB: verify-only init refuses (no schema).
+    assert!(
+        Forge::init(ForgeConfig::new(db.url()).without_migrations())
+            .await
+            .is_err()
+    );
+    // Run migrations as a separate, app-lifecycle-independent step.
+    Forge::migrate(ForgeConfig::new(db.url())).await.unwrap();
+    // Idempotent: a second migrate is a no-op, not an error.
+    Forge::migrate(ForgeConfig::new(db.url())).await.unwrap();
+    // The app now boots verify-only against the migrated schema.
+    assert!(
+        Forge::init(ForgeConfig::new(db.url()).without_migrations())
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
 async fn migrations_require_at_least_two_connections() {
     let db = TestDatabase::new().await.unwrap();
     // Migrations hold a lock connection while a second runs the SQL, so max_connections=1

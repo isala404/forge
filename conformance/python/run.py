@@ -76,7 +76,7 @@ async def dispatch(client, op, args):
     if op == "kv.set":
         return await client.kv_set(
             args["key"], value_to_str(args["value"]),
-            args.get("ttl_seconds"), args.get("if_not_exists"),
+            args.get("ttl_seconds"), args.get("if_not_exists"), args.get("if_exists"),
         )
     if op == "kv.get":
         return await client.kv_get(args["key"])
@@ -111,6 +111,8 @@ async def dispatch(client, op, args):
         return await client.schedule_cron(args["name"], args["expr"], args["queue"], value_to_str(args["payload"]))
     if op == "schedule.cancel":
         return await client.schedule_cancel(args["name"])
+    if op == "schedule.cancel_at":
+        return await client.schedule_cancel_at(args["job_id"])
     if op == "schedule.list":
         items = await client.schedule_list()
         return [
@@ -125,7 +127,7 @@ async def dispatch(client, op, args):
             for s in items
         ]
     if op == "queue.enqueue":
-        return await client.queue_enqueue(args["queue"], value_to_str(args["payload"]), args.get("max_attempts"), args.get("dedup_id"))
+        return await client.queue_enqueue(args["queue"], value_to_str(args["payload"]), args.get("max_attempts"), args.get("dedup_id"), args.get("delay_seconds"))
     if op == "queue.dequeue":
         job = await client.queue_dequeue(args["queue"], args["visibility_seconds"], args["wait_seconds"])
         if job is None:

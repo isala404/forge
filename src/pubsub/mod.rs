@@ -38,7 +38,8 @@ pub const MAX_TOPIC_BYTES: usize = 256;
 pub const MAX_PAYLOAD_BYTES: usize = 7000;
 
 /// A live stream of payloads for one subscribed topic. Each item is one published
-/// message; the stream ends (`None`) if the underlying connection drops.
+/// message; transient connection drops are re-established transparently, so the
+/// stream ends (`None`) only when the shared listener is shut down.
 pub type Subscription = BoxStream<'static, Result<Bytes>>;
 
 /// Publish/subscribe over a single Postgres connection. Object-safe; the facade

@@ -117,6 +117,15 @@ async fn presign_requires_secret_and_signs() {
         signed.blob().presign_download("k", Duration::ZERO).await,
         Err(ForgeError::Invalid(_))
     ));
+
+    // A 0-byte upload cap admits only empty bodies — rejected (P2-5).
+    assert!(matches!(
+        signed
+            .blob()
+            .presign_upload("k", Duration::from_secs(60), 0)
+            .await,
+        Err(ForgeError::Invalid(_))
+    ));
 }
 
 #[tokio::test]

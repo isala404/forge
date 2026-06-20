@@ -16,7 +16,7 @@ SQS-backed implementation stays a drop-in later.
 > commit. This is not an edge case; design for it. Forge does **not** offer exactly-once and does not
 > approximate it. (Restated under *Delivery / consistency guarantees* — it is the one thing that breaks apps.)
 
-## Trait (Rust sketch — directional; this doc wins on conflict)
+## Trait (this doc is normative for semantics; the shipped trait signatures are normative for shape)
 
 ```rust
 #[async_trait]
@@ -48,10 +48,11 @@ pub trait Queue: Send + Sync {
     /// point-in-time. Accepts a `"<queue>.dlq"` name for dead-letter backlogs.
     async fn depth(&self, queue: &str) -> Result<QueueDepth, ForgeError>;
 
-    /// Managed consume loop: bounded concurrency, auto-heartbeat, graceful
-    /// shutdown, panic => nack. See Worker.
-    fn worker(&self, queue: &str) -> WorkerBuilder;
 }
+
+// Managed consume loop: bounded concurrency, auto-heartbeat, graceful shutdown,
+// panic => nack. Lives on `Forge` (not the `Queue` trait): `forge.worker(queue)`.
+// In the bindings it is `runWorker`/`run_worker` over the FFI. See Worker.
 
 /// SQS ApproximateNumberOfMessages{,NotVisible,Delayed}. Estimates, not snapshots.
 #[non_exhaustive]
@@ -107,7 +108,7 @@ pub struct Job {
     pub max_attempts: u32,
     /// Lease deadline; refresh with `heartbeat` before this passes.
     pub leased_until: SystemTime,
-    /* opaque lease fence (worker_id, attempts) — not public surface */
+    /* opaque per-lease fence token (lease_token UUID) — not public surface */
 }
 ```
 
@@ -127,8 +128,10 @@ consumable queue (dequeue/depth accept `.dlq` names; `enqueue` rejects them).
 | `dequeue` | Long-poll up to `opts.wait` (<= 20s). Atomically claims one available, due job via `FOR UPDATE SKIP LOCKED`, moves it **available -> leased**, sets `leased_until = now + visibility_timeout`, stamps the worker fence, and returns it. `Ok(None)` if nothing became available before `wait` elapsed. **Claiming does not increment `attempts`** — a delivery *is* an attempt; `attempt` is read off the row (see Deviations). |
 | `ack` | **leased -> done.** Removes the job from the working set. Idempotent: acking a job whose lease already expired and was reclaimed by another worker is **not** an error (returns `Ok(())`); the reclaiming worker's later `ack` wins. This is the at-least-once seam — `ack` does **not** mean "no one else ran this." Idempotent consumers make that safe. |
 | `nack` | Marks the current delivery failed. `retry_in = None` -> **leased -> available** immediately (`ChangeMessageVisibility(0)`). `retry_in = Some(d)` -> available at `now + d`. The redelivery **increments `attempts`**; if the incremented count reaches `max_attempts`, the job goes to the dead-letter queue instead of available (see Visibility / leasing / retry / DLQ). |
-| `heartbeat` | Extends the lease to `now + visibility_timeout`. Fenced by `(worker_id, attempts)`: if the lease was already lost (expired and reclaimed), returns `Precondition` — stop work, another worker owns it now. beanstalkd `touch` semantics. |
-| `depth` | Returns approximate `{visible, in_flight, delayed}` counts for the queue in one query, excluding terminal (`done`) jobs. **No locking, no leasing** — unlike polling the queue, it never makes a job invisible or bumps `attempts`, so it is the correct way to gauge a DLQ backlog (`depth("orders.dlq")`). Counts are estimates: a concurrent enqueue/lease may not be reflected. A lapsed-but-unreclaimed lease counts as `visible` (the next `dequeue` will hand it out). |
+| `heartbeat` | Extends the lease to `now + visibility_timeout`. Fenced by a per-lease token: if the lease was already lost (expired and reclaimed), returns `Precondition` — stop work, another worker owns it now. beanstalkd `touch` semantics. |
+| `depth` | Returns approximate `{visible, in_flight, delayed}` counts for the queue in one query, excluding terminal (`done`/`dead`) jobs. **No locking, no leasing** — unlike polling the queue, it never makes a job invisible or bumps `attempts`, so it is the correct way to gauge a DLQ backlog (`depth("orders.dlq")`). Counts are estimates: a concurrent enqueue/lease may not be reflected. A lapsed-but-unreclaimed lease counts as `visible` (the next `dequeue` will hand it out). |
+
+> **Deploy/shutdown note.** A worker interrupted mid-job (graceful shutdown, pod eviction) does **not** ack; the lease lapses and the job is reclaimed as a redelivery, which **increments `attempts`**. So a `max_attempts = 1` job interrupted by a deploy goes straight to the DLQ. Size `max_attempts` with deploys in mind, or drain workers before terminating.
 | `worker` | Returns a `WorkerBuilder`. The built worker runs a managed loop: dequeues up to `concurrency` jobs, runs the handler, **auto-heartbeats** at ~`visibility_timeout / 3` while the handler runs, `ack`s on `Ok`, `nack`s on `Err`, and **`nack`s on panic** (caught at the task boundary, never crashes the loop). On shutdown it stops dequeuing and waits (bounded by a grace period) for in-flight handlers, heartbeating them until they finish or the grace expires. |
 
 ### Backoff (port of `forge-core::RetryConfig::calculate_backoff`)
@@ -153,7 +156,7 @@ is saturating (no panic at high attempt counts). `Fixed`/`Linear` follow the sam
 ## Ordering
 
 **No ordering guarantee.** Jobs are not delivered in enqueue order. Roughly-FIFO emerges from
-`ORDER BY scheduled_at` under light load, but it is **best-effort and never promised** — `SKIP LOCKED`,
+`ORDER BY available_at` under light load, but it is **best-effort and never promised** — `SKIP LOCKED`,
 concurrent workers, delays, and redeliveries all reorder freely. Do not encode ordering assumptions.
 Strict FIFO is a non-goal.
 
@@ -164,7 +167,7 @@ Strict FIFO is a non-goal.
   deadline; nothing else touches it.
 - **Lease expiry => redelivery.** If `leased_until` passes with no `ack` or `heartbeat`, the job returns to
   **available** and is redelivered. **This is where `attempts` increments** — the redelivery is the next
-  attempt. The expired worker's stale `ack`/`heartbeat` then fails its `(worker_id, attempts)` fence and is
+  attempt. The expired worker's stale `ack`/`heartbeat` then fails its per-lease token fence and is
   a no-op / `Precondition`.
 - **Attempts increment on redelivery, never on claim.** First delivery is attempt 1 (`attempts` column = 0
   at rest, surfaced as `attempt = 1`). The increment happens on redelivery — explicit `nack` or
@@ -225,7 +228,7 @@ or `dedup_id` values.
   an over-eager caller degrades gracefully instead of erroring.
 - **DLQ name is derived, not configured.** SQS attaches an arbitrary redrive target ARN. Forge fixes it to
   `"<queue>.dlq"` for a one-obvious-way mapping; redrive-back is post-v1.
-- **Lease fence is `(worker_id, attempts)`, exposed only as behavior.** SQS uses opaque receipt handles.
+- **Lease fence is a per-lease token, exposed only as behavior.** SQS uses opaque receipt handles.
   Forge's fence delivers the same "stale handle can't mutate" guarantee on Postgres without a receipt type
   on the public surface.
 

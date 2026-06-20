@@ -83,6 +83,7 @@ async function dispatch(client, op, args) {
         valueToString(args.value),
         args.ttl_seconds ?? null,
         args.if_not_exists ?? null,
+        args.if_exists ?? null,
       )
     case 'kv.get':
       return await client.kvGet(args.key) // string | null
@@ -118,6 +119,8 @@ async function dispatch(client, op, args) {
       return await client.scheduleCron(args.name, args.expr, args.queue, valueToString(args.payload))
     case 'schedule.cancel':
       return client.scheduleCancel(args.name)
+    case 'schedule.cancel_at':
+      return client.scheduleCancelAt(args.job_id)
     case 'schedule.list': {
       const list = await client.scheduleList()
       return list.map((s) => ({
@@ -130,7 +133,7 @@ async function dispatch(client, op, args) {
       }))
     }
     case 'queue.enqueue':
-      return await client.queueEnqueue(args.queue, valueToString(args.payload), args.max_attempts ?? null, args.dedup_id ?? null)
+      return await client.queueEnqueue(args.queue, valueToString(args.payload), args.max_attempts ?? null, args.dedup_id ?? null, args.delay_seconds ?? null)
     case 'queue.dequeue': {
       const job = await client.queueDequeue(args.queue, args.visibility_seconds, args.wait_seconds)
       return job == null ? null : { id: job.id, receipt: job.receipt, payload: job.payload, attempt: job.attempt }

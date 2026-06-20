@@ -18,6 +18,16 @@
       ]
     },
     {
+      "name": "set_xx_writes_only_when_present",
+      "note": "SET XX (if_exists) writes only a live key — exposed in both bindings (P1-6 capability gap).",
+      "steps": [
+        { "op": "kv.set", "args": { "key": "x", "value": "v", "if_exists": true }, "expect": { "value": false } },
+        { "op": "kv.set", "args": { "key": "x", "value": "v" }, "expect": { "value": true } },
+        { "op": "kv.set", "args": { "key": "x", "value": "w", "if_exists": true }, "expect": { "value": true } },
+        { "op": "kv.get", "args": { "key": "x" }, "expect": { "value": "w" } }
+      ]
+    },
+    {
       "name": "delete_and_exists",
       "steps": [
         { "op": "kv.set", "args": { "key": "d", "value": "v" }, "expect": { "value": true } },

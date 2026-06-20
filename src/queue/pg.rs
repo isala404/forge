@@ -9,7 +9,7 @@
 //! Redelivery timing: an explicit `nack` applies the configured backoff (with
 //! jitter, computed in Rust); a lease-expiry reclaim makes the job available
 //! immediately, because a lease expiry means a worker likely crashed and prompt
-//! retry by a healthy worker beats delay. (Recorded in `.agents/PROGRESS.md`.)
+//! retry by a healthy worker beats delay.
 
 use super::{
     Backoff, DequeueOpts, EnqueueOpts, Job, JobId, MAX_PAYLOAD_BYTES, MAX_VISIBILITY_TIMEOUT,

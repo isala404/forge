@@ -76,6 +76,13 @@ pub trait Schedule: crate::sealed::Sealed + Send + Sync {
     /// Cancel a schedule by name. `true` if one was removed, `false` if absent.
     async fn cancel(&self, name: &str) -> Result<bool>;
 
+    /// Cancel a one-shot created by [`Schedule::at`], by the [`JobId`] it returned.
+    /// `true` if it was still pending and removed, `false` if it already fired or
+    /// never existed. Enables send-later recall and disappearing-message cancellation.
+    async fn cancel_at(&self, job_id: JobId) -> Result<bool> {
+        self.cancel(&format!("at:{job_id}")).await
+    }
+
     /// List all registered schedules.
     async fn list(&self) -> Result<Vec<ScheduleInfo>>;
 

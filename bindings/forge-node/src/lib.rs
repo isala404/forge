@@ -32,6 +32,16 @@ fn err(e: forge::ForgeError) -> napi::Error {
     napi::Error::from_reason(format!("{}: {}", code_of(&e), e))
 }
 
+/// Run pending migrations and return — the schema step decoupled from `connect`.
+/// Operators run this once at deploy; the app then connects with
+/// `runMigrations: false` (verify-only). Idempotent and concurrency-safe.
+#[napi]
+pub async fn migrate(postgres_url: String) -> Result<()> {
+    forge::Forge::migrate(forge::ForgeConfig::new(postgres_url))
+        .await
+        .map_err(err)
+}
+
 /// Convert an `f64` seconds value into a `Duration`, raising `Invalid` on a
 /// negative or non-finite input. Zero passes straight through so the core applies
 /// its own validation: bindings convert and pass through, they never clamp or
@@ -214,6 +224,16 @@ impl ForgeClient {
         Ok(ForgeClient::from_forge(forge))
     }
 
+    /// Connect using the `FORGE_*` environment variables (`FORGE_POSTGRES_URL`,
+    /// `FORGE_KV_NAMESPACE`, `FORGE_BLOB_BACKEND`, …) — the same vars that drive the
+    /// Rust crate, so config is identical across all three languages.
+    #[napi(factory)]
+    pub async fn connect_from_env() -> Result<ForgeClient> {
+        let cfg = forge::ForgeConfig::from_env().map_err(err)?;
+        let forge = forge::Forge::init(cfg).await.map_err(err)?;
+        Ok(ForgeClient::from_forge(forge))
+    }
+
     /// Connect with the full per-deployment option surface (namespace, pool size,
     /// migration toggle, blob backend, …) instead of just a URL + signing secret.
     #[napi(factory)]
@@ -296,12 +316,16 @@ impl ForgeClient {
         value: String,
         ttl_seconds: Option<f64>,
         if_not_exists: Option<bool>,
+        if_exists: Option<bool>,
     ) -> Result<bool> {
         let mut opts = forge::SetOpts::new();
         if let Some(t) = ttl_seconds {
             opts = opts.with_ttl(secs("ttlSeconds", t)?);
         }
-        if if_not_exists.unwrap_or(false) {
+        // `ifExists` (XX) takes precedence over `ifNotExists` (NX) if both are set.
+        if if_exists.unwrap_or(false) {
+            opts = opts.with_mode(forge::SetMode::IfExists);
+        } else if if_not_exists.unwrap_or(false) {
             opts = opts.with_mode(forge::SetMode::IfNotExists);
         }
         self.forge
@@ -379,6 +403,7 @@ impl ForgeClient {
         payload: String,
         max_attempts: Option<u32>,
         dedup_id: Option<String>,
+        delay_seconds: Option<f64>,
     ) -> Result<String> {
         let mut opts = forge::EnqueueOpts::new();
         if let Some(m) = max_attempts {
@@ -386,6 +411,9 @@ impl ForgeClient {
         }
         if let Some(d) = dedup_id {
             opts = opts.with_dedup_id(d);
+        }
+        if let Some(s) = delay_seconds {
+            opts = opts.with_delay(secs("delaySeconds", s)?);
         }
         let id = self
             .forge
@@ -1025,6 +1053,18 @@ impl ForgeClient {
         self.forge.schedule().cancel(&name).await.map_err(err)
     }
 
+    /// Cancel a one-shot scheduled by `scheduleAt`, by the JobId it returned. `true`
+    /// if it was still pending and removed, `false` if it already fired or never
+    /// existed. (Send-later recall / disappearing-message cancellation.)
+    #[napi]
+    pub async fn schedule_cancel_at(&self, job_id: String) -> Result<bool> {
+        self.forge
+            .schedule()
+            .cancel(&format!("at:{job_id}"))
+            .await
+            .map_err(err)
+    }
+
     /// List every registered schedule (crons and pending one-shots).
     #[napi]
     pub async fn schedule_list(&self) -> Result<Vec<JsScheduleInfo>> {
@@ -1142,5 +1182,14 @@ impl JsSubscription {
             Some(Err(e)) => Err(err(e)),
             None => Ok(None),
         }
+    }
+
+    /// Unsubscribe now, releasing the broadcast receiver deterministically instead
+    /// of waiting for GC. Idempotent; subsequent `next()` calls return `null`. A
+    /// GraphQL server should call this when a client's WebSocket closes.
+    #[napi]
+    pub async fn close(&self) {
+        let mut inner = self.inner.lock().await;
+        *inner = futures_util::stream::empty().boxed();
     }
 }
