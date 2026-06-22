@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "DELETE FROM forge_schedules WHERE name = $1 RETURNING name",
+  "query": "DELETE FROM forge_schedules WHERE name = $1 AND app = $2 RETURNING name",
   "describe": {
     "columns": [
       {
@@ -11,6 +11,7 @@
     ],
     "parameters": {
       "Left": [
+        "Text",
         "Text"
       ]
     },
@@ -18,5 +19,5 @@
       false
     ]
   },
-  "hash": "e471a4cc330bba66f84efe746cd0a1ee4e9fb62261da9522481ddd11181bf288"
+  "hash": "f90e36bb4876d1cf7975cb60a21d7c59aacadc050fb33b1ddd99a565b6f40033"
 }

@@ -119,6 +119,7 @@ fn expected_tables() -> &'static [TableSpec] {
                 Col("created_at", TSTZ),
                 Col("idle_deadline", TSTZ),
                 Col("abs_deadline", TSTZ),
+                Col("app", "text"),
             ],
         },
         TableSpec {
@@ -129,6 +130,7 @@ fn expected_tables() -> &'static [TableSpec] {
                 Col("owner_id", "text"),
                 Col("label", "text"),
                 Col("created_at", TSTZ),
+                Col("app", "text"),
             ],
         },
         TableSpec {
@@ -155,6 +157,7 @@ fn expected_tables() -> &'static [TableSpec] {
                 Col("next_run", TSTZ),
                 Col("last_run", TSTZ),
                 Col("created_at", TSTZ),
+                Col("app", "text"),
             ],
         },
     ]

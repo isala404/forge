@@ -1,26 +1,4 @@
 {
   "comment": "Each entry is a (scenario, op?, language) expected to FAIL today. CI asserts the observed failure set equals exactly this set. When a fix lands, delete its entry here so CI flips green. See conformance/README.md.",
-  "gaps": [
-    {
-      "primitive": "config",
-      "scenario": "namespace_isolation",
-      "languages": ["rust", "node", "python"],
-      "task": "P1-2",
-      "note": "Config keys are global per database; the namespace only covers kv/ratelimit/blob today. Fix: namespace config keys so apps sharing a database are isolated."
-    },
-    {
-      "primitive": "queue",
-      "scenario": "namespace_isolation",
-      "languages": ["rust", "node", "python"],
-      "task": "P1-2",
-      "note": "Queue names are global per database. Fix: prefix queue names with the namespace."
-    },
-    {
-      "primitive": "auth",
-      "scenario": "session_namespace_isolation",
-      "languages": ["rust", "node", "python"],
-      "task": "P1-2",
-      "note": "Sessions are global per database; a session from one app validates in another. Fix: add an app/namespace column scoping sessions (and api keys)."
-    }
-  ]
+  "gaps": []
 }

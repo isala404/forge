@@ -48,16 +48,30 @@ fn cap_cache<T>(cache: &mut HashMap<String, Cached<T>>) {
 /// Postgres-backed [`ConfigStore`].
 pub(crate) struct PgConfig {
     pool: PgPool,
+    /// Namespace prefix applied to stored config/flag keys, so apps sharing a
+    /// database don't collide. Empty = no prefix. The per-instance cache and the
+    /// `FORGE_CFG_<KEY>` env override use the caller (logical) key.
+    namespace: String,
     values: Mutex<HashMap<String, Cached<Option<String>>>>,
     flags: Mutex<HashMap<String, Cached<Option<FlagRule>>>>,
 }
 
 impl PgConfig {
-    pub(crate) fn new(pool: PgPool) -> Self {
+    pub(crate) fn new(pool: PgPool, namespace: String) -> Self {
         Self {
             pool,
+            namespace,
             values: Mutex::new(HashMap::new()),
             flags: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Stored key for a caller key, applying the namespace prefix.
+    fn physical(&self, key: &str) -> String {
+        if self.namespace.is_empty() {
+            key.to_string()
+        } else {
+            format!("{}:{}", self.namespace, key)
         }
     }
 
@@ -106,9 +120,10 @@ impl PgConfig {
         if let Some(hit) = self.cached_value(key) {
             return Ok(hit);
         }
-        let value = sqlx::query_scalar!("SELECT value FROM forge_config WHERE key = $1", key)
-            .fetch_optional(&self.pool)
-            .await?;
+        let value =
+            sqlx::query_scalar!("SELECT value FROM forge_config WHERE key = $1", self.physical(key))
+                .fetch_optional(&self.pool)
+                .await?;
         self.store_value(key, value.clone());
         Ok(value)
     }
@@ -120,7 +135,7 @@ impl PgConfig {
         }
         let rule = sqlx::query_scalar!(
             r#"SELECT rule AS "rule!: Json<FlagRule>" FROM forge_flags WHERE key = $1"#,
-            key
+            self.physical(key)
         )
         .fetch_optional(&self.pool)
         .await?
@@ -254,7 +269,7 @@ impl ConfigStore for PgConfig {
             sqlx::query!(
                 "INSERT INTO forge_config (key, value) VALUES ($1, $2) \
                  ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-                key,
+                self.physical(key),
                 value,
             )
             .execute(&self.pool)
@@ -306,7 +321,7 @@ impl ConfigStore for PgConfig {
             sqlx::query!(
                 "INSERT INTO forge_flags (key, rule) VALUES ($1, $2) \
                  ON CONFLICT (key) DO UPDATE SET rule = EXCLUDED.rule",
-                key,
+                self.physical(key),
                 Json(&rule) as _,
             )
             .execute(&self.pool)
@@ -326,7 +341,7 @@ impl ConfigStore for PgConfig {
         );
         obs::instrument("config", "delete_raw", span, async move {
             check_key(key)?;
-            let removed = sqlx::query!("DELETE FROM forge_config WHERE key = $1", key)
+            let removed = sqlx::query!("DELETE FROM forge_config WHERE key = $1", self.physical(key))
                 .execute(&self.pool)
                 .await?
                 .rows_affected()
@@ -347,7 +362,7 @@ impl ConfigStore for PgConfig {
         );
         obs::instrument("config", "delete_flag", span, async move {
             check_key(key)?;
-            let removed = sqlx::query!("DELETE FROM forge_flags WHERE key = $1", key)
+            let removed = sqlx::query!("DELETE FROM forge_flags WHERE key = $1", self.physical(key))
                 .execute(&self.pool)
                 .await?
                 .rows_affected()

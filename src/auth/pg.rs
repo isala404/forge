@@ -49,11 +49,15 @@ const KEY_PREFIX: &str = "fk_";
 /// Postgres-backed [`Auth`].
 pub(crate) struct PgAuth {
     pool: PgPool,
+    /// The app namespace (`forge_sessions.app` / `forge_api_keys.app`), so an app
+    /// sharing a database can neither validate nor revoke another app's sessions or
+    /// keys. Empty = the unnamespaced app.
+    app: String,
 }
 
 impl PgAuth {
-    pub(crate) fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub(crate) fn new(pool: PgPool, app: String) -> Self {
+        Self { pool, app }
     }
 
     /// Delete expired sessions. Idempotent; call from `maintain`.
@@ -223,13 +227,14 @@ impl Auth for PgAuth {
             let abs = opts.absolute_timeout.as_secs_f64();
             sqlx::query!(
                 "INSERT INTO forge_sessions \
-                   (token_hash, user_id, idle_secs, idle_deadline, abs_deadline) \
+                   (token_hash, user_id, idle_secs, idle_deadline, abs_deadline, app) \
                  VALUES ($1, $2, $3, now() + make_interval(secs => $3), \
-                         now() + make_interval(secs => $4))",
+                         now() + make_interval(secs => $4), $5)",
                 token_hash,
                 user_id,
                 idle,
                 abs,
+                self.app,
             )
             .execute(&self.pool)
             .await?;
@@ -252,9 +257,10 @@ impl Auth for PgAuth {
             let row = sqlx::query!(
                 r#"UPDATE forge_sessions
                    SET idle_deadline = LEAST(now() + make_interval(secs => idle_secs), abs_deadline)
-                   WHERE token_hash = $1 AND idle_deadline > now() AND abs_deadline > now()
+                   WHERE token_hash = $1 AND app = $2 AND idle_deadline > now() AND abs_deadline > now()
                    RETURNING user_id, created_at, idle_deadline AS expires_at"#,
                 token_hash,
+                self.app,
             )
             .fetch_optional(&self.pool)
             .await?;
@@ -278,8 +284,9 @@ impl Auth for PgAuth {
         );
         obs::instrument("auth", "revoke_session", span, async move {
             sqlx::query!(
-                "DELETE FROM forge_sessions WHERE token_hash = $1",
-                token_hash
+                "DELETE FROM forge_sessions WHERE token_hash = $1 AND app = $2",
+                token_hash,
+                self.app,
             )
             .execute(&self.pool)
             .await?;
@@ -297,9 +304,13 @@ impl Auth for PgAuth {
             error.variant = Empty,
         );
         obs::instrument("auth", "revoke_all_sessions", span, async move {
-            let r = sqlx::query!("DELETE FROM forge_sessions WHERE user_id = $1", user_id)
-                .execute(&self.pool)
-                .await?;
+            let r = sqlx::query!(
+                "DELETE FROM forge_sessions WHERE user_id = $1 AND app = $2",
+                user_id,
+                self.app,
+            )
+            .execute(&self.pool)
+            .await?;
             tracing::Span::current().record("auth.revoked_count", r.rows_affected());
             Ok(r.rows_affected())
         })
@@ -321,12 +332,13 @@ impl Auth for PgAuth {
             let secret = format!("{KEY_PREFIX}{}", random_token());
             let key_hash = sha256_hex(secret.as_bytes());
             let created_at = sqlx::query_scalar!(
-                "INSERT INTO forge_api_keys (id, key_hash, owner_id, label) \
-                 VALUES ($1, $2, $3, $4) RETURNING created_at",
+                "INSERT INTO forge_api_keys (id, key_hash, owner_id, label, app) \
+                 VALUES ($1, $2, $3, $4, $5) RETURNING created_at",
                 id,
                 key_hash,
                 owner_id,
                 label,
+                self.app,
             )
             .fetch_one(&self.pool)
             .await?;
@@ -352,8 +364,9 @@ impl Auth for PgAuth {
         );
         obs::instrument("auth", "verify_api_key", span, async move {
             let row = sqlx::query!(
-                "SELECT id, owner_id, label FROM forge_api_keys WHERE key_hash = $1",
+                "SELECT id, owner_id, label FROM forge_api_keys WHERE key_hash = $1 AND app = $2",
                 key_hash,
+                self.app,
             )
             .fetch_optional(&self.pool)
             .await?;
@@ -380,8 +393,9 @@ impl Auth for PgAuth {
         );
         obs::instrument("auth", "revoke_api_key", span, async move {
             let removed = sqlx::query_scalar!(
-                "DELETE FROM forge_api_keys WHERE id = $1 RETURNING id",
+                "DELETE FROM forge_api_keys WHERE id = $1 AND app = $2 RETURNING id",
                 key_id,
+                self.app,
             )
             .fetch_optional(&self.pool)
             .await?

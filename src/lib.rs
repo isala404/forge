@@ -139,16 +139,27 @@ impl Forge {
             pool.clone(),
             cfg.queue_dedup_window,
             cfg.queue_retention,
+            cfg.kv_namespace.clone(),
         ));
-        let config = Arc::new(config_store::PgConfig::new(pool.clone()));
+        let config = Arc::new(config_store::PgConfig::new(
+            pool.clone(),
+            cfg.kv_namespace.clone(),
+        ));
         let ratelimit = Arc::new(ratelimit::PgRateLimit::new(
             pool.clone(),
             cfg.kv_namespace.clone(),
             cfg.ratelimit_fail_open,
         ));
-        let auth = Arc::new(auth::PgAuth::new(pool.clone()));
-        let pubsub = Arc::new(pubsub::PgPubsub::new(pool.clone(), cfg.postgres.clone()));
-        let schedule = Arc::new(schedule::PgSchedule::new(pool.clone()));
+        let auth = Arc::new(auth::PgAuth::new(pool.clone(), cfg.kv_namespace.clone()));
+        let pubsub = Arc::new(pubsub::PgPubsub::new(
+            pool.clone(),
+            cfg.postgres.clone(),
+            cfg.kv_namespace.clone(),
+        ));
+        let schedule = Arc::new(schedule::PgSchedule::new(
+            pool.clone(),
+            cfg.kv_namespace.clone(),
+        ));
 
         // The one v1 backend choice: blob bytes in BYTEA, or on a filesystem directory.
         let (blob, blob_lifecycle): (Arc<dyn Blob>, Arc<dyn BackendLifecycle>) =

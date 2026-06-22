@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, owner_id, label FROM forge_api_keys WHERE key_hash = $1",
+  "query": "SELECT id, owner_id, label FROM forge_api_keys WHERE key_hash = $1 AND app = $2",
   "describe": {
     "columns": [
       {
@@ -21,6 +21,7 @@
     ],
     "parameters": {
       "Left": [
+        "Text",
         "Text"
       ]
     },
@@ -30,5 +31,5 @@
       false
     ]
   },
-  "hash": "1346b2db134575e2fd094ff7f82b056f6e23d094a2fad6e5d4ed7515ad6b5a16"
+  "hash": "1e32f8c09cd09ace31150bb5735e402000fb5b2257964a4782a69b8b31d3bdff"
 }

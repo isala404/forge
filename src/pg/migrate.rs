@@ -47,6 +47,10 @@ fn embedded_migrations() -> Vec<Migration> {
             "v010_dead_status",
             include_str!("../migrations/v010_dead_status.sql"),
         ),
+        Migration::parse(
+            "v011_namespace_columns",
+            include_str!("../migrations/v011_namespace_columns.sql"),
+        ),
     ]
 }
 

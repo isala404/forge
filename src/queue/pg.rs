@@ -42,14 +42,45 @@ pub(crate) struct PgQueue {
     pool: PgPool,
     dedup_window: Duration,
     retention: Duration,
+    /// Namespace prefix on queue names (`<ns>:<queue>`), so apps sharing a database
+    /// don't cross-consume each other's queues. Empty = no prefix.
+    namespace: String,
 }
 
 impl PgQueue {
-    pub(crate) fn new(pool: PgPool, dedup_window: Duration, retention: Duration) -> Self {
+    pub(crate) fn new(
+        pool: PgPool,
+        dedup_window: Duration,
+        retention: Duration,
+        namespace: String,
+    ) -> Self {
         Self {
             pool,
             dedup_window,
             retention,
+            namespace,
+        }
+    }
+
+    /// Stored queue name for a caller name, applying the namespace prefix.
+    fn physical(&self, queue: &str) -> String {
+        if self.namespace.is_empty() {
+            queue.to_string()
+        } else {
+            format!("{}:{}", self.namespace, queue)
+        }
+    }
+
+    /// Strip the namespace prefix from a stored queue name (for the returned `Job`).
+    fn logical(&self, stored: &str) -> String {
+        if self.namespace.is_empty() {
+            stored.to_string()
+        } else {
+            stored
+                .strip_prefix(&self.namespace)
+                .and_then(|s| s.strip_prefix(':'))
+                .unwrap_or(stored)
+                .to_string()
         }
     }
 
@@ -194,6 +225,7 @@ impl Queue for PgQueue {
             check_queue_name(queue, false)?;
             check_payload(&payload_vec)?;
             check_enqueue_opts(&opts)?;
+            let queue = self.physical(queue); // apply namespace; SQL below binds it
             let Some(dedup_id) = opts.dedup_id.clone() else {
                 let id = sqlx::query_scalar!(
                     r#"INSERT INTO forge_jobs (queue, payload, status, attempts, max_attempts, backoff, available_at)
@@ -282,12 +314,15 @@ impl Queue for PgQueue {
         obs::instrument("queue", "dequeue", span, async move {
             check_queue_name(queue, true)?;
             check_visibility(opts.visibility_timeout)?;
+            let pq = self.physical(queue);
             // Reclaim expired leases once up front so crashed work redelivers.
-            self.reclaim(queue).await?;
+            self.reclaim(&pq).await?;
 
             let deadline = tokio::time::Instant::now() + wait;
             loop {
-                if let Some(job) = self.try_claim(queue, vis_secs).await? {
+                if let Some(mut job) = self.try_claim(&pq, vis_secs).await? {
+                    // Return the caller's (logical) queue name, not the prefixed one.
+                    job.queue = self.logical(&job.queue);
                     let s = tracing::Span::current();
                     s.record("job.id", tracing::field::display(job.id));
                     s.record("job.attempt", job.attempt);
@@ -473,7 +508,7 @@ impl Queue for PgQueue {
                      count(*) FILTER (WHERE status = 'available' AND available_at > now())   AS "delayed!"
                    FROM forge_jobs
                    WHERE queue = $1"#,
-                queue,
+                self.physical(queue),
             )
             .fetch_one(&self.pool)
             .await?;

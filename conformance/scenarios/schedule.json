@@ -20,6 +20,15 @@
       ]
     },
     {
+      "name": "namespace_isolation",
+      "note": "Schedules are scoped per app (P1-2): a cron registered in one namespace must not appear in another's list(), and names don't collide across apps.",
+      "steps": [
+        { "op": "schedule.cron", "args": { "name": "c1", "expr": "0 0 * * *", "queue": "q", "payload": "{}" }, "namespace": "app-a" },
+        { "op": "schedule.list", "args": {}, "namespace": "app-b", "expect": { "value": [] } },
+        { "op": "schedule.list", "args": {}, "namespace": "app-a", "expect": { "value": [ { "kind": "cron", "name": "c1" } ] } }
+      ]
+    },
+    {
       "name": "cron_register_then_cancel",
       "steps": [
         { "op": "schedule.cron", "args": { "name": "c1", "expr": "0 0 * * *", "queue": "q", "payload": "{}" } },

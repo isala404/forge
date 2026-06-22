@@ -41,8 +41,11 @@ pub struct ForgeConfig {
     /// Apply embedded migrations at init. Default true. When false, init still verifies
     /// the schema is present and refuses to start if it is not; it never migrates lazily.
     pub run_migrations: bool,
-    /// Prefix applied to every kv key, so multiple apps can share one database
-    /// without colliding. Empty by default. Must not contain `:`.
+    /// App namespace, so multiple apps can share one database without colliding —
+    /// applied across **all** primitives: a key prefix (kv/ratelimit/blob), a name
+    /// prefix (queue/config/flags), a channel prefix (pubsub), and an `app` column
+    /// (sessions/api keys/schedules). Empty by default. Must not contain `:`. (The
+    /// field keeps its `kv_namespace` name for backward compatibility.)
     pub kv_namespace: String,
     /// Window within which a repeated `enqueue` `dedup_id` is de-duplicated.
     /// Default 5 minutes (SQS FIFO precedent).

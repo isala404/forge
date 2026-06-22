@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM forge_schedules WHERE name = $1 AND app = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a01c7190d0c36762151f55a358b871daabbdb869ace999f1fa7ecf48fdf726c1"
+}

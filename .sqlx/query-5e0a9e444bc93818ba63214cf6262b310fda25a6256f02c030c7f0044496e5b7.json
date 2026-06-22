@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT name, kind, cron_expr, target_queue, next_run, last_run FROM forge_schedules ORDER BY name",
+  "query": "SELECT name, kind, cron_expr, target_queue, next_run, last_run FROM forge_schedules WHERE app = $1 ORDER BY name",
   "describe": {
     "columns": [
       {
@@ -35,7 +35,9 @@
       }
     ],
     "parameters": {
-      "Left": []
+      "Left": [
+        "Text"
+      ]
     },
     "nullable": [
       false,
@@ -46,5 +48,5 @@
       true
     ]
   },
-  "hash": "8cbde844c810fc0696c25b5e7a1dde4daee1bc7ce812495bdf6e610f2bede197"
+  "hash": "5e0a9e444bc93818ba63214cf6262b310fda25a6256f02c030c7f0044496e5b7"
 }

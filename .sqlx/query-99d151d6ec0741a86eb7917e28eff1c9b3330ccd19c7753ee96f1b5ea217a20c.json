@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM forge_sessions WHERE token_hash = $1 AND app = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "99d151d6ec0741a86eb7917e28eff1c9b3330ccd19c7753ee96f1b5ea217a20c"
+}

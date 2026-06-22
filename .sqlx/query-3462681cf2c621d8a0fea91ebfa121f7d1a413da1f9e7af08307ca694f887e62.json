@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE forge_schedules SET last_run = now(), next_run = $2 WHERE name = $1 AND app = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Timestamptz",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3462681cf2c621d8a0fea91ebfa121f7d1a413da1f9e7af08307ca694f887e62"
+}

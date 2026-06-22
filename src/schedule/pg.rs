@@ -30,11 +30,37 @@ const TICK_BATCH: i64 = 1000;
 /// Postgres-backed [`Schedule`].
 pub(crate) struct PgSchedule {
     pool: PgPool,
+    /// App namespace: scopes the (name, app) schedule key and is mixed into the
+    /// stored target-queue name so a scheduled enqueue lands in this app's queue.
+    /// Empty = the unnamespaced app.
+    app: String,
 }
 
 impl PgSchedule {
-    pub(crate) fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub(crate) fn new(pool: PgPool, app: String) -> Self {
+        Self { pool, app }
+    }
+
+    /// The stored (namespaced) target-queue name, matching `PgQueue`'s prefixing.
+    fn physical_queue(&self, queue: &str) -> String {
+        if self.app.is_empty() {
+            queue.to_string()
+        } else {
+            format!("{}:{}", self.app, queue)
+        }
+    }
+
+    /// Strip the namespace prefix from a stored target-queue name.
+    fn logical_queue(&self, stored: &str) -> String {
+        if self.app.is_empty() {
+            stored.to_string()
+        } else {
+            stored
+                .strip_prefix(&self.app)
+                .and_then(|s| s.strip_prefix(':'))
+                .unwrap_or(stored)
+                .to_string()
+        }
     }
 
     /// Fire every due schedule once. Returns how many jobs were enqueued. Idempotent
@@ -53,7 +79,7 @@ impl PgSchedule {
         obs::instrument("schedule", "tick", span, async move {
             let mut tx = self.pool.begin().await?;
             let due = sqlx::query!(
-                r#"SELECT name, kind, cron_expr, target_queue, payload, job_id,
+                r#"SELECT name, app, kind, cron_expr, target_queue, payload, job_id,
                           EXTRACT(EPOCH FROM (now() - next_run))::float8 AS "lateness!"
                    FROM forge_schedules
                    WHERE next_run <= now()
@@ -102,17 +128,23 @@ impl PgSchedule {
                 match next {
                     Some(n) => {
                         sqlx::query!(
-                            "UPDATE forge_schedules SET last_run = now(), next_run = $2 WHERE name = $1",
+                            "UPDATE forge_schedules SET last_run = now(), next_run = $2 \
+                             WHERE name = $1 AND app = $3",
                             row.name,
                             n,
+                            row.app,
                         )
                         .execute(&mut *tx)
                         .await?;
                     }
                     None => {
-                        sqlx::query!("DELETE FROM forge_schedules WHERE name = $1", row.name)
-                            .execute(&mut *tx)
-                            .await?;
+                        sqlx::query!(
+                            "DELETE FROM forge_schedules WHERE name = $1 AND app = $2",
+                            row.name,
+                            row.app,
+                        )
+                        .execute(&mut *tx)
+                        .await?;
                     }
                 }
             }
@@ -190,17 +222,18 @@ impl Schedule for PgSchedule {
                 .ok_or_else(|| ForgeError::invalid("cron expression never fires"))?;
             sqlx::query!(
                 "INSERT INTO forge_schedules \
-                   (name, kind, cron_expr, target_queue, payload, job_id, next_run) \
-                 VALUES ($1, 'cron', $2, $3, $4, NULL, $5) \
-                 ON CONFLICT (name) DO UPDATE SET \
+                   (name, kind, cron_expr, target_queue, payload, job_id, next_run, app) \
+                 VALUES ($1, 'cron', $2, $3, $4, NULL, $5, $6) \
+                 ON CONFLICT (name, app) DO UPDATE SET \
                    kind = 'cron', cron_expr = EXCLUDED.cron_expr, \
                    target_queue = EXCLUDED.target_queue, payload = EXCLUDED.payload, \
                    job_id = NULL, next_run = EXCLUDED.next_run, last_run = NULL",
                 name,
                 expr,
-                queue,
+                self.physical_queue(queue),
                 payload.as_ref(),
                 next,
+                self.app,
             )
             .execute(&self.pool)
             .await?;
@@ -231,13 +264,14 @@ impl Schedule for PgSchedule {
             }
             sqlx::query!(
                 "INSERT INTO forge_schedules \
-                   (name, kind, cron_expr, target_queue, payload, job_id, next_run) \
-                 VALUES ($1, 'at', NULL, $2, $3, $4, $5)",
+                   (name, kind, cron_expr, target_queue, payload, job_id, next_run, app) \
+                 VALUES ($1, 'at', NULL, $2, $3, $4, $5, $6)",
                 name,
-                queue,
+                self.physical_queue(queue),
                 payload.as_ref(),
                 job_id,
                 when_dt,
+                self.app,
             )
             .execute(&self.pool)
             .await?;
@@ -255,8 +289,9 @@ impl Schedule for PgSchedule {
         );
         obs::instrument("schedule", "cancel", span, async move {
             let removed = sqlx::query_scalar!(
-                "DELETE FROM forge_schedules WHERE name = $1 RETURNING name",
+                "DELETE FROM forge_schedules WHERE name = $1 AND app = $2 RETURNING name",
                 name,
+                self.app,
             )
             .fetch_optional(&self.pool)
             .await?
@@ -276,7 +311,8 @@ impl Schedule for PgSchedule {
         obs::instrument("schedule", "list", span, async move {
             let rows = sqlx::query!(
                 "SELECT name, kind, cron_expr, target_queue, next_run, last_run \
-                 FROM forge_schedules ORDER BY name",
+                 FROM forge_schedules WHERE app = $1 ORDER BY name",
+                self.app,
             )
             .fetch_all(&self.pool)
             .await?;
@@ -289,7 +325,7 @@ impl Schedule for PgSchedule {
                         ScheduleKind::At
                     },
                     name: r.name,
-                    queue: r.target_queue,
+                    queue: self.logical_queue(&r.target_queue),
                     next_run: r.next_run.into(),
                     last_run: r.last_run.map(Into::into),
                 })

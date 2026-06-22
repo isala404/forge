@@ -46,24 +46,32 @@ pub(crate) struct PgPubsub {
     /// a pooled connection for its open-ended lifetime without starving the pool, so
     /// the broker opens its own dedicated connection.
     url: String,
+    /// Namespace mixed into the channel name, so apps sharing a database don't
+    /// receive each other's messages on the same topic. Empty = no prefix.
+    namespace: String,
     /// The broker is started lazily on the first `subscribe`, so a publish-only app
     /// never opens the extra connection.
     broker: OnceCell<Broker>,
 }
 
 impl PgPubsub {
-    pub(crate) fn new(pool: PgPool, url: String) -> Self {
+    pub(crate) fn new(pool: PgPool, url: String, namespace: String) -> Self {
         Self {
             pool,
             url,
+            namespace,
             broker: OnceCell::new(),
         }
     }
 
-    /// Map an arbitrary topic onto a valid Postgres channel name. Single source of
-    /// truth shared with [`super::channel_for`].
-    fn channel(topic: &str) -> String {
-        super::channel_for(topic)
+    /// Map an arbitrary topic onto a valid Postgres channel name, mixing in the
+    /// namespace so two apps' identical topics resolve to different channels.
+    fn channel(&self, topic: &str) -> String {
+        if self.namespace.is_empty() {
+            super::channel_for(topic)
+        } else {
+            super::channel_for(&format!("{}:{}", self.namespace, topic))
+        }
     }
 
     fn check_topic(topic: &str) -> Result<()> {
@@ -199,7 +207,7 @@ impl Pubsub for PgPubsub {
             let text = std::str::from_utf8(&payload).map_err(|_| {
                 ForgeError::invalid("pubsub payload must be valid UTF-8 (NOTIFY payloads are text)")
             })?;
-            let channel = Self::channel(topic);
+            let channel = self.channel(topic);
             sqlx::query!("SELECT pg_notify($1, $2)", channel, text)
                 .execute(&self.pool)
                 .await?;
@@ -210,7 +218,7 @@ impl Pubsub for PgPubsub {
 
     async fn subscribe(&self, topic: &str) -> Result<Subscription> {
         Self::check_topic(topic)?;
-        let channel = Self::channel(topic);
+        let channel = self.channel(topic);
         let broker = self.broker().await?;
 
         let (ack_tx, ack_rx) = oneshot::channel();
@@ -259,7 +267,7 @@ mod tests {
 
     #[test]
     fn channel_is_valid_fixed_length_identifier() {
-        let c = PgPubsub::channel("chat:550e8400-e29b-41d4-a716-446655440000");
+        let c = super::super::channel_for("chat:550e8400-e29b-41d4-a716-446655440000");
         assert_eq!(c.len(), 38); // "forge_" + 32 hex
         assert!(c.starts_with("forge_"));
         assert!(c.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'));
@@ -268,8 +276,8 @@ mod tests {
 
     #[test]
     fn distinct_topics_get_distinct_channels() {
-        assert_ne!(PgPubsub::channel("chat:1"), PgPubsub::channel("chat:2"));
-        assert_eq!(PgPubsub::channel("presence"), PgPubsub::channel("presence"));
+        assert_ne!(super::super::channel_for("chat:1"), super::super::channel_for("chat:2"));
+        assert_eq!(super::super::channel_for("presence"), super::super::channel_for("presence"));
     }
 
     #[test]
