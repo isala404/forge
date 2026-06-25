@@ -81,7 +81,7 @@ async fn shutdown_drain_is_bounded_by_grace() {
     // Fire shutdown after the job is surely in-flight; the handler then hangs.
     let shutdown = tokio::time::sleep(Duration::from_millis(300));
     let run = worker.run_until(shutdown, |_job| async move {
-        tokio::time::sleep(Duration::from_secs(60)).await; // hang
+        tokio::time::sleep(Duration::from_secs(60)).await;
         Ok::<(), String>(())
     });
 

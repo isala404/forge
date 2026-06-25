@@ -46,6 +46,8 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: build
         run: cargo build --all-features
+      - name: binding types match the schema (codegen drift guard)
+        run: cargo run --manifest-path tools/codegen/Cargo.toml -- --check
       - name: unit tests (no database)
         run: cargo test
 
@@ -186,6 +188,6 @@ jobs:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@v5
       # Builds both bindings and runs the Rust, Node, and Python runners; each
-      # exits non-zero iff its failure set differs from conformance/known_gaps.json.
+      # exits non-zero iff its failure set differs from src/conformance/known_gaps.json.
       - name: run all conformance runners
-        run: bash conformance/run-all.sh
+        run: bash tools/conformance/run-all.sh

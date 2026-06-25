@@ -246,9 +246,6 @@ async def undelivered_message_ids(pool, limit: int):
     return [r["id"] for r in rows]
 
 
-# Batch loaders — each takes a list of ids and returns rows for the DataLoaders.
-
-
 async def users_by_ids(pool, ids: list[uuid.UUID]):
     return await pool.fetch(
         "SELECT id, username, display_name FROM users WHERE id = ANY($1::uuid[])", ids

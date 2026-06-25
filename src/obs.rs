@@ -8,7 +8,7 @@ use std::time::Instant;
 use tracing::Instrument;
 
 /// Stable, secret-free variant label for spans and metrics. Never the message.
-pub(crate) fn error_variant(e: &ForgeError) -> &'static str {
+fn error_variant(e: &ForgeError) -> &'static str {
     match e {
         ForgeError::Config(_) => "config",
         ForgeError::Unavailable(_) => "unavailable",
@@ -17,18 +17,13 @@ pub(crate) fn error_variant(e: &ForgeError) -> &'static str {
         ForgeError::Limit(_) => "limit",
         ForgeError::Invalid(_) => "invalid",
         ForgeError::Backend { .. } => "backend",
+        // `ForgeError` is `#[non_exhaustive]`; a future variant
+        // gets a generic label until this match is extended.
+        #[allow(unreachable_patterns)]
+        _ => "unknown",
     }
 }
 
-/// `"ok"` on success, else the error variant label.
-pub(crate) fn outcome_str<T>(r: &Result<T>) -> &'static str {
-    match r {
-        Ok(_) => "ok",
-        Err(e) => error_variant(e),
-    }
-}
-
-/// Emit op counter + latency histogram, plus an error counter on failure.
 fn record_metrics(
     primitive: &'static str,
     op: &'static str,
@@ -59,10 +54,13 @@ where
 {
     let started = Instant::now();
     let result = fut.instrument(span.clone()).await;
-    let outcome = outcome_str(&result);
+    let outcome = match &result {
+        Ok(_) => "ok",
+        Err(e) => error_variant(e),
+    };
     span.record("outcome", outcome);
-    if let Err(e) = &result {
-        span.record("error.variant", error_variant(e));
+    if result.is_err() {
+        span.record("error.variant", outcome);
     }
     record_metrics(primitive, op, outcome, started);
     result

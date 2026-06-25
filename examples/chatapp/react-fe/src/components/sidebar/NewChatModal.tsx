@@ -1,27 +1,31 @@
 import { useState, type FormEvent } from 'react'
-import { useMutation } from 'urql'
 import { Plus, X } from '@phosphor-icons/react'
 import { Modal } from '../ui/Modal'
 import { Button } from '../ui/Button'
+import { useMutation } from 'urql'
 import { CreateChatMutation } from '../../graphql/operations'
 import { unmaskChat } from '../../lib/derive'
 import { errorMessage } from '../../lib/errors'
-
-type Kind = 'DIRECT' | 'GROUP'
 
 type Props = {
   onClose: () => void
   onCreated: (chatId: string) => void
 }
 
+// A conversation is just a set of people. One other person is a direct chat; two
+// or more is a group, and only then does an (optional) group name make sense. The
+// kind is inferred from the member count rather than chosen up front, so there is
+// no Direct/Group switch to get wrong. A blank group name is fine: the sidebar
+// derives a title from the members when none is set.
 export function NewChatModal({ onClose, onCreated }: Props) {
   const [, createChat] = useMutation(CreateChatMutation)
-  const [kind, setKind] = useState<Kind>('DIRECT')
   const [title, setTitle] = useState('')
   const [draft, setDraft] = useState('')
   const [members, setMembers] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+
+  const isGroup = members.length >= 2
 
   function addMember() {
     const name = draft.trim().replace(/^@/, '')
@@ -34,10 +38,7 @@ export function NewChatModal({ onClose, onCreated }: Props) {
     setDraft('')
   }
 
-  const directReady = kind === 'DIRECT' && members.length === 1
-  const groupReady =
-    kind === 'GROUP' && title.trim().length > 0 && members.length >= 1
-  const canSubmit = directReady || groupReady
+  const canSubmit = members.length >= 1
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
@@ -45,8 +46,8 @@ export function NewChatModal({ onClose, onCreated }: Props) {
     setError(null)
     setBusy(true)
     const res = await createChat({
-      kind,
-      title: kind === 'GROUP' ? title.trim() : null,
+      kind: isGroup ? 'GROUP' : 'DIRECT',
+      title: isGroup && title.trim() ? title.trim() : null,
       memberUsernames: members,
     })
     setBusy(false)
@@ -80,43 +81,8 @@ export function NewChatModal({ onClose, onCreated }: Props) {
       }
     >
       <form id="new-chat-form" onSubmit={onSubmit} className="stack">
-        <div className="segmented" role="tablist" aria-label="Chat kind">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={kind === 'DIRECT'}
-            data-active={kind === 'DIRECT' || undefined}
-            onClick={() => setKind('DIRECT')}
-          >
-            Direct
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={kind === 'GROUP'}
-            data-active={kind === 'GROUP' || undefined}
-            onClick={() => setKind('GROUP')}
-          >
-            Group
-          </button>
-        </div>
-
-        {kind === 'GROUP' && (
-          <label className="field">
-            <span className="field-label">Group name</span>
-            <input
-              className="input"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="Weekend plans"
-            />
-          </label>
-        )}
-
         <label className="field">
-          <span className="field-label">
-            {kind === 'DIRECT' ? 'Username' : 'Members'}
-          </span>
+          <span className="field-label">Members</span>
           <div className="chip-input">
             <input
               className="input"
@@ -128,15 +94,13 @@ export function NewChatModal({ onClose, onCreated }: Props) {
                   addMember()
                 }
               }}
-              placeholder={kind === 'DIRECT' ? 'ada' : 'Add a username, press Enter'}
-              disabled={kind === 'DIRECT' && members.length >= 1}
+              placeholder="Add a username, press Enter"
             />
             <button
               type="button"
               className="icon-btn"
               onClick={addMember}
               aria-label="Add member"
-              disabled={kind === 'DIRECT' && members.length >= 1}
             >
               <Plus size={18} />
             </button>
@@ -158,11 +122,22 @@ export function NewChatModal({ onClose, onCreated }: Props) {
             </div>
           )}
           <span className="field-hint">
-            {kind === 'DIRECT'
-              ? 'You will be added automatically. Pick exactly one other person.'
-              : 'You are added automatically. Add at least one more member.'}
+            You are added automatically. Add one person for a direct chat, or more
+            for a group.
           </span>
         </label>
+
+        {isGroup && (
+          <label className="field">
+            <span className="field-label">Group name (optional)</span>
+            <input
+              className="input"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="Weekend plans"
+            />
+          </label>
+        )}
 
         {error && (
           <p className="form-banner" role="alert">

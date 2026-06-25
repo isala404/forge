@@ -15,7 +15,13 @@ RUN if [ -f ./schema.graphql ] || [ -f ../schema.graphql ]; then bun run codegen
 
 FROM nginx:1.27-alpine
 COPY --from=build /app/dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# nginx.conf is a template: the base image's 20-envsubst-on-templates.sh renders
+# /etc/nginx/templates/*.template into /etc/nginx/conf.d/ before nginx starts. The
+# filter restricts substitution to BACKEND_ORIGIN so nginx's own $uri/$host stay
+# literal. BACKEND_ORIGIN is the backend on the internal docker network (set per
+# stack in docker-compose); it's where presigned /_forge/blob traffic is proxied.
+COPY nginx.conf /etc/nginx/templates/default.conf.template
+ENV NGINX_ENVSUBST_FILTER=BACKEND_ORIGIN
 COPY docker-entrypoint.sh /docker-entrypoint.d/40-env.sh
 RUN chmod +x /docker-entrypoint.d/40-env.sh
 EXPOSE 80

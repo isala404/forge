@@ -18,7 +18,13 @@ async fn main() -> forge::Result<()> {
     // it replaces the existing row rather than creating a duplicate.
     forge
         .schedule()
-        .cron("nightly-report", "0 3 * * *", "reports", Bytes::from_static(b"{}"))
+        .cron(
+            "nightly-report",
+            "0 3 * * *",
+            "reports",
+            Bytes::from_static(b"{}"),
+            ScheduleOpts::new(), // or .with_max_attempts(n)
+        )
         .await?;
 
     // One-shot: fires once at an absolute instant, returns the future queue JobId
@@ -26,7 +32,12 @@ async fn main() -> forge::Result<()> {
     let when = SystemTime::now() + Duration::from_secs(3600);
     let job_id = forge
         .schedule()
-        .at(when, "reminders", Bytes::from_static(br#"{"kind":"trial-end"}"#))
+        .at(
+            when,
+            "reminders",
+            Bytes::from_static(br#"{"kind":"trial-end"}"#),
+            ScheduleOpts::new(),
+        )
         .await?;
     let _ = job_id;
 
@@ -47,10 +58,9 @@ async fn main() -> forge::Result<()> {
 }
 ```
 
-### Variants for tests and custom cadence
+### Variant for tests and custom cadence
 
-- `run_scheduler_until(shutdown)` — same 30s tick, but stops when your `shutdown` future resolves instead of on a signal. Use it when you manage lifecycle yourself.
-- `run_scheduler_with(interval, shutdown)` — pick the tick `interval` (e.g. a 50ms tick in an integration test so you don't wait 30s for a fire). Both still enqueue every due schedule exactly once per tick, safely across replicas.
+For a faster cadence (e.g. a test that shouldn't wait 30s for a fire), drive `run_scheduler_once` yourself on whatever interval you like. Each call enqueues every due schedule exactly once, safely across replicas.
 
 ```rust
 // In a test: tick fast, stop on a oneshot.
@@ -58,7 +68,14 @@ let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 let handle = tokio::spawn({
     let f = forge.clone();
     async move {
-        f.run_scheduler_with(Duration::from_millis(50), async { let _ = rx.await; }).await;
+        let mut shutdown = std::pin::pin!(async { let _ = rx.await; });
+        loop {
+            let _ = f.run_scheduler_once().await;
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+                _ = &mut shutdown => break,
+            }
+        }
     }
 });
 // ... assert the job landed in its queue ...
@@ -113,4 +130,4 @@ This is deliberately *not* the same loop as the scheduler. `run_scheduler*` fire
 
 ## Node and Python
 
-The bindings expose the single-pass `runSchedulerOnce()` / `run_scheduler_once()` and `maintain()`, plus `scheduleAt`/`scheduleCron` (Node) and `at`/`cron` (Python) for registration. They do **not** expose the managed `run_scheduler` loop — drive ticks yourself on an interval (e.g. `setInterval` every 30s in Node, an `asyncio` loop in Python) and call `maintain()` alongside it. The exactly-one-enqueue-per-tick guarantee holds the same way, since it lives in Postgres, not in the loop. Note `scheduleAt` takes `whenEpochMs` (epoch milliseconds), not a `SystemTime`.
+The bindings expose the single-pass `runSchedulerOnce()` / `run_scheduler_once()` and `maintain()`, plus `scheduleAt`/`scheduleCron` (Node) and `schedule_at`/`schedule_cron` (Python) for registration. Each registration call takes an optional `maxAttempts` / `max_attempts` last argument (the queue's 5 by default) for the job the tick enqueues. They do **not** expose the managed `run_scheduler` loop — drive ticks yourself on an interval (e.g. `setInterval` every 30s in Node, an `asyncio` loop in Python) and call `maintain()` alongside it. The exactly-one-enqueue-per-tick guarantee holds the same way, since it lives in Postgres, not in the loop. Note `scheduleAt` takes `whenEpochMs` (epoch milliseconds), not a `SystemTime`. `scheduleList(cursor?, limit?)` / `schedule_list(cursor=None, limit=100)` paginate, returning a page object with `items` plus a next-page `cursor`.

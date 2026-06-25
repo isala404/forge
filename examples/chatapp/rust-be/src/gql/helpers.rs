@@ -1,5 +1,9 @@
+use std::time::{Duration, Instant};
+
 use async_graphql::dataloader::DataLoader;
 use async_graphql::{Context, Error, ErrorExtensions, ID, Result};
+use forge::{Bytes, ForgeError};
+use futures_util::Stream;
 use uuid::Uuid;
 
 use crate::context::{Ctx, CurrentUser};
@@ -20,6 +24,26 @@ pub(crate) fn me(ctx: &Context<'_>) -> Result<CurrentUser> {
     ctx.data_opt::<CurrentUser>()
         .cloned()
         .ok_or_else(|| err("UNAUTHENTICATED", "not authenticated"))
+}
+
+/// Gate the ops/admin mutations. The allowlist is a comma-separated list of user
+/// ids in `ADMIN_USER_IDS`. Unset means an empty allowlist, so these mutations are
+/// denied for everyone (fail closed) — the right default for a demo that ships no
+/// roles system. The single entry `*` allows any authenticated user: a dev/demo
+/// convenience, never for production.
+pub(crate) fn require_admin(ctx: &Context<'_>) -> Result<CurrentUser> {
+    let user = me(ctx)?;
+    let uid = user.id.to_string();
+    let allowed = std::env::var("ADMIN_USER_IDS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .any(|id| id == "*" || (!id.is_empty() && id == uid));
+    if allowed {
+        Ok(user)
+    } else {
+        Err(err("FORBIDDEN", "admin only"))
+    }
 }
 
 pub(crate) fn err(code: &str, msg: impl Into<String>) -> Error {
@@ -83,4 +107,35 @@ pub(crate) async fn load_user(ctx: &Context<'_>, id: Uuid) -> Result<UserRow> {
         .await
         .map_err(|e| err("BACKEND", e.to_string()))?
         .ok_or_else(|| err("NOT_FOUND", "user not found"))
+}
+
+pub(crate) const REVALIDATE_EVERY: Duration = Duration::from_secs(60);
+
+/// Wraps a pubsub stream so it ends once the principal's session no longer
+/// validates. Re-checks at most once per [`REVALIDATE_EVERY`] (gated on
+/// delivered items). API-key principals carry no token and are never ended.
+pub(crate) fn guarded<S>(
+    c: Ctx,
+    user: CurrentUser,
+    raw: S,
+) -> impl Stream<Item = std::result::Result<Bytes, ForgeError>>
+where
+    S: Stream<Item = std::result::Result<Bytes, ForgeError>>,
+{
+    use futures_util::StreamExt;
+    let mut checked_at = Instant::now();
+    raw.take_while(move |_item| {
+        let c = c.clone();
+        let token = user.token.clone();
+        let due = checked_at.elapsed() >= REVALIDATE_EVERY;
+        if due {
+            checked_at = Instant::now();
+        }
+        async move {
+            if !due || token.is_empty() {
+                return true;
+            }
+            matches!(c.forge.auth().validate_session(&token).await, Ok(Some(_)))
+        }
+    })
 }

@@ -60,7 +60,6 @@ pub trait ConfigExt: ConfigStore {
 #[non_exhaustive]
 pub struct EvalCtx {
     pub targeting_key: Option<String>,
-    pub attributes: std::collections::BTreeMap<String, String>,
 }
 
 /// Boolean flag rule. v1 is boolean-only (see Non-goals).
@@ -74,8 +73,7 @@ pub enum FlagRule {
 ```
 
 `get_raw`/`set_raw` are dyn-safe so `ConfigStore` can live behind `dyn`; `get::<T>` is an
-extension because generic methods are not dyn-safe. `EvalCtx::attributes` is reserved
-for future rule kinds; v1 rules read only `targeting_key`.
+extension because generic methods are not dyn-safe. v1 rules read only `targeting_key`.
 
 ## Semantics
 
@@ -230,4 +228,4 @@ Deliberately **not** provided (some post-v1):
 - **Real-time push / instant invalidation** — the 30s cache is the freshness contract.
   No watch/subscribe, no sub-second propagation.
 - **Multi-variant or weighted targeting beyond `Percent`/`AllowList`**, attribute-based
-  rules (`EvalCtx.attributes` is reserved, unused in v1), and flag dependencies.
+  rules, and flag dependencies.

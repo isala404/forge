@@ -95,7 +95,6 @@ type Query {
   presence(userIds: [ID!]!): [User!]!
   "Whether the `reactions_v2` feature flag is enabled for the current user (forge config)."
   reactionsEnabled: Boolean!
-  "Developer-tools gauges (kv scan + DLQ depth) for the settings page."
   opsStats: OpsStats!
 }
 

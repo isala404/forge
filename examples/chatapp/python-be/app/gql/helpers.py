@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import uuid
+from collections.abc import AsyncIterator
 
 import forge_py
 from graphql import GraphQLError
@@ -80,6 +82,19 @@ async def require_user(info: Info) -> dict:
     return u
 
 
+async def require_admin(info: Info) -> dict:
+    # Gate the ops/admin mutations. The allowlist is a comma-separated list of user
+    # ids in ADMIN_USER_IDS. Unset means an empty allowlist, so these mutations are
+    # denied for everyone (fail closed) — the right default for a demo that ships no
+    # roles system. The single entry "*" allows any authenticated user: a dev/demo
+    # convenience, never for production.
+    u = await require_user(info)
+    allowed = {i.strip() for i in os.environ.get("ADMIN_USER_IDS", "").split(",") if i.strip()}
+    if "*" not in allowed and str(u["id"]) not in allowed:
+        raise gqlerr("FORBIDDEN", "admin only")
+    return u
+
+
 async def require_member(info: Info, chat_id: uuid.UUID, user_id: uuid.UUID) -> None:
     if not await db.is_member(info.context["pool"], chat_id, user_id):
         raise gqlerr("NOT_FOUND", "chat not found or not a member")
@@ -100,3 +115,23 @@ async def max_upload_bytes(info: Info) -> int:
     except (forge_py.ForgeError, ValueError):
         pass
     return DEFAULT_MAX_UPLOAD_BYTES
+
+
+REAUTH_INTERVAL_SECS = 60.0
+
+
+async def sub_events(info: Info, topic: str) -> AsyncIterator[dict]:
+    sub = await info.context["forge"].pubsub_subscribe(topic)
+    # Re-validate the principal at most once per interval so a revoked session ends
+    # the stream instead of streaming forever.
+    next_check = time.monotonic() + REAUTH_INTERVAL_SECS
+    revalidate = info.context.has_token()
+    async for payload in sub:
+        if revalidate and time.monotonic() >= next_check:
+            if await info.context.revalidate() is None:
+                return
+            next_check = time.monotonic() + REAUTH_INTERVAL_SECS
+        try:
+            yield json.loads(payload)
+        except (ValueError, TypeError):
+            continue

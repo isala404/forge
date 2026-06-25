@@ -26,6 +26,11 @@ pub const REAP_QUEUE: &str = "reap";
 pub struct AppCtx {
     pub forge: Forge,
     pub pool: PgPool,
+    /// A throwaway argon2id hash minted once at startup. `login` verifies the
+    /// submitted password against it when the username doesn't exist, so the
+    /// username-miss path spends the same argon2 time as a real verify and the
+    /// timing no longer reveals which usernames are registered.
+    pub decoy_hash: forge::PhcString,
 }
 
 pub type Ctx = Arc<AppCtx>;

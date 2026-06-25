@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import uuid
 from contextlib import asynccontextmanager
 
 import asyncpg
@@ -57,12 +58,17 @@ def build_app() -> FastAPI:
             "postgres://postgres:forge@127.0.0.1:5432/chatapp_python_be",
         )
         secret = env("FORGE_BLOB_SIGNING_SECRET", "dev-secret-change-me")
+        # connect migrates Forge's system tables at startup; it owns its database.
         forge = await forge_py.ForgeClient.connect(pg, secret)
         pool = await asyncpg.create_pool(pg, min_size=1, max_size=10)
         await db.migrate(pool)
 
         app.state.forge = forge
         app.state.pool = pool
+        # Mint the login decoy hash once, via forge's own hasher so its argon2 params
+        # always match real password hashes. `login` verifies against it on a username
+        # miss to keep that path's timing indistinguishable from a real verify.
+        app.state.decoy_hash = await forge.hash_password(str(uuid.uuid4()))
 
         scheduler_interval = env_float("APP_SCHEDULER_MS", 30000.0) / 1000.0
         stop = asyncio.Event()

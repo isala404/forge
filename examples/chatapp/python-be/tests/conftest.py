@@ -25,6 +25,9 @@ os.environ["FORGE_BLOB_SIGNING_SECRET"] = "test-secret"
 os.environ["APP_PRESENCE_TTL_SECS"] = "2"
 os.environ["APP_DISAPPEARING_SECS"] = "2"
 os.environ["APP_SCHEDULER_MS"] = "500"
+# "*" = any authenticated user is an admin, so the ops tests can exercise the gated
+# mutations without knowing a user id at boot. A real deploy lists actual ids.
+os.environ["ADMIN_USER_IDS"] = "*"
 
 
 def _free_port() -> int:

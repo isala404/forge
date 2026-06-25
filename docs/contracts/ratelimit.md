@@ -68,6 +68,12 @@ counter row. `Limit` is passed per call — the policy lives in caller code, not
 server config — so the same `bucket` may be checked with different `max`/`per` from
 different call sites; the row tracks consumption, the `Limit` parametrizes the math.
 
+> **The subject is persisted verbatim** in the `forge_ratelimit.subject` column on every
+> `check`. The confidentiality guarantee (no raw key in observability) covers
+> logs/spans/errors **only**, not at-rest storage. A caller who rate-limits by a secret
+> value (e.g. a raw API key) SHOULD pass an opaque/derived id — a hash of the secret —
+> as the subject, not the secret itself.
+
 ## Semantics
 
 | op | behavior |

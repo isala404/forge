@@ -2,6 +2,7 @@ import { GraphQLError } from "graphql";
 
 export type ForgeCode =
   | "UNAUTHENTICATED"
+  | "FORBIDDEN"
   | "INVALID"
   | "LIMIT"
   | "NOT_FOUND"

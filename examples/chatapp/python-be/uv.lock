@@ -83,6 +83,7 @@ dependencies = [
     { name = "forge-py" },
     { name = "strawberry-graphql", extra = ["fastapi"] },
     { name = "uvicorn" },
+    { name = "websockets" },
 ]
 
 [package.dev-dependencies]
@@ -91,7 +92,6 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
-    { name = "websockets" },
 ]
 
 [package.metadata]
@@ -101,6 +101,7 @@ requires-dist = [
     { name = "forge-py", editable = "../../../bindings/forge-py" },
     { name = "strawberry-graphql", extras = ["fastapi"], specifier = ">=0.260" },
     { name = "uvicorn", specifier = ">=0.34" },
+    { name = "websockets", specifier = ">=14" },
 ]
 
 [package.metadata.requires-dev]
@@ -109,7 +110,6 @@ dev = [
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-asyncio", specifier = ">=0.25" },
     { name = "ruff", specifier = ">=0.9" },
-    { name = "websockets", specifier = ">=14" },
 ]
 
 [[package]]

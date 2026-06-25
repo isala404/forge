@@ -58,14 +58,13 @@ impl TestDatabase {
         &self.url
     }
 
-    /// Build a `Forge` against this database (runs migrations on the fresh DB).
+    /// Build a `Forge` against this database. `init` migrates the throwaway DB's schema.
     pub async fn forge(&self) -> Result<Forge> {
         Forge::init(ForgeConfig::new(self.url.clone())).await
     }
 
-    /// Run a raw SQL statement against this database — test setup only (e.g. seeding an
-    /// incompatible pre-existing `forge_*` table before `Forge::init` to exercise the
-    /// structural schema check).
+    /// Run a raw SQL statement against this database — test setup only (e.g. seeding
+    /// rows or auxiliary tables a test needs before `Forge::init`).
     pub async fn execute_raw(&self, sql: &str) -> Result<()> {
         let mut conn = PgConnection::connect(&self.url)
             .await

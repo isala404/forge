@@ -1,22 +1,18 @@
 //! `kv` — lineage: Redis. See `docs/contracts/kv.md`.
+//!
+//! The contract (the [`Kv`] trait, its DTOs and limits) lives in this module, which
+//! also wires the Postgres backend.
 
-use crate::error::{ForgeError, Result};
+use crate::error::Result;
 use crate::types::Cursor;
 use async_trait::async_trait;
 use bytes::Bytes;
-use serde::Serialize;
-use serde::de::DeserializeOwned;
 use std::time::Duration;
 
-#[cfg(feature = "postgres")]
-mod pg;
-#[cfg(feature = "postgres")]
-pub(crate) use pg::PgKv;
-
-/// Largest allowed key in encoded UTF-8 bytes (fits a btree entry without TOAST). Over => [`crate::ForgeError::Limit`].
+/// Largest allowed key in encoded UTF-8 bytes (fits a btree entry without TOAST). Over => [`crate::error::ForgeError::Limit`].
 pub const MAX_KEY_BYTES: usize = 512;
 
-/// Largest allowed value in bytes (1 MiB): a string/counter/session store, not a blob store. Over => [`crate::ForgeError::Limit`].
+/// Largest allowed value in bytes (1 MiB): a string/counter/session store, not a blob store. Over => [`crate::error::ForgeError::Limit`].
 pub const MAX_VALUE_BYTES: usize = 1024 * 1024;
 
 /// Condition under which a `set` writes. Mirrors Redis `SET` / `SET NX` / `SET XX`.
@@ -61,7 +57,7 @@ impl SetOpts {
 ///
 /// Object-safe (facade hands out `Arc<dyn Kv>`). Exact semantics, limits, and error mapping: `docs/contracts/kv.md`.
 #[async_trait]
-pub trait Kv: crate::sealed::Sealed + Send + Sync {
+pub trait Kv: Send + Sync {
     /// `GET`. `Some(value)` if present and unexpired, else `None`. An expired key returns `None`, guaranteed.
     async fn get(&self, key: &str) -> Result<Option<Bytes>>;
 
@@ -80,7 +76,7 @@ pub trait Kv: crate::sealed::Sealed + Send + Sync {
     async fn exists(&self, key: &str) -> Result<bool>;
 
     /// `INCRBY` (atomic). Missing/expired key starts from `0`; non-numeric existing value is
-    /// [`crate::ForgeError::Invalid`], `i64` overflow is [`crate::ForgeError::Limit`]. TTL preserved.
+    /// [`crate::error::ForgeError::Invalid`], `i64` overflow is [`crate::error::ForgeError::Limit`]. TTL preserved.
     async fn incr(&self, key: &str, by: i64) -> Result<i64>;
 
     /// `EXPIRE`. Sets/replaces the TTL on a live key; `false` if absent/expired. Does not create keys.
@@ -100,31 +96,7 @@ pub trait Kv: crate::sealed::Sealed + Send + Sync {
     ) -> Result<(Vec<String>, Option<Cursor>)>;
 }
 
-/// JSON convenience helpers over [`Kv`]. Blanket-implemented, so they work on `&dyn Kv` too.
-/// A (de)serialization failure is [`ForgeError::Invalid`]: a caller-data bug, not a backend error.
-#[async_trait]
-pub trait KvExt: Kv {
-    /// `set` a value serialized to JSON.
-    async fn set_json<T: Serialize + Send + Sync>(
-        &self,
-        key: &str,
-        value: &T,
-        opts: SetOpts,
-    ) -> Result<bool> {
-        let bytes = serde_json::to_vec(value)
-            .map_err(|e| ForgeError::invalid(format!("could not serialize value: {e}")))?;
-        self.set(key, Bytes::from(bytes), opts).await
-    }
-
-    /// `get` a value and deserialize it from JSON. `None` if the key is absent.
-    async fn get_json<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
-        match self.get(key).await? {
-            Some(bytes) => serde_json::from_slice(&bytes)
-                .map(Some)
-                .map_err(|e| ForgeError::invalid(format!("could not deserialize value: {e}"))),
-            None => Ok(None),
-        }
-    }
-}
-
-impl<T: Kv + ?Sized> KvExt for T {}
+mod memory;
+mod postgres;
+pub(crate) use memory::MemKv;
+pub(crate) use postgres::PgKv;

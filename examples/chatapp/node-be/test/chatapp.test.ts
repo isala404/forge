@@ -29,6 +29,9 @@ const APP_ENV = {
   APP_DISAPPEARING_SECS: "2",
   APP_SCHEDULER_MS: "300",
   FORGE_BLOB_SIGNING_SECRET: "test-signing-secret",
+  // "*" = any authenticated user is an admin, so the ops tests below can exercise the
+  // gated mutations without knowing a user id at boot. A real deploy lists actual ids.
+  ADMIN_USER_IDS: "*",
 };
 
 let running: ServerHandle;
@@ -121,7 +124,6 @@ describe("auth", () => {
       { u: name },
     );
     const tokenB = b.login.token;
-    // session A logs everyone out
     await anon.withToken(a.token).ok(`mutation { logoutAll }`);
     const r = await new HttpClient(httpUrl, tokenB).gql<{ me: unknown }>(`query { me { id } }`);
     expect(r.data?.me).toBeNull();

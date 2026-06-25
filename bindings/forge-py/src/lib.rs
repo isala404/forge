@@ -18,7 +18,7 @@
 // `Limit` is intentionally NOT imported by name: the `Limit` exception type below
 // would collide with `forge::Limit`. It is referenced fully-qualified where used.
 use forge::{
-    EvalCtx, FailMode, FlagRule, Forge, ForgeConfig, PutOpts, SessionOpts, SetMode, SetOpts,
+    Algo, EvalCtx, FailMode, FlagRule, Forge, ForgeConfig, PutOpts, SessionOpts, SetMode, SetOpts,
 };
 use futures_util::StreamExt;
 use pyo3::create_exception;
@@ -73,17 +73,28 @@ fn secs(field: &str, value: f64) -> PyResult<Duration> {
     })
 }
 
-/// Run pending migrations and return — the schema step decoupled from `connect`.
-/// Operators run this once at deploy; the app then connects with
-/// `run_migrations=False` (verify-only). Idempotent and concurrency-safe. `await` it.
-#[pyfunction]
-fn migrate(py: Python<'_>, postgres_url: String) -> PyResult<Bound<'_, PyAny>> {
-    future_into_py(py, async move {
-        Forge::migrate(ForgeConfig::new(postgres_url))
-            .await
-            .map_err(pyerr)
-    })
+/// Build [`forge::ScheduleOpts`] from an optional max-attempts override.
+fn schedule_opts(max_attempts: Option<u32>) -> forge::ScheduleOpts {
+    let mut opts = forge::ScheduleOpts::new();
+    if let Some(m) = max_attempts {
+        opts = opts.with_max_attempts(m);
+    }
+    opts
 }
+
+/// Map an optional algorithm name onto [`Algo`]. `None` keeps the token-bucket
+/// default; `"token_bucket"` / `"sliding_window"` select explicitly; anything else
+/// is `Invalid`.
+fn parse_algo(name: Option<&str>) -> PyResult<Algo> {
+    match name {
+        None | Some("token_bucket") => Ok(Algo::TokenBucket),
+        Some("sliding_window") => Ok(Algo::SlidingWindow),
+        Some(other) => Err(pyerr(forge::ForgeError::invalid(format!(
+            "unknown rate-limit algo {other:?}; expected \"token_bucket\" or \"sliding_window\""
+        )))),
+    }
+}
+
 
 /// Epoch milliseconds for a `SystemTime` (saturating).
 fn epoch_ms(t: SystemTime) -> f64 {
@@ -92,87 +103,10 @@ fn epoch_ms(t: SystemTime) -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Object metadata (S3 `HeadObject`). `last_modified_ms` is epoch milliseconds.
-#[pyclass(get_all)]
-struct BlobInfo {
-    key: String,
-    size: u64,
-    content_type: String,
-    etag: String,
-    last_modified_ms: f64,
-    metadata: HashMap<String, String>,
-}
-
-/// A registered schedule. `kind` is `"cron"` or `"at"`; `cron_expr` is set only for
-/// crons. Times are epoch milliseconds.
-#[pyclass(get_all)]
-struct ScheduleInfo {
-    name: String,
-    kind: String,
-    cron_expr: Option<String>,
-    queue: String,
-    next_run_ms: f64,
-    last_run_ms: Option<f64>,
-}
-
-/// A validated session's metadata. Times are epoch milliseconds.
-#[pyclass(get_all)]
-struct SessionInfo {
-    user_id: String,
-    created_at_ms: f64,
-    expires_at_ms: f64,
-}
-
-/// Non-secret API-key metadata.
-#[pyclass(get_all)]
-struct ApiKeyInfo {
-    id: String,
-    owner_id: String,
-    label: String,
-}
-
-/// One line of `backend_report`: which provider powers a primitive.
-#[pyclass(get_all)]
-struct BackendInfo {
-    primitive: String,
-    provider: String,
-    durable: bool,
-    caveats: String,
-}
-
-/// A freshly minted API key. `secret` is shown exactly once.
-#[pyclass(get_all)]
-struct ApiKey {
-    id: String,
-    secret: String,
-    label: String,
-    created_at_ms: f64,
-}
-
-/// A leased job. Settle it with ack/nack/heartbeat using the opaque,
-/// delivery-unique `receipt` (NOT `id`, which is stable across redeliveries and is
-/// the natural idempotency key).
-#[pyclass(get_all)]
-struct Job {
-    id: String,
-    receipt: String,
-    payload: String,
-    attempt: u32,
-    max_attempts: u32,
-    leased_until_ms: f64,
-    queue: String,
-}
-
-/// A full rate-limit decision (all IETF RateLimit fields, unlike the legacy
-/// `rate_limit_check` tuple which omits `limit`/`reset_after_seconds`).
-#[pyclass(get_all)]
-struct Decision {
-    allowed: bool,
-    limit: u32,
-    remaining: u32,
-    reset_after_seconds: f64,
-    retry_after_seconds: Option<f64>,
-}
+// The cross-language value DTOs (Job, Decision, BlobInfo, …) are generated from one
+// schema shared with the Node binding — see tools/codegen/src/schema.rs. Regenerate with
+// the codegen tool; never hand-edit.
+include!("types.generated.rs");
 
 /// A live subscription, usable as a Python async iterator
 /// (`async for payload in subscription:`). Each item is `bytes`.
@@ -228,8 +162,8 @@ struct ForgeClient {
 
 #[pymethods]
 impl ForgeClient {
-    /// Connect, run migrations, and ping — mirrors `Forge::init`. Pass
-    /// `signing_secret` to enable presigned blob URLs. `await` the result.
+    /// Connect, migrate the system database, and ping — mirrors `Forge::init`. Pass
+    /// `signing_secret` to enable presigned blob URLs. `await` it.
     #[staticmethod]
     #[pyo3(signature = (postgres_url, signing_secret=None))]
     fn connect<'py>(
@@ -445,41 +379,6 @@ impl ForgeClient {
                 None => EvalCtx::new(),
             };
             Ok::<bool, PyErr>(forge.config().flag(&key, default_value, &ctx).await)
-        })
-    }
-
-    /// Atomic check-and-consume. `fail_open` overrides the instance default for what
-    /// happens on a backend error: `None` = default, `True` = allow, `False` = deny.
-    /// Returns `(allowed, remaining, retry_after_seconds)`.
-    #[pyo3(signature = (bucket, key, max, per_seconds, fail_open=None))]
-    fn rate_limit_check<'py>(
-        &self,
-        py: Python<'py>,
-        bucket: String,
-        key: String,
-        max: u32,
-        per_seconds: f64,
-        fail_open: Option<bool>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let forge = self.forge.clone();
-        future_into_py(py, async move {
-            let limit =
-                forge::Limit::per_duration(max, secs("per_seconds", per_seconds)?);
-            let mode = match fail_open {
-                None => FailMode::Default,
-                Some(true) => FailMode::Open,
-                Some(false) => FailMode::Closed,
-            };
-            let d = forge
-                .ratelimit()
-                .check_with(&bucket, &key, limit, mode)
-                .await
-                .map_err(pyerr)?;
-            Ok((
-                d.allowed,
-                d.remaining,
-                d.retry_after.map(|x| x.as_secs_f64()),
-            ))
         })
     }
 
@@ -718,25 +617,30 @@ impl ForgeClient {
     }
 
     /// Schedule a one-shot enqueue at `when_epoch_ms`; returns the future JobId.
+    #[pyo3(signature = (when_epoch_ms, queue, payload, max_attempts=None))]
     fn schedule_at<'py>(
         &self,
         py: Python<'py>,
         when_epoch_ms: f64,
         queue: String,
         payload: String,
+        max_attempts: Option<u32>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let forge = self.forge.clone();
         future_into_py(py, async move {
             let when = UNIX_EPOCH + Duration::from_millis(when_epoch_ms.max(0.0) as u64);
             let id = forge
                 .schedule()
-                .at(when, &queue, forge::Bytes::from(payload))
+                .at(when, &queue, forge::Bytes::from(payload), schedule_opts(max_attempts))
                 .await
                 .map_err(pyerr)?;
             Ok(id.to_string())
         })
     }
 
+    /// Upsert a recurring cron schedule. `max_attempts` overrides the delivery
+    /// attempts of the job each tick enqueues (omit for the queue default of 5).
+    #[pyo3(signature = (name, expr, queue, payload, max_attempts=None))]
     fn schedule_cron<'py>(
         &self,
         py: Python<'py>,
@@ -744,12 +648,13 @@ impl ForgeClient {
         expr: String,
         queue: String,
         payload: String,
+        max_attempts: Option<u32>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let forge = self.forge.clone();
         future_into_py(py, async move {
             forge
                 .schedule()
-                .cron(&name, &expr, &queue, forge::Bytes::from(payload))
+                .cron(&name, &expr, &queue, forge::Bytes::from(payload), schedule_opts(max_attempts))
                 .await
                 .map_err(pyerr)
         })
@@ -770,14 +675,19 @@ impl ForgeClient {
         future_into_py(py, async move { forge.maintain().await.map_err(pyerr) })
     }
 
-    /// Approximate `(visible, in_flight, delayed)` counts for a queue (SQS
-    /// `GetQueueAttributes`). Pass `"<queue>.dlq"` to gauge a dead-letter backlog
-    /// without leasing its jobs. For a DLQ every job is `visible`, so `visible` is its size.
+    /// Approximate depth (`QueueDepth` with `visible`/`in_flight`/`delayed`) for a
+    /// queue (SQS `GetQueueAttributes`). Pass `"<queue>.dlq"` to gauge a dead-letter
+    /// backlog without leasing its jobs. For a DLQ every job is `visible`, so
+    /// `visible` is its size.
     fn queue_depth<'py>(&self, py: Python<'py>, queue: String) -> PyResult<Bound<'py, PyAny>> {
         let forge = self.forge.clone();
         future_into_py(py, async move {
             let d = forge.queue().depth(&queue).await.map_err(pyerr)?;
-            Ok((d.visible, d.in_flight, d.delayed))
+            Ok(QueueDepth {
+                visible: d.visible,
+                in_flight: d.in_flight,
+                delayed: d.delayed,
+            })
         })
     }
 
@@ -955,9 +865,10 @@ impl ForgeClient {
     }
 
     /// Connect with the full per-deployment option surface (namespace, pool size,
-    /// migration toggle, filesystem blob backend, …). `await` the result.
+    /// filesystem blob backend, …). `connect_with` migrates the system database at
+    /// startup. `await` the result.
     #[staticmethod]
-    #[pyo3(signature = (postgres_url, signing_secret=None, kv_namespace=None, max_connections=None, run_migrations=None, blob_base_url=None, filesystem_blob_root=None))]
+    #[pyo3(signature = (postgres_url, signing_secret=None, kv_namespace=None, max_connections=None, blob_base_url=None, filesystem_blob_root=None))]
     #[allow(clippy::too_many_arguments)]
     fn connect_with<'py>(
         py: Python<'py>,
@@ -965,7 +876,6 @@ impl ForgeClient {
         signing_secret: Option<String>,
         kv_namespace: Option<String>,
         max_connections: Option<u32>,
-        run_migrations: Option<bool>,
         blob_base_url: Option<String>,
         filesystem_blob_root: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
@@ -979,9 +889,6 @@ impl ForgeClient {
             }
             if let Some(n) = max_connections {
                 cfg = cfg.with_max_connections(n);
-            }
-            if run_migrations == Some(false) {
-                cfg = cfg.without_migrations();
             }
             if let Some(base) = blob_base_url {
                 cfg = cfg.with_blob_base_url(base);
@@ -1012,8 +919,6 @@ impl ForgeClient {
             })
             .collect()
     }
-
-    // --- kv parity -----------------------------------------------------------------
 
     /// `EXPIRE key ttl_seconds`. Sets/replaces the TTL on a live key; `False` if absent.
     fn kv_expire<'py>(
@@ -1056,8 +961,8 @@ impl ForgeClient {
         })
     }
 
-    /// `SCAN prefix*` with cursor pagination. Returns `(keys, cursor)`; pass `cursor`
-    /// back for the next page (`None` when iteration is done).
+    /// `SCAN prefix*` with cursor pagination. Returns a `ScanPage` (`keys` plus a
+    /// next-page `cursor`); pass `cursor` back for the next page (`None` when done).
     #[pyo3(signature = (prefix, cursor=None, limit=100))]
     fn kv_scan_page<'py>(
         &self,
@@ -1070,11 +975,12 @@ impl ForgeClient {
         future_into_py(py, async move {
             let cur = cursor.map(forge::Cursor::from_token);
             let (keys, next) = forge.kv().scan(&prefix, cur, limit).await.map_err(pyerr)?;
-            Ok((keys, next.map(|c| c.token().to_string())))
+            Ok(ScanPage {
+                keys,
+                cursor: next.map(|c| c.token().to_string()),
+            })
         })
     }
-
-    // --- blob parity ---------------------------------------------------------------
 
     /// `HeadObject`: full metadata, or `None` if the object does not exist.
     fn blob_head<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, PyAny>> {
@@ -1097,7 +1003,7 @@ impl ForgeClient {
     }
 
     /// `ListObjectsV2`: up to `limit` objects under `prefix`, lexicographic, with cursor
-    /// pagination. Returns `(items, cursor)`.
+    /// pagination. Returns a `BlobListPage` (`items` plus a next-page `cursor`).
     #[pyo3(signature = (prefix, cursor=None, limit=100))]
     fn blob_list<'py>(
         &self,
@@ -1126,7 +1032,10 @@ impl ForgeClient {
                     metadata: i.metadata.into_iter().collect(),
                 })
                 .collect();
-            Ok((items, page.next.map(|c| c.token().to_string())))
+            Ok(BlobListPage {
+                items,
+                cursor: page.next.map(|c| c.token().to_string()),
+            })
         })
     }
 
@@ -1156,13 +1065,13 @@ impl ForgeClient {
         })
     }
 
-    // --- ratelimit parity (full Decision) ------------------------------------------
-
-    /// Atomic check-and-consume returning the FULL [`Decision`] (all IETF RateLimit
-    /// fields). Prefer this over `rate_limit_check`, whose tuple omits `limit` and
-    /// `reset_after_seconds`.
-    #[pyo3(signature = (bucket, key, max, per_seconds, fail_open=None))]
-    fn rate_limit<'py>(
+    /// Atomic check-and-consume of one unit, returning the full [`Decision`] (all
+    /// IETF RateLimit fields). `fail_open` overrides the instance default for what
+    /// happens on a backend error: `None` = default, `True` = allow, `False` = deny.
+    /// `algo` selects the algorithm: `"token_bucket"` (default) or `"sliding_window"`.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (bucket, key, max, per_seconds, fail_open=None, algo=None))]
+    fn rate_limit_check<'py>(
         &self,
         py: Python<'py>,
         bucket: String,
@@ -1170,11 +1079,13 @@ impl ForgeClient {
         max: u32,
         per_seconds: f64,
         fail_open: Option<bool>,
+        algo: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let forge = self.forge.clone();
         future_into_py(py, async move {
+            let algo = parse_algo(algo.as_deref())?;
             let limit =
-                forge::Limit::per_duration(max, secs("per_seconds", per_seconds)?);
+                forge::Limit::per_duration(max, secs("per_seconds", per_seconds)?).with_algo(algo);
             let mode = match fail_open {
                 None => FailMode::Default,
                 Some(true) => FailMode::Open,
@@ -1194,8 +1105,6 @@ impl ForgeClient {
             })
         })
     }
-
-    // --- schedule parity -----------------------------------------------------------
 
     /// Cancel a schedule by name. `True` if one was removed, `False` if none existed.
     fn schedule_cancel<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
@@ -1222,12 +1131,21 @@ impl ForgeClient {
         })
     }
 
-    /// List every registered schedule (crons and pending one-shots).
-    fn schedule_list<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    /// List registered schedules, ordered by name, up to `limit` per page (default
+    /// 100) plus an opaque next-page `cursor` (`None` when done). Returns a
+    /// `SchedulePage`; pass its `cursor` back to page through a large backlog.
+    #[pyo3(signature = (cursor=None, limit=100))]
+    fn schedule_list<'py>(
+        &self,
+        py: Python<'py>,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let forge = self.forge.clone();
         future_into_py(py, async move {
-            let items = forge.schedule().list().await.map_err(pyerr)?;
-            Ok(items
+            let cur = cursor.map(forge::Cursor::from_token);
+            let (items, next) = forge.schedule().list(cur, limit).await.map_err(pyerr)?;
+            let items: Vec<ScheduleInfo> = items
                 .into_iter()
                 .map(|s| {
                     let (kind, cron_expr) = match s.kind {
@@ -1243,13 +1161,14 @@ impl ForgeClient {
                         last_run_ms: s.last_run.map(epoch_ms),
                     }
                 })
-                .collect::<Vec<_>>())
+                .collect();
+            Ok(SchedulePage {
+                items,
+                cursor: next.map(|c| c.token().to_string()),
+            })
         })
     }
 
-    // --- config flag parity --------------------------------------------------------
-
-    /// Set a flag to always-on.
     fn set_flag_on<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, PyAny>> {
         let forge = self.forge.clone();
         future_into_py(py, async move {
@@ -1261,7 +1180,6 @@ impl ForgeClient {
         })
     }
 
-    /// Set a flag to always-off.
     fn set_flag_off<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, PyAny>> {
         let forge = self.forge.clone();
         future_into_py(py, async move {
@@ -1289,8 +1207,6 @@ impl ForgeClient {
                 .map_err(pyerr)
         })
     }
-
-    // --- auth parity ---------------------------------------------------------------
 
     /// Validate a session token; returns full [`SessionInfo`] (user id + times) or
     /// `None`. Use `validate_session` when only the user id is needed.
@@ -1356,13 +1272,16 @@ fn forge_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Subscription>()?;
     m.add_class::<BlobInfo>()?;
     m.add_class::<ScheduleInfo>()?;
+    m.add_class::<SchedulePage>()?;
     m.add_class::<SessionInfo>()?;
     m.add_class::<ApiKeyInfo>()?;
     m.add_class::<BackendInfo>()?;
     m.add_class::<ApiKey>()?;
     m.add_class::<Job>()?;
     m.add_class::<Decision>()?;
-    m.add_function(wrap_pyfunction!(migrate, m)?)?;
+    m.add_class::<QueueDepth>()?;
+    m.add_class::<ScanPage>()?;
+    m.add_class::<BlobListPage>()?;
 
     let py = m.py();
     m.add("ForgeError", py.get_type::<ForgeError>())?;

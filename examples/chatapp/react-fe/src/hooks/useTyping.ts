@@ -43,7 +43,6 @@ export function useTypingWatch(chatId: string) {
     },
   )
 
-  // Sweep expired typers.
   useEffect(() => {
     const id = window.setInterval(() => {
       setActive((cur) => {

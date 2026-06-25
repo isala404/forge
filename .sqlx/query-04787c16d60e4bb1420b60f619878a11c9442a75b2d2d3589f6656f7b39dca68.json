@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO forge_jobs (id, queue, payload, status, attempts, max_attempts, available_at) VALUES ($1, $2, $3, 'available', 0, $4, now())",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Bytea",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "04787c16d60e4bb1420b60f619878a11c9442a75b2d2d3589f6656f7b39dca68"
+}

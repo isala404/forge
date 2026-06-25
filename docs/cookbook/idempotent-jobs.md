@@ -112,7 +112,7 @@ loop {
 }
 ```
 
-Note: `TypedJob`'s `job` field is private — you build a `TypedJob` only via `dequeue_typed`, and read the lease back out with `.job()` or `.into_parts()`. In the managed-worker snippet above, the `TypedJob { payload, job }` construction is shown for illustration; real worker handlers just hold the `Job` and call `job.payload_json()` directly (see `examples/chatapp/rust-be/src/worker.rs:53`).
+Note: `TypedJob`'s `job` field is private — you build a `TypedJob` only via `dequeue_typed`, and read the lease back out with `.job()`. In the managed-worker snippet above, the `TypedJob { payload, job }` construction is shown for illustration; real worker handlers just hold the `Job` and call `job.payload_json()` directly (see `examples/chatapp/rust-be/src/worker.rs:53`).
 
 ## ack / nack / heartbeat and the fence token
 

@@ -1,7 +1,7 @@
 """Serves Forge presigned blob URLs.
 
 forge-py does not expose `blob_router()`, so this mounts the equivalent route at the
-default presign prefix (`/_forge/blob`). It verifies the HMAC signature and expiry with
+default presign prefix (`/api/files`). It verifies the HMAC signature and expiry with
 `blob_verify_presign` (the exact check the built-in Rust router performs), then does the
 get/put against blob storage. Without this, presigned URLs would not resolve."""
 
@@ -14,6 +14,17 @@ router = APIRouter()
 
 # Forge's blob hard cap; mirrors the Rust router's DefaultBodyLimit(MAX_OBJECT_BYTES).
 MAX_OBJECT_BYTES = 50 * 1024 * 1024
+
+# Cache directive on presigned downloads, matching the Rust router: the client may
+# cache the bytes but must revalidate each use (the ETag makes that a cheap 304);
+# `private` keeps a shared proxy from caching one user's signed object.
+CACHE_CONTROL = "private, no-cache"
+
+
+def _etag_matches(if_none_match: str, etag: str) -> bool:
+    """Does an If-None-Match value match `etag` (already quoted)? Supports the
+    comma-separated list form and the `*` wildcard, per RFC 9110."""
+    return any(c.strip() in ("*", etag) for c in if_none_match.split(","))
 
 
 def _params(request: Request):
@@ -30,7 +41,7 @@ def _params(request: Request):
     return key, expires, max_bytes, sig
 
 
-@router.get("/_forge/blob")
+@router.get("/api/files")
 async def download(request: Request):
     parsed = _params(request)
     if parsed is None:
@@ -39,22 +50,37 @@ async def download(request: Request):
     forge = request.app.state.forge
     if not await forge.blob_verify_presign("GET", key, expires, max_bytes, sig):
         return PlainTextResponse("invalid or expired signature", status_code=403)
+
+    # One head() gives both the content type and the ETag for conditional requests,
+    # matching the Rust router. The ETag is the storage etag, quoted per RFC 9110.
+    info = await forge.blob_head(key)
+    ct = (info.content_type if info else None) or "application/octet-stream"
+    etag = f'"{info.etag}"' if info else None
+
+    # Honour If-None-Match: a cached client that already holds this exact object gets
+    # a bodyless 304 instead of the full payload re-sent.
+    inm = request.headers.get("if-none-match")
+    if etag and inm and _etag_matches(inm, etag):
+        return Response(
+            status_code=304,
+            headers={"ETag": etag, "Cache-Control": CACHE_CONTROL},
+        )
+
     data = await forge.blob_get(key)
     if data is None:
         return PlainTextResponse("not found", status_code=404)
-    ct = await forge.blob_content_type(key) or "application/octet-stream"
     # Match Forge's own router: never let a served blob render inline or be MIME-sniffed.
-    return Response(
-        content=data,
-        media_type=ct,
-        headers={
-            "Content-Disposition": "attachment",
-            "X-Content-Type-Options": "nosniff",
-        },
-    )
+    headers = {
+        "Content-Disposition": "attachment",
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": CACHE_CONTROL,
+    }
+    if etag:
+        headers["ETag"] = etag
+    return Response(content=data, media_type=ct, headers=headers)
 
 
-@router.put("/_forge/blob")
+@router.put("/api/files")
 async def upload(request: Request):
     parsed = _params(request)
     if parsed is None:

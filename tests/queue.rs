@@ -225,14 +225,12 @@ async fn dlq_job_exhaustion_parks_as_dead_not_chained() {
     let forge = db.forge().await.unwrap();
     let q = forge.queue();
 
-    // Exhaust in the main queue: the job re-homes to orders.dlq.
     q.enqueue("orders", payload("x"), EnqueueOpts::new().with_max_attempts(1))
         .await
         .unwrap();
     let j = q.dequeue("orders", vis(30)).await.unwrap().unwrap();
     q.nack(&j, NackOpts::default()).await.unwrap();
 
-    // Consume the DLQ and exhaust it too.
     let d = q.dequeue("orders.dlq", vis(30)).await.unwrap().unwrap();
     assert_eq!(d.attempt, 1, "DLQ job is a fresh attempt");
     q.nack(&d, NackOpts::default()).await.unwrap();
@@ -333,12 +331,10 @@ async fn depth_reports_visible_in_flight_and_delayed() {
     assert_eq!((d.visible, d.in_flight, d.delayed), (2, 0, 1));
     assert_eq!(d.total(), 3);
 
-    // Leasing one moves it visible -> in_flight.
     let job = q.dequeue("d", vis(120)).await.unwrap().expect("a job");
     let d = q.depth("d").await.unwrap();
     assert_eq!((d.visible, d.in_flight, d.delayed), (1, 1, 1));
 
-    // Acking drops it from every count.
     q.ack(&job).await.unwrap();
     let d = q.depth("d").await.unwrap();
     assert_eq!((d.visible, d.in_flight, d.delayed), (1, 0, 1));

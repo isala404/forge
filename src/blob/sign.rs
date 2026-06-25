@@ -28,13 +28,7 @@ impl Method {
 /// The exact bytes covered by the signature. Order and separators are fixed so the
 /// signer and verifier agree.
 fn canonical(method: Method, key: &str, expires_epoch: i64, max_bytes: u64) -> String {
-    format!(
-        "{}\n{}\n{}\n{}",
-        method.as_str(),
-        key,
-        expires_epoch,
-        max_bytes
-    )
+    format!("{}\n{key}\n{expires_epoch}\n{max_bytes}", method.as_str())
 }
 
 /// HMAC-SHA256 hex signature over the canonical string. `max_bytes` is `0` for a
@@ -55,7 +49,7 @@ pub(crate) fn sign(
 
 /// Constant-time verification of a hex signature against the canonical string.
 /// A malformed (non-hex) signature, or any mismatch, returns `false` — never panics.
-/// Consumed by `Blob::verify_presigned` and the `blob-router`.
+/// Consumed by `Blob::verify_presigned`.
 pub(crate) fn verify(
     secret: &[u8],
     method: Method,

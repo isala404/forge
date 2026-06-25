@@ -7,18 +7,16 @@
 //! presence): a request handler `publish`es an event, and every open `subscribe`
 //! stream for that topic receives it. It is deliberately *not* a queue — there is
 //! no durability, ordering guarantee across connections, or redelivery. Use
-//! [`crate::Queue`] when a message must not be lost.
+//! [`crate::queue::Queue`] when a message must not be lost.
+//!
+//! The contract (the [`Pubsub`] trait, [`Subscription`], [`channel_for`]) lives in
+//! this module, which also wires the Postgres backend.
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::stream::BoxStream;
 
 use crate::error::Result;
-
-#[cfg(feature = "postgres")]
-mod pg;
-#[cfg(feature = "postgres")]
-pub(crate) use pg::PgPubsub;
 
 /// The Postgres `LISTEN`/`NOTIFY` channel a `topic` maps to. Exposed so a process
 /// in another language (via the bindings) can `LISTEN` on the exact channel that a
@@ -29,11 +27,11 @@ pub fn channel_for(topic: &str) -> String {
     format!("forge_{}", h.get(..32).unwrap_or(h.as_str()))
 }
 
-/// Largest allowed topic in UTF-8 bytes. Over => [`crate::ForgeError::Invalid`].
+/// Largest allowed topic in UTF-8 bytes. Over => [`crate::error::ForgeError::Invalid`].
 pub const MAX_TOPIC_BYTES: usize = 256;
 
 /// Largest allowed payload in bytes. Postgres caps a `NOTIFY` payload at 8000
-/// bytes; we reserve headroom. Over => [`crate::ForgeError::Limit`]. For larger
+/// bytes; we reserve headroom. Over => [`crate::error::ForgeError::Limit`]. For larger
 /// data, publish a reference (e.g. a row id) and have the subscriber read it.
 pub const MAX_PAYLOAD_BYTES: usize = 7000;
 
@@ -43,12 +41,12 @@ pub const MAX_PAYLOAD_BYTES: usize = 7000;
 pub type Subscription = BoxStream<'static, Result<Bytes>>;
 
 /// Publish/subscribe over a single Postgres connection. Object-safe; the facade
-/// hands out `&dyn Pubsub` via [`crate::Forge::pubsub`].
+/// hands out `&dyn Pubsub` via `forge::Forge::pubsub`.
 ///
 /// Exact delivery semantics (at-most-once, connected-only, no persistence) are in
 /// `docs/contracts/pubsub.md`.
 #[async_trait]
-pub trait Pubsub: crate::sealed::Sealed + Send + Sync {
+pub trait Pubsub: Send + Sync {
     /// Publish `payload` to every subscriber currently listening on `topic`.
     ///
     /// Fire-and-forget: returns `Ok` even with zero subscribers, and a message
@@ -63,3 +61,8 @@ pub trait Pubsub: crate::sealed::Sealed + Send + Sync {
     /// channel is released once it has no remaining subscribers.
     async fn subscribe(&self, topic: &str) -> Result<Subscription>;
 }
+
+mod memory;
+mod postgres;
+pub(crate) use memory::MemPubsub;
+pub(crate) use postgres::PgPubsub;

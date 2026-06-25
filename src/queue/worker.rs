@@ -96,10 +96,12 @@ impl WorkerBuilder {
             };
 
             let job = tokio::select! {
-                r = self.queue.dequeue(&self.name, DequeueOpts {
-                    wait: self.poll_wait,
-                    visibility_timeout: self.visibility_timeout,
-                }) => r,
+                r = self.queue.dequeue(
+                    &self.name,
+                    DequeueOpts::new()
+                        .with_wait(self.poll_wait)
+                        .with_visibility_timeout(self.visibility_timeout),
+                ) => r,
                 _ = &mut shutdown => break,
             };
 

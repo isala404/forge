@@ -2,7 +2,11 @@
 //!
 //! Object storage keyed by `/`-delimited path strings. Whole-body `put`/`get` (no
 //! streaming/multipart in v1), `head`/`delete`/`list`, and HMAC-signed presigned
-//! URLs that resolve through the optional `blob-router`.
+//! URLs the host app serves and verifies via [`Blob::verify_presigned`].
+//!
+//! The contract (the [`Blob`] trait, [`BlobInfo`], [`PutOpts`], [`ListPage`], the
+//! limits) lives in this module, which also wires the Postgres and filesystem backends
+//! plus the backend-agnostic signing helpers.
 
 use crate::error::Result;
 use crate::types::Cursor;
@@ -11,26 +15,11 @@ use bytes::Bytes;
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
-mod common;
-mod sign;
-
-#[cfg(feature = "postgres")]
-mod fs;
-#[cfg(feature = "postgres")]
-mod pg;
-#[cfg(feature = "postgres")]
-pub(crate) use fs::FsBlob;
-#[cfg(feature = "postgres")]
-pub(crate) use pg::PgBlob;
-
-#[cfg(feature = "blob-router")]
-pub mod router;
-
-/// Largest object body accepted by `put` (50 MiB). Over => [`crate::ForgeError::Limit`].
+/// Largest object body accepted by `put` (50 MiB). Over => [`crate::error::ForgeError::Limit`].
 pub const MAX_OBJECT_BYTES: usize = 50 * 1024 * 1024;
-/// Largest object key, in encoded UTF-8 bytes. Over => [`crate::ForgeError::Limit`].
+/// Largest object key, in encoded UTF-8 bytes. Over => [`crate::error::ForgeError::Limit`].
 pub const MAX_KEY_BYTES: usize = 1024;
-/// Largest `content_type`, in bytes. Over => [`crate::ForgeError::Limit`].
+/// Largest `content_type`, in bytes. Over => [`crate::error::ForgeError::Limit`].
 pub const MAX_CONTENT_TYPE_BYTES: usize = 256;
 /// Largest user metadata, total of all keys + values, in bytes. Over => `Limit`.
 pub const MAX_METADATA_BYTES: usize = 2048;
@@ -55,13 +44,11 @@ impl PutOpts {
         Self::default()
     }
 
-    /// Set the content type.
     pub fn with_content_type(mut self, ct: impl Into<String>) -> Self {
         self.content_type = Some(ct.into());
         self
     }
 
-    /// Add one user-metadata entry.
     pub fn with_metadata(mut self, k: impl Into<String>, v: impl Into<String>) -> Self {
         self.metadata.insert(k.into(), v.into());
         self
@@ -86,9 +73,31 @@ pub struct BlobInfo {
     pub metadata: BTreeMap<String, String>,
 }
 
+impl BlobInfo {
+    /// Construct object metadata. For backend implementors; app code receives this from
+    /// [`Blob::head`] / [`Blob::list`].
+    pub fn new(
+        key: String,
+        size: u64,
+        content_type: String,
+        etag: String,
+        last_modified: SystemTime,
+        metadata: BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            key,
+            size,
+            content_type,
+            etag,
+            last_modified,
+            metadata,
+        }
+    }
+}
+
 /// One page of [`Blob::list`] results, in lexicographic key order.
 #[non_exhaustive]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ListPage {
     /// The objects on this page.
     pub items: Vec<BlobInfo>,
@@ -96,11 +105,19 @@ pub struct ListPage {
     pub next: Option<Cursor>,
 }
 
+impl ListPage {
+    /// Construct a list page. For backend implementors; app code receives this from
+    /// [`Blob::list`].
+    pub fn new(items: Vec<BlobInfo>, next: Option<Cursor>) -> Self {
+        Self { items, next }
+    }
+}
+
 /// S3-shaped object storage. Object-safe; the facade hands out `Arc<dyn Blob>`.
 ///
 /// Exact semantics, limits, presign scheme, and error mapping: `docs/contracts/blob.md`.
 #[async_trait]
-pub trait Blob: crate::sealed::Sealed + Send + Sync {
+pub trait Blob: Send + Sync {
     /// `PutObject`. Buffered (≤ 50 MiB), last-write-wins. The new `etag` is read via
     /// [`Blob::head`].
     async fn put(&self, key: &str, data: Bytes, opts: PutOpts) -> Result<()>;
@@ -129,10 +146,9 @@ pub trait Blob: crate::sealed::Sealed + Send + Sync {
     /// expired; `Ok(false)` for a bad signature or an expired URL; `Err(Config)` if no
     /// signing secret is set, `Err(Invalid)` if `method` is not `GET`/`PUT`.
     ///
-    /// This is the same check the built-in [`crate::Forge::blob_router`] performs,
-    /// exposed so a host app (or a language binding) that serves the presigned URLs
-    /// itself can enforce it instead of trusting the key blindly. `expires_epoch`,
-    /// `max_bytes`, and `sig` come straight off the URL's query params.
+    /// Exposed so the host app (or a language binding) that serves the presigned URLs
+    /// enforces it instead of trusting the key blindly. `expires_epoch`, `max_bytes`,
+    /// and `sig` come straight off the URL's query params.
     async fn verify_presigned(
         &self,
         method: &str,
@@ -141,11 +157,14 @@ pub trait Blob: crate::sealed::Sealed + Send + Sync {
         max_bytes: u64,
         sig: &str,
     ) -> Result<bool>;
-
-    /// Whether a signing secret is configured, so presigned URLs can be minted and
-    /// verified. The facade uses this to fail `blob_router()` early when presigning is
-    /// unconfigured. Defaults to `false`; backends that support presigning override it.
-    fn presign_ready(&self) -> bool {
-        false
-    }
 }
+
+mod common;
+mod sign;
+
+mod fs;
+mod memory;
+mod postgres;
+pub(crate) use fs::FsBlob;
+pub(crate) use memory::MemBlob;
+pub(crate) use postgres::PgBlob;

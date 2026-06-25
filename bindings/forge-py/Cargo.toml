@@ -11,7 +11,7 @@ name = "forge_py"
 crate-type = ["cdylib"]
 
 [dependencies]
-forge = { package = "forge-rs", path = "../.." }
+forge = { path = "../.." }
 # abi3-py39: build against the stable ABI so one wheel runs on CPython >= 3.9
 # (including newer interpreters than this pyo3 release knows about).
 pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }

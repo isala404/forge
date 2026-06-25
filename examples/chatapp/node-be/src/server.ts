@@ -26,9 +26,23 @@ function send(res: ServerResponse, status: number, body: string): void {
   res.end(body);
 }
 
-// The forge-node binding has no built-in HTTP router, so /_forge/blob is served
+// The forge-node binding has no built-in HTTP router, so /api/files is served
 // here against the same presign contract. Binary goes through put/getBytes intact.
 const BLOB_BODY_LIMIT = 50 * 1024 * 1024;
+
+// Cache directive on presigned downloads, matching the Rust router: the client may
+// cache the bytes but must revalidate each use (the ETag makes that a cheap 304);
+// `private` keeps a shared proxy from caching one user's signed object.
+const CACHE_CONTROL = "private, no-cache";
+
+// Does an If-None-Match value match `etag` (already quoted)? Supports the
+// comma-separated list form and the `*` wildcard, per RFC 9110.
+function etagMatches(ifNoneMatch: string, etag: string): boolean {
+  return ifNoneMatch
+    .split(",")
+    .map((c) => c.trim())
+    .some((candidate) => candidate === "*" || candidate === etag);
+}
 
 function readBody(req: IncomingMessage, limit: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -95,6 +109,31 @@ async function handleBlob(
     return;
   }
 
+  // One head() gives both the content type and the ETag for conditional requests,
+  // matching the Rust router. The ETag is the storage etag, quoted per RFC 9110.
+  let contentType = "application/octet-stream";
+  let etag: string | null = null;
+  try {
+    const info = await app.forge.blobHead(key);
+    if (info) {
+      if (info.contentType) contentType = info.contentType;
+      etag = `"${info.etag}"`;
+    }
+  } catch {
+    /* keep defaults; a head failure just means no conditional request support */
+  }
+
+  // Honour If-None-Match: a cached client that already holds this exact object gets a bodyless 304 instead of the full payload re-sent.
+  const inm = req.headers["if-none-match"];
+  if (etag && typeof inm === "string" && etagMatches(inm, etag)) {
+    res.writeHead(304, {
+      etag,
+      "cache-control": CACHE_CONTROL,
+      ...corsHeaders(),
+    });
+    return void res.end();
+  }
+
   let bytes: Buffer | null;
   try {
     bytes = await app.forge.blobGetBytes(key);
@@ -102,23 +141,19 @@ async function handleBlob(
     return send(res, 500, "download failed: " + (e as Error).message);
   }
   if (bytes === null) return send(res, 404, "not found");
-  let contentType = "application/octet-stream";
-  try {
-    const ct = await app.forge.blobContentType(key);
-    if (ct) contentType = ct;
-  } catch {
-    /* keep default */
-  }
   // Match Forge's own blob router: never let a served blob render inline or be
   // MIME-sniffed, so a member who uploaded text/html or svg can't land stored XSS
   // on the backend origin.
-  res.writeHead(200, {
+  const headers: Record<string, string> = {
     "content-type": contentType,
     "content-length": String(bytes.length),
     "content-disposition": "attachment",
     "x-content-type-options": "nosniff",
+    "cache-control": CACHE_CONTROL,
     ...corsHeaders(),
-  });
+  };
+  if (etag) headers.etag = etag;
+  res.writeHead(200, headers);
   res.end(bytes);
 }
 
@@ -171,7 +206,7 @@ export async function startServer(port = parseInt(envOr("PORT", "8082"), 10)): P
       }
       if (path === "/healthz") return send(res, 200, "ok");
       if (path === "/graphql") return void yoga.handle(req, res);
-      if (path.startsWith("/_forge/blob")) return void handleBlob(app, req, res, url);
+      if (path.startsWith("/api/files")) return void handleBlob(app, req, res, url);
       return send(res, 404, "not found");
     } catch (e) {
       console.error("request error:", e);

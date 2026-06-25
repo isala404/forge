@@ -85,7 +85,7 @@ return a fully-formed, ready-to-use URL as a `String`.
 | `delete` | Removes the object. Returns `true` if an object was removed, `false` if the key was already absent. Idempotent: a second `delete` returns `false`, not an error. |
 | `list` | Returns up to `limit` `BlobInfo`s whose key starts with `prefix`, in **lexicographic key order**, plus a `Cursor` for the next page (`None` when iteration is complete). Cursor-based only — no offset. An empty `prefix` lists the whole namespace. |
 | `presign_upload` | Returns a URL that authorizes a single `PUT` of **this one key**, valid for `expires`, rejecting bodies over `max_bytes`. The upload, when performed, behaves exactly like `put` (last-write-wins, fresh `etag`). |
-| `presign_download` | Returns a URL that authorizes a single `GET` of **this one key**, valid for `expires`. Resolves to the object's current bytes at fetch time (no snapshot). A download of a since-deleted key yields a `404` at the router. |
+| `presign_download` | Returns a URL that authorizes a single `GET` of **this one key**, valid for `expires`. Resolves to the object's current bytes at fetch time (no snapshot). A download of a since-deleted key yields a `404` at the serving endpoint. |
 
 Keys are `/`-delimited path strings (`exports/2026/report.csv`). The `/` is an
 ordinary key byte, not a directory separator — there are no directories, only a flat
@@ -121,35 +121,48 @@ relationship across distinct keys for `put`/`delete` beyond per-key linearizabil
   `put`. Equal bytes => equal `etag`; any byte change => a different `etag`. It is
   **not** guaranteed to be S3-MD5-shaped (see Deviations) — treat it as an opaque
   change-detection token, not a checksum of a known algorithm.
-- **Presigned URLs resolve through a mounted router.** On the Postgres backend the
-  signed URL points at Forge's optional axum router (`forge.blob_router()`,
-  feature-gated) that the app mounts. The router verifies the HMAC signature, the
-  expiry, the key scope, and (on upload) the `max_bytes` cap, then performs the
-  equivalent `get`/`put` against `forge_blobs`. Signing and verification are identical
-  to the S3 path, so swapping to S3 changes nothing in app code — only the URL host.
-- **Downloads are served defensively.** The router answers a presigned `GET` with the
-  stored `content_type` but also `Content-Disposition: attachment` and
+- **The serving endpoint is the app's.** Forge ships **no** HTTP router and no axum
+  dependency. On the Postgres backend the signed URL points at an endpoint the **app
+  MUST implement** over the public `Blob` trait. That endpoint MUST verify the HMAC
+  signature, the expiry, the key scope, and (on upload) the `max_bytes` cap with
+  `verify_presigned`, then perform the equivalent `get`/`put`. Signing and verification
+  are identical to the S3 path, so swapping to S3 changes nothing in app code — only the
+  URL host. The reference implementation is
+  `examples/chatapp/rust-be/src/blob_router.rs`.
+- **Downloads MUST be served defensively.** An endpoint serving a presigned `GET` MUST
+  return the stored `content_type` **and** `Content-Disposition: attachment` **and**
   `X-Content-Type-Options: nosniff`. Objects are caller-supplied bytes served from the
   app's own origin, so a stored HTML/SVG payload must never be rendered inline or
-  sniffed into an active type — that would be stored XSS. Subresource loads (`<img>`,
-  `<video>`) ignore `Content-Disposition`, so legitimate inline media still works; only
-  top-level navigation to the URL is forced to download. A binding that serves presigned
-  URLs itself (e.g. `forge-py`) must set the same two headers.
+  sniffed into an active type — that would be stored XSS. These two headers are the
+  stored-XSS defense; nothing in the library sets them, so the serving app or language
+  binding MUST. Subresource loads (`<img>`, `<video>`) ignore `Content-Disposition`, so
+  legitimate inline media still works; only top-level navigation to the URL is forced to
+  download.
+- **Conditional downloads.** A presigned `GET` SHOULD also return the object's `ETag` and
+  `Cache-Control: private, no-cache` (the bytes may be cached but must be revalidated,
+  since a key can be overwritten). A client that sends `If-None-Match` with the current
+  ETag gets a bodyless `304 Not Modified` (the `*` wildcard and comma-separated lists
+  are honoured per RFC 9110).
+- **Upload body limit.** The serving endpoint MUST allow request bodies up to the
+  **50 MiB (52 428 800-byte) object cap** so a signed upload can reach `max_bytes`.
+  Frameworks that cap bodies lower by default (axum defaults to 2 MiB) MUST raise the
+  limit to the object cap; the signed `max_bytes` still fences each `PUT`.
+- **Upload error mapping.** A body over the signed `max_bytes`, or over the object-size
+  cap, is `413 Payload Too Large`; an over-long `Content-Type` header (a client-supplied
+  value) is `400 Bad Request`, not `413`.
 - **Signature scope.** Each URL is bound to one `key`, one method (`GET` xor `PUT`),
   one expiry, and (upload) one `max_bytes`. A URL cannot be replayed against a
   different key, method, or a larger body. Expiry is at seconds precision (`TIMESTAMPTZ`).
 - **No snapshot semantics.** A presigned download serves the object's bytes **at fetch
   time**, not at sign time. If the object is overwritten or deleted between signing and
   fetching, the fetch reflects the current state (current bytes, or `404`).
-- **Verifying a presign yourself.** `verify_presigned(method, key, expires_epoch,
-  max_bytes, sig)` returns `Ok(true)` only when the signature matches the configured
-  secret AND the URL has not expired (`Ok(false)` otherwise; `Err(Config)` with no
-  secret; `Err(Invalid)` for a non-`GET`/`PUT` method). It is the exact check the
-  built-in router performs, exposed so an app or a language binding that serves the
-  presigned URLs itself enforces them rather than trusting the key. The built-in
-  `blob_router` also raises axum's default 2 MiB request-body limit to the 50 MiB
-  object cap, so uploads up to the cap go through (the signed `max_bytes` still fences
-  each `PUT`).
+- **The check the serving endpoint MUST perform.** `verify_presigned(method, key,
+  expires_epoch, max_bytes, sig)` returns `Ok(true)` only when the signature matches the
+  configured secret AND the URL has not expired (`Ok(false)` otherwise; `Err(Config)`
+  with no secret; `Err(Invalid)` for a non-`GET`/`PUT` method). It returns a bare `bool`
+  and enforces **no** HTTP headers. Any app or language binding that serves the presigned
+  URLs MUST call it on every request and MUST reject anything but `Ok(true)`, rather than
+  trusting the key.
 
 ## Limits
 
@@ -180,10 +193,10 @@ cap is on the encoded byte length, not character count.
 | presign `expires` over the 7-day ceiling | `Limit` | no |
 | empty key; presign `expires` zero/negative | `Invalid` | no — caller bug |
 | transient backend outage (pool timeout, dropped conn, `08xxx`/`57014`) | `Unavailable` | yes |
-| router: presigned request with a bad/tampered or expired signature | `Precondition` | no — re-sign |
-| router: presigned upload body exceeds the signed `max_bytes` | `Precondition` | no — fence miss |
-| router: malformed presigned request (missing/garbled signing params) | `Invalid` | no — caller bug |
-| `presign_upload` / `presign_download` / `verify_presigned` / `blob_router` invoked without a configured signing secret | `Config` | no — set `blob_signing_secret` |
+| serving endpoint: presigned request with a bad/tampered or expired signature | `Precondition` | no — re-sign |
+| serving endpoint: presigned upload body exceeds the signed `max_bytes` | `Precondition` | no — fence miss |
+| serving endpoint: malformed presigned request (missing/garbled signing params) | `Invalid` | no — caller bug |
+| `presign_upload` / `presign_download` / `verify_presigned` invoked without a configured signing secret | `Config` | no — set `blob_signing_secret` |
 | misconfiguration (bad DSN, missing migration) at `Forge::init()` | `Config` | no — init only |
 | other vendor/SDK error | `Backend` (carries retryability flag) | per flag |
 
@@ -195,7 +208,7 @@ yields `Precondition` (the signed precondition no longer holds), while a *malfor
 request (a caller that built the URL wrong) yields `Invalid`. Presigning is **optional**:
 `Forge::init()` succeeds with no `blob_signing_secret` and the CRUD surface
 (`put`/`get`/`head`/`delete`/`list`) works fully. The secret is required only by
-`presign_upload`, `presign_download`, `verify_presigned`, and `blob_router`; calling any
+`presign_upload`, `presign_download`, and `verify_presigned`; calling any
 of those without a configured secret returns `Config` at that call (consistently — not a
 mix of `Config` and `Invalid`), not at init. Error messages never contain object bytes,
 key contents, metadata values, or signing secrets.
@@ -207,10 +220,12 @@ key contents, metadata values, or signing secrets.
   secret, scoped to one key/method/expiry (and `max_bytes` on upload). Same guarantees
   (single-key, time-bound, size-capped, unforgeable), simpler scheme, no AWS
   credential machinery.
-- **Presigned URLs require the mounted router on the Postgres backend.** S3 URLs
-  resolve at AWS. Forge's Postgres URLs resolve only if the app has mounted
-  `forge.blob_router()`; without it, signed URLs do not resolve. (On an S3 backend the
-  URLs point at S3 directly and no router is needed — app code is unchanged.)
+- **Presigned URLs require an app-implemented serving endpoint on the Postgres backend.**
+  S3 URLs resolve at AWS. Forge ships no router, so its Postgres URLs resolve only if the
+  app implements an endpoint over the `Blob` trait at the signed prefix (see
+  `examples/chatapp/rust-be/src/blob_router.rs`); without it, signed URLs do not resolve.
+  (On an S3 backend the URLs point at S3 directly and no endpoint is needed — app code is
+  unchanged.)
 - **50 MiB object cap (S3 allows 5 GiB per `PutObject`).** v1 buffers the whole body in
   memory and stores `BYTEA`. Larger objects need streaming + multipart, which are
   post-v1. Over => `Limit`.
@@ -229,8 +244,9 @@ key contents, metadata values, or signing secrets.
 ## Observability
 
 One span per operation, emitted automatically. Span name `forge.blob.<op>`
-(`put` / `get` / `head` / `delete` / `list` / `presign_upload` / `presign_download`),
-plus `forge.blob.router.<get|put>` for a verified router request.
+(`put` / `get` / `head` / `delete` / `list` / `presign_upload` / `presign_download`).
+The app's serving endpoint runs in the host's own request stack, so its spans are the
+app's, not Forge's.
 
 Fields (never object bytes, never key contents, never metadata values, never signing
 secrets or signatures):
@@ -267,5 +283,5 @@ Keys, bytes, metadata values, signatures, and the signing secret are **never** e
 - **No server-side copy / move / rename.** No `CopyObject`. To relocate an object,
   `get` then `put` then `delete` from the caller.
 - **No multi-key transactions** and no cross-key atomicity or snapshots.
-- **Not a CDN.** No edge caching, no cache-control orchestration; the router serves
-  bytes directly.
+- **Not a CDN.** No edge caching, no cache-control orchestration; the serving endpoint
+  returns bytes directly from the app's own origin.

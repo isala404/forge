@@ -2,17 +2,14 @@
 //! `docs/contracts/config.md`.
 //!
 //! The trait is [`ConfigStore`] (module `config_store`) so it never collides with
-//! [`crate::ForgeConfig`]; the facade accessor is `forge.config()`.
+//! `forge::ForgeConfig`; the facade accessor is `forge.config()`.
+//!
+//! The contract (the [`ConfigStore`] trait, [`ConfigExt`], [`EvalCtx`], [`FlagRule`])
+//! lives in this module, which also wires the Postgres backend.
 
 use crate::error::{ForgeError, Result};
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
-use std::collections::BTreeMap;
-
-#[cfg(feature = "postgres")]
-mod pg;
-#[cfg(feature = "postgres")]
-pub(crate) use pg::PgConfig;
 
 /// Largest allowed config key in encoded UTF-8 bytes. Over => [`ForgeError::Invalid`].
 pub const MAX_KEY_BYTES: usize = 256;
@@ -36,8 +33,6 @@ pub struct EvalCtx {
     /// Stable subject id (user/org). Drives `Percent`/`AllowList`. `None` => those rules
     /// fall back per the contract.
     pub targeting_key: Option<String>,
-    /// Reserved for future attribute-based rules; unused by v1 rules.
-    pub attributes: BTreeMap<String, String>,
 }
 
 impl EvalCtx {
@@ -50,14 +45,7 @@ impl EvalCtx {
     pub fn user(key: impl Into<String>) -> Self {
         Self {
             targeting_key: Some(key.into()),
-            attributes: BTreeMap::new(),
         }
-    }
-
-    /// Attach an attribute (reserved for future rule kinds).
-    pub fn with_attribute(mut self, k: impl Into<String>, v: impl Into<String>) -> Self {
-        self.attributes.insert(k.into(), v.into());
-        self
     }
 }
 
@@ -80,7 +68,7 @@ pub enum FlagRule {
 ///
 /// Exact resolution order, caching, and flag evaluation: `docs/contracts/config.md`.
 #[async_trait]
-pub trait ConfigStore: crate::sealed::Sealed + Send + Sync {
+pub trait ConfigStore: Send + Sync {
     /// Resolved string value: env `FORGE_CFG_<KEY>` over the stored value over `None`.
     /// Served from the in-process cache (≤30s stale). `None` if unset at every layer.
     async fn get_raw(&self, key: &str) -> Result<Option<String>>;
@@ -124,3 +112,8 @@ pub trait ConfigExt: ConfigStore {
 }
 
 impl<T: ConfigStore + ?Sized> ConfigExt for T {}
+
+mod memory;
+mod postgres;
+pub(crate) use memory::MemConfig;
+pub(crate) use postgres::PgConfig;

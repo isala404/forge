@@ -15,7 +15,7 @@ use thiserror::Error;
 #[non_exhaustive]
 pub enum ForgeError {
     /// Misconfiguration: bad connection string, missing migration, malformed
-    /// option. Per principle 3 this can only occur during [`crate::Forge::init`].
+    /// option. Per principle 3 this can only occur during `forge::Forge::init`.
     /// Not retryable — fix the configuration.
     #[error("configuration error: {0}")]
     Config(String),
@@ -150,7 +150,6 @@ fn is_transient_sqlx_error(err: &sqlx::Error) -> bool {
     }
 }
 
-/// Result type alias used throughout Forge.
 pub type Result<T> = std::result::Result<T, ForgeError>;
 
 #[cfg(test)]
@@ -203,6 +202,74 @@ mod tests {
         assert!(!ForgeError::precondition("x").is_retryable());
         assert!(ForgeError::backend_with("x", true, std::io::Error::other("e")).is_retryable());
         assert!(!ForgeError::backend("x").is_retryable());
+    }
+
+    /// Guards against silent drift between the `ForgeError` enum and the normative
+    /// code table in `docs/contracts/errors.md`: a new variant won't compile (the
+    /// match below is exhaustive), a renamed/removed doc row fails the set check, and
+    /// a changed `is_retryable()` that the doc didn't follow fails the per-row check.
+    #[test]
+    fn errors_md_table_matches_the_enum() {
+        // Exhaustive: adding a variant forces a new arm here (and, via the assertions,
+        // a new errors.md row).
+        fn code(e: &ForgeError) -> &'static str {
+            match e {
+                ForgeError::Config(_) => "Config",
+                ForgeError::Unavailable(_) => "Unavailable",
+                ForgeError::NotFound => "NotFound",
+                ForgeError::Precondition(_) => "Precondition",
+                ForgeError::Limit(_) => "Limit",
+                ForgeError::Invalid(_) => "Invalid",
+                ForgeError::Backend { .. } => "Backend",
+            }
+        }
+        let samples = [
+            ForgeError::config("c"),
+            ForgeError::unavailable("u"),
+            ForgeError::NotFound,
+            ForgeError::precondition("p"),
+            ForgeError::limit("l"),
+            ForgeError::invalid("i"),
+            ForgeError::backend("b"),
+        ];
+
+        let doc = include_str!("../docs/contracts/errors.md");
+        // The first backtick-quoted token of each table data row is its canonical code.
+        let doc_rows: Vec<(String, String)> = doc
+            .lines()
+            .filter(|l| l.trim_start().starts_with("| `"))
+            .filter_map(|l| {
+                let cells: Vec<&str> = l.split('|').map(str::trim).collect();
+                // cells: ["", code, rust, node, python, retryable, meaning, ""]
+                let code = cells.get(1)?.trim_matches('`').to_string();
+                let retryable = cells.get(5)?.replace('*', "").to_lowercase();
+                Some((code, retryable))
+            })
+            .collect();
+
+        let doc_codes: std::collections::BTreeSet<&str> =
+            doc_rows.iter().map(|(c, _)| c.as_str()).collect();
+        let enum_codes: std::collections::BTreeSet<&str> =
+            samples.iter().map(code).collect();
+        assert_eq!(
+            doc_codes, enum_codes,
+            "errors.md code set must equal the ForgeError variant set"
+        );
+
+        for e in &samples {
+            let c = code(e);
+            let (_, doc_retryable) = doc_rows
+                .iter()
+                .find(|(rc, _)| rc == c)
+                .unwrap_or_else(|| panic!("errors.md has no row for {c}"));
+            match doc_retryable.as_str() {
+                // Backend carries a per-error flag, so the doc says "per-error".
+                "per-error" => assert_eq!(c, "Backend"),
+                "yes" => assert!(e.is_retryable(), "{c}: doc says retryable, enum says not"),
+                "no" => assert!(!e.is_retryable(), "{c}: doc says not retryable, enum says it is"),
+                other => panic!("{c}: unrecognized retryable cell {other:?}"),
+            }
+        }
     }
 
     #[test]

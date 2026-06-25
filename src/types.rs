@@ -5,14 +5,6 @@
 pub struct Cursor(pub(crate) String);
 
 impl Cursor {
-    pub(crate) fn new(token: impl Into<String>) -> Self {
-        Self(token.into())
-    }
-
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
-
     /// The cursor as an opaque token string. It is still opaque — treat it as a
     /// black box and only pass it back via [`Cursor::from_token`]. Exposed so a
     /// language binding can carry a cursor across the FFI boundary as a string.

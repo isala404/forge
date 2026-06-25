@@ -82,6 +82,21 @@ impl Cron {
         }
         None
     }
+
+    /// The most recent matching minute at or before `at` (UTC), or `None` if none falls
+    /// within ~4 years back. Used to find the latest *missed* tick on recovery: for a
+    /// fast cron many ticks behind, this is essentially `at` truncated to the minute, so
+    /// the grace check sees a tick that is only seconds late rather than the oldest one.
+    pub(crate) fn prev_or_at(&self, at: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        let mut t = at.with_second(0)?.with_nanosecond(0)?;
+        for _ in 0..(4 * 366 * 24 * 60) {
+            if self.matches(&t) {
+                return Some(t);
+            }
+            t -= chrono::Duration::minutes(1);
+        }
+        None
+    }
 }
 
 /// Parse one field into a `min..=max` bitmap. Returns the bitmap and whether the
@@ -241,6 +256,27 @@ mod tests {
         );
         // A day name is not a valid month name, so it fails to parse in the month field.
         assert!(Cron::parse("0 9 * MON *").is_err());
+    }
+
+    #[test]
+    fn prev_or_at_finds_the_most_recent_tick() {
+        // Every-minute cron: prev tick is `at` truncated to the minute.
+        let every = Cron::parse("* * * * *").unwrap();
+        assert_eq!(
+            every.prev_or_at(at("2026-06-06T10:30:45Z")),
+            Some(at("2026-06-06T10:30:00Z"))
+        );
+        // A daily 09:00 cron, asked at 14:00, points back to 09:00 the same day.
+        let daily = Cron::parse("0 9 * * *").unwrap();
+        assert_eq!(
+            daily.prev_or_at(at("2026-06-06T14:00:00Z")),
+            Some(at("2026-06-06T09:00:00Z"))
+        );
+        // An exact match is returned as-is (at-or-before, inclusive).
+        assert_eq!(
+            daily.prev_or_at(at("2026-06-06T09:00:00Z")),
+            Some(at("2026-06-06T09:00:00Z"))
+        );
     }
 
     #[test]

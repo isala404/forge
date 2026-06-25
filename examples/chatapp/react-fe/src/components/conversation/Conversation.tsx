@@ -32,7 +32,6 @@ export function Conversation({ chatId, selfId, onBack }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const newest = items[0]?.message ?? null
 
-  // Mark the newest incoming message read whenever it changes.
   const lastReadId = useRef<string | null>(null)
   useEffect(() => {
     if (!newest) return

@@ -46,8 +46,13 @@ const wsClient = createWsClient({
 })
 
 onTokenChange(() => {
-  // Drop the socket so the next subscription reconnects with the new principal.
-  void wsClient.dispose()
+  // Drop the current socket so the next subscription reconnects with the new
+  // principal (connectionParams are re-read on each connect). `terminate` is the
+  // right tool here: it closes the live socket but the client stays reusable and
+  // reconnects on demand. `dispose` would permanently kill the client, so after
+  // the first login no subscription could ever connect again without a full page
+  // reload — which is exactly the "had to refresh for messages to arrive" bug.
+  wsClient.terminate()
 })
 
 export const client = new Client({

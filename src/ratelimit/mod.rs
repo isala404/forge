@@ -3,19 +3,17 @@
 //!
 //! One op, [`RateLimit::check`], an atomic check-and-consume. There is deliberately
 //! no peek (that is the classic TOCTOU race).
+//!
+//! The contract (the [`RateLimit`] trait, [`Limit`], [`Decision`], [`Algo`],
+//! [`FailMode`]) lives in this module, which also wires the Postgres backend.
 
 use crate::error::Result;
 use async_trait::async_trait;
 use std::time::Duration;
 
-#[cfg(feature = "postgres")]
-mod pg;
-#[cfg(feature = "postgres")]
-pub(crate) use pg::PgRateLimit;
-
-/// Largest allowed bucket name, in bytes. Over => [`crate::ForgeError::Limit`].
+/// Largest allowed bucket name, in bytes. Over => [`crate::error::ForgeError::Limit`].
 pub const MAX_BUCKET_BYTES: usize = 128;
-/// Largest allowed subject key, in bytes. Over => [`crate::ForgeError::Limit`].
+/// Largest allowed subject key, in bytes. Over => [`crate::error::ForgeError::Limit`].
 pub const MAX_KEY_BYTES: usize = 512;
 
 /// Rate-limit algorithm.
@@ -62,7 +60,7 @@ pub struct Limit {
 
 impl Limit {
     /// `max` units per `per`, token-bucket (the common default). `const` so a typed
-    /// [`crate::RateBucket`] policy can be declared as a `const`/`static`.
+    /// `forge::RateBucket` policy can be declared as a `const`/`static`.
     pub const fn per_duration(max: u32, per: Duration) -> Self {
         Self {
             max,
@@ -95,12 +93,32 @@ pub struct Decision {
     pub retry_after: Option<Duration>,
 }
 
+impl Decision {
+    /// Construct a decision. For backend implementors; app code receives this from
+    /// [`RateLimit::check`].
+    pub fn new(
+        allowed: bool,
+        limit: u32,
+        remaining: u32,
+        reset_after: Duration,
+        retry_after: Option<Duration>,
+    ) -> Self {
+        Self {
+            allowed,
+            limit,
+            remaining,
+            reset_after,
+            retry_after,
+        }
+    }
+}
+
 /// An atomic check-and-consume rate limiter. Lineage: token bucket / GCRA + IETF
 /// RateLimit headers. Object-safe; the facade hands out `Arc<dyn RateLimit>`.
 ///
 /// Exact algorithm math, failure modes, and limits: `docs/contracts/ratelimit.md`.
 #[async_trait]
-pub trait RateLimit: crate::sealed::Sealed + Send + Sync {
+pub trait RateLimit: Send + Sync {
     /// Atomic check-and-consume of one unit against `limit` for subject `key` under
     /// namespace `bucket`. A *denied* request is `Ok(Decision { allowed: false, .. })`,
     /// never an `Err`. On a backend error the configured failure mode applies
@@ -121,3 +139,8 @@ pub trait RateLimit: crate::sealed::Sealed + Send + Sync {
         fail: FailMode,
     ) -> Result<Decision>;
 }
+
+mod memory;
+mod postgres;
+pub(crate) use memory::MemRateLimit;
+pub(crate) use postgres::PgRateLimit;

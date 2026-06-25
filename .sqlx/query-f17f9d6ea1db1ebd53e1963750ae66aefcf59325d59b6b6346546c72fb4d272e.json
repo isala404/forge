@@ -1,0 +1,54 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT name, kind, cron_expr, target_queue, next_run, last_run FROM forge_schedules WHERE app = $1 AND ($2::text IS NULL OR name > $2) ORDER BY name LIMIT $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "kind",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "cron_expr",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "target_queue",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "next_run",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 5,
+        "name": "last_run",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "f17f9d6ea1db1ebd53e1963750ae66aefcf59325d59b6b6346546c72fb4d272e"
+}

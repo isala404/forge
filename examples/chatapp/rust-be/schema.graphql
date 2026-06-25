@@ -123,7 +123,6 @@ type Mutation {
 }
 
 type Subscription {
-  "New messages in a chat (live)."
   messageAdded(chatId: ID!): Message!
   typing(chatId: ID!): TypingEvent!
   receiptChanged(chatId: ID!): Receipt!

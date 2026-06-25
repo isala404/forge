@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO forge_job_dedup (queue, dedup_id, job_id, expires_at)\n                   VALUES ($1, $2, $3, now() + make_interval(secs => $4))\n                   ON CONFLICT (queue, dedup_id) DO UPDATE\n                     SET job_id = CASE WHEN forge_job_dedup.expires_at <= now()\n                                       THEN EXCLUDED.job_id ELSE forge_job_dedup.job_id END,\n                         expires_at = CASE WHEN forge_job_dedup.expires_at <= now()\n                                           THEN EXCLUDED.expires_at ELSE forge_job_dedup.expires_at END\n                   RETURNING job_id, (job_id = $3) AS \"claimed!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "job_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "claimed!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Uuid",
+        "Float8"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "f64ba8c1f651f0be71b5e4945c5f0f2681bce39ece1bcc033cc2e56a5a4a2ee6"
+}

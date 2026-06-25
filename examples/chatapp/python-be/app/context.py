@@ -36,13 +36,16 @@ class Context(BaseContext):
     key; the principal resolves lazily on first `auth()` and is cached for the
     request/socket lifetime (WS connection_params arrive only after this is built)."""
 
-    def __init__(self, forge, pool, presence_ttl: float, http_token: str | None):
+    def __init__(self, forge, pool, presence_ttl: float, http_token: str | None, decoy_hash: str):
         super().__init__()
         self._services = {
             "forge": forge,
             "pool": pool,
             "presence_ttl": presence_ttl,
             "loaders": make_loaders(pool, forge),
+            # Throwaway argon2id hash (minted once at startup) for the login timing
+            # decoy; see app.gql.auth.login.
+            "decoy_hash": decoy_hash,
         }
         self._http_token = http_token
         self._resolved = False
@@ -120,6 +123,6 @@ def make_context_getter(presence_ttl: float):
     async def getter(connection: HTTPConnection) -> Context:
         state = connection.app.state
         http_token = _bearer(connection.headers.get("authorization"))
-        return Context(state.forge, state.pool, presence_ttl, http_token)
+        return Context(state.forge, state.pool, presence_ttl, http_token, state.decoy_hash)
 
     return getter

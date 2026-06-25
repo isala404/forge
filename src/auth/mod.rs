@@ -4,16 +4,14 @@
 //!
 //! Only hashes are ever stored or logged. The secret newtypes ([`PhcString`],
 //! [`SessionToken`], [`ApiKeySecret`]) have redacted `Debug`.
+//!
+//! The contract (the [`Auth`] trait, the secret newtypes, [`Session`]/[`ApiKey`] DTOs)
+//! lives in this module, which also wires the Postgres backend.
 
 use crate::error::Result;
 use async_trait::async_trait;
 use std::fmt;
 use std::time::{Duration, SystemTime};
-
-#[cfg(feature = "postgres")]
-mod pg;
-#[cfg(feature = "postgres")]
-pub(crate) use pg::PgAuth;
 
 /// Max password plaintext (argon2 input cap; blocks DoS via huge inputs).
 pub const MAX_PASSWORD_BYTES: usize = 4096;
@@ -53,6 +51,13 @@ impl fmt::Debug for PhcString {
 pub struct SessionToken(String);
 
 impl SessionToken {
+    /// Wrap a freshly minted token. For backend implementors only — the secret newtype
+    /// keeps the plaintext from being logged; app code receives this from
+    /// [`Auth::create_session`].
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
     /// The raw token, to hand to the client exactly once.
     pub fn as_str(&self) -> &str {
         &self.0
@@ -71,6 +76,13 @@ impl fmt::Debug for SessionToken {
 pub struct ApiKeySecret(String);
 
 impl ApiKeySecret {
+    /// Wrap a freshly minted `fk_...` secret. For backend implementors only — the
+    /// secret newtype keeps the plaintext from being logged; app code receives this
+    /// from [`Auth::create_api_key`].
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
     /// The raw `fk_...` key, to hand to the user exactly once.
     pub fn as_str(&self) -> &str {
         &self.0
@@ -108,7 +120,6 @@ impl SessionOpts {
         Self::default()
     }
 
-    /// Set the sliding idle timeout.
     pub fn with_idle_timeout(mut self, d: Duration) -> Self {
         self.idle_timeout = d;
         self
@@ -133,6 +144,18 @@ pub struct Session {
     pub expires_at: SystemTime,
 }
 
+impl Session {
+    /// Construct a live session. For backend implementors; app code receives this from
+    /// [`Auth::validate_session`].
+    pub fn new(user_id: String, created_at: SystemTime, expires_at: SystemTime) -> Self {
+        Self {
+            user_id,
+            created_at,
+            expires_at,
+        }
+    }
+}
+
 /// A freshly created API key. The `secret` is shown exactly once.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
@@ -147,6 +170,19 @@ pub struct ApiKey {
     pub created_at: SystemTime,
 }
 
+impl ApiKey {
+    /// Construct a freshly created API key. For backend implementors; app code receives
+    /// this from [`Auth::create_api_key`].
+    pub fn new(id: String, label: String, secret: ApiKeySecret, created_at: SystemTime) -> Self {
+        Self {
+            id,
+            label,
+            secret,
+            created_at,
+        }
+    }
+}
+
 /// Non-secret API-key metadata returned by [`Auth::verify_api_key`].
 #[non_exhaustive]
 #[derive(Debug, Clone)]
@@ -159,18 +195,30 @@ pub struct ApiKeyInfo {
     pub label: String,
 }
 
+impl ApiKeyInfo {
+    /// Construct API-key metadata. For backend implementors; app code receives this
+    /// from [`Auth::verify_api_key`].
+    pub fn new(id: String, owner_id: String, label: String) -> Self {
+        Self {
+            id,
+            owner_id,
+            label,
+        }
+    }
+}
+
 /// Auth primitives: argon2id passwords, opaque hashed sessions, `fk_` API keys.
 /// Object-safe; the facade hands out `Arc<dyn Auth>`.
 ///
 /// Forge does NOT own the users table — `user_id`/`owner_id` are opaque app strings.
 /// Exact semantics, timeouts, and error mapping: `docs/contracts/auth.md`.
 #[async_trait]
-pub trait Auth: crate::sealed::Sealed + Send + Sync {
+pub trait Auth: Send + Sync {
     /// Hash a password with argon2id at Forge-owned current params (fresh salt).
     async fn hash_password(&self, plain: &str) -> Result<PhcString>;
 
     /// Constant-time verify. `Ok(true)`/`Ok(false)`; a malformed `hash` is
-    /// [`crate::ForgeError::Invalid`], never `Ok(false)`.
+    /// [`crate::error::ForgeError::Invalid`], never `Ok(false)`.
     async fn verify_password(&self, plain: &str, hash: &PhcString) -> Result<bool>;
 
     /// `true` if `hash` is below Forge-current params (call after a successful verify
@@ -199,3 +247,8 @@ pub trait Auth: crate::sealed::Sealed + Send + Sync {
     /// Revoke a key by id. `Ok(true)` if removed, `Ok(false)` if unknown.
     async fn revoke_api_key(&self, key_id: &str) -> Result<bool>;
 }
+
+mod memory;
+mod postgres;
+pub(crate) use memory::MemAuth;
+pub(crate) use postgres::PgAuth;

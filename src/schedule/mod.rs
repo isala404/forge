@@ -4,25 +4,23 @@
 //! A thin layer over [`crate::queue`]: a due tick enqueues a job, so all of the
 //! queue's at-least-once / retry / DLQ semantics are inherited. A scheduled job is
 //! delivered **at least once** — consumers must be idempotent.
+//!
+//! The contract (the [`Schedule`] trait, [`ScheduleInfo`], [`ScheduleKind`],
+//! [`ScheduleOpts`]) lives in this module, which also wires the Postgres backend plus
+//! the cron-expression evaluator.
 
 use crate::error::Result;
 use crate::queue::JobId;
+use crate::types::Cursor;
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::time::SystemTime;
 
-mod cron;
-
-#[cfg(feature = "postgres")]
-mod pg;
-#[cfg(feature = "postgres")]
-pub(crate) use pg::PgSchedule;
-
-/// Largest allowed schedule name, in bytes. Over => [`crate::ForgeError::Limit`].
+/// Largest allowed schedule name, in bytes. Over => [`crate::error::ForgeError::Limit`].
 pub const MAX_NAME_BYTES: usize = 256;
 
 /// Largest accepted `at` horizon: ~100 years from now, in days (365.25 × 100). A
-/// `when` past this is [`crate::ForgeError::Limit`]. An absolute time a century out is
+/// `when` past this is [`crate::error::ForgeError::Limit`]. An absolute time a century out is
 /// effectively always a bug, and a fixed ceiling keeps backends in agreement (same
 /// rationale as the kv TTL ceiling). A past/now `when` is *not* rejected — it fires on
 /// the next tick if within the missed-tick grace, else is skipped and logged.
@@ -36,6 +34,29 @@ pub enum ScheduleKind {
     Cron(String),
     /// A one-shot enqueue at a fixed time.
     At,
+}
+
+/// Per-schedule delivery options applied to the queue job each tick enqueues.
+/// `#[non_exhaustive]` + builder so new knobs can be added without breaking callers.
+/// An unset field inherits the queue's own default (`max_attempts = 5`), matching a
+/// plain [`crate::queue::Queue::enqueue`].
+#[non_exhaustive]
+#[derive(Debug, Clone, Default)]
+pub struct ScheduleOpts {
+    /// Max delivery attempts for the enqueued job before it dead-letters. `None` =
+    /// the queue default (5).
+    pub max_attempts: Option<u32>,
+}
+
+impl ScheduleOpts {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_max_attempts(mut self, max_attempts: u32) -> Self {
+        self.max_attempts = Some(max_attempts);
+        self
+    }
 }
 
 /// A registered schedule, returned by [`Schedule::list`].
@@ -54,6 +75,26 @@ pub struct ScheduleInfo {
     pub last_run: Option<SystemTime>,
 }
 
+impl ScheduleInfo {
+    /// Construct a registered-schedule snapshot. For backend implementors; app code
+    /// receives this from [`Schedule::list`].
+    pub fn new(
+        name: String,
+        kind: ScheduleKind,
+        queue: String,
+        next_run: SystemTime,
+        last_run: Option<SystemTime>,
+    ) -> Self {
+        Self {
+            name,
+            kind,
+            queue,
+            next_run,
+            last_run,
+        }
+    }
+}
+
 /// Recurring and one-shot future work. Lineage: cron + Unix `at` + k8s CronJob.
 /// Object-safe; the facade hands out `Arc<dyn Schedule>`.
 ///
@@ -61,17 +102,32 @@ pub struct ScheduleInfo {
 /// loop) or `forge.run_scheduler_once()` (one pass). Exactly one enqueue happens per
 /// tick across all replicas. Exact semantics: `docs/contracts/schedule.md`.
 #[async_trait]
-pub trait Schedule: crate::sealed::Sealed + Send + Sync {
+pub trait Schedule: Send + Sync {
     /// Upsert a recurring cron schedule by `name` (re-registering replaces it). The
     /// 5-field `expr` (UTC) is validated now; an invalid one is
-    /// [`crate::ForgeError::Invalid`].
-    async fn cron(&self, name: &str, expr: &str, queue: &str, payload: Bytes) -> Result<()>;
+    /// [`crate::error::ForgeError::Invalid`]. `opts` controls the delivery options of the job
+    /// each tick enqueues (pass [`ScheduleOpts::new`] for the queue defaults).
+    async fn cron(
+        &self,
+        name: &str,
+        expr: &str,
+        queue: &str,
+        payload: Bytes,
+        opts: ScheduleOpts,
+    ) -> Result<()>;
 
     /// Schedule a one-shot enqueue at `when`. Returns the [`JobId`] the eventual
     /// queue job will carry. A `when` already in the past (or now) is accepted and
     /// fires on the next tick if within the missed-tick grace; a `when` more than
-    /// [`MAX_AT_HORIZON_DAYS`] out is [`crate::ForgeError::Limit`].
-    async fn at(&self, when: SystemTime, queue: &str, payload: Bytes) -> Result<JobId>;
+    /// [`MAX_AT_HORIZON_DAYS`] out is [`crate::error::ForgeError::Limit`]. `opts` controls the
+    /// enqueued job's delivery options (pass [`ScheduleOpts::new`] for the defaults).
+    async fn at(
+        &self,
+        when: SystemTime,
+        queue: &str,
+        payload: Bytes,
+        opts: ScheduleOpts,
+    ) -> Result<JobId>;
 
     /// Cancel a schedule by name. `true` if one was removed, `false` if absent.
     async fn cancel(&self, name: &str) -> Result<bool>;
@@ -83,12 +139,26 @@ pub trait Schedule: crate::sealed::Sealed + Send + Sync {
         self.cancel(&format!("at:{job_id}")).await
     }
 
-    /// List all registered schedules.
-    async fn list(&self) -> Result<Vec<ScheduleInfo>>;
+    /// List registered schedules, ordered by name, up to `limit` per page plus a
+    /// next-page cursor (`None` when iteration is complete). Mirrors the kv/blob
+    /// pagination shape so a backlog of pending one-shots never forces an unbounded
+    /// materialization. Weakly consistent: tolerate duplicates across pages.
+    async fn list(
+        &self,
+        cursor: Option<Cursor>,
+        limit: u32,
+    ) -> Result<(Vec<ScheduleInfo>, Option<Cursor>)>;
 
     /// Run one scheduler pass: fire every due schedule once, returning how many jobs
-    /// were enqueued. Drive it via [`crate::Forge::run_scheduler`] /
-    /// [`crate::Forge::run_scheduler_once`]; safe to run concurrently across replicas,
+    /// were enqueued. Drive it via `forge::Forge::run_scheduler` /
+    /// `forge::Forge::run_scheduler_once`; safe to run concurrently across replicas,
     /// since each due row is claimed exactly once.
     async fn process_due(&self) -> Result<u64>;
 }
+
+mod cron;
+
+mod memory;
+mod postgres;
+pub(crate) use memory::MemSchedule;
+pub(crate) use postgres::PgSchedule;

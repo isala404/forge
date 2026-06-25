@@ -20,7 +20,7 @@ test('new chat: first message and the chat appear without a reload', async ({ pa
 
   await page.getByRole('button', { name: 'New chat' }).click()
   const dialog = page.getByRole('dialog', { name: 'New conversation' })
-  await dialog.getByPlaceholder('ada').fill(bob)
+  await dialog.getByPlaceholder('Add a username, press Enter').fill(bob)
   await dialog.getByRole('button', { name: 'Add member' }).click()
   await dialog.getByRole('button', { name: 'Create' }).click()
 

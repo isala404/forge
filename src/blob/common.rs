@@ -91,9 +91,17 @@ pub(super) fn like_escape(prefix: &str) -> String {
     out
 }
 
-/// Build a signed URL (pool-free, so it is unit-testable without a database). A missing
-/// secret is `Config` — presigning is unconfigured, a deployment problem, classified
-/// the same way across presign/verify/router.
+/// A missing signing secret is `Config` — presigning is unconfigured, a deployment
+/// problem, classified the same way across presign/verify/router.
+fn require_secret(secret: Option<&[u8]>) -> Result<&[u8]> {
+    secret.ok_or_else(|| {
+        ForgeError::config(
+            "blob signing secret is not configured (set ForgeConfig.blob_signing_secret)",
+        )
+    })
+}
+
+/// Build a signed URL (pool-free, so it is unit-testable without a database).
 pub(super) fn presign_url(
     secret: Option<&[u8]>,
     base_url: &str,
@@ -102,11 +110,7 @@ pub(super) fn presign_url(
     expires: Duration,
     max_bytes: u64,
 ) -> Result<String> {
-    let secret = secret.ok_or_else(|| {
-        ForgeError::config(
-            "blob signing secret is not configured (set ForgeConfig.blob_signing_secret)",
-        )
-    })?;
+    let secret = require_secret(secret)?;
     if expires.is_zero() {
         return Err(ForgeError::invalid("presign expires must be positive"));
     }
@@ -139,11 +143,7 @@ pub(super) fn verify_presigned(
     max_bytes: u64,
     sig: &str,
 ) -> Result<bool> {
-    let secret = secret.ok_or_else(|| {
-        ForgeError::config(
-            "blob signing secret is not configured (set ForgeConfig.blob_signing_secret)",
-        )
-    })?;
+    let secret = require_secret(secret)?;
     let method = match method.to_ascii_uppercase().as_str() {
         "GET" => Method::Get,
         "PUT" => Method::Put,
@@ -168,6 +168,112 @@ pub(super) fn verify_presigned(
     ))
 }
 
+/// State every blob backend carries: the key namespace and the presign signing config.
+/// Both backends (`PgBlob`, `FsBlob`) embed one and route the backend-agnostic work —
+/// key namespacing and presigned-URL mint/verify — through it, so those can never
+/// diverge between the two stores.
+pub(super) struct Shared {
+    namespace: String,
+    /// HMAC key for presigned URLs. `None` => presigning is unconfigured and errors.
+    secret: Option<Vec<u8>>,
+    /// URL prefix presigned URLs point at (where the host app serves them).
+    base_url: String,
+}
+
+impl Shared {
+    pub(super) fn new(namespace: String, secret: Option<Vec<u8>>, base_url: String) -> Self {
+        Self {
+            namespace,
+            secret,
+            base_url,
+        }
+    }
+
+    pub(super) fn physical(&self, key: &str) -> String {
+        physical(&self.namespace, key)
+    }
+
+    pub(super) fn logical<'a>(&self, stored: &'a str) -> &'a str {
+        logical(&self.namespace, stored)
+    }
+
+    /// Mint a presigned upload URL: validate, then sign. Identical across backends.
+    pub(super) async fn presign_upload(
+        &self,
+        key: &str,
+        expires: Duration,
+        max_bytes: u64,
+    ) -> Result<String> {
+        let span = tracing::info_span!(
+            "forge.blob.presign_upload",
+            blob.key_hash = %crate::util::key_hash(key),
+            blob.presign_expires_secs = expires.as_secs(),
+            blob.presign_max_bytes = max_bytes,
+            outcome = tracing::field::Empty,
+            error.variant = tracing::field::Empty,
+        );
+        crate::obs::instrument("blob", "presign_upload", span, async move {
+            check_key(key)?;
+            if max_bytes > MAX_OBJECT_BYTES as u64 {
+                return Err(ForgeError::limit(
+                    "presign max_bytes exceeds the 50 MiB object cap",
+                ));
+            }
+            presign_url(
+                self.secret.as_deref(),
+                &self.base_url,
+                Method::Put,
+                key,
+                expires,
+                max_bytes,
+            )
+        })
+        .await
+    }
+
+    /// Mint a presigned download URL. Identical across backends.
+    pub(super) async fn presign_download(&self, key: &str, expires: Duration) -> Result<String> {
+        let span = tracing::info_span!(
+            "forge.blob.presign_download",
+            blob.key_hash = %crate::util::key_hash(key),
+            blob.presign_expires_secs = expires.as_secs(),
+            outcome = tracing::field::Empty,
+            error.variant = tracing::field::Empty,
+        );
+        crate::obs::instrument("blob", "presign_download", span, async move {
+            check_key(key)?;
+            presign_url(
+                self.secret.as_deref(),
+                &self.base_url,
+                Method::Get,
+                key,
+                expires,
+                0,
+            )
+        })
+        .await
+    }
+
+    /// Verify a presigned URL's params against the secret. Identical across backends.
+    pub(super) fn verify_presigned(
+        &self,
+        method: &str,
+        key: &str,
+        expires_epoch: i64,
+        max_bytes: u64,
+        sig: &str,
+    ) -> Result<bool> {
+        verify_presigned(
+            self.secret.as_deref(),
+            method,
+            key,
+            expires_epoch,
+            max_bytes,
+            sig,
+        )
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
@@ -182,7 +288,7 @@ mod tests {
     fn presign_requires_a_secret() {
         let err = presign_url(
             None,
-            "/_forge/blob",
+            "/api/files",
             Method::Get,
             "k",
             Duration::from_secs(60),
@@ -190,7 +296,7 @@ mod tests {
         )
         .unwrap_err();
         // Missing signing secret is a configuration problem, classified `Config`
-        // consistently across presign_*, verify_presigned, and blob_router.
+        // consistently across presign_* and verify_presigned.
         assert!(matches!(err, ForgeError::Config(_)));
     }
 
@@ -198,14 +304,14 @@ mod tests {
     fn presigned_url_carries_signed_params() {
         let url = presign_url(
             Some(b"secret"),
-            "/_forge/blob",
+            "/api/files",
             Method::Put,
             "exports/a b.csv",
             Duration::from_secs(60),
             1024,
         )
         .unwrap();
-        assert!(url.starts_with("/_forge/blob?key="));
+        assert!(url.starts_with("/api/files?key="));
         assert!(url.contains("max_bytes=1024"));
         assert!(url.contains("sig="));
         // The space in the key is percent-encoded (NON_ALPHANUMERIC also encodes `.`/`/`).

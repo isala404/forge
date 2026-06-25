@@ -32,16 +32,6 @@ fn err(e: forge::ForgeError) -> napi::Error {
     napi::Error::from_reason(format!("{}: {}", code_of(&e), e))
 }
 
-/// Run pending migrations and return — the schema step decoupled from `connect`.
-/// Operators run this once at deploy; the app then connects with
-/// `runMigrations: false` (verify-only). Idempotent and concurrency-safe.
-#[napi]
-pub async fn migrate(postgres_url: String) -> Result<()> {
-    forge::Forge::migrate(forge::ForgeConfig::new(postgres_url))
-        .await
-        .map_err(err)
-}
-
 /// Convert an `f64` seconds value into a `Duration`, raising `Invalid` on a
 /// negative or non-finite input. Zero passes straight through so the core applies
 /// its own validation: bindings convert and pass through, they never clamp or
@@ -54,111 +44,43 @@ fn secs(field: &str, value: f64) -> Result<Duration> {
     })
 }
 
-/// A leased job handed to JavaScript. Settle it with `ack`/`nack`/`heartbeat`
-/// using the opaque, delivery-unique `receipt` (NOT `id`, which is stable across
-/// redeliveries and is the natural idempotency key).
-#[napi(object)]
-pub struct JsJob {
-    pub id: String,
-    /// Delivery-unique handle for ack/nack/heartbeat (SQS ReceiptHandle).
-    pub receipt: String,
-    pub payload: String,
-    pub attempt: u32,
-    pub max_attempts: u32,
-    pub leased_until_ms: f64,
-    pub queue: String,
+/// Convert an `f64` byte count into a `u64`, raising `Invalid` on a negative or
+/// non-finite input rather than silently coercing it (P0-5). JS has no native u64,
+/// so the boundary stays `f64`; the core's own 50 MiB cap covers the high end.
+fn bytes(field: &str, value: f64) -> Result<u64> {
+    if !value.is_finite() || value < 0.0 {
+        return Err(err(forge::ForgeError::invalid(format!(
+            "{field} must be a non-negative number of bytes"
+        ))));
+    }
+    Ok(value as u64)
 }
 
-/// A rate-limit decision (maps onto the IETF RateLimit header fields).
-#[napi(object)]
-pub struct JsDecision {
-    pub allowed: bool,
-    pub limit: u32,
-    pub remaining: u32,
-    /// Seconds until the limit fully resets (the IETF `RateLimit-Reset` value).
-    pub reset_after_seconds: f64,
-    pub retry_after_seconds: Option<f64>,
+fn schedule_opts(max_attempts: Option<u32>) -> forge::ScheduleOpts {
+    let mut opts = forge::ScheduleOpts::new();
+    if let Some(m) = max_attempts {
+        opts = opts.with_max_attempts(m);
+    }
+    opts
 }
 
-/// A freshly minted API key. `secret` is shown exactly once.
-#[napi(object)]
-pub struct JsApiKey {
-    pub id: String,
-    pub secret: String,
-    pub label: String,
-    pub created_at_ms: f64,
+/// Map an optional algorithm name onto [`forge::Algo`]. `None` keeps the token-bucket
+/// default; `"token_bucket"` / `"sliding_window"` select explicitly; anything else
+/// is `Invalid`.
+fn parse_algo(name: Option<&str>) -> Result<forge::Algo> {
+    match name {
+        None | Some("token_bucket") => Ok(forge::Algo::TokenBucket),
+        Some("sliding_window") => Ok(forge::Algo::SlidingWindow),
+        Some(other) => Err(err(forge::ForgeError::invalid(format!(
+            "unknown rate-limit algo {other:?}; expected \"token_bucket\" or \"sliding_window\""
+        )))),
+    }
 }
 
-/// Approximate queue depth (SQS `ApproximateNumberOfMessages{,NotVisible,Delayed}`).
-#[napi(object)]
-pub struct JsQueueDepth {
-    pub visible: u32,
-    pub in_flight: u32,
-    pub delayed: u32,
-}
-
-/// One page of `kvScanPage`: the keys plus an opaque `cursor` for the next page
-/// (`null` when iteration is complete).
-#[napi(object)]
-pub struct JsScanPage {
-    pub keys: Vec<String>,
-    pub cursor: Option<String>,
-}
-
-/// Object metadata (S3 `HeadObject`). `lastModifiedMs` is epoch milliseconds.
-#[napi(object)]
-pub struct JsBlobInfo {
-    pub key: String,
-    pub size: f64,
-    pub content_type: String,
-    pub etag: String,
-    pub last_modified_ms: f64,
-    pub metadata: HashMap<String, String>,
-}
-
-/// One page of `blobList`: the objects plus an opaque next-page `cursor`.
-#[napi(object)]
-pub struct JsBlobPage {
-    pub items: Vec<JsBlobInfo>,
-    pub cursor: Option<String>,
-}
-
-/// A registered schedule (`scheduleList`). `kind` is `"cron"` or `"at"`; `cronExpr`
-/// is set only for crons. Times are epoch milliseconds.
-#[napi(object)]
-pub struct JsScheduleInfo {
-    pub name: String,
-    pub kind: String,
-    pub cron_expr: Option<String>,
-    pub queue: String,
-    pub next_run_ms: f64,
-    pub last_run_ms: Option<f64>,
-}
-
-/// A validated session's metadata (`validateSessionInfo`). Times are epoch ms.
-#[napi(object)]
-pub struct JsSession {
-    pub user_id: String,
-    pub created_at_ms: f64,
-    pub expires_at_ms: f64,
-}
-
-/// Non-secret API-key metadata (`verifyApiKeyInfo`).
-#[napi(object)]
-pub struct JsApiKeyInfo {
-    pub id: String,
-    pub owner_id: String,
-    pub label: String,
-}
-
-/// One line of `backendReport`: which provider powers a primitive.
-#[napi(object)]
-pub struct JsBackendInfo {
-    pub primitive: String,
-    pub provider: String,
-    pub durable: bool,
-    pub caveats: String,
-}
+// The cross-language value DTOs (JsJob, JsDecision, JsBlobInfo, …) are generated from one
+// schema shared with the Python binding — see tools/codegen/src/schema.rs. napi derives
+// index.d.ts from these structs. Regenerate with the codegen tool; never hand-edit.
+include!("types.generated.rs");
 
 /// Connection options for `ForgeClient.connectWith` — the full per-deployment surface
 /// (every field optional; omitted fields take Forge's defaults).
@@ -168,7 +90,6 @@ pub struct JsConnectOptions {
     pub signing_secret: Option<String>,
     pub kv_namespace: Option<String>,
     pub max_connections: Option<u32>,
-    pub run_migrations: Option<bool>,
     pub blob_base_url: Option<String>,
     /// Set to store blob bytes on a local directory instead of in Postgres `BYTEA`.
     pub filesystem_blob_root: Option<String>,
@@ -209,7 +130,7 @@ impl ForgeClient {
 
 #[napi]
 impl ForgeClient {
-    /// Connect, run migrations, and ping — mirrors `Forge::init`. Pass
+    /// Connect, migrate the system database, and ping — mirrors `Forge::init`. Pass
     /// `signingSecret` to enable presigned blob URLs.
     #[napi(factory)]
     pub async fn connect(
@@ -235,7 +156,8 @@ impl ForgeClient {
     }
 
     /// Connect with the full per-deployment option surface (namespace, pool size,
-    /// migration toggle, blob backend, …) instead of just a URL + signing secret.
+    /// blob backend, …) instead of just a URL + signing secret. `connect` migrates the
+    /// system database at startup.
     #[napi(factory)]
     pub async fn connect_with(
         postgres_url: String,
@@ -250,9 +172,6 @@ impl ForgeClient {
         }
         if let Some(n) = options.max_connections {
             cfg = cfg.with_max_connections(n);
-        }
-        if options.run_migrations == Some(false) {
-            cfg = cfg.without_migrations();
         }
         if let Some(base) = options.blob_base_url {
             cfg = cfg.with_blob_base_url(base);
@@ -359,7 +278,10 @@ impl ForgeClient {
             .map_err(err)
     }
 
-    /// `INCRBY key by` (atomic). Returns the new value.
+    /// `INCRBY key by` (atomic). Returns the new value. The counter is an i64
+    /// core-side, but JS numbers are f64, so a value beyond 2^53 loses precision
+    /// here (the Python binding returns the exact i64). Real counters never reach
+    /// that range; if yours might, read it back losslessly via `kvGetBytes`.
     #[napi]
     pub async fn kv_incr(&self, key: String, by: i32) -> Result<f64> {
         let v = self
@@ -528,7 +450,6 @@ impl ForgeClient {
         })
     }
 
-    /// Store a config value (`set_raw`).
     #[napi]
     pub async fn config_set(&self, key: String, value: String) -> Result<()> {
         self.forge.config().set_raw(&key, &value).await.map_err(err)
@@ -566,9 +487,10 @@ impl ForgeClient {
         self.forge.config().flag(&key, default_value, &ctx).await
     }
 
-    /// Atomic check-and-consume: `max` per `perSeconds` (token bucket).
+    /// Atomic check-and-consume: `max` per `perSeconds`.
     /// `failOpen` overrides what happens on a backend error: omit for the instance
-    /// default, `true` to allow, `false` to deny.
+    /// default, `true` to allow, `false` to deny. `algo` selects the algorithm:
+    /// `"token_bucket"` (default) or `"sliding_window"`.
     #[napi]
     pub async fn rate_limit_check(
         &self,
@@ -577,8 +499,11 @@ impl ForgeClient {
         max: u32,
         per_seconds: f64,
         fail_open: Option<bool>,
+        algo: Option<String>,
     ) -> Result<JsDecision> {
-        let limit = forge::Limit::per_duration(max, secs("perSeconds", per_seconds)?);
+        let algo = parse_algo(algo.as_deref())?;
+        let limit =
+            forge::Limit::per_duration(max, secs("perSeconds", per_seconds)?).with_algo(algo);
         let fm = match fail_open {
             None => forge::FailMode::Default,
             Some(true) => forge::FailMode::Open,
@@ -599,7 +524,6 @@ impl ForgeClient {
         })
     }
 
-    /// Store an object (string body).
     #[napi]
     pub async fn blob_put(
         &self,
@@ -618,7 +542,6 @@ impl ForgeClient {
             .map_err(err)
     }
 
-    /// Store an object (binary body).
     #[napi]
     pub async fn blob_put_bytes(
         &self,
@@ -674,7 +597,7 @@ impl ForgeClient {
             .presign_upload(
                 &key,
                 secs("expiresSeconds", expires_seconds)?,
-                max_bytes.max(0.0) as u64,
+                bytes("maxBytes", max_bytes)?,
             )
             .await
             .map_err(err)
@@ -698,7 +621,7 @@ impl ForgeClient {
                 &method,
                 &key,
                 expires_epoch as i64,
-                max_bytes.max(0.0) as u64,
+                bytes("maxBytes", max_bytes)?,
                 &sig,
             )
             .await
@@ -839,18 +762,20 @@ impl ForgeClient {
         when_epoch_ms: f64,
         queue: String,
         payload: String,
+        max_attempts: Option<u32>,
     ) -> Result<String> {
         let when = UNIX_EPOCH + Duration::from_millis(when_epoch_ms.max(0.0) as u64);
         let id = self
             .forge
             .schedule()
-            .at(when, &queue, forge::Bytes::from(payload))
+            .at(when, &queue, forge::Bytes::from(payload), schedule_opts(max_attempts))
             .await
             .map_err(err)?;
         Ok(id.to_string())
     }
 
-    /// Upsert a recurring cron schedule by name.
+    /// Upsert a recurring cron schedule by name. `maxAttempts` overrides the delivery
+    /// attempts of the job each tick enqueues (omit for the queue default of 5).
     #[napi]
     pub async fn schedule_cron(
         &self,
@@ -858,10 +783,11 @@ impl ForgeClient {
         expr: String,
         queue: String,
         payload: String,
+        max_attempts: Option<u32>,
     ) -> Result<()> {
         self.forge
             .schedule()
-            .cron(&name, &expr, &queue, forge::Bytes::from(payload))
+            .cron(&name, &expr, &queue, forge::Bytes::from(payload), schedule_opts(max_attempts))
             .await
             .map_err(err)
     }
@@ -910,8 +836,6 @@ impl ForgeClient {
     pub fn pubsub_channel(&self, topic: String) -> String {
         forge::pubsub::channel_for(&topic)
     }
-
-    // --- kv parity -----------------------------------------------------------------
 
     /// `EXPIRE key ttlSeconds`. Sets/replaces the TTL on a live key; `false` if absent.
     #[napi]
@@ -964,8 +888,6 @@ impl ForgeClient {
             cursor: next.map(|c| c.token().to_string()),
         })
     }
-
-    // --- blob parity ---------------------------------------------------------------
 
     /// `HeadObject`: full metadata (size, content type, etag, last-modified, user
     /// metadata), or `null` if the object does not exist.
@@ -1045,8 +967,6 @@ impl ForgeClient {
             .map_err(err)
     }
 
-    // --- schedule parity -----------------------------------------------------------
-
     /// Cancel a schedule by name. `true` if one was removed, `false` if none existed.
     #[napi]
     pub async fn schedule_cancel(&self, name: String) -> Result<bool> {
@@ -1065,11 +985,23 @@ impl ForgeClient {
             .map_err(err)
     }
 
-    /// List every registered schedule (crons and pending one-shots).
+    /// List registered schedules (crons and pending one-shots), ordered by name, up
+    /// to `limit` per page (default 100) plus an opaque next-page `cursor` (`null`
+    /// when done). Pass the returned `cursor` back to page through a large backlog.
     #[napi]
-    pub async fn schedule_list(&self) -> Result<Vec<JsScheduleInfo>> {
-        let items = self.forge.schedule().list().await.map_err(err)?;
-        Ok(items
+    pub async fn schedule_list(
+        &self,
+        cursor: Option<String>,
+        limit: Option<u32>,
+    ) -> Result<JsSchedulePage> {
+        let cur = cursor.map(forge::Cursor::from_token);
+        let (items, next) = self
+            .forge
+            .schedule()
+            .list(cur, limit.unwrap_or(100))
+            .await
+            .map_err(err)?;
+        let items = items
             .into_iter()
             .map(|s| {
                 let (kind, cron_expr) = match s.kind {
@@ -1085,10 +1017,12 @@ impl ForgeClient {
                     last_run_ms: s.last_run.map(epoch_ms),
                 }
             })
-            .collect())
+            .collect();
+        Ok(JsSchedulePage {
+            items,
+            cursor: next.map(|c| c.token().to_string()),
+        })
     }
-
-    // --- config flag parity --------------------------------------------------------
 
     /// Set a flag to always-on.
     #[napi]
@@ -1119,8 +1053,6 @@ impl ForgeClient {
             .await
             .map_err(err)
     }
-
-    // --- auth parity ---------------------------------------------------------------
 
     /// Validate a session token; returns full session metadata (user id + times), or
     /// `null`. Use `validateSession` when only the user id is needed.

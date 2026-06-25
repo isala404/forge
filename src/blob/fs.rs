@@ -14,8 +14,7 @@
 //! with the Postgres backend via [`super::common`], so signing is identical.
 
 use super::common;
-use super::sign::Method;
-use super::{Blob, BlobInfo, DEFAULT_CONTENT_TYPE, ListPage, MAX_OBJECT_BYTES, PutOpts};
+use super::{Blob, BlobInfo, DEFAULT_CONTENT_TYPE, ListPage, PutOpts};
 use crate::error::{ForgeError, Result};
 use crate::obs;
 use crate::types::Cursor;
@@ -39,9 +38,7 @@ const ORPHAN_GRACE: Duration = Duration::from_secs(60 * 60);
 /// Filesystem-backed [`Blob`]: metadata in `forge_fs_blobs`, bytes under `root`.
 pub(crate) struct FsBlob {
     pool: PgPool,
-    namespace: String,
-    secret: Option<Vec<u8>>,
-    base_url: String,
+    shared: common::Shared,
     root: PathBuf,
 }
 
@@ -60,36 +57,9 @@ impl FsBlob {
         })?;
         Ok(Self {
             pool,
-            namespace,
-            secret,
-            base_url,
+            shared: common::Shared::new(namespace, secret, base_url),
             root,
         })
-    }
-
-    fn physical(&self, key: &str) -> String {
-        common::physical(&self.namespace, key)
-    }
-
-    fn logical<'a>(&self, stored: &'a str) -> &'a str {
-        common::logical(&self.namespace, stored)
-    }
-
-    fn build_presigned(
-        &self,
-        method: Method,
-        key: &str,
-        expires: Duration,
-        max_bytes: u64,
-    ) -> Result<String> {
-        common::presign_url(
-            self.secret.as_deref(),
-            &self.base_url,
-            method,
-            key,
-            expires,
-            max_bytes,
-        )
     }
 
     /// A fresh content path, sharded into a two-char prefix directory so one directory
@@ -162,8 +132,6 @@ fn fs_err(e: std::io::Error) -> ForgeError {
     ForgeError::backend_with("blob filesystem error", false, e)
 }
 
-impl crate::sealed::Sealed for FsBlob {}
-
 #[async_trait]
 impl Blob for FsBlob {
     async fn put(&self, key: &str, data: Bytes, opts: PutOpts) -> Result<()> {
@@ -179,7 +147,7 @@ impl Blob for FsBlob {
         obs::instrument("blob", "put", span, async move {
             common::check_key(key)?;
             common::check_put(&data, &opts)?;
-            let pk = self.physical(key);
+            let pk = self.shared.physical(key);
             let etag = sha256_hex(&data);
             let content_type = opts
                 .content_type
@@ -251,7 +219,7 @@ impl Blob for FsBlob {
         );
         obs::instrument("blob", "get", span, async move {
             common::check_key(key)?;
-            let pk = self.physical(key);
+            let pk = self.shared.physical(key);
             let data_ref =
                 sqlx::query_scalar!("SELECT data_ref FROM forge_fs_blobs WHERE key = $1", pk)
                     .fetch_optional(&self.pool)
@@ -295,7 +263,7 @@ impl Blob for FsBlob {
         );
         obs::instrument("blob", "head", span, async move {
             common::check_key(key)?;
-            let pk = self.physical(key);
+            let pk = self.shared.physical(key);
             let row = sqlx::query!(
                 r#"SELECT content_type, etag, size,
                           metadata AS "metadata: Json<Meta>", last_modified
@@ -305,13 +273,15 @@ impl Blob for FsBlob {
             .fetch_optional(&self.pool)
             .await?;
             tracing::Span::current().record("blob.hit", row.is_some());
-            Ok(row.map(|r| BlobInfo {
-                key: key.to_string(),
-                size: u64::try_from(r.size).unwrap_or(0),
-                content_type: r.content_type,
-                etag: r.etag,
-                last_modified: r.last_modified.into(),
-                metadata: r.metadata.0,
+            Ok(row.map(|r| {
+                BlobInfo::new(
+                    key.to_string(),
+                    u64::try_from(r.size).unwrap_or(0),
+                    r.content_type,
+                    r.etag,
+                    r.last_modified.into(),
+                    r.metadata.0,
+                )
             }))
         })
         .await
@@ -327,7 +297,7 @@ impl Blob for FsBlob {
         );
         obs::instrument("blob", "delete", span, async move {
             common::check_key(key)?;
-            let pk = self.physical(key);
+            let pk = self.shared.physical(key);
             let removed = sqlx::query_scalar!(
                 "DELETE FROM forge_fs_blobs WHERE key = $1 RETURNING data_ref",
                 pk
@@ -346,10 +316,10 @@ impl Blob for FsBlob {
     }
 
     async fn list(&self, prefix: &str, cursor: Option<Cursor>, limit: u32) -> Result<ListPage> {
-        let physical_prefix = self.physical(prefix);
+        let physical_prefix = self.shared.physical(prefix);
         let pattern = format!("{}%", common::like_escape(&physical_prefix));
         let limit_i = i64::from(limit.clamp(1, 1000));
-        let after = cursor.as_ref().map(|c| c.as_str().to_string());
+        let after = cursor.as_ref().map(|c| c.token().to_string());
         let span = tracing::info_span!(
             "forge.blob.list",
             blob.list_returned = Empty,
@@ -373,59 +343,33 @@ impl Blob for FsBlob {
             let next = if (rows.len() as i64) < limit_i {
                 None
             } else {
-                rows.last().map(|r| Cursor::new(r.key.clone()))
+                rows.last().map(|r| Cursor::from_token(r.key.clone()))
             };
             let items = rows
                 .into_iter()
-                .map(|r| BlobInfo {
-                    key: self.logical(&r.key).to_string(),
-                    size: u64::try_from(r.size).unwrap_or(0),
-                    content_type: r.content_type,
-                    etag: r.etag,
-                    last_modified: r.last_modified.into(),
-                    metadata: r.metadata.0,
+                .map(|r| {
+                    BlobInfo::new(
+                        self.shared.logical(&r.key).to_string(),
+                        u64::try_from(r.size).unwrap_or(0),
+                        r.content_type,
+                        r.etag,
+                        r.last_modified.into(),
+                        r.metadata.0,
+                    )
                 })
                 .collect::<Vec<_>>();
             tracing::Span::current().record("blob.list_returned", items.len());
-            Ok(ListPage { items, next })
+            Ok(ListPage::new(items, next))
         })
         .await
     }
 
     async fn presign_upload(&self, key: &str, expires: Duration, max_bytes: u64) -> Result<String> {
-        let span = tracing::info_span!(
-            "forge.blob.presign_upload",
-            blob.key_hash = %key_hash(key),
-            blob.presign_expires_secs = expires.as_secs(),
-            blob.presign_max_bytes = max_bytes,
-            outcome = Empty,
-            error.variant = Empty,
-        );
-        obs::instrument("blob", "presign_upload", span, async move {
-            common::check_key(key)?;
-            if max_bytes > MAX_OBJECT_BYTES as u64 {
-                return Err(ForgeError::limit(
-                    "presign max_bytes exceeds the 50 MiB object cap",
-                ));
-            }
-            self.build_presigned(Method::Put, key, expires, max_bytes)
-        })
-        .await
+        self.shared.presign_upload(key, expires, max_bytes).await
     }
 
     async fn presign_download(&self, key: &str, expires: Duration) -> Result<String> {
-        let span = tracing::info_span!(
-            "forge.blob.presign_download",
-            blob.key_hash = %key_hash(key),
-            blob.presign_expires_secs = expires.as_secs(),
-            outcome = Empty,
-            error.variant = Empty,
-        );
-        obs::instrument("blob", "presign_download", span, async move {
-            common::check_key(key)?;
-            self.build_presigned(Method::Get, key, expires, 0)
-        })
-        .await
+        self.shared.presign_download(key, expires).await
     }
 
     async fn verify_presigned(
@@ -436,17 +380,7 @@ impl Blob for FsBlob {
         max_bytes: u64,
         sig: &str,
     ) -> Result<bool> {
-        common::verify_presigned(
-            self.secret.as_deref(),
-            method,
-            key,
-            expires_epoch,
-            max_bytes,
-            sig,
-        )
-    }
-
-    fn presign_ready(&self) -> bool {
-        self.secret.is_some()
+        self.shared
+            .verify_presigned(method, key, expires_epoch, max_bytes, sig)
     }
 }

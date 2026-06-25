@@ -95,7 +95,6 @@ where
 async fn full_suite() {
     let be = Backend::start().await;
 
-    // --- signup -> session (two users) ---
     let alice = be.signup("alice", "Alice", "hunter2").await;
     let bob = be.signup("bob", "Bob", "hunter2").await;
     assert!(!alice.token.is_empty() && !bob.token.is_empty());
@@ -118,7 +117,6 @@ async fn full_suite() {
     let anon = be.gql("", "{me{id}}", json!({})).await;
     assert!(anon["data"]["me"].is_null() && anon.get("errors").is_none());
 
-    // --- create group chat; both members see it ---
     let chat = be
         .gql(
             &alice.token,
@@ -153,7 +151,6 @@ async fn full_suite() {
         .await;
     assert_eq!(error_code(&denied), "NOT_FOUND");
 
-    // --- send + receive a message live over a subscription ---
     let mut msg_sub = Sub::start(
         &be.ws_url,
         &bob.token,
@@ -171,7 +168,7 @@ async fn full_suite() {
     assert_eq!(live["messageAdded"]["sender"]["username"], "alice");
     assert_eq!(live["messageAdded"]["id"], sent.as_str());
 
-    // --- typing event (suppresses the caller's own) ---
+    // typing fan-out suppresses the sender's own event
     let mut typing_sub = Sub::start(
         &be.ws_url,
         &bob.token,
@@ -190,7 +187,7 @@ async fn full_suite() {
     assert_eq!(typing["typing"]["user"]["username"], "alice");
     assert_eq!(typing["typing"]["typing"], true);
 
-    // --- unread increments via fanout worker, then clears on markRead ---
+    // unread increment is driven by the async fanout worker
     wait_until(Duration::from_secs(5), || async {
         let v = be
             .gql(
@@ -218,11 +215,9 @@ async fn full_suite() {
         json!({"c": chat_id, "m": sent}),
     )
     .await;
-    // read receipt turns read, live.
     let rc = receipt_sub.next_data().await;
     assert_eq!(rc["receiptChanged"]["user"]["username"], "bob");
     assert!(rc["receiptChanged"]["readAt"].is_string());
-    // unread cleared.
     let cleared = be
         .gql(
             &bob.token,
@@ -232,7 +227,6 @@ async fn full_suite() {
         .await;
     assert_eq!(cleared["data"]["chat"]["unread"], 0);
 
-    // --- presence: online via heartbeat, offline after kv TTL expiry ---
     be.gql(&alice.token, "mutation{heartbeat}", json!({})).await;
     let online = be
         .gql(
@@ -255,7 +249,6 @@ async fn full_suite() {
     })
     .await;
 
-    // --- attachment upload: presign -> PUT -> send -> media.downloadUrl fetch ---
     let ticket = be
         .gql(
             &alice.token,
@@ -316,7 +309,7 @@ async fn full_suite() {
         .await;
     assert_eq!(error_code(&empty), "INVALID");
 
-    // --- rate limit throttles a send burst (5 / 10s, fail-open) ---
+    // rate limit: 5 msgs / 10s, fail-open
     let dave = be.signup("dave", "Dave", "hunter2").await;
     let solo = be
         .gql(
@@ -345,7 +338,6 @@ async fn full_suite() {
     }
     assert!(limited, "send burst was never rate-limited");
 
-    // --- disappearing message vanishes after its ttl ---
     be.gql(
         &alice.token,
         "mutation($id:ID!){setDisappearing(chatId:$id,enabled:true){disappearingSeconds}}",
@@ -377,7 +369,6 @@ async fn full_suite() {
     )
     .await;
 
-    // --- reactions feature flag toggles (forge config) ---
     let toggled = be
         .gql(
             &alice.token,
@@ -387,7 +378,6 @@ async fn full_suite() {
         .await;
     assert_eq!(toggled["data"]["setReactionsRollout"], true);
 
-    // --- api key authenticates a request ---
     let apikey = be
         .gql(
             &alice.token,
@@ -403,7 +393,6 @@ async fn full_suite() {
     let via_key = be.gql(&secret, "{me{username}}", json!({})).await;
     assert_eq!(via_key["data"]["me"]["username"], "alice");
 
-    // --- opsStats reflects online + DLQ ---
     be.gql(&bob.token, "mutation{heartbeat}", json!({})).await;
     be.gql(&alice.token, "mutation{triggerFailingJob}", json!({}))
         .await;
@@ -417,7 +406,6 @@ async fn full_suite() {
     })
     .await;
 
-    // --- logoutAll revokes other sessions ---
     let alice2 = be.login("alice", "hunter2").await;
     be.gql(&alice.token, "mutation{logoutAll}", json!({})).await;
     let revoked = be.gql(&alice2.token, "{me{id}}", json!({})).await;

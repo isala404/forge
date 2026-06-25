@@ -7,6 +7,6 @@ node_modules
 **/test-results/**
 
 # conformance runner artifacts
-conformance/python/.venv/
-conformance/python/__pycache__/
+tools/conformance/python/.venv/
+tools/conformance/python/__pycache__/
 bindings/forge-py/dist/

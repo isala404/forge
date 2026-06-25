@@ -23,6 +23,18 @@ pub fn key_hash(key: &str) -> String {
     full.get(..16).unwrap_or(&full).to_string()
 }
 
+/// Apply an app namespace to a logical key as `<ns>:<key>`. An empty namespace
+/// leaves the key untouched. The single source of truth for the prefixing rule the
+/// kv/config/ratelimit/queue/pubsub backends share; namespaces are colon-free, so
+/// `<ns>:<key>` never collides across distinct `(ns, key)`.
+pub fn namespaced(ns: &str, key: &str) -> String {
+    if ns.is_empty() {
+        key.to_string()
+    } else {
+        format!("{ns}:{key}")
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
@@ -51,5 +63,12 @@ mod tests {
         let h = key_hash("user:42:session");
         assert_eq!(h.len(), 16);
         assert!(!h.contains("user"));
+    }
+
+    #[test]
+    fn namespaced_prefixes_only_when_set() {
+        assert_eq!(namespaced("", "k"), "k");
+        assert_eq!(namespaced("app", "k"), "app:k");
+        assert_eq!(namespaced("app", "a:b"), "app:a:b");
     }
 }

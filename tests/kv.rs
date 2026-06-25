@@ -289,7 +289,6 @@ async fn mget_returns_values_in_input_order_with_holes() {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(1100)).await;
 
-    // Order preserved, misses are None, and a duplicate key repeats its value.
     let got = kv.mget(&["a", "b", "c", "d", "a"]).await.unwrap();
     assert_eq!(
         got,

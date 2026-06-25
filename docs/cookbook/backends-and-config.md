@@ -1,6 +1,6 @@
 # Choosing backends: Postgres everywhere, filesystem blob
 
-In v1, Forge runs on a single Postgres database. Every primitive — kv, queue, blob, auth, config, ratelimit, schedule, pubsub — is Postgres-backed. The one backend choice you actually get to make is where blob *bytes* live: in a `BYTEA` column (default) or on a local filesystem directory. Blob metadata always stays in Postgres either way. This page shows how to select that backend three ways (builder, `ForgeConfig`, and `FORGE_*` env), how to print a `backend_report()` for a health page, and where `from_parts` fits for external providers.
+By default, Forge runs on a single Postgres database: every primitive — kv, queue, blob, auth, config, ratelimit, schedule, pubsub — is Postgres-backed. Two non-Postgres options exist today: where blob *bytes* live (a `BYTEA` column by default, or a local filesystem directory — metadata always stays in Postgres either way), and an in-process `kv` backend for state that doesn't need to survive a restart. This page shows how to select a backend two ways (`ForgeConfig` and `FORGE_*` env) and how to print a `backend_report()` for a health page.
 
 ## The default: Postgres everything
 
@@ -18,37 +18,17 @@ async fn main() -> forge::Result<()> {
 }
 ```
 
-## Filesystem blob via the builder
-
-When you don't want large objects inflating the WAL, store the bytes on disk. Metadata still goes to Postgres; only the object body moves. Use `Forge::builder()`:
-
-```rust
-use forge::Forge;
-
-#[tokio::main]
-async fn main() -> forge::Result<()> {
-    let forge = Forge::builder()
-        .postgres("postgres://localhost/myapp")
-        .filesystem_blob("/var/lib/app/blobs") // directory; created if missing
-        .blob_signing_secret("change-me")       // optional; enables presign + blob_router
-        .build()
-        .await?;
-    Ok(())
-}
-```
-
-`ForgeBuilder` exposes only the knobs that have a builder method (`postgres`, `blob`, `filesystem_blob`, `blob_signing_secret`, `kv_namespace`, `max_connections`). For anything else, hand it a full `ForgeConfig` with `.config(cfg)`, which replaces the whole config. `build()` is just sugar for `Forge::init(self.cfg)`.
-
 ## Filesystem blob via `ForgeConfig`
 
-Equivalent, if you'd rather build the config directly. Two ways to set the backend:
+When you don't want large objects inflating the WAL, store the bytes on disk. Metadata still goes to Postgres; only the object body moves. Build a `ForgeConfig` — two ways to set the backend:
 
 ```rust
 use forge::{BlobBackendConfig, ForgeConfig};
 
 // Convenience method:
 let cfg = ForgeConfig::new("postgres://localhost/myapp")
-    .with_filesystem_blob("/var/lib/app/blobs");
+    .with_filesystem_blob("/var/lib/app/blobs") // directory; created if missing
+    .with_blob_signing_secret("change-me");      // optional; enables presign + blob_router
 
 // Or the explicit enum (same result):
 let cfg = ForgeConfig::new("postgres://localhost/myapp")
@@ -56,6 +36,8 @@ let cfg = ForgeConfig::new("postgres://localhost/myapp")
         root: "/var/lib/app/blobs".into(),
     });
 ```
+
+Pass it to `Forge::init(cfg).await?`. Every knob is a `with_*` method on `ForgeConfig`.
 
 `BlobBackendConfig` is `#[non_exhaustive]` with two variants today: `Postgres` (the `Default`) and `Filesystem { root: PathBuf }`. It's an enum precisely so a future S3/R2/GCS backend is a non-breaking variant add, not a redesign.
 
@@ -122,34 +104,15 @@ fn health_json(report: &BackendReport) -> serde_json::Value {
 
 `BackendInfo` fields are `primitive: Primitive`, `provider: &'static str`, `durable: bool`, `caveats: &'static str`. With the default config, every line reads `provider=postgres`. Switch blob to filesystem and the blob line reads `provider=filesystem` with caveats `local-dir, shared-mount-for-multi-replica, put-not-atomic-with-app-sql`. The Postgres pubsub line always carries the caveat `at-most-once, non-durable` regardless of blob choice.
 
-## `from_parts`: the external-provider escape hatch
+## Adding a backend
 
-`Forge::from_parts(ForgeParts)` builds a `Forge` from caller-supplied trait objects (`Arc<dyn Kv>`, `Arc<dyn Queue>`, …). It's the seam for external provider crates that implement Forge's traits without forking the crate — not something built-in deployments need. `from_parts` calls each backend's `init()` lifecycle hook before returning. You supply every primitive plus a `lifecycle: Vec<Arc<dyn BackendLifecycle>>` (one per primitive, so `maintain`/`backend_report` see them) and an optional `pool` (set it if any primitive is Postgres-backed, to keep `forge.pool()` working).
-
-```rust
-use std::sync::Arc;
-use forge::{Forge, ForgeParts};
-
-let forge = Forge::from_parts(ForgeParts {
-    kv: my_kv,            // Arc<dyn Kv>
-    queue: my_queue,      // Arc<dyn Queue>
-    blob: my_blob,
-    auth: my_auth,
-    config: my_config,
-    ratelimit: my_ratelimit,
-    schedule: my_schedule,
-    pubsub: my_pubsub,
-    lifecycle: vec![/* one Arc<dyn BackendLifecycle> per primitive */],
-    pool: None,
-}).await?;
-```
-
-Adding a real second backend for a primitive means implementing the primitive trait plus a `BackendLifecycle` (its `name`, `primitive`, `durable`, `caveats`, and an overridden `maintain` if it has anything to sweep). That's the entire extension surface — the seam is built, but v1 ships only Postgres-everywhere plus the filesystem blob option.
+Second backends are added *inside* Forge, not bolted on from outside: the primitive traits (`Kv`, `Queue`, …) are **sealed** — public to call, implementable only within this crate — so a backend choice can never leak into application code. To add one you implement the primitive trait plus a `BackendLifecycle` (its `name`, `primitive`, `durable`, `caveats`, and an overridden `maintain` if it has anything to sweep), then wire it into `Forge::init`. The filesystem blob backend (`src/blob/fs.rs`) is the worked example: same `Blob` contract, different byte storage; the in-process `kv` backend (`src/kv/memory.rs`) is a second. Postgres still backs every primitive by default, and additional in-process backends are landing incrementally.
 
 ## Gotchas and contract guarantees
 
 - **Filesystem blob trades atomicity for a smaller WAL.** With Postgres blob, a `put` is atomic with surrounding app SQL. With filesystem blob, the bytes are written to disk while metadata commits to Postgres — the `put` is *not* atomic with your app's SQL, and a multi-replica deploy needs a shared mount so every replica sees the same directory. `Forge::maintain()` runs the filesystem orphan sweep (reclaiming files whose metadata rows are gone); call `maintain` on a schedule either way.
-- **`max_connections >= 2` when migrations run.** The default config runs migrations at init, and the migration runner holds one connection for the advisory lock while drawing a second. With `max_connections == 1` that deadlocks until the acquire timeout. `validate()` rejects it up front. Either raise the pool or set `without_migrations()` and migrate out of band.
+- **Forge migrates its system database at startup.** Forge requires its own Postgres database — the *system database*, separate from your application's — and owns it entirely. `init` connects and applies the embedded `forge_*` migrations before returning. It's idempotent and safe to run concurrently across replicas: an advisory lock serializes it and checksums guard immutability. Each distinct feature database (see below) is migrated the same way.
+- **`max_connections >= 2`.** The migration runner holds one connection for the advisory lock while drawing a second to run the SQL, so `max_connections == 1` would deadlock until the acquire timeout. `validate()` rejects that up front. A same-server feature bulkhead pool, which the system pool migrates rather than the pool itself, is exempt and may be size 1.
 - **Misconfiguration fails at `init`, never lazily.** `validate()` checks the statically-checkable fields (empty DSN, `kv_namespace` containing `:`, empty filesystem root) and returns `ForgeError::Config`; connection and migration failures surface in `init`. Nothing fails on first primitive use.
 - **Presigning is optional and independent of the blob backend.** `init` succeeds with no `blob_signing_secret`, and the full CRUD surface (`put`/`get`/`head`/`delete`/`list`) works. The secret is required only by `presign_upload`, `presign_download`, `verify_presigned`, and `blob_router()`; calling any of those without it returns `Config` at that call. `blob_router()` is feature-gated behind `blob-router` and serves presigned URLs against the Postgres backend.
 - **`backend_report()` is observability, not control flow.** It exists so a health page can show what's powering each slot. Do not branch app logic on the provider name — the whole point of the seam is that swapping the blob backend changes no app code.

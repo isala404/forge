@@ -21,6 +21,21 @@ export function requireAuth(ctx: GqlContext): CurrentUser {
   return ctx.currentUser;
 }
 
+// Gate the ops/admin mutations. The allowlist is a comma-separated list of user
+// ids in ADMIN_USER_IDS. Unset means an empty allowlist, so these mutations are
+// denied for everyone (fail closed) — the right default for a demo that ships no
+// roles system. The single entry "*" allows any authenticated user: a dev/demo
+// convenience, never for production.
+export function requireAdmin(ctx: GqlContext): CurrentUser {
+  const user = requireAuth(ctx);
+  const allowed = (process.env.ADMIN_USER_IDS ?? "")
+    .split(",")
+    .map((id) => id.trim())
+    .some((id) => id === "*" || (id !== "" && id === user.id));
+  if (!allowed) throw err("FORBIDDEN", "admin only");
+  return user;
+}
+
 export function parseId(id: string): string {
   if (!UUID_RE.test(id)) throw err("INVALID", `not a valid id: ${id}`);
   return id;
@@ -84,7 +99,6 @@ async function stillValid(ctx: GqlContext): Promise<boolean> {
 // Subscriptions: subscribe to the chat/presence topic, filter by event type,
 // re-hydrate the domain object (via loaders), and yield the GraphQL payload.
 // Closing the generator (graphql-ws calls return()) releases the JsSubscription.
-// Periodically re-validates the session and ends the stream if it no longer holds.
 export async function* mapEvents<T>(
   ctx: GqlContext,
   topic: string,

@@ -79,7 +79,6 @@ async fn flags_on_off_and_missing_resolves_to_default() {
     let c = forge.config();
     let ctx = EvalCtx::user("u1");
 
-    // A missing flag resolves to the caller's default (never errors).
     assert!(c.flag("ff", true, &ctx).await);
     assert!(!c.flag("ff", false, &ctx).await);
 

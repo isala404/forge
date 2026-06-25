@@ -39,6 +39,9 @@ impl Backend {
             .env("BIND", "127.0.0.1")
             .env("PORT", port.to_string())
             .env("FORGE_BLOB_SIGNING_SECRET", "test-secret")
+            // "*" = any authenticated user is an admin, so the ops tests can exercise the
+            // gated mutations without knowing a user id at boot. Real deploys list ids.
+            .env("ADMIN_USER_IDS", "*")
             // Short TTLs so presence-offline and disappearing-message paths finish fast.
             .env("APP_PRESENCE_TTL_SECS", "1")
             .env("APP_DISAPPEARING_SECS", "1")
@@ -138,7 +141,7 @@ impl Backend {
         v["data"]["sendMessage"]["id"].as_str().unwrap().to_string()
     }
 
-    /// Resolve a possibly-relative URL (presigned blob URLs point at `/_forge/blob/...`)
+    /// Resolve a possibly-relative URL (presigned blob URLs point at `/api/files/...`)
     /// against the backend origin.
     pub fn abs(&self, url: &str) -> String {
         if url.starts_with("http") {

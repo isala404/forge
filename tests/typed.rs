@@ -57,10 +57,8 @@ async fn config_typed_reads_default_and_set() {
     let forge = db.forge().await.unwrap();
     let key: ConfigKey<u64> = ConfigKey::new("max_upload_bytes", 1024);
 
-    // Unset → default.
     assert_eq!(forge.config().get_or_default(&key).await.unwrap(), 1024);
     assert!(forge.config().get_typed(&key).await.unwrap().is_none());
-    // Set → typed read.
     forge.config().set_typed(&key, &5_000_000).await.unwrap();
     assert_eq!(
         forge.config().get_typed(&key).await.unwrap(),

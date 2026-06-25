@@ -43,3 +43,56 @@ export async function loginViaUi(page: Page, username: string, password = 'passw
   await pw.press('Enter')
   await expect(page.getByPlaceholder('Search chats')).toBeVisible()
 }
+
+// Minimal GraphQL POST for test setup. Throws on transport or GraphQL errors so a
+// broken precondition fails the test loudly rather than silently.
+async function gql<T>(
+  backend: string,
+  query: string,
+  variables: Record<string, unknown>,
+  token?: string,
+): Promise<T> {
+  const headers: Record<string, string> = { 'content-type': 'application/json' }
+  if (token) headers.authorization = `Bearer ${token}`
+  const res = await fetch(backend, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ query, variables }),
+  })
+  const json = (await res.json()) as { data?: T; errors?: unknown }
+  if (json.errors || !json.data) {
+    throw new Error(`graphql error: ${JSON.stringify(json.errors ?? json)}`)
+  }
+  return json.data
+}
+
+// Sign in through the API and return the bearer token (test setup, not under test).
+export async function login(backend: string, username: string, password = 'password123'): Promise<string> {
+  const data = await gql<{ login: { token: string } }>(
+    backend,
+    `mutation($u:String!,$p:String!){ login(username:$u,password:$p){ token } }`,
+    { u: username, p: password },
+  )
+  return data.login.token
+}
+
+// Create a direct chat with one other user through the API and return its id.
+export async function createDirectChat(backend: string, token: string, otherUsername: string): Promise<string> {
+  const data = await gql<{ createChat: { id: string } }>(
+    backend,
+    `mutation($m:[String!]!){ createChat(kind:DIRECT, title:null, memberUsernames:$m){ id } }`,
+    { m: [otherUsername] },
+    token,
+  )
+  return data.createChat.id
+}
+
+// Send a message into a chat through the API (used to drive a live event at a peer).
+export async function sendMessageApi(backend: string, token: string, chatId: string, body: string): Promise<void> {
+  await gql(
+    backend,
+    `mutation($c:ID!,$b:String!){ sendMessage(chatId:$c, body:$b){ id } }`,
+    { c: chatId, b: body },
+    token,
+  )
+}

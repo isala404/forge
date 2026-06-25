@@ -71,8 +71,6 @@ pub struct EnqueueOpts {
     pub delay: Duration,
     /// SQS redrive maxReceiveCount. Deliveries before dead-letter. Default 5.
     pub max_attempts: u32,
-    /// Retry backoff for redeliveries. Default exponential + jitter.
-    pub backoff: Backoff,
     /// SQS MessageDeduplicationId. Dedups enqueues per-queue within the
     /// dedup window (default 5 min). `None` = no dedup.
     pub dedup_id: Option<String>,
@@ -93,10 +91,10 @@ pub struct NackOpts {
     pub retry_in: Option<Duration>,
 }
 
-/// Exponential by default: base 1s, factor 2^(attempt-1), capped, ±25% jitter,
-/// ms precision. (Port of forge-core calculate_backoff; see Semantics.)
+/// Redelivery backoff: base 1s, factor 2^(attempt-1), capped, ±25% jitter,
+/// ms precision. Not caller-configurable. (See Semantics.)
 #[non_exhaustive]
-pub enum Backoff { Fixed(Duration), Linear(Duration), Exponential { base: Duration, cap: Duration } }
+pub enum Backoff { Exponential { base: Duration, cap: Duration } }
 
 #[non_exhaustive]
 pub struct Job {
@@ -134,12 +132,12 @@ consumable queue (dequeue/depth accept `.dlq` names; `enqueue` rejects them).
 > **Deploy/shutdown note.** A worker interrupted mid-job (graceful shutdown, pod eviction) does **not** ack; the lease lapses and the job is reclaimed as a redelivery, which **increments `attempts`**. So a `max_attempts = 1` job interrupted by a deploy goes straight to the DLQ. Size `max_attempts` with deploys in mind, or drain workers before terminating.
 | `worker` | Returns a `WorkerBuilder`. The built worker runs a managed loop: dequeues up to `concurrency` jobs, runs the handler, **auto-heartbeats** at ~`visibility_timeout / 3` while the handler runs, `ack`s on `Ok`, `nack`s on `Err`, and **`nack`s on panic** (caught at the task boundary, never crashes the loop). On shutdown it stops dequeuing and waits (bounded by a grace period) for in-flight handlers, heartbeating them until they finish or the grace expires. |
 
-### Backoff (port of `forge-core::RetryConfig::calculate_backoff`)
+### Backoff
 
-Default redelivery delay for attempt *n* (1-based): `base * 2^(n-1)`, capped at `cap`, then **±25%
-jitter**, at **millisecond** precision. `base = 1s`, `cap = 300s` by default. Jitter desynchronizes a
+Redelivery delay for attempt *n* (1-based): `base * 2^(n-1)`, capped at `cap`, then **±25%
+jitter**, at **millisecond** precision (`base = 1s`, `cap = 300s`). Jitter desynchronizes a
 fleet retrying after a shared upstream outage so they don't re-thunder the recovering dependency. Overflow
-is saturating (no panic at high attempt counts). `Fixed`/`Linear` follow the same jitter + cap rule.
+is saturating (no panic at high attempt counts). A global 12h ceiling applies on top of `cap`.
 
 ## Delivery / consistency guarantees
 
@@ -176,7 +174,7 @@ Strict FIFO is a non-goal.
 - **Dead-letter queue.** Exhausted jobs move to `"<queue>.dlq"` (SQS redrive policy). They are **never
   silently dropped**. The DLQ is an ordinary queue (consumable / inspectable). Automatic redrive *back* to
   the source queue is a non-goal for v1.
-- **Backoff between retries.** Governed by `EnqueueOpts.backoff` (default exponential + jitter, above).
+- **Backoff between retries.** Fixed policy: exponential + jitter (above). Not caller-configurable.
 
 ## Limits
 

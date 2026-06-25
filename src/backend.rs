@@ -1,16 +1,21 @@
 //! The backend seam: provider lifecycle + a per-primitive backend report.
 //!
-//! The primitive traits ([`crate::Kv`], [`crate::Queue`], …) are the *operation*
+//! The primitive traits ([`crate::kv::Kv`], [`crate::queue::Queue`], …) are the *operation*
 //! contracts. They say nothing about how a backend is initialized, health-checked, or
 //! swept. [`BackendLifecycle`] is that missing layer: one value per primitive that
-//! knows which provider powers it and how to maintain it. [`crate::Forge`] holds a
-//! `Vec<Arc<dyn BackendLifecycle>>` and drives them from [`crate::Forge::maintain`] and
-//! [`crate::Forge::backend_report`].
+//! knows which provider powers it and how to maintain it. `forge::Forge` holds a
+//! `Vec<Arc<dyn BackendLifecycle>>` and drives them from `forge::Forge::maintain` and
+//! `forge::Forge::backend_report`.
 //!
 //! In v1 every primitive is Postgres, with the one exception that `blob` can store
 //! bytes on a local filesystem instead of `BYTEA`. The seam is built so a second
 //! backend for any single primitive is a later, app-code-invisible addition: a new
 //! [`BackendLifecycle`] impl and a new config variant, nothing more.
+//!
+//! The concrete [`BackendLifecycle`] impls for the crate-local `Pg*`/`FsBlob` types live
+//! in this module too, rather than scattered across the per-primitive modules, so each
+//! primitive module stays focused on its operation contract. Backends with nothing to
+//! sweep inherit the no-op `maintain` default.
 
 use crate::error::Result;
 use async_trait::async_trait;
@@ -47,38 +52,11 @@ impl Primitive {
     }
 }
 
-impl fmt::Display for Primitive {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// The result of a backend health probe.
-#[non_exhaustive]
-#[derive(Debug, Clone)]
-pub struct BackendHealth {
-    /// Whether the backend is currently usable.
-    pub healthy: bool,
-    /// Human-readable detail for logs/health pages (never secrets).
-    pub detail: String,
-}
-
-impl BackendHealth {
-    /// A healthy result with no extra detail.
-    pub fn ok() -> Self {
-        Self {
-            healthy: true,
-            detail: String::new(),
-        }
-    }
-}
-
 /// Per-primitive provider lifecycle, beside the operation traits.
 ///
 /// One implementation exists per configured backend. The defaults make a no-op
-/// backend (no init, healthy, nothing to sweep) a one-line impl; backends with real
-/// maintenance (the Postgres sweeps, the filesystem orphan sweep) override
-/// [`BackendLifecycle::maintain`].
+/// backend (nothing to sweep) a one-line impl; backends with real maintenance (the
+/// Postgres sweeps, the filesystem orphan sweep) override [`BackendLifecycle::maintain`].
 #[async_trait]
 pub trait BackendLifecycle: Send + Sync {
     /// Provider id, e.g. `"postgres"` or `"filesystem"`.
@@ -99,23 +77,54 @@ pub trait BackendLifecycle: Send + Sync {
         "none"
     }
 
-    /// One-time initialization. Postgres backends migrate via the shared runner, so
-    /// this defaults to a no-op; external providers can use it.
-    async fn init(&self) -> Result<()> {
-        Ok(())
-    }
-
-    /// Liveness probe. Defaults to healthy; backends override to actually check.
-    async fn health(&self) -> Result<BackendHealth> {
-        Ok(BackendHealth::ok())
-    }
-
     /// Idempotent maintenance (expiry sweeps, lease reclaim, orphan cleanup). Defaults
     /// to a no-op for backends with nothing to sweep.
     async fn maintain(&self) -> Result<()> {
         Ok(())
     }
 }
+
+/// The open injection seam: one marker trait per primitive bundling its *operation*
+/// contract with [`BackendLifecycle`]. An external author who implements both for a type
+/// can hand it to [`Forge::builder`](crate::Forge::builder) for that primitive; Forge then
+/// routes operations to it and drives its maintenance/report exactly like a built-in.
+///
+/// Each is a pure marker with a blanket impl, so any type implementing both halves
+/// qualifies automatically — implementors never name these traits. A stored
+/// `Arc<dyn KvBackend>` upcasts to both `Arc<dyn Kv>` (operations) and
+/// `Arc<dyn BackendLifecycle>` (maintenance) with no extra glue.
+pub trait KvBackend: crate::kv::Kv + BackendLifecycle {}
+impl<T: crate::kv::Kv + BackendLifecycle> KvBackend for T {}
+
+/// See [`KvBackend`]: the injection marker for the queue primitive.
+pub trait QueueBackend: crate::queue::Queue + BackendLifecycle {}
+impl<T: crate::queue::Queue + BackendLifecycle> QueueBackend for T {}
+
+/// See [`KvBackend`]: the injection marker for the config-store primitive.
+pub trait ConfigStoreBackend: crate::config_store::ConfigStore + BackendLifecycle {}
+impl<T: crate::config_store::ConfigStore + BackendLifecycle> ConfigStoreBackend for T {}
+
+/// See [`KvBackend`]: the injection marker for the ratelimit primitive.
+pub trait RateLimitBackend: crate::ratelimit::RateLimit + BackendLifecycle {}
+impl<T: crate::ratelimit::RateLimit + BackendLifecycle> RateLimitBackend for T {}
+
+/// See [`KvBackend`]: the injection marker for the blob primitive. Distinct from the
+/// [`BlobBackendConfig`](crate::config::BlobBackendConfig) enum, which only selects where a
+/// *built-in* blob stores bytes.
+pub trait BlobBackend: crate::blob::Blob + BackendLifecycle {}
+impl<T: crate::blob::Blob + BackendLifecycle> BlobBackend for T {}
+
+/// See [`KvBackend`]: the injection marker for the auth primitive.
+pub trait AuthBackend: crate::auth::Auth + BackendLifecycle {}
+impl<T: crate::auth::Auth + BackendLifecycle> AuthBackend for T {}
+
+/// See [`KvBackend`]: the injection marker for the schedule primitive.
+pub trait ScheduleBackend: crate::schedule::Schedule + BackendLifecycle {}
+impl<T: crate::schedule::Schedule + BackendLifecycle> ScheduleBackend for T {}
+
+/// See [`KvBackend`]: the injection marker for the pubsub primitive.
+pub trait PubsubBackend: crate::pubsub::Pubsub + BackendLifecycle {}
+impl<T: crate::pubsub::Pubsub + BackendLifecycle> PubsubBackend for T {}
 
 /// One line of [`BackendReport`]: which provider powers a primitive and its properties.
 #[non_exhaustive]
@@ -127,13 +136,38 @@ pub struct BackendInfo {
     pub caveats: &'static str,
 }
 
+impl BackendInfo {
+    /// Construct one report line. For the facade that assembles the report from each
+    /// backend's [`BackendLifecycle`].
+    pub fn new(
+        primitive: Primitive,
+        provider: &'static str,
+        durable: bool,
+        caveats: &'static str,
+    ) -> Self {
+        Self {
+            primitive,
+            provider,
+            durable,
+            caveats,
+        }
+    }
+}
+
 /// A snapshot of which backend powers each primitive — for logs, health pages, and
 /// debugging. Never needed for ordinary request handling (the provider must not leak
-/// into app logic); see [`crate::Forge::backend_report`].
+/// into app logic); see `forge::Forge::backend_report`.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct BackendReport {
     pub backends: Vec<BackendInfo>,
+}
+
+impl BackendReport {
+    /// Assemble a report from its per-primitive lines.
+    pub fn new(backends: Vec<BackendInfo>) -> Self {
+        Self { backends }
+    }
 }
 
 impl fmt::Display for BackendReport {
@@ -153,14 +187,6 @@ impl fmt::Display for BackendReport {
     }
 }
 
-// --- Postgres + filesystem backend lifecycle impls -------------------------------
-//
-// Centralized here (both the trait and the Pg*/FsBlob types are crate-local, so the
-// orphan rule allows it) to keep the per-primitive modules focused on their operation
-// contracts. The maintenance arms call each backend's inherent sweep; backends with
-// nothing to sweep inherit the no-op default.
-
-#[cfg(feature = "postgres")]
 #[async_trait]
 impl BackendLifecycle for crate::kv::PgKv {
     fn name(&self) -> &'static str {
@@ -174,7 +200,26 @@ impl BackendLifecycle for crate::kv::PgKv {
     }
 }
 
-#[cfg(feature = "postgres")]
+#[async_trait]
+impl BackendLifecycle for crate::kv::MemKv {
+    fn name(&self) -> &'static str {
+        "memory"
+    }
+    fn primitive(&self) -> Primitive {
+        Primitive::Kv
+    }
+    fn durable(&self) -> bool {
+        false
+    }
+    fn caveats(&self) -> &'static str {
+        "in-process, not shared across replicas"
+    }
+    async fn maintain(&self) -> Result<()> {
+        self.purge_expired();
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl BackendLifecycle for crate::queue::PgQueue {
     fn name(&self) -> &'static str {
@@ -188,7 +233,6 @@ impl BackendLifecycle for crate::queue::PgQueue {
     }
 }
 
-#[cfg(feature = "postgres")]
 #[async_trait]
 impl BackendLifecycle for crate::ratelimit::PgRateLimit {
     fn name(&self) -> &'static str {
@@ -202,7 +246,6 @@ impl BackendLifecycle for crate::ratelimit::PgRateLimit {
     }
 }
 
-#[cfg(feature = "postgres")]
 #[async_trait]
 impl BackendLifecycle for crate::auth::PgAuth {
     fn name(&self) -> &'static str {
@@ -216,7 +259,6 @@ impl BackendLifecycle for crate::auth::PgAuth {
     }
 }
 
-#[cfg(feature = "postgres")]
 #[async_trait]
 impl BackendLifecycle for crate::config_store::PgConfig {
     fn name(&self) -> &'static str {
@@ -227,7 +269,6 @@ impl BackendLifecycle for crate::config_store::PgConfig {
     }
 }
 
-#[cfg(feature = "postgres")]
 #[async_trait]
 impl BackendLifecycle for crate::schedule::PgSchedule {
     fn name(&self) -> &'static str {
@@ -238,7 +279,6 @@ impl BackendLifecycle for crate::schedule::PgSchedule {
     }
 }
 
-#[cfg(feature = "postgres")]
 #[async_trait]
 impl BackendLifecycle for crate::pubsub::PgPubsub {
     fn name(&self) -> &'static str {
@@ -252,7 +292,6 @@ impl BackendLifecycle for crate::pubsub::PgPubsub {
     }
 }
 
-#[cfg(feature = "postgres")]
 #[async_trait]
 impl BackendLifecycle for crate::blob::PgBlob {
     fn name(&self) -> &'static str {
@@ -263,7 +302,6 @@ impl BackendLifecycle for crate::blob::PgBlob {
     }
 }
 
-#[cfg(feature = "postgres")]
 #[async_trait]
 impl BackendLifecycle for crate::blob::FsBlob {
     fn name(&self) -> &'static str {

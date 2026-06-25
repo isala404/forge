@@ -156,7 +156,7 @@ export function runScheduler(app: AppCtx, stopped: Stopped): void {
       try {
         await app.forge.runSchedulerOnce();
         await reconcileOnce(app);
-        // Sweep expired kv/queue/ratelimit/auth rows (forge-node now exposes maintain).
+        // forge-node now exposes maintain
         await app.forge.maintain();
       } catch (e) {
         console.warn("scheduler tick failed:", (e as Error).message);

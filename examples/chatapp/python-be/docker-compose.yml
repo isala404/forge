@@ -51,8 +51,14 @@ services:
     environment:
       # Point the browser at the backend's PUBLISHED URL (host-reachable), not the
       # in-network service name — these are consumed by the SPA at runtime.
-      VITE_GRAPHQL_HTTP: http://127.0.0.1:8083/graphql
-      VITE_GRAPHQL_WS: ws://127.0.0.1:8083/graphql
+      # Override via the environment (e.g. `--env-file .env.orb`) when 127.0.0.1 ports
+      # aren't host-reachable, as on OrbStack; the defaults suit Docker Desktop.
+      VITE_GRAPHQL_HTTP: ${PYBE_GRAPHQL_HTTP:-http://127.0.0.1:8083/graphql}
+      VITE_GRAPHQL_WS: ${PYBE_GRAPHQL_WS:-ws://127.0.0.1:8083/graphql}
+      # Presigned blob URLs are relative (`/api/files`), so nginx proxies them to
+      # the backend on the internal network — reachable regardless of host port
+      # forwarding, so uploads work on both Docker Desktop and OrbStack unchanged.
+      BACKEND_ORIGIN: http://pybe-backend:8083
     ports:
       - "127.0.0.1:8093:80"
     depends_on:

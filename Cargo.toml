@@ -1,5 +1,5 @@
 [package]
-name = "forge-rs"
+name = "forge"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
@@ -8,17 +8,16 @@ repository = "https://github.com/isala404/forge"
 description = "The standard library for agent-built SaaS: hardened infra primitives on Postgres"
 keywords = ["postgres", "queue", "kv", "primitives", "backend"]
 categories = ["database", "asynchronous"]
+# Ship only the crate itself; the bindings, examples, language runners, and CI
+# config build under their own lockfiles and must not bloat the published package.
+exclude = ["/bindings", "/examples", "/tools", "/.github"]
 
-# The library is `forge` even though the package is `forge-rs`, for clean `use forge::...`.
 [lib]
 name = "forge"
 path = "src/lib.rs"
 
 [features]
-default = ["postgres"]
-# The Postgres backend implements every primitive. It is the only backend in v0.1;
-# the feature exists so future backends (redis, s3) slot in behind the same structure.
-postgres = []
+default = []
 # One-line OTLP export wiring for traces. Without it, spans still flow to whatever
 # `tracing` subscriber the app installs.
 otel = [
@@ -32,9 +31,8 @@ otel = [
 # DB-backed integration tests. A sentinel test fails loudly if TEST_DATABASE_URL is unset,
 # so "0 tests ran" cannot masquerade as a pass.
 pg-tests = []
-# The optional axum router that serves presigned blob URLs against the Postgres
-# backend (`forge.blob_router()`). Off by default; presign signing works without it.
-blob-router = ["dep:axum"]
+# Exposes `forge::conformance` for external backend authors / the cross-language runner; cfg(test) otherwise.
+conformance = []
 
 [dependencies]
 # Async + runtime
@@ -57,6 +55,9 @@ bytes = "1.10"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# Config files. `${VAR}` env interpolation is a small in-house helper over toml::Value;
+# no figment/config layer, to keep the dependency surface minimal.
+toml = "0.8"
 uuid = { version = "1.19", features = ["v4", "serde"] }
 chrono = { version = "0.4", default-features = false, features = ["serde", "std", "clock"] }
 
@@ -85,13 +86,11 @@ opentelemetry-otlp = { version = "0.27", optional = true, default-features = fal
 tracing-opentelemetry = { version = "0.28", optional = true }
 tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter", "fmt"] }
 
-# Blob presign router (feature = "blob-router")
-axum = { version = "0.8", optional = true, default-features = false, features = ["tokio", "http1", "query"] }
-
 [dev-dependencies]
 tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+async-trait = "0.1"
 
 [lints.rust]
 unsafe_code = "forbid"

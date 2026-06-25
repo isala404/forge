@@ -103,7 +103,7 @@ async fn presign_requires_secret_and_signs() {
         .presign_download("exports/a.csv", Duration::from_secs(60))
         .await
         .unwrap();
-    assert!(dl.starts_with("/_forge/blob?key="));
+    assert!(dl.starts_with("/api/files?key="));
     assert!(dl.contains("sig="));
 
     let up = signed

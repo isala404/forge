@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import pg from "pg";
 import DataLoader from "dataloader";
 import { ForgeClient, type JsSubscription } from "forge-node";
@@ -76,10 +77,16 @@ export interface Loaders {
 export class AppCtx {
   forge: ForgeClient;
   pool: pg.Pool;
+  // A throwaway argon2id hash minted once at startup (see initAppCtx). `login`
+  // verifies the submitted password against it when the username doesn't exist, so
+  // the username-miss path spends the same argon2 time as a real verify and the
+  // timing no longer reveals which usernames are registered.
+  decoyHash: string;
 
-  constructor(forge: ForgeClient, pool: pg.Pool) {
+  constructor(forge: ForgeClient, pool: pg.Pool, decoyHash: string) {
     this.forge = forge;
     this.pool = pool;
+    this.decoyHash = decoyHash;
   }
 
   makeLoaders(viewerId: string | null): Loaders {
@@ -228,13 +235,18 @@ export function postgresUrl(): string {
 }
 
 export async function initAppCtx(pgUrl = postgresUrl()): Promise<AppCtx> {
+  // connect migrates Forge's system tables at startup; it owns its database.
   const forge = await ForgeClient.connect(
     pgUrl,
     process.env.FORGE_BLOB_SIGNING_SECRET || "dev-secret-change-me",
   );
   const pool = new pg.Pool({ connectionString: pgUrl, max: 10 });
   await db.migrate(pool);
-  return new AppCtx(forge, pool);
+  // Mint the login decoy hash once, via forge's own hasher so its argon2 params
+  // always match real password hashes. `login` verifies against it on a username
+  // miss to keep that path's timing indistinguishable from a real verify.
+  const decoyHash = await forge.hashPassword(randomUUID());
+  return new AppCtx(forge, pool, decoyHash);
 }
 
 // A bearer token authenticates as either a session (slides the idle deadline) or

@@ -1,7 +1,6 @@
 /* App layout and component styles. One accent, one radius scale (sm/md/lg/pill),
    one neutral ramp, all from the tokens in index.css. */
 
-/* ---------- shared primitives ---------- */
 .avatar {
   display: inline-flex;
   align-items: center;
@@ -198,7 +197,6 @@
   flex: none;
 }
 
-/* ---------- skeletons ---------- */
 .skeleton {
   display: inline-block;
   background: linear-gradient(
@@ -211,7 +209,6 @@
   animation: skeleton-shimmer 1.4s ease infinite;
 }
 
-/* ---------- empty / error states ---------- */
 .state-block {
   display: flex;
   flex-direction: column;
@@ -247,7 +244,6 @@
   line-height: 1.5;
 }
 
-/* ---------- auth ---------- */
 .auth-shell {
   display: grid;
   grid-template-columns: 1fr;
@@ -347,7 +343,6 @@
   }
 }
 
-/* ---------- boot ---------- */
 .boot {
   display: flex;
   flex-direction: column;
@@ -364,7 +359,6 @@
   height: 22px;
 }
 
-/* ---------- app shell ---------- */
 .app {
   display: grid;
   grid-template-columns: minmax(300px, 380px) 1fr;
@@ -378,7 +372,6 @@
   border-left: 1px solid var(--border);
 }
 
-/* ---------- sidebar ---------- */
 .sidebar {
   display: flex;
   flex-direction: column;
@@ -449,7 +442,6 @@
   flex-direction: column;
 }
 
-/* ---------- chat row ---------- */
 .chat-row {
   display: flex;
   align-items: center;
@@ -521,7 +513,6 @@
   pointer-events: none;
 }
 
-/* ---------- conversation ---------- */
 .convo,
 .convo-placeholder,
 .settings {
@@ -618,7 +609,6 @@
   box-shadow: var(--shadow-sm);
 }
 
-/* ---------- bubbles ---------- */
 .bubble-row {
   display: flex;
   animation: fade-up 0.18s ease both;
@@ -688,7 +678,6 @@
   font-size: 13px;
 }
 
-/* ---------- typing ---------- */
 .typing-indicator {
   display: flex;
   align-items: center;
@@ -719,7 +708,6 @@
   animation-delay: 0.36s;
 }
 
-/* ---------- composer ---------- */
 .composer {
   flex: none;
   padding: 10px 14px;
@@ -789,7 +777,6 @@
   color: var(--text-muted);
 }
 
-/* ---------- modal ---------- */
 .modal-scrim {
   position: fixed;
   inset: 0;
@@ -842,7 +829,6 @@
   font-size: 14px;
 }
 
-/* ---------- segmented / chips ---------- */
 .segmented {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -899,7 +885,6 @@
   background: rgba(0, 0, 0, 0.08);
 }
 
-/* ---------- settings ---------- */
 .settings-head {
   display: flex;
   align-items: center;
@@ -1040,7 +1025,6 @@
   word-break: break-all;
 }
 
-/* ---------- toasts ---------- */
 .toast-stack {
   position: fixed;
   bottom: 20px;
@@ -1070,7 +1054,6 @@
   border-color: var(--accent);
 }
 
-/* ---------- responsive: single pane on mobile ---------- */
 @media (max-width: 768px) {
   .app {
     grid-template-columns: 1fr;

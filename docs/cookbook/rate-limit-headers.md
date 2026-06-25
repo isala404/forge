@@ -133,9 +133,9 @@ async fn check_login(forge: &forge::Forge, ip: &str) -> forge::Result<()> {
 
 ## Node / Python bindings
 
-Both bindings expose the check but flatten it. The fail mode is an optional boolean (`failOpen` / `fail_open`): omit for the instance default, `true` for open, `false` for closed.
+Both bindings return the full decision, so you can emit every IETF header from any language. The fail mode is an optional boolean (`failOpen` / `fail_open`): omit for the instance default, `true` for open, `false` for closed. The optional `algo` selects the algorithm: `"token_bucket"` (default) or `"sliding_window"`.
 
-- **Node** — `rate_limit_check(bucket, key, max, perSeconds, failOpen?)` returns `{ allowed, limit, remaining, retryAfterSeconds }`.
-- **Python** — the equivalent check returns a `(allowed, remaining, retryAfterSeconds)` tuple.
+- **Node** — `rateLimitCheck(bucket, key, max, perSeconds, failOpen?, algo?)` returns `{ allowed, limit, remaining, resetAfterSeconds, retryAfterSeconds }`.
+- **Python** — `rate_limit_check(bucket, key, max, per_seconds, fail_open=None, algo=None)` returns a `Decision` with `allowed`, `limit`, `remaining`, `reset_after_seconds`, `retry_after_seconds`.
 
-Heads-up for this recipe specifically: neither binding currently surfaces `reset_after`, so you **cannot** emit `RateLimit-Reset` from the bindings the way you can in Rust — you only get `RateLimit-Limit` (Node), `RateLimit-Remaining`, and `Retry-After`. Both also expose only token-bucket via `perSeconds` (no algorithm switch). If you need `RateLimit-Reset` or `SlidingWindow`, that path is Rust-only today.
+So `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` (from `reset_after_seconds`), and `Retry-After` are all available through the bindings, with the same algorithm choice as Rust.

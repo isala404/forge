@@ -9,7 +9,7 @@ description = "Node.js (napi-rs) bindings for Forge — kv + queue from JavaScri
 crate-type = ["cdylib"]
 
 [dependencies]
-forge = { package = "forge-rs", path = "../.." }
+forge = { path = "../.." }
 futures-util = "0.3"
 napi = { version = "2", default-features = false, features = ["napi6", "tokio_rt"] }
 napi-derive = "2"

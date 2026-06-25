@@ -3,7 +3,7 @@
 One taxonomy, three surfaces. The variant set is small and every variant tells the
 caller what to *do*. Retryability is part of the contract, per variant. This table
 is normative: the bindings and the conformance suite
-(`conformance/scenarios/*.json`) enforce it.
+(`src/conformance/scenarios/*.json`) enforce it.
 
 | Canonical code | Rust (`ForgeError`) | Node (thrown `Error`) | Python (exception) | Retryable | Meaning / what to do |
 |---|---|---|---|---|---|

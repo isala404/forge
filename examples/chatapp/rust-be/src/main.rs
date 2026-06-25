@@ -1,6 +1,7 @@
 //! chatapp Rust backend: a pure GraphQL API over Forge. axum 0.8 + async-graphql 7
 //! (code-first, with DataLoader) sharing Forge's Postgres pool.
 
+mod blob_router;
 mod context;
 mod db;
 mod gql;
@@ -44,20 +45,28 @@ async fn main() -> Result<()> {
         "FORGE_POSTGRES_URL",
         "postgres://postgres:forge@127.0.0.1:5432/chatapp_rust",
     );
-    let forge = Forge::init(
-        ForgeConfig::new(&pg)
-            .with_blob_signing_secret(env_or("FORGE_BLOB_SIGNING_SECRET", "dev-secret-change-me"))
-            .with_blob_base_url("/_forge/blob"),
-    )
-    .await?;
+    let cfg = ForgeConfig::new(&pg)
+        .with_blob_signing_secret(env_or("FORGE_BLOB_SIGNING_SECRET", "dev-secret-change-me"))
+        .with_blob_base_url("/api/files");
+    // init migrates Forge's system tables at startup; it owns its database.
+    let forge = Forge::init(cfg).await?;
 
     // Reuse Forge's pool for the domain tables rather than opening a second one.
     let pool = forge.pool().clone();
     db::migrate(&pool).await?;
 
+    // Mint the login decoy hash once, via forge's own hasher so its argon2 params
+    // always match real password hashes. `login` verifies against it on a username
+    // miss to keep that path's timing indistinguishable from a real verify.
+    let decoy_hash = forge
+        .auth()
+        .hash_password(&uuid::Uuid::new_v4().to_string())
+        .await?;
+
     let ctx: Ctx = Arc::new(AppCtx {
         forge: forge.clone(),
         pool,
+        decoy_hash,
     });
     let schema = gql::schema(ctx.clone());
 
@@ -70,7 +79,7 @@ async fn main() -> Result<()> {
         schema,
         ctx: ctx.clone(),
     })
-    .nest("/_forge/blob", forge.blob_router()?);
+    .nest("/api/files", blob_router::router(ctx.clone()));
 
     let port = env_or("PORT", "8081");
     // In a container set BIND=0.0.0.0 so the published port reaches the process.

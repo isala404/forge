@@ -29,14 +29,16 @@ at-least-once delivery — is **inherited**, not re-implemented.
 #[async_trait]
 pub trait Schedule: Send + Sync {
     /// Register or replace a recurring schedule. Upsert by `name`: re-registering
-    /// the same name replaces `expr`, `queue`, and `payload` atomically. `expr` is
-    /// validated as 5-field cron at registration; invalid => `Invalid`.
-    async fn cron(&self, name: &str, expr: &str, queue: &str, payload: Bytes)
+    /// the same name replaces `expr`, `queue`, `payload`, and `opts` atomically.
+    /// `expr` is validated as 5-field cron at registration; invalid => `Invalid`.
+    /// `opts` sets the delivery options of the job each tick enqueues.
+    async fn cron(&self, name: &str, expr: &str, queue: &str, payload: Bytes, opts: ScheduleOpts)
         -> Result<(), ForgeError>;
 
     /// Unix `at`: schedule a single enqueue at absolute `when` (a `SystemTime`).
     /// Returns the `queue` JobId the eventual enqueue will carry — see Semantics.
-    async fn at(&self, when: SystemTime, queue: &str, payload: Bytes)
+    /// `opts` sets the enqueued job's delivery options.
+    async fn at(&self, when: SystemTime, queue: &str, payload: Bytes, opts: ScheduleOpts)
         -> Result<JobId, ForgeError>;
 
     /// Remove a schedule by name. Returns `true` if one was removed, `false` if no
@@ -47,12 +49,22 @@ pub trait Schedule: Send + Sync {
     /// still pending and removed, `false` if it already fired or never existed.
     async fn cancel_at(&self, job_id: JobId) -> Result<bool, ForgeError>;
 
-    /// All registered schedules — recurring crons and pending one-shots (the `kind`
-    /// field distinguishes them). A one-shot disappears once it has fired.
-    async fn list(&self) -> Result<Vec<ScheduleInfo>, ForgeError>;
+    /// Registered schedules ordered by name — recurring crons and pending one-shots
+    /// (the `kind` field distinguishes them). A one-shot disappears once it has
+    /// fired. Paginated: up to `limit` per page plus a next-page cursor (`None` when
+    /// done), matching kv/blob, so a backlog of pending one-shots is never an
+    /// unbounded materialization.
+    async fn list(&self, cursor: Option<Cursor>, limit: u32)
+        -> Result<(Vec<ScheduleInfo>, Option<Cursor>), ForgeError>;
 }
 
 pub enum ScheduleKind { Cron(String), At } // Cron carries the 5-field expression
+
+// Per-schedule delivery options for the job each tick enqueues (#[non_exhaustive]
+// builder). An unset field inherits the queue's enqueue default.
+pub struct ScheduleOpts {
+    pub max_attempts: Option<u32>, // None => queue default (5)
+}
 
 #[non_exhaustive]
 pub struct ScheduleInfo {
@@ -71,11 +83,11 @@ handed to `queue` verbatim. `JobId` is the `queue` primitive's id type.
 
 | op | behavior |
 |----|----------|
-| `cron` | Upsert by `name`. Inserts the schedule, or replaces an existing one's `expr`/`queue`/`payload` (one atomic write — re-registering the same name does **not** create a second schedule). `expr` is parsed and validated as 5-field cron at this call; a bad expression is rejected here, never silently at tick time. `next_run` is recomputed from the new `expr`. Returns `Ok(())`. |
-| `at` | Schedules exactly one enqueue at `when`. A `when` already in the past fires on the next tick if within the missed-tick grace (below), else is skipped + logged — the same policy as a missed cron tick. Returns the `JobId` the eventual enqueue will carry, so the caller can correlate / inspect / `ack` it via `queue` once it lands. The job becomes visible in `queue` only when the tick fires, not at `at` call time (see resolution). |
+| `cron` | Upsert by `name`. Inserts the schedule, or replaces an existing one's `expr`/`queue`/`payload`/`opts` (one atomic write — re-registering the same name does **not** create a second schedule). `expr` is parsed and validated as 5-field cron at this call; a bad expression is rejected here, never silently at tick time. `next_run` is recomputed from the new `expr`. `opts` set the `max_attempts` of the job each tick enqueues (unset => the queue default). Returns `Ok(())`. |
+| `at` | Schedules exactly one enqueue at `when`, with `opts` controlling the enqueued job's `max_attempts` (unset => queue default). A `when` already in the past fires on the next tick if within the missed-tick grace (below), else is skipped + logged — the same policy as a missed cron tick. Returns the `JobId` the eventual enqueue will carry, so the caller can correlate / inspect / `ack` it via `queue` once it lands. The job becomes visible in `queue` only when the tick fires, not at `at` call time (see resolution). |
 | `cancel` | Removes the recurring schedule named `name`. Returns `true` if one existed and was removed, `false` if none did. Cancelling an unknown name is **success** (`Ok(false)`), not `NotFound`. A tick already enqueued before `cancel` is **not** recalled — it lives in `queue` now and runs to completion there. `cancel` targets named (cron) schedules; recall a still-pending one-shot with `cancel_at(job_id)`. |
 | `cancel_at` | Removes a still-pending one-shot created by `at`, by the `JobId` it returned. `true` if it was pending and removed, `false` if it already fired (or never existed). Once the one-shot's tick has fired the job lives in `queue` and `cancel_at` returns `false` — recall it through `queue` if needed. |
-| `list` | Returns every registered schedule with its `next_run`/`last_run` — recurring crons (`kind = Cron(expr)`) **and** pending one-shots (`kind = At`). A one-shot appears here only until it fires; once fired it is deleted from the schedule table and lives on solely as an ordinary `queue` job. Empty vec if none. |
+| `list` | Returns registered schedules ordered by name with their `next_run`/`last_run` — recurring crons (`kind = Cron(expr)`) **and** pending one-shots (`kind = At`) — up to `limit` per page plus a next-page `cursor` (`None` when iteration is done; pass it back for the next page, like kv/blob `scan`). A one-shot appears here only until it fires; once fired it is deleted from the schedule table and lives on solely as an ordinary `queue` job. Empty page + `None` cursor if none. Paginating avoids materializing a backlog of a million pending one-shots in one call. |
 
 A scheduled enqueue is indistinguishable, once landed, from any other `queue` job: same
 payload, same retry/backoff/DLQ rules. schedule's entire job is *deciding when to call
@@ -148,7 +160,7 @@ century out is effectively always a bug, and a fixed ceiling keeps backends in a
 | condition | variant | retryable |
 |-----------|---------|-----------|
 | `cancel` on an unknown name | returns `false`, not an error | — |
-| `list` with no schedules | returns empty vec, not an error | — |
+| `list` with no schedules | returns an empty page + `None` cursor, not an error | — |
 | malformed/sub-minute cron `expr`; empty `name`; invalid target queue name | `Invalid` | no — caller bug |
 | `name` over 256 B; `payload` over 256 KiB; `at.when` over the ~100-year ceiling | `Limit` | no |
 | transient backend outage (pool timeout, dropped conn, `08xxx`/`57014`) | `Unavailable` | yes |

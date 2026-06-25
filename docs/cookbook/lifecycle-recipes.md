@@ -39,7 +39,7 @@ async fn main() -> Result<()> {
 }
 ```
 
-`Forge::init` validates the config, connects, and runs (or, with `without_migrations()`, only verifies) the embedded migrations before returning. Misconfiguration fails here with `ForgeError::Config`, never lazily on first use. `forge.blob_router()` errors with `Config` unless `blob_signing_secret` is set. `Forge` is `Clone` (an `Arc` inside) and `Send + Sync`, so clone it freely into handlers and tasks.
+`Forge::init` validates the config, connects to Forge's system database, and runs the embedded migrations before returning. Misconfiguration fails here with `ForgeError::Config`, never lazily on first use. `forge.blob_router()` errors with `Config` unless `blob_signing_secret` is set. `Forge` is `Clone` (an `Arc` inside) and `Send + Sync`, so clone it freely into handlers and tasks.
 
 ## Web + workers: a managed consumer per queue
 
@@ -86,7 +86,7 @@ If a handler's lease is lost mid-run (heartbeat hits `Precondition` because anot
 
 `schedule` does not deliver jobs; each tick *enqueues* into a queue, which is then consumed by a worker like the one above. Two loops drive the cadence:
 
-- `forge.run_scheduler()` — runs the tick loop until SIGINT/SIGTERM, firing due schedules every ~30s. Variants: `run_scheduler_until(shutdown)` (your own shutdown future, still 30s ticks) and `run_scheduler_with(interval, shutdown)` (custom cadence, e.g. a short tick in tests).
+- `forge.run_scheduler()` — runs the tick loop until SIGINT/SIGTERM, firing due schedules every ~30s. For tests or a custom cadence, call `run_scheduler_once()` yourself on whatever interval you like.
 - `forge.maintain()` — one idempotent housekeeping sweep across every backend: purge expired kv rows and old completed jobs, reclaim leases orphaned by crashed workers, drop stale dedup and rate-limit rows, expire dead sessions, and (filesystem blob) reclaim orphaned files. It is *not* on a built-in timer; call it yourself on a schedule.
 
 `run_scheduler` has no maintenance built in, so the common shape is one task for the scheduler and a separate periodic loop for `maintain`:
