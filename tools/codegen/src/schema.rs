@@ -1,14 +1,14 @@
 //! The single source of truth for Forge's cross-language binding DTOs.
 //!
-//! Every value type that crosses the FFI boundary — a queue `Job`, a rate-limit
-//! `Decision`, object metadata, a paginated list — is declared here exactly once. The
-//! generator turns this list into the Rust struct definitions for both bindings, so the
-//! Node (`Js*`, via napi) and Python (`#[pyclass]`, via pyo3) surfaces are mechanically
+//! Every value type that crosses the FFI boundary (a queue `Job`, a rate-limit
+//! `Decision`, object metadata, a paginated list) is declared here once. The generator
+//! turns this list into the Rust struct definitions for both bindings, so the Node
+//! (`Js*`, via napi) and Python (`#[pyclass]`, via pyo3) surfaces are mechanically
 //! identical and cannot drift from each other or from this schema.
 //!
-//! The hand-written `From<forge::…>` conversions in each binding still map the core
-//! `forge` types onto these structs; if a field changes here, those conversions stop
-//! compiling until they are updated — so the core crate cannot drift silently either.
+//! The hand-written `From<forge::…>` conversions in each binding map the core `forge`
+//! types onto these structs; if a field changes here, those conversions stop compiling
+//! until updated, so the core crate cannot drift silently either.
 
 /// A field's logical type, rendered to a concrete Rust (per binding) or Python type.
 ///
@@ -22,9 +22,9 @@ pub enum Ty {
     OptStr,
     /// `bool`.
     Bool,
-    /// `u32` — a small count or attempt number.
+    /// `u32`: a small count or attempt number.
     U32,
-    /// `f64` — epoch milliseconds or a duration in seconds.
+    /// `f64`: epoch milliseconds or a duration in seconds.
     F64,
     /// `Option<f64>`.
     OptF64,
@@ -109,7 +109,7 @@ pub struct Dto {
     pub name: &'static str,
     /// The Node struct name (napi renders it as the TS interface name).
     pub node_name: &'static str,
-    /// The Python `#[pyclass]` name (the Python class name).
+    /// The Python `#[pyclass]` name.
     pub py_name: &'static str,
     /// Whether the Python struct needs `#[derive(Clone)]` (it is nested inside a page).
     pub clone: bool,

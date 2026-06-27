@@ -34,7 +34,7 @@ const wsClient = createWsClient({
     // operations are handled by the HTTP authExchange; this only covers the socket
     // itself being rejected. We key off the close code so a transient network drop
     // (which graphql-ws will retry and reconnect on its own) does not log the user
-    // out — only an auth-specific close clears the session, via the same setToken
+    // out; only an auth-specific close clears the session, via the same setToken
     // path as the HTTP side, dropping the app back to login.
     closed: (event) => {
       const code = (event as CloseEvent)?.code
@@ -51,7 +51,7 @@ onTokenChange(() => {
   // right tool here: it closes the live socket but the client stays reusable and
   // reconnects on demand. `dispose` would permanently kill the client, so after
   // the first login no subscription could ever connect again without a full page
-  // reload — which is exactly the "had to refresh for messages to arrive" bug.
+  // reload, which is exactly the "had to refresh for messages to arrive" bug.
   wsClient.terminate()
 })
 

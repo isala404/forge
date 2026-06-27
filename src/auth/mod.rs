@@ -1,12 +1,9 @@
-//! `auth` — lineage: OWASP + PHC + PHP `password_*` + Stripe/GitHub keys. See
+//! `auth`. Lineage: OWASP + PHC + PHP `password_*` + Stripe/GitHub keys. See
 //! `docs/contracts/auth.md`. Primitives, not a product: passwords (argon2id PHC),
 //! opaque hashed sessions (idle + absolute timeouts), and `fk_`-prefixed API keys.
 //!
 //! Only hashes are ever stored or logged. The secret newtypes ([`PhcString`],
 //! [`SessionToken`], [`ApiKeySecret`]) have redacted `Debug`.
-//!
-//! The contract (the [`Auth`] trait, the secret newtypes, [`Session`]/[`ApiKey`] DTOs)
-//! lives in this module, which also wires the Postgres backend.
 
 use crate::error::Result;
 use async_trait::async_trait;
@@ -51,9 +48,8 @@ impl fmt::Debug for PhcString {
 pub struct SessionToken(String);
 
 impl SessionToken {
-    /// Wrap a freshly minted token. For backend implementors only — the secret newtype
-    /// keeps the plaintext from being logged; app code receives this from
-    /// [`Auth::create_session`].
+    /// Wrap a freshly minted token. For backend implementors; app code receives this
+    /// from [`Auth::create_session`].
     pub fn new(s: impl Into<String>) -> Self {
         Self(s.into())
     }
@@ -76,9 +72,8 @@ impl fmt::Debug for SessionToken {
 pub struct ApiKeySecret(String);
 
 impl ApiKeySecret {
-    /// Wrap a freshly minted `fk_...` secret. For backend implementors only — the
-    /// secret newtype keeps the plaintext from being logged; app code receives this
-    /// from [`Auth::create_api_key`].
+    /// Wrap a freshly minted `fk_...` secret. For backend implementors; app code
+    /// receives this from [`Auth::create_api_key`].
     pub fn new(s: impl Into<String>) -> Self {
         Self(s.into())
     }
@@ -164,7 +159,7 @@ pub struct ApiKey {
     pub id: String,
     /// The label given at creation.
     pub label: String,
-    /// The full `fk_...` secret — capture it now; it is never recoverable.
+    /// The full `fk_...` secret; capture it now, it is never recoverable.
     pub secret: ApiKeySecret,
     /// When the key was created.
     pub created_at: SystemTime,
@@ -210,7 +205,7 @@ impl ApiKeyInfo {
 /// Auth primitives: argon2id passwords, opaque hashed sessions, `fk_` API keys.
 /// Object-safe; the facade hands out `Arc<dyn Auth>`.
 ///
-/// Forge does NOT own the users table — `user_id`/`owner_id` are opaque app strings.
+/// Forge does NOT own the users table; `user_id`/`owner_id` are opaque app strings.
 /// Exact semantics, timeouts, and error mapping: `docs/contracts/auth.md`.
 #[async_trait]
 pub trait Auth: Send + Sync {

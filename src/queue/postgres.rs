@@ -81,17 +81,31 @@ impl PgQueue {
 
     /// Reclaim expired leases in `queue`: exhausted jobs re-home to the DLQ, the
     /// rest return to `available` immediately with attempts bumped. Idempotent.
+    // Runtime SQL until offline sqlx metadata is regenerated for the DLQ reclaim updates.
+    #[allow(clippy::disallowed_methods)]
     async fn reclaim(&self, queue: &str) -> Result<()> {
-        // Exhausted first — re-homing changes `queue`, so the second statement
-        // (still scoped to `queue`) won't touch them again.
-        sqlx::query!(
+        // Exhausted jobs already in a DLQ are terminal; never chain into `.dlq.dlq`.
+        sqlx::query(
+            "UPDATE forge_jobs \
+             SET status = 'dead', attempts = attempts + 1, \
+                 lease_token = NULL, leased_until = NULL, lease_secs = NULL \
+             WHERE queue = $1 AND queue LIKE '%.dlq' AND status = 'leased' \
+               AND leased_until <= now() AND attempts + 1 >= max_attempts",
+        )
+        .bind(queue)
+        .execute(&self.pool)
+        .await?;
+
+        // Exhausted non-DLQ jobs re-home first: changing `queue` keeps the normal
+        // retry statement below from touching them in the same sweep.
+        sqlx::query(
             "UPDATE forge_jobs \
              SET queue = queue || '.dlq', status = 'available', attempts = 0, \
                  available_at = now(), lease_token = NULL, leased_until = NULL, lease_secs = NULL \
              WHERE queue = $1 AND status = 'leased' AND leased_until <= now() \
-               AND attempts + 1 >= max_attempts",
-            queue
+               AND attempts + 1 >= max_attempts AND queue NOT LIKE '%.dlq'",
         )
+        .bind(queue)
         .execute(&self.pool)
         .await?;
 
@@ -149,6 +163,8 @@ impl PgQueue {
 
     /// Maintenance sweep: purge old `done` jobs, reclaim expired leases across
     /// all queues, drop stale dedup entries. Idempotent.
+    // Runtime SQL until offline sqlx metadata is regenerated for the DLQ reclaim updates.
+    #[allow(clippy::disallowed_methods)]
     pub(crate) async fn maintenance(&self) -> Result<()> {
         let retention_secs = self.retention.as_secs_f64();
         sqlx::query!(
@@ -159,11 +175,21 @@ impl PgQueue {
         .execute(&self.pool)
         .await?;
 
-        sqlx::query!(
+        sqlx::query(
+            "UPDATE forge_jobs \
+             SET status = 'dead', attempts = attempts + 1, \
+                 lease_token = NULL, leased_until = NULL, lease_secs = NULL \
+             WHERE status = 'leased' AND leased_until <= now() \
+               AND attempts + 1 >= max_attempts AND queue LIKE '%.dlq'",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
             "UPDATE forge_jobs \
              SET queue = queue || '.dlq', status = 'available', attempts = 0, \
                  available_at = now(), lease_token = NULL, leased_until = NULL, lease_secs = NULL \
-             WHERE status = 'leased' AND leased_until <= now() AND attempts + 1 >= max_attempts"
+             WHERE status = 'leased' AND leased_until <= now() \
+               AND attempts + 1 >= max_attempts AND queue NOT LIKE '%.dlq'",
         )
         .execute(&self.pool)
         .await?;
@@ -192,7 +218,7 @@ impl PgQueue {
         .fetch_one(&self.pool)
         .await
         {
-            Ok(true) => ForgeError::precondition("lease lost — another worker owns this job"),
+            Ok(true) => ForgeError::precondition("lease lost: another worker owns this job"),
             Ok(false) => ForgeError::NotFound,
             Err(e) => e.into(),
         }
@@ -201,11 +227,14 @@ impl PgQueue {
 
 #[async_trait]
 impl Queue for PgQueue {
+    // Runtime SQL until offline sqlx metadata is regenerated for caller-selected job ids.
+    #[allow(clippy::disallowed_methods)]
     async fn enqueue(&self, queue: &str, payload: Bytes, opts: EnqueueOpts) -> Result<JobId> {
         let delay_secs = opts.delay.as_secs_f64();
         let max_attempts = i32::try_from(opts.max_attempts).unwrap_or(i32::MAX);
         let payload_vec = payload.as_ref().to_vec();
         let dedup_window_secs = self.dedup_window.as_secs_f64();
+        let requested_id = opts.job_id.map(|id| id.0);
         let span = tracing::info_span!(
             "forge.queue.enqueue",
             queue = %queue,
@@ -219,21 +248,42 @@ impl Queue for PgQueue {
             check_queue_name(queue, false)?;
             check_payload(&payload_vec)?;
             check_enqueue_opts(&opts)?;
-            let queue = self.physical(queue); // apply namespace; SQL below binds it
+            let queue = self.physical(queue); // namespaced name; bound by the SQL below
             let Some(dedup_id) = opts.dedup_id.clone() else {
-                let id = sqlx::query_scalar!(
-                    r#"INSERT INTO forge_jobs (queue, payload, status, attempts, max_attempts, available_at)
-                       VALUES ($1, $2, 'available', 0, $3, now() + make_interval(secs => $4))
-                       RETURNING id"#,
-                    queue,
-                    payload_vec,
-                    max_attempts,
-                    delay_secs,
+                let id = requested_id.unwrap_or_else(Uuid::new_v4);
+                let inserted = sqlx::query_scalar::<_, Uuid>(
+                    "INSERT INTO forge_jobs \
+                       (id, queue, payload, status, attempts, max_attempts, available_at) \
+                     VALUES ($1, $2, $3, 'available', 0, $4, now() + make_interval(secs => $5)) \
+                     ON CONFLICT (id) DO NOTHING \
+                     RETURNING id",
                 )
-                .fetch_one(&self.pool)
+                .bind(id)
+                .bind(&queue)
+                .bind(&payload_vec)
+                .bind(max_attempts)
+                .bind(delay_secs)
+                .fetch_optional(&self.pool)
                 .await?;
                 tracing::Span::current().record("dedup_hit", false);
-                return Ok(JobId(id));
+                if let Some(id) = inserted {
+                    return Ok(JobId(id));
+                }
+                if requested_id.is_some() {
+                    let existing_queue = sqlx::query_scalar::<_, String>(
+                        "SELECT queue FROM forge_jobs WHERE id = $1",
+                    )
+                    .bind(id)
+                    .fetch_optional(&self.pool)
+                    .await?;
+                    if existing_queue.as_deref() == Some(queue.as_str()) {
+                        return Ok(JobId(id));
+                    }
+                    return Err(ForgeError::precondition(
+                        "requested job id already exists for another queue",
+                    ));
+                }
+                return Err(ForgeError::backend("generated job id collided"));
             };
 
             // The upsert always returns the surviving dedup row in one round-trip. When
@@ -241,7 +291,7 @@ impl Queue for PgQueue {
             // `claimed` is true and we insert the job; a still-live slot keeps its
             // existing job_id, so `claimed` is false and we return it without a second
             // lookup. (new_id is freshly random, so it can't equal an existing live id.)
-            let new_id = Uuid::new_v4();
+            let new_id = requested_id.unwrap_or_else(Uuid::new_v4);
             let mut tx = self.pool.begin().await?;
             let row = sqlx::query!(
                 r#"INSERT INTO forge_job_dedup (queue, dedup_id, job_id, expires_at)
@@ -261,22 +311,44 @@ impl Queue for PgQueue {
             .await?;
 
             if row.claimed {
-                sqlx::query!(
-                    r#"INSERT INTO forge_jobs (id, queue, payload, status, attempts, max_attempts, available_at)
-                       VALUES ($1, $2, $3, 'available', 0, $4, now() + make_interval(secs => $5))"#,
-                    new_id,
-                    queue,
-                    payload_vec,
-                    max_attempts,
-                    delay_secs,
+                let inserted = sqlx::query_scalar::<_, Uuid>(
+                    r#"INSERT INTO forge_jobs
+                         (id, queue, payload, status, attempts, max_attempts, available_at)
+                       VALUES ($1, $2, $3, 'available', 0, $4, now() + make_interval(secs => $5))
+                       ON CONFLICT (id) DO NOTHING
+                       RETURNING id"#,
                 )
-                .execute(&mut *tx)
+                .bind(new_id)
+                .bind(&queue)
+                .bind(&payload_vec)
+                .bind(max_attempts)
+                .bind(delay_secs)
+                .fetch_optional(&mut *tx)
                 .await?;
-                tx.commit().await?;
                 tracing::Span::current().record("dedup_hit", false);
-                Ok(JobId(new_id))
+                if inserted.is_some() {
+                    tx.commit().await?;
+                    return Ok(JobId(new_id));
+                }
+
+                if requested_id.is_some() {
+                    let existing_queue = sqlx::query_scalar::<_, String>(
+                        "SELECT queue FROM forge_jobs WHERE id = $1",
+                    )
+                    .bind(new_id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+                    if existing_queue.as_deref() == Some(queue.as_str()) {
+                        tx.commit().await?;
+                        return Ok(JobId(new_id));
+                    }
+                    return Err(ForgeError::precondition(
+                        "requested job id already exists for another queue",
+                    ));
+                }
+                Err(ForgeError::backend("generated job id collided"))
             } else {
-                // Live dedup entry — return the existing job id (success).
+                // Live dedup entry: return the existing job id.
                 tx.commit().await?;
                 tracing::Span::current().record("dedup_hit", true);
                 Ok(JobId(row.job_id))
@@ -410,7 +482,7 @@ impl Queue for PgQueue {
                     tracing::Span::current().record("outcome", "dead");
                     return Ok(());
                 }
-                // Exhausted — re-home to DLQ with attempts reset so DLQ consumers see a clean slate.
+                // Exhausted: re-home to DLQ with attempts reset so DLQ consumers see a clean slate.
                 sqlx::query!(
                     "UPDATE forge_jobs \
                      SET queue = queue || '.dlq', status = 'available', attempts = 0, \

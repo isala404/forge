@@ -19,7 +19,7 @@
     },
     {
       "name": "set_xx_writes_only_when_present",
-      "note": "SET XX (if_exists) writes only a live key — exposed in both bindings (P1-6 capability gap).",
+      "note": "SET XX (if_exists) writes only a live key and is exposed in every language binding.",
       "steps": [
         { "op": "kv.set", "args": { "key": "x", "value": "v", "if_exists": true }, "expect": { "value": false } },
         { "op": "kv.set", "args": { "key": "x", "value": "v" }, "expect": { "value": true } },
@@ -64,14 +64,14 @@
     },
     {
       "name": "ttl_zero_is_rejected",
-      "note": "Core rejects ttl<=0 as Invalid. Bindings today skip the TTL (persist forever) and return true — P0-5 gap for node+python.",
+      "note": "Forge rejects ttl<=0 as Invalid, and bindings pass that invalid value through rather than silently persisting forever.",
       "steps": [
         { "op": "kv.set", "args": { "key": "t", "value": "v", "ttl_seconds": 0 }, "expect": { "error": "Invalid" } }
       ]
     },
     {
       "name": "binary_value_roundtrips_losslessly",
-      "note": "Non-UTF-8 bytes survive the FFI via the dedicated bytes API (P0-4). The string surface (kv.set/kv.get) is UTF-8-only by contract.",
+      "note": "Non-UTF-8 bytes survive the FFI via the dedicated bytes API. The string surface (kv.set/kv.get) is UTF-8-only by contract.",
       "steps": [
         { "op": "kv.set_bytes", "args": { "key": "bin", "value": { "$bytes": [0, 255, 0, 254] } }, "expect": { "value": true } },
         { "op": "kv.get_bytes", "args": { "key": "bin" }, "expect": { "bytes": { "$bytes": [0, 255, 0, 254] } } }
@@ -79,7 +79,7 @@
     },
     {
       "name": "namespace_isolation",
-      "note": "Two namespaces over one database must not see each other's keys. Already true for kv today; the same scenario template covers the other 7 primitives once P1-2 lands.",
+      "note": "Two namespaces over one database must not see each other's keys.",
       "steps": [
         { "op": "kv.set", "args": { "key": "shared", "value": "ns-a" }, "namespace": "app-a", "expect": { "value": true } },
         { "op": "kv.get", "args": { "key": "shared" }, "namespace": "app-b", "expect": { "value": null } },

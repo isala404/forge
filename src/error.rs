@@ -1,11 +1,10 @@
-//! The single public error currency: [`ForgeError`] and [`Result`].
+//! The public error type: [`ForgeError`] and [`Result`].
 //!
-//! The taxonomy is small and every variant tells the caller what to *do*
-//! (retry, fix config, treat as a caller bug). Retryability is part of the
-//! contract per variant. Error messages and `Display` output never contain
-//! secrets, payloads, keys, or raw backend error text — the underlying source
-//! (which may carry constraint or schema names) is reachable via
-//! [`std::error::Error::source`] for structured logging but is never rendered.
+//! The taxonomy is small and every variant says what the caller should do (retry, fix
+//! config, treat as a caller bug); retryability is part of the contract. `Display` never
+//! renders secrets, payloads, keys, or raw backend text. The underlying cause (which may
+//! name constraints or schemas) stays reachable via [`std::error::Error::source`] for
+//! logging but is never shown.
 
 use thiserror::Error;
 
@@ -14,9 +13,8 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum ForgeError {
-    /// Misconfiguration: bad connection string, missing migration, malformed
-    /// option. Per principle 3 this can only occur during `forge::Forge::init`.
-    /// Not retryable — fix the configuration.
+    /// Misconfiguration: bad connection string, missing migration, malformed option. By
+    /// principle 3 this can only occur during `forge::Forge::init`. Not retryable.
     #[error("configuration error: {0}")]
     Config(String),
 
@@ -29,9 +27,8 @@ pub enum ForgeError {
     #[error("not found")]
     NotFound,
 
-    /// A precondition was not met: CAS mismatch, lease/fence lost, duplicate
-    /// `dedup_id`, `SET NX` miss surfaced as an error path. Not retryable as-is —
-    /// re-read state and decide.
+    /// A precondition was not met: CAS mismatch, lease/fence lost, duplicate `dedup_id`,
+    /// `SET NX` miss surfaced as an error path. Not retryable as-is; re-read state and decide.
     #[error("precondition failed: {0}")]
     Precondition(String),
 
@@ -44,9 +41,9 @@ pub enum ForgeError {
     #[error("invalid input: {0}")]
     Invalid(String),
 
-    /// A backend/SDK error that is not one of the above. `Display` shows only
-    /// `context`; the raw cause is on `source()`, never rendered, so this is safe
-    /// to surface. `retryable` carries the contract's per-error retryability flag.
+    /// A backend/SDK error that is none of the above. `Display` shows only `context`; the raw
+    /// cause stays on `source()`, never rendered, so it is safe to surface. `retryable` carries
+    /// the contract's per-error flag.
     #[error("backend error: {context}")]
     Backend {
         context: String,
@@ -112,8 +109,8 @@ impl ForgeError {
     /// Classify a [`sqlx::Error`] into the taxonomy without leaking its text.
     pub fn from_sqlx(err: sqlx::Error) -> Self {
         if is_transient_sqlx_error(&err) {
-            // Raw error omitted: it may name constraints/schemas, and the caller
-            // gains nothing from it beyond the retryable signal.
+            // Raw error omitted: it can name constraints or schemas, and the caller needs
+            // only the retryable signal.
             Self::Unavailable("database temporarily unavailable".to_string())
         } else {
             Self::Backend {
@@ -132,10 +129,9 @@ impl From<sqlx::Error> for ForgeError {
     }
 }
 
-/// Heuristic for sqlx errors that are safe-to-retry transient failures: pool
-/// checkout timeouts, dropped or closed connections, and IO errors against the
-/// database socket. Logical errors (constraint violations, type mismatches,
-/// missing rows) intentionally do not retry.
+/// Transient sqlx failures that are safe to retry: pool checkout timeouts, dropped or closed
+/// connections, IO errors on the database socket. Logical errors (constraint violations, type
+/// mismatches, missing rows) do not retry.
 fn is_transient_sqlx_error(err: &sqlx::Error) -> bool {
     match err {
         sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed | sqlx::Error::WorkerCrashed => true,
@@ -204,10 +200,10 @@ mod tests {
         assert!(!ForgeError::backend("x").is_retryable());
     }
 
-    /// Guards against silent drift between the `ForgeError` enum and the normative
-    /// code table in `docs/contracts/errors.md`: a new variant won't compile (the
-    /// match below is exhaustive), a renamed/removed doc row fails the set check, and
-    /// a changed `is_retryable()` that the doc didn't follow fails the per-row check.
+    /// Guards against drift between the `ForgeError` enum and the code table in
+    /// `docs/contracts/errors.md`: a new variant won't compile (the match is exhaustive), a
+    /// renamed or removed doc row fails the set check, and a changed `is_retryable()` the doc
+    /// didn't follow fails the per-row check.
     #[test]
     fn errors_md_table_matches_the_enum() {
         // Exhaustive: adding a variant forces a new arm here (and, via the assertions,
@@ -249,8 +245,7 @@ mod tests {
 
         let doc_codes: std::collections::BTreeSet<&str> =
             doc_rows.iter().map(|(c, _)| c.as_str()).collect();
-        let enum_codes: std::collections::BTreeSet<&str> =
-            samples.iter().map(code).collect();
+        let enum_codes: std::collections::BTreeSet<&str> = samples.iter().map(code).collect();
         assert_eq!(
             doc_codes, enum_codes,
             "errors.md code set must equal the ForgeError variant set"
@@ -266,7 +261,10 @@ mod tests {
                 // Backend carries a per-error flag, so the doc says "per-error".
                 "per-error" => assert_eq!(c, "Backend"),
                 "yes" => assert!(e.is_retryable(), "{c}: doc says retryable, enum says not"),
-                "no" => assert!(!e.is_retryable(), "{c}: doc says not retryable, enum says it is"),
+                "no" => assert!(
+                    !e.is_retryable(),
+                    "{c}: doc says not retryable, enum says it is"
+                ),
                 other => panic!("{c}: unrecognized retryable cell {other:?}"),
             }
         }

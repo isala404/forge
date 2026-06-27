@@ -14,7 +14,7 @@ export const PRESENCE_TOPIC = "presence";
 export const FANOUT_QUEUE = "fanout";
 export const REAP_QUEUE = "reap";
 // Its worker always nacks (max 1 attempt), so a triggered job dead-letters into
-// `fail.dlq` — the opsStats DLQ gauge reads from there.
+// `fail.dlq`. The opsStats DLQ gauge reads from there.
 export const FAIL_QUEUE = "fail";
 
 export function chatTopic(chatId: string): string {
@@ -234,19 +234,32 @@ export function postgresUrl(): string {
   );
 }
 
-export async function initAppCtx(pgUrl = postgresUrl()): Promise<AppCtx> {
-  // connect migrates Forge's system tables at startup; it owns its database.
-  const forge = await ForgeClient.connect(
-    pgUrl,
-    process.env.FORGE_BLOB_SIGNING_SECRET || "dev-secret-change-me",
-  );
-  const pool = new pg.Pool({ connectionString: pgUrl, max: 10 });
+export async function initAppCtx(pgUrl?: string): Promise<AppCtx> {
+  const resolvedPgUrl = pgUrl || postgresUrl();
+  // App startup uses the portable FORGE_* path so backend selectors such as
+  // FORGE_QUEUE_BACKEND and FORGE_BLOB_BACKEND work the same as Rust/Python.
+  const forge = pgUrl
+    ? await ForgeClient.connect(
+        resolvedPgUrl,
+        process.env.FORGE_BLOB_SIGNING_SECRET || "dev-secret-change-me",
+      )
+    : await connectForgeFromEnv(resolvedPgUrl);
+  const pool = new pg.Pool({ connectionString: resolvedPgUrl, max: 10 });
   await db.migrate(pool);
   // Mint the login decoy hash once, via forge's own hasher so its argon2 params
   // always match real password hashes. `login` verifies against it on a username
   // miss to keep that path's timing indistinguishable from a real verify.
   const decoyHash = await forge.hashPassword(randomUUID());
   return new AppCtx(forge, pool, decoyHash);
+}
+
+async function connectForgeFromEnv(defaultPgUrl: string): Promise<ForgeClient> {
+  if (!process.env.FORGE_POSTGRES_URL) process.env.FORGE_POSTGRES_URL = defaultPgUrl;
+  if (!process.env.FORGE_BLOB_SIGNING_SECRET) {
+    process.env.FORGE_BLOB_SIGNING_SECRET = "dev-secret-change-me";
+  }
+  if (!process.env.FORGE_BLOB_BASE_URL) process.env.FORGE_BLOB_BASE_URL = "/api/files";
+  return ForgeClient.connectFromEnv();
 }
 
 // A bearer token authenticates as either a session (slides the idle deadline) or

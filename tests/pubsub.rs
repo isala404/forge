@@ -53,7 +53,7 @@ async fn message_published_before_subscribe_is_not_delivered() {
     let db = TestDatabase::new().await.unwrap();
     let forge = db.forge().await.unwrap();
 
-    // No subscriber yet — this is fire-and-forget and must still succeed.
+    // No subscriber yet. Fire-and-forget publish must still succeed.
     forge
         .pubsub()
         .publish("room", Bytes::from_static(b"missed"))

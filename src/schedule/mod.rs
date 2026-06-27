@@ -1,13 +1,9 @@
-//! `schedule` — lineage: cron + Unix `at` + Kubernetes CronJob. See
+//! `schedule`. Lineage: cron + Unix `at` + Kubernetes CronJob. See
 //! `docs/contracts/schedule.md`.
 //!
-//! A thin layer over [`crate::queue`]: a due tick enqueues a job, so all of the
-//! queue's at-least-once / retry / DLQ semantics are inherited. A scheduled job is
-//! delivered **at least once** — consumers must be idempotent.
-//!
-//! The contract (the [`Schedule`] trait, [`ScheduleInfo`], [`ScheduleKind`],
-//! [`ScheduleOpts`]) lives in this module, which also wires the Postgres backend plus
-//! the cron-expression evaluator.
+//! A thin layer over [`crate::queue`]: a due tick enqueues a job, so the queue's
+//! at-least-once / retry / DLQ semantics are inherited. A scheduled job is delivered
+//! **at least once**, so consumers must be idempotent.
 
 use crate::error::Result;
 use crate::queue::JobId;
@@ -19,11 +15,11 @@ use std::time::SystemTime;
 /// Largest allowed schedule name, in bytes. Over => [`crate::error::ForgeError::Limit`].
 pub const MAX_NAME_BYTES: usize = 256;
 
-/// Largest accepted `at` horizon: ~100 years from now, in days (365.25 × 100). A
-/// `when` past this is [`crate::error::ForgeError::Limit`]. An absolute time a century out is
-/// effectively always a bug, and a fixed ceiling keeps backends in agreement (same
-/// rationale as the kv TTL ceiling). A past/now `when` is *not* rejected — it fires on
-/// the next tick if within the missed-tick grace, else is skipped and logged.
+/// Largest accepted `at` horizon: ~100 years from now, in days (365.25 × 100). A `when`
+/// past this is [`crate::error::ForgeError::Limit`]: a time a century out is effectively
+/// always a bug, and a fixed ceiling keeps backends in agreement (same rationale as the
+/// kv TTL ceiling). A past/now `when` is *not* rejected: it fires on the next tick if
+/// within the missed-tick grace, else is skipped and logged.
 pub const MAX_AT_HORIZON_DAYS: i64 = 36525;
 
 /// What a registered schedule is.
@@ -36,10 +32,9 @@ pub enum ScheduleKind {
     At,
 }
 
-/// Per-schedule delivery options applied to the queue job each tick enqueues.
-/// `#[non_exhaustive]` + builder so new knobs can be added without breaking callers.
-/// An unset field inherits the queue's own default (`max_attempts = 5`), matching a
-/// plain [`crate::queue::Queue::enqueue`].
+/// Per-schedule delivery options applied to the queue job each tick enqueues. An unset
+/// field inherits the queue's own default (`max_attempts = 5`), matching a plain
+/// [`crate::queue::Queue::enqueue`].
 #[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub struct ScheduleOpts {
@@ -99,8 +94,9 @@ impl ScheduleInfo {
 /// Object-safe; the facade hands out `Arc<dyn Schedule>`.
 ///
 /// The ticker that fires due schedules runs via `forge.run_scheduler()` (managed
-/// loop) or `forge.run_scheduler_once()` (one pass). Exactly one enqueue happens per
-/// tick across all replicas. Exact semantics: `docs/contracts/schedule.md`.
+/// loop) or `forge.run_scheduler_once()` (one pass). Built-in backends use stable queue
+/// job ids so retrying a claimed tick is idempotent; custom queue backends must honor
+/// `EnqueueOpts::job_id`. Exact semantics: `docs/contracts/schedule.md`.
 #[async_trait]
 pub trait Schedule: Send + Sync {
     /// Upsert a recurring cron schedule by `name` (re-registering replaces it). The
@@ -134,15 +130,14 @@ pub trait Schedule: Send + Sync {
 
     /// Cancel a one-shot created by [`Schedule::at`], by the [`JobId`] it returned.
     /// `true` if it was still pending and removed, `false` if it already fired or
-    /// never existed. Enables send-later recall and disappearing-message cancellation.
+    /// never existed.
     async fn cancel_at(&self, job_id: JobId) -> Result<bool> {
         self.cancel(&format!("at:{job_id}")).await
     }
 
-    /// List registered schedules, ordered by name, up to `limit` per page plus a
-    /// next-page cursor (`None` when iteration is complete). Mirrors the kv/blob
-    /// pagination shape so a backlog of pending one-shots never forces an unbounded
-    /// materialization. Weakly consistent: tolerate duplicates across pages.
+    /// List registered schedules, ordered by name, up to `limit` per page plus a next-page
+    /// cursor (`None` when iteration is complete). Weakly consistent: tolerate duplicates
+    /// across pages.
     async fn list(
         &self,
         cursor: Option<Cursor>,

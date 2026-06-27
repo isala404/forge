@@ -1,4 +1,4 @@
-//! Cross-language conformance runner — Rust side.
+//! Cross-language conformance runner (Rust side).
 //!
 //! Reads `src/conformance/scenarios/*.json` and runs each scenario against a fresh
 //! throwaway Forge, asserting the observable result matches the canonical
@@ -36,14 +36,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Mutex;
 
 const SCENARIO_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/conformance/scenarios");
-const GAPS_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/conformance/known_gaps.json");
+const GAPS_FILE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/src/conformance/known_gaps.json"
+);
 
 /// Signing secret wired into every variant so the blob presign/verify scenarios have a
 /// configured key regardless of which backend stores the bytes.
 const SIGNING_SECRET: &str = "conformance-signing-secret";
 
 /// Which backend a scenario runs against. The same scenario JSON must pass on every
-/// applicable variant — that is the whole point of the matrix.
+/// applicable variant, which is the point of the matrix.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Variant {
     /// Every primitive on Postgres (the reference, durable backend).
@@ -52,7 +55,7 @@ enum Variant {
     /// connected (init migrates it), but no primitive state touches it.
     Memory,
     /// Blob bytes on a per-scenario filesystem directory, metadata in Postgres. Only the
-    /// blob scenarios exercise this — the other primitives keep their Postgres default.
+    /// blob scenarios exercise this; the other primitives keep their Postgres default.
     Filesystem,
 }
 
@@ -78,8 +81,8 @@ fn variants_for(primitive: &str) -> &'static [Variant] {
 /// Whether a scenario applies to `variant`. A scenario may pin itself to a subset of
 /// backends via an optional `"backends"` array when it asserts a capability one backend
 /// documents it cannot provide (e.g. the in-process scheduler holds no queue handle, so
-/// scheduler->queue delivery is Postgres-only). Absent the field, every variant applies —
-/// the default, so a scenario is backend-agnostic unless it explicitly says otherwise.
+/// scheduler->queue delivery is Postgres-only). Absent the field, every variant applies
+/// (the default), so a scenario is backend-agnostic unless it explicitly says otherwise.
 fn scenario_runs_on(scenario: &Value, variant: Variant) -> bool {
     match scenario.get("backends").and_then(Value::as_array) {
         None => true,
@@ -117,10 +120,14 @@ impl VariantFactory {
     /// scenario's namespaces (so namespace isolation rides on the Postgres metadata, not on
     /// separate directories).
     fn fs_root(&self) -> Result<PathBuf, String> {
-        let mut guard = self.tmp.lock().map_err(|_| "tmp lock poisoned".to_string())?;
+        let mut guard = self
+            .tmp
+            .lock()
+            .map_err(|_| "tmp lock poisoned".to_string())?;
         if guard.is_none() {
             let n = FS_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-            let dir = std::env::temp_dir().join(format!("forge_conf_blob_{}_{n}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("forge_conf_blob_{}_{n}", std::process::id()));
             std::fs::create_dir_all(&dir).map_err(|e| format!("create blob tempdir: {e}"))?;
             *guard = Some(dir);
         }
@@ -143,7 +150,11 @@ impl ForgeFactory for VariantFactory {
     async fn forge(&self, namespace: &str) -> Result<Forge, String> {
         let mut guard = self.db.lock().await;
         if guard.is_none() {
-            *guard = Some(TestDatabase::new().await.map_err(|e| format!("db setup: {e}"))?);
+            *guard = Some(
+                TestDatabase::new()
+                    .await
+                    .map_err(|e| format!("db setup: {e}"))?,
+            );
         }
         let url = guard.as_ref().unwrap().url().to_string();
         // init migrates the throwaway DB's schema (idempotent across the per-namespace
@@ -195,7 +206,7 @@ async fn conformance_rust() {
                         println!("XFAIL {primitive}/{name} [{label}]: {e}");
                     }
                     (Ok(()), true) => problems.push(format!(
-                        "{primitive}/{name} [{label}]: PASSED but is a registered rust gap — remove it from known_gaps.json"
+                        "{primitive}/{name} [{label}]: PASSED but is a registered rust gap; remove it from known_gaps.json"
                     )),
                     (Err(e), false) => problems.push(format!("{primitive}/{name} [{label}]: {e}")),
                 }
@@ -203,7 +214,10 @@ async fn conformance_rust() {
         }
     }
 
-    println!("\nconformance(rust): {passed} ok, {} unexpected", problems.len());
+    println!(
+        "\nconformance(rust): {passed} ok, {} unexpected",
+        problems.len()
+    );
     assert!(
         problems.is_empty(),
         "unexpected conformance results:\n  {}",

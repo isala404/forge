@@ -118,7 +118,7 @@ async fn presign_requires_secret_and_signs() {
         Err(ForgeError::Invalid(_))
     ));
 
-    // A 0-byte upload cap admits only empty bodies — rejected (P2-5).
+    // A 0-byte upload cap admits only empty bodies, so it's rejected (P2-5).
     assert!(matches!(
         signed
             .blob()

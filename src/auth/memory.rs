@@ -1,12 +1,11 @@
 //! In-process `auth` backend. Contract: docs/contracts/auth.md.
 //!
-//! Passwords are stateless: [`MemAuth`] hashes and verifies argon2id PHC strings with
-//! the *same* Forge-pinned parameters as [`super::PgAuth`] (Forge never owns the users
-//! table), so a hash minted here verifies under Postgres and vice versa. Sessions and
-//! API keys live in `Mutex<HashMap>`s keyed by the SHA-256 of the secret — only digests
-//! are ever stored, exactly as the SQL backend stores them. The observable contract
-//! matches [`super::PgAuth`]; only the storage differs — there is no SQL, and nothing
-//! survives a restart.
+//! Passwords are stateless: [`MemAuth`] hashes and verifies argon2id PHC strings with the
+//! same Forge-pinned parameters as [`super::PgAuth`] (Forge never owns the users table), so
+//! a hash minted here verifies under Postgres and vice versa. Sessions and API keys live in
+//! `Mutex<HashMap>`s keyed by the SHA-256 of the secret; only digests are stored, as in the
+//! SQL backend. The observable contract matches [`super::PgAuth`]; only the storage differs.
+//! Nothing survives a restart.
 
 use super::{
     ApiKey, ApiKeyInfo, ApiKeySecret, Auth, MAX_ID_BYTES, MAX_LABEL_BYTES, MAX_PASSWORD_BYTES,
@@ -24,11 +23,10 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime};
 use uuid::Uuid;
 
-// Forge-owned argon2id parameters. Deliberately duplicated from `super::PgAuth`'s pinned
-// constants (the helpers there are module-private and unreachable from here) and kept
-// byte-for-byte identical, so both backends hash at the same cost and agree on
-// `needs_rehash`. A divergence here would silently mark every Postgres-minted hash as
-// stale (or vice versa) the moment an app moved between backends.
+// Forge-owned argon2id parameters, duplicated from `super::PgAuth`'s pinned constants
+// (those helpers are module-private and unreachable here) and kept identical so both
+// backends hash at the same cost and agree on `needs_rehash`. Divergence would silently
+// mark every Postgres-minted hash as stale (or vice versa) when an app moved backends.
 const ARGON2_M_COST: u32 = 19_456; // KiB (19 MiB)
 const ARGON2_T_COST: u32 = 2;
 const ARGON2_P_COST: u32 = 1;
@@ -271,7 +269,7 @@ impl Auth for MemAuth {
                 )))
             }
             // Unknown, expired, or revoked all read as absent (never an error). Expired
-            // records linger until `purge_expired`, exactly like the unswept SQL rows.
+            // records linger until `purge_expired`, like the unswept SQL rows.
             _ => Ok(None),
         }
     }
@@ -312,8 +310,8 @@ impl Auth for MemAuth {
 
     async fn verify_api_key(&self, key: &str) -> Result<Option<ApiKeyInfo>> {
         // Look the key up by the SHA-256 of the presented secret: the raw secret is never
-        // compared, and the digest is high-entropy, so this leaks no timing signal about
-        // it — the same property the SQL backend's indexed-digest lookup has.
+        // compared, and the digest is high-entropy, so this leaks no timing signal about it,
+        // the same property the SQL backend's indexed-digest lookup has.
         let pk = self.physical(&sha256_hex(key.as_bytes()));
         let api_keys = lock(&self.api_keys);
         Ok(api_keys
@@ -415,7 +413,10 @@ mod tests {
         let auth = MemAuth::new(String::new());
         let strong = auth.hash_password("pw").await.unwrap();
         assert!(!auth.needs_rehash(&strong), "current params are fine");
-        assert!(auth.needs_rehash(&PhcString::new("garbage")), "garbage => rehash");
+        assert!(
+            auth.needs_rehash(&PhcString::new("garbage")),
+            "garbage => rehash"
+        );
 
         // A valid argon2id hash below the current memory cost must be flagged.
         let weak = Argon2::new(
@@ -426,13 +427,19 @@ mod tests {
         .hash_password(b"pw", &SaltString::generate(&mut OsRng))
         .unwrap()
         .to_string();
-        assert!(auth.needs_rehash(&PhcString::new(weak)), "below params => rehash");
+        assert!(
+            auth.needs_rehash(&PhcString::new(weak)),
+            "below params => rehash"
+        );
     }
 
     #[tokio::test]
     async fn session_create_validate_revoke() {
         let auth = MemAuth::new(String::new());
-        let token = auth.create_session("user-1", SessionOpts::new()).await.unwrap();
+        let token = auth
+            .create_session("user-1", SessionOpts::new())
+            .await
+            .unwrap();
 
         let s = auth
             .validate_session(token.as_str())
@@ -442,10 +449,20 @@ mod tests {
         assert_eq!(s.user_id, "user-1");
         assert!(s.expires_at > s.created_at);
 
-        assert!(auth.validate_session("unknown-token").await.unwrap().is_none());
+        assert!(
+            auth.validate_session("unknown-token")
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         auth.revoke_session(token.as_str()).await.unwrap();
-        assert!(auth.validate_session(token.as_str()).await.unwrap().is_none());
+        assert!(
+            auth.validate_session(token.as_str())
+                .await
+                .unwrap()
+                .is_none()
+        );
         // Revoke is idempotent.
         auth.revoke_session(token.as_str()).await.unwrap();
     }
@@ -457,11 +474,19 @@ mod tests {
             .with_idle_timeout(Duration::from_millis(100))
             .with_absolute_timeout(Duration::from_millis(100));
         let token = auth.create_session("u", opts).await.unwrap();
-        assert!(auth.validate_session(token.as_str()).await.unwrap().is_some());
+        assert!(
+            auth.validate_session(token.as_str())
+                .await
+                .unwrap()
+                .is_some()
+        );
 
         tokio::time::sleep(Duration::from_millis(150)).await;
         assert!(
-            auth.validate_session(token.as_str()).await.unwrap().is_none(),
+            auth.validate_session(token.as_str())
+                .await
+                .unwrap()
+                .is_none(),
             "past both deadlines => absent"
         );
         // The expired record lingers (validate does not delete) until a sweep reclaims it.
@@ -504,7 +529,11 @@ mod tests {
         assert!(auth.validate_session(a1.as_str()).await.unwrap().is_none());
         assert!(auth.validate_session(a2.as_str()).await.unwrap().is_none());
         assert!(auth.validate_session(b1.as_str()).await.unwrap().is_some());
-        assert_eq!(auth.revoke_all_sessions("a").await.unwrap(), 0, "idempotent");
+        assert_eq!(
+            auth.revoke_all_sessions("a").await.unwrap(),
+            0,
+            "idempotent"
+        );
     }
 
     #[tokio::test]
@@ -525,7 +554,12 @@ mod tests {
         assert!(auth.verify_api_key("fk_unknown").await.unwrap().is_none());
 
         assert!(auth.revoke_api_key(&key.id).await.unwrap());
-        assert!(auth.verify_api_key(key.secret.as_str()).await.unwrap().is_none());
+        assert!(
+            auth.verify_api_key(key.secret.as_str())
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(
             !auth.revoke_api_key(&key.id).await.unwrap(),
             "revoking an unknown id => false"
@@ -545,8 +579,18 @@ mod tests {
         );
 
         let key = a.create_api_key("u", "k").await.unwrap();
-        assert!(a.verify_api_key(key.secret.as_str()).await.unwrap().is_some());
-        assert!(b.verify_api_key(key.secret.as_str()).await.unwrap().is_none());
+        assert!(
+            a.verify_api_key(key.secret.as_str())
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            b.verify_api_key(key.secret.as_str())
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(
             !b.revoke_api_key(&key.id).await.unwrap(),
             "another app cannot revoke the key"

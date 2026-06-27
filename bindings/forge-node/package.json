@@ -1,9 +1,23 @@
 {
   "name": "forge-node",
-  "version": "0.1.0",
-  "description": "Node.js bindings for Forge (kv + queue) via napi-rs",
+  "version": "1.0.0",
+  "description": "Node.js bindings for Forge: hardened infra primitives on Postgres",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/isala404/forge.git",
+    "directory": "bindings/forge-node"
+  },
   "main": "index.js",
   "types": "index.d.ts",
+  "files": [
+    "README.md",
+    "index.js",
+    "index.d.ts",
+    "typed.js",
+    "typed.d.ts",
+    "forge-node.*.node"
+  ],
   "exports": {
     ".": {
       "types": "./index.d.ts",
@@ -19,12 +33,13 @@
   },
   "scripts": {
     "build": "napi build --platform --release",
-    "build:debug": "napi build --platform"
+    "build:debug": "napi build --platform",
+    "prepack": "npm run build"
   },
   "devDependencies": {
     "@napi-rs/cli": "^2.18.4"
   },
   "engines": {
-    "node": ">=14"
+    "node": ">=18"
   }
 }

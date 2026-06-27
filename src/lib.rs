@@ -1,19 +1,16 @@
-//! Forge — the standard library for agent-built SaaS.
-//!
-//! One crate, every backend primitive an app needs, hardened once and built on
-//! interfaces the industry already trusts. See the per-primitive contracts in
+//! Forge: the standard library for agent-built SaaS. One crate, every backend primitive an
+//! app needs, on interfaces the industry already trusts. Per-primitive contracts live in
 //! `docs/contracts/`.
 //!
-//! Forge requires its own **system database**: a Postgres database it fully owns, kept
-//! separate from your application's database. [`Forge::init`] connects to it and migrates
-//! its `forge_*` tables at startup. Individual primitives can be pointed at their own
-//! database via [`ForgeConfig::with_feature_database`], but a system database is always
-//! required.
+//! Forge owns a system database: a Postgres database kept separate from your application's.
+//! [`Forge::init`] connects and migrates its `forge_*` tables at startup. Primitives can
+//! point at their own database via [`ForgeConfig::with_feature_database`], but the system
+//! database is always required.
 //!
 //! ```no_run
 //! # async fn demo() -> forge::Result<()> {
 //! use forge::{Forge, ForgeConfig};
-//! // A database Forge owns — not the one holding your application tables.
+//! // A database Forge owns, not the one holding your application tables.
 //! let forge = Forge::init(ForgeConfig::new("postgres://localhost/myapp_forge")).await?;
 //! forge.kv().set("greeting", "hi".into(), Default::default()).await?;
 //! let id = forge.queue().enqueue("emails", b"payload".to_vec().into(), Default::default()).await?;
@@ -33,8 +30,8 @@ pub mod pubsub;
 pub mod queue;
 pub mod ratelimit;
 pub mod schedule;
-pub mod types;
 pub mod typed;
+pub mod types;
 
 mod obs;
 mod util;
@@ -73,15 +70,14 @@ pub use typed::{
 };
 pub use types::Cursor;
 
-// Re-exported so callers needn't add a separate `bytes` dependency.
+// Re-exported so callers needn't depend on `bytes` directly.
 pub use bytes::Bytes;
 
 #[cfg(feature = "otel")]
 pub use obs::install_otlp;
 
-/// The single handle an application holds. Cheap to clone (`Arc` inside) and
-/// `Send + Sync`. Construct it once with [`Forge::init`]; it owns the pool and
-/// every primitive.
+/// The single handle an application holds. Cheap to clone (`Arc` inside), `Send + Sync`.
+/// Construct once with [`Forge::init`]; it owns the pool and every primitive.
 #[derive(Clone)]
 pub struct Forge {
     inner: Arc<ForgeInner>,
@@ -102,10 +98,8 @@ struct ForgeInner {
     pool: sqlx::PgPool,
 }
 
-/// The primitives whose correctness leans on cross-process delivery/sharing — pubsub and
-/// ratelimit — that resolve to a non-durable (memory) backend under `cfg`. Kept pure and
-/// DB-free so the warning decision is unit-testable; [`Forge::build_from`] iterates it to
-/// emit one warning per affected primitive before construction.
+/// Primitives whose correctness needs cross-process delivery (pubsub, ratelimit) but that
+/// resolve to a memory backend under `cfg`. Pure and DB-free so it stays unit-testable.
 fn non_durable_warnings(cfg: &ForgeConfig) -> Vec<Primitive> {
     [Primitive::Pubsub, Primitive::RateLimit]
         .into_iter()
@@ -113,8 +107,6 @@ fn non_durable_warnings(cfg: &ForgeConfig) -> Vec<Primitive> {
         .collect()
 }
 
-/// Warn that a non-durable backend was selected for a primitive whose correctness depends
-/// on cross-process delivery/sharing (pubsub, ratelimit).
 fn warn_non_durable(p: Primitive) {
     tracing::warn!(
         primitive = p.as_str(),
@@ -122,11 +114,9 @@ fn warn_non_durable(p: Primitive) {
     );
 }
 
-/// Externally-supplied backends, one optional slot per primitive, threaded through the
-/// single construction path. A present slot is used as both the operation trait and the
-/// lifecycle handle and suppresses any Postgres connect/migrate on that primitive's behalf
-/// — it brings its own state and lifecycle, exactly like an in-process backend.
-/// [`Forge::init`] passes the all-`None` default; [`ForgeBuilder`] fills the slots.
+/// Externally-supplied backends, one optional slot per primitive. A present slot serves as
+/// both the operation and lifecycle handle and suppresses Postgres connect/migrate for that
+/// primitive. [`Forge::init`] passes all-`None`; [`ForgeBuilder`] fills the slots.
 #[derive(Default)]
 struct Injected {
     kv: Option<Arc<dyn KvBackend>>,
@@ -140,8 +130,7 @@ struct Injected {
 }
 
 impl Injected {
-    /// Whether a backend was injected for `p`. Drives the pool/migration plan: an injected
-    /// primitive is excluded from the Postgres-backed set, like a memory one.
+    /// Whether a backend was injected for `p`.
     fn is_injected(&self, p: Primitive) -> bool {
         match p {
             Primitive::Kv => self.kv.is_some(),
@@ -157,18 +146,17 @@ impl Injected {
 }
 
 impl Forge {
-    /// Validate config, connect, migrate the schema, and construct every primitive.
-    /// Forge owns its system database, so init migrates it (and every distinct feature
-    /// database) at startup — idempotent and safe to run concurrently across replicas:
-    /// an advisory lock serializes it and checksums guard immutability. Misconfiguration
-    /// fails here with [`ForgeError::Config`], never lazily on first use.
+    /// Validate, connect, migrate, and construct every primitive. Migrates the system
+    /// database (and each distinct feature database) at startup; idempotent and safe to run
+    /// concurrently across replicas, with an advisory lock serializing it and checksums
+    /// guarding immutability. Misconfiguration fails here with [`ForgeError::Config`], never
+    /// lazily on first use.
     pub async fn init(cfg: ForgeConfig) -> Result<Self> {
         Self::build_from(cfg, Injected::default()).await
     }
 
-    /// Start a builder for the open injection escape hatch: keep most primitives on their
-    /// config-selected built-in, but swap in an externally-implemented backend for one or
-    /// more. See [`ForgeBuilder`].
+    /// Builder for swapping in externally-implemented backends per primitive while leaving
+    /// the rest on their config-selected built-in. See [`ForgeBuilder`].
     pub fn builder() -> ForgeBuilder {
         ForgeBuilder {
             cfg: ForgeConfig::default(),
@@ -176,25 +164,19 @@ impl Forge {
         }
     }
 
-    /// The single construction path behind both [`Forge::init`] and [`Forge::builder`].
-    /// For each primitive with an injected backend, that backend is used as both the
-    /// operation trait and the lifecycle handle, and no Postgres connect/migrate happens on
-    /// its behalf; every other primitive falls back to its config-selected built-in. The
-    /// pool/migration plan is therefore built from the Postgres-backed *built-in* set only.
+    /// The single construction path behind [`Forge::init`] and [`Forge::builder`]. Each
+    /// primitive uses its injected backend if present, else its config-selected built-in;
+    /// the pool/migration plan covers only the Postgres-backed built-ins.
     async fn build_from(cfg: ForgeConfig, injected: Injected) -> Result<Self> {
         cfg.validate()?;
 
-        // Warn once, up front, for every primitive whose correctness leans on cross-process
-        // delivery/sharing but resolves to a non-durable memory backend (pubsub, ratelimit).
         for p in non_durable_warnings(&cfg) {
             warn_non_durable(p);
         }
 
-        // A primitive on the in-process backend, or one supplied by an injected backend,
-        // must never trigger a Postgres connect or migrate, so the pool/migration plan is
-        // built from the Postgres-backed built-in set only. Blob counts as Postgres-backed
-        // for both BYTEA and filesystem, since filesystem still keeps its metadata in
-        // Postgres.
+        // In-process, injected, and (for blob) memory backends never connect or migrate
+        // Postgres, so the pool/migration plan covers only the Postgres-backed built-ins.
+        // Filesystem blob counts as Postgres-backed: it keeps its metadata in Postgres.
         let is_pg_backed = |p: Primitive| -> bool {
             if injected.is_injected(p) {
                 false
@@ -205,10 +187,9 @@ impl Forge {
             }
         };
 
-        // The system pool is mandatory: Forge owns its system database and migrates it at
-        // init even when every primitive is in-memory. Each Postgres-backed feature
-        // override gets its own isolated pool; a memory-backed primitive's feature-database
-        // override is ignored entirely — no connect, no migrate.
+        // The system pool is mandatory even when every primitive is in-memory: Forge owns
+        // and migrates its system database. Each Postgres-backed feature override gets its
+        // own isolated pool; a memory-backed override is ignored.
         let system_pool = pg::connect(&cfg.system_database()).await?;
         let mut feature_pools: HashMap<Primitive, sqlx::PgPool> = HashMap::new();
         for (feature, db) in &cfg.feature_databases {
@@ -224,8 +205,7 @@ impl Forge {
         };
 
         // Migrate each distinct Postgres target once: the system database plus the distinct
-        // targets of Postgres-backed feature overrides. Memory-backed features never made
-        // it into `feature_pools`, so they contribute no migration target.
+        // targets of Postgres-backed feature overrides.
         let mut by_target: HashMap<String, sqlx::PgPool> = HashMap::new();
         by_target.insert(cfg.system_database().postgres, system_pool.clone());
         for (feature, db) in &cfg.feature_databases {
@@ -240,156 +220,105 @@ impl Forge {
         }
 
         let secret = cfg.blob_signing_secret.clone().map(String::into_bytes);
+        let ns = &cfg.kv_namespace;
 
-        // Each primitive resolves to its operation handle plus the lifecycle handle off the
-        // same object. An injected backend wins outright (upcast to both halves); otherwise
-        // the config-selected built-in is constructed, drawing its pool only here. Every
-        // primitive now ships both a Postgres and an in-process built-in; the non-durable
-        // warning for memory pubsub/ratelimit was emitted above.
-        let (kv, kv_life): (Arc<dyn Kv>, Arc<dyn BackendLifecycle>) = match injected.kv {
-            Some(b) => (b.clone(), b),
-            None => match cfg.backend_for(Primitive::Kv) {
-                Backend::Postgres => {
-                    let k = Arc::new(kv::PgKv::new(
-                        pool_for(Primitive::Kv),
-                        cfg.kv_namespace.clone(),
-                    ));
-                    (k.clone(), k)
-                }
-                Backend::Memory => {
-                    let k = Arc::new(kv::MemKv::new(cfg.kv_namespace.clone()));
-                    (k.clone(), k)
-                }
-            },
-        };
-        let (queue, queue_life): (Arc<dyn Queue>, Arc<dyn BackendLifecycle>) = match injected.queue
-        {
-            Some(b) => (b.clone(), b),
-            None => match cfg.backend_for(Primitive::Queue) {
-                Backend::Postgres => {
-                    let q = Arc::new(queue::PgQueue::new(
-                        pool_for(Primitive::Queue),
-                        cfg.queue_dedup_window,
-                        cfg.queue_retention,
-                        cfg.kv_namespace.clone(),
-                    ));
-                    (q.clone(), q)
-                }
-                Backend::Memory => {
-                    let q = Arc::new(queue::MemQueue::new(
-                        cfg.queue_dedup_window,
-                        cfg.queue_retention,
-                        cfg.kv_namespace.clone(),
-                    ));
-                    (q.clone(), q)
-                }
-            },
-        };
-        let (config, config_life): (Arc<dyn ConfigStore>, Arc<dyn BackendLifecycle>) =
-            match injected.config {
-                Some(b) => (b.clone(), b),
-                None => match cfg.backend_for(Primitive::Config) {
-                    Backend::Postgres => {
-                        let c = Arc::new(config_store::PgConfig::new(
-                            pool_for(Primitive::Config),
-                            cfg.kv_namespace.clone(),
-                        ));
-                        (c.clone(), c)
-                    }
-                    Backend::Memory => {
-                        let c = Arc::new(config_store::MemConfig::new(cfg.kv_namespace.clone()));
-                        (c.clone(), c)
-                    }
-                },
-            };
-        let (ratelimit, ratelimit_life): (Arc<dyn RateLimit>, Arc<dyn BackendLifecycle>) =
-            match injected.ratelimit {
-                Some(b) => (b.clone(), b),
-                None => match cfg.backend_for(Primitive::RateLimit) {
-                    Backend::Postgres => {
-                        let r = Arc::new(ratelimit::PgRateLimit::new(
-                            pool_for(Primitive::RateLimit),
-                            cfg.kv_namespace.clone(),
-                            cfg.ratelimit_fail_open,
-                        ));
-                        (r.clone(), r)
-                    }
-                    Backend::Memory => {
-                        let r = Arc::new(ratelimit::MemRateLimit::new(
-                            cfg.kv_namespace.clone(),
-                            cfg.ratelimit_fail_open,
-                        ));
-                        (r.clone(), r)
-                    }
-                },
-            };
-        let (auth, auth_life): (Arc<dyn Auth>, Arc<dyn BackendLifecycle>) = match injected.auth {
-            Some(b) => (b.clone(), b),
-            None => match cfg.backend_for(Primitive::Auth) {
-                Backend::Postgres => {
-                    let a = Arc::new(auth::PgAuth::new(
-                        pool_for(Primitive::Auth),
-                        cfg.kv_namespace.clone(),
-                    ));
-                    (a.clone(), a)
-                }
-                Backend::Memory => {
-                    let a = Arc::new(auth::MemAuth::new(cfg.kv_namespace.clone()));
-                    (a.clone(), a)
-                }
-            },
-        };
-        let (pubsub, pubsub_life): (Arc<dyn Pubsub>, Arc<dyn BackendLifecycle>) =
-            match injected.pubsub {
-                Some(b) => (b.clone(), b),
-                // Postgres pubsub needs the connection URL (not just the pool) for LISTEN/NOTIFY.
-                None => match cfg.backend_for(Primitive::Pubsub) {
-                    Backend::Postgres => {
-                        let p = Arc::new(pubsub::PgPubsub::new(
-                            pool_for(Primitive::Pubsub),
-                            cfg.database_for(Primitive::Pubsub).postgres,
-                            cfg.kv_namespace.clone(),
-                        ));
-                        (p.clone(), p)
-                    }
-                    Backend::Memory => {
-                        let p = Arc::new(pubsub::MemPubsub::new(cfg.kv_namespace.clone()));
-                        (p.clone(), p)
-                    }
-                },
-            };
-        let (schedule, schedule_life): (Arc<dyn Schedule>, Arc<dyn BackendLifecycle>) =
-            match injected.schedule {
-                Some(b) => (b.clone(), b),
-                None => match cfg.backend_for(Primitive::Schedule) {
-                    Backend::Postgres => {
-                        let s = Arc::new(schedule::PgSchedule::new(
-                            pool_for(Primitive::Schedule),
-                            cfg.kv_namespace.clone(),
-                        ));
-                        (s.clone(), s)
-                    }
-                    Backend::Memory => {
-                        // The scheduler delivers through the resolved queue backend, so a
-                        // memory-backed schedule actually enqueues work (queue is built above).
-                        let s = Arc::new(schedule::MemSchedule::new(
-                            cfg.kv_namespace.clone(),
-                            queue.clone(),
-                        ));
-                        (s.clone(), s)
-                    }
-                },
-            };
+        // Each primitive resolves to its operation handle and a lifecycle handle off the same
+        // object: an injected backend if present (upcast to both halves), else the
+        // config-selected built-in, which draws its pool only here.
+        macro_rules! resolve {
+            ($op:path, $inj:expr, $prim:expr, $pg:expr, $mem:expr) => {{
+                let pair: (Arc<dyn $op>, Arc<dyn BackendLifecycle>) = match $inj {
+                    Some(b) => (b.clone(), b),
+                    None => match cfg.backend_for($prim) {
+                        Backend::Postgres => {
+                            let v = Arc::new($pg);
+                            (v.clone(), v)
+                        }
+                        Backend::Memory => {
+                            let v = Arc::new($mem);
+                            (v.clone(), v)
+                        }
+                    },
+                };
+                pair
+            }};
+        }
 
-        // The blob backend choice: an injected store, else bytes in BYTEA, on a filesystem
-        // directory, or (not yet) in memory.
+        let (kv, kv_life) = resolve!(
+            Kv,
+            injected.kv,
+            Primitive::Kv,
+            kv::PgKv::new(pool_for(Primitive::Kv), ns.clone()),
+            kv::MemKv::new(ns.clone())
+        );
+        let (queue, queue_life) = resolve!(
+            Queue,
+            injected.queue,
+            Primitive::Queue,
+            queue::PgQueue::new(
+                pool_for(Primitive::Queue),
+                cfg.queue_dedup_window,
+                cfg.queue_retention,
+                ns.clone()
+            ),
+            queue::MemQueue::new(cfg.queue_dedup_window, cfg.queue_retention, ns.clone())
+        );
+        let (config, config_life) = resolve!(
+            ConfigStore,
+            injected.config,
+            Primitive::Config,
+            config_store::PgConfig::new(pool_for(Primitive::Config), ns.clone()),
+            config_store::MemConfig::new(ns.clone())
+        );
+        let (ratelimit, ratelimit_life) = resolve!(
+            RateLimit,
+            injected.ratelimit,
+            Primitive::RateLimit,
+            ratelimit::PgRateLimit::new(
+                pool_for(Primitive::RateLimit),
+                ns.clone(),
+                cfg.ratelimit_fail_open
+            ),
+            ratelimit::MemRateLimit::new(ns.clone(), cfg.ratelimit_fail_open)
+        );
+        let (auth, auth_life) = resolve!(
+            Auth,
+            injected.auth,
+            Primitive::Auth,
+            auth::PgAuth::new(pool_for(Primitive::Auth), ns.clone()),
+            auth::MemAuth::new(ns.clone())
+        );
+        // Postgres pubsub needs the connection URL, not just the pool, for LISTEN/NOTIFY.
+        let (pubsub, pubsub_life) = resolve!(
+            Pubsub,
+            injected.pubsub,
+            Primitive::Pubsub,
+            pubsub::PgPubsub::new(
+                pool_for(Primitive::Pubsub),
+                cfg.database_for(Primitive::Pubsub).postgres,
+                ns.clone()
+            ),
+            pubsub::MemPubsub::new(ns.clone())
+        );
+        // Schedule delivers through the resolved queue, so a memory-backed schedule still
+        // enqueues real work; built after queue for that reason.
+        let (schedule, schedule_life) = resolve!(
+            Schedule,
+            injected.schedule,
+            Primitive::Schedule,
+            schedule::PgSchedule::new(pool_for(Primitive::Schedule), ns.clone(), queue.clone()),
+            schedule::MemSchedule::new(ns.clone(), queue.clone())
+        );
+
+        // Blob has three built-ins (BYTEA, filesystem, memory) instead of the Postgres/Memory
+        // pair, so it resolves on its own. Filesystem still keeps its metadata in Postgres.
         let (blob, blob_life): (Arc<dyn Blob>, Arc<dyn BackendLifecycle>) = match injected.blob {
             Some(b) => (b.clone(), b),
             None => match &cfg.blob_backend {
                 BlobBackendConfig::Postgres => {
                     let b = Arc::new(blob::PgBlob::new(
                         pool_for(Primitive::Blob),
-                        cfg.kv_namespace.clone(),
+                        ns.clone(),
                         secret.clone(),
                         cfg.blob_base_url.clone(),
                     ));
@@ -398,7 +327,7 @@ impl Forge {
                 BlobBackendConfig::Filesystem { root } => {
                     let b = Arc::new(blob::FsBlob::new(
                         pool_for(Primitive::Blob),
-                        cfg.kv_namespace.clone(),
+                        ns.clone(),
                         secret.clone(),
                         cfg.blob_base_url.clone(),
                         root.clone(),
@@ -407,7 +336,7 @@ impl Forge {
                 }
                 BlobBackendConfig::Memory => {
                     let b = Arc::new(blob::MemBlob::new(
-                        cfg.kv_namespace.clone(),
+                        ns.clone(),
                         secret.clone(),
                         cfg.blob_base_url.clone(),
                     ));
@@ -416,9 +345,8 @@ impl Forge {
             },
         };
 
-        // One lifecycle handle per primitive (Primitive order), for maintain + report. Each
-        // is the object the primitive actually resolved to, so `backend_report()` reflects
-        // the live choice (an injected or memory backend reports its own name/durability).
+        // Lifecycle handles in Primitive order, for maintain + backend_report. Each is the
+        // object the primitive resolved to, so the report reflects the live choice.
         let lifecycle: Vec<Arc<dyn BackendLifecycle>> = vec![
             kv_life,
             queue_life,
@@ -446,9 +374,8 @@ impl Forge {
         })
     }
 
-    /// A snapshot of which backend powers each primitive — for logs, health pages, and
-    /// debugging. Not needed for ordinary request handling (the provider must never
-    /// leak into app logic).
+    /// Which backend powers each primitive, for logs and health pages. Not needed for
+    /// request handling; the backend choice must not leak into app logic.
     pub fn backend_report(&self) -> BackendReport {
         let backends = self
             .inner
@@ -459,17 +386,10 @@ impl Forge {
         BackendReport::new(backends)
     }
 
-    /// The pool to Forge's **system database** — the one every feature without a
-    /// per-feature override shares. This is Forge's own database, *not* your application's;
-    /// it holds the `forge_*` tables and Forge migrates it at init. Exposed as an escape
-    /// hatch for Forge-adjacent SQL (a read against a `forge_*` table, a one-off in a
-    /// migration job) — not as a home for your application's domain tables, which belong in
-    /// your own database. Features given their own database via
-    /// [`ForgeConfig::with_feature_database`] run on separate, isolated pools not reachable
-    /// through this accessor.
-    ///
-    /// Using it ties the caller to Forge's `sqlx` major version; that is the price of
-    /// sharing the connection pool, and it is opt-in.
+    /// The pool to Forge's system database (the `forge_*` tables, not your application's). An
+    /// escape hatch for Forge-adjacent SQL, not a home for your domain tables; features with
+    /// their own database run on separate pools not reachable here. Using it ties the caller
+    /// to Forge's `sqlx` major version.
     pub fn pool(&self) -> &sqlx::PgPool {
         &self.inner.pool
     }
@@ -484,9 +404,9 @@ impl Forge {
         self.inner.queue.as_ref()
     }
 
-    /// Live publish/subscribe for realtime fan-out (subscriptions, presence).
-    /// Lineage: Postgres LISTEN/NOTIFY + Redis pub/sub. See `docs/contracts/pubsub.md`.
-    /// Not durable — use [`Forge::queue`] when a message must not be lost.
+    /// Live publish/subscribe for realtime fan-out (subscriptions, presence). Lineage:
+    /// Postgres LISTEN/NOTIFY + Redis pub/sub. See `docs/contracts/pubsub.md`. Not durable;
+    /// use [`Forge::queue`] when a message must not be lost.
     pub fn pubsub(&self) -> &dyn Pubsub {
         self.inner.pubsub.as_ref()
     }
@@ -508,28 +428,28 @@ impl Forge {
         self.inner.blob.as_ref()
     }
 
-    /// Auth primitives: passwords, sessions, API keys. Lineage: OWASP + PHC +
-    /// Stripe/GitHub keys. See `docs/contracts/auth.md`.
+    /// Auth primitives: passwords, sessions, API keys. Lineage: OWASP + PHC + Stripe/GitHub
+    /// keys. See `docs/contracts/auth.md`.
     pub fn auth(&self) -> &dyn Auth {
         self.inner.auth.as_ref()
     }
 
     /// Recurring + one-shot scheduling. Lineage: cron + Unix `at` + k8s CronJob. See
-    /// `docs/contracts/schedule.md`. Register work via this; drive ticks with
+    /// `docs/contracts/schedule.md`. Register work here; drive ticks with
     /// [`Forge::run_scheduler`].
     pub fn schedule(&self) -> &dyn Schedule {
         self.inner.schedule.as_ref()
     }
 
-    /// Run one scheduler pass — fire every due schedule once — and return how many
-    /// jobs were enqueued. For tests or a custom loop; most apps call
-    /// [`Forge::run_scheduler`]. Safe to run concurrently across replicas.
+    /// Run one scheduler pass, firing every due schedule once, and return how many jobs were
+    /// enqueued. For tests or a custom loop; most apps call [`Forge::run_scheduler`]. Safe to
+    /// run concurrently across replicas.
     pub async fn run_scheduler_once(&self) -> Result<u64> {
         self.inner.schedule.process_due().await
     }
 
-    /// Run the scheduler loop until SIGINT/SIGTERM, firing due schedules roughly every
-    /// 30s. Run it on every replica — each tick enqueues exactly once.
+    /// Run the scheduler loop until SIGINT/SIGTERM, firing due schedules roughly every 30s.
+    /// Run it on every replica; each tick enqueues exactly once.
     pub async fn run_scheduler(&self) {
         let mut shutdown = std::pin::pin!(queue::worker::shutdown_signal());
         loop {
@@ -543,16 +463,16 @@ impl Forge {
         }
     }
 
-    /// A managed worker for `queue_name`: bounded concurrency, auto-heartbeat,
-    /// `ack`/`nack` on completion, graceful shutdown.
+    /// A managed worker for `queue_name`: bounded concurrency, auto-heartbeat, `ack`/`nack`
+    /// on completion, graceful shutdown.
     pub fn worker(&self, queue_name: impl Into<String>) -> WorkerBuilder {
         WorkerBuilder::new(self.inner.queue.clone(), queue_name)
     }
 
     /// Run the maintenance sweep across every backend: purge expired kv rows and old
     /// completed jobs, reclaim leases orphaned by crashed workers, drop stale dedup and
-    /// rate-limit rows, expire dead sessions, and (filesystem blob) reclaim orphaned
-    /// files. Idempotent; call it on a schedule. Drives each backend's lifecycle hook.
+    /// rate-limit rows, expire dead sessions, and reclaim orphaned filesystem blobs.
+    /// Idempotent; call it on a schedule.
     pub async fn maintain(&self) -> Result<()> {
         for backend in &self.inner.lifecycle {
             backend.maintain().await?;
@@ -561,10 +481,9 @@ impl Forge {
     }
 }
 
-/// Builds a [`Forge`] with externally-implemented backends swapped in per primitive — the
-/// open injection escape hatch. Start from [`Forge::builder`], point it at the mandatory
-/// system database, inject a backend for any primitive you want to own, and leave the rest
-/// on their config-selected built-in:
+/// Builds a [`Forge`] with externally-implemented backends swapped in per primitive. Start
+/// from [`Forge::builder`], point it at the system database, inject a backend for any
+/// primitive you want to own, and leave the rest on their config-selected built-in:
 ///
 /// ```no_run
 /// # use std::sync::Arc;
@@ -579,26 +498,25 @@ impl Forge {
 /// ```
 ///
 /// An injected primitive supplies its own state and lifecycle, so Forge never connects or
-/// migrates Postgres on its behalf. Knobs beyond the system database (namespaces, per-
-/// feature databases, blob signing, …) are set on a [`ForgeConfig`] passed to
-/// [`config`](ForgeBuilder::config); the builder itself stays deliberately small.
+/// migrates Postgres on its behalf. Other knobs (namespaces, per-feature databases, blob
+/// signing) come from a [`ForgeConfig`] passed to [`config`](ForgeBuilder::config); the
+/// builder itself stays small.
 pub struct ForgeBuilder {
     cfg: ForgeConfig,
     injected: Injected,
 }
 
 impl ForgeBuilder {
-    /// Set the mandatory system database connection string. Equivalent to setting
-    /// `postgres` on the inner [`ForgeConfig`]; required unless [`config`](Self::config)
-    /// already carries one.
+    /// Set the mandatory system database connection string. Equivalent to setting `postgres`
+    /// on the inner [`ForgeConfig`]; required unless [`config`](Self::config) carries one.
     pub fn postgres(mut self, url: impl Into<String>) -> Self {
         self.cfg.postgres = url.into();
         self
     }
 
     /// Supply the full base [`ForgeConfig`]. Replaces the builder's config wholesale, so set
-    /// it before calling [`postgres`](Self::postgres) if you use both, or just set `postgres`
-    /// on the config you pass here.
+    /// it before [`postgres`](Self::postgres) if you use both, or just set `postgres` on the
+    /// config you pass here.
     pub fn config(mut self, cfg: ForgeConfig) -> Self {
         self.cfg = cfg;
         self
@@ -616,8 +534,8 @@ impl ForgeBuilder {
         self
     }
 
-    /// Inject the config-store backend. (Named `config_store` so it does not collide with
-    /// [`config`](Self::config), which supplies the base [`ForgeConfig`].)
+    /// Inject the config-store backend. Named `config_store` so it does not collide with
+    /// [`config`](Self::config), which supplies the base [`ForgeConfig`].
     pub fn config_store(mut self, b: Arc<dyn ConfigStoreBackend>) -> Self {
         self.injected.config = Some(b);
         self
@@ -669,12 +587,12 @@ impl ForgeBuilder {
 mod tests {
     use super::*;
 
-    /// A pure, DB-free check: the warning decision flags exactly the two delivery/sharing
-    /// primitives when they resolve to memory, regardless of order.
+    /// The warning decision flags exactly the two delivery/sharing primitives when they
+    /// resolve to memory, regardless of order, with no database.
     #[test]
     fn non_durable_warnings_flags_memory_pubsub_and_ratelimit() {
         // default_backend(Memory) makes every primitive memory; only pubsub and ratelimit
-        // should be flagged, proving the helper filters rather than echoing the whole config.
+        // should be flagged, proving the helper filters rather than echoing the config.
         let cfg = ForgeConfig::new("postgres://x/y").default_backend(Backend::Memory);
         let mut got = non_durable_warnings(&cfg);
         got.sort_by_key(|p| p.as_str());

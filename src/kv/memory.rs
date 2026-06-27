@@ -4,7 +4,7 @@
 //! Postgres backend uses, so namespacing is identical. TTL is honored in-process:
 //! expired entries read as absent and are purged lazily on read (and in bulk by
 //! `maintain`). The observable contract matches [`super::PgKv`]; only the storage
-//! differs — there is no SQL and nothing survives a restart.
+//! differs: there is no SQL and nothing survives a restart.
 
 use super::{Kv, MAX_KEY_BYTES, MAX_VALUE_BYTES, SetMode, SetOpts};
 use crate::error::{ForgeError, Result};
@@ -101,7 +101,7 @@ impl MemKv {
 }
 
 /// Convert a TTL to a whole-second [`Duration`] (rounding a positive sub-second TTL up
-/// to 1s), rejecting zero (`Invalid`) and over-max (`Limit`) — mirrors the Postgres
+/// to 1s), rejecting zero (`Invalid`) and over-max (`Limit`). Mirrors the Postgres
 /// backend's `ttl_to_secs` so a given TTL expires at the same observable instant.
 fn ttl_to_duration(ttl: Duration) -> Result<Duration> {
     if ttl.is_zero() {
@@ -209,7 +209,7 @@ impl Kv for MemKv {
         let now = Instant::now();
         let mut state = self.lock();
         // A missing or expired key starts from 0 with no TTL; a live key adds `by` and
-        // keeps its TTL — matching the Postgres backend's ON CONFLICT branch.
+        // keeps its TTL, matching the Postgres backend's ON CONFLICT branch.
         let (current, expires_at) = match state.get(&pk).filter(|e| !e.is_expired(now)) {
             Some(e) => {
                 let n = std::str::from_utf8(&e.value)
@@ -239,13 +239,13 @@ impl Kv for MemKv {
         let pk = self.physical(key);
         let now = Instant::now();
         let mut state = self.lock();
-        if state.get(&pk).is_none_or(|e| e.is_expired(now)) {
-            return Ok(false);
+        match state.get_mut(&pk) {
+            Some(e) if !e.is_expired(now) => {
+                e.expires_at = Some(now + dur);
+                Ok(true)
+            }
+            _ => Ok(false),
         }
-        if let Some(e) = state.get_mut(&pk) {
-            e.expires_at = Some(now + dur);
-        }
-        Ok(true)
     }
 
     async fn compare_and_swap(&self, key: &str, old: Option<Bytes>, new: Bytes) -> Result<bool> {
@@ -284,8 +284,8 @@ impl Kv for MemKv {
     ) -> Result<(Vec<String>, Option<Cursor>)> {
         let physical_prefix = self.physical(prefix);
         let limit = limit.clamp(1, 10_000) as usize;
-        // Keyset pagination over the physical key, exactly like the Postgres backend:
-        // the cursor token is the last physical key returned.
+        // Keyset pagination over the physical key, like the Postgres backend: the
+        // cursor token is the last physical key returned.
         let after = cursor.map(|c| c.token().to_string());
         let now = Instant::now();
         let state = self.lock();
@@ -330,10 +330,22 @@ mod tests {
         let nx = SetOpts::new().with_mode(SetMode::IfNotExists);
         let xx = SetOpts::new().with_mode(SetMode::IfExists);
 
-        assert!(!kv.set("k", b("v"), xx.clone()).await.unwrap(), "XX absent => no write");
-        assert!(kv.set("k", b("first"), nx.clone()).await.unwrap(), "NX absent => write");
-        assert!(!kv.set("k", b("second"), nx).await.unwrap(), "NX live => blocked");
-        assert!(kv.set("k", b("third"), xx).await.unwrap(), "XX live => write");
+        assert!(
+            !kv.set("k", b("v"), xx.clone()).await.unwrap(),
+            "XX absent => no write"
+        );
+        assert!(
+            kv.set("k", b("first"), nx.clone()).await.unwrap(),
+            "NX absent => write"
+        );
+        assert!(
+            !kv.set("k", b("second"), nx).await.unwrap(),
+            "NX live => blocked"
+        );
+        assert!(
+            kv.set("k", b("third"), xx).await.unwrap(),
+            "XX live => write"
+        );
         assert_eq!(kv.get("k").await.unwrap(), Some(b("third")));
     }
 
@@ -341,7 +353,8 @@ mod tests {
     async fn ttl_expires_and_zero_is_invalid() {
         let kv = MemKv::new(String::new());
         assert!(matches!(
-            kv.set("z", b("v"), SetOpts::new().with_ttl(Duration::ZERO)).await,
+            kv.set("z", b("v"), SetOpts::new().with_ttl(Duration::ZERO))
+                .await,
             Err(ForgeError::Invalid(_))
         ));
 
@@ -351,7 +364,11 @@ mod tests {
         assert!(kv.exists("k").await.unwrap());
         // The backend rounds TTL up to whole seconds, so wait past the 1s deadline.
         tokio::time::sleep(Duration::from_millis(1100)).await;
-        assert_eq!(kv.get("k").await.unwrap(), None, "expired key reads as absent");
+        assert_eq!(
+            kv.get("k").await.unwrap(),
+            None,
+            "expired key reads as absent"
+        );
         assert!(!kv.exists("k").await.unwrap());
     }
 
@@ -361,7 +378,11 @@ mod tests {
         assert_eq!(kv.incr("c", 1).await.unwrap(), 1, "missing key starts at 0");
         assert_eq!(kv.incr("c", 10).await.unwrap(), 11);
         assert_eq!(kv.incr("c", -5).await.unwrap(), 6);
-        assert_eq!(kv.get("c").await.unwrap(), Some(b("6")), "counter is a string value");
+        assert_eq!(
+            kv.get("c").await.unwrap(),
+            Some(b("6")),
+            "counter is a string value"
+        );
 
         kv.set("s", b("nope"), SetOpts::new()).await.unwrap();
         assert!(matches!(kv.incr("s", 1).await, Err(ForgeError::Invalid(_))));
@@ -370,14 +391,23 @@ mod tests {
     #[tokio::test]
     async fn compare_and_swap_guards_writes() {
         let kv = MemKv::new(String::new());
-        assert!(kv.compare_and_swap("k", None, b("v1")).await.unwrap(), "expected absent");
+        assert!(
+            kv.compare_and_swap("k", None, b("v1")).await.unwrap(),
+            "expected absent"
+        );
         assert!(
             !kv.compare_and_swap("k", None, b("v2")).await.unwrap(),
             "now present => expected-absent fails"
         );
-        assert!(kv.compare_and_swap("k", Some(b("v1")), b("v2")).await.unwrap());
         assert!(
-            !kv.compare_and_swap("k", Some(b("v1")), b("v3")).await.unwrap(),
+            kv.compare_and_swap("k", Some(b("v1")), b("v2"))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !kv.compare_and_swap("k", Some(b("v1")), b("v3"))
+                .await
+                .unwrap(),
             "stale expected value"
         );
         assert_eq!(kv.get("k").await.unwrap(), Some(b("v2")));
@@ -426,13 +456,17 @@ mod tests {
     async fn purge_expired_reclaims_only_dead_entries() {
         let kv = MemKv::new(String::new());
         kv.set("live", b("v"), SetOpts::new()).await.unwrap();
-        kv.set("dead", b("v"), SetOpts::new().with_ttl(Duration::from_secs(1)))
-            .await
-            .unwrap();
+        kv.set(
+            "dead",
+            b("v"),
+            SetOpts::new().with_ttl(Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
         tokio::time::sleep(Duration::from_millis(1100)).await;
         kv.purge_expired();
         // Assert against the map directly: a `get` would lazily purge too, so reaching in
-        // is what proves the bulk sweep — not the read path — reclaimed the dead entry.
+        // is what proves the bulk sweep (not the read path) reclaimed the dead entry.
         let state = kv.lock();
         assert!(state.contains_key("live"));
         assert!(!state.contains_key("dead"));

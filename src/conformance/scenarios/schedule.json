@@ -12,7 +12,7 @@
     },
     {
       "name": "cancel_at_recalls_a_pending_oneshot",
-      "note": "One-shots created by at() can be recalled by JobId (send-later / disappearing-message cancellation) — P1-3.",
+      "note": "One-shots created by at() can be recalled by JobId, supporting send-later and disappearing-message cancellation.",
       "steps": [
         { "op": "schedule.at", "args": { "when_epoch_ms": 4102444800000, "queue": "q", "payload": "{}" }, "as": "jid" },
         { "op": "schedule.cancel_at", "args": { "job_id": { "$ref": "jid" } }, "expect": { "value": true } },
@@ -21,7 +21,7 @@
     },
     {
       "name": "namespace_isolation",
-      "note": "Schedules are scoped per app (P1-2): a cron registered in one namespace must not appear in another's list(), and names don't collide across apps.",
+      "note": "Schedules are scoped per app: a cron registered in one namespace must not appear in another's list(), and names do not collide across apps.",
       "steps": [
         { "op": "schedule.cron", "args": { "name": "c1", "expr": "0 0 * * *", "queue": "q", "payload": "{}" }, "namespace": "app-a" },
         { "op": "schedule.list", "args": {}, "namespace": "app-b", "expect": { "value": { "items": [], "cursor": null } } },
@@ -38,7 +38,7 @@
     },
     {
       "name": "list_paginates_by_cursor",
-      "note": "P1-3: list() must page by cursor so a backlog of pending one-shots never forces an unbounded materialization. A full page returns an opaque cursor; the final short page returns null.",
+      "note": "list() pages by cursor so a backlog of pending one-shots never forces an unbounded materialization. A full page returns an opaque cursor; the final short page returns null.",
       "steps": [
         { "op": "schedule.cron", "args": { "name": "a", "expr": "0 0 * * *", "queue": "q", "payload": "{}" } },
         { "op": "schedule.cron", "args": { "name": "b", "expr": "0 0 * * *", "queue": "q", "payload": "{}" } },
@@ -51,7 +51,7 @@
     },
     {
       "name": "opts_carry_max_attempts_to_the_enqueued_job",
-      "note": "P1-3: per-schedule queue opts. A one-attempt scheduled job must enqueue with max_attempts=1, not the hardcoded default of 5. Backend-agnostic: the memory scheduler delivers through its resolved queue backend too.",
+      "note": "Per-schedule queue opts carry through to the enqueued job. Backend-agnostic: the memory scheduler delivers through its resolved queue backend too.",
       "steps": [
         { "op": "schedule.at", "args": { "when_epoch_ms": { "$now_ms": -2000 }, "queue": "oneshot", "payload": "x", "max_attempts": 1 } },
         { "op": "schedule.tick", "args": {}, "expect": { "value": 1 } },

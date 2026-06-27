@@ -2,10 +2,11 @@
 //! backend, plus the filesystem-specific orphan sweep and binary-safety guarantees.
 //! Run with `cargo test --features pg-tests` (needs TEST_DATABASE_URL).
 #![cfg(feature = "pg-tests")]
-#![allow(clippy::unwrap_used, clippy::panic)]
+#![allow(clippy::unwrap_used, clippy::panic, clippy::disallowed_methods)]
 
 use forge::testing::TestDatabase;
 use forge::{Bytes, Forge, ForgeConfig, ForgeError, PutOpts};
+use sqlx::{Connection, PgConnection};
 use std::time::Duration;
 
 /// A unique scratch directory for this test's blob bytes, derived from the unique test
@@ -23,6 +24,18 @@ async fn fs_forge(db: &TestDatabase, root: &std::path::Path) -> Forge {
     )
     .await
     .unwrap()
+}
+
+async fn data_ref(db: &TestDatabase, key: &str) -> String {
+    let mut conn = PgConnection::connect(db.url()).await.unwrap();
+    let data_ref =
+        sqlx::query_scalar::<_, String>("SELECT data_ref FROM forge_fs_blobs WHERE key = $1")
+            .bind(key)
+            .fetch_one(&mut conn)
+            .await
+            .unwrap();
+    conn.close().await.ok();
+    data_ref
 }
 
 #[tokio::test]
@@ -95,6 +108,60 @@ async fn fs_list_is_prefixed_ordered_and_paginated() {
     assert_eq!(p1.items.first().map(|i| i.key.as_str()), Some("img/a.png"));
     let p2 = b.list("img/", p1.next, 1).await.unwrap();
     assert_eq!(p2.items.first().map(|i| i.key.as_str()), Some("img/b.png"));
+}
+
+#[tokio::test]
+async fn fs_missing_data_file_is_not_found_across_get_head_and_list() {
+    let db = TestDatabase::new().await.unwrap();
+    let root = temp_root(&db);
+    let forge = fs_forge(&db, &root).await;
+    let b = forge.blob();
+
+    b.put("ghost/file.txt", Bytes::from_static(b"x"), PutOpts::new())
+        .await
+        .unwrap();
+    db.execute_raw(
+        "UPDATE forge_fs_blobs SET data_ref = 'missing/file' WHERE key = 'ghost/file.txt'",
+    )
+    .await
+    .unwrap();
+
+    assert!(b.get("ghost/file.txt").await.unwrap().is_none());
+    assert!(b.head("ghost/file.txt").await.unwrap().is_none());
+    let page = b.list("ghost/", None, 100).await.unwrap();
+    assert!(page.items.is_empty());
+}
+
+#[tokio::test]
+async fn fs_overwrite_keeps_old_file_until_orphan_grace() {
+    let db = TestDatabase::new().await.unwrap();
+    let root = temp_root(&db);
+    let forge = fs_forge(&db, &root).await;
+    let b = forge.blob();
+
+    b.put("docs/race.txt", Bytes::from_static(b"old"), PutOpts::new())
+        .await
+        .unwrap();
+    let old_ref = data_ref(&db, "docs/race.txt").await;
+    let old_path = root.join(&old_ref);
+    let old_file = std::fs::File::open(&old_path).unwrap();
+    old_file
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(2 * 60 * 60))
+        .unwrap();
+
+    b.put("docs/race.txt", Bytes::from_static(b"new"), PutOpts::new())
+        .await
+        .unwrap();
+    forge.maintain().await.unwrap();
+
+    assert!(
+        old_path.exists(),
+        "an overwritten file remains readable through the orphan grace window"
+    );
+    assert_eq!(
+        b.get("docs/race.txt").await.unwrap().unwrap(),
+        Bytes::from_static(b"new")
+    );
 }
 
 #[tokio::test]

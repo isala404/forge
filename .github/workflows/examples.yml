@@ -144,3 +144,32 @@ jobs:
       - run: bun install
       - run: bun run codegen
       - run: bun run build
+
+  browser-e2e:
+    name: browser e2e (all chatapp stacks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: [rust-be, node-be, python-be, react-fe]
+    defaults:
+      run:
+        working-directory: examples/chatapp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Boot all stacks
+        run: docker compose up --build -d
+      - name: Install frontend test deps
+        working-directory: examples/chatapp/react-fe
+        run: bun install
+      - name: Install Playwright browsers
+        working-directory: examples/chatapp/react-fe
+        run: bunx playwright install --with-deps chromium
+      - name: Run Playwright
+        working-directory: examples/chatapp/react-fe
+        run: bun run test:e2e
+      - name: Dump compose logs
+        if: failure()
+        run: docker compose logs --no-color
+      - name: Stop stacks
+        if: always()
+        run: docker compose down -v

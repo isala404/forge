@@ -1,12 +1,11 @@
 """Typed projection over the forge_py ForgeClient.
 
 Bind a name + JSON codec to a type, so app code enqueues a ``SendEmail`` model
-instead of a raw queue string + ``json.dumps``. This is the Python view of the same
-typed layer the Rust crate exposes (``src/typed.rs``) and the Node binding exposes
-(``forge-node/typed``). Pure Python — no extra build step.
+instead of a raw queue string + ``json.dumps``. The Python view of the typed layer
+the Rust crate (``src/typed.rs``) and Node binding (``forge-node/typed``) expose.
 
 Each handle takes the compiled ``ForgeClient`` plus optional ``loads``/``dumps`` so a
-Pydantic/attrs model can plug its own (de)serialization in; the defaults use ``json``.
+Pydantic/attrs model can supply its own codec; the defaults use ``json``.
 """
 
 from __future__ import annotations
@@ -25,17 +24,16 @@ Dumps = Callable[[Any], str]
 def forge_error_code(exc: BaseException) -> str:
     """The Forge error class name for a raised exception (e.g. ``"Invalid"``).
 
-    The Python binding already raises a typed hierarchy (``forge_py.NotFound`` …),
-    so the code is just the exception's class name; this helper exists for symmetry
-    with the Node binding's ``forgeErrorCode`` string parser.
+    The Python binding raises a typed hierarchy, so the code is the exception's class
+    name; this mirrors the Node binding's ``forgeErrorCode`` string parser.
     """
     return type(exc).__name__
 
 
 def forge_error_retryable(exc: BaseException) -> bool:
-    """Whether a raised Forge error is retryable per docs/contracts/errors.md. Only
-    ``Unavailable`` is retryable from the exception class; a retryable ``Backend``
-    error is not distinguishable here (the flag is not surfaced), so it reads False.
+    """Whether a raised Forge error is retryable, per docs/contracts/errors.md. Only
+    ``Unavailable`` is retryable from the class; a retryable ``Backend`` error is not
+    distinguishable here (the flag is not surfaced), so it reads False.
     """
     return type(exc).__name__ == "Unavailable"
 
@@ -191,7 +189,7 @@ class TypedTopic(Generic[T]):
         await self._c.pubsub_publish(self._topic, self._dumps(event))
 
     async def subscribe(self) -> AsyncIterator[T]:
-        """``async for event in topic.subscribe():`` — each item decoded into ``T``."""
+        """``async for event in topic.subscribe():`` decodes each item into ``T``."""
         sub = await self._c.pubsub_subscribe(self._topic)
         async for payload in sub:
             yield self._loads(
@@ -211,16 +209,15 @@ async def run_worker(
     stop: Optional[asyncio.Event] = None,
     loads: Loads = json.loads,
 ) -> None:
-    """Run the canonical managed worker loop over a queue: dequeue, auto-heartbeat
-    at a third of the visibility window, ack on success / nack on exception, abandon
-    on lease loss, and drain on ``stop``. This is the loop every app would otherwise
-    re-invent with subtle bugs (no heartbeat, double-run past the visibility window).
+    """Managed worker loop over a queue: dequeue, heartbeat at a third of the
+    visibility window, ack on success / nack on exception, abandon on lease loss,
+    drain on ``stop``.
 
         stop = asyncio.Event()
         await run_worker(client, "emails", handle, stop=stop)
 
     ``handler(job)`` receives a :class:`TypedJob` (payload decoded via ``loads``);
-    raising nacks the job. ``stop`` shuts the loop down after the in-flight job drains.
+    raising nacks the job. ``stop`` stops the loop after the in-flight job drains.
     """
     hb_every = max(1.0, visibility_seconds / 3.0)
     while not (stop is not None and stop.is_set()):
@@ -245,7 +242,7 @@ async def run_worker(
                 await asyncio.sleep(hb_every)
                 try:
                     await client.queue_heartbeat(receipt)
-                except Exception:  # lease lost — stop heartbeating  # noqa: BLE001
+                except Exception:  # lease lost; stop heartbeating  # noqa: BLE001
                     lease_lost.set()
                     return
 

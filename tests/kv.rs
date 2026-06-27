@@ -240,7 +240,7 @@ async fn colon_keys_are_allowed_redis_style() {
     let forge = db.forge().await.unwrap();
     let kv = forge.kv();
 
-    // Redis idiom `entity:id:field` must work — agents generate it constantly.
+    // Redis idiom `entity:id:field` must work; agents generate it constantly.
     kv.set("user:42:session", b("tok"), SetOpts::new())
         .await
         .unwrap();

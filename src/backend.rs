@@ -1,28 +1,26 @@
-//! The backend seam: provider lifecycle + a per-primitive backend report.
+//! The backend seam: provider lifecycle plus a per-primitive backend report.
 //!
-//! The primitive traits ([`crate::kv::Kv`], [`crate::queue::Queue`], …) are the *operation*
-//! contracts. They say nothing about how a backend is initialized, health-checked, or
-//! swept. [`BackendLifecycle`] is that missing layer: one value per primitive that
-//! knows which provider powers it and how to maintain it. `forge::Forge` holds a
+//! The primitive traits ([`crate::kv::Kv`], [`crate::queue::Queue`], …) are the operation
+//! contracts; they say nothing about how a backend is initialized, health-checked, or
+//! swept. [`BackendLifecycle`] is that layer: one value per primitive that knows which
+//! provider powers it and how to maintain it. `forge::Forge` holds a
 //! `Vec<Arc<dyn BackendLifecycle>>` and drives them from `forge::Forge::maintain` and
 //! `forge::Forge::backend_report`.
 //!
-//! In v1 every primitive is Postgres, with the one exception that `blob` can store
-//! bytes on a local filesystem instead of `BYTEA`. The seam is built so a second
-//! backend for any single primitive is a later, app-code-invisible addition: a new
-//! [`BackendLifecycle`] impl and a new config variant, nothing more.
+//! In v1 every primitive is Postgres, except that `blob` can store bytes on a local
+//! filesystem instead of `BYTEA`. Adding a second backend for a primitive is a new
+//! [`BackendLifecycle`] impl plus a new config variant, nothing more.
 //!
-//! The concrete [`BackendLifecycle`] impls for the crate-local `Pg*`/`FsBlob` types live
-//! in this module too, rather than scattered across the per-primitive modules, so each
-//! primitive module stays focused on its operation contract. Backends with nothing to
-//! sweep inherit the no-op `maintain` default.
+//! The [`BackendLifecycle`] impls for the crate-local `Pg*`/`FsBlob` types live here
+//! rather than in the per-primitive modules, so each primitive module stays focused on
+//! its operation contract. Backends with nothing to sweep inherit the no-op `maintain`
+//! default.
 
 use crate::error::Result;
 use async_trait::async_trait;
 use std::fmt;
 
-/// The eight primitives Forge provides. Used by [`BackendLifecycle`] and the backend
-/// report to name which slot a provider fills.
+/// The eight primitives Forge provides.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Primitive {
@@ -54,9 +52,9 @@ impl Primitive {
 
 /// Per-primitive provider lifecycle, beside the operation traits.
 ///
-/// One implementation exists per configured backend. The defaults make a no-op
-/// backend (nothing to sweep) a one-line impl; backends with real maintenance (the
-/// Postgres sweeps, the filesystem orphan sweep) override [`BackendLifecycle::maintain`].
+/// One implementation per configured backend. The defaults let a backend with nothing to
+/// sweep be a one-line impl; backends with real maintenance override
+/// [`BackendLifecycle::maintain`].
 #[async_trait]
 pub trait BackendLifecycle: Send + Sync {
     /// Provider id, e.g. `"postgres"` or `"filesystem"`.
@@ -66,8 +64,7 @@ pub trait BackendLifecycle: Send + Sync {
     fn primitive(&self) -> Primitive;
 
     /// Whether data in this backend survives a restart. `true` for Postgres and the
-    /// filesystem blob store; a future in-memory/Redis-without-persistence backend
-    /// would say `false`.
+    /// filesystem blob store.
     fn durable(&self) -> bool {
         true
     }
@@ -84,15 +81,15 @@ pub trait BackendLifecycle: Send + Sync {
     }
 }
 
-/// The open injection seam: one marker trait per primitive bundling its *operation*
-/// contract with [`BackendLifecycle`]. An external author who implements both for a type
-/// can hand it to [`Forge::builder`](crate::Forge::builder) for that primitive; Forge then
-/// routes operations to it and drives its maintenance/report exactly like a built-in.
+/// Injection marker: one trait per primitive bundling its operation contract with
+/// [`BackendLifecycle`]. Implement both for a type and hand it to
+/// [`Forge::builder`](crate::Forge::builder); Forge routes operations to it and drives its
+/// maintenance/report like a built-in.
 ///
-/// Each is a pure marker with a blanket impl, so any type implementing both halves
-/// qualifies automatically — implementors never name these traits. A stored
-/// `Arc<dyn KvBackend>` upcasts to both `Arc<dyn Kv>` (operations) and
-/// `Arc<dyn BackendLifecycle>` (maintenance) with no extra glue.
+/// Each is a marker with a blanket impl, so any type implementing both halves qualifies
+/// automatically; implementors never name these traits. A stored `Arc<dyn KvBackend>`
+/// upcasts to both `Arc<dyn Kv>` (operations) and `Arc<dyn BackendLifecycle>`
+/// (maintenance) with no extra glue.
 pub trait KvBackend: crate::kv::Kv + BackendLifecycle {}
 impl<T: crate::kv::Kv + BackendLifecycle> KvBackend for T {}
 
@@ -110,7 +107,7 @@ impl<T: crate::ratelimit::RateLimit + BackendLifecycle> RateLimitBackend for T {
 
 /// See [`KvBackend`]: the injection marker for the blob primitive. Distinct from the
 /// [`BlobBackendConfig`](crate::config::BlobBackendConfig) enum, which only selects where a
-/// *built-in* blob stores bytes.
+/// built-in blob stores bytes.
 pub trait BlobBackend: crate::blob::Blob + BackendLifecycle {}
 impl<T: crate::blob::Blob + BackendLifecycle> BlobBackend for T {}
 
@@ -137,8 +134,7 @@ pub struct BackendInfo {
 }
 
 impl BackendInfo {
-    /// Construct one report line. For the facade that assembles the report from each
-    /// backend's [`BackendLifecycle`].
+    /// Construct one report line.
     pub fn new(
         primitive: Primitive,
         provider: &'static str,
@@ -154,9 +150,9 @@ impl BackendInfo {
     }
 }
 
-/// A snapshot of which backend powers each primitive — for logs, health pages, and
-/// debugging. Never needed for ordinary request handling (the provider must not leak
-/// into app logic); see `forge::Forge::backend_report`.
+/// A snapshot of which backend powers each primitive, for logs, health pages, and
+/// debugging. Not needed for request handling; the provider must not leak into app logic.
+/// See `forge::Forge::backend_report`.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct BackendReport {

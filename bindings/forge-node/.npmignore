@@ -1,0 +1,7 @@
+target
+node_modules
+Cargo.toml
+Cargo.lock
+build.rs
+src
+*.log

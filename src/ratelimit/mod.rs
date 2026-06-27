@@ -1,4 +1,4 @@
-//! `ratelimit` — lineage: token bucket / GCRA + IETF RateLimit fields. See
+//! `ratelimit`. Lineage: token bucket / GCRA + IETF RateLimit fields. See
 //! `docs/contracts/ratelimit.md`.
 //!
 //! One op, [`RateLimit::check`], an atomic check-and-consume. There is deliberately
@@ -28,10 +28,10 @@ pub enum Algo {
 }
 
 /// Per-check override of what happens when the limiter *backend* errors (not when a
-/// request is merely denied — that is always `Ok(Decision { allowed: false })`).
-/// A backend outage should fail-open for a high-volume best-effort bucket (sending a
-/// chat message) but fail-closed for an abuse- or payment-sensitive one (login, OTP).
-/// Lets one `RateLimit` mix both without a global flag or a hand-rolled `unwrap_or`.
+/// request is merely denied, which is always `Ok(Decision { allowed: false })`).
+/// A backend outage should fail-open for a high-volume best-effort bucket (a chat
+/// message) but fail-closed for an abuse- or payment-sensitive one (login, OTP), so
+/// one `RateLimit` can mix both without a global flag.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FailMode {
@@ -83,13 +83,13 @@ impl Limit {
 pub struct Decision {
     /// Whether this call was admitted (and consumed one unit).
     pub allowed: bool,
-    /// Echoes `Limit.max` — `RateLimit-Limit`.
+    /// Echoes `Limit.max` (`RateLimit-Limit`).
     pub limit: u32,
-    /// Units left after this call — `RateLimit-Remaining`.
+    /// Units left after this call (`RateLimit-Remaining`).
     pub remaining: u32,
-    /// Time until the limit fully resets — `RateLimit-Reset`.
+    /// Time until the limit fully resets (`RateLimit-Reset`).
     pub reset_after: Duration,
-    /// Earliest retry, set iff `!allowed` — `Retry-After`.
+    /// Earliest retry, set iff `!allowed` (`Retry-After`).
     pub retry_after: Option<Duration>,
 }
 
@@ -122,7 +122,7 @@ pub trait RateLimit: Send + Sync {
     /// Atomic check-and-consume of one unit against `limit` for subject `key` under
     /// namespace `bucket`. A *denied* request is `Ok(Decision { allowed: false, .. })`,
     /// never an `Err`. On a backend error the configured failure mode applies
-    /// (fail-open by default — returns a synthetic allow and logs a warning).
+    /// (fail-open by default: returns a synthetic allow and logs a warning).
     async fn check(&self, bucket: &str, key: &str, limit: Limit) -> Result<Decision> {
         self.check_with(bucket, key, limit, FailMode::Default).await
     }

@@ -1,4 +1,4 @@
-//! Small dependency-light helpers shared across the crate.
+//! Small helpers shared across the crate.
 
 use sha2::{Digest, Sha256};
 
@@ -7,7 +7,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex(Sha256::digest(bytes).as_slice())
 }
 
-/// Lowercase hex encoding of `bytes`. Used for random token rendering and HMAC tags.
+/// Lowercase hex encoding of `bytes`.
 pub fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write;
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -23,10 +23,9 @@ pub fn key_hash(key: &str) -> String {
     full.get(..16).unwrap_or(&full).to_string()
 }
 
-/// Apply an app namespace to a logical key as `<ns>:<key>`. An empty namespace
-/// leaves the key untouched. The single source of truth for the prefixing rule the
-/// kv/config/ratelimit/queue/pubsub backends share; namespaces are colon-free, so
-/// `<ns>:<key>` never collides across distinct `(ns, key)`.
+/// Prefix a logical key with an app namespace as `<ns>:<key>`; an empty namespace leaves
+/// the key untouched. Namespaces are colon-free, so `<ns>:<key>` never collides across
+/// distinct `(ns, key)`.
 pub fn namespaced(ns: &str, key: &str) -> String {
     if ns.is_empty() {
         key.to_string()

@@ -11,7 +11,7 @@ export interface ServerHandle {
 }
 
 // Boot the real server in a child Node process (native TS stripping) so the test
-// talks to it only over HTTP/WS — no shared module graph, no dual-graphql realm.
+// talks to it only over HTTP/WS: no shared module graph, no dual-graphql realm.
 export function startServerProcess(env: Record<string, string>): Promise<ServerHandle> {
   const child: ChildProcess = spawn(process.execPath, [SERVER_ENTRY], {
     env: { ...process.env, ...env, PORT: "0" },

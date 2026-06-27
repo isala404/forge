@@ -3,7 +3,7 @@
 //! request carries the key, expiry, size cap, and HMAC signature as query params; we
 //! verify them with `Blob::verify_presigned` (the exact check the signer enforces) and
 //! then do the get/put against blob storage. The node and python backends carry the
-//! same hand-rolled route — see their `server.ts` / `blob_router.py`.
+//! same hand-rolled route. See their `server.ts` / `blob_router.py`.
 
 // Returning the axum `Response` in a `Result::Err` is the idiomatic short-circuit for
 // these handlers.
@@ -95,7 +95,9 @@ async fn download(State(ctx): State<Ctx>, Query(p): Query<Params>, headers: Head
 
     // Honour `If-None-Match`: a cached client that already holds this exact object
     // (same ETag) gets a bodyless 304 instead of the full payload re-sent.
-    let if_none_match = headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok());
+    let if_none_match = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok());
     if let Some(etag) = etag.as_deref()
         && etag_matches(if_none_match, etag)
     {
@@ -115,14 +117,18 @@ async fn download(State(ctx): State<Ctx>, Query(p): Query<Params>, headers: Head
                 .map(|i| i.content_type)
                 .unwrap_or_else(|| DEFAULT_CONTENT_TYPE.to_string());
             // Objects are caller-supplied bytes served from the app's own origin, so
-            // never let the browser render them inline or sniff a different type — that
+            // never let the browser render them inline or sniff a different type: that
             // turns a stored HTML/SVG payload into stored XSS. `attachment` + `nosniff`
             // still allow `<img>`/`<video>` subresource loads, which ignore Content-Disposition.
             let mut resp_headers = HeaderMap::new();
             insert_header(&mut resp_headers, header::CONTENT_TYPE, &ct);
             insert_header(&mut resp_headers, header::CONTENT_DISPOSITION, "attachment");
             insert_header(&mut resp_headers, header::X_CONTENT_TYPE_OPTIONS, "nosniff");
-            insert_header(&mut resp_headers, header::CACHE_CONTROL, CACHE_CONTROL_VALUE);
+            insert_header(
+                &mut resp_headers,
+                header::CACHE_CONTROL,
+                CACHE_CONTROL_VALUE,
+            );
             if let Some(etag) = etag.as_deref() {
                 insert_header(&mut resp_headers, header::ETAG, etag);
             }
@@ -144,7 +150,11 @@ async fn upload(
     }
     // The signed cap fences the body size (Precondition, not just a kindness).
     if body.len() as u64 > p.max_bytes {
-        return (StatusCode::PAYLOAD_TOO_LARGE, "body exceeds signed max_bytes").into_response();
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "body exceeds signed max_bytes",
+        )
+            .into_response();
     }
     let mut opts = forge::PutOpts::new();
     if let Some(ct) = headers
@@ -186,7 +196,13 @@ mod tests {
     fn etag_does_not_match_when_absent_or_different() {
         let etag = "\"abc123\"";
         assert!(!etag_matches(None, etag), "no If-None-Match → full body");
-        assert!(!etag_matches(Some("\"other\""), etag), "different etag → full body");
-        assert!(!etag_matches(Some("abc123"), etag), "unquoted is not a match");
+        assert!(
+            !etag_matches(Some("\"other\""), etag),
+            "different etag → full body"
+        );
+        assert!(
+            !etag_matches(Some("abc123"), etag),
+            "unquoted is not a match"
+        );
     }
 }

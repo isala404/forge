@@ -163,6 +163,51 @@ async fn dedup_collapses_enqueues_within_window() {
 }
 
 #[tokio::test]
+async fn requested_job_id_is_idempotent_even_with_new_dedup_slot() {
+    let db = TestDatabase::new().await.unwrap();
+    let forge = db.forge().await.unwrap();
+    let q = forge.queue();
+
+    let requested = JobId::new();
+    let first = q
+        .enqueue(
+            "q",
+            payload("first"),
+            EnqueueOpts::new().with_job_id(requested),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first, requested);
+
+    let second = q
+        .enqueue(
+            "q",
+            payload("second"),
+            EnqueueOpts::new()
+                .with_job_id(requested)
+                .with_dedup_id("fresh-slot"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        second, requested,
+        "same requested id on same queue is success even while claiming a new dedup slot"
+    );
+
+    assert!(matches!(
+        q.enqueue(
+            "other",
+            payload("bad"),
+            EnqueueOpts::new()
+                .with_job_id(requested)
+                .with_dedup_id("other-slot"),
+        )
+        .await,
+        Err(ForgeError::Precondition(_))
+    ));
+}
+
+#[tokio::test]
 async fn unknown_job_id_is_not_found() {
     let db = TestDatabase::new().await.unwrap();
     let forge = db.forge().await.unwrap();
@@ -225,9 +270,13 @@ async fn dlq_job_exhaustion_parks_as_dead_not_chained() {
     let forge = db.forge().await.unwrap();
     let q = forge.queue();
 
-    q.enqueue("orders", payload("x"), EnqueueOpts::new().with_max_attempts(1))
-        .await
-        .unwrap();
+    q.enqueue(
+        "orders",
+        payload("x"),
+        EnqueueOpts::new().with_max_attempts(1),
+    )
+    .await
+    .unwrap();
     let j = q.dequeue("orders", vis(30)).await.unwrap().unwrap();
     q.nack(&j, NackOpts::default()).await.unwrap();
 
@@ -260,7 +309,10 @@ async fn nack_retry_in_is_bounded() {
     let job = q.dequeue("q", vis(30)).await.unwrap().unwrap();
     // A century-long park is rejected; the cap is the 12h visibility ceiling.
     let res = q
-        .nack(&job, NackOpts::retry_in(Duration::from_secs(100 * 365 * 24 * 3600)))
+        .nack(
+            &job,
+            NackOpts::retry_in(Duration::from_secs(100 * 365 * 24 * 3600)),
+        )
         .await;
     assert!(matches!(res, Err(ForgeError::Invalid(_))));
 }

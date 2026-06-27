@@ -1,10 +1,9 @@
 //! Node.js bindings for Forge via napi-rs.
 //!
-//! Exposes a representative slice of every primitive (kv, queue, config, ratelimit,
-//! blob, auth, schedule) to JavaScript. Async Rust methods become JS `Promise`s
+//! Exposes the Forge primitive surface to JavaScript. Async Rust methods become JS `Promise`s
 //! (snake_case → camelCase). The queue is exposed as raw `enqueue`/`dequeue`/`ack`/
-//! `nack`: leased jobs are held Rust-side in a map and referenced from JS by id, so
-//! the opaque lease fence never crosses the boundary.
+//! `nack`: leased jobs are held Rust-side in a map and referenced from JS by
+//! delivery-unique receipt, so the opaque lease fence never crosses the boundary.
 
 use futures_util::StreamExt;
 use napi::bindgen_prelude::*;
@@ -35,7 +34,7 @@ fn err(e: forge::ForgeError) -> napi::Error {
 /// Convert an `f64` seconds value into a `Duration`, raising `Invalid` on a
 /// negative or non-finite input. Zero passes straight through so the core applies
 /// its own validation: bindings convert and pass through, they never clamp or
-/// silently coerce a caller's out-of-range value (P0-5).
+/// silently coerce a caller's out-of-range value.
 fn secs(field: &str, value: f64) -> Result<Duration> {
     Duration::try_from_secs_f64(value).map_err(|_| {
         err(forge::ForgeError::invalid(format!(
@@ -45,8 +44,8 @@ fn secs(field: &str, value: f64) -> Result<Duration> {
 }
 
 /// Convert an `f64` byte count into a `u64`, raising `Invalid` on a negative or
-/// non-finite input rather than silently coercing it (P0-5). JS has no native u64,
-/// so the boundary stays `f64`; the core's own 50 MiB cap covers the high end.
+/// non-finite input rather than silently coercing it. JS has no native u64, so the
+/// boundary stays `f64`; the core's own 50 MiB cap covers the high end.
 fn bytes(field: &str, value: f64) -> Result<u64> {
     if !value.is_finite() || value < 0.0 {
         return Err(err(forge::ForgeError::invalid(format!(
@@ -78,12 +77,12 @@ fn parse_algo(name: Option<&str>) -> Result<forge::Algo> {
 }
 
 // The cross-language value DTOs (JsJob, JsDecision, JsBlobInfo, …) are generated from one
-// schema shared with the Python binding — see tools/codegen/src/schema.rs. napi derives
+// schema shared with the Python binding; see tools/codegen/src/schema.rs. napi derives
 // index.d.ts from these structs. Regenerate with the codegen tool; never hand-edit.
 include!("types.generated.rs");
 
-/// Connection options for `ForgeClient.connectWith` — the full per-deployment surface
-/// (every field optional; omitted fields take Forge's defaults).
+/// Connection options for `ForgeClient.connectWith`. Every field optional;
+/// omitted fields take Forge's defaults.
 #[napi(object)]
 #[derive(Default)]
 pub struct JsConnectOptions {
@@ -112,7 +111,7 @@ pub struct ForgeClient {
     /// entry instead of overwriting the in-flight one. `ack`/`nack`/`heartbeat`
     /// recover the `forge::Job` (whose lease fence is not part of the public
     /// surface) by receipt. Entries are evicted on settle and, as a leak backstop,
-    /// once their original lease has been expired for over 24h.
+    /// once their last observed lease/heartbeat has been expired for over 24h.
     leased: Arc<Mutex<HashMap<String, forge::Job>>>,
     /// Monotonic counter making each dequeue's receipt unique.
     seq: Arc<std::sync::atomic::AtomicU64>,
@@ -130,7 +129,7 @@ impl ForgeClient {
 
 #[napi]
 impl ForgeClient {
-    /// Connect, migrate the system database, and ping — mirrors `Forge::init`. Pass
+    /// Connect, migrate the system database, and ping; mirrors `Forge::init`. Pass
     /// `signingSecret` to enable presigned blob URLs.
     #[napi(factory)]
     pub async fn connect(
@@ -146,7 +145,7 @@ impl ForgeClient {
     }
 
     /// Connect using the `FORGE_*` environment variables (`FORGE_POSTGRES_URL`,
-    /// `FORGE_KV_NAMESPACE`, `FORGE_BLOB_BACKEND`, …) — the same vars that drive the
+    /// `FORGE_KV_NAMESPACE`, `FORGE_BLOB_BACKEND`, …), the same vars that drive the
     /// Rust crate, so config is identical across all three languages.
     #[napi(factory)]
     pub async fn connect_from_env() -> Result<ForgeClient> {
@@ -207,7 +206,7 @@ impl ForgeClient {
         Ok(v.map(|b| String::from_utf8_lossy(&b).into_owned()))
     }
 
-    /// `GET key` → the raw value bytes, or `null`. Lossless, unlike `kvGet` (P0-4).
+    /// `GET key` → the raw value bytes, or `null`. Lossless, unlike `kvGet`.
     #[napi]
     pub async fn kv_get_bytes(&self, key: String) -> Result<Option<Buffer>> {
         let v = self.forge.kv().get(&key).await.map_err(err)?;
@@ -215,7 +214,7 @@ impl ForgeClient {
     }
 
     /// `MGET keys` → each value as a UTF-8 string (or `null` if missing/expired), in
-    /// input order. One round-trip — use instead of a per-key `kvGet` loop.
+    /// input order. One round-trip; use instead of a per-key `kvGet` loop.
     #[napi]
     pub async fn kv_mget(&self, keys: Vec<String>) -> Result<Vec<Option<String>>> {
         let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
@@ -382,8 +381,7 @@ impl ForgeClient {
                 };
                 let mut leased = self.leased.lock().await;
                 // Backstop against true leaks (dequeued, never settled): drop entries
-                // whose lease lapsed over 24h ago. The grace is far longer than any
-                // heartbeat window, so a heartbeated job is never evicted mid-flight.
+                // whose last observed lease/heartbeat lapsed over 24h ago.
                 let cutoff = SystemTime::now() - Duration::from_secs(24 * 60 * 60);
                 leased.retain(|_, j| j.leased_until > cutoff);
                 leased.insert(receipt, job);
@@ -405,7 +403,7 @@ impl ForgeClient {
 
     /// Nack a leased job by its `receipt`; optional `retrySeconds` delays the
     /// redelivery. Raises `PRECONDITION` if the receipt is unknown (the lease was
-    /// lost — stop working on this job).
+    /// lost, stop working on this job).
     #[napi]
     pub async fn queue_nack(&self, receipt: String, retry_seconds: Option<f64>) -> Result<()> {
         let job = self.leased.lock().await.remove(&receipt);
@@ -425,7 +423,7 @@ impl ForgeClient {
     /// beanstalkd touch) by one visibility timeout. Call before `leasedUntilMs` for a
     /// handler that may outlive its visibility window, so the job is not redelivered
     /// mid-flight. Raises `PRECONDITION` if the receipt is unknown (the lease was
-    /// lost — stop working on this job).
+    /// lost, stop working on this job).
     #[napi]
     pub async fn queue_heartbeat(&self, receipt: String) -> Result<()> {
         let job = self.leased.lock().await.get(&receipt).cloned();
@@ -434,7 +432,13 @@ impl ForgeClient {
                 "unknown receipt: the lease was lost",
             )));
         };
-        self.forge.queue().heartbeat(&job).await.map_err(err)
+        self.forge.queue().heartbeat(&job).await.map_err(err)?;
+        if let Some(stored) = self.leased.lock().await.get_mut(&receipt) {
+            if stored.id == job.id && stored.lease_token() == job.lease_token() {
+                stored.leased_until = SystemTime::now();
+            }
+        }
+        Ok(())
     }
 
     /// Approximate `{visible, inFlight, delayed}` counts for a queue (SQS
@@ -471,7 +475,7 @@ impl ForgeClient {
             .map_err(err)
     }
 
-    /// Evaluate a boolean flag for `targetingKey`. Never throws — resolves to
+    /// Evaluate a boolean flag for `targetingKey`. Never throws; resolves to
     /// `defaultValue` on any failure.
     #[napi]
     pub async fn flag(
@@ -665,7 +669,7 @@ impl ForgeClient {
 
     /// Whether a stored PHC `hash` should be re-hashed (its argon2id params are below
     /// the current Forge baseline). Call after a successful `verifyPassword`; if `true`,
-    /// re-hash the plaintext and persist it — transparent upgrade, no forced reset.
+    /// re-hash the plaintext and persist it. Transparent upgrade, no forced reset.
     #[napi]
     pub fn needs_rehash(&self, hash: String) -> bool {
         self.forge.auth().needs_rehash(&forge::PhcString::new(hash))
@@ -833,8 +837,8 @@ impl ForgeClient {
     /// The Postgres `LISTEN`/`NOTIFY` channel a topic maps to. `LISTEN` on this with
     /// a native Postgres client to receive what `pubsub_publish(topic, …)` sends.
     #[napi]
-    pub fn pubsub_channel(&self, topic: String) -> String {
-        forge::pubsub::channel_for(&topic)
+    pub fn pubsub_channel(&self, topic: String) -> Result<String> {
+        self.forge.pubsub().channel_for(&topic).map_err(err)
     }
 
     /// `EXPIRE key ttlSeconds`. Sets/replaces the TTL on a live key; `false` if absent.

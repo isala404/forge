@@ -103,7 +103,7 @@ async def reconcile_once(forge, pool) -> None:
     """Heal work whose post-commit enqueue/schedule was dropped. The app and Forge
     hold separate pools, so the send tx can't enlist the enqueue; this bounded sweep
     is the safety net. Both repairs are idempotent, so running them every tick is safe."""
-    # Dropped reaps: delete due disappearing messages (blob best-effort here — a missed
+    # Dropped reaps: delete due disappearing messages (blob best-effort here; a missed
     # blob is retried next tick, and we'd rather make progress than block the sweep).
     for row in await db.due_disappearing_messages(pool, RECONCILE_LIMIT):
         if row["media_key"]:

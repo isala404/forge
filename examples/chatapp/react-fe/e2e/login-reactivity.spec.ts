@@ -10,8 +10,8 @@ import {
 } from './helpers'
 
 // Guards the post-login live-reactivity bug: the urql wiring used to `dispose()` the
-// graphql-ws client whenever the auth token changed. `dispose()` is terminal — the
-// client can never be reused — so after the very first UI login no subscription could
+// graphql-ws client whenever the auth token changed. `dispose()` is terminal: the
+// client can never be reused, so after the very first UI login no subscription could
 // ever connect, and live messages only appeared after a full page reload re-created
 // the client. The fix uses `terminate()` (drop the socket, keep the client). Here a
 // freshly-logged-in Alice must receive Bob's message live, with no reload.
@@ -27,7 +27,7 @@ test('a freshly logged-in user receives a peer message live without reloading', 
   const chatId = await createDirectChat(backend, aliceToken, bob)
 
   // Watch every socket this page opens for the moment Alice's messageAdded
-  // subscription is sent — that means the live channel is established, so Bob's
+  // subscription is sent, which means the live channel is established, so Bob's
   // send afterwards can't be lost to the at-most-once pubsub. Registered before the
   // first navigation so the very first socket is observed.
   const messageSubscribed = waitForFrame(page, 'messageAdded')

@@ -2,12 +2,12 @@
 //!
 //! `publish` is one `pg_notify($channel, $payload)` on a pooled connection.
 //! `subscribe` registers a topic's channel on a single shared `LISTEN` connection
-//! (a per-process broker task) and hands back an in-process fan-out stream. Sharing
-//! one connection across every subscription — instead of opening a dedicated
-//! connection per `subscribe` — keeps `N` subscribers on `M` topics at one Postgres
-//! connection rather than `N×M`. The broker awaits `LISTEN` registration before a
-//! `subscribe` resolves, so a publish can never race ahead of its own subscription.
-//! Arbitrary topics are mapped to a valid, fixed-length channel identifier by hash.
+//! (a per-process broker task) and hands back an in-process fan-out stream. One shared
+//! connection across every subscription, instead of one per `subscribe`, keeps `N`
+//! subscribers on `M` topics at one Postgres connection rather than `N×M`. The broker
+//! awaits `LISTEN` registration before a `subscribe` resolves, so a publish can never
+//! race ahead of its own subscription. Topics are mapped to a valid, fixed-length
+//! channel identifier by hash.
 
 use super::{MAX_PAYLOAD_BYTES, MAX_TOPIC_BYTES, Pubsub, Subscription};
 use crate::error::{ForgeError, Result};
@@ -45,11 +45,11 @@ struct Broker {
 }
 
 /// Lives inside a subscription's stream. When the stream is dropped, this tells the
-/// broker to re-check the channel and `UNLISTEN` it if no subscribers remain — so a
-/// channel is released deterministically on drop, not only when the next `NOTIFY`
-/// happens to arrive. The broadcast receiver is dropped before this guard (it sits
-/// first in the stream's state tuple), so `receiver_count()` is already accurate when
-/// the broker handles the `Unregister`.
+/// broker to re-check the channel and `UNLISTEN` it if no subscribers remain, so a
+/// channel is released on drop, not only when the next `NOTIFY` happens to arrive. The
+/// broadcast receiver is dropped before this guard (it sits first in the stream's state
+/// tuple), so `receiver_count()` is already accurate when the broker handles the
+/// `Unregister`.
 struct SubGuard {
     channel: String,
     cmd_tx: mpsc::UnboundedSender<Cmd>,
@@ -92,7 +92,7 @@ impl PgPubsub {
     /// Map an arbitrary topic onto a valid Postgres channel name, mixing in the
     /// namespace so two apps' identical topics resolve to different channels.
     fn channel(&self, topic: &str) -> String {
-        super::channel_for(&crate::util::namespaced(&self.namespace, topic))
+        super::hashed_channel_for(&crate::util::namespaced(&self.namespace, topic))
     }
 
     fn check_topic(topic: &str) -> Result<()> {
@@ -195,7 +195,7 @@ async fn broker_task(
 }
 
 /// Reconnect the shared listener and re-`LISTEN` every active channel, retrying with a
-/// fixed backoff until it succeeds. Notifications during the gap are lost — pubsub is
+/// fixed backoff until it succeeds. Notifications during the gap are lost: pubsub is
 /// connected-only / fire-and-forget by contract.
 async fn reconnect(url: &str, channels: &HashMap<String, broadcast::Sender<Bytes>>) -> PgListener {
     loop {
@@ -221,6 +221,11 @@ async fn reconnect(url: &str, channels: &HashMap<String, broadcast::Sender<Bytes
 
 #[async_trait]
 impl Pubsub for PgPubsub {
+    fn channel_for(&self, topic: &str) -> Result<String> {
+        Self::check_topic(topic)?;
+        Ok(self.channel(topic))
+    }
+
     async fn publish(&self, topic: &str, payload: Bytes) -> Result<()> {
         let span = tracing::info_span!(
             "forge.pubsub.publish",
@@ -309,7 +314,7 @@ mod tests {
 
     #[test]
     fn channel_is_valid_fixed_length_identifier() {
-        let c = super::super::channel_for("chat:550e8400-e29b-41d4-a716-446655440000");
+        let c = super::super::hashed_channel_for("chat:550e8400-e29b-41d4-a716-446655440000");
         assert_eq!(c.len(), 38); // "forge_" + 32 hex
         assert!(c.starts_with("forge_"));
         assert!(c.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'));
@@ -318,8 +323,14 @@ mod tests {
 
     #[test]
     fn distinct_topics_get_distinct_channels() {
-        assert_ne!(super::super::channel_for("chat:1"), super::super::channel_for("chat:2"));
-        assert_eq!(super::super::channel_for("presence"), super::super::channel_for("presence"));
+        assert_ne!(
+            super::super::hashed_channel_for("chat:1"),
+            super::super::hashed_channel_for("chat:2")
+        );
+        assert_eq!(
+            super::super::hashed_channel_for("presence"),
+            super::super::hashed_channel_for("presence")
+        );
     }
 
     #[test]

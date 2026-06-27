@@ -91,7 +91,7 @@ pub(super) fn like_escape(prefix: &str) -> String {
     out
 }
 
-/// A missing signing secret is `Config` — presigning is unconfigured, a deployment
+/// A missing signing secret is `Config`: presigning is unconfigured, a deployment
 /// problem, classified the same way across presign/verify/router.
 fn require_secret(secret: Option<&[u8]>) -> Result<&[u8]> {
     secret.ok_or_else(|| {
@@ -119,7 +119,7 @@ pub(super) fn presign_url(
             "presign expires exceeds the 7-day maximum",
         ));
     }
-    // A 0-byte upload cap admits only empty bodies — almost certainly a caller bug.
+    // A 0-byte upload cap admits only empty bodies, almost certainly a caller bug.
     if matches!(method, Method::Put) && max_bytes == 0 {
         return Err(ForgeError::invalid(
             "presign_upload max_bytes must be positive (0 admits only empty bodies)",
@@ -169,8 +169,8 @@ pub(super) fn verify_presigned(
 }
 
 /// State every blob backend carries: the key namespace and the presign signing config.
-/// Both backends (`PgBlob`, `FsBlob`) embed one and route the backend-agnostic work —
-/// key namespacing and presigned-URL mint/verify — through it, so those can never
+/// Both backends (`PgBlob`, `FsBlob`) embed one and route the backend-agnostic work
+/// (key namespacing and presigned-URL mint/verify) through it, so those can never
 /// diverge between the two stores.
 pub(super) struct Shared {
     namespace: String,

@@ -163,7 +163,7 @@ wheels = [
 
 [[package]]
 name = "forge-py"
-version = "0.1.0"
+version = "1.0.0"
 source = { editable = "../../../bindings/forge-py" }
 
 [[package]]

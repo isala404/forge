@@ -13,7 +13,7 @@
     },
     {
       "name": "enqueue_delay_makes_the_job_delayed",
-      "note": "enqueue delay (SQS DelaySeconds) is now exposed in both bindings (P1-6 capability gap). A delayed job is not immediately dequeueable.",
+      "note": "enqueue delay (SQS DelaySeconds) is exposed in all bindings; a delayed job is not immediately dequeueable.",
       "steps": [
         { "op": "queue.enqueue", "args": { "queue": "d", "payload": "later", "delay_seconds": 60 } },
         { "op": "queue.depth", "args": { "queue": "d" }, "expect": { "shape": { "visible": 0, "delayed": 1 } } },
@@ -22,7 +22,7 @@
     },
     {
       "name": "namespace_isolation",
-      "note": "Queue names are GLOBAL per database today (P1-2). A dequeue under another namespace must not see the job. Fails in all three languages until P1-2 namespaces queue names.",
+      "note": "Queue names are scoped by Forge namespace. A dequeue under another namespace must not see the job.",
       "steps": [
         { "op": "queue.enqueue", "args": { "queue": "q", "payload": "x" }, "namespace": "app-a" },
         { "op": "queue.dequeue", "args": { "queue": "q", "visibility_seconds": 30, "wait_seconds": 0 }, "namespace": "app-b", "expect": { "value": null } }
@@ -30,14 +30,14 @@
     },
     {
       "name": "nack_unknown_receipt_is_precondition",
-      "note": "A nack with a receipt this client never issued means the lease was lost; it must raise Precondition (stop the work), not silently succeed (P0-3).",
+      "note": "A nack with a receipt this client never issued means the lease was lost; it must raise Precondition, not silently succeed.",
       "steps": [
         { "op": "queue.nack", "args": { "receipt": "never-issued:0" }, "expect": { "error": "Precondition" } }
       ]
     },
     {
       "name": "dequeue_zero_visibility_is_rejected",
-      "note": "visibility 0 is Invalid in the core. Node passes 0 through (gets Invalid); Python clamps to 1ms and succeeds — P0-5 gap for python.",
+      "note": "visibility 0 is invalid in every language binding; bindings pass invalid durations through to Forge rather than clamping.",
       "steps": [
         { "op": "queue.enqueue", "args": { "queue": "q", "payload": "x" } },
         { "op": "queue.dequeue", "args": { "queue": "q", "visibility_seconds": 0, "wait_seconds": 0 }, "expect": { "error": "Invalid" } }

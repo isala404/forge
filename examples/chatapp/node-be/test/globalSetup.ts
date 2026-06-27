@@ -1,8 +1,19 @@
 import pg from "pg";
 
-const ADMIN_URL = "postgres://postgres:forge@127.0.0.1:5432/postgres";
-export const TEST_DB = "chatapp_node_test";
-export const TEST_DB_URL = `postgres://postgres:forge@127.0.0.1:5432/${TEST_DB}`;
+function databaseUrl(adminUrl: string, database: string): string {
+  const url = new URL(adminUrl);
+  url.pathname = `/${database}`;
+  return url.toString();
+}
+
+const ADMIN_URL =
+  process.env.CHATAPP_TEST_ADMIN_URL ??
+  process.env.TEST_DATABASE_URL ??
+  "postgres://postgres:forge@127.0.0.1:5432/postgres";
+
+export const TEST_DB = process.env.CHATAPP_TEST_DB ?? "chatapp_node_test";
+export const TEST_DB_URL =
+  process.env.CHATAPP_TEST_DATABASE_URL ?? databaseUrl(ADMIN_URL, TEST_DB);
 
 // Drop + recreate a dedicated test database so every run starts clean (and Forge's
 // migrations re-apply against a fresh schema).

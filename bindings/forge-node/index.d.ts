@@ -104,8 +104,8 @@ export interface JsBackendInfo {
   caveats: string
 }
 /**
- * Connection options for `ForgeClient.connectWith` — the full per-deployment surface
- * (every field optional; omitted fields take Forge's defaults).
+ * Connection options for `ForgeClient.connectWith`. Every field optional;
+ * omitted fields take Forge's defaults.
  */
 export interface JsConnectOptions {
   signingSecret?: string
@@ -121,20 +121,20 @@ export interface JsConnectOptions {
  */
 export declare class ForgeClient {
   /**
-   * Connect, migrate the system database, and ping — mirrors `Forge::init`. Pass
+   * Connect, migrate the system database, and ping; mirrors `Forge::init`. Pass
    * `signingSecret` to enable presigned blob URLs.
    */
   static connect(postgresUrl: string, signingSecret?: string | undefined | null): Promise<ForgeClient>
   /**
    * Connect using the `FORGE_*` environment variables (`FORGE_POSTGRES_URL`,
-   * `FORGE_KV_NAMESPACE`, `FORGE_BLOB_BACKEND`, …) — the same vars that drive the
+   * `FORGE_KV_NAMESPACE`, `FORGE_BLOB_BACKEND`, …), the same vars that drive the
    * Rust crate, so config is identical across all three languages.
    */
   static connectFromEnv(): Promise<ForgeClient>
   /**
    * Connect with the full per-deployment option surface (namespace, pool size,
-   * blob backend, …) instead of just a URL + signing secret. `connectWith` migrates
-   * the system database at startup.
+   * blob backend, …) instead of just a URL + signing secret. `connect` migrates the
+   * system database at startup.
    */
   static connectWith(postgresUrl: string, options: JsConnectOptions): Promise<ForgeClient>
   /** A backend report: which provider powers each primitive (for health pages/logs). */
@@ -144,11 +144,11 @@ export declare class ForgeClient {
    * UTF-8-only; use `kvGetBytes` for values that may hold arbitrary bytes.
    */
   kvGet(key: string): Promise<string | null>
-  /** `GET key` → the raw value bytes, or `null`. Lossless, unlike `kvGet` (P0-4). */
+  /** `GET key` → the raw value bytes, or `null`. Lossless, unlike `kvGet`. */
   kvGetBytes(key: string): Promise<Buffer | null>
   /**
    * `MGET keys` → each value as a UTF-8 string (or `null` if missing/expired), in
-   * input order. One round-trip — use instead of a per-key `kvGet` loop.
+   * input order. One round-trip; use instead of a per-key `kvGet` loop.
    */
   kvMget(keys: Array<string>): Promise<Array<string | undefined | null>>
   /**
@@ -161,7 +161,12 @@ export declare class ForgeClient {
    * the write happened.
    */
   kvSetBytes(key: string, value: Buffer, ttlSeconds?: number | undefined | null, ifNotExists?: boolean | undefined | null): Promise<boolean>
-  /** `INCRBY key by` (atomic). Returns the new value. */
+  /**
+   * `INCRBY key by` (atomic). Returns the new value. The counter is an i64
+   * core-side, but JS numbers are f64, so a value beyond 2^53 loses precision
+   * here (the Python binding returns the exact i64). Real counters never reach
+   * that range; if yours might, read it back losslessly via `kvGetBytes`.
+   */
   kvIncr(key: string, by: number): Promise<number>
   /** `SCAN prefix*` (first page) → up to `limit` matching keys. */
   kvScan(prefix: string, limit: number): Promise<Array<string>>
@@ -181,7 +186,7 @@ export declare class ForgeClient {
   /**
    * Nack a leased job by its `receipt`; optional `retrySeconds` delays the
    * redelivery. Raises `PRECONDITION` if the receipt is unknown (the lease was
-   * lost — stop working on this job).
+   * lost, stop working on this job).
    */
   queueNack(receipt: string, retrySeconds?: number | undefined | null): Promise<void>
   /**
@@ -189,7 +194,7 @@ export declare class ForgeClient {
    * beanstalkd touch) by one visibility timeout. Call before `leasedUntilMs` for a
    * handler that may outlive its visibility window, so the job is not redelivered
    * mid-flight. Raises `PRECONDITION` if the receipt is unknown (the lease was
-   * lost — stop working on this job).
+   * lost, stop working on this job).
    */
   queueHeartbeat(receipt: string): Promise<void>
   /**
@@ -198,14 +203,13 @@ export declare class ForgeClient {
    * without leasing its jobs (no side effects, unlike dequeue-to-count).
    */
   queueDepth(queue: string): Promise<JsQueueDepth>
-  /** Store a config value (`set_raw`). */
   configSet(key: string, value: string): Promise<void>
   /** Resolve a config value (env `FORGE_CFG_<KEY>` > store > `null`). */
   configGet(key: string): Promise<string | null>
   /** Set a percentage-rollout flag (`0..=100`). */
   setFlagPercent(key: string, percent: number): Promise<void>
   /**
-   * Evaluate a boolean flag for `targetingKey`. Never throws — resolves to
+   * Evaluate a boolean flag for `targetingKey`. Never throws; resolves to
    * `defaultValue` on any failure.
    */
   flag(key: string, defaultValue: boolean, targetingKey?: string | undefined | null): Promise<boolean>
@@ -216,9 +220,7 @@ export declare class ForgeClient {
    * `"token_bucket"` (default) or `"sliding_window"`.
    */
   rateLimitCheck(bucket: string, key: string, max: number, perSeconds: number, failOpen?: boolean | undefined | null, algo?: string | undefined | null): Promise<JsDecision>
-  /** Store an object (string body). */
   blobPut(key: string, data: string, contentType?: string | undefined | null): Promise<void>
-  /** Store an object (binary body). */
   blobPutBytes(key: string, data: Buffer, contentType?: string | undefined | null): Promise<void>
   /** Fetch an object as a UTF-8 string, or `null`. */
   blobGet(key: string): Promise<string | null>
@@ -245,7 +247,7 @@ export declare class ForgeClient {
   /**
    * Whether a stored PHC `hash` should be re-hashed (its argon2id params are below
    * the current Forge baseline). Call after a successful `verifyPassword`; if `true`,
-   * re-hash the plaintext and persist it — transparent upgrade, no forced reset.
+   * re-hash the plaintext and persist it. Transparent upgrade, no forced reset.
    */
   needsRehash(hash: string): boolean
   /**

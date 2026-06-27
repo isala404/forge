@@ -27,7 +27,7 @@ async fn shutdown() {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Emit the SDL without touching the database — useful for parity checks in CI.
+    // Emit the SDL without touching the database, useful for parity checks in CI.
     if std::env::args().any(|a| a == "--print-schema") {
         print!("{}", gql::sdl());
         return Ok(());
@@ -47,7 +47,8 @@ async fn main() -> Result<()> {
     );
     let cfg = ForgeConfig::new(&pg)
         .with_blob_signing_secret(env_or("FORGE_BLOB_SIGNING_SECRET", "dev-secret-change-me"))
-        .with_blob_base_url("/api/files");
+        .with_blob_base_url("/api/files")
+        .with_env_overrides()?;
     // init migrates Forge's system tables at startup; it owns its database.
     let forge = Forge::init(cfg).await?;
 

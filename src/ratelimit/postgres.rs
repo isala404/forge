@@ -2,7 +2,7 @@
 //!
 //! Each `check` is atomic against its one `(bucket, subject)` row: the row is locked
 //! `FOR UPDATE` inside a transaction, the algorithm math runs in Rust against the
-//! locked state, and the new state is written before commit — so concurrent checks on
+//! locked state, and the new state is written before commit, so concurrent checks on
 //! one key serialize and never double-spend. The math is pure (see `*_step`), so it is
 //! unit-tested without a database.
 
@@ -299,7 +299,7 @@ struct SlidingState {
     prev: i64,
 }
 
-/// One sliding-window step (fixed window with weighted prior — the standard
+/// One sliding-window step (fixed window with weighted prior, the standard
 /// approximate sliding count). Returns the state to persist and the `Decision`.
 fn sliding_step(
     stored: Option<SlidingState>,

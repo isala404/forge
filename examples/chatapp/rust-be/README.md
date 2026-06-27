@@ -11,15 +11,15 @@ ignored).
 
 ## Endpoints
 
-- `POST /graphql` — queries and mutations.
-- `GET  /graphql` — subscriptions over `graphql-transport-ws` (WebSocket upgrade).
-- `GET  /healthz` — liveness.
-- `/_forge/blob/*` — Forge's presigned blob router (where attachment URLs point).
+- `POST /graphql`: queries and mutations.
+- `GET  /graphql`: subscriptions over `graphql-transport-ws` (WebSocket upgrade).
+- `GET  /healthz`: liveness.
+- `/_forge/blob/*`: Forge's presigned blob router (where attachment URLs point).
 
-Both GraphQL endpoints are **Bearer**-authenticated. The token is sent as
+Both GraphQL endpoints are Bearer-authenticated. The token is sent as
 `Authorization: Bearer <token>` on HTTP and as `connectionParams.authorization`
 (`"Bearer <token>"`) on the WS socket. A bearer is accepted if it validates as either a
-Forge **session** (idle timeout slides on use) or an **API key** (`fk_…`, mapped to its
+Forge session (idle timeout slides on use) or an API key (`fk_…`, mapped to its
 owner). `me` returns null when unauthenticated; every other authed resolver raises
 `UNAUTHENTICATED`. CORS is permissive (dev).
 
@@ -28,7 +28,7 @@ owner). `me` returns null when unauthenticated; every other authed resolver rais
 | file | responsibility |
 | --- | --- |
 | `src/db.rs` | the domain tables (`users`/`chats`/`chat_members`/`messages`/`receipts`) over Forge's pool, including the batched reads that back the loaders |
-| `src/loaders.rs` | async-graphql `DataLoader`s: user-by-id, chat members, last message, unread, message receipts, online presence — one batched round-trip per field per request |
+| `src/loaders.rs` | async-graphql `DataLoader`s: user-by-id, chat members, last message, unread, message receipts, online presence, one batched round-trip per field per request |
 | `src/gql/` | the code-first schema, split by role: `types.rs` (output objects), `query.rs`, `mutation.rs`, `subscription.rs`, `helpers.rs` (auth + error mapping), `mod.rs` (schema/SDL builders + the SDL-parity test) |
 | `src/context.rs` | shared app context, the realtime `Event` envelope, kv helpers (presence/unread/typing), config, DLQ gauge |
 | `src/worker.rs` | in-process queue workers: `fanout` (deliver + unread, idempotent), `reap` (delete disappearing messages), `fail` (always nacks → DLQ demo) |
@@ -82,15 +82,15 @@ cargo test
 
 `cargo test` runs the unit tests (SDL parity, error-code mapping, credential
 validation) and one integration suite (`tests/integration.rs`). The integration suite
-**creates a uniquely-named Postgres database** at
-`postgres://postgres:forge@127.0.0.1:5432`, **boots the real binary** against it on an
+creates a uniquely-named Postgres database at
+`postgres://postgres:forge@127.0.0.1:5432`, boots the real binary against it on an
 ephemeral port, drives the GraphQL API over HTTP and WS through every SPEC scenario
 (signup → session; two users see a group chat; live message over a subscription; typing
 event; presence online → offline via kv TTL; attachment presign → PUT → send → download;
 unread increments then clears on `markRead`; read receipt turns read; rate-limit throttles
 a send burst; disappearing message vanishes; reactions flag toggles; API key
 authenticates; `opsStats` reflects online + DLQ; `logoutAll` revokes other sessions),
-then **drops the database**. No skips.
+then drops the database. No skips.
 
 ## Gates
 

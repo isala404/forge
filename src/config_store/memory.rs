@@ -1,14 +1,14 @@
 //! In-process `config` (+ flags) backend. Contract: docs/contracts/config.md.
 //!
 //! Two `Mutex<HashMap>` maps keyed by the same `<namespace>:<key>` physical key the
-//! Postgres backend uses (so namespacing is identical): one for raw string values,
-//! one for [`FlagRule`]s. The map *is* the source of truth — there is no separate
-//! cache to converge, so a committed write is visible to every reader immediately
-//! (well within the contract's staleness bound). The `FORGE_CFG_<KEY>` env override,
-//! key/value limits, and flag-rule evaluation all match [`super::PgConfig`]; only the
-//! storage differs — there is no SQL and nothing survives a restart.
+//! Postgres backend uses (so namespacing is identical): one for raw values, one for
+//! [`FlagRule`]s. The map is the source of truth, so a committed write is visible to
+//! every reader immediately. The `FORGE_CFG_<KEY>` env override, key/value limits, and
+//! flag-rule evaluation all match [`super::PgConfig`]; nothing survives a restart.
 
-use super::{ConfigStore, EvalCtx, FlagRule, MAX_ALLOWLIST_ENTRIES, MAX_KEY_BYTES, MAX_VALUE_BYTES};
+use super::{
+    ConfigStore, EvalCtx, FlagRule, MAX_ALLOWLIST_ENTRIES, MAX_KEY_BYTES, MAX_VALUE_BYTES,
+};
 use crate::backend::{BackendLifecycle, Primitive};
 use crate::error::{ForgeError, Result};
 use async_trait::async_trait;
@@ -83,7 +83,7 @@ fn check_rule(rule: &FlagRule) -> Result<()> {
 
 /// Stable bucket in `0..100` for `(flag_key, targeting_key)`. Uses the crate's
 /// sha256-based hash so the bucket is identical across instances and deploys (never
-/// `DefaultHasher`, whose seed is per-process) — matching the Postgres backend exactly.
+/// `DefaultHasher`, whose seed is per-process). Matches the Postgres backend.
 fn stable_bucket(flag_key: &str, targeting_key: &str) -> u32 {
     let hex = crate::util::sha256_hex(format!("{flag_key}:{targeting_key}").as_bytes());
     let prefix = hex.get(..8).unwrap_or("0");
@@ -122,8 +122,8 @@ impl ConfigStore for MemConfig {
         }
         // Fall back to the uppercased name (the universal env convention), so an operator
         // exporting FORGE_CFG_MAX_UPLOAD_MB finds a key "max_upload_mb". The verbatim name
-        // above takes precedence. Only uppercase (an allocation) when the key actually has a
-        // lowercase letter to fold — an already-uppercase key would re-probe the same var.
+        // above takes precedence. Only uppercase (an allocation) when the key has a
+        // lowercase letter to fold; an already-uppercase key would re-probe the same var.
         if key.bytes().any(|b| b.is_ascii_lowercase())
             && let Ok(v) = std::env::var(format!("FORGE_CFG_{}", key.to_ascii_uppercase()))
         {
@@ -309,7 +309,11 @@ mod tests {
     #[test]
     fn percent_bucket_is_stable_and_namespaced() {
         let a = stable_bucket("flag_a", "user-1");
-        assert_eq!(a, stable_bucket("flag_a", "user-1"), "same inputs => same bucket");
+        assert_eq!(
+            a,
+            stable_bucket("flag_a", "user-1"),
+            "same inputs => same bucket"
+        );
         assert!(a < 100);
         assert_ne!(
             stable_bucket("flag_a", "user-1"),
@@ -324,8 +328,14 @@ mod tests {
         let b = MemConfig::new("app_b".to_string());
         a.set_raw("shared", "from-a").await.unwrap();
         b.set_raw("shared", "from-b").await.unwrap();
-        assert_eq!(a.get_raw("shared").await.unwrap(), Some("from-a".to_string()));
-        assert_eq!(b.get_raw("shared").await.unwrap(), Some("from-b".to_string()));
+        assert_eq!(
+            a.get_raw("shared").await.unwrap(),
+            Some("from-a".to_string())
+        );
+        assert_eq!(
+            b.get_raw("shared").await.unwrap(),
+            Some("from-b".to_string())
+        );
 
         a.set_flag("gate", FlagRule::On).await.unwrap();
         // The physical key carries the namespace, so b never sees a's flag.

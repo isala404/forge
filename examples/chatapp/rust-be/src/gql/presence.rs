@@ -38,7 +38,14 @@ impl PresenceMutation {
         let cid = parse_id(&chat_id)?;
         require_member(c, cid, user.id).await?;
         // The indicator rides the pubsub `typing` event; nothing reads a kv key.
-        c.publish(&chat_topic(cid), &Event::Typing { user_id: user.id, typing }).await;
+        c.publish(
+            &chat_topic(cid),
+            &Event::Typing {
+                user_id: user.id,
+                typing,
+            },
+        )
+        .await;
         Ok(true)
     }
 
@@ -46,7 +53,14 @@ impl PresenceMutation {
         let c = app(ctx)?;
         let user = me(ctx)?;
         c.touch_presence(user.id).await.map_err(map_db)?;
-        c.publish(PRESENCE_TOPIC, &Event::Presence { user_id: user.id, online: true }).await;
+        c.publish(
+            PRESENCE_TOPIC,
+            &Event::Presence {
+                user_id: user.id,
+                online: true,
+            },
+        )
+        .await;
         Ok(true)
     }
 }
@@ -65,7 +79,12 @@ impl PresenceSubscription {
         let user = me(ctx)?;
         let cid = parse_id(&chat_id)?;
         require_member(&c, cid, user.id).await?;
-        let raw = c.forge.pubsub().subscribe(&chat_topic(cid)).await.map_err(map_forge)?;
+        let raw = c
+            .forge
+            .pubsub()
+            .subscribe(&chat_topic(cid))
+            .await
+            .map_err(map_forge)?;
         let me_id = user.id;
         let raw = guarded(c.clone(), user, raw);
         Ok(raw.filter_map(move |item| {
@@ -75,7 +94,10 @@ impl PresenceSubscription {
                 match serde_json::from_slice::<Event>(&bytes).ok()? {
                     Event::Typing { user_id, typing } if user_id != me_id => {
                         let u = db::users_by_ids(&c.pool, &[user_id]).await.ok()?.pop()?;
-                        Some(TypingEvent { user: GqlUser(u), typing })
+                        Some(TypingEvent {
+                            user: GqlUser(u),
+                            typing,
+                        })
                     }
                     _ => None,
                 }
@@ -94,7 +116,12 @@ impl PresenceSubscription {
         for id in &user_ids {
             wanted.push(parse_id(id)?);
         }
-        let raw = c.forge.pubsub().subscribe(PRESENCE_TOPIC).await.map_err(map_forge)?;
+        let raw = c
+            .forge
+            .pubsub()
+            .subscribe(PRESENCE_TOPIC)
+            .await
+            .map_err(map_forge)?;
         let raw = guarded(c.clone(), user, raw);
         Ok(raw.filter_map(move |item| {
             let c = c.clone();
@@ -103,7 +130,11 @@ impl PresenceSubscription {
                 let bytes = item.ok()?;
                 match serde_json::from_slice::<Event>(&bytes).ok()? {
                     Event::Presence { user_id, .. } if wanted.contains(&user_id) => {
-                        db::users_by_ids(&c.pool, &[user_id]).await.ok()?.pop().map(GqlUser)
+                        db::users_by_ids(&c.pool, &[user_id])
+                            .await
+                            .ok()?
+                            .pop()
+                            .map(GqlUser)
                     }
                     _ => None,
                 }

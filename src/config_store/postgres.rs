@@ -46,7 +46,7 @@ fn cap_cache<T>(cache: &mut HashMap<String, Cached<T>>) {
 }
 
 /// Read a fresh cached value (within the TTL), cloned out. A poisoned lock, or a stale or
-/// absent entry, reads as a miss (the caller falls through to the DB) — never a panic.
+/// absent entry, reads as a miss (the caller falls through to the DB), never a panic.
 fn cache_get<T: Clone>(cache: &Mutex<HashMap<String, Cached<T>>>, key: &str) -> Option<T> {
     let cache = cache.lock().ok()?;
     let entry = cache.get(key)?;
@@ -54,7 +54,7 @@ fn cache_get<T: Clone>(cache: &Mutex<HashMap<String, Cached<T>>>, key: &str) -> 
 }
 
 /// Insert into a bounded cache (purging first if at the cap). A poisoned lock skips the
-/// write silently — the cache is only an optimization, never a source of truth.
+/// write silently; the cache is only an optimization, never a source of truth.
 fn cache_put<T>(cache: &Mutex<HashMap<String, Cached<T>>>, key: &str, value: T) {
     if let Ok(mut cache) = cache.lock() {
         cap_cache(&mut cache);
@@ -98,10 +98,12 @@ impl PgConfig {
         if let Some(hit) = cache_get(&self.values, key) {
             return Ok(hit);
         }
-        let value =
-            sqlx::query_scalar!("SELECT value FROM forge_config WHERE key = $1", self.physical(key))
-                .fetch_optional(&self.pool)
-                .await?;
+        let value = sqlx::query_scalar!(
+            "SELECT value FROM forge_config WHERE key = $1",
+            self.physical(key)
+        )
+        .fetch_optional(&self.pool)
+        .await?;
         cache_put(&self.values, key, value.clone());
         Ok(value)
     }
@@ -211,8 +213,8 @@ impl ConfigStore for PgConfig {
             // Fall back to the uppercased name (the universal env convention), so an
             // operator exporting FORGE_CFG_MAX_UPLOAD_MB finds a key "max_upload_mb".
             // The verbatim name above takes precedence. Only uppercase (an allocation)
-            // when the key actually has a lowercase letter to fold — already-uppercase
-            // keys would just re-probe the same var.
+            // when the key has a lowercase letter to fold; an already-uppercase key
+            // would just re-probe the same var.
             if key.bytes().any(|b| b.is_ascii_lowercase())
                 && let Ok(v) = std::env::var(format!("FORGE_CFG_{}", key.to_ascii_uppercase()))
             {
@@ -320,10 +322,13 @@ impl ConfigStore for PgConfig {
         );
         obs::instrument("config", "delete_raw", span, async move {
             check_key(key)?;
-            let removed = sqlx::query!("DELETE FROM forge_config WHERE key = $1", self.physical(key))
-                .execute(&self.pool)
-                .await?
-                .rows_affected()
+            let removed = sqlx::query!(
+                "DELETE FROM forge_config WHERE key = $1",
+                self.physical(key)
+            )
+            .execute(&self.pool)
+            .await?
+            .rows_affected()
                 > 0;
             // Cache the absence locally; other instances converge within the cache TTL.
             cache_put(&self.values, key, None);
@@ -341,11 +346,12 @@ impl ConfigStore for PgConfig {
         );
         obs::instrument("config", "delete_flag", span, async move {
             check_key(key)?;
-            let removed = sqlx::query!("DELETE FROM forge_flags WHERE key = $1", self.physical(key))
-                .execute(&self.pool)
-                .await?
-                .rows_affected()
-                > 0;
+            let removed =
+                sqlx::query!("DELETE FROM forge_flags WHERE key = $1", self.physical(key))
+                    .execute(&self.pool)
+                    .await?
+                    .rows_affected()
+                    > 0;
             cache_put(&self.flags, key, None);
             Ok(removed)
         })

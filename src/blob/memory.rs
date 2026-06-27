@@ -1,10 +1,9 @@
 //! In-process `blob` backend. Contract: docs/contracts/blob.md.
 //!
-//! Object bytes and metadata live in a `Mutex<HashMap>` keyed by the same
-//! `<namespace>:<key>` physical key the Postgres backend uses, so namespacing — and the
-//! HMAC presign/verify scheme it shares via [`super::common`] — are identical. The
-//! observable contract matches [`super::PgBlob`]; only the storage differs: bytes sit in
-//! memory (not `BYTEA`, not a local directory) and nothing survives a restart.
+//! Bytes and metadata live in a `Mutex<HashMap>` keyed by the same `<namespace>:<key>`
+//! physical key the Postgres backend uses, so namespacing and the HMAC presign/verify
+//! scheme (shared via [`super::common`]) stay identical. Observable behavior matches
+//! [`super::PgBlob`]; only storage differs, and nothing survives a restart.
 
 use super::common;
 use super::{Blob, BlobInfo, DEFAULT_CONTENT_TYPE, ListPage, PutOpts};
@@ -18,9 +17,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// One stored object: its bytes plus the metadata `head`/`list` echo back. `size` and
-/// `etag` are derived from `data` at read time, so the bytes are the single source of
-/// truth for both.
+/// One stored object: bytes plus the metadata `head`/`list` echo back. `size` and `etag`
+/// derive from `data`, the source of truth for both.
 struct Object {
     data: Bytes,
     content_type: String,
@@ -30,8 +28,8 @@ struct Object {
 }
 
 impl Object {
-    /// Build the body-less metadata view for `head`/`list`. `key` is the logical
-    /// (namespace-stripped) key the caller used; only the body length is reported.
+    /// Body-less metadata view for `head`/`list`. `key` is the logical
+    /// (namespace-stripped) key the caller used.
     fn info(&self, key: String) -> BlobInfo {
         BlobInfo::new(
             key,
@@ -47,8 +45,8 @@ impl Object {
 /// In-memory [`Blob`]: bytes + metadata in a map, presigning via the shared HMAC scheme.
 pub(crate) struct MemBlob {
     state: Mutex<HashMap<String, Object>>,
-    /// Namespace + presign signing config, routed through the same helper the Postgres
-    /// and filesystem backends use so key mapping and URL signing never diverge.
+    /// Namespace + presign config, via the same helper the Postgres and filesystem
+    /// backends use so key mapping and URL signing never diverge.
     shared: common::Shared,
 }
 
@@ -60,9 +58,9 @@ impl MemBlob {
         }
     }
 
-    /// Take the map lock, recovering the guard if a previous holder panicked. The critical
-    /// sections are short and synchronous (no `await` held across the lock), so a poisoned
-    /// lock never reflects a half-updated invariant worth aborting for.
+    /// Take the map lock, recovering the guard if a previous holder panicked. Critical
+    /// sections are short and synchronous (no `await` across the lock), so a poisoned lock
+    /// never reflects a half-updated invariant worth aborting for.
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Object>> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -87,8 +85,8 @@ impl Blob for MemBlob {
         let content_type = opts
             .content_type
             .unwrap_or_else(|| DEFAULT_CONTENT_TYPE.to_string());
-        // Last-write-wins: a fresh object fully replaces any prior bytes and metadata,
-        // mirroring the Postgres `ON CONFLICT DO UPDATE SET ...` overwrite.
+        // Last-write-wins: a fresh object replaces all prior bytes and metadata, like the
+        // Postgres `ON CONFLICT DO UPDATE SET ...` overwrite.
         self.lock().insert(
             pk,
             Object {
@@ -123,8 +121,8 @@ impl Blob for MemBlob {
     async fn list(&self, prefix: &str, cursor: Option<Cursor>, limit: u32) -> Result<ListPage> {
         let physical_prefix = self.shared.physical(prefix);
         let limit = limit.clamp(1, 1000) as usize;
-        // Keyset pagination over the physical key, exactly like the Postgres backend: the
-        // cursor token is the last physical key returned; the next page starts after it.
+        // Keyset pagination over the physical key, like the Postgres backend: the cursor
+        // token is the last physical key returned; the next page starts after it.
         let after = cursor.map(|c| c.token().to_string());
         let state = self.lock();
         let mut matched: Vec<(String, BlobInfo)> = state
@@ -209,7 +207,9 @@ mod tests {
         let opts = PutOpts::new()
             .with_content_type("text/csv")
             .with_metadata("owner", "alice");
-        blob.put("exports/data.csv", b("a,b,c"), opts).await.unwrap();
+        blob.put("exports/data.csv", b("a,b,c"), opts)
+            .await
+            .unwrap();
 
         assert_eq!(
             blob.get("exports/data.csv").await.unwrap(),
@@ -220,7 +220,10 @@ mod tests {
         assert_eq!(info.size, 5);
         assert_eq!(info.content_type, "text/csv");
         assert_eq!(info.etag, sha256_hex(b"a,b,c"), "etag is the content hash");
-        assert_eq!(info.metadata.get("owner").map(String::as_str), Some("alice"));
+        assert_eq!(
+            info.metadata.get("owner").map(String::as_str),
+            Some("alice")
+        );
 
         assert_eq!(blob.get("missing").await.unwrap(), None);
         assert!(blob.head("missing").await.unwrap().is_none());
@@ -360,15 +363,23 @@ mod tests {
         let unsigned = MemBlob::new(String::new(), None, "/files".to_string());
         // No signing secret => presign and verify are Config errors (a deployment problem).
         assert!(matches!(
-            unsigned.presign_download("k", Duration::from_secs(60)).await,
+            unsigned
+                .presign_download("k", Duration::from_secs(60))
+                .await,
             Err(ForgeError::Config(_))
         ));
         assert!(matches!(
-            unsigned.verify_presigned("GET", "k", 0, 0, "deadbeef").await,
+            unsigned
+                .verify_presigned("GET", "k", 0, 0, "deadbeef")
+                .await,
             Err(ForgeError::Config(_))
         ));
 
-        let blob = MemBlob::new(String::new(), Some(b"sign-key".to_vec()), "/files".to_string());
+        let blob = MemBlob::new(
+            String::new(),
+            Some(b"sign-key".to_vec()),
+            "/files".to_string(),
+        );
         let url = blob
             .presign_download("docs/report.pdf", Duration::from_secs(300))
             .await
@@ -400,7 +411,11 @@ mod tests {
 
     #[tokio::test]
     async fn presign_upload_signs_the_size_cap() {
-        let blob = MemBlob::new(String::new(), Some(b"sign-key".to_vec()), "/files".to_string());
+        let blob = MemBlob::new(
+            String::new(),
+            Some(b"sign-key".to_vec()),
+            "/files".to_string(),
+        );
         let url = blob
             .presign_upload("uploads/x.bin", Duration::from_secs(120), 4096)
             .await

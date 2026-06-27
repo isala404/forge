@@ -19,7 +19,7 @@ async fn init_runs_migrations_and_is_idempotent() {
 async fn init_requires_at_least_two_connections_to_migrate() {
     let db = TestDatabase::new().await.unwrap();
     // Init migrates at startup, holding a lock connection while a second runs the SQL, so
-    // max_connections=1 would deadlock — fail loudly at init instead.
+    // max_connections=1 would deadlock; fail loudly at init instead.
     let res = Forge::init(ForgeConfig::new(db.url()).with_max_connections(1)).await;
     assert!(matches!(res, Err(ForgeError::Config(_))));
 

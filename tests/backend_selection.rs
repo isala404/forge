@@ -2,7 +2,7 @@
 //!
 //! Proves D5: a memory-backed primitive does not connect or migrate its Postgres
 //! feature-database override. The override here points at a host that does not exist, so
-//! a successful init is the proof — had memory selection tried to connect it, init would
+//! a successful init is the proof: had memory selection tried to connect it, init would
 //! fail loudly.
 #![cfg(feature = "pg-tests")]
 #![allow(clippy::unwrap_used, clippy::panic)]
@@ -167,10 +167,7 @@ async fn memory_kv_ignores_its_bogus_postgres_feature_database() {
     }
 }
 
-/// The builder's open injection escape hatch: kv runs on an externally-supplied backend
-/// while the other seven primitives stay on Postgres. Proves the injected backend is the
-/// one the facade routes to, that the report names it, and that `maintain()` drives its
-/// lifecycle — all through the same construction path as `Forge::init`.
+/// Builder injects a kv backend while the other seven primitives stay on Postgres.
 #[tokio::test]
 async fn builder_injects_kv_while_the_rest_stay_postgres() {
     let db = TestDatabase::new().await.unwrap();
@@ -239,7 +236,11 @@ async fn init_default_config_is_all_postgres() {
             "{:?} must be postgres on the default path",
             x.primitive
         );
-        assert!(x.durable, "{:?} must be durable on the default path", x.primitive);
+        assert!(
+            x.durable,
+            "{:?} must be durable on the default path",
+            x.primitive
+        );
     }
 
     // The default kv is the Postgres-backed one and works end to end.
@@ -247,11 +248,7 @@ async fn init_default_config_is_all_postgres() {
     assert_eq!(forge.kv().get("k").await.unwrap(), Some(b("v")));
 }
 
-/// Every primitive on its in-process backend at once: `default_backend(Memory)` covers the
-/// seven non-blob primitives and `with_memory_blob` covers blob, on the mandatory system
-/// database (still connected and migrated). Proves the all-memory init succeeds, that one
-/// real operation per primitive works in-process, and that the report names all eight
-/// providers `memory` + non-durable.
+/// Every primitive on its in-process backend at once (`default_backend(Memory)` plus `with_memory_blob`) on the mandatory system database.
 #[tokio::test]
 async fn all_memory_backends_init_and_operate_in_process() {
     let db = TestDatabase::new().await.unwrap();
@@ -288,7 +285,11 @@ async fn all_memory_backends_init_and_operate_in_process() {
     // ratelimit: a check inside a fresh budget is allowed.
     let decision = forge
         .ratelimit()
-        .check("api", "user-1", Limit::per_duration(5, Duration::from_secs(60)))
+        .check(
+            "api",
+            "user-1",
+            Limit::per_duration(5, Duration::from_secs(60)),
+        )
         .await
         .unwrap();
     assert!(decision.allowed, "first call in a fresh bucket is allowed");
@@ -314,7 +315,7 @@ async fn all_memory_backends_init_and_operate_in_process() {
         .expect("the session validates");
     assert_eq!(session.user_id, "user-1");
 
-    // pubsub: subscribe, publish, receive (subscribe first — only later messages deliver).
+    // pubsub: subscribe, publish, receive (subscribe first: only later messages deliver).
     let mut sub = forge.pubsub().subscribe("events").await.unwrap();
     forge.pubsub().publish("events", b("ping")).await.unwrap();
     let msg = sub
@@ -361,6 +362,41 @@ async fn all_memory_backends_init_and_operate_in_process() {
             "{:?} must report the memory provider",
             x.primitive
         );
-        assert!(!x.durable, "{:?} memory backend is not durable", x.primitive);
+        assert!(
+            !x.durable,
+            "{:?} memory backend is not durable",
+            x.primitive
+        );
     }
+}
+
+#[tokio::test]
+async fn postgres_schedule_enqueues_through_memory_queue() {
+    let db = TestDatabase::new().await.unwrap();
+
+    let cfg = ForgeConfig::new(db.url()).with_backend(Primitive::Queue, Backend::Memory);
+    let forge = Forge::init(cfg)
+        .await
+        .expect("init must succeed with Postgres schedule and memory queue");
+
+    let id = forge
+        .schedule()
+        .at(
+            SystemTime::now() - Duration::from_secs(2),
+            "jobs",
+            b("scheduled"),
+            ScheduleOpts::new(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(forge.run_scheduler_once().await.unwrap(), 1);
+    let job = forge
+        .queue()
+        .dequeue("jobs", DequeueOpts::new().with_wait(Duration::ZERO))
+        .await
+        .unwrap()
+        .expect("scheduled work lands in the configured memory queue");
+    assert_eq!(job.id, id);
+    assert_eq!(job.payload, b("scheduled"));
 }

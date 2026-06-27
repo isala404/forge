@@ -1,9 +1,9 @@
 [package]
 name = "forge-py"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 publish = false
-description = "Python (pyo3) bindings for Forge — a representative slice of every primitive"
+description = "Python (pyo3) bindings for Forge — hardened infra primitives on Postgres"
 
 # Build with maturin: `maturin develop` (dev) or `maturin build --release`.
 [lib]
@@ -11,7 +11,8 @@ name = "forge_py"
 crate-type = ["cdylib"]
 
 [dependencies]
-forge = { path = "../.." }
+# Enable OTLP export so the prebuilt wheel ships with observability wired in.
+forge = { path = "../..", features = ["otel"] }
 # abi3-py39: build against the stable ABI so one wheel runs on CPython >= 3.9
 # (including newer interpreters than this pyo3 release knows about).
 pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }

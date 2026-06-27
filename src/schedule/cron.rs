@@ -24,8 +24,7 @@ impl Cron {
     /// Parse a standard 5-field cron expression. Invalid syntax/range => `Invalid`.
     pub(crate) fn parse(expr: &str) -> Result<Self> {
         // Nonstandard but ubiquitous macros (Quartz/Vixie cron); agents emit them constantly.
-        let expanded = expand_macro(expr);
-        let src = expanded.unwrap_or(expr);
+        let src = expand_macro(expr).unwrap_or(expr);
         let fields: Vec<&str> = src.split_whitespace().collect();
         if fields.len() != 5 {
             return Err(ForgeError::invalid(format!(
@@ -84,9 +83,9 @@ impl Cron {
     }
 
     /// The most recent matching minute at or before `at` (UTC), or `None` if none falls
-    /// within ~4 years back. Used to find the latest *missed* tick on recovery: for a
-    /// fast cron many ticks behind, this is essentially `at` truncated to the minute, so
-    /// the grace check sees a tick that is only seconds late rather than the oldest one.
+    /// within ~4 years back. Finds the latest *missed* tick on recovery: for a fast cron
+    /// many ticks behind, this is essentially `at` truncated to the minute, so the grace
+    /// check sees a tick only seconds late rather than the oldest one.
     pub(crate) fn prev_or_at(&self, at: DateTime<Utc>) -> Option<DateTime<Utc>> {
         let mut t = at.with_second(0)?.with_nanosecond(0)?;
         for _ in 0..(4 * 366 * 24 * 60) {
@@ -99,15 +98,29 @@ impl Cron {
     }
 }
 
-/// Parse one field into a `min..=max` bitmap. Returns the bitmap and whether the
-/// field was restricted (anything other than `*`).
 /// Three-letter month names (JAN=1 … DEC=12) and day names (SUN=0 … SAT=6).
 const MONTHS: &[(&str, usize)] = &[
-    ("JAN", 1), ("FEB", 2), ("MAR", 3), ("APR", 4), ("MAY", 5), ("JUN", 6),
-    ("JUL", 7), ("AUG", 8), ("SEP", 9), ("OCT", 10), ("NOV", 11), ("DEC", 12),
+    ("JAN", 1),
+    ("FEB", 2),
+    ("MAR", 3),
+    ("APR", 4),
+    ("MAY", 5),
+    ("JUN", 6),
+    ("JUL", 7),
+    ("AUG", 8),
+    ("SEP", 9),
+    ("OCT", 10),
+    ("NOV", 11),
+    ("DEC", 12),
 ];
 const DAYS: &[(&str, usize)] = &[
-    ("SUN", 0), ("MON", 1), ("TUE", 2), ("WED", 3), ("THU", 4), ("FRI", 5), ("SAT", 6),
+    ("SUN", 0),
+    ("MON", 1),
+    ("TUE", 2),
+    ("WED", 3),
+    ("THU", 4),
+    ("FRI", 5),
+    ("SAT", 6),
 ];
 
 /// Expand a `@`-macro to its 5-field equivalent, or `None` if not a macro.
@@ -149,7 +162,10 @@ fn parse_field(
         let (lo, hi) = if range == "*" {
             (min, max)
         } else if let Some((a, b)) = range.split_once('-') {
-            (parse_num(a, min, max, names)?, parse_num(b, min, max, names)?)
+            (
+                parse_num(a, min, max, names)?,
+                parse_num(b, min, max, names)?,
+            )
         } else {
             let v = parse_num(range, min, max, names)?;
             (v, v)
@@ -171,10 +187,7 @@ fn parse_field(
 }
 
 fn parse_num(s: &str, min: usize, max: usize, names: &[(&str, usize)]) -> Result<usize> {
-    let n = if let Some(&(_, v)) = names
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case(s))
-    {
+    let n = if let Some(&(_, v)) = names.iter().find(|(name, _)| name.eq_ignore_ascii_case(s)) {
         v
     } else {
         s.parse::<usize>()
@@ -237,8 +250,12 @@ mod tests {
     #[test]
     fn daily_macro_equals_its_expansion() {
         assert_eq!(
-            Cron::parse("@daily").unwrap().next_after(at("2026-06-06T10:00:00Z")),
-            Cron::parse("0 0 * * *").unwrap().next_after(at("2026-06-06T10:00:00Z"))
+            Cron::parse("@daily")
+                .unwrap()
+                .next_after(at("2026-06-06T10:00:00Z")),
+            Cron::parse("0 0 * * *")
+                .unwrap()
+                .next_after(at("2026-06-06T10:00:00Z"))
         );
         assert!(Cron::parse("@hourly").is_ok());
         assert!(Cron::parse("@weekly").is_ok());

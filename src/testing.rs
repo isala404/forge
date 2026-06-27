@@ -2,7 +2,7 @@
 //!
 //! Each [`TestDatabase`] creates a uniquely-named database (off `TEST_DATABASE_URL`,
 //! never `DATABASE_URL`, so a test run can never touch a real database) and drops
-//! it on `Drop` — even on panic, via a dedicated thread + runtime. The contract
+//! it on `Drop`, even on panic, via a dedicated thread + runtime. The contract
 //! test suites in `tests/` build a fresh [`crate::Forge`] per test on top of one.
 
 // CREATE/DROP DATABASE take a dynamic database name and run against a database
@@ -27,7 +27,7 @@ impl TestDatabase {
     pub async fn new() -> Result<Self> {
         let admin_url = std::env::var("TEST_DATABASE_URL").map_err(|_| {
             ForgeError::config(
-                "TEST_DATABASE_URL is not set — DB-backed tests need a Postgres to create test databases against",
+                "TEST_DATABASE_URL is not set: DB-backed tests need a Postgres to create test databases against",
             )
         })?;
         // 12 hex chars of the UUID is plenty of uniqueness and keeps the db name short.
@@ -63,7 +63,7 @@ impl TestDatabase {
         Forge::init(ForgeConfig::new(self.url.clone())).await
     }
 
-    /// Run a raw SQL statement against this database — test setup only (e.g. seeding
+    /// Run a raw SQL statement against this database. Test setup only (e.g. seeding
     /// rows or auxiliary tables a test needs before `Forge::init`).
     pub async fn execute_raw(&self, sql: &str) -> Result<()> {
         let mut conn = PgConnection::connect(&self.url)

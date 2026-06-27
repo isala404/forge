@@ -12,7 +12,7 @@ export function uniqueUser(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${rand}`
 }
 
-// Create an account straight through the API — test setup, not the thing under test.
+// Create an account straight through the API (test setup, not the thing under test).
 export async function signup(
   backend: string,
   username: string,

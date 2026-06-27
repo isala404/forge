@@ -1,9 +1,9 @@
-# chatapp — node-be
+# chatapp: node-be
 
 The Node/TypeScript GraphQL backend for the chatapp example. It serves exactly the
 canonical `../schema.graphql` over GraphQL Yoga (HTTP) and graphql-ws (subscriptions),
 builds the executable schema with `@graphql-tools/schema`, and uses
-[`forge-node`](../../../bindings/forge-node) for all infrastructure — auth, blob,
+[`forge-node`](../../../bindings/forge-node) for all infrastructure: auth, blob,
 pubsub, queue, kv, schedule, ratelimit, config. Domain data lives in the unprefixed
 `users`/`chats`/`chat_members`/`messages`/`receipts` tables (see `../migrations.sql`),
 which the server applies on startup.
@@ -88,7 +88,7 @@ docker compose -f docker-compose.yml up --build
 ```
 
 Brings up Postgres 18, the backend (which compiles the `forge-node` native addon from
-source — the repo-root `.dockerignore` strips committed `*.node` binaries), and the shared
+source; the repo-root `.dockerignore` strips committed `*.node` binaries), and the shared
 React SPA pointed at the backend. SPA at http://127.0.0.1:5173, backend at
 http://127.0.0.1:8082/graphql.
 

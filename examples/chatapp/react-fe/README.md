@@ -10,7 +10,7 @@ env points it at, because all three serve the one canonical `../schema.graphql`.
 - [urql](https://commerce.nearform.com/open-source/urql/) with the normalized
   `@urql/exchange-graphcache`, `@urql/exchange-auth`, and a `graphql-ws`
   subscription socket
-- `@graphql-codegen/cli` with the **client preset** generating typed `graphql()`
+- `@graphql-codegen/cli` with the client preset generating typed `graphql()`
   documents from `../schema.graphql`
 - Phosphor icons, self-hosted Geist variable fonts
 
@@ -86,9 +86,14 @@ bun run codegen     # regenerate src/gql from ../schema.graphql
 bun run dev         # vite dev server on :5173
 bun run build       # tsc -b + vite build
 bun run lint        # eslint
+bun run test:e2e    # against docker compose stacks from ..
 ```
 
 (`npm` works too; `bun` is the project default.)
+
+On OrbStack, bring the stacks up from `examples/chatapp` with
+`docker compose --env-file .env.orb up --build`, then run
+`bun run test:e2e --config=playwright.orb.config.ts` from this directory.
 
 ## Docker
 

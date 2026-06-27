@@ -3,19 +3,19 @@
 //! secret-bearing fields can also be filled from `FORGE_*` env vars via
 //! [`ForgeConfig::from_env`]. Precedence when sources overlap: env var > TOML > default.
 
-use crate::error::{ForgeError, Result};
 use crate::backend::Primitive;
+use crate::error::{ForgeError, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// Conservative server-side ceilings applied to every **runtime** connection (see
-/// [`DatabaseConfig`]). They bound how long a single statement runs, how long it waits
-/// on a lock, and how long it may sit idle inside an open transaction — so one wedged
-/// query or lock wait can't pin a pooled connection indefinitely and drain the pool.
-/// `Duration::ZERO` on any of them disables that ceiling (Postgres' unlimited default).
-/// Migrations set their own, longer limits inline, so these don't constrain them.
+/// Server-side ceilings applied to every runtime connection (see [`DatabaseConfig`]).
+/// They bound how long a single statement runs, how long it waits on a lock, and how
+/// long it may sit idle inside an open transaction, so one wedged query or lock wait
+/// can't pin a pooled connection and drain the pool. `Duration::ZERO` on any of them
+/// disables that ceiling (Postgres' unlimited default). Migrations set their own,
+/// longer limits inline, so these don't constrain them.
 const DEFAULT_STATEMENT_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_IDLE_IN_TX_TIMEOUT: Duration = Duration::from_secs(15);
@@ -106,7 +106,10 @@ impl std::fmt::Debug for DatabaseConfig {
             .field("acquire_timeout", &self.acquire_timeout)
             .field("statement_timeout", &self.statement_timeout)
             .field("lock_timeout", &self.lock_timeout)
-            .field("idle_in_transaction_timeout", &self.idle_in_transaction_timeout)
+            .field(
+                "idle_in_transaction_timeout",
+                &self.idle_in_transaction_timeout,
+            )
             .finish()
     }
 }
@@ -121,20 +124,15 @@ pub enum Backend {
     #[default]
     Postgres,
     /// An in-process accelerator. Fast and dependency-free, but **not durable** and
-    /// **not shared** across processes or replicas — state lives only in this process's
+    /// **not shared** across processes or replicas: state lives only in this process's
     /// memory and is lost on restart.
     Memory,
 }
 
 /// Which backend stores blob bytes. Metadata always lives in Postgres; this only
-/// chooses where the object *body* goes.
-///
-/// This is an `enum` so a later S3/R2/GCS backend is a non-breaking variant add. It
-/// ships three variants: `BYTEA` in Postgres (the default, atomic with surrounding app
-/// SQL), a local filesystem directory (keeps large objects out of the WAL, at the
-/// cost of `put` no longer being atomic with app SQL and needing a shared mount for
-/// multi-replica deploys), and an in-process store (non-durable, not shared across
-/// replicas).
+/// chooses where the object *body* goes. An `enum` so a later S3/R2/GCS backend is a
+/// non-breaking variant add. Filesystem keeps large objects out of the WAL but makes
+/// `put` non-atomic with app SQL and needs a shared mount for multi-replica deploys.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum BlobBackendConfig {
@@ -156,11 +154,10 @@ pub enum BlobBackendConfig {
 #[non_exhaustive]
 #[derive(Clone)]
 pub struct ForgeConfig {
-    /// Connection string for Forge's **system database** — a Postgres database Forge
-    /// fully owns, kept separate from your application's own database. Forge creates and
-    /// migrates its `forge_*` tables here at [`Forge::init`](crate::Forge::init), and
-    /// nothing else should write to it. Give Forge its own database (or at least its own
-    /// schema); don't point it at the database that holds your application tables.
+    /// Connection string for Forge's **system database**: a Postgres database Forge fully
+    /// owns, separate from your application's own. Forge creates and migrates its `forge_*`
+    /// tables here at [`Forge::init`](crate::Forge::init); nothing else should write to it.
+    /// Give Forge its own database or schema; don't point it at your application tables.
     pub postgres: String,
     /// Maximum pooled connections. Default 10. Must be >= 2: init migrates the system
     /// database at startup, holding one connection for the migration lock while a second
@@ -176,11 +173,11 @@ pub struct ForgeConfig {
     /// Server-side `idle_in_transaction_session_timeout` for runtime connections.
     /// Default 15s; `ZERO` disables.
     pub idle_in_transaction_timeout: Duration,
-    /// App namespace, so multiple apps can share one database without colliding —
-    /// applied across **all** primitives: a key prefix (kv/ratelimit/blob), a name
-    /// prefix (queue/config/flags), a channel prefix (pubsub), and an `app` column
-    /// (sessions/api keys/schedules). Empty by default. Must not contain `:`. (The
-    /// field keeps its `kv_namespace` name for backward compatibility.)
+    /// App namespace, so multiple apps can share one database without colliding. Applied
+    /// across all primitives: a key prefix (kv/ratelimit/blob), a name prefix
+    /// (queue/config/flags), a channel prefix (pubsub), and an `app` column (sessions/api
+    /// keys/schedules). Empty by default. Must not contain `:`. (Keeps the `kv_namespace`
+    /// name for backward compatibility.)
     pub kv_namespace: String,
     /// Window within which a repeated `enqueue` `dedup_id` is de-duplicated.
     /// Default 5 minutes (SQS FIFO precedent).
@@ -195,7 +192,7 @@ pub struct ForgeConfig {
     /// (the blob CRUD surface still works); set it to enable `presign_*` and
     /// `verify_presigned`. Fill from `FORGE_BLOB_SIGNING_SECRET`.
     pub blob_signing_secret: Option<String>,
-    /// URL prefix presigned blob URLs point at — where the host app serves them.
+    /// URL prefix presigned blob URLs point at (where the host app serves them).
     /// Default `/api/files`.
     pub blob_base_url: String,
     /// Which backend stores blob bytes. Default [`BlobBackendConfig::Postgres`].
@@ -207,14 +204,13 @@ pub struct ForgeConfig {
     /// absent here falls back to `default_backend`. Blob is excluded: it carries its own
     /// `blob_backend` so there is a single source of truth for where blob bytes live.
     pub backends: HashMap<Primitive, Backend>,
-    /// Per-feature database overrides. A primitive listed here gets its **own dedicated
-    /// connection pool** to the configured Postgres database, isolated from the system
-    /// pool and from every other feature — so one feature exhausting its connections
-    /// can't starve the rest, and a feature can live on a different server. Each distinct
-    /// database is migrated at init just like the system database. Absent primitives use
-    /// the system pool built from `postgres` / `max_connections` / `acquire_timeout`.
-    /// Empty by default: the zero-config path is exactly one pool against the system
-    /// database. Set via [`ForgeConfig::with_feature_database`].
+    /// Per-feature database overrides. A primitive listed here gets its own dedicated
+    /// connection pool to the configured Postgres database, isolated from the system pool
+    /// and every other feature, so one feature exhausting its connections can't starve the
+    /// rest and a feature can live on a different server. Each distinct database is migrated
+    /// at init like the system database. Absent primitives use the system pool built from
+    /// `postgres` / `max_connections` / `acquire_timeout`. Empty by default. Set via
+    /// [`ForgeConfig::with_feature_database`].
     pub feature_databases: HashMap<Primitive, DatabaseConfig>,
 }
 
@@ -253,9 +249,11 @@ fn env_secs(name: &str, v: &str) -> Result<Duration> {
 /// Parse a `FORGE_*_TIMEOUT_MS` env value into a `Duration`. `0` is allowed and means
 /// "disable this server-side timeout" (it maps to Postgres' unlimited default).
 fn env_ms(name: &str, v: &str) -> Result<Duration> {
-    let ms: u64 = v
-        .parse()
-        .map_err(|_| ForgeError::config(format!("{name} must be a non-negative integer (milliseconds): {v:?}")))?;
+    let ms: u64 = v.parse().map_err(|_| {
+        ForgeError::config(format!(
+            "{name} must be a non-negative integer (milliseconds): {v:?}"
+        ))
+    })?;
     Ok(Duration::from_millis(ms))
 }
 
@@ -299,7 +297,9 @@ fn env_bool(name: &str, v: &str) -> Result<bool> {
 /// A non-negative number of seconds from TOML into a `Duration`.
 fn dur_secs(name: &str, secs: f64) -> Result<Duration> {
     Duration::try_from_secs_f64(secs).map_err(|_| {
-        ForgeError::config(format!("{name} must be a non-negative number of seconds, got {secs}"))
+        ForgeError::config(format!(
+            "{name} must be a non-negative number of seconds, got {secs}"
+        ))
     })
 }
 
@@ -318,7 +318,7 @@ fn parse_primitive(name: &str) -> Result<Primitive> {
 }
 
 /// Parse a backend selector (`postgres`/`memory`, case-insensitive) for the env and
-/// TOML loaders. `name` is the source key for a precise error. A bad value is loud.
+/// TOML loaders. `name` is the source key for a precise error.
 fn parse_backend(name: &str, val: &str) -> Result<Backend> {
     match val.trim().to_ascii_lowercase().as_str() {
         "postgres" => Ok(Backend::Postgres),
@@ -330,9 +330,9 @@ fn parse_backend(name: &str, val: &str) -> Result<Backend> {
 }
 
 /// Substitute `${VAR}` / `${VAR:-default}` references using `lookup`. A missing variable
-/// with no default is a hard error: config must fail loud, never resolve to "". Splits the
-/// environment lookup out so the substitution logic is unit-testable without touching the
-/// process environment (the crate forbids the `unsafe` that `set_var` now requires).
+/// with no default is a hard error: config must fail loud, never resolve to "". `lookup`
+/// is injected so substitution is unit-testable without touching the process environment
+/// (the crate forbids the `unsafe` that `set_var` now requires).
 fn interpolate_with(input: &str, lookup: impl Fn(&str) -> Option<String>) -> Result<String> {
     let mut out = String::with_capacity(input.len());
     let mut rest = input;
@@ -480,10 +480,10 @@ impl ForgeConfig {
         }
     }
 
-    /// Build from `FORGE_*` environment variables. `FORGE_POSTGRES_URL` is
-    /// required; the rest fall back to defaults. This is exactly "no TOML file, env
-    /// overrides applied to defaults" — see [`from_toml_str`](Self::from_toml_str) for
-    /// the file-backed path, which shares the same override pass.
+    /// Build from `FORGE_*` environment variables. `FORGE_POSTGRES_URL` is required; the
+    /// rest fall back to defaults. This is env overrides applied to defaults with no TOML
+    /// file; see [`from_toml_str`](Self::from_toml_str) for the file-backed path, which
+    /// shares the same override pass.
     pub fn from_env() -> Result<Self> {
         if std::env::var("FORGE_POSTGRES_URL").is_err() {
             return Err(ForgeError::config(
@@ -495,29 +495,40 @@ impl ForgeConfig {
         Ok(cfg)
     }
 
+    /// Apply the same `FORGE_*` overrides as [`from_env`](Self::from_env) on top of a config
+    /// that already carries code defaults. Lets an app set a friendly local default Postgres
+    /// URL while deploys still switch backends through env vars.
+    pub fn with_env_overrides(mut self) -> Result<Self> {
+        self.apply_env_overrides()?;
+        Ok(self)
+    }
+
     /// Load configuration from a TOML file. See [`from_toml_str`](Self::from_toml_str)
     /// for the interpolation/override semantics.
     pub fn from_toml_file(path: impl AsRef<std::path::Path>) -> Result<Self> {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path).map_err(|e| {
-            ForgeError::config(format!("could not read config file {}: {e}", path.display()))
+            ForgeError::config(format!(
+                "could not read config file {}: {e}",
+                path.display()
+            ))
         })?;
         Self::from_toml_str(&text)
     }
 
     /// Parse configuration from TOML text. String values may embed `${VAR}` /
-    /// `${VAR:-default}`, interpolated from the environment at load (a missing variable
-    /// with no default is a hard error — config fails loud, never resolves to empty).
-    /// `FORGE_*` environment variables are then layered on top, so the precedence is
-    /// **env var > TOML value > built-in default**. Unknown keys are rejected with a
-    /// precise error rather than silently ignored.
+    /// `${VAR:-default}`, interpolated from the environment at load (a missing variable with
+    /// no default is a hard error: config fails loud, never resolves to empty). `FORGE_*`
+    /// environment variables are then layered on top, so precedence is **env var > TOML
+    /// value > built-in default**. Unknown keys are rejected with a precise error.
     pub fn from_toml_str(s: &str) -> Result<Self> {
         let mut value: toml::Value = s
             .parse()
             .map_err(|e| ForgeError::config(format!("invalid TOML config: {e}")))?;
         interpolate_value(&mut value)?;
-        let parsed = TomlConfig::deserialize(value)
-            .map_err(|e| ForgeError::config(format!("config does not match the expected schema: {e}")))?;
+        let parsed = TomlConfig::deserialize(value).map_err(|e| {
+            ForgeError::config(format!("config does not match the expected schema: {e}"))
+        })?;
         let mut cfg = Self::default();
         cfg.apply_toml(parsed)?;
         cfg.apply_env_overrides()?;
@@ -620,7 +631,8 @@ impl ForgeConfig {
                 .with_lock_timeout(self.lock_timeout)
                 .with_idle_in_transaction_timeout(self.idle_in_transaction_timeout);
             if let Some(secs) = db.acquire_timeout_secs {
-                dc.acquire_timeout = dur_secs(&format!("databases.{name}.acquire_timeout_secs"), secs)?;
+                dc.acquire_timeout =
+                    dur_secs(&format!("databases.{name}.acquire_timeout_secs"), secs)?;
             }
             if let Some(ms) = db.statement_timeout_ms {
                 dc.statement_timeout = Duration::from_millis(ms);
@@ -685,10 +697,9 @@ impl ForgeConfig {
         if let Some(v) = env("FORGE_RATELIMIT_FAIL_OPEN") {
             self.ratelimit_fail_open = env_bool("FORGE_RATELIMIT_FAIL_OPEN", &v)?;
         }
-        // Portable, binding-neutral backend selection: the same FORGE_* vars drive
-        // Rust, Node, and Python with no per-language API. Each arm assigns explicitly so
-        // env beats a TOML `blob.backend` either direction (`=postgres` must undo a file's
-        // `fs`, not silently no-op). `filesystem` needs a root.
+        // The same FORGE_* vars drive Rust, Node, and Python with no per-language API.
+        // Each arm assigns explicitly so env beats a TOML `blob.backend` either direction
+        // (`=postgres` must undo a file's `fs`, not silently no-op). `filesystem` needs a root.
         if let Some(v) = env("FORGE_BLOB_BACKEND") {
             match v.to_ascii_lowercase().as_str() {
                 "" => {}
@@ -709,10 +720,9 @@ impl ForgeConfig {
                 }
             }
         }
-        // Portable per-primitive backend selection. FORGE_DEFAULT_BACKEND sets the
-        // fallback; FORGE_<PRIM>_BACKEND overrides one primitive. Blob is intentionally
-        // skipped here: its backend comes from FORGE_BLOB_BACKEND above, which also
-        // understands `filesystem` (a value the postgres/memory selector cannot express).
+        // FORGE_DEFAULT_BACKEND sets the fallback; FORGE_<PRIM>_BACKEND overrides one
+        // primitive. Blob is skipped: its backend comes from FORGE_BLOB_BACKEND above,
+        // which also understands `filesystem` (a value postgres/memory can't express).
         if let Some(v) = env("FORGE_DEFAULT_BACKEND") {
             self.default_backend = parse_backend("FORGE_DEFAULT_BACKEND", &v)?;
         }
@@ -726,7 +736,7 @@ impl ForgeConfig {
             }
         }
         // Per-feature isolated databases. `FORGE_<FEATURE>_POSTGRES_URL` defines a fresh
-        // pool (inheriting the now-resolved global sizing/timeouts); when it is absent the
+        // pool (inheriting the now-resolved global sizing/timeouts); when absent, the
         // per-field knobs still refine a pool defined in TOML, so env beats the file for an
         // individual field too. A feature with neither is left untouched.
         for feature in ALL_PRIMITIVES {
@@ -869,8 +879,8 @@ impl ForgeConfig {
         self
     }
 
-    /// The system database — the one Forge owns and every non-overridden feature uses,
-    /// built from the top-level `postgres` / `max_connections` / `acquire_timeout` fields.
+    /// The system database: the one Forge owns and every non-overridden feature uses, built
+    /// from the top-level `postgres` / `max_connections` / `acquire_timeout` fields.
     pub(crate) fn system_database(&self) -> DatabaseConfig {
         DatabaseConfig {
             postgres: self.postgres.clone(),
@@ -893,7 +903,10 @@ impl ForgeConfig {
     /// The resolved backend for a non-blob primitive: its override if present, else
     /// `default_backend`. Blob is resolved through `blob_backend`, not this.
     pub(crate) fn backend_for(&self, p: Primitive) -> Backend {
-        self.backends.get(&p).copied().unwrap_or(self.default_backend)
+        self.backends
+            .get(&p)
+            .copied()
+            .unwrap_or(self.default_backend)
     }
 
     /// Validate the statically-checkable fields with a precise message;
@@ -933,7 +946,10 @@ impl std::fmt::Debug for ForgeConfig {
             .field("acquire_timeout", &self.acquire_timeout)
             .field("statement_timeout", &self.statement_timeout)
             .field("lock_timeout", &self.lock_timeout)
-            .field("idle_in_transaction_timeout", &self.idle_in_transaction_timeout)
+            .field(
+                "idle_in_transaction_timeout",
+                &self.idle_in_transaction_timeout,
+            )
             .field("kv_namespace", &self.kv_namespace)
             .field("queue_dedup_window", &self.queue_dedup_window)
             .field("queue_retention", &self.queue_retention)
@@ -1004,7 +1020,10 @@ mod tests {
             DatabaseConfig::new("postgres://kv-server/db").with_max_connections(3),
         );
         // kv resolves to its override; an un-overridden feature keeps the default.
-        assert_eq!(cfg.database_for(Primitive::Kv).postgres, "postgres://kv-server/db");
+        assert_eq!(
+            cfg.database_for(Primitive::Kv).postgres,
+            "postgres://kv-server/db"
+        );
         assert_eq!(cfg.database_for(Primitive::Kv).max_connections, 3);
         assert_eq!(
             cfg.database_for(Primitive::Queue).postgres,
@@ -1047,13 +1066,19 @@ mod tests {
             "/api/files"
         );
         // A set var wins over its default.
-        assert_eq!(interpolate_with("${DB_HOST:-fallback}", lookup).unwrap(), "db.internal");
+        assert_eq!(
+            interpolate_with("${DB_HOST:-fallback}", lookup).unwrap(),
+            "db.internal"
+        );
     }
 
     #[test]
     fn interpolation_missing_var_without_default_is_loud_error() {
         let err = interpolate_with("${NOPE}", |_| None);
-        assert!(matches!(err, Err(ForgeError::Config(_))), "missing var must error, not empty: {err:?}");
+        assert!(
+            matches!(err, Err(ForgeError::Config(_))),
+            "missing var must error, not empty: {err:?}"
+        );
         // And an unterminated reference is rejected rather than silently passed through.
         assert!(matches!(
             interpolate_with("${UNTERMINATED", |_| Some("x".into())),
@@ -1099,32 +1124,46 @@ mod tests {
         assert!(!cfg.ratelimit_fail_open);
         assert_eq!(
             cfg.blob_backend,
-            BlobBackendConfig::Filesystem { root: "/data/blobs".into() }
+            BlobBackendConfig::Filesystem {
+                root: "/data/blobs".into()
+            }
         );
         assert_eq!(cfg.blob_base_url, "/files");
         let kv = cfg.database_for(Primitive::Kv);
         assert_eq!(kv.postgres, "postgres://kv-server/forge");
         assert_eq!(kv.max_connections, 3);
         // An un-overridden feature still resolves to the system database.
-        assert_eq!(cfg.database_for(Primitive::Queue).postgres, "postgres://localhost/forge");
+        assert_eq!(
+            cfg.database_for(Primitive::Queue).postgres,
+            "postgres://localhost/forge"
+        );
     }
 
     #[test]
     fn from_toml_str_rejects_unknown_key() {
         let err = ForgeConfig::from_toml_str("[postgres]\nurl = \"x\"\nbogus = 1\n");
-        assert!(matches!(err, Err(ForgeError::Config(_))), "typo'd key must be rejected: {err:?}");
+        assert!(
+            matches!(err, Err(ForgeError::Config(_))),
+            "typo'd key must be rejected: {err:?}"
+        );
     }
 
     #[test]
     fn from_toml_str_fs_blob_requires_root() {
         let err = ForgeConfig::from_toml_str("[blob]\nbackend = \"fs\"\n");
-        assert!(matches!(err, Err(ForgeError::Config(_))), "fs backend without root must error: {err:?}");
+        assert!(
+            matches!(err, Err(ForgeError::Config(_))),
+            "fs backend without root must error: {err:?}"
+        );
     }
 
     #[test]
     fn from_toml_str_rejects_unknown_database_primitive() {
         let err = ForgeConfig::from_toml_str("[databases.nope]\nurl = \"postgres://x/y\"\n");
-        assert!(matches!(err, Err(ForgeError::Config(_))), "unknown primitive must error: {err:?}");
+        assert!(
+            matches!(err, Err(ForgeError::Config(_))),
+            "unknown primitive must error: {err:?}"
+        );
     }
 
     #[test]
@@ -1140,14 +1179,21 @@ mod tests {
 
     /// Build an env lookup from literal pairs, so precedence tests need no `set_var`.
     fn env_map<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
-        move |k| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string())
+        move |k| {
+            pairs
+                .iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| v.to_string())
+        }
     }
 
     #[test]
     fn env_blob_backend_postgres_overrides_toml_fs() {
         // A TOML file selected fs; FORGE_BLOB_BACKEND=postgres must win (env > TOML).
         let mut cfg = ForgeConfig::new("postgres://x/y");
-        cfg.blob_backend = BlobBackendConfig::Filesystem { root: "/data".into() };
+        cfg.blob_backend = BlobBackendConfig::Filesystem {
+            root: "/data".into(),
+        };
         cfg.apply_overrides(&env_map(&[("FORGE_BLOB_BACKEND", "postgres")]))
             .unwrap();
         assert_eq!(cfg.blob_backend, BlobBackendConfig::Postgres);
@@ -1194,6 +1240,9 @@ mod tests {
             Primitive::Kv,
             DatabaseConfig::new("postgres://other/db").with_max_connections(1),
         );
-        assert!(matches!(other_server.validate(), Err(ForgeError::Config(_))));
+        assert!(matches!(
+            other_server.validate(),
+            Err(ForgeError::Config(_))
+        ));
     }
 }

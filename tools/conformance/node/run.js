@@ -1,5 +1,5 @@
 'use strict'
-// Cross-language conformance runner — Node side. Reads the shared scenario
+// Cross-language conformance runner, Node side. Reads the shared scenario
 // matrix in src/conformance/scenarios/*.json and runs each scenario against the
 // forge-node binding on a throwaway database. Asserts the observed failure set
 // equals exactly the `node` entries in src/conformance/known_gaps.json. See
@@ -10,6 +10,7 @@
 const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
+const os = require('os')
 const { Client } = require('pg')
 const { ForgeClient } = require('../../../bindings/forge-node')
 
@@ -84,6 +85,58 @@ function asBuffer(v) {
   if (typeof v === 'string') return Buffer.from(v, 'utf8')
   if (v && Array.isArray(v.$bytes)) return Buffer.from(v.$bytes)
   throw new Error('cannot coerce value to bytes: ' + JSON.stringify(v))
+}
+
+function provider(report, primitive) {
+  const row = report.find((r) => r.primitive === primitive)
+  return row && row.provider
+}
+
+function restoreEnv(saved) {
+  for (const [key, value] of Object.entries(saved)) {
+    if (value == null) delete process.env[key]
+    else process.env[key] = value
+  }
+}
+
+async function runBackendSelectionSmoke() {
+  await withTestDb(async (url) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-node-blob-'))
+    const keys = [
+      'FORGE_POSTGRES_URL',
+      'FORGE_BLOB_SIGNING_SECRET',
+      'FORGE_QUEUE_BACKEND',
+      'FORGE_BLOB_BACKEND',
+      'FORGE_BLOB_FS_ROOT',
+    ]
+    const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]))
+    try {
+      process.env.FORGE_POSTGRES_URL = url
+      process.env.FORGE_BLOB_SIGNING_SECRET = SIGNING_SECRET
+      process.env.FORGE_QUEUE_BACKEND = 'memory'
+      process.env.FORGE_BLOB_BACKEND = 'filesystem'
+      process.env.FORGE_BLOB_FS_ROOT = root
+
+      const client = await ForgeClient.connectFromEnv()
+      const report = client.backendReport()
+      if (provider(report, 'queue') !== 'memory') throw new Error('queue backend was not memory')
+      if (provider(report, 'blob') !== 'filesystem') throw new Error('blob backend was not filesystem')
+
+      await client.queueEnqueue('swapq', 'hello')
+      const job = await client.queueDequeue('swapq', 30, 0)
+      if (!job || job.payload !== 'hello') throw new Error('memory queue smoke failed')
+      await client.queueAck(job.receipt)
+
+      await client.blobPut('swap/blob.txt', 'blob', 'text/plain')
+      if ((await client.blobGet('swap/blob.txt')) !== 'blob') {
+        throw new Error('filesystem blob smoke failed')
+      }
+    } finally {
+      restoreEnv(saved)
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+  console.log('PASS  backend/env_backend_selection')
 }
 // Decompose a presigned URL into the signed params verify_presigned needs, so a scenario
 // can $ref them straight into a verify step. Mirrors the Rust runner's presign_to_value.
@@ -401,9 +454,15 @@ async function main() {
       }
       if (!err && !expectedFail) { passed++; console.log('PASS  ' + key) }
       else if (err && expectedFail) { passed++; console.log('XFAIL ' + key + ': ' + err.message) }
-      else if (!err && expectedFail) problems.push(`${key}: PASSED but is a registered node gap — remove it from known_gaps.json`)
+      else if (!err && expectedFail) problems.push(`${key}: PASSED but is a registered node gap; remove it from known_gaps.json`)
       else problems.push(`${key}: ${err.message}`)
     }
+  }
+  try {
+    await runBackendSelectionSmoke()
+    passed++
+  } catch (e) {
+    problems.push('backend/env_backend_selection: ' + e.message)
   }
   console.log(`\nconformance(node): ${passed} ok, ${problems.length} unexpected`)
   if (problems.length) {

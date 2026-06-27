@@ -1,17 +1,10 @@
-//! The typed layer: a thin, strongly-typed surface over the stringly-typed primitive
-//! traits, so generated app code binds a *name + codec + defaults* to a Rust type
-//! instead of inventing key strings and JSON conventions per app.
+//! A thin, strongly-typed surface over the stringly-typed primitive traits, so generated
+//! app code binds a *name + codec + defaults* to a Rust type instead of inventing key strings
+//! and JSON conventions per app. The low-level traits stay the contract; prefer this surface.
 //!
-//! Each typed handle wraps the low-level operation. `KvKey<T>` ties a key to a
-//! JSON-serializable value type; `QueueName<T>` / [`QueuePayload`] tie a queue to its
-//! payload and defaults; `ConfigKey<T>` carries the key, value type, and a default;
-//! `RateBucket<S>` binds a bucket to its policy, fail mode, and subject type;
-//! `BlobKey<K>` and `Topic<E>` do the same for blob paths and pubsub events. The
-//! low-level traits stay the contract; this is the surface agents should prefer.
-//!
-//! The same definitions are the source of truth the Node and Python typed handles
-//! mirror, so a `SendEmail` job is expressed once per language from one shape rather
-//! than redeclared three times.
+//! The same definitions are the source of truth the Node and Python typed handles mirror, so
+//! a `SendEmail` job is expressed once per language from one shape rather than redeclared
+//! three times.
 
 use crate::blob::{Blob, BlobInfo, PutOpts};
 use crate::config_store::ConfigStore;
@@ -256,7 +249,7 @@ pub trait QueueTyped: Queue {
 impl<Q: Queue + ?Sized> QueueTyped for Q {}
 
 /// A value that names a rate-limit subject (the per-caller key). Blanket-implemented
-/// for any `Display` type, so a `UserId` newtype works as a subject out of the box.
+/// for any `Display` type, so a `UserId` newtype works as a subject.
 pub trait RateSubject {
     /// The subject string consumed by [`RateLimit::check`].
     fn rate_subject(&self) -> String;
@@ -268,11 +261,10 @@ impl<T: std::fmt::Display + ?Sized> RateSubject for T {
     }
 }
 
-/// A rate-limit bucket bound to its policy, fail mode, and subject type `S`. Declaring
-/// one constant per bucket keeps the bucket name, the limit, and the fail-open/closed
-/// decision in one place instead of scattered across call sites. `S` may be unsized
-/// (e.g. `RateBucket<str>`). `PhantomData<fn(&S)>` keeps it `Send`/`Sync` so a bucket
-/// can be a `const`/`static`.
+/// A rate-limit bucket bound to its policy, fail mode, and subject type `S`. Declare one
+/// constant per bucket to keep the name, limit, and fail mode together. `S` may be unsized
+/// (e.g. `RateBucket<str>`); `PhantomData<fn(&S)>` keeps it `Send`/`Sync` so a bucket can be
+/// a `const`/`static`.
 pub struct RateBucket<S: ?Sized> {
     bucket: &'static str,
     limit: Limit,

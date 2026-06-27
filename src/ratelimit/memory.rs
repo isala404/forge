@@ -1,11 +1,9 @@
 //! In-process `ratelimit` backend. Contract: docs/contracts/ratelimit.md.
 //!
 //! Per-process limiter state behind a `Mutex<HashMap>`, keyed by the same namespaced
-//! `(bucket, subject)` the Postgres backend keys its row on. The algorithm math is the
-//! exact same pure step the Postgres backend runs against a `FOR UPDATE`-locked row —
-//! only the storage differs: there is no SQL, nothing survives a restart, and the
-//! buckets are not shared across processes. The observable [`Decision`] contract matches
-//! [`super::PgRateLimit`].
+//! `(bucket, subject)` the Postgres backend keys its row on, running the same pure
+//! algorithm step. Nothing survives a restart and buckets are not shared across
+//! processes; the observable [`Decision`] contract matches [`super::PgRateLimit`].
 
 use super::{Algo, Decision, FailMode, Limit, MAX_BUCKET_BYTES, MAX_KEY_BYTES, RateLimit};
 use crate::backend::{BackendLifecycle, Primitive};
@@ -19,24 +17,22 @@ use std::time::{Duration, Instant};
 /// that fits one fits the other. Over => `Limit`.
 const MAX_PER_SECS: f64 = 100.0 * 365.0 * 24.0 * 60.0 * 60.0;
 /// Entries untouched this long are dropped by `maintain`. An idle bucket has refilled
-/// to full / its window has aged out long before this, so dropping it is observably
-/// identical to keeping it — a re-check starts from a fresh full bucket either way.
-/// Mirrors the Postgres sweep window.
+/// to full or its window has aged out by then, so dropping it is observably identical to
+/// keeping it: a re-check starts from a fresh full bucket either way. Mirrors the
+/// Postgres sweep window.
 const IDLE_PURGE_SECS: u64 = 24 * 60 * 60;
 
-/// One subject's mutable limiter state. A given `(bucket, subject)` is realistically
-/// only ever checked with one algorithm, but — like the Postgres row that carries every
-/// column — the entry holds both algorithms' state so switching algorithm on a key reads
-/// the other algorithm's fresh state, exactly as the row would. Whichever `check` runs
-/// touches only its own fields.
+/// One subject's mutable limiter state. The entry holds both algorithms' state (like the
+/// Postgres row that carries every column), so switching algorithm on a key reads the
+/// other algorithm's fresh state. Whichever `check` runs touches only its own fields.
 struct Bucket {
     /// Token-bucket level. `None` until the first token-bucket check, where it reads as a
     /// fresh full bucket (mirrors the row's `NULL` tokens default).
     tokens: Option<f64>,
     /// Sliding-window state. `None` until the first sliding-window check.
     sliding: Option<SlidingState>,
-    /// Last time this entry was touched. Drives the token-bucket refill (tokens accrue
-    /// over the elapsed time since this instant) and the idle-purge sweep.
+    /// Last time this entry was touched. Drives the token-bucket refill and the
+    /// idle-purge sweep.
     updated_at: Instant,
 }
 
@@ -54,14 +50,13 @@ pub(crate) struct MemRateLimit {
     state: Mutex<HashMap<(String, String), Bucket>>,
     /// Prefix joined to every bucket as `<namespace>:<bucket>`. Empty = no prefix.
     namespace: String,
-    /// Instance default for what happens on a *soft* backend error. In-process bucket
-    /// math is infallible, so this never actually fires; it exists for construction
-    /// parity with [`super::PgRateLimit`] and to keep the fail-open contract honored if a
-    /// fallible path is ever added.
+    /// Instance default for what happens on a *soft* backend error. In-process bucket math
+    /// is infallible, so this never fires today; it exists for parity with
+    /// [`super::PgRateLimit`] and stays honored if a fallible path is ever added.
     fail_open: bool,
     /// Fixed origin for the sliding-window clock: `now_epoch` is seconds since this
-    /// instant. The window math only needs a monotonic seconds source consistent across
-    /// calls; the absolute offset merely fixes where `per`-aligned window boundaries fall.
+    /// instant. The math needs only a monotonic seconds source; the absolute offset just
+    /// fixes where `per`-aligned window boundaries fall.
     origin: Instant,
 }
 
@@ -75,9 +70,9 @@ impl MemRateLimit {
         }
     }
 
-    /// Take the map lock, recovering the guard if a previous holder panicked. The
-    /// critical sections are short and synchronous (no `await` held across the lock), so
-    /// a poisoned lock never reflects a half-updated invariant worth aborting for.
+    /// Take the map lock, recovering the guard if a previous holder panicked. Critical
+    /// sections are short and synchronous (no `await` across the lock), so a poisoned lock
+    /// never reflects a half-updated invariant worth aborting for.
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<(String, String), Bucket>> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -107,8 +102,10 @@ impl MemRateLimit {
             .entry((ns_bucket.to_string(), subject.to_string()))
             .or_insert_with(|| Bucket::fresh(now));
         // A just-inserted entry has `updated_at == now`, so `elapsed == 0` and a `None`
-        // token level reads as a full bucket — exactly the freshly-inserted Postgres row.
-        let elapsed = now.saturating_duration_since(entry.updated_at).as_secs_f64();
+        // token level reads as a full bucket, like the freshly-inserted Postgres row.
+        let elapsed = now
+            .saturating_duration_since(entry.updated_at)
+            .as_secs_f64();
         let (new_tokens, decision) = token_bucket_step(entry.tokens, elapsed, limit);
         entry.tokens = Some(new_tokens);
         entry.updated_at = now;
@@ -163,8 +160,8 @@ impl RateLimit for MemRateLimit {
         match result {
             Ok(d) => Ok(d),
             // The in-process math is infallible, so this branch never fires today; it
-            // mirrors the Postgres backend so a soft error from any future fallible path
-            // is governed by the same `ratelimit_fail_open` semantics.
+            // mirrors the Postgres backend so a future fallible path obeys the same
+            // `ratelimit_fail_open` semantics.
             Err(e) if fail_open && is_soft_error(&e) => {
                 tracing::warn!(error = %e, "ratelimit backend error; failing open (allowing)");
                 Ok(synthetic_allow(limit))
@@ -272,7 +269,7 @@ struct SlidingState {
     prev: i64,
 }
 
-/// One sliding-window step (fixed window with weighted prior — the standard approximate
+/// One sliding-window step (fixed window with weighted prior, the standard approximate
 /// sliding count). Returns the state to persist and the `Decision`. Identical to the
 /// Postgres backend's step.
 fn sliding_step(
@@ -426,7 +423,8 @@ mod tests {
             Err(ForgeError::Invalid(_))
         ));
         assert!(matches!(
-            rl.check("api", "u", Limit::per_duration(1, Duration::ZERO)).await,
+            rl.check("api", "u", Limit::per_duration(1, Duration::ZERO))
+                .await,
             Err(ForgeError::Invalid(_))
         ));
     }

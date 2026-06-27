@@ -3,7 +3,7 @@ import { backendOf, signup, uniqueUser } from './helpers'
 
 // Guards the rust-be regression where GET /graphql was routed only to the websocket
 // upgrade handler, so the SPA's GET-method boot queries (me, chats) returned 400 and
-// login appeared to do nothing — the app stayed on the sign-in screen. The fix makes
+// login appeared to do nothing: the app stayed on the sign-in screen. The fix makes
 // GET serve plain queries too, matching node and python.
 test('signing in lands in the authenticated app shell', async ({ page }, testInfo) => {
   const username = uniqueUser('auth')

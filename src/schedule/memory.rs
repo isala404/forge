@@ -1,25 +1,18 @@
 //! In-process `schedule` backend. Contract: docs/contracts/schedule.md.
 //!
-//! A `Mutex<HashMap>` of registered schedules keyed by name (each instance is already
-//! scoped to one app, so the app never has to be part of the key — separate instances
-//! are separate maps). The target-queue name is stored with the SAME `<app>:<queue>`
-//! prefix the Postgres backend uses and stripped back to the logical name on
-//! [`Schedule::list`], so namespacing is identical.
+//! A `Mutex<HashMap>` of registered schedules keyed by name. Each instance is scoped to
+//! one app, so the app is not part of the key (separate instances are separate maps). The
+//! target-queue name is stored with the same `<app>:<queue>` prefix the Postgres backend
+//! uses and stripped back to the logical name on [`Schedule::list`].
 //!
-//! Timing and the observable contract match [`super::PgSchedule`]: `cron`/`at` register
-//! a schedule, [`Schedule::process_due`] computes due ticks with the shared
+//! Timing and the observable contract match [`super::PgSchedule`]: `cron`/`at` register a
+//! schedule, [`Schedule::process_due`] computes due ticks with the shared
 //! [`Cron`](super::cron::Cron) evaluator (same missed-tick grace window), advances a
 //! recurring schedule to its next tick, and drops a one-shot once it has fired.
 //!
-//! Delivery is real: the backend holds an [`Arc<dyn Queue>`](super::super::Queue) (the
-//! Forge instance's resolved queue backend, whatever it is) and `process_due` enqueues a
-//! job through it for every due tick, carrying the schedule's stored payload and
-//! `max_attempts` — so a memory-backed schedule actually runs work, just like Postgres.
-//! The lone divergence: a one-shot [`Schedule::at`] returns a [`JobId`] used as the
-//! cancellation handle (`cancel_at`), but the delivered job is minted a fresh id by
-//! `enqueue` (the public queue API takes no caller-chosen id). `cancel_at` before the tick
-//! still works; only post-delivery tracking by that exact id does not — a small, declared
-//! in-memory caveat, not a delivery gap.
+//! Delivery is real: the backend holds an [`Arc<dyn Queue>`](super::super::Queue) and
+//! `process_due` enqueues a job through it for every due tick, carrying the schedule's
+//! stored payload, job id, and `max_attempts`.
 
 use super::cron::Cron;
 use super::{
@@ -32,30 +25,35 @@ use crate::types::Cursor;
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
+use uuid::Uuid;
 
 /// A tick more than this far late (e.g. every replica was down) fires once on recovery
 /// only if within the window, else is skipped and logged. Matches the Postgres backend's
 /// `MISSED_TICK_GRACE_SECS` (k8s `startingDeadlineSeconds`).
 const MISSED_TICK_GRACE_SECS: f64 = 60.0 * 60.0;
+/// In-process claim timeout for a due schedule. If a `process_due` future is cancelled
+/// after claiming but before settling, a later pass may retry after this window.
+const CLAIM_TIMEOUT_SECS: i64 = 30;
 
-/// One registered schedule. Only the fields this backend observes are kept: the `kind`
-/// (cron vs one-shot, surfaced by `list` and driving `process_due`), the namespaced
-/// target queue (`list` strips the prefix back), and the tick bookkeeping. Times are held
-/// as [`DateTime<Utc>`] for clean cron math; the `SystemTime` boundary conversion happens
-/// only in `at` (in) and `list` (out).
+/// One registered schedule. Times are held as [`DateTime<Utc>`] for cron math; the
+/// `SystemTime` boundary conversion happens only in `at` (in) and `list` (out).
 struct ScheduleEntry {
     kind: ScheduleKind,
     /// Stored (namespaced) target-queue name, matching `PgSchedule`'s prefixing.
     target_queue: String,
-    /// The body each tick enqueues. Retained (unlike before) because delivery is real.
+    /// The body each tick enqueues.
     payload: Bytes,
+    /// One-shot job id returned by `at`; cron ticks use deterministic ids.
+    job_id: Option<JobId>,
     /// Delivery options carried onto the enqueued job (currently `max_attempts`).
     opts: ScheduleOpts,
     next_run: DateTime<Utc>,
     last_run: Option<DateTime<Utc>>,
+    claim: Option<(Uuid, DateTime<Utc>)>,
 }
 
 pub(crate) struct MemSchedule {
@@ -63,7 +61,7 @@ pub(crate) struct MemSchedule {
     /// App namespace mixed into the stored target-queue name so a scheduled enqueue
     /// names this app's queue. Empty = the unnamespaced app.
     app: String,
-    /// The Forge instance's resolved queue backend; a due tick enqueues through it.
+    /// Resolved queue backend; a due tick enqueues through it.
     queue: Arc<dyn Queue>,
 }
 
@@ -98,6 +96,36 @@ impl MemSchedule {
                 .and_then(|s| s.strip_prefix(':'))
                 .unwrap_or(stored)
         }
+    }
+
+    /// Stable id for one cron tick, matching the Postgres scheduler's scheme. Makes retry
+    /// after a successful enqueue but unsettled claim idempotent for built-in queue
+    /// backends and custom queues that honor `EnqueueOpts::job_id`.
+    fn tick_job_id(&self, name: &str, next_run: DateTime<Utc>) -> JobId {
+        let mut h = Sha256::new();
+        h.update(b"forge:schedule:tick:v1");
+        h.update([0]);
+        h.update(self.app.as_bytes());
+        h.update([0]);
+        h.update(name.as_bytes());
+        h.update([0]);
+        let ts = next_run
+            .timestamp_nanos_opt()
+            .map_or_else(|| next_run.to_rfc3339(), |n| n.to_string());
+        h.update(ts.as_bytes());
+
+        let digest = h.finalize();
+        let mut bytes = [0u8; 16];
+        for (dst, src) in bytes.iter_mut().zip(digest.iter()) {
+            *dst = *src;
+        }
+        if let Some(b) = bytes.get_mut(6) {
+            *b = (*b & 0x0f) | 0x80;
+        }
+        if let Some(b) = bytes.get_mut(8) {
+            *b = (*b & 0x3f) | 0x80;
+        }
+        JobId(Uuid::from_bytes(bytes))
     }
 }
 
@@ -162,17 +190,19 @@ impl Schedule for MemSchedule {
         let next = Cron::parse(expr)?
             .next_after(Utc::now())
             .ok_or_else(|| ForgeError::invalid("cron expression never fires"))?;
-        // Insert replaces any existing schedule of the same name, resetting last_run —
-        // the in-process analogue of the Postgres `ON CONFLICT (name, app) DO UPDATE`.
+        // Insert replaces any existing schedule of the same name, resetting last_run; the
+        // in-process analogue of the Postgres `ON CONFLICT (name, app) DO UPDATE`.
         self.lock().insert(
             name.to_string(),
             ScheduleEntry {
                 kind: ScheduleKind::Cron(expr.to_string()),
                 target_queue: self.physical_queue(queue),
                 payload,
+                job_id: None,
                 opts,
                 next_run: next,
                 last_run: None,
+                claim: None,
             },
         );
         Ok(())
@@ -203,9 +233,11 @@ impl Schedule for MemSchedule {
                 kind: ScheduleKind::At,
                 target_queue: self.physical_queue(queue),
                 payload,
+                job_id: Some(job_id),
                 opts,
                 next_run: when_dt,
                 last_run: None,
+                claim: None,
             },
         );
         Ok(job_id)
@@ -221,8 +253,8 @@ impl Schedule for MemSchedule {
         limit: u32,
     ) -> Result<(Vec<ScheduleInfo>, Option<Cursor>)> {
         let limit = limit.clamp(1, 10_000) as usize;
-        // Keyset pagination over the name, exactly like the Postgres backend: the cursor
-        // token is the last name returned, and `name` is the unique order column.
+        // Keyset pagination over the name, like the Postgres backend: the cursor token is
+        // the last name returned, and `name` is the unique order column.
         let after = cursor.map(|c| c.token().to_string());
         let state = self.lock();
         let mut names: Vec<&String> = state
@@ -255,33 +287,53 @@ impl Schedule for MemSchedule {
 
     async fn process_due(&self) -> Result<u64> {
         let now = Utc::now();
-        // Phase 1 (locked, synchronous): select due schedules, advance/drop their bookkeeping,
-        // and collect the deliveries to make. The lock is dropped before any async enqueue —
-        // a std Mutex guard must never be held across `.await`.
-        let to_enqueue: Vec<(String, Bytes, EnqueueOpts)> = {
+        struct DuePlan {
+            name: String,
+            claim: Uuid,
+            next_run: DateTime<Utc>,
+            enqueue: Option<(String, Bytes, EnqueueOpts)>,
+            next: Option<DateTime<Utc>>,
+        }
+
+        let claim_matches = |entry: &ScheduleEntry, next_run: DateTime<Utc>, claim: Uuid| {
+            entry.next_run == next_run && entry.claim.as_ref().is_some_and(|(id, _)| *id == claim)
+        };
+
+        // Phase 1 (locked, synchronous): claim due schedules and collect the work to do.
+        // The schedule state is not advanced yet; if enqueue fails, the claim is cleared
+        // and a later pass retries instead of losing the tick.
+        let plans: Vec<DuePlan> = {
             let mut state = self.lock();
+            let stale_before = now - chrono::Duration::seconds(CLAIM_TIMEOUT_SECS);
             // Due schedules in next_run order, mirroring the Postgres `ORDER BY next_run`.
             // There is no batch cap: with no row locking to contend for, one pass can fire
             // every due schedule.
             let mut due: Vec<(DateTime<Utc>, String)> = state
                 .iter()
-                .filter(|(_, e)| e.next_run <= now)
+                .filter(|(_, e)| {
+                    e.next_run <= now
+                        && e.claim
+                            .as_ref()
+                            .is_none_or(|(_, claimed_at)| *claimed_at <= stale_before)
+                })
                 .map(|(name, e)| (e.next_run, name.clone()))
                 .collect();
             due.sort();
 
-            let mut deliveries = Vec::new();
+            let mut plans = Vec::new();
             for (_, name) in due {
-                let Some(entry) = state.get(&name) else {
+                let Some(entry) = state.get_mut(&name) else {
                     continue;
                 };
+                let claim = Uuid::new_v4();
+                entry.claim = Some((claim, now));
                 let next_run = entry.next_run;
                 let cron = match &entry.kind {
                     ScheduleKind::Cron(expr) => Cron::parse(expr).ok(),
                     ScheduleKind::At => None,
                 };
 
-                // For a cron the grace is measured from the MOST-RECENT missed tick, so a fast
+                // For a cron the grace is measured from the most-recent missed tick, so a fast
                 // cron that fell behind during an outage still fires its latest tick instead of
                 // being skipped wholesale. A one-shot (no cron) keeps its next_run.
                 let base_lateness = (now - next_run).num_seconds() as f64;
@@ -289,49 +341,82 @@ impl Schedule for MemSchedule {
                     .as_ref()
                     .and_then(|c| c.prev_or_at(now))
                     .map_or(base_lateness, |prev| (now - prev).num_seconds() as f64);
-                if lateness <= MISSED_TICK_GRACE_SECS {
+                let enqueue = if lateness <= MISSED_TICK_GRACE_SECS {
                     // Unset `max_attempts` inherits the queue's own enqueue default, matching
                     // the Postgres tick's `unwrap_or` path.
                     let mut eo = EnqueueOpts::new();
                     if let Some(m) = entry.opts.max_attempts {
                         eo.max_attempts = m;
                     }
-                    deliveries.push((
+                    let job_id = entry
+                        .job_id
+                        .unwrap_or_else(|| self.tick_job_id(&name, next_run));
+                    eo = eo.with_job_id(job_id);
+                    Some((
                         self.logical_queue(&entry.target_queue).to_string(),
                         entry.payload.clone(),
                         eo,
-                    ));
+                    ))
                 } else {
                     tracing::warn!(
                         schedule.name = %name,
                         lateness_secs = lateness,
                         "skipping missed schedule tick (past the grace window)"
                     );
-                }
+                    None
+                };
 
-                // Advance a cron to its next tick; drop a one-shot (or a cron that will never
-                // fire again) regardless of whether it fired — same as the Postgres path.
-                match cron.and_then(|c| c.next_after(now)) {
-                    Some(n) => {
-                        if let Some(e) = state.get_mut(&name) {
-                            e.last_run = Some(now);
-                            e.next_run = n;
-                        }
-                    }
-                    None => {
-                        state.remove(&name);
-                    }
-                }
+                // After a successful enqueue/skip, advance a cron to its next tick or drop a
+                // one-shot (or a cron that will never fire again), matching Postgres.
+                let next = cron.and_then(|c| c.next_after(now));
+                plans.push(DuePlan {
+                    name,
+                    claim,
+                    next_run,
+                    enqueue,
+                    next,
+                });
             }
-            deliveries
+            plans
         };
 
         // Phase 2 (unlocked, async): enqueue each delivery through the resolved queue backend,
-        // so a memory-backed schedule actually runs work. Returns the number enqueued.
+        // so a memory-backed schedule actually runs work. Phase 3 settles only after
+        // enqueue succeeds, so transient queue errors leave the schedule retryable.
         let mut enqueued = 0u64;
-        for (queue, payload, opts) in to_enqueue {
-            self.queue.enqueue(&queue, payload, opts).await?;
-            enqueued += 1;
+        for plan in plans {
+            if let Some((queue, payload, opts)) = plan.enqueue {
+                if let Err(e) = self.queue.enqueue(&queue, payload, opts).await {
+                    let mut state = self.lock();
+                    if let Some(entry) = state.get_mut(&plan.name)
+                        && claim_matches(entry, plan.next_run, plan.claim)
+                    {
+                        entry.claim = None;
+                    }
+                    return Err(e);
+                }
+                enqueued += 1;
+            }
+
+            let mut state = self.lock();
+            let should_settle = state
+                .get(&plan.name)
+                .is_some_and(|entry| claim_matches(entry, plan.next_run, plan.claim));
+            if !should_settle {
+                continue;
+            }
+            match plan.next {
+                Some(next) => {
+                    if let Some(entry) = state.get_mut(&plan.name) {
+                        entry.last_run = Some(now);
+                        entry.next_run = next;
+                        entry.claim = None;
+                    }
+                }
+                None => {
+                    state.remove(&plan.name);
+                }
+            }
         }
         Ok(enqueued)
     }
@@ -360,6 +445,9 @@ impl BackendLifecycle for MemSchedule {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::queue::{DequeueOpts, Job, NackOpts, QueueDepth};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     fn b(s: &str) -> Bytes {
@@ -380,6 +468,50 @@ mod tests {
         MemSchedule::new(app.to_string(), mem_queue())
     }
 
+    struct FlakyQueue {
+        inner: Arc<crate::queue::MemQueue>,
+        enqueues: AtomicUsize,
+    }
+
+    impl FlakyQueue {
+        fn new() -> Self {
+            Self {
+                inner: mem_queue(),
+                enqueues: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Queue for FlakyQueue {
+        async fn enqueue(&self, queue: &str, payload: Bytes, opts: EnqueueOpts) -> Result<JobId> {
+            if self.enqueues.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(ForgeError::unavailable("simulated queue outage"));
+            }
+            self.inner.enqueue(queue, payload, opts).await
+        }
+
+        async fn dequeue(&self, queue: &str, opts: DequeueOpts) -> Result<Option<Job>> {
+            self.inner.dequeue(queue, opts).await
+        }
+
+        async fn ack(&self, job: &Job) -> Result<()> {
+            self.inner.ack(job).await
+        }
+
+        async fn nack(&self, job: &Job, opts: NackOpts) -> Result<()> {
+            self.inner.nack(job, opts).await
+        }
+
+        async fn heartbeat(&self, job: &Job) -> Result<()> {
+            self.inner.heartbeat(job).await
+        }
+
+        async fn depth(&self, queue: &str) -> Result<QueueDepth> {
+            self.inner.depth(queue).await
+        }
+    }
+
     #[tokio::test]
     async fn cron_registers_and_lists_with_logical_queue() {
         let s = sched("");
@@ -394,14 +526,20 @@ mod tests {
         assert_eq!(info.kind, ScheduleKind::Cron("0 0 * * *".to_string()));
         assert_eq!(info.queue, "jobs");
         assert!(info.last_run.is_none());
-        assert!(info.next_run > SystemTime::now(), "next tick is in the future");
+        assert!(
+            info.next_run > SystemTime::now(),
+            "next tick is in the future"
+        );
     }
 
     #[tokio::test]
     async fn at_returns_a_job_id_and_lists_as_one_shot() {
         let s = sched("");
         let when = SystemTime::now() + Duration::from_secs(3600);
-        let id = s.at(when, "jobs", b("x"), ScheduleOpts::new()).await.unwrap();
+        let id = s
+            .at(when, "jobs", b("x"), ScheduleOpts::new())
+            .await
+            .unwrap();
         let (items, _) = s.list(None, 100).await.unwrap();
         assert_eq!(items.len(), 1);
         let info = items.first().unwrap();
@@ -453,7 +591,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(s.process_due().await.unwrap(), 0, "past the 1h grace window");
+        assert_eq!(
+            s.process_due().await.unwrap(),
+            0,
+            "past the 1h grace window"
+        );
         let (items, _) = s.list(None, 100).await.unwrap();
         assert!(items.is_empty(), "a skipped one-shot is still cleaned up");
     }
@@ -471,9 +613,11 @@ mod tests {
                     kind: ScheduleKind::Cron("* * * * *".to_string()),
                     target_queue: "jobs".to_string(),
                     payload: b("x"),
+                    job_id: None,
                     opts: ScheduleOpts::new(),
                     next_run: Utc::now() - chrono::Duration::hours(2),
                     last_run: None,
+                    claim: None,
                 },
             );
         }
@@ -582,7 +726,8 @@ mod tests {
     async fn invalid_registrations_are_rejected() {
         let s = sched("");
         assert!(matches!(
-            s.cron("", "0 0 * * *", "q", b("x"), ScheduleOpts::new()).await,
+            s.cron("", "0 0 * * *", "q", b("x"), ScheduleOpts::new())
+                .await,
             Err(ForgeError::Invalid(_))
         ));
         assert!(matches!(
@@ -596,12 +741,14 @@ mod tests {
             Err(ForgeError::Invalid(_))
         ));
         assert!(matches!(
-            s.cron("n", "not a cron", "q", b("x"), ScheduleOpts::new()).await,
+            s.cron("n", "not a cron", "q", b("x"), ScheduleOpts::new())
+                .await,
             Err(ForgeError::Invalid(_))
         ));
         // Feb 30 never exists, so the expression parses but never fires.
         assert!(matches!(
-            s.cron("n", "0 0 30 2 *", "q", b("x"), ScheduleOpts::new()).await,
+            s.cron("n", "0 0 30 2 *", "q", b("x"), ScheduleOpts::new())
+                .await,
             Err(ForgeError::Invalid(_))
         ));
     }
@@ -624,7 +771,13 @@ mod tests {
         let s = MemSchedule::new(String::new(), q.clone());
         // A one-shot 2s in the past fires on the next tick (within the grace window).
         let when = SystemTime::now() - Duration::from_secs(2);
-        s.at(when, "oneshot", b("hello"), ScheduleOpts::new().with_max_attempts(1))
+        let id = s
+            .at(
+                when,
+                "oneshot",
+                b("hello"),
+                ScheduleOpts::new().with_max_attempts(1),
+            )
             .await
             .unwrap();
         // The tick enqueues exactly one job...
@@ -637,9 +790,46 @@ mod tests {
             .await
             .unwrap()
             .expect("the scheduled job was enqueued");
+        assert_eq!(job.id, id);
         assert_eq!(job.payload.as_ref(), b"hello");
         assert_eq!(job.max_attempts, 1);
         // The one-shot is consumed: a second tick delivers nothing.
         assert_eq!(s.process_due().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn process_due_keeps_schedule_pending_when_queue_enqueue_fails() {
+        let q = Arc::new(FlakyQueue::new());
+        let s = MemSchedule::new(String::new(), q.clone());
+        let id = s
+            .at(
+                SystemTime::now() - Duration::from_secs(2),
+                "oneshot",
+                b("hello"),
+                ScheduleOpts::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            s.process_due().await,
+            Err(ForgeError::Unavailable(_))
+        ));
+        let (items, _) = s.list(None, 100).await.unwrap();
+        assert_eq!(
+            items.len(),
+            1,
+            "failed enqueue leaves the schedule retryable"
+        );
+
+        assert_eq!(s.process_due().await.unwrap(), 1);
+        let job = q
+            .dequeue("oneshot", DequeueOpts::new().with_wait(Duration::ZERO))
+            .await
+            .unwrap()
+            .expect("retry enqueued the due job");
+        assert_eq!(job.id, id);
+        let (items, _) = s.list(None, 100).await.unwrap();
+        assert!(items.is_empty(), "successful retry consumes the one-shot");
     }
 }

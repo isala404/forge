@@ -62,101 +62,6 @@ function readBody(req: IncomingMessage, limit: number): Promise<Buffer> {
   });
 }
 
-async function handleBlob(
-  app: AppCtx,
-  req: IncomingMessage,
-  res: ServerResponse,
-  url: URL,
-): Promise<void> {
-  const key = url.searchParams.get("key");
-  const expires = parseInt(url.searchParams.get("expires") || "", 10);
-  const maxBytes = parseInt(url.searchParams.get("max_bytes") || "0", 10) || 0;
-  const sig = url.searchParams.get("sig");
-  if (!key || !sig || !Number.isFinite(expires)) return send(res, 400, "missing params");
-
-  const method = req.method === "PUT" ? "PUT" : req.method === "GET" ? "GET" : null;
-  if (!method) {
-    res.writeHead(405, corsHeaders());
-    return void res.end();
-  }
-
-  let ok: boolean;
-  try {
-    ok = await app.forge.blobVerifyPresign(method, key, expires, maxBytes, sig);
-  } catch (e) {
-    return send(res, 403, "presign check failed: " + (e as Error).message);
-  }
-  if (!ok) return send(res, 403, "forbidden");
-
-  if (method === "PUT") {
-    // Enforce the signed max_bytes while reading, so an oversized body is rejected
-    // before it is buffered — never trust the client to honor the cap it echoed.
-    const cap = maxBytes > 0 ? Math.min(maxBytes, BLOB_BODY_LIMIT) : BLOB_BODY_LIMIT;
-    let body: Buffer;
-    try {
-      body = await readBody(req, cap);
-    } catch {
-      return send(res, 413, "upload exceeds signed max_bytes");
-    }
-    const contentType = req.headers["content-type"] || "application/octet-stream";
-    try {
-      await app.forge.blobPutBytes(key, body, contentType);
-    } catch (e) {
-      return send(res, 500, "upload failed: " + (e as Error).message);
-    }
-    res.writeHead(200, corsHeaders());
-    res.end();
-    return;
-  }
-
-  // One head() gives both the content type and the ETag for conditional requests,
-  // matching the Rust router. The ETag is the storage etag, quoted per RFC 9110.
-  let contentType = "application/octet-stream";
-  let etag: string | null = null;
-  try {
-    const info = await app.forge.blobHead(key);
-    if (info) {
-      if (info.contentType) contentType = info.contentType;
-      etag = `"${info.etag}"`;
-    }
-  } catch {
-    /* keep defaults; a head failure just means no conditional request support */
-  }
-
-  // Honour If-None-Match: a cached client that already holds this exact object gets a bodyless 304 instead of the full payload re-sent.
-  const inm = req.headers["if-none-match"];
-  if (etag && typeof inm === "string" && etagMatches(inm, etag)) {
-    res.writeHead(304, {
-      etag,
-      "cache-control": CACHE_CONTROL,
-      ...corsHeaders(),
-    });
-    return void res.end();
-  }
-
-  let bytes: Buffer | null;
-  try {
-    bytes = await app.forge.blobGetBytes(key);
-  } catch (e) {
-    return send(res, 500, "download failed: " + (e as Error).message);
-  }
-  if (bytes === null) return send(res, 404, "not found");
-  // Match Forge's own blob router: never let a served blob render inline or be
-  // MIME-sniffed, so a member who uploaded text/html or svg can't land stored XSS
-  // on the backend origin.
-  const headers: Record<string, string> = {
-    "content-type": contentType,
-    "content-length": String(bytes.length),
-    "content-disposition": "attachment",
-    "x-content-type-options": "nosniff",
-    "cache-control": CACHE_CONTROL,
-    ...corsHeaders(),
-  };
-  if (etag) headers.etag = etag;
-  res.writeHead(200, headers);
-  res.end(bytes);
-}
-
 export interface RunningServer {
   server: http.Server;
   app: AppCtx;
@@ -206,7 +111,95 @@ export async function startServer(port = parseInt(envOr("PORT", "8082"), 10)): P
       }
       if (path === "/healthz") return send(res, 200, "ok");
       if (path === "/graphql") return void yoga.handle(req, res);
-      if (path.startsWith("/api/files")) return void handleBlob(app, req, res, url);
+      if (path.startsWith("/api/files")) {
+        const key = url.searchParams.get("key");
+        const expires = parseInt(url.searchParams.get("expires") || "", 10);
+        const maxBytes = parseInt(url.searchParams.get("max_bytes") || "0", 10) || 0;
+        const sig = url.searchParams.get("sig");
+        if (!key || !sig || !Number.isFinite(expires)) return send(res, 400, "missing params");
+
+        const method = req.method === "PUT" ? "PUT" : req.method === "GET" ? "GET" : null;
+        if (!method) {
+          res.writeHead(405, corsHeaders());
+          return void res.end();
+        }
+
+        let ok: boolean;
+        try {
+          ok = await app.forge.blobVerifyPresign(method, key, expires, maxBytes, sig);
+        } catch (e) {
+          return send(res, 403, "presign check failed: " + (e as Error).message);
+        }
+        if (!ok) return send(res, 403, "forbidden");
+
+        if (method === "PUT") {
+          // Enforce the signed max_bytes while reading, so an oversized body is
+          // rejected before it is buffered.
+          const cap = maxBytes > 0 ? Math.min(maxBytes, BLOB_BODY_LIMIT) : BLOB_BODY_LIMIT;
+          let body: Buffer;
+          try {
+            body = await readBody(req, cap);
+          } catch {
+            return send(res, 413, "upload exceeds signed max_bytes");
+          }
+          const contentType = req.headers["content-type"] || "application/octet-stream";
+          try {
+            await app.forge.blobPutBytes(key, body, contentType);
+          } catch (e) {
+            return send(res, 500, "upload failed: " + (e as Error).message);
+          }
+          res.writeHead(200, corsHeaders());
+          res.end();
+          return;
+        }
+
+        // One head() gives both the content type and the ETag for conditional
+        // requests, matching the Rust router.
+        let contentType = "application/octet-stream";
+        let etag: string | null = null;
+        try {
+          const info = await app.forge.blobHead(key);
+          if (info) {
+            if (info.contentType) contentType = info.contentType;
+            etag = `"${info.etag}"`;
+          }
+        } catch {
+          /* keep defaults; a head failure just means no conditional request support */
+        }
+
+        const inm = req.headers["if-none-match"];
+        if (etag && typeof inm === "string" && etagMatches(inm, etag)) {
+          res.writeHead(304, {
+            etag,
+            "cache-control": CACHE_CONTROL,
+            ...corsHeaders(),
+          });
+          return void res.end();
+        }
+
+        let bytes: Buffer | null;
+        try {
+          bytes = await app.forge.blobGetBytes(key);
+        } catch (e) {
+          return send(res, 500, "download failed: " + (e as Error).message);
+        }
+        if (bytes === null) return send(res, 404, "not found");
+
+        // Match Forge's own blob router: never let a served blob render inline or
+        // be MIME-sniffed, so uploaded HTML/SVG cannot run on the backend origin.
+        const headers: Record<string, string> = {
+          "content-type": contentType,
+          "content-length": String(bytes.length),
+          "content-disposition": "attachment",
+          "x-content-type-options": "nosniff",
+          "cache-control": CACHE_CONTROL,
+          ...corsHeaders(),
+        };
+        if (etag) headers.etag = etag;
+        res.writeHead(200, headers);
+        res.end(bytes);
+        return;
+      }
       return send(res, 404, "not found");
     } catch (e) {
       console.error("request error:", e);

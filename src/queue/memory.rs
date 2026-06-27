@@ -5,8 +5,7 @@
 //! dedup map keyed by `(<namespace>:<queue>, dedup_id)`. The same physical queue
 //! name (`crate::util::namespaced`) is used, so namespacing is identical. Leasing,
 //! attempt counting, default-backoff redelivery, and `.dlq` redrive match
-//! [`super::PgQueue`]; only the storage differs — there is no SQL and nothing
-//! survives a restart.
+//! [`super::PgQueue`]; only the storage differs: no SQL, nothing survives a restart.
 //!
 //! Redelivery timing follows the same rule as Postgres: an explicit `nack` applies
 //! [`Backoff::default`] (with per-job jitter), while a lease-expiry reclaim makes the
@@ -154,12 +153,10 @@ impl MemQueue {
         }
     }
 
-    /// Reclaim expired leases: exhausted jobs re-home to `.dlq` (attempts reset), the
-    /// rest return to `available` immediately with attempts bumped. With `queue: Some`,
-    /// scoped to that physical queue; `None` sweeps every queue. Mirrors
-    /// [`super::PgQueue::reclaim`] — note re-homing here is unconditional, matching the
-    /// SQL, so a lease-expiry on a `.dlq` job can produce `.dlq.dlq` (the `nack` path's
-    /// terminal `dead` handling does not apply to crash reclaim).
+    /// Reclaim expired leases: exhausted non-DLQ jobs re-home to `.dlq` (attempts reset),
+    /// exhausted DLQ jobs become terminal `dead`, and the rest return to `available`
+    /// immediately with attempts bumped. With `queue: Some`, scoped to that physical queue;
+    /// `None` sweeps every queue. Mirrors [`super::PgQueue::reclaim`].
     fn reclaim_locked(jobs: &mut HashMap<Uuid, JobRow>, now: Instant, queue: Option<&str>) {
         for row in jobs.values_mut() {
             if queue.is_some_and(|q| row.queue != q) {
@@ -170,8 +167,15 @@ impl MemQueue {
             }
             let new_attempts = row.attempts.saturating_add(1);
             if new_attempts >= row.max_attempts {
-                row.queue.push_str(".dlq");
-                row.attempts = 0;
+                if row.queue.ends_with(".dlq") {
+                    row.status = Status::Dead;
+                    row.attempts = new_attempts;
+                    row.clear_lease();
+                    continue;
+                } else {
+                    row.queue.push_str(".dlq");
+                    row.attempts = 0;
+                }
             } else {
                 row.attempts = new_attempts;
             }
@@ -246,16 +250,32 @@ impl Queue for MemQueue {
         let pq = self.physical(queue);
         let mut state = self.lock();
 
-        let id = if let Some(dedup_id) = opts.dedup_id.clone() {
+        let requested_id = opts.job_id.map(|id| id.0);
+        let id = if let Some(dedup_id) = opts.dedup_id {
             let key = (pq.clone(), dedup_id);
             // A live slot returns its existing job id (success, not an error). An expired
-            // slot is overwritten and a fresh job created — matching the Postgres upsert.
+            // slot is overwritten and a fresh job created, matching the Postgres upsert.
             if let Some(entry) = state.dedup.get(&key)
                 && entry.expires_at > now
             {
                 return Ok(JobId(entry.job_id));
             }
-            let id = Uuid::new_v4();
+            let id = requested_id.unwrap_or_else(Uuid::new_v4);
+            if let Some(existing) = state.jobs.get(&id) {
+                if existing.queue == pq {
+                    state.dedup.insert(
+                        key,
+                        DedupEntry {
+                            job_id: id,
+                            expires_at: now + self.dedup_window,
+                        },
+                    );
+                    return Ok(JobId(id));
+                }
+                return Err(ForgeError::precondition(
+                    "requested job id already exists for another queue",
+                ));
+            }
             state.dedup.insert(
                 key,
                 DedupEntry {
@@ -265,9 +285,17 @@ impl Queue for MemQueue {
             );
             id
         } else {
-            Uuid::new_v4()
+            requested_id.unwrap_or_else(Uuid::new_v4)
         };
 
+        if let Some(existing) = state.jobs.get(&id) {
+            if existing.queue == pq {
+                return Ok(JobId(id));
+            }
+            return Err(ForgeError::precondition(
+                "requested job id already exists for another queue",
+            ));
+        }
         state.jobs.insert(
             id,
             JobRow::available(pq, payload, opts.max_attempts, available_at),
@@ -340,7 +368,7 @@ impl Queue for MemQueue {
         };
         if row.status != Status::Leased || row.lease_token != Some(token) {
             return Err(ForgeError::precondition(
-                "lease lost — another worker owns this job",
+                "lease lost: another worker owns this job",
             ));
         }
 
@@ -352,7 +380,7 @@ impl Queue for MemQueue {
                 row.attempts = new_attempts;
                 row.clear_lease();
             } else {
-                // Exhausted — re-home to DLQ with attempts reset so DLQ consumers see a clean slate.
+                // Exhausted: re-home to DLQ with attempts reset so DLQ consumers see a clean slate.
                 row.queue.push_str(".dlq");
                 row.status = Status::Available;
                 row.attempts = 0;
@@ -363,9 +391,9 @@ impl Queue for MemQueue {
         }
 
         // Explicit retry timing wins; otherwise the default backoff curve (with per-job jitter).
-        let delay = opts
-            .retry_in
-            .unwrap_or_else(|| Backoff::default().delay_for_attempt(new_attempts, seed_from_id(id)));
+        let delay = opts.retry_in.unwrap_or_else(|| {
+            Backoff::default().delay_for_attempt(new_attempts, seed_from_id(id))
+        });
         row.status = Status::Available;
         row.attempts = new_attempts;
         row.available_at = now + delay;
@@ -384,7 +412,7 @@ impl Queue for MemQueue {
         };
         if row.status != Status::Leased || row.lease_token != Some(token) {
             return Err(ForgeError::precondition(
-                "lease lost — another worker owns this job",
+                "lease lost: another worker owns this job",
             ));
         }
         if let Some(d) = row.lease_dur {
@@ -394,7 +422,7 @@ impl Queue for MemQueue {
     }
 
     async fn depth(&self, queue: &str) -> Result<QueueDepth> {
-        // Allow `.dlq` names: gauging a dead-letter backlog is the headline use.
+        // Allow `.dlq` names: gauging a dead-letter backlog is a primary use.
         check_queue_name(queue, true)?;
         let pq = self.physical(queue);
         let now = Instant::now();
@@ -601,7 +629,11 @@ mod tests {
         q.nack(&job, NackOpts::retry_in(Duration::ZERO))
             .await
             .unwrap();
-        let again = q.dequeue("work", deq()).await.unwrap().expect("redelivered");
+        let again = q
+            .dequeue("work", deq())
+            .await
+            .unwrap()
+            .expect("redelivered");
         assert_eq!(again.id, job.id);
         assert_eq!(again.attempt, 2, "redelivery increments the attempt");
     }
@@ -647,17 +679,55 @@ mod tests {
             "the exhausted job moved to the dead-letter queue"
         );
 
-        let dead = q.dequeue("send.dlq", deq()).await.unwrap().expect("dlq job");
+        let dead = q
+            .dequeue("send.dlq", deq())
+            .await
+            .unwrap()
+            .expect("dlq job");
         assert_eq!(dead.id, job.id);
         assert_eq!(dead.queue, "send.dlq");
         assert_eq!(dead.attempt, 1, "attempts reset on redrive");
 
-        // Exhausting a job already in a `.dlq` is terminal — no `.dlq.dlq`.
+        // Exhausting a job already in a `.dlq` is terminal: no `.dlq.dlq`.
         q.nack(&dead, NackOpts::default()).await.unwrap();
         assert_eq!(q.depth("send.dlq").await.unwrap(), QueueDepth::new(0, 0, 0));
         assert_eq!(
             q.depth("send.dlq.dlq").await.unwrap(),
             QueueDepth::new(0, 0, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_dlq_lease_becomes_dead_not_chained() {
+        let q = queue();
+        q.enqueue(
+            "send",
+            payload("x"),
+            EnqueueOpts::new().with_max_attempts(1),
+        )
+        .await
+        .unwrap();
+        let job = q.dequeue("send", deq()).await.unwrap().expect("a job");
+        q.nack(&job, NackOpts::default()).await.unwrap();
+
+        let short = DequeueOpts::new()
+            .with_wait(Duration::ZERO)
+            .with_visibility_timeout(Duration::from_millis(1));
+        let dead = q
+            .dequeue("send.dlq", short)
+            .await
+            .unwrap()
+            .expect("dlq job");
+        assert_eq!(dead.queue, "send.dlq");
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        q.maintain_sweep();
+
+        assert_eq!(q.depth("send.dlq").await.unwrap(), QueueDepth::new(0, 0, 0));
+        assert_eq!(
+            q.depth("send.dlq.dlq").await.unwrap(),
+            QueueDepth::new(0, 0, 0),
+            "expired DLQ leases must become dead, not chain into a second DLQ"
         );
     }
 
@@ -689,7 +759,10 @@ mod tests {
             SystemTime::now(),
             Uuid::new_v4(),
         );
-        assert!(matches!(q.heartbeat(&ghost).await, Err(ForgeError::NotFound)));
+        assert!(matches!(
+            q.heartbeat(&ghost).await,
+            Err(ForgeError::NotFound)
+        ));
     }
 
     #[tokio::test]
@@ -764,7 +837,8 @@ mod tests {
         ));
         assert!(
             matches!(
-                q.enqueue("jobs.dlq", payload("x"), EnqueueOpts::new()).await,
+                q.enqueue("jobs.dlq", payload("x"), EnqueueOpts::new())
+                    .await,
                 Err(ForgeError::Invalid(_))
             ),
             "enqueue to a reserved .dlq name is rejected"

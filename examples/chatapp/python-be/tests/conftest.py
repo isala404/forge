@@ -8,17 +8,30 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import socket
 import threading
 import time
+from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
 import pytest
 import pytest_asyncio
 
-TEST_DB = "chatapp_python_be_test"
-ADMIN_URL = "postgres://postgres:forge@127.0.0.1:5432/postgres"
-TEST_URL = f"postgres://postgres:forge@127.0.0.1:5432/{TEST_DB}"
+
+def _database_url(admin_url: str, database: str) -> str:
+    parts = urlsplit(admin_url)
+    return urlunsplit(parts._replace(path=f"/{database}"))
+
+
+TEST_DB = os.environ.get("CHATAPP_TEST_DB", "chatapp_python_be_test")
+if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", TEST_DB):
+    raise ValueError("CHATAPP_TEST_DB must be a simple PostgreSQL identifier")
+ADMIN_URL = os.environ.get(
+    "CHATAPP_TEST_ADMIN_URL",
+    os.environ.get("TEST_DATABASE_URL", "postgres://postgres:forge@127.0.0.1:5432/postgres"),
+)
+TEST_URL = os.environ.get("CHATAPP_TEST_DATABASE_URL", _database_url(ADMIN_URL, TEST_DB))
 
 os.environ["FORGE_POSTGRES_URL"] = TEST_URL
 os.environ["FORGE_BLOB_SIGNING_SECRET"] = "test-secret"
@@ -39,9 +52,16 @@ def _free_port() -> int:
 async def _ensure_db() -> None:
     conn = await asyncpg.connect(ADMIN_URL)
     try:
-        exists = await conn.fetchval("SELECT 1 FROM pg_database WHERE datname=$1", TEST_DB)
-        if not exists:
-            await conn.execute(f'CREATE DATABASE "{TEST_DB}"')
+        await conn.execute(
+            """
+            SELECT pg_terminate_backend(pid)
+            FROM pg_stat_activity
+            WHERE datname = $1 AND pid <> pg_backend_pid()
+            """,
+            TEST_DB,
+        )
+        await conn.execute(f'DROP DATABASE IF EXISTS "{TEST_DB}"')
+        await conn.execute(f'CREATE DATABASE "{TEST_DB}"')
     finally:
         await conn.close()
 

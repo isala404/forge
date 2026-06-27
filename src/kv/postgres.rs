@@ -45,10 +45,9 @@ impl PgKv {
         }
     }
 
-    /// Validate the *physical* key (namespace prefix included) is within the byte
-    /// cap, so a namespaced key can't exceed the btree-entry budget the cap exists
-    /// to protect. Keys may contain `:`; the prefix stays unambiguous because the
-    /// namespace is colon-free.
+    /// Validate the *physical* key (namespace prefix included) against the byte cap,
+    /// so a namespaced key can't exceed it. Keys may contain `:`; the prefix stays
+    /// unambiguous because the namespace is colon-free.
     fn check_key(namespace: &str, key: &str) -> Result<()> {
         let physical = if namespace.is_empty() {
             key.len()
@@ -152,8 +151,8 @@ impl Kv for PgKv {
                 Self::check_key(&self.namespace, k)?;
             }
             let physical: Vec<String> = keys.iter().map(|k| self.physical(k)).collect();
-            // One round-trip; dedup is implicit (the map collapses repeats), and we
-            // re-expand to every input position below to honor order + duplicates.
+            // One round-trip; the map collapses duplicate keys, and we re-expand to
+            // every input position below to honor order and duplicates.
             let rows = sqlx::query!(
                 "SELECT key, value FROM forge_kv \
                  WHERE key = ANY($1) AND (expires_at IS NULL OR expires_at > now())",
@@ -161,18 +160,15 @@ impl Kv for PgKv {
             )
             .fetch_all(&self.pool)
             .await?;
-            // Move each owned row value into `Bytes` (zero-copy: `Bytes::from(Vec<u8>)`
-            // takes the buffer). Re-expanding to input positions is then a cheap refcount
-            // bump per slot, which also makes duplicate input keys cheap.
+            // `Bytes::from(Vec<u8>)` takes the buffer with no copy; re-expanding to input
+            // positions is then a cheap refcount bump, including for duplicate keys.
             let mut found: std::collections::HashMap<String, Bytes> =
                 std::collections::HashMap::with_capacity(rows.len());
             for r in rows {
                 found.insert(r.key, Bytes::from(r.value));
             }
-            let out: Vec<Option<Bytes>> = physical
-                .iter()
-                .map(|pk| found.get(pk).cloned())
-                .collect();
+            let out: Vec<Option<Bytes>> =
+                physical.iter().map(|pk| found.get(pk).cloned()).collect();
             tracing::Span::current().record("kv.hits", out.iter().filter(|v| v.is_some()).count());
             Ok(out)
         })

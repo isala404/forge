@@ -1,16 +1,13 @@
-//! `pubsub` — lightweight publish/subscribe for live fan-out to connected clients.
+//! `pubsub`: lightweight publish/subscribe for live fan-out to connected clients.
 //! Lineage: Postgres `LISTEN`/`NOTIFY`, with Redis pub/sub delivery semantics
 //! (fire-and-forget, no persistence, delivered only to currently-connected
 //! subscribers). See `docs/contracts/pubsub.md`.
 //!
-//! This is the transport behind realtime features (GraphQL subscriptions, live
-//! presence): a request handler `publish`es an event, and every open `subscribe`
-//! stream for that topic receives it. It is deliberately *not* a queue — there is
-//! no durability, ordering guarantee across connections, or redelivery. Use
-//! [`crate::queue::Queue`] when a message must not be lost.
+//! A request handler `publish`es an event, and every open `subscribe` stream for that
+//! topic receives it. Not a queue: no durability, ordering across connections, or
+//! redelivery. Use [`crate::queue::Queue`] when a message must not be lost.
 //!
-//! The contract (the [`Pubsub`] trait, [`Subscription`], [`channel_for`]) lives in
-//! this module, which also wires the Postgres backend.
+//! The [`Pubsub`] trait and [`Subscription`] live here, alongside the Postgres backend.
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -18,13 +15,20 @@ use futures_util::stream::BoxStream;
 
 use crate::error::Result;
 
-/// The Postgres `LISTEN`/`NOTIFY` channel a `topic` maps to. Exposed so a process
-/// in another language (via the bindings) can `LISTEN` on the exact channel that a
-/// `publish` notifies — useful when a host app already holds a native Postgres
-/// connection and prefers to subscribe through it rather than over the FFI boundary.
-pub fn channel_for(topic: &str) -> String {
+pub(crate) fn hashed_channel_for(topic: &str) -> String {
     let h = crate::util::sha256_hex(topic.as_bytes());
     format!("forge_{}", h.get(..32).unwrap_or(h.as_str()))
+}
+
+/// The legacy unnamespaced Postgres `LISTEN`/`NOTIFY` hash for `topic`.
+///
+/// Prefer [`Pubsub::channel_for`] (via `forge.pubsub().channel_for(topic)`); it includes
+/// the configured Forge namespace and any backend-specific mapping.
+#[deprecated(
+    note = "use forge.pubsub().channel_for(topic) so namespaces and backend mapping are honored"
+)]
+pub fn channel_for(topic: &str) -> String {
+    hashed_channel_for(topic)
 }
 
 /// Largest allowed topic in UTF-8 bytes. Over => [`crate::error::ForgeError::Invalid`].
@@ -36,17 +40,20 @@ pub const MAX_TOPIC_BYTES: usize = 256;
 pub const MAX_PAYLOAD_BYTES: usize = 7000;
 
 /// A live stream of payloads for one subscribed topic. Each item is one published
-/// message; transient connection drops are re-established transparently, so the
-/// stream ends (`None`) only when the shared listener is shut down.
+/// message; transient connection drops are re-established, so the stream ends (`None`)
+/// only when the shared listener is shut down.
 pub type Subscription = BoxStream<'static, Result<Bytes>>;
 
-/// Publish/subscribe over a single Postgres connection. Object-safe; the facade
-/// hands out `&dyn Pubsub` via `forge::Forge::pubsub`.
+/// Publish/subscribe over a single Postgres connection. Reached via `forge::Forge::pubsub`.
 ///
-/// Exact delivery semantics (at-most-once, connected-only, no persistence) are in
+/// Delivery semantics (at-most-once, connected-only, no persistence) are in
 /// `docs/contracts/pubsub.md`.
 #[async_trait]
 pub trait Pubsub: Send + Sync {
+    /// The backend channel a topic maps to. For Postgres, the `LISTEN`/`NOTIFY`
+    /// channel, including any Forge namespace prefixing.
+    fn channel_for(&self, topic: &str) -> Result<String>;
+
     /// Publish `payload` to every subscriber currently listening on `topic`.
     ///
     /// Fire-and-forget: returns `Ok` even with zero subscribers, and a message

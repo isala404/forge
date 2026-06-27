@@ -1,4 +1,4 @@
-"""Cross-language conformance runner — Python side.
+"""Cross-language conformance runner, Python side.
 
 Reads the shared scenario matrix in src/conformance/scenarios/*.json and runs
 each scenario against the forge_py binding on a throwaway database. Asserts the
@@ -12,7 +12,9 @@ import asyncio
 import json
 import os
 import pathlib
+import shutil
 import sys
+import tempfile
 import time
 import uuid
 
@@ -47,7 +49,7 @@ def admin_exec(sql: str) -> None:
         conn.execute(sql)
 
 
-# error mapping — exception class name is the canonical code
+# error mapping: exception class name is the canonical code
 CODES = {"Config", "Unavailable", "NotFound", "Precondition", "Limit", "Invalid", "Backend"}
 
 
@@ -82,6 +84,64 @@ def value_to_bytes(v):
     if isinstance(v, dict) and "$bytes" in v:
         return bytes(v["$bytes"])
     raise ValueError(f"cannot coerce value to bytes: {v!r}")
+
+
+def provider(report, primitive: str):
+    for row in report:
+        if row.primitive == primitive:
+            return row.provider
+    return None
+
+
+def restore_env(saved):
+    for key, value in saved.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+
+async def run_backend_selection_smoke():
+    name = "forge_conf_" + uuid.uuid4().hex[:12]
+    admin_exec(f'CREATE DATABASE "{name}"')
+    url = swap_db(ADMIN_URL, name)
+    root = tempfile.mkdtemp(prefix="forge-py-blob-")
+    keys = [
+        "FORGE_POSTGRES_URL",
+        "FORGE_BLOB_SIGNING_SECRET",
+        "FORGE_QUEUE_BACKEND",
+        "FORGE_BLOB_BACKEND",
+        "FORGE_BLOB_FS_ROOT",
+    ]
+    saved = {key: os.environ.get(key) for key in keys}
+    try:
+        os.environ["FORGE_POSTGRES_URL"] = url
+        os.environ["FORGE_BLOB_SIGNING_SECRET"] = SIGNING_SECRET
+        os.environ["FORGE_QUEUE_BACKEND"] = "memory"
+        os.environ["FORGE_BLOB_BACKEND"] = "filesystem"
+        os.environ["FORGE_BLOB_FS_ROOT"] = root
+
+        client = await forge_py.ForgeClient.connect_from_env()
+        report = client.backend_report()
+        if provider(report, "queue") != "memory":
+            raise AssertionError("queue backend was not memory")
+        if provider(report, "blob") != "filesystem":
+            raise AssertionError("blob backend was not filesystem")
+
+        await client.queue_enqueue("swapq", "hello")
+        job = await client.queue_dequeue("swapq", 30, 0)
+        if job is None or job.payload != "hello":
+            raise AssertionError("memory queue smoke failed")
+        await client.queue_ack(job.receipt)
+
+        await client.blob_put("swap/blob.txt", b"blob", "text/plain")
+        if await client.blob_get("swap/blob.txt") != b"blob":
+            raise AssertionError("filesystem blob smoke failed")
+    finally:
+        restore_env(saved)
+        shutil.rmtree(root, ignore_errors=True)
+        admin_exec(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+    print("PASS  backend/env_backend_selection")
 
 
 def parse_presign(url, key, method):
@@ -397,9 +457,14 @@ async def main():
                 passed += 1
                 print(f"XFAIL {key}: {err}")
             elif err is None and expected_fail:
-                problems.append(f"{key}: PASSED but is a registered python gap — remove it from known_gaps.json")
+                problems.append(f"{key}: PASSED but is a registered python gap; remove it from known_gaps.json")
             else:
                 problems.append(f"{key}: {err}")
+    try:
+        await run_backend_selection_smoke()
+        passed += 1
+    except Exception as e:  # noqa: BLE001
+        problems.append(f"backend/env_backend_selection: {e}")
     print(f"\nconformance(python): {passed} ok, {len(problems)} unexpected")
     if problems:
         print("unexpected conformance results:\n  " + "\n  ".join(problems), file=sys.stderr)

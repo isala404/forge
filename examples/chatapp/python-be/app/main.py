@@ -31,7 +31,7 @@ class ChatGraphQLRouter(GraphQLRouter):
     async def on_ws_connect(self, context):
         # A socket with no token stays anonymous (subscriptions then fail at
         # require_user, as before). But a token that's present and does NOT validate
-        # must not open even an anonymous socket — reject the handshake.
+        # must not open even an anonymous socket: reject the handshake.
         if context.has_token() and await context.revalidate() is None:
             raise ConnectionRejectionError()
         return await super().on_ws_connect(context)
@@ -58,8 +58,12 @@ def build_app() -> FastAPI:
             "postgres://postgres:forge@127.0.0.1:5432/chatapp_python_be",
         )
         secret = env("FORGE_BLOB_SIGNING_SECRET", "dev-secret-change-me")
-        # connect migrates Forge's system tables at startup; it owns its database.
-        forge = await forge_py.ForgeClient.connect(pg, secret)
+        os.environ.setdefault("FORGE_POSTGRES_URL", pg)
+        os.environ.setdefault("FORGE_BLOB_SIGNING_SECRET", secret)
+        os.environ.setdefault("FORGE_BLOB_BASE_URL", "/api/files")
+        # connect_from_env migrates Forge's system tables and honors backend selectors
+        # such as FORGE_QUEUE_BACKEND / FORGE_BLOB_BACKEND.
+        forge = await forge_py.ForgeClient.connect_from_env()
         pool = await asyncpg.create_pool(pg, min_size=1, max_size=10)
         await db.migrate(pool)
 

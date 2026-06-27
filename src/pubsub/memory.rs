@@ -2,16 +2,15 @@
 //!
 //! A `Mutex<HashMap>` of `channel -> tokio::sync::broadcast::Sender`, keyed by the
 //! same hashed `<namespace>:<topic>` channel the Postgres backend derives, so
-//! namespacing and topic-to-channel mapping are identical. `publish` fans a message
-//! out to every receiver currently live on that channel; `subscribe` hands back a
-//! stream of payloads published *after* it returns. Delivery is fire-and-forget and
-//! connected-only, exactly like [`super::PgPubsub`] — the one difference being that
-//! the broadcast never leaves this process. That is the declared caveat: there is no
-//! cross-process / cross-replica delivery here, where `LISTEN`/`NOTIFY` would have it.
+//! namespacing and topic-to-channel mapping match. `publish` fans a message out to
+//! every receiver currently live on that channel; `subscribe` hands back a stream of
+//! payloads published *after* it returns. Delivery is fire-and-forget and
+//! connected-only like [`super::PgPubsub`], the difference being that the broadcast
+//! never leaves this process: no cross-process / cross-replica delivery, where
+//! `LISTEN`/`NOTIFY` would have it.
 //!
 //! Subscriberless channels are reclaimed lazily on the hot path (a `publish` whose
-//! send finds no receivers drops the channel) and in bulk by `maintain`, mirroring the
-//! kv backend's lazy-purge-plus-sweep model.
+//! send finds no receivers drops the channel) and in bulk by `maintain`.
 
 use super::{MAX_PAYLOAD_BYTES, MAX_TOPIC_BYTES, Pubsub, Subscription};
 use crate::backend::{BackendLifecycle, Primitive};
@@ -51,10 +50,10 @@ impl MemPubsub {
     }
 
     /// Map an arbitrary topic onto a channel name, mixing in the namespace so two
-    /// apps' identical topics resolve to different channels — the exact scheme the
-    /// Postgres backend uses, so a topic resolves the same way in either backend.
+    /// apps' identical topics resolve to different channels. Same scheme as the
+    /// Postgres backend, so a topic resolves the same way in either.
     fn channel(&self, topic: &str) -> String {
-        super::channel_for(&crate::util::namespaced(&self.namespace, topic))
+        super::hashed_channel_for(&crate::util::namespaced(&self.namespace, topic))
     }
 
     fn check_topic(topic: &str) -> Result<()> {
@@ -79,6 +78,11 @@ impl MemPubsub {
 
 #[async_trait]
 impl Pubsub for MemPubsub {
+    fn channel_for(&self, topic: &str) -> Result<String> {
+        Self::check_topic(topic)?;
+        Ok(self.channel(topic))
+    }
+
     async fn publish(&self, topic: &str, payload: Bytes) -> Result<()> {
         Self::check_topic(topic)?;
         if payload.len() > MAX_PAYLOAD_BYTES {
@@ -115,7 +119,7 @@ impl Pubsub for MemPubsub {
 
         // Subscribe to the channel's sender (creating it on first subscribe). The
         // receiver captures the sender's current position, so only messages published
-        // after this point are delivered — matching the connected-only contract.
+        // after this point are delivered, matching the connected-only contract.
         let rx = self
             .lock()
             .entry(channel)
@@ -124,8 +128,8 @@ impl Pubsub for MemPubsub {
 
         // A lagging subscriber skips dropped messages rather than erroring the stream.
         // The stream ends (`Closed`) only once the sender is gone, which can't happen
-        // while this receiver is live (a channel is dropped only with zero receivers) —
-        // so in practice it ends when the consumer drops the stream to unsubscribe.
+        // while this receiver is live (a channel is dropped only with zero receivers), so
+        // in practice it ends when the consumer drops the stream to unsubscribe.
         let stream = futures_util::stream::unfold(rx, |mut rx| async move {
             loop {
                 match rx.recv().await {
@@ -248,8 +252,16 @@ mod tests {
         let a = MemPubsub::new("app_a".to_string());
         let bb = MemPubsub::new("app_b".to_string());
         assert_ne!(a.channel("shared"), bb.channel("shared"));
+        assert_ne!(
+            a.channel_for("shared").unwrap(),
+            super::super::hashed_channel_for("shared"),
+            "the backend channel method must include namespace prefixing"
+        );
         let none = MemPubsub::new(String::new());
-        assert_eq!(none.channel("shared"), super::super::channel_for("shared"));
+        assert_eq!(
+            none.channel_for("shared").unwrap(),
+            super::super::hashed_channel_for("shared")
+        );
 
         // Observably, one app's publish never reaches another app's subscriber.
         let mut sub_b = bb.subscribe("shared").await.unwrap();
@@ -272,10 +284,7 @@ mod tests {
         // The subscriber is gone but its sender lingers in the map; a publish that finds
         // no receivers reclaims it on the spot rather than leaking it.
         ps.publish("t", b("x")).await.unwrap();
-        assert!(
-            ps.lock().is_empty(),
-            "a publish to a dead channel drops it"
-        );
+        assert!(ps.lock().is_empty(), "a publish to a dead channel drops it");
     }
 
     #[tokio::test]

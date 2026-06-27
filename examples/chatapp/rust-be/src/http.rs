@@ -1,6 +1,6 @@
 //! HTTP surface: GET and POST /graphql both serve queries (the SPA's urql client sends
 //! queries over GET), and a GET with an `Upgrade` header is the graphql-transport-ws
-//! subscription handshake — all on one endpoint, Bearer-authenticated, plus permissive
+//! subscription handshake, all on one endpoint, Bearer-authenticated, plus permissive
 //! CORS for the cross-origin SPA. A bearer validates as either a Forge session (sliding
 //! idle) or an API key → `user_id`.
 
@@ -71,7 +71,7 @@ async fn graphql_handler(
 }
 
 /// A GET to `/graphql` is either a graphql-transport-ws upgrade (subscriptions, carries an
-/// `Upgrade` header) or a plain query — urql sends queries over GET. Dispatch on the header
+/// `Upgrade` header) or a plain query; urql sends queries over GET. Dispatch on the header
 /// so both share the one endpoint, exactly as the Node and Python backends do.
 async fn graphql_get(State(st): State<AppState>, req: Request) -> Response {
     if req.headers().contains_key(header::UPGRADE) {

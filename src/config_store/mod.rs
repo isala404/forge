@@ -1,11 +1,8 @@
-//! `config` (+ flags) — lineage: 12-factor env precedence + OpenFeature. See
+//! `config` (+ flags). Lineage: 12-factor env precedence + OpenFeature. See
 //! `docs/contracts/config.md`.
 //!
 //! The trait is [`ConfigStore`] (module `config_store`) so it never collides with
 //! `forge::ForgeConfig`; the facade accessor is `forge.config()`.
-//!
-//! The contract (the [`ConfigStore`] trait, [`ConfigExt`], [`EvalCtx`], [`FlagRule`])
-//! lives in this module, which also wires the Postgres backend.
 
 use crate::error::{ForgeError, Result};
 use async_trait::async_trait;

@@ -1,6 +1,6 @@
 //! Presigned-URL signing: HMAC-SHA256 over a canonical `(method, key, expiry,
 //! max_bytes)` string. Shared by `presign_*` (signing) and the router (verifying), so
-//! the two can never drift. No axum/HTTP dependency lives here — only the crypto.
+//! the two can never drift. No axum/HTTP dependency lives here, only the crypto.
 
 use crate::error::{ForgeError, Result};
 use hmac::{Hmac, Mac};
@@ -48,7 +48,7 @@ pub(crate) fn sign(
 }
 
 /// Constant-time verification of a hex signature against the canonical string.
-/// A malformed (non-hex) signature, or any mismatch, returns `false` — never panics.
+/// A malformed (non-hex) signature, or any mismatch, returns `false`, never panics.
 /// Consumed by `Blob::verify_presigned`.
 pub(crate) fn verify(
     secret: &[u8],

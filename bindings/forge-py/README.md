@@ -2,7 +2,7 @@
 
 Python bindings for Forge via [pyo3](https://pyo3.rs). A **natively async**
 `ForgeClient` over the async Rust core: every method returns an awaitable driven on a
-shared Tokio runtime, so an asyncio app `await`s the binding directly — no thread-pool
+shared Tokio runtime, so an asyncio app `await`s the binding directly: no thread-pool
 wrapper, the event loop is never blocked. The full primitive surface is exposed (kv,
 queue, config, ratelimit, blob, auth, schedule, pubsub), plus `backend_report`.
 

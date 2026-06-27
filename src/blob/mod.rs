@@ -1,4 +1,4 @@
-//! `blob` — lineage: AWS S3 API. See `docs/contracts/blob.md`.
+//! `blob`. Lineage: AWS S3 API. See `docs/contracts/blob.md`.
 //!
 //! Object storage keyed by `/`-delimited path strings. Whole-body `put`/`get` (no
 //! streaming/multipart in v1), `head`/`delete`/`list`, and HMAC-signed presigned

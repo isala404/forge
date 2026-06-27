@@ -1,6 +1,6 @@
-//! Shared Postgres backend infrastructure: pool construction, init-time probes,
-//! and the embedded migration runner. Every connection failure is a
-//! [`ForgeError::Config`]: misconfiguration fails loudly in `Forge::init`, never lazily on first use.
+//! Shared Postgres backend infrastructure: pool construction, init-time probes, and the
+//! embedded migration runner. Every connection failure is a [`ForgeError::Config`], so
+//! misconfiguration fails in `Forge::init`, never lazily on first use.
 
 mod migrations;
 pub(crate) use migrations::MigrationRunner;
@@ -20,15 +20,17 @@ pub(crate) async fn connect(db: &DatabaseConfig) -> Result<sqlx::PgPool> {
         .map_err(|e| ForgeError::config(format!("invalid postgres connection string: {e}")))?
         .application_name("forge");
 
-    // Conservative server-side ceilings, set at connection startup (applied on every
-    // reconnect, no extra round-trip, no query text => the offline sqlx cache is
-    // untouched). These bound runtime statements; migrations override them inline with
-    // their own longer `SET LOCAL` limits. A zero `Duration` opts out of that ceiling.
-    // statement_timeout/lock_timeout/idle_in_transaction_session_timeout take a unitless
-    // integer as milliseconds.
+    // Server-side ceilings applied at connection startup (on every reconnect, no extra
+    // round-trip, no query text, so the offline sqlx cache stays untouched). They bound
+    // runtime statements; migrations override them inline with their own longer `SET LOCAL`
+    // limits. A zero `Duration` opts out. These timeouts take milliseconds as a unitless
+    // integer.
     let mut runtime_opts: Vec<(&str, String)> = Vec::new();
     if !db.statement_timeout.is_zero() {
-        runtime_opts.push(("statement_timeout", db.statement_timeout.as_millis().to_string()));
+        runtime_opts.push((
+            "statement_timeout",
+            db.statement_timeout.as_millis().to_string(),
+        ));
     }
     if !db.lock_timeout.is_zero() {
         runtime_opts.push(("lock_timeout", db.lock_timeout.as_millis().to_string()));

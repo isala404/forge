@@ -1,7 +1,6 @@
-//! Python bindings for Forge via pyo3 — natively asynchronous.
-//!
-//! Every method returns a Python awaitable driven on a shared Tokio runtime
-//! (`pyo3-async-runtimes`), so an asyncio app `await`s the binding directly:
+//! Python bindings for Forge via pyo3. Natively async: every method returns a Python
+//! awaitable driven on a shared Tokio runtime (`pyo3-async-runtimes`), so an asyncio app
+//! `await`s the binding directly:
 //!
 //! ```python
 //! forge = await ForgeClient.connect(url, signing_secret)
@@ -10,10 +9,10 @@
 //!     ...
 //! ```
 //!
-//! There is no thread-pool wrapper to write: the binding never blocks the event
-//! loop. Forge errors surface as typed exceptions (`forge_py.NotFound`,
-//! `forge_py.Limit`, …, all subclasses of `forge_py.ForgeError`). Leased queue jobs
-//! are held Rust-side and referenced by id, as in the Node binding.
+//! The binding never blocks the event loop. Forge errors surface as typed exceptions
+//! (`forge_py.NotFound`, `forge_py.Limit`, …, all subclasses of `forge_py.ForgeError`).
+//! Leased queue jobs are held Rust-side and referenced by delivery-unique receipt, as in
+//! the Node binding.
 
 // `Limit` is intentionally NOT imported by name: the `Limit` exception type below
 // would collide with `forge::Limit`. It is referenced fully-qualified where used.
@@ -61,10 +60,9 @@ fn pyerr(e: forge::ForgeError) -> PyErr {
     }
 }
 
-/// Convert an `f64` seconds value into a `Duration`, raising `Invalid` on a
-/// negative or non-finite input. Zero passes straight through so the core applies
-/// its own validation: bindings convert and pass through, they never clamp or
-/// silently coerce a caller's out-of-range value (P0-5).
+/// Convert `f64` seconds to a `Duration`, raising `Invalid` on negative or non-finite
+/// input. Zero passes through so the core runs its own validation; the binding never
+/// clamps or coerces an out-of-range value.
 fn secs(field: &str, value: f64) -> PyResult<Duration> {
     Duration::try_from_secs_f64(value).map_err(|_| {
         pyerr(forge::ForgeError::invalid(format!(
@@ -103,9 +101,9 @@ fn epoch_ms(t: SystemTime) -> f64 {
         .unwrap_or(0.0)
 }
 
-// The cross-language value DTOs (Job, Decision, BlobInfo, …) are generated from one
-// schema shared with the Node binding — see tools/codegen/src/schema.rs. Regenerate with
-// the codegen tool; never hand-edit.
+// The value DTOs (Job, Decision, BlobInfo, …) are generated from one schema shared with
+// the Node binding (tools/codegen/src/schema.rs). Regenerate with the codegen tool;
+// never hand-edit.
 include!("types.generated.rs");
 
 /// A live subscription, usable as a Python async iterator
@@ -133,9 +131,9 @@ impl Subscription {
         })
     }
 
-    /// Unsubscribe now, releasing the broadcast receiver deterministically instead
-    /// of waiting for GC. Idempotent; the iterator then stops. Call when a client's
-    /// connection closes (e.g. a GraphQL subscription's WebSocket).
+    /// Unsubscribe now, releasing the broadcast receiver instead of waiting for GC. Call when a
+    /// client's connection closes (e.g. a GraphQL subscription's WebSocket). Idempotent; the
+    /// iterator then stops.
     fn aclose<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         future_into_py(py, async move {
@@ -162,7 +160,7 @@ struct ForgeClient {
 
 #[pymethods]
 impl ForgeClient {
-    /// Connect, migrate the system database, and ping — mirrors `Forge::init`. Pass
+    /// Connect, migrate the system database, and ping (mirrors `Forge::init`). Pass
     /// `signing_secret` to enable presigned blob URLs. `await` it.
     #[staticmethod]
     #[pyo3(signature = (postgres_url, signing_secret=None))]
@@ -186,8 +184,8 @@ impl ForgeClient {
     }
 
     /// Connect using the `FORGE_*` environment variables (`FORGE_POSTGRES_URL`,
-    /// `FORGE_KV_NAMESPACE`, `FORGE_BLOB_BACKEND`, …) — the same vars that drive the
-    /// Rust crate, so config is identical across all three languages. `await` it.
+    /// `FORGE_KV_NAMESPACE`, `FORGE_BLOB_BACKEND`, …), the same vars that drive the Rust
+    /// crate. `await` it.
     #[staticmethod]
     fn connect_from_env(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
         future_into_py(py, async move {
@@ -268,7 +266,7 @@ impl ForgeClient {
         })
     }
 
-    /// `GET key` → the raw value bytes, or `None`. Lossless, unlike `kv_get` (P0-4).
+    /// `GET key` → the raw value bytes, or `None`. Lossless, unlike `kv_get`.
     fn kv_get_bytes<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, PyAny>> {
         let forge = self.forge.clone();
         future_into_py(py, async move {
@@ -515,7 +513,7 @@ impl ForgeClient {
 
     /// Whether a stored PHC `hash` should be re-hashed (its argon2id params are below
     /// the current Forge baseline). Call after a successful `verify_password`; if
-    /// `True`, re-hash the plaintext and persist it — transparent upgrade, no reset.
+    /// `True`, re-hash the plaintext and persist it (transparent upgrade, no reset).
     fn needs_rehash(&self, hash: String) -> bool {
         self.forge.auth().needs_rehash(&forge::PhcString::new(hash))
     }
@@ -756,9 +754,8 @@ impl ForgeClient {
                         queue: job.queue.clone(),
                     };
                     let mut map = leased.lock().await;
-                    // Leak backstop: drop entries whose lease lapsed over 24h ago. The
-                    // grace far exceeds any heartbeat window, so a heartbeated job is
-                    // never evicted mid-flight.
+                    // Leak backstop: drop entries whose last observed lease/heartbeat
+                    // lapsed over 24h ago.
                     let cutoff = SystemTime::now() - Duration::from_secs(24 * 60 * 60);
                     map.retain(|_, j| j.leased_until > cutoff);
                     map.insert(receipt, job);
@@ -783,7 +780,7 @@ impl ForgeClient {
     }
 
     /// Nack a leased job by its `receipt`. Raises `Precondition` if the receipt is
-    /// unknown (the lease was lost — stop working on this job).
+    /// unknown (the lease was lost; stop working on this job).
     #[pyo3(signature = (receipt, retry_seconds=None))]
     fn queue_nack<'py>(
         &self,
@@ -825,7 +822,13 @@ impl ForgeClient {
                     "unknown receipt: the lease was lost",
                 )));
             };
-            forge.queue().heartbeat(&job).await.map_err(pyerr)
+            forge.queue().heartbeat(&job).await.map_err(pyerr)?;
+            if let Some(stored) = leased.lock().await.get_mut(&receipt) {
+                if stored.id == job.id && stored.lease_token() == job.lease_token() {
+                    stored.leased_until = SystemTime::now();
+                }
+            }
+            Ok(())
         })
     }
 
@@ -860,8 +863,8 @@ impl ForgeClient {
 
     /// The Postgres `LISTEN`/`NOTIFY` channel a topic maps to. Pure and cheap; kept
     /// for parity with the Node binding. Prefer `pubsub_subscribe`.
-    fn pubsub_channel(&self, topic: String) -> String {
-        forge::pubsub::channel_for(&topic)
+    fn pubsub_channel(&self, topic: String) -> PyResult<String> {
+        self.forge.pubsub().channel_for(&topic).map_err(pyerr)
     }
 
     /// Connect with the full per-deployment option surface (namespace, pool size,
@@ -1115,7 +1118,7 @@ impl ForgeClient {
     }
 
     /// Cancel a one-shot scheduled by `schedule_at`, by the JobId it returned. `True`
-    /// if it was still pending and removed, `False` otherwise. (Send-later recall.)
+    /// if it was still pending and removed, `False` otherwise.
     fn schedule_cancel_at<'py>(
         &self,
         py: Python<'py>,
@@ -1133,7 +1136,7 @@ impl ForgeClient {
 
     /// List registered schedules, ordered by name, up to `limit` per page (default
     /// 100) plus an opaque next-page `cursor` (`None` when done). Returns a
-    /// `SchedulePage`; pass its `cursor` back to page through a large backlog.
+    /// `SchedulePage`; pass its `cursor` back for the next page.
     #[pyo3(signature = (cursor=None, limit=100))]
     fn schedule_list<'py>(
         &self,

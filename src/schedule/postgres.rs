@@ -1,10 +1,9 @@
 //! Postgres `schedule` backend + ticker. Contract: docs/contracts/schedule.md.
 //!
 //! `cron`/`at` register rows in `forge_schedules`. The ticker ([`PgSchedule::process_due`],
-//! driven by `forge.run_scheduler()`) claims due rows with `FOR UPDATE SKIP LOCKED` and,
-//! in the SAME transaction, inserts a job into `forge_jobs` and advances/deletes the
-//! schedule row — so a tick enqueues exactly once across all replicas (the row claim
-//! is the synchronization point) and never loses a tick to a crash between the two.
+//! driven by `forge.run_scheduler()`) claims due rows with `FOR UPDATE SKIP LOCKED`, then
+//! delivers through the Forge instance's resolved queue backend. Postgres is only the
+//! schedule coordinator here; the target queue can be Postgres, memory, or injected.
 
 use super::cron::Cron;
 use super::{
@@ -12,12 +11,14 @@ use super::{
 };
 use crate::error::{ForgeError, Result};
 use crate::obs;
-use crate::queue::{JobId, MAX_PAYLOAD_BYTES};
+use crate::queue::{EnqueueOpts, JobId, MAX_PAYLOAD_BYTES, Queue};
 use crate::types::Cursor;
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
+use sha2::{Digest, Sha256};
+use sqlx::{PgPool, Row};
+use std::sync::Arc;
 use std::time::SystemTime;
 use tracing::field::Empty;
 use uuid::Uuid;
@@ -32,6 +33,8 @@ const TICK_BATCH: i64 = 1000;
 /// Postgres-backed [`Schedule`].
 pub(crate) struct PgSchedule {
     pool: PgPool,
+    /// The Forge instance's resolved queue backend; a due tick enqueues through it.
+    queue: Arc<dyn Queue>,
     /// App namespace: scopes the (name, app) schedule key and is mixed into the
     /// stored target-queue name so a scheduled enqueue lands in this app's queue.
     /// Empty = the unnamespaced app.
@@ -39,8 +42,8 @@ pub(crate) struct PgSchedule {
 }
 
 impl PgSchedule {
-    pub(crate) fn new(pool: PgPool, app: String) -> Self {
-        Self { pool, app }
+    pub(crate) fn new(pool: PgPool, app: String, queue: Arc<dyn Queue>) -> Self {
+        Self { pool, queue, app }
     }
 
     /// The stored (namespaced) target-queue name, matching `PgQueue`'s prefixing.
@@ -50,6 +53,36 @@ impl PgSchedule {
         } else {
             format!("{}:{}", self.app, queue)
         }
+    }
+
+    /// Stable id for one cron tick, so a retry after "queue enqueue succeeded but
+    /// schedule transaction did not commit" is idempotent in built-in queue backends.
+    fn tick_job_id(&self, name: &str, next_run: DateTime<Utc>) -> JobId {
+        let mut h = Sha256::new();
+        h.update(b"forge:schedule:tick:v1");
+        h.update([0]);
+        h.update(self.app.as_bytes());
+        h.update([0]);
+        h.update(name.as_bytes());
+        h.update([0]);
+        let ts = next_run
+            .timestamp_nanos_opt()
+            .map_or_else(|| next_run.to_rfc3339(), |n| n.to_string());
+        h.update(ts.as_bytes());
+
+        let digest = h.finalize();
+        let mut bytes = [0u8; 16];
+        for (dst, src) in bytes.iter_mut().zip(digest.iter()) {
+            *dst = *src;
+        }
+        // Mark as a custom-version UUID with the RFC 4122 variant bits set.
+        if let Some(b) = bytes.get_mut(6) {
+            *b = (*b & 0x0f) | 0x80;
+        }
+        if let Some(b) = bytes.get_mut(8) {
+            *b = (*b & 0x3f) | 0x80;
+        }
+        JobId(Uuid::from_bytes(bytes))
     }
 
     /// Strip the namespace prefix from a stored target-queue name.
@@ -68,9 +101,11 @@ impl PgSchedule {
     /// Fire every due schedule once. Returns how many jobs were enqueued. Idempotent
     /// and safe to run concurrently on many replicas (per-row claim).
     // NOTE (P2-11): up to TICK_BATCH due schedules are processed in one transaction.
-    // A single failing insert rolls back and retries the whole batch on the next
-    // pass. Fine for v1; a per-row savepoint (or a smaller batch) would contain a
-    // poison row so one bad schedule can't stall the others. Revisit at scale.
+    // A single failing enqueue rolls back schedule advancement and retries the whole
+    // batch on the next pass. Fine for v1; a per-row savepoint (or a smaller batch)
+    // would contain a poison row so one bad schedule can't stall the others. Revisit at scale.
+    // Runtime SQL until offline sqlx metadata is regenerated for namespace-scoped ticks.
+    #[allow(clippy::disallowed_methods)]
     async fn process_due_inner(&self) -> Result<u64> {
         let span = tracing::info_span!(
             "forge.schedule.tick",
@@ -80,66 +115,78 @@ impl PgSchedule {
         );
         obs::instrument("schedule", "tick", span, async move {
             let mut tx = self.pool.begin().await?;
-            let due = sqlx::query!(
+            let due = sqlx::query(
                 r#"SELECT name, app, kind, cron_expr, target_queue, payload, job_id,
-                          max_attempts,
-                          EXTRACT(EPOCH FROM (now() - next_run))::float8 AS "lateness!"
+                          next_run, max_attempts,
+                          EXTRACT(EPOCH FROM (now() - next_run))::float8 AS lateness
                    FROM forge_schedules
-                   WHERE next_run <= now()
+                   WHERE next_run <= now() AND app = $2
                    ORDER BY next_run
                    FOR UPDATE SKIP LOCKED
                    LIMIT $1"#,
-                TICK_BATCH,
             )
+            .bind(TICK_BATCH)
+            .bind(&self.app)
             .fetch_all(&mut *tx)
             .await?;
 
             let now = Utc::now();
             let mut fired = 0u64;
             for row in due {
+                let name: String = row.try_get("name")?;
+                let app: String = row.try_get("app")?;
+                let kind: String = row.try_get("kind")?;
+                let cron_expr: Option<String> = row.try_get("cron_expr")?;
+                let target_queue: String = row.try_get("target_queue")?;
+                let payload: Vec<u8> = row.try_get("payload")?;
+                let job_id: Option<Uuid> = row.try_get("job_id")?;
+                let next_run: DateTime<Utc> = row.try_get("next_run")?;
+                let max_attempts: Option<i32> = row.try_get("max_attempts")?;
+                let row_lateness: f64 = row.try_get("lateness")?;
                 // For a cron, the grace decision is measured from the MOST-RECENT missed
                 // tick, not the oldest stored next_run. Otherwise a fast cron (e.g.
                 // `* * * * *`) that fell behind during a long outage is wrongly skipped
                 // wholesale, even though its latest tick is only seconds late and the
                 // contract promises that one fires. One-shot/`at` rows keep next_run.
-                let lateness = if row.kind == "cron" {
-                    row.cron_expr
+                let lateness = if kind == "cron" {
+                    cron_expr
                         .as_deref()
                         .and_then(|e| Cron::parse(e).ok())
                         .and_then(|c| c.prev_or_at(now))
-                        .map_or(row.lateness, |prev| (now - prev).num_seconds() as f64)
+                        .map_or(row_lateness, |prev| (now - prev).num_seconds() as f64)
                 } else {
-                    row.lateness
+                    row_lateness
                 };
                 if lateness <= MISSED_TICK_GRACE_SECS {
-                    let job_id = row.job_id.unwrap_or_else(Uuid::new_v4);
+                    let job_id = job_id
+                        .map(JobId)
+                        .unwrap_or_else(|| self.tick_job_id(&name, next_run));
                     // Unset opts inherit the queue's own enqueue defaults. Retry timing is the
                     // queue's default backoff policy, resolved at delivery time, not persisted.
-                    let max_attempts = row.max_attempts.unwrap_or(5);
-                    sqlx::query!(
-                        "INSERT INTO forge_jobs \
-                           (id, queue, payload, status, attempts, max_attempts, available_at) \
-                         VALUES ($1, $2, $3, 'available', 0, $4, now())",
-                        job_id,
-                        row.target_queue,
-                        row.payload.as_slice(),
-                        max_attempts,
-                    )
-                    .execute(&mut *tx)
-                    .await?;
+                    let mut opts = EnqueueOpts::new().with_job_id(job_id);
+                    if let Some(m) = max_attempts {
+                        opts = opts.with_max_attempts(u32::try_from(m).unwrap_or(0));
+                    }
+                    self.queue
+                        .enqueue(
+                            &self.logical_queue(&target_queue),
+                            Bytes::from(payload),
+                            opts,
+                        )
+                        .await?;
                     fired += 1;
                 } else {
                     tracing::warn!(
-                        schedule.name = %row.name,
+                        schedule.name = %name,
                         lateness_secs = lateness,
                         "skipping missed schedule tick (past the grace window)"
                     );
                 }
 
                 // A cron whose expression no longer parses or never fires again is
-                // silently dropped here rather than erroring — same path as a one-shot.
-                let next = if row.kind == "cron" {
-                    row.cron_expr
+                // silently dropped here rather than erroring, same path as a one-shot.
+                let next = if kind == "cron" {
+                    cron_expr
                         .as_deref()
                         .and_then(|e| Cron::parse(e).ok())
                         .and_then(|c| c.next_after(Utc::now()))
@@ -151,9 +198,9 @@ impl PgSchedule {
                         sqlx::query!(
                             "UPDATE forge_schedules SET last_run = now(), next_run = $2 \
                              WHERE name = $1 AND app = $3",
-                            row.name,
+                            name,
                             n,
-                            row.app,
+                            app,
                         )
                         .execute(&mut *tx)
                         .await?;
@@ -161,8 +208,8 @@ impl PgSchedule {
                     None => {
                         sqlx::query!(
                             "DELETE FROM forge_schedules WHERE name = $1 AND app = $2",
-                            row.name,
-                            row.app,
+                            name,
+                            app,
                         )
                         .execute(&mut *tx)
                         .await?;

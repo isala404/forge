@@ -10,7 +10,19 @@ use serde_json::{Value, json};
 use sqlx::{Connection, Executor, PgConnection};
 use uuid::Uuid;
 
-const ADMIN_URL: &str = "postgres://postgres:forge@127.0.0.1:5432/postgres";
+fn admin_url() -> String {
+    std::env::var("CHATAPP_TEST_ADMIN_URL")
+        .or_else(|_| std::env::var("TEST_DATABASE_URL"))
+        .unwrap_or_else(|_| "postgres://postgres:forge@127.0.0.1:5432/postgres".to_string())
+}
+
+fn database_url(name: &str) -> String {
+    let admin = admin_url();
+    let base = admin
+        .rsplit_once('/')
+        .map_or(admin.as_str(), |(base, _)| base);
+    format!("{base}/{name}")
+}
 
 pub struct Session {
     pub id: String,
@@ -30,7 +42,7 @@ impl Backend {
     pub async fn start() -> Self {
         let db_name = format!("chatapp_rust_test_{}", Uuid::new_v4().simple());
         create_database(&db_name).await;
-        let db_url = format!("postgres://postgres:forge@127.0.0.1:5432/{db_name}");
+        let db_url = database_url(&db_name);
 
         let port = free_port();
         let bin = env!("CARGO_BIN_EXE_chatapp-rust-be");
@@ -160,13 +172,14 @@ impl Backend {
 
 impl Drop for Backend {
     fn drop(&mut self) {
-        // Belt-and-suspenders: if a test panics before `teardown`, still reap the child.
+        // If a test panics before `teardown`, still reap the child.
         let _ = self.child.kill();
     }
 }
 
 async fn create_database(name: &str) {
-    let mut conn = PgConnection::connect(ADMIN_URL)
+    let admin = admin_url();
+    let mut conn = PgConnection::connect(&admin)
         .await
         .expect("connect to admin postgres db");
     // name is a generated uuid suffix, safe to interpolate; CREATE DATABASE cannot bind.
@@ -177,7 +190,8 @@ async fn create_database(name: &str) {
 }
 
 async fn drop_database(name: &str) {
-    if let Ok(mut conn) = PgConnection::connect(ADMIN_URL).await {
+    let admin = admin_url();
+    if let Ok(mut conn) = PgConnection::connect(&admin).await {
         let _ = conn
             .execute(format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)").as_str())
             .await;

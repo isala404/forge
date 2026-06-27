@@ -1,7 +1,7 @@
-# chatapp — Python backend
+# chatapp: Python backend
 
-A pure GraphQL API for the chatapp example: **FastAPI + Strawberry** (code-first schema,
-HTTP + `graphql-transport-ws`), **asyncpg** for the chat tables, and **forge-py** for every
+A pure GraphQL API for the chatapp example: FastAPI + Strawberry (code-first schema,
+HTTP + `graphql-transport-ws`), asyncpg for the chat tables, and forge-py for every
 infra primitive (auth, blob, pubsub, queue, kv, schedule, ratelimit, config).
 
 It serves exactly the canonical `../schema.graphql`. Strawberry is code-first, so parity is

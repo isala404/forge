@@ -4,7 +4,7 @@
 //! `cargo test --features pg-tests` (needs TEST_DATABASE_URL).
 #![cfg(feature = "pg-tests")]
 // Dynamic table-name counts run against throwaway DBs, so the compile-time query macros
-// don't apply — same exception the test harness takes.
+// don't apply; same exception the test harness takes.
 #![allow(clippy::unwrap_used, clippy::panic, clippy::disallowed_methods)]
 
 use bytes::Bytes;
@@ -22,8 +22,7 @@ async fn count(url: &str, table: &str) -> i64 {
     n
 }
 
-/// kv lives on the default database, queue on a separate one. Writes must land in their
-/// own database and nowhere else — proving the two features run on isolated backends.
+/// kv on the default database, queue on a separate one; each write lands only in its own.
 #[tokio::test]
 async fn feature_override_routes_writes_to_its_own_database() {
     let default_db = TestDatabase::new().await.unwrap();
@@ -61,17 +60,15 @@ async fn feature_override_routes_writes_to_its_own_database() {
     assert_eq!(forge.queue().depth("emails").await.unwrap().visible, 1);
 }
 
-/// An override pointed at the *same* server as the default still gets its own pool —
-/// the bulkhead case. Both features must work against the single shared database.
+/// An override pointed at the same server as the default still gets its own pool.
 #[tokio::test]
 async fn same_server_override_uses_a_separate_pool() {
     let db = TestDatabase::new().await.unwrap();
 
-    let cfg = ForgeConfig::new(db.url().to_string())
-        .with_feature_database(
-            Primitive::Kv,
-            DatabaseConfig::new(db.url().to_string()).with_max_connections(2),
-        );
+    let cfg = ForgeConfig::new(db.url().to_string()).with_feature_database(
+        Primitive::Kv,
+        DatabaseConfig::new(db.url().to_string()).with_max_connections(2),
+    );
     let forge = Forge::init(cfg).await.unwrap();
 
     forge

@@ -1,11 +1,7 @@
-//! `queue` — lineage: AWS SQS. See `docs/contracts/queue.md`.
+//! `queue`. Lineage: AWS SQS. See `docs/contracts/queue.md`.
 //!
 //! AT-LEAST-ONCE delivery: a job may be delivered more than once. Consumers
 //! MUST be idempotent. Attempts increment on redelivery, never on claim.
-//!
-//! The contract (the [`Queue`] trait, [`Job`], the option/`Backoff` types) lives in
-//! this module, which also wires the Postgres backend plus the managed [`worker`]
-//! consumer.
 
 use crate::error::{ForgeError, Result};
 use async_trait::async_trait;
@@ -15,7 +11,7 @@ use std::fmt;
 use std::time::{Duration, SystemTime};
 use uuid::Uuid;
 
-/// Largest allowed payload (256 KiB — the SQS `SendMessage` ceiling, enforced
+/// Largest allowed payload (256 KiB, the SQS `SendMessage` ceiling, enforced
 /// so a future SQS backend stays honest). Over => [`crate::error::ForgeError::Limit`].
 pub const MAX_PAYLOAD_BYTES: usize = 256 * 1024;
 
@@ -68,7 +64,7 @@ impl Backoff {
     /// Delay before the `attempt`-th retry (1-based), with ±25% jitter at
     /// millisecond precision. `seed` decorrelates a fleet retrying after a
     /// shared outage; pass something per-job (e.g. id bytes) for that effect.
-    /// Saturating throughout — no panic at high attempt counts.
+    /// Saturating throughout: no panic at high attempt counts.
     pub fn delay_for_attempt(&self, attempt: u32, seed: u64) -> Duration {
         let n = attempt.max(1);
         let Backoff::Exponential { base, cap } = self;
@@ -117,6 +113,11 @@ pub struct EnqueueOpts {
     /// SQS `MessageDeduplicationId`: dedups enqueues per `(queue, dedup_id)`
     /// within the dedup window. `None` disables dedup.
     pub dedup_id: Option<String>,
+    /// Caller-selected id for systems layered on top of queue, such as `schedule`.
+    /// Normal app enqueues leave this unset and let the backend mint an id. Backends
+    /// must treat a repeated same-queue id as idempotent success, including when a
+    /// fresh `dedup_id` is also supplied.
+    pub job_id: Option<JobId>,
 }
 
 impl Default for EnqueueOpts {
@@ -125,6 +126,7 @@ impl Default for EnqueueOpts {
             delay: Duration::ZERO,
             max_attempts: 5,
             dedup_id: None,
+            job_id: None,
         }
     }
 }
@@ -148,6 +150,12 @@ impl EnqueueOpts {
         self.dedup_id = Some(dedup_id.into());
         self
     }
+    /// Set the job id the backend should assign. Intended for Forge primitives that
+    /// need stable correlation across retries; callers usually let queue mint ids.
+    pub fn with_job_id(mut self, job_id: JobId) -> Self {
+        self.job_id = Some(job_id);
+        self
+    }
 }
 
 /// Options for [`Queue::dequeue`].
@@ -156,7 +164,7 @@ impl EnqueueOpts {
 pub struct DequeueOpts {
     /// SQS long-poll `WaitTimeSeconds`, clamped to [`MAX_WAIT`].
     pub wait: Duration,
-    /// SQS `VisibilityTimeout` — the lease duration. `0 < t <=` [`MAX_VISIBILITY_TIMEOUT`].
+    /// SQS `VisibilityTimeout`: the lease duration. `0 < t <=` [`MAX_VISIBILITY_TIMEOUT`].
     pub visibility_timeout: Duration,
 }
 
@@ -263,7 +271,7 @@ pub struct Job {
 impl Job {
     /// Construct a leased job. For backend implementors: a backend mints this from a
     /// claimed row, supplying the per-lease fence `lease_token` that `ack`/`nack`/
-    /// `heartbeat` later check via [`Job::lease_token`]. App code never calls this — it
+    /// `heartbeat` later check via [`Job::lease_token`]. App code never calls this; it
     /// receives `Job`s from [`Queue::dequeue`].
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -294,7 +302,7 @@ impl Job {
     }
 
     /// Deserialize the payload from JSON. A decode failure is
-    /// [`ForgeError::Invalid`] — the payload is caller data, not a backend error.
+    /// [`ForgeError::Invalid`]; the payload is caller data, not a backend error.
     pub fn payload_json<T: DeserializeOwned>(&self) -> Result<T> {
         serde_json::from_slice(&self.payload)
             .map_err(|e| ForgeError::invalid(format!("could not deserialize payload: {e}")))
@@ -327,7 +335,7 @@ pub trait Queue: Send + Sync {
     async fn nack(&self, job: &Job, opts: NackOpts) -> Result<()>;
 
     /// Extend the lease (beanstalkd `touch`). [`crate::error::ForgeError::Precondition`]
-    /// if the lease was already lost to another worker — stop work on this job.
+    /// if the lease was already lost to another worker; stop work on this job.
     async fn heartbeat(&self, job: &Job) -> Result<()>;
 
     /// SQS `GetQueueAttributes`: approximate visible / in-flight / delayed counts

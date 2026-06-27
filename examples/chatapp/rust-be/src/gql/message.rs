@@ -51,7 +51,12 @@ impl MessageMutation {
         let d = c
             .forge
             .ratelimit()
-            .check_with("upload", &user.id.to_string(), upload_limit(), forge::FailMode::Closed)
+            .check_with(
+                "upload",
+                &user.id.to_string(),
+                upload_limit(),
+                forge::FailMode::Closed,
+            )
             .await
             .map_err(map_forge)?;
         if !d.allowed {
@@ -89,7 +94,12 @@ impl MessageMutation {
         let d = c
             .forge
             .ratelimit()
-            .check_with("send", &user.id.to_string(), send_limit(), forge::FailMode::Open)
+            .check_with(
+                "send",
+                &user.id.to_string(),
+                send_limit(),
+                forge::FailMode::Open,
+            )
             .await
             .map_err(map_forge)?;
         if !d.allowed {
@@ -166,7 +176,8 @@ impl MessageMutation {
         .await
         .map_err(map_db)?;
 
-        c.publish(&chat_topic(cid), &Event::Message { message_id: msg_id }).await;
+        c.publish(&chat_topic(cid), &Event::Message { message_id: msg_id })
+            .await;
         enqueue_fanout(c, msg_id).await?;
 
         if let Some(when) = expires_at {
@@ -174,7 +185,12 @@ impl MessageMutation {
                 .map_err(|e| err("BACKEND", e.to_string()))?;
             c.forge
                 .schedule()
-                .at(when.into(), REAP_QUEUE, Bytes::from(payload), forge::ScheduleOpts::new())
+                .at(
+                    when.into(),
+                    REAP_QUEUE,
+                    Bytes::from(payload),
+                    forge::ScheduleOpts::new(),
+                )
                 .await
                 .map_err(map_forge)?;
         }
@@ -197,10 +213,14 @@ impl MessageMutation {
         let cid = parse_id(&chat_id)?;
         require_member(c, cid, user.id).await?;
         let seconds = enabled.then(disappearing_secs);
-        db::set_disappearing(&c.pool, cid, seconds).await.map_err(map_db)?;
+        db::set_disappearing(&c.pool, cid, seconds)
+            .await
+            .map_err(map_db)?;
         // Turning off recalls not-yet-expired messages.
         if !enabled {
-            db::cancel_pending_reaps(&c.pool, cid).await.map_err(map_db)?;
+            db::cancel_pending_reaps(&c.pool, cid)
+                .await
+                .map_err(map_db)?;
         }
         db::chat(&c.pool, cid)
             .await
@@ -224,7 +244,12 @@ impl MessageSubscription {
         let user = me(ctx)?;
         let cid = parse_id(&chat_id)?;
         require_member(&c, cid, user.id).await?;
-        let raw = c.forge.pubsub().subscribe(&chat_topic(cid)).await.map_err(map_forge)?;
+        let raw = c
+            .forge
+            .pubsub()
+            .subscribe(&chat_topic(cid))
+            .await
+            .map_err(map_forge)?;
         let raw = guarded(c.clone(), user, raw);
         Ok(raw.filter_map(move |item| {
             let c = c.clone();

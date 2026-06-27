@@ -446,8 +446,8 @@ pub async fn due_messages(pool: &PgPool, limit: i64) -> Result<Vec<(Uuid, Option
     )
 }
 
-/// Live messages with at least one never-delivered receipt, older than a grace window
-/// — fanout that was likely never enqueued. The sweep re-enqueues fanout for these
+/// Live messages with at least one never-delivered receipt, older than a grace window:
+/// fanout that was likely never enqueued. The sweep re-enqueues fanout for these
 /// (idempotent on `mark_delivered`). Bounded.
 pub async fn undelivered_message_ids(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>> {
     let rows: Vec<(Uuid,)> = sqlx::query_as(

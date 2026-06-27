@@ -1,17 +1,17 @@
 //! Filesystem `blob` backend. Contract: docs/contracts/blob.md.
 //!
-//! Object metadata lives in Postgres (`forge_fs_blobs`); the object *bytes* live on a
-//! configured local directory. This keeps large objects out of the WAL (smaller
-//! backups, less replication/vacuum pressure) at two documented costs: `put` is no
-//! longer atomic with surrounding app SQL (the file is written outside the DB
-//! transaction), and a multi-replica deployment needs a shared mount (or sticky
-//! routing) because each replica resolves bytes from its own filesystem.
+//! Metadata lives in Postgres (`forge_fs_blobs`); the bytes live in a configured local
+//! directory. This keeps large objects out of the WAL (smaller backups, less
+//! replication/vacuum pressure) at two costs: `put` is no longer atomic with surrounding
+//! app SQL (the file is written outside the DB transaction), and a multi-replica
+//! deployment needs a shared mount (or sticky routing) since each replica resolves bytes
+//! from its own filesystem.
 //!
-//! Crash windows are bounded and self-healing: the file is written *before* the
-//! metadata row commits, so a crash in between leaves an orphan file (reclaimed by the
-//! maintenance sweep), never a row pointing at a missing file. A row that does point at
-//! a missing file is treated as not-found. Presign/verify and key checks are shared
-//! with the Postgres backend via [`super::common`], so signing is identical.
+//! Crash windows are bounded: the file is written before the metadata row commits, so a
+//! crash in between leaves an orphan file (reclaimed by the maintenance sweep), never a
+//! row pointing at a missing file. A row that does point at a missing file is treated as
+//! not-found. Presign/verify and key checks are shared with the Postgres backend via
+//! [`super::common`], so signing is identical.
 
 use super::common;
 use super::{Blob, BlobInfo, DEFAULT_CONTENT_TYPE, ListPage, PutOpts};
@@ -21,8 +21,9 @@ use crate::types::Cursor;
 use crate::util::{key_hash, sha256_hex};
 use async_trait::async_trait;
 use bytes::Bytes;
-use sqlx::PgPool;
+use chrono::{DateTime, Utc};
 use sqlx::types::Json;
+use sqlx::{PgPool, Row};
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -70,11 +71,10 @@ impl FsBlob {
         format!("{prefix}/{id}")
     }
 
-    /// Reclaim files on disk that no metadata row references (e.g. a `put` that wrote
-    /// its file then crashed before committing, or an overwrite's superseded file).
-    /// Only files older than [`ORPHAN_GRACE`] are removed, so an in-flight `put` is
-    /// never swept. Returns how many files were removed. Registered on the maintenance
-    /// hook.
+    /// Reclaim files on disk that no metadata row references (a `put` that wrote its file
+    /// then crashed before committing, or an overwrite's superseded file). Only files
+    /// older than [`ORPHAN_GRACE`] are removed, so an in-flight `put` is never swept.
+    /// Registered on the maintenance hook.
     pub(crate) async fn sweep_orphans(&self) -> Result<u64> {
         let referenced: HashSet<String> =
             sqlx::query_scalar!("SELECT data_ref FROM forge_fs_blobs")
@@ -87,7 +87,7 @@ impl FsBlob {
         let mut removed = 0u64;
         let mut prefixes = match tokio::fs::read_dir(&self.root).await {
             Ok(d) => d,
-            // Nothing written yet (or root vanished) — nothing to sweep.
+            // Nothing written yet (or root vanished); nothing to sweep.
             Err(_) => return Ok(0),
         };
         while let Some(prefix_entry) = prefixes.next_entry().await.map_err(fs_err)? {
@@ -123,6 +123,40 @@ impl FsBlob {
             }
         }
         Ok(removed)
+    }
+
+    async fn data_file_exists(&self, data_ref: &str) -> Result<bool> {
+        match tokio::fs::metadata(self.root.join(data_ref)).await {
+            Ok(meta) => Ok(meta.is_file()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::warn!(
+                    data_ref = %data_ref,
+                    "blob row resolves to a missing file (crash window, or replicas without a shared mount)"
+                );
+                Ok(false)
+            }
+            Err(e) => Err(fs_err(e)),
+        }
+    }
+
+    async fn refresh_orphan_grace(&self, data_ref: &str) -> Result<()> {
+        let path = self.root.join(data_ref);
+        let data_ref = data_ref.to_string();
+        tokio::task::spawn_blocking(move || {
+            match std::fs::OpenOptions::new().write(true).open(&path) {
+                Ok(file) => file.set_modified(SystemTime::now()).map_err(fs_err),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    tracing::warn!(
+                        data_ref = %data_ref,
+                        "overwritten blob row pointed at a missing old file"
+                    );
+                    Ok(())
+                }
+                Err(e) => Err(fs_err(e)),
+            }
+        })
+        .await
+        .map_err(|e| ForgeError::backend_with("blob filesystem task join error", true, e))?
     }
 }
 
@@ -169,7 +203,10 @@ impl Blob for FsBlob {
                 .map_err(fs_err)?;
             tokio::fs::rename(&tmp, &path).await.map_err(fs_err)?;
 
-            // Commit metadata; capture any superseded file's ref to delete after commit.
+            // Commit metadata. If overwriting, refresh the superseded file's mtime while
+            // the row still references it: after commit it becomes an orphan, but the
+            // sweep's grace window then starts now, so concurrent readers that saw the
+            // old row never observe a normal overwrite as missing.
             let mut tx = self.pool.begin().await?;
             let old_ref = sqlx::query_scalar!(
                 "SELECT data_ref FROM forge_fs_blobs WHERE key = $1 FOR UPDATE",
@@ -177,6 +214,11 @@ impl Blob for FsBlob {
             )
             .fetch_optional(&mut *tx)
             .await?;
+            if let Some(old) = old_ref.as_deref()
+                && old != data_ref
+            {
+                self.refresh_orphan_grace(old).await?;
+            }
             sqlx::query!(
                 "INSERT INTO forge_fs_blobs \
                    (key, data_ref, content_type, etag, metadata, size, last_modified) \
@@ -195,14 +237,6 @@ impl Blob for FsBlob {
             .execute(&mut *tx)
             .await?;
             tx.commit().await?;
-
-            // Best-effort: drop the overwritten file. If this fails it becomes an
-            // orphan and the sweep reclaims it.
-            if let Some(old) = old_ref
-                && old != data_ref
-            {
-                let _ = tokio::fs::remove_file(self.root.join(&old)).await;
-            }
             Ok(())
         })
         .await
@@ -235,10 +269,10 @@ impl Blob for FsBlob {
                     s.record("blob.size_bytes", bytes.len());
                     Ok(Some(Bytes::from(bytes)))
                 }
-                // Row points at a missing file: treat as not-found per the contract,
-                // but WARN — a *live* row resolving to no file is the crash window
-                // during a put, or the tell of a multi-replica deploy without a shared
-                // mount (each replica sees only its own files).
+                // Row points at a missing file: treat as not-found per the contract, but
+                // warn. A live row resolving to no file is the crash window during a put,
+                // or the tell of a multi-replica deploy without a shared mount (each
+                // replica sees only its own files).
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     s.record("blob.hit", false);
                     tracing::warn!(
@@ -253,6 +287,8 @@ impl Blob for FsBlob {
         .await
     }
 
+    // Runtime SQL until the offline sqlx metadata is regenerated for the data_ref column.
+    #[allow(clippy::disallowed_methods)]
     async fn head(&self, key: &str) -> Result<Option<BlobInfo>> {
         let span = tracing::info_span!(
             "forge.blob.head",
@@ -264,25 +300,34 @@ impl Blob for FsBlob {
         obs::instrument("blob", "head", span, async move {
             common::check_key(key)?;
             let pk = self.shared.physical(key);
-            let row = sqlx::query!(
-                r#"SELECT content_type, etag, size,
-                          metadata AS "metadata: Json<Meta>", last_modified
+            let row = sqlx::query(
+                r#"SELECT data_ref, content_type, etag, size, metadata, last_modified
                    FROM forge_fs_blobs WHERE key = $1"#,
-                pk
             )
+            .bind(pk)
             .fetch_optional(&self.pool)
             .await?;
-            tracing::Span::current().record("blob.hit", row.is_some());
-            Ok(row.map(|r| {
-                BlobInfo::new(
-                    key.to_string(),
-                    u64::try_from(r.size).unwrap_or(0),
-                    r.content_type,
-                    r.etag,
-                    r.last_modified.into(),
-                    r.metadata.0,
-                )
-            }))
+            let Some(row) = row else {
+                tracing::Span::current().record("blob.hit", false);
+                return Ok(None);
+            };
+            let data_ref: String = row.try_get("data_ref")?;
+            if !self.data_file_exists(&data_ref).await? {
+                tracing::Span::current().record("blob.hit", false);
+                return Ok(None);
+            }
+            let size: i64 = row.try_get("size")?;
+            let metadata: Json<Meta> = row.try_get("metadata")?;
+            let last_modified: DateTime<Utc> = row.try_get("last_modified")?;
+            tracing::Span::current().record("blob.hit", true);
+            Ok(Some(BlobInfo::new(
+                key.to_string(),
+                u64::try_from(size).unwrap_or(0),
+                row.try_get("content_type")?,
+                row.try_get("etag")?,
+                last_modified.into(),
+                metadata.0,
+            )))
         })
         .await
     }
@@ -315,6 +360,8 @@ impl Blob for FsBlob {
         .await
     }
 
+    // Runtime SQL until the offline sqlx metadata is regenerated for the data_ref column.
+    #[allow(clippy::disallowed_methods)]
     async fn list(&self, prefix: &str, cursor: Option<Cursor>, limit: u32) -> Result<ListPage> {
         let physical_prefix = self.shared.physical(prefix);
         let pattern = format!("{}%", common::like_escape(&physical_prefix));
@@ -327,37 +374,44 @@ impl Blob for FsBlob {
             error.variant = Empty,
         );
         obs::instrument("blob", "list", span, async move {
-            let rows = sqlx::query!(
-                r#"SELECT key, content_type, etag, size,
-                          metadata AS "metadata: Json<Meta>", last_modified
+            let rows = sqlx::query(
+                r#"SELECT key, data_ref, content_type, etag, size, metadata, last_modified
                    FROM forge_fs_blobs
                    WHERE key LIKE $1 ESCAPE '\' AND ($2::text IS NULL OR key > $2)
                    ORDER BY key LIMIT $3"#,
-                pattern,
-                after,
-                limit_i,
             )
+            .bind(pattern)
+            .bind(after)
+            .bind(limit_i)
             .fetch_all(&self.pool)
             .await?;
 
             let next = if (rows.len() as i64) < limit_i {
                 None
             } else {
-                rows.last().map(|r| Cursor::from_token(r.key.clone()))
+                rows.last()
+                    .and_then(|r| r.try_get::<String, _>("key").ok())
+                    .map(Cursor::from_token)
             };
-            let items = rows
-                .into_iter()
-                .map(|r| {
-                    BlobInfo::new(
-                        self.shared.logical(&r.key).to_string(),
-                        u64::try_from(r.size).unwrap_or(0),
-                        r.content_type,
-                        r.etag,
-                        r.last_modified.into(),
-                        r.metadata.0,
-                    )
-                })
-                .collect::<Vec<_>>();
+            let mut items = Vec::new();
+            for r in rows {
+                let data_ref: String = r.try_get("data_ref")?;
+                if !self.data_file_exists(&data_ref).await? {
+                    continue;
+                }
+                let key: String = r.try_get("key")?;
+                let size: i64 = r.try_get("size")?;
+                let metadata: Json<Meta> = r.try_get("metadata")?;
+                let last_modified: DateTime<Utc> = r.try_get("last_modified")?;
+                items.push(BlobInfo::new(
+                    self.shared.logical(&key).to_string(),
+                    u64::try_from(size).unwrap_or(0),
+                    r.try_get("content_type")?,
+                    r.try_get("etag")?,
+                    last_modified.into(),
+                    metadata.0,
+                ));
+            }
             tracing::Span::current().record("blob.list_returned", items.len());
             Ok(ListPage::new(items, next))
         })

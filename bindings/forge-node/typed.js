@@ -1,8 +1,7 @@
 // Typed projection over the napi ForgeClient: bind a name + JSON codec to a type, so
-// app code enqueues `SendEmail` instead of a raw queue string + JSON.stringify. This
-// is the Node view of the same typed layer the Rust crate exposes (src/typed.rs) and
-// the Python binding exposes (forge_py/typed.py). Plain JS (no build step); the types
-// live in typed.d.ts.
+// app code enqueues `SendEmail` instead of a raw queue string + JSON.stringify. The
+// Node view of the typed layer in the Rust crate (src/typed.rs) and Python binding
+// (forge_py/typed.py). Plain JS (no build step); the types live in typed.d.ts.
 
 'use strict'
 
@@ -117,7 +116,7 @@ class TypedTopic {
   publish(event) {
     return this.client.pubsubPublish(this.topic, JSON.stringify(event))
   }
-  /** Subscribe, yielding decoded events. `for await (const e of topic.subscribe())`. */
+  /** Subscribe; yields decoded events. `for await (const e of topic.subscribe())`. */
   async subscribe() {
     const sub = await this.client.pubsubSubscribe(this.topic)
     return {
@@ -137,16 +136,15 @@ class TypedTopic {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 /**
- * Run the canonical managed worker loop over a queue: dequeue, auto-heartbeat at a
- * third of the visibility window, ack on success / nack on throw, abandon on lease
- * loss, and drain on shutdown. This is the loop every app would otherwise re-invent
- * with subtle bugs (no heartbeat, double-run past the visibility window).
+ * Managed worker loop over a queue: dequeue, auto-heartbeat at a third of the
+ * visibility window, ack on success / nack on throw, abandon on lease loss, drain
+ * on shutdown.
  *
  *   const stop = new AbortController()
  *   runWorker(client, "emails", async (job) => { ... }, { signal: stop.signal })
  *
  * `handler(job)` receives `{ id, attempt, maxAttempts, payload, signal }`; `payload`
- * is the raw string. `signal` aborts if the lease is lost mid-flight — a cooperative
+ * is the raw string. `signal` aborts if the lease is lost mid-flight; a cooperative
  * handler should check it and stop. Returns a promise that resolves when `signal`
  * (opts.signal) aborts and the in-flight job has drained.
  */

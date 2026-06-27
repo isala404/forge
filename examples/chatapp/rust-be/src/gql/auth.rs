@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use async_graphql::{Context, Object, Result};
-use forge::{SessionOpts};
+use forge::SessionOpts;
 use uuid::Uuid;
 
 use crate::context::{Ctx, SESSION_ABSOLUTE, SESSION_IDLE};
@@ -49,7 +49,10 @@ impl AuthMutation {
         if !d.allowed {
             return Err(err("LIMIT", "too many signup attempts; try again later"));
         }
-        if db::username_taken(&c.pool, username).await.map_err(map_db)? {
+        if db::username_taken(&c.pool, username)
+            .await
+            .map_err(map_db)?
+        {
             return Err(err("PRECONDITION", "username already taken"));
         }
         let hash = c

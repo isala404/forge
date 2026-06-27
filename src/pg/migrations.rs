@@ -143,7 +143,7 @@ impl MigrationRunner {
             unknown.sort_unstable();
             return Err(ForgeError::config(format!(
                 "database has migration(s) this binary does not know about: [{}]. \
-                 Refusing to start — the schema is ahead of this binary; deploy the latest version.",
+                 Refusing to start. The schema is ahead of this binary; deploy the latest version.",
                 unknown.join(", ")
             )));
         }
@@ -278,13 +278,13 @@ impl MigrationRunner {
             let now = Instant::now();
             if now >= deadline {
                 return Err(ForgeError::config(format!(
-                    "timed out after {:?} waiting for the migration advisory lock — \
+                    "timed out after {:?} waiting for the migration advisory lock, \
                      another node is migrating or stalled holding it",
                     self.config.lock_acquire_timeout
                 )));
             }
             if now.duration_since(last_warn) >= self.config.lock_warn_interval {
-                warn!("still waiting for the migration lock — another node is holding it");
+                warn!("still waiting for the migration lock, another node is holding it");
                 last_warn = now;
             }
             tokio::time::sleep(self.config.lock_poll_interval).await;
@@ -308,7 +308,7 @@ fn verify_checksum(migration: &Migration, recorded: &str) -> Result<()> {
     if computed != recorded {
         return Err(ForgeError::config(format!(
             "migration '{}' has changed since it was applied (recorded {recorded}, now {computed}). \
-             Migrations are immutable once applied — revert the file or add a new migration.",
+             Migrations are immutable once applied. Revert the file or add a new migration.",
             migration.version
         )));
     }
@@ -333,11 +333,10 @@ fn is_empty_or_comment_only(stmt: &str) -> bool {
         })
 }
 
-/// Consume a `$...$` dollar-quote tag whose opening `$` was just pushed to
-/// `current`. Appends every consumed char to `current` and returns the full tag
-/// (e.g. `$$` or `$body$`). A return that is not `len >= 2 && ends_with('$')`
-/// means no valid tag started here. Shared by the opening and closing scans so
-/// the two stay in lockstep.
+/// Consume a `$...$` dollar-quote tag whose opening `$` was just pushed to `current`,
+/// appending consumed chars to `current` and returning the full tag (e.g. `$$` or
+/// `$body$`). A return that isn't `len >= 2 && ends_with('$')` means no valid tag started
+/// here. Shared by the opening and closing scans so they stay in lockstep.
 fn scan_dollar_tag(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
     current: &mut String,
@@ -362,9 +361,8 @@ fn scan_dollar_tag(
     tag
 }
 
-/// Split SQL into statements, respecting dollar-quoted strings, single-quoted
-/// literals, and `--`/block comments — so semicolons inside `$$` PL/pgSQL bodies
-/// don't split.
+/// Split SQL into statements, respecting dollar-quoted strings, single-quoted literals,
+/// and `--`/block comments, so semicolons inside `$$` PL/pgSQL bodies don't split.
 fn split_sql_statements(sql: &str) -> Vec<String> {
     let mut statements = Vec::new();
     let mut current = String::new();

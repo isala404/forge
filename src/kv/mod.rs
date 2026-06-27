@@ -1,7 +1,7 @@
-//! `kv` — lineage: Redis. See `docs/contracts/kv.md`.
+//! `kv`. Lineage: Redis. See `docs/contracts/kv.md`.
 //!
-//! The contract (the [`Kv`] trait, its DTOs and limits) lives in this module, which
-//! also wires the Postgres backend.
+//! The [`Kv`] trait, its DTOs, and its limits live here; the module also wires the
+//! Postgres backend.
 
 use crate::error::Result;
 use crate::types::Cursor;

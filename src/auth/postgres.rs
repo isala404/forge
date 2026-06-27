@@ -66,8 +66,8 @@ impl PgAuth {
         // capped at validate), so the abs_deadline arm is redundant; dropping it lets
         // the delete use the idle_deadline index instead of seq-scanning.
         let r = sqlx::query!("DELETE FROM forge_sessions WHERE idle_deadline <= now()")
-        .execute(&self.pool)
-        .await?;
+            .execute(&self.pool)
+            .await?;
         Ok(r.rows_affected())
     }
 }
@@ -263,9 +263,7 @@ impl Auth for PgAuth {
             .fetch_optional(&self.pool)
             .await?;
             tracing::Span::current().record("auth.session_valid", row.is_some());
-            Ok(row.map(|r| {
-                Session::new(r.user_id, r.created_at.into(), r.expires_at.into())
-            }))
+            Ok(row.map(|r| Session::new(r.user_id, r.created_at.into(), r.expires_at.into())))
         })
         .await
     }

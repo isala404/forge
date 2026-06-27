@@ -7,7 +7,7 @@ method names are camelCased.
 
 ## Build
 
-The platform binary (`*.node`) is not committed — build it from source:
+The platform binary (`*.node`) is not committed; build it from source:
 
 ```sh
 npm install          # installs @napi-rs/cli

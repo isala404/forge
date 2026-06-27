@@ -3,7 +3,7 @@
 #![allow(clippy::unwrap_used, clippy::panic)]
 
 use forge::testing::TestDatabase;
-use forge::{Bytes, DequeueOpts, ForgeError, ScheduleKind, ScheduleOpts};
+use forge::{Bytes, DequeueOpts, ForgeConfig, ForgeError, ScheduleKind, ScheduleOpts};
 use std::time::{Duration, SystemTime};
 
 #[tokio::test]
@@ -14,7 +14,7 @@ async fn at_fires_a_due_one_shot_into_the_queue() {
     let id = forge
         .schedule()
         .at(
-            SystemTime::now(),
+            SystemTime::now() - Duration::from_secs(2),
             "reports",
             Bytes::from_static(b"r1"),
             ScheduleOpts::new(),
@@ -56,7 +56,7 @@ async fn fast_cron_far_behind_still_fires_its_most_recent_tick() {
 
     // Simulate a long outage: the stored tick is ~90 minutes stale (well past the 1h
     // grace). The most-recent missed tick is still within grace, so recovery must fire
-    // exactly one job — not skip the schedule wholesale. (pg-relative time, so the
+    // exactly one job, not skip the schedule wholesale. (pg-relative time, so the
     // Docker VM clock skew can't flake this.)
     db.execute_raw(
         "UPDATE forge_schedules SET next_run = now() - interval '90 minutes' \
@@ -149,7 +149,7 @@ async fn concurrent_ticks_fire_each_schedule_once() {
         forge
             .schedule()
             .at(
-                SystemTime::now(),
+                SystemTime::now() - Duration::from_secs(2),
                 "burst",
                 Bytes::from(format!("j{i}")),
                 ScheduleOpts::new(),
@@ -166,6 +166,40 @@ async fn concurrent_ticks_fire_each_schedule_once() {
         5,
         "each due schedule fires exactly once across concurrent ticks"
     );
+}
+
+#[tokio::test]
+async fn scheduler_ticks_are_scoped_to_namespace() {
+    let db = TestDatabase::new().await.unwrap();
+    let forge_a = ForgeConfig::new(db.url()).with_kv_namespace("app_a");
+    let forge_b = ForgeConfig::new(db.url()).with_kv_namespace("app_b");
+    let app_a = forge::Forge::init(forge_a).await.unwrap();
+    let app_b = forge::Forge::init(forge_b).await.unwrap();
+
+    let id = app_a
+        .schedule()
+        .at(
+            SystemTime::now() - Duration::from_secs(2),
+            "jobs",
+            Bytes::from_static(b"a"),
+            ScheduleOpts::new(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        app_b.run_scheduler_once().await.unwrap(),
+        0,
+        "app_b must not fire app_a schedules"
+    );
+    assert_eq!(app_a.run_scheduler_once().await.unwrap(), 1);
+    let job = app_a
+        .queue()
+        .dequeue("jobs", DequeueOpts::new().with_wait(Duration::ZERO))
+        .await
+        .unwrap()
+        .expect("app_a's scheduler fires app_a's job");
+    assert_eq!(job.id, id);
 }
 
 #[tokio::test]
@@ -237,7 +271,7 @@ async fn schedule_opts_carry_to_the_enqueued_job() {
     // A one-attempt scheduled job: the opts must reach the tick-time enqueue, not the
     // hardcoded default of 5. Schedule a hair in the past so it is unambiguously due
     // regardless of sub-second host/DB clock skew (this test checks opt propagation,
-    // not the zero-buffer now() firing path — `at_fires_a_due_one_shot` covers that).
+    // not the zero-buffer now() firing path; `at_fires_a_due_one_shot` covers that).
     let past = SystemTime::now() - Duration::from_secs(2);
     forge
         .schedule()
@@ -257,7 +291,10 @@ async fn schedule_opts_carry_to_the_enqueued_job() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(job.max_attempts, 1, "scheduled job carries the chosen max_attempts");
+    assert_eq!(
+        job.max_attempts, 1,
+        "scheduled job carries the chosen max_attempts"
+    );
     forge.queue().ack(&job).await.unwrap();
 
     // An unset opt still inherits the queue default (5).
@@ -289,9 +326,15 @@ async fn list_paginates_by_cursor() {
     let s = forge.schedule();
 
     for name in ["a", "b", "c"] {
-        s.cron(name, "0 0 * * *", "q", Bytes::from_static(b"p"), ScheduleOpts::new())
-            .await
-            .unwrap();
+        s.cron(
+            name,
+            "0 0 * * *",
+            "q",
+            Bytes::from_static(b"p"),
+            ScheduleOpts::new(),
+        )
+        .await
+        .unwrap();
     }
 
     let (page1, cur1) = s.list(None, 2).await.unwrap();
@@ -301,6 +344,10 @@ async fn list_paginates_by_cursor() {
 
     let (page2, cur2) = s.list(Some(cur1), 2).await.unwrap();
     let names2: Vec<&str> = page2.iter().map(|s| s.name.as_str()).collect();
-    assert_eq!(names2, vec!["c"], "second page holds the remaining schedule");
+    assert_eq!(
+        names2,
+        vec!["c"],
+        "second page holds the remaining schedule"
+    );
     assert!(cur2.is_none(), "a short page ends iteration");
 }

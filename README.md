@@ -1,30 +1,210 @@
 # Forge
 
-The standard library for agent-built SaaS: one crate, one Postgres connection, and every backend primitive an app needs, hardened once and built on interfaces the industry already trusts.
+Every web app needs the same plumbing, and the usual answer is a separate service for each piece:
 
-AI agents build whole SaaS backends now, and each one re-implements the same plumbing: a key-value store, a job queue, scheduled tasks, file storage, rate limiting, config and flags, and auth. That regenerated plumbing is exactly where the subtle correctness and security bugs live. Forge implements these primitives once, behind a small frozen interface an agent targets and reuses everywhere.
+- Redis for caching and sessions
+- a queue for background jobs
+- object storage for uploads
+- a service for auth
+- a cron runner for scheduled work
+- a rate limiter
 
-Each primitive mirrors a design the industry (and every agent's training data) already knows, so generated code is correct on day one:
+Six things to provision, secure, mock in tests, and learn before you ship a feature. It's worse for an AI agent building the app, where each service is more to wire up and another API to get wrong.
 
-| Primitive        | Mirrors                               |
-| ---------------- | ------------------------------------- |
-| `kv`             | Redis                                 |
-| `queue`          | AWS SQS                               |
-| `schedule`       | cron + Unix `at`                      |
-| `blob`           | AWS S3                                |
-| `config` / flags | 12-factor + OpenFeature               |
-| `ratelimit`      | token bucket + IETF RateLimit headers |
-| `auth`           | OWASP + PHC                           |
-| `pubsub`         | Postgres LISTEN/NOTIFY + Redis pub/sub |
+Forge does all of it in one library, with the same API in Rust, Node, and Python.
 
-Postgres backs every primitive by default, with zero extra infrastructure. Dedicated backends (Redis, S3, and so on) plug in later behind the same interface, without changing application code.
+## One connection, eight primitives
 
-## Examples & bindings
+```bash
+npm install forge-node
+```
 
-One chat app, three interchangeable backends, lives under [`examples/chatapp/`](examples/chatapp/) — a **Rust/axum** backend ([`rust-be`](examples/chatapp/rust-be)), a **TypeScript/Node** backend (GraphQL Yoga, [`node-be`](examples/chatapp/node-be)), and a **Python/FastAPI** backend (Strawberry, [`python-be`](examples/chatapp/python-be)). The same **React** SPA ([`react-fe`](examples/chatapp/react-fe)) is built once per backend. Each backend is a full chat app on Forge + GraphQL that exercises **every** primitive: opaque multi-device sessions (`auth`), direct-to-storage media (`blob`), presence/typing/unread (`kv`), off-request fan-out (`queue`), abuse limits (`ratelimit`), send-later + disappearing messages (`schedule`), feature flags (`config`), and live GraphQL subscriptions over `pubsub` (Postgres LISTEN/NOTIFY). The Rust app uses the `forge` crate directly; the others go through the [`forge-node`](bindings/forge-node) and [`forge-py`](bindings/forge-py) bindings. One Playwright suite in [`examples/chatapp/react-fe/e2e/`](examples/chatapp/react-fe/e2e) runs against all three and proves they behave identically. Each primitive's semantic contract lives in [`docs/contracts/`](docs/contracts/).
+```ts
+import { ForgeClient } from "forge-node";
 
-**Status:** pre-v1, under active rewrite. The previous full-stack framework remains in this repository's git history. The public surface freezes at 1.0; until then it changes freely.
+const forge = await ForgeClient.connect("postgres://localhost/myapp");
 
-**Stability policy (from 1.0):** the primitive traits (`Kv`, `Queue`, `Blob`, …) are **sealed** — public to call, but implementable only inside this crate. This keeps each trait a one-way contract, so methods can be added on point releases without breaking downstream code; backends are added inside Forge (see `src/backend.rs`), and a deliberate, versioned provider SPI can come later. The semantics in [`docs/contracts/`](docs/contracts/) are normative; the shipped trait signatures are normative for shape.
+// auth: argon2 password hashing and sessions
+const hash = await forge.hashPassword(password);
+const session = await forge.createSession(userId);
 
-MIT.
+// rate limit: 20 attempts per minute, keyed by email
+const limit = await forge.rateLimitCheck("login", email, 20, 60);
+if (!limit.allowed) throw new Error("slow down");
+
+// key/value: TTL cache and atomic counters
+await forge.kvSet(`user:${userId}`, JSON.stringify(profile), 3600);
+const views = await forge.kvIncr(`views:${userId}`, 1);
+
+// queue: background jobs
+await forge.queueEnqueue("emails", JSON.stringify({ to: email }));
+
+// pub/sub: fan an event out to subscribers
+await forge.pubsubPublish("user.created", JSON.stringify({ userId }));
+
+// blob: store a file, hand back a link that expires in an hour
+await forge.blobPut(`exports/${userId}.csv`, csv, "text/csv");
+const link = await forge.blobPresignDownload(`exports/${userId}.csv`, 3600);
+
+// schedule: recurring work on a cron
+await forge.scheduleCron("nightly-report", "0 0 * * *", "reports", "{}");
+
+// feature flags: roll a feature out to 25% of users
+await forge.setFlagPercent("new-ui", 25);
+const newUi = await forge.flag("new-ui", false, userId);
+```
+
+<details>
+<summary>The same in Rust</summary>
+
+```bash
+cargo add forge
+```
+
+```rust
+use std::time::Duration;
+use forge::{
+    Forge, ForgeConfig, Bytes, SetOpts, EnqueueOpts, PutOpts,
+    ScheduleOpts, SessionOpts, Limit, FlagRule, EvalCtx,
+};
+
+let forge = Forge::init(ForgeConfig::new("postgres://localhost/myapp")).await?;
+
+// auth
+let hash = forge.auth().hash_password(&password).await?;
+let session = forge.auth().create_session(&user_id, SessionOpts::default()).await?;
+
+// rate limit
+let limit = forge.ratelimit()
+    .check("login", &email, Limit::per_duration(20, Duration::from_secs(60)))
+    .await?;
+
+// key/value
+forge.kv().set(&format!("user:{user_id}"), profile.into(),
+    SetOpts::new().with_ttl(Duration::from_secs(3600))).await?;
+let views = forge.kv().incr(&format!("views:{user_id}"), 1).await?;
+
+// queue
+forge.queue().enqueue("emails", payload.into(), EnqueueOpts::new()).await?;
+
+// pub/sub
+forge.pubsub().publish("user.created", Bytes::from(event)).await?;
+
+// blob
+forge.blob().put(&key, body, PutOpts::new()).await?;
+let link = forge.blob().presign_download(&key, Duration::from_secs(3600)).await?;
+
+// schedule
+forge.schedule().cron("nightly-report", "0 0 * * *", "reports", Bytes::new(), ScheduleOpts::new()).await?;
+
+// feature flags
+forge.config().set_flag("new-ui", FlagRule::Percent(25)).await?;
+let new_ui = forge.config().flag("new-ui", false, &EvalCtx::user(user_id)).await;
+```
+</details>
+
+<details>
+<summary>The same in Python</summary>
+
+```bash
+pip install forge-py
+```
+
+```python
+import json
+import forge_py
+
+forge = await forge_py.ForgeClient.connect("postgres://localhost/myapp")
+
+# auth
+hash = await forge.hash_password(password)
+session = await forge.create_session(user_id)
+
+# rate limit
+limit = await forge.rate_limit_check("login", email, 20, 60)
+if not limit.allowed:
+    raise RuntimeError("slow down")
+
+# key/value
+await forge.kv_set(f"user:{user_id}", json.dumps(profile), 3600)
+views = await forge.kv_incr(f"views:{user_id}", 1)
+
+# queue
+await forge.queue_enqueue("emails", json.dumps({"to": email}))
+
+# pub/sub
+await forge.pubsub_publish("user.created", json.dumps({"user_id": user_id}))
+
+# blob
+await forge.blob_put(f"exports/{user_id}.csv", csv, "text/csv")
+link = await forge.blob_presign_download(f"exports/{user_id}.csv", 3600)
+
+# schedule
+await forge.schedule_cron("nightly-report", "0 0 * * *", "reports", "{}")
+
+# feature flags
+await forge.set_flag_percent("new-ui", 25)
+new_ui = await forge.flag("new-ui", False, user_id)
+```
+</details>
+
+More Coming Soon...
+
+## What you get
+
+| Primitive | What it does |
+| --- | --- |
+| key/value | get, set, mget, incr, compare-and-swap, prefix scan, TTLs |
+| queue | enqueue and dequeue with acks, retries, delays, dedup, depth |
+| pub/sub | publish and subscribe on topics |
+| blob | put, get, delete, presigned upload and download URLs |
+| auth | password hashing, sessions, API keys |
+| rate limit | token-bucket or sliding-window checks |
+| schedule | cron and one-off jobs |
+| config | settings and feature flags with percentage rollout |
+
+By default every primitive runs on one Postgres database, so there's nothing else to operate. When one needs to scale, move that piece onto its own backend without changing your code.
+
+## Test on memory, ship on Postgres
+
+The memory and Postgres backends pass the same conformance suite, so tests run in-process with no database and behave the way production will. Switch backends with one environment variable.
+
+```bash
+FORGE_DEFAULT_BACKEND=memory       # tests
+FORGE_POSTGRES_URL=postgres://...  # production
+```
+
+## Build it with an agent
+
+Forge's API isn't in any model's training data, so a coding agent won't know it cold. Install the `forge-idiomatic-developer` skill so your agent learns the conventions before it writes any Forge code.
+
+```bash
+npx skills add isala404/forge
+```
+
+It teaches which primitive fits which task and the idioms for each language, so you get working code instead of guesses.
+
+## Not in scope
+
+- The APIs are a shared subset, not a full reimplementation. key/value covers the Redis commands most apps use, not Lua scripts or sorted sets. blob does CRUD and presigned URLs, not S3 lifecycle rules.
+- Forge ships two backends, memory and Postgres, plus local disk for blob. If you need Redis or S3, implement the primitive's trait and inject it, or use that service directly.
+- Not an ORM or a web framework. Your tables and routes stay yours.
+
+## Examples
+
+Three full apps in [`examples/`](./examples), each built on the Rust, Node, and Python backends with a React frontend.
+
+- todo: accounts, lists, and a background audit queue
+- links: a URL shortener with click counts, QR images, and analytics
+- chat: real-time messaging with presence
+
+## License
+
+MIT. Do whatever you want.
+
+<p align="center">
+  <strong>Postgres is enough.</strong><br>
+  <a href="https://tryforge.dev/docs/quick-start">Get Started</a> ·
+  <a href="https://tryforge.dev/docs">Documentation</a> ·
+  <a href="https://github.com/isala404/forge/discussions">Discussions</a>
+</p>

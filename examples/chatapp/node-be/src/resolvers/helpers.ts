@@ -23,7 +23,7 @@ export function requireAuth(ctx: GqlContext): CurrentUser {
 
 // Gate the ops/admin mutations. The allowlist is a comma-separated list of user
 // ids in ADMIN_USER_IDS. Unset means an empty allowlist, so these mutations are
-// denied for everyone (fail closed) — the right default for a demo that ships no
+// denied for everyone (fail closed), the right default for a demo that ships no
 // roles system. The single entry "*" allows any authenticated user: a dev/demo
 // convenience, never for production.
 export function requireAdmin(ctx: GqlContext): CurrentUser {

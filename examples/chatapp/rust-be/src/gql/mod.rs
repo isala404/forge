@@ -38,22 +38,34 @@ pub struct Mutation(
 );
 
 #[derive(MergedSubscription, Default)]
-pub struct Subscription(MessageSubscription, PresenceSubscription, ReceiptSubscription);
+pub struct Subscription(
+    MessageSubscription,
+    PresenceSubscription,
+    ReceiptSubscription,
+);
 
 pub type AppSchema = async_graphql::Schema<Query, Mutation, Subscription>;
 
 pub fn schema(ctx: Ctx) -> AppSchema {
     let loader = DataLoader::new(AppLoader { ctx: ctx.clone() }, tokio::spawn);
-    async_graphql::Schema::build(Query::default(), Mutation::default(), Subscription::default())
-        .data(ctx)
-        .data(loader)
-        .finish()
+    async_graphql::Schema::build(
+        Query::default(),
+        Mutation::default(),
+        Subscription::default(),
+    )
+    .data(ctx)
+    .data(loader)
+    .finish()
 }
 
 pub fn sdl() -> String {
-    async_graphql::Schema::build(Query::default(), Mutation::default(), Subscription::default())
-        .finish()
-        .sdl()
+    async_graphql::Schema::build(
+        Query::default(),
+        Mutation::default(),
+        Subscription::default(),
+    )
+    .finish()
+    .sdl()
 }
 
 #[cfg(test)]
@@ -86,9 +98,16 @@ mod tests {
     }
 
     fn looks_like_def(line: &str) -> bool {
-        ["type ", "enum ", "scalar ", "input ", "interface ", "union "]
-            .iter()
-            .any(|k| line.starts_with(k))
+        [
+            "type ",
+            "enum ",
+            "scalar ",
+            "input ",
+            "interface ",
+            "union ",
+        ]
+        .iter()
+        .any(|k| line.starts_with(k))
     }
 
     fn normalize_block(lines: &[String]) -> String {
@@ -114,10 +133,19 @@ mod tests {
     #[test]
     fn forge_errors_map_to_graphql_codes() {
         assert_eq!(forge_error_code(&ForgeError::NotFound), "NOT_FOUND");
-        assert_eq!(forge_error_code(&ForgeError::Invalid("x".into())), "INVALID");
+        assert_eq!(
+            forge_error_code(&ForgeError::Invalid("x".into())),
+            "INVALID"
+        );
         assert_eq!(forge_error_code(&ForgeError::Limit("x".into())), "LIMIT");
-        assert_eq!(forge_error_code(&ForgeError::Precondition("x".into())), "PRECONDITION");
-        assert_eq!(forge_error_code(&ForgeError::Unavailable("x".into())), "UNAVAILABLE");
+        assert_eq!(
+            forge_error_code(&ForgeError::Precondition("x".into())),
+            "PRECONDITION"
+        );
+        assert_eq!(
+            forge_error_code(&ForgeError::Unavailable("x".into())),
+            "UNAVAILABLE"
+        );
         assert_eq!(forge_error_code(&ForgeError::Config("x".into())), "CONFIG");
     }
 

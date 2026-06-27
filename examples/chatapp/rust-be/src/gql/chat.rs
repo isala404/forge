@@ -25,7 +25,10 @@ impl ChatQuery {
         let user = me(ctx)?;
         let chat_id = parse_id(&id)?;
         require_member(c, chat_id, user.id).await?;
-        Ok(db::chat(&c.pool, chat_id).await.map_err(map_db)?.map(GqlChat))
+        Ok(db::chat(&c.pool, chat_id)
+            .await
+            .map_err(map_db)?
+            .map(GqlChat))
     }
 }
 
@@ -58,7 +61,10 @@ impl ChatMutation {
             ChatKind::Group => "group",
         };
         if kind == ChatKind::Direct && ids.len() != 2 {
-            return Err(err("INVALID", "a direct chat needs exactly one other member"));
+            return Err(err(
+                "INVALID",
+                "a direct chat needs exactly one other member",
+            ));
         }
         let chat_id = db::create_chat(&c.pool, kind_str, title.as_deref(), user.id, &ids)
             .await

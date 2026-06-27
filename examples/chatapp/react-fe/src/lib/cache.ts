@@ -25,7 +25,7 @@ export const cacheConfig: CacheExchangeOpts = {
   // graphcache updates entity fields automatically but never adds an entity to a list
   // it wasn't already in. These two write the mutation results into the list queries
   // the UI reads, so a new chat and the sender's own message render from the mutation
-  // alone — without waiting on the at-most-once pubsub echo, which a just-created chat
+  // alone, without waiting on the at-most-once pubsub echo, which a just-created chat
   // may not be subscribed to yet (the lost-echo race, most visible on slower backends).
   updates: {
     Mutation: {

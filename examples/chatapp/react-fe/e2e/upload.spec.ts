@@ -5,7 +5,7 @@ import { backendOf, loginViaUi, signup, uniqueUser } from './helpers'
 // (`/api/files`), so the browser PUTs them to the SPA origin; nginx must proxy
 // that to the backend, which verifies the signature and stores the bytes. The bug
 // this protects against was the SPA origin answering the PUT itself: a static-only
-// nginx returned 405, and a body over its default 1 MiB limit returned 413 — the
+// nginx returned 405, and a body over its default 1 MiB limit returned 413; the
 // upload never reached the backend at all. We assert the PUT returns 200 and the
 // attachment renders, using a >1 MiB file so the old 413 path would also fail.
 test('attachment uploads through the blob proxy and renders in the conversation', async ({ page }, testInfo) => {
