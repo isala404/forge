@@ -1,5 +1,5 @@
 [package]
-name = "forge"
+name = "forgelib"
 version = "1.0.0"
 edition = "2024"
 rust-version = "1.92"
@@ -13,7 +13,7 @@ categories = ["database", "asynchronous"]
 exclude = ["/bindings", "/examples", "/tools", "/.github"]
 
 [lib]
-name = "forge"
+name = "forgelib"
 path = "src/lib.rs"
 
 [features]

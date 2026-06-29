@@ -1,7 +1,7 @@
 // Typed projection over the napi ForgeClient: bind a name + JSON codec to a type, so
 // app code enqueues `SendEmail` instead of a raw queue string + JSON.stringify. The
 // Node view of the typed layer in the Rust crate (src/typed.rs) and Python binding
-// (forge_py/typed.py). Plain JS (no build step); the types live in typed.d.ts.
+// (forgelib/typed.py). Plain JS (no build step); the types live in typed.d.ts.
 
 'use strict'
 

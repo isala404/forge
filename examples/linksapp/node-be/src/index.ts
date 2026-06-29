@@ -1,15 +1,12 @@
 import { serve } from "@hono/node-server";
-import { ForgeClient } from "forge-node";
+import { ForgeClient } from "forgelib";
 
 import { api, type Bindings } from "./routes.ts";
 import { runClicksWorker, runExpireWorker, runSchedulerLoop } from "./worker.ts";
 import { envOr } from "./utils.ts";
 
 async function start(): Promise<void> {
-  process.env.FORGE_POSTGRES_URL ||= "postgres://postgres:forge@127.0.0.1:5432/linksapp_node";
-  process.env.FORGE_BLOB_SIGNING_SECRET ||= "dev-secret-change-me";
-
-  const forge = await ForgeClient.connectFromEnv();
+  const forge = await ForgeClient.init(); // reads ./forge.toml
   const bindings = { forge } satisfies Bindings;
 
   runClicksWorker(forge);

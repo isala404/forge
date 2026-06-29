@@ -12,7 +12,7 @@ mod worker;
 use std::sync::Arc;
 
 use anyhow::Result;
-use forge::{Forge, ForgeConfig};
+use forgelib::Forge;
 
 use context::{AppCtx, Ctx, scheduler_interval};
 use http::AppState;
@@ -41,16 +41,9 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let pg = env_or(
-        "FORGE_POSTGRES_URL",
-        "postgres://postgres:forge@127.0.0.1:5432/chatapp_rust",
-    );
-    let cfg = ForgeConfig::new(&pg)
-        .with_blob_signing_secret(env_or("FORGE_BLOB_SIGNING_SECRET", "dev-secret-change-me"))
-        .with_blob_base_url("/api/files")
-        .with_env_overrides()?;
-    // init migrates Forge's system tables at startup; it owns its database.
-    let forge = Forge::init(cfg).await?;
+    // Reads ./forge.toml; Forge owns its database and migrates the forge_* tables at
+    // startup. The connection string and blob signing secret live in that file.
+    let forge = Forge::init().await?;
 
     // Reuse Forge's pool for the domain tables rather than opening a second one.
     let pool = forge.pool().clone();

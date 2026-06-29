@@ -9,8 +9,8 @@
 // that does not exist yet, so the compile-time query macros cannot apply here.
 #![allow(clippy::disallowed_methods)]
 
+use crate::Forge;
 use crate::error::{ForgeError, Result};
-use crate::{Forge, ForgeConfig};
 use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
 
@@ -58,9 +58,22 @@ impl TestDatabase {
         &self.url
     }
 
+    /// A `forge.toml` whose system database points at this throwaway database, with `extra`
+    /// TOML appended. `extra` keys before any `[section]` header extend `[postgres]` (e.g.
+    /// `"max_connections = 2\n"`); start a new section to set anything else (`"[forge]\n…"`).
+    pub fn config_toml(&self, extra: &str) -> String {
+        format!("[postgres]\nurl = \"{}\"\n{extra}", self.url)
+    }
+
     /// Build a `Forge` against this database. `init` migrates the throwaway DB's schema.
     pub async fn forge(&self) -> Result<Forge> {
-        Forge::init(ForgeConfig::new(self.url.clone())).await
+        self.forge_with("").await
+    }
+
+    /// Build a `Forge` against this database with `extra` TOML appended to the config (see
+    /// [`config_toml`](Self::config_toml) for how `extra` composes).
+    pub async fn forge_with(&self, extra: &str) -> Result<Forge> {
+        Forge::init_from_str(&self.config_toml(extra)).await
     }
 
     /// Run a raw SQL statement against this database. Test setup only (e.g. seeding

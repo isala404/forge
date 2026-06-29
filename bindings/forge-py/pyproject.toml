@@ -3,7 +3,7 @@ requires = ["maturin>=1.5,<2"]
 build-backend = "maturin"
 
 [project]
-name = "forge-py"
+name = "forgelib"
 version = "1.0.0"
 description = "Python bindings for Forge — hardened infra primitives on Postgres"
 requires-python = ">=3.9"
@@ -15,8 +15,7 @@ classifiers = [
 ]
 
 [tool.maturin]
-module-name = "forge_py"
-# Mixed layout: ship the pure-Python typed projection (forge_typed) alongside the
-# compiled forge_py extension.
+module-name = "forgelib"
+# Mixed layout: ship the pure-Python typed projection alongside the compiled extension.
 python-source = "python"
 auditwheel = "repair"

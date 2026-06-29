@@ -2,10 +2,10 @@
 //!
 //! Reads `src/conformance/scenarios/*.json` and runs each scenario against a fresh
 //! throwaway Forge, asserting the observable result matches the canonical
-//! contract. The Node and Python runners execute the *same* JSON. See
+//! contract. The Node and Python runners execute the same JSON. See
 //! `tools/conformance/README.md`.
 //!
-//! The scenario interpreter itself lives in the in-crate `forge::conformance`
+//! The scenario interpreter itself lives in the in-crate `forgelib::conformance`
 //! module; this test is a thin caller that supplies a `ForgeFactory` backed by a
 //! throwaway Postgres database and layers the rust `known_gaps.json`
 //! bookkeeping on top.
@@ -26,9 +26,9 @@
 )]
 
 use async_trait::async_trait;
-use forge::conformance::ForgeFactory;
-use forge::testing::TestDatabase;
-use forge::{Backend, Forge, ForgeConfig};
+use forgelib::conformance::ForgeFactory;
+use forgelib::testing::TestDatabase;
+use forgelib::Forge;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Mutex as StdMutex;
@@ -158,16 +158,24 @@ impl ForgeFactory for VariantFactory {
         }
         let url = guard.as_ref().unwrap().url().to_string();
         // init migrates the throwaway DB's schema (idempotent across the per-namespace
-        // inits against the same DB).
-        let mut cfg = ForgeConfig::new(&url)
-            .with_kv_namespace(namespace)
-            .with_blob_signing_secret(SIGNING_SECRET);
-        cfg = match self.variant {
-            Variant::Postgres => cfg,
-            Variant::Memory => cfg.default_backend(Backend::Memory).with_memory_blob(),
-            Variant::Filesystem => cfg.with_filesystem_blob(self.fs_root()?),
+        // inits against the same DB). One `[blob]` table per variant so signing_secret and
+        // the filesystem backend don't collide as duplicate tables.
+        let base = format!("[postgres]\nurl = \"{url}\"\n[forge]\nnamespace = \"{namespace}\"\n");
+        let toml = match self.variant {
+            Variant::Postgres => {
+                format!("{base}[blob]\nsigning_secret = \"{SIGNING_SECRET}\"\n")
+            }
+            Variant::Memory => format!(
+                "{base}[blob]\nsigning_secret = \"{SIGNING_SECRET}\"\n\
+                 [backends]\ndefault = \"memory\"\nblob = \"memory\"\n"
+            ),
+            Variant::Filesystem => format!(
+                "{base}[blob]\nsigning_secret = \"{SIGNING_SECRET}\"\n\
+                 backend = \"fs\"\nfs_root = \"{}\"\n",
+                self.fs_root()?.display(),
+            ),
         };
-        Forge::init(cfg)
+        Forge::init_from_str(&toml)
             .await
             .map_err(|e| format!("forge init (ns {namespace:?}): {e}"))
     }
@@ -195,7 +203,7 @@ async fn conformance_rust() {
                 }
                 let label = variant.label();
                 let factory = VariantFactory::new(variant);
-                let result = forge::conformance::run_one(&factory, scenario).await;
+                let result = forgelib::conformance::run_one(&factory, scenario).await;
                 match (result, expected_fail) {
                     (Ok(()), false) => {
                         passed += 1;

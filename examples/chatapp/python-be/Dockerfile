@@ -1,7 +1,7 @@
 # Build context is the REPO ROOT — this project has path deps on bindings/forge-py:
 #   docker build -f examples/chatapp/python-be/Dockerfile .
 #
-# Single stage: uv builds the editable forge-py wheel with maturin, which needs the Rust
+# Single stage: uv builds the editable forgelib wheel with maturin, which needs the Rust
 # toolchain, so the runtime image carries Python + Rust. Keeps the uv venv in place.
 # Migrations run on startup from app.main's lifespan (db.migrate) — no build-time DB.
 FROM python:3.13-bookworm

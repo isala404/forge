@@ -1,8 +1,8 @@
 //! `config` (+ flags). Lineage: 12-factor env precedence + OpenFeature. See
 //! `docs/contracts/config.md`.
 //!
-//! The trait is [`ConfigStore`] (module `config_store`) so it never collides with
-//! `forge::ForgeConfig`; the facade accessor is `forge.config()`.
+//! The trait is [`ConfigStore`] (module `config_store`) so it never collides with Forge's
+//! own `forge.toml` configuration; the facade accessor is `forge.config()`.
 
 use crate::error::{ForgeError, Result};
 use async_trait::async_trait;
@@ -74,7 +74,7 @@ pub trait ConfigStore: Send + Sync {
     /// cache bound; an active `FORGE_CFG_<KEY>` env var still shadows it.
     async fn set_raw(&self, key: &str, value: &str) -> Result<()>;
 
-    /// OpenFeature `getBooleanValue`. **Never errors, never panics**: any failure
+    /// OpenFeature `getBooleanValue`. Never errors, never panics: any failure
     /// (missing flag, backend down, malformed rule) resolves to `default`, reason
     /// logged via obs.
     async fn flag(&self, key: &str, default: bool, ctx: &EvalCtx) -> bool;

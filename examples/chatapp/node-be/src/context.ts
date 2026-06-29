@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import DataLoader from "dataloader";
-import { ForgeClient, type JsSubscription } from "forge-node";
+import { ForgeClient, type JsSubscription } from "forgelib";
 
 import * as db from "./db.ts";
 import type { MessageRow, ReceiptRow, UserRow } from "./db.ts";
@@ -235,15 +235,12 @@ export function postgresUrl(): string {
 }
 
 export async function initAppCtx(pgUrl?: string): Promise<AppCtx> {
-  const resolvedPgUrl = pgUrl || postgresUrl();
-  // App startup uses the portable FORGE_* path so backend selectors such as
-  // FORGE_QUEUE_BACKEND and FORGE_BLOB_BACKEND work the same as Rust/Python.
-  const forge = pgUrl
-    ? await ForgeClient.connect(
-        resolvedPgUrl,
-        process.env.FORGE_BLOB_SIGNING_SECRET || "dev-secret-change-me",
-      )
-    : await connectForgeFromEnv(resolvedPgUrl);
+  // Forge instantiates from ./forge.toml, whose ${FORGE_POSTGRES_URL} default flows from the
+  // environment. A caller-supplied pgUrl (tests) points both Forge and the app's own pool at
+  // the same throwaway database; production leaves it to the env / forge.toml default.
+  if (pgUrl) process.env.FORGE_POSTGRES_URL = pgUrl;
+  const resolvedPgUrl = postgresUrl();
+  const forge = await ForgeClient.init();
   const pool = new pg.Pool({ connectionString: resolvedPgUrl, max: 10 });
   await db.migrate(pool);
   // Mint the login decoy hash once, via forge's own hasher so its argon2 params
@@ -251,15 +248,6 @@ export async function initAppCtx(pgUrl?: string): Promise<AppCtx> {
   // miss to keep that path's timing indistinguishable from a real verify.
   const decoyHash = await forge.hashPassword(randomUUID());
   return new AppCtx(forge, pool, decoyHash);
-}
-
-async function connectForgeFromEnv(defaultPgUrl: string): Promise<ForgeClient> {
-  if (!process.env.FORGE_POSTGRES_URL) process.env.FORGE_POSTGRES_URL = defaultPgUrl;
-  if (!process.env.FORGE_BLOB_SIGNING_SECRET) {
-    process.env.FORGE_BLOB_SIGNING_SECRET = "dev-secret-change-me";
-  }
-  if (!process.env.FORGE_BLOB_BASE_URL) process.env.FORGE_BLOB_BASE_URL = "/api/files";
-  return ForgeClient.connectFromEnv();
 }
 
 // A bearer token authenticates as either a session (slides the idle deadline) or

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use async_graphql::{Context, Object, Result};
-use forge::SessionOpts;
+use forgelib::SessionOpts;
 use uuid::Uuid;
 
 use crate::context::{Ctx, SESSION_ABSOLUTE, SESSION_IDLE};
@@ -43,7 +43,7 @@ impl AuthMutation {
         let d = c
             .forge
             .ratelimit()
-            .check_with("otp", username, otp_limit(), forge::FailMode::Closed)
+            .check_with("otp", username, otp_limit(), forgelib::FailMode::Closed)
             .await
             .map_err(map_forge)?;
         if !d.allowed {
@@ -78,7 +78,7 @@ impl AuthMutation {
         let d = c
             .forge
             .ratelimit()
-            .check_with("otp", username, otp_limit(), forge::FailMode::Closed)
+            .check_with("otp", username, otp_limit(), forgelib::FailMode::Closed)
             .await
             .map_err(map_forge)?;
         if !d.allowed {
@@ -95,7 +95,7 @@ impl AuthMutation {
                 .await;
             return Err(err("UNAUTHENTICATED", "invalid username or password"));
         };
-        let phc = forge::PhcString::new(hash);
+        let phc = forgelib::PhcString::new(hash);
         let ok = c
             .forge
             .auth()
@@ -157,7 +157,7 @@ impl AuthMutation {
                 "apikey",
                 &user.id.to_string(),
                 apikey_limit(),
-                forge::FailMode::Closed,
+                forgelib::FailMode::Closed,
             )
             .await
             .map_err(map_forge)?;
@@ -201,10 +201,10 @@ pub(super) async fn issue_session(c: &Ctx, user_id: Uuid) -> Result<SessionPaylo
     })
 }
 
-fn otp_limit() -> forge::Limit {
-    forge::Limit::per_duration(10, Duration::from_secs(60))
+fn otp_limit() -> forgelib::Limit {
+    forgelib::Limit::per_duration(10, Duration::from_secs(60))
 }
 
-fn apikey_limit() -> forge::Limit {
-    forge::Limit::per_duration(5, Duration::from_secs(3600))
+fn apikey_limit() -> forgelib::Limit {
+    forgelib::Limit::per_duration(5, Duration::from_secs(3600))
 }

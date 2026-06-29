@@ -6,7 +6,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 
-import forge_py
+import forgelib
 from graphql import GraphQLError
 from strawberry.types import Info
 
@@ -52,7 +52,7 @@ _FORGE_CODE_BY_TYPE = {
 }
 
 
-def map_forge(err: forge_py.ForgeError) -> GraphQLError:
+def map_forge(err: forgelib.ForgeError) -> GraphQLError:
     return gqlerr(_FORGE_CODE_BY_TYPE.get(type(err).__name__, "BACKEND"), str(err))
 
 
@@ -103,7 +103,7 @@ async def require_member(info: Info, chat_id: uuid.UUID, user_id: uuid.UUID) -> 
 async def publish_event(info: Info, topic: str, event: dict) -> None:
     try:
         await info.context["forge"].pubsub_publish(topic, json.dumps(event))
-    except forge_py.ForgeError:
+    except forgelib.ForgeError:
         pass
 
 
@@ -112,7 +112,7 @@ async def max_upload_bytes(info: Info) -> int:
         v = await info.context["forge"].config_get("max_upload_bytes")
         if v is not None:
             return int(v)
-    except (forge_py.ForgeError, ValueError):
+    except (forgelib.ForgeError, ValueError):
         pass
     return DEFAULT_MAX_UPLOAD_BYTES
 

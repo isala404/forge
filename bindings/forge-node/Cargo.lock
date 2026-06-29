@@ -377,7 +377,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
-name = "forge"
+name = "forge-node"
+version = "1.0.0"
+dependencies = [
+ "forgelib",
+ "futures-util",
+ "napi",
+ "napi-build",
+ "napi-derive",
+ "tokio",
+]
+
+[[package]]
+name = "forgelib"
 version = "1.0.0"
 dependencies = [
  "argon2",
@@ -403,18 +415,6 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "uuid",
-]
-
-[[package]]
-name = "forge-node"
-version = "1.0.0"
-dependencies = [
- "forge",
- "futures-util",
- "napi",
- "napi-build",
- "napi-derive",
- "tokio",
 ]
 
 [[package]]

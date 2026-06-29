@@ -1,7 +1,7 @@
 """Cross-language conformance runner, Python side.
 
 Reads the shared scenario matrix in src/conformance/scenarios/*.json and runs
-each scenario against the forge_py binding on a throwaway database. Asserts the
+each scenario against the forgelib binding on a throwaway database. Asserts the
 observed failure set equals exactly the ``python`` entries in
 src/conformance/known_gaps.json. See ../README.md.
 
@@ -19,7 +19,7 @@ import time
 import uuid
 
 import psycopg
-import forge_py
+import forgelib
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent.parent.parent
@@ -30,6 +30,20 @@ LANG = "python"
 BACKEND = "postgres"
 # Enables the blob presign/verify scenarios; harmless for the rest.
 SIGNING_SECRET = "conformance-signing-secret"
+# Forge reads this forge.toml; its ${FORGE_*} references resolve from the env vars the
+# runner sets before each init, so one file drives every per-namespace/per-backend client.
+CONFIG_PATH = str(HERE / "forge.toml")
+
+
+async def connect_ns(url: str, ns: str):
+    """A client whose system database is ``url`` and namespace is ``ns``, on the default
+    Postgres backends. Sets the env the toml interpolates, then loads it fresh."""
+    os.environ["FORGE_POSTGRES_URL"] = url
+    os.environ["FORGE_NAMESPACE"] = ns
+    os.environ["FORGE_BLOB_SIGNING_SECRET"] = SIGNING_SECRET
+    for key in ("FORGE_QUEUE_BACKEND", "FORGE_BLOB_BACKEND", "FORGE_BLOB_FS_ROOT"):
+        os.environ.pop(key, None)
+    return await forgelib.ForgeClient.init_from(CONFIG_PATH)
 
 ADMIN_URL = os.environ.get("TEST_DATABASE_URL")
 if not ADMIN_URL:
@@ -108,6 +122,7 @@ async def run_backend_selection_smoke():
     root = tempfile.mkdtemp(prefix="forge-py-blob-")
     keys = [
         "FORGE_POSTGRES_URL",
+        "FORGE_NAMESPACE",
         "FORGE_BLOB_SIGNING_SECRET",
         "FORGE_QUEUE_BACKEND",
         "FORGE_BLOB_BACKEND",
@@ -116,12 +131,13 @@ async def run_backend_selection_smoke():
     saved = {key: os.environ.get(key) for key in keys}
     try:
         os.environ["FORGE_POSTGRES_URL"] = url
+        os.environ["FORGE_NAMESPACE"] = ""
         os.environ["FORGE_BLOB_SIGNING_SECRET"] = SIGNING_SECRET
         os.environ["FORGE_QUEUE_BACKEND"] = "memory"
         os.environ["FORGE_BLOB_BACKEND"] = "filesystem"
         os.environ["FORGE_BLOB_FS_ROOT"] = root
 
-        client = await forge_py.ForgeClient.connect_from_env()
+        client = await forgelib.ForgeClient.init_from(CONFIG_PATH)
         report = client.backend_report()
         if provider(report, "queue") != "memory":
             raise AssertionError("queue backend was not memory")
@@ -395,7 +411,7 @@ async def run_scenario(scenario):
     name = "forge_conf_" + uuid.uuid4().hex[:12]
     admin_exec(f'CREATE DATABASE "{name}"')
     url = swap_db(ADMIN_URL, name)
-    # connect_with migrates the throwaway DB's schema (idempotent across namespaces).
+    # init_from migrates the throwaway DB's schema (idempotent across namespaces).
     try:
         clients = {}
         captures = {}
@@ -405,13 +421,13 @@ async def run_scenario(scenario):
         for i, step in enumerate(scenario["steps"]):
             ns = step.get("namespace", "")
             if ns not in clients:
-                clients[ns] = await forge_py.ForgeClient.connect_with(url, signing_secret=SIGNING_SECRET, kv_namespace=ns)
+                clients[ns] = await connect_ns(url, ns)
             client = clients[ns]
             args = resolve(step.get("args", {}), captures)
             ok, value, code = True, None, None
             try:
                 value = await dispatch(client, step["op"], args, subscriptions, step.get("as"))
-            except forge_py.ForgeError as e:
+            except forgelib.ForgeError as e:
                 ok, code = False, canonical_error_code(e)
             if step.get("as") and ok:
                 captures[step["as"]] = value

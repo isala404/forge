@@ -1,17 +1,17 @@
 [project]
 name = "linksapp-python-be"
 version = "0.1.0"
-description = "linksapp Python REST backend (FastAPI + forge-py)"
+description = "linksapp Python REST backend (FastAPI + forgelib)"
 requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn>=0.34",
-    "forge-py",
+    "forgelib",
     "segno>=1.6",
 ]
 
 [tool.uv.sources]
-forge-py = { path = "../../../bindings/forge-py", editable = true }
+forgelib = { path = "../../../bindings/forge-py", editable = true }
 
 [dependency-groups]
 dev = [

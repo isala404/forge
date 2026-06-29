@@ -1,0 +1,9 @@
+# Forge instantiates its runtime from this file. String values may reference the
+# environment as ${VAR} / ${VAR:-default}, so secrets and per-deploy connection
+# strings stay out of the committed file.
+[postgres]
+url = "${FORGE_POSTGRES_URL:-postgres://postgres:forge@127.0.0.1:5432/chatapp_node}"
+
+[blob]
+signing_secret = "${FORGE_BLOB_SIGNING_SECRET:-dev-secret-change-me}"
+base_url = "/api/files"

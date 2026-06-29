@@ -1,7 +1,7 @@
 [project]
 name = "chatapp-python-be"
 version = "0.1.0"
-description = "chatapp Python GraphQL backend (FastAPI + Strawberry + forge-py)"
+description = "chatapp Python GraphQL backend (FastAPI + Strawberry + forgelib)"
 requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.115",
@@ -12,7 +12,7 @@ dependencies = [
     "websockets>=14",
     "strawberry-graphql[fastapi]>=0.260",
     "asyncpg>=0.30",
-    "forge-py",
+    "forgelib",
 ]
 
 [dependency-groups]
@@ -24,7 +24,7 @@ dev = [
 ]
 
 [tool.uv.sources]
-forge-py = { path = "../../../bindings/forge-py", editable = true }
+forgelib = { path = "../../../bindings/forge-py", editable = true }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

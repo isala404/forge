@@ -15,19 +15,19 @@ use tokio::sync::Mutex;
 
 /// A stable, machine-readable code for each `ForgeError` variant, so JS callers can
 /// branch on the failure class (prefixed onto the error message in [`err`]).
-fn code_of(e: &forge::ForgeError) -> &'static str {
+fn code_of(e: &forgelib::ForgeError) -> &'static str {
     match e {
-        forge::ForgeError::NotFound => "NOT_FOUND",
-        forge::ForgeError::Invalid(_) => "INVALID",
-        forge::ForgeError::Limit(_) => "LIMIT",
-        forge::ForgeError::Precondition(_) => "PRECONDITION",
-        forge::ForgeError::Unavailable(_) => "UNAVAILABLE",
-        forge::ForgeError::Config(_) => "CONFIG",
+        forgelib::ForgeError::NotFound => "NOT_FOUND",
+        forgelib::ForgeError::Invalid(_) => "INVALID",
+        forgelib::ForgeError::Limit(_) => "LIMIT",
+        forgelib::ForgeError::Precondition(_) => "PRECONDITION",
+        forgelib::ForgeError::Unavailable(_) => "UNAVAILABLE",
+        forgelib::ForgeError::Config(_) => "CONFIG",
         _ => "BACKEND",
     }
 }
 
-fn err(e: forge::ForgeError) -> napi::Error {
+fn err(e: forgelib::ForgeError) -> napi::Error {
     napi::Error::from_reason(format!("{}: {}", code_of(&e), e))
 }
 
@@ -37,7 +37,7 @@ fn err(e: forge::ForgeError) -> napi::Error {
 /// silently coerce a caller's out-of-range value.
 fn secs(field: &str, value: f64) -> Result<Duration> {
     Duration::try_from_secs_f64(value).map_err(|_| {
-        err(forge::ForgeError::invalid(format!(
+        err(forgelib::ForgeError::invalid(format!(
             "{field} must be a non-negative number of seconds"
         )))
     })
@@ -48,29 +48,29 @@ fn secs(field: &str, value: f64) -> Result<Duration> {
 /// boundary stays `f64`; the core's own 50 MiB cap covers the high end.
 fn bytes(field: &str, value: f64) -> Result<u64> {
     if !value.is_finite() || value < 0.0 {
-        return Err(err(forge::ForgeError::invalid(format!(
+        return Err(err(forgelib::ForgeError::invalid(format!(
             "{field} must be a non-negative number of bytes"
         ))));
     }
     Ok(value as u64)
 }
 
-fn schedule_opts(max_attempts: Option<u32>) -> forge::ScheduleOpts {
-    let mut opts = forge::ScheduleOpts::new();
+fn schedule_opts(max_attempts: Option<u32>) -> forgelib::ScheduleOpts {
+    let mut opts = forgelib::ScheduleOpts::new();
     if let Some(m) = max_attempts {
         opts = opts.with_max_attempts(m);
     }
     opts
 }
 
-/// Map an optional algorithm name onto [`forge::Algo`]. `None` keeps the token-bucket
+/// Map an optional algorithm name onto [`forgelib::Algo`]. `None` keeps the token-bucket
 /// default; `"token_bucket"` / `"sliding_window"` select explicitly; anything else
 /// is `Invalid`.
-fn parse_algo(name: Option<&str>) -> Result<forge::Algo> {
+fn parse_algo(name: Option<&str>) -> Result<forgelib::Algo> {
     match name {
-        None | Some("token_bucket") => Ok(forge::Algo::TokenBucket),
-        Some("sliding_window") => Ok(forge::Algo::SlidingWindow),
-        Some(other) => Err(err(forge::ForgeError::invalid(format!(
+        None | Some("token_bucket") => Ok(forgelib::Algo::TokenBucket),
+        Some("sliding_window") => Ok(forgelib::Algo::SlidingWindow),
+        Some(other) => Err(err(forgelib::ForgeError::invalid(format!(
             "unknown rate-limit algo {other:?}; expected \"token_bucket\" or \"sliding_window\""
         )))),
     }
@@ -81,19 +81,6 @@ fn parse_algo(name: Option<&str>) -> Result<forge::Algo> {
 // index.d.ts from these structs. Regenerate with the codegen tool; never hand-edit.
 include!("types.generated.rs");
 
-/// Connection options for `ForgeClient.connectWith`. Every field optional;
-/// omitted fields take Forge's defaults.
-#[napi(object)]
-#[derive(Default)]
-pub struct JsConnectOptions {
-    pub signing_secret: Option<String>,
-    pub kv_namespace: Option<String>,
-    pub max_connections: Option<u32>,
-    pub blob_base_url: Option<String>,
-    /// Set to store blob bytes on a local directory instead of in Postgres `BYTEA`.
-    pub filesystem_blob_root: Option<String>,
-}
-
 /// Epoch milliseconds for a `SystemTime` (saturating).
 fn epoch_ms(t: SystemTime) -> f64 {
     t.duration_since(UNIX_EPOCH)
@@ -102,23 +89,23 @@ fn epoch_ms(t: SystemTime) -> f64 {
 }
 
 /// A Forge client: one Postgres pool, every primitive. Construct with
-/// `ForgeClient.connect(url)`.
+/// `ForgeClient.init()`, which reads `forge.toml`.
 #[napi]
 pub struct ForgeClient {
-    forge: forge::Forge,
+    forge: forgelib::Forge,
     /// Leased-but-not-settled jobs, keyed by a delivery-unique opaque receipt
     /// (not the job id), so a job redelivered to this same process gets a fresh
     /// entry instead of overwriting the in-flight one. `ack`/`nack`/`heartbeat`
-    /// recover the `forge::Job` (whose lease fence is not part of the public
+    /// recover the `forgelib::Job` (whose lease fence is not part of the public
     /// surface) by receipt. Entries are evicted on settle and, as a leak backstop,
     /// once their last observed lease/heartbeat has been expired for over 24h.
-    leased: Arc<Mutex<HashMap<String, forge::Job>>>,
+    leased: Arc<Mutex<HashMap<String, forgelib::Job>>>,
     /// Monotonic counter making each dequeue's receipt unique.
     seq: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl ForgeClient {
-    fn from_forge(forge: forge::Forge) -> Self {
+    fn from_forge(forge: forgelib::Forge) -> Self {
         Self {
             forge,
             leased: Arc::new(Mutex::new(HashMap::new())),
@@ -129,56 +116,21 @@ impl ForgeClient {
 
 #[napi]
 impl ForgeClient {
-    /// Connect, migrate the system database, and ping; mirrors `Forge::init`. Pass
-    /// `signingSecret` to enable presigned blob URLs.
+    /// Read `forge.toml` from the current directory and instantiate the runtime from it;
+    /// mirrors Rust's `Forge::init`. The file is the single source of configuration; its
+    /// string values may reference the environment as `${VAR}` / `${VAR:-default}`. Migrates
+    /// the system database at startup.
     #[napi(factory)]
-    pub async fn connect(
-        postgres_url: String,
-        signing_secret: Option<String>,
-    ) -> Result<ForgeClient> {
-        let mut cfg = forge::ForgeConfig::new(postgres_url);
-        if let Some(secret) = signing_secret {
-            cfg = cfg.with_blob_signing_secret(secret);
-        }
-        let forge = forge::Forge::init(cfg).await.map_err(err)?;
+    pub async fn init() -> Result<ForgeClient> {
+        let forge = forgelib::Forge::init().await.map_err(err)?;
         Ok(ForgeClient::from_forge(forge))
     }
 
-    /// Connect using the `FORGE_*` environment variables (`FORGE_POSTGRES_URL`,
-    /// `FORGE_KV_NAMESPACE`, `FORGE_BLOB_BACKEND`, …), the same vars that drive the
-    /// Rust crate, so config is identical across all three languages.
+    /// Like `init`, but reads the `forge.toml` at `path` instead of the one in the current
+    /// directory.
     #[napi(factory)]
-    pub async fn connect_from_env() -> Result<ForgeClient> {
-        let cfg = forge::ForgeConfig::from_env().map_err(err)?;
-        let forge = forge::Forge::init(cfg).await.map_err(err)?;
-        Ok(ForgeClient::from_forge(forge))
-    }
-
-    /// Connect with the full per-deployment option surface (namespace, pool size,
-    /// blob backend, …) instead of just a URL + signing secret. `connect` migrates the
-    /// system database at startup.
-    #[napi(factory)]
-    pub async fn connect_with(
-        postgres_url: String,
-        options: JsConnectOptions,
-    ) -> Result<ForgeClient> {
-        let mut cfg = forge::ForgeConfig::new(postgres_url);
-        if let Some(s) = options.signing_secret {
-            cfg = cfg.with_blob_signing_secret(s);
-        }
-        if let Some(ns) = options.kv_namespace {
-            cfg = cfg.with_kv_namespace(ns);
-        }
-        if let Some(n) = options.max_connections {
-            cfg = cfg.with_max_connections(n);
-        }
-        if let Some(base) = options.blob_base_url {
-            cfg = cfg.with_blob_base_url(base);
-        }
-        if let Some(root) = options.filesystem_blob_root {
-            cfg = cfg.with_filesystem_blob(root);
-        }
-        let forge = forge::Forge::init(cfg).await.map_err(err)?;
+    pub async fn init_from(path: String) -> Result<ForgeClient> {
+        let forge = forgelib::Forge::init_from(path).await.map_err(err)?;
         Ok(ForgeClient::from_forge(forge))
     }
 
@@ -236,19 +188,19 @@ impl ForgeClient {
         if_not_exists: Option<bool>,
         if_exists: Option<bool>,
     ) -> Result<bool> {
-        let mut opts = forge::SetOpts::new();
+        let mut opts = forgelib::SetOpts::new();
         if let Some(t) = ttl_seconds {
             opts = opts.with_ttl(secs("ttlSeconds", t)?);
         }
         // `ifExists` (XX) takes precedence over `ifNotExists` (NX) if both are set.
         if if_exists.unwrap_or(false) {
-            opts = opts.with_mode(forge::SetMode::IfExists);
+            opts = opts.with_mode(forgelib::SetMode::IfExists);
         } else if if_not_exists.unwrap_or(false) {
-            opts = opts.with_mode(forge::SetMode::IfNotExists);
+            opts = opts.with_mode(forgelib::SetMode::IfNotExists);
         }
         self.forge
             .kv()
-            .set(&key, forge::Bytes::from(value), opts)
+            .set(&key, forgelib::Bytes::from(value), opts)
             .await
             .map_err(err)
     }
@@ -263,16 +215,16 @@ impl ForgeClient {
         ttl_seconds: Option<f64>,
         if_not_exists: Option<bool>,
     ) -> Result<bool> {
-        let mut opts = forge::SetOpts::new();
+        let mut opts = forgelib::SetOpts::new();
         if let Some(t) = ttl_seconds {
             opts = opts.with_ttl(secs("ttlSeconds", t)?);
         }
         if if_not_exists.unwrap_or(false) {
-            opts = opts.with_mode(forge::SetMode::IfNotExists);
+            opts = opts.with_mode(forgelib::SetMode::IfNotExists);
         }
         self.forge
             .kv()
-            .set(&key, forge::Bytes::from(value.to_vec()), opts)
+            .set(&key, forgelib::Bytes::from(value.to_vec()), opts)
             .await
             .map_err(err)
     }
@@ -326,7 +278,7 @@ impl ForgeClient {
         dedup_id: Option<String>,
         delay_seconds: Option<f64>,
     ) -> Result<String> {
-        let mut opts = forge::EnqueueOpts::new();
+        let mut opts = forgelib::EnqueueOpts::new();
         if let Some(m) = max_attempts {
             opts = opts.with_max_attempts(m);
         }
@@ -339,7 +291,7 @@ impl ForgeClient {
         let id = self
             .forge
             .queue()
-            .enqueue(&queue, forge::Bytes::from(payload), opts)
+            .enqueue(&queue, forgelib::Bytes::from(payload), opts)
             .await
             .map_err(err)?;
         Ok(id.to_string())
@@ -354,7 +306,7 @@ impl ForgeClient {
         visibility_seconds: f64,
         wait_seconds: f64,
     ) -> Result<Option<JsJob>> {
-        let opts = forge::DequeueOpts::new()
+        let opts = forgelib::DequeueOpts::new()
             .with_visibility_timeout(secs("visibilitySeconds", visibility_seconds)?)
             .with_wait(secs("waitSeconds", wait_seconds)?);
         match self
@@ -408,13 +360,13 @@ impl ForgeClient {
     pub async fn queue_nack(&self, receipt: String, retry_seconds: Option<f64>) -> Result<()> {
         let job = self.leased.lock().await.remove(&receipt);
         let Some(job) = job else {
-            return Err(err(forge::ForgeError::precondition(
+            return Err(err(forgelib::ForgeError::precondition(
                 "unknown receipt: the lease was lost",
             )));
         };
         let opts = match retry_seconds {
-            Some(s) => forge::NackOpts::retry_in(secs("retrySeconds", s)?),
-            None => forge::NackOpts::default(),
+            Some(s) => forgelib::NackOpts::retry_in(secs("retrySeconds", s)?),
+            None => forgelib::NackOpts::default(),
         };
         self.forge.queue().nack(&job, opts).await.map_err(err)
     }
@@ -428,7 +380,7 @@ impl ForgeClient {
     pub async fn queue_heartbeat(&self, receipt: String) -> Result<()> {
         let job = self.leased.lock().await.get(&receipt).cloned();
         let Some(job) = job else {
-            return Err(err(forge::ForgeError::precondition(
+            return Err(err(forgelib::ForgeError::precondition(
                 "unknown receipt: the lease was lost",
             )));
         };
@@ -470,7 +422,7 @@ impl ForgeClient {
     pub async fn set_flag_percent(&self, key: String, percent: u8) -> Result<()> {
         self.forge
             .config()
-            .set_flag(&key, forge::FlagRule::Percent(percent))
+            .set_flag(&key, forgelib::FlagRule::Percent(percent))
             .await
             .map_err(err)
     }
@@ -485,8 +437,8 @@ impl ForgeClient {
         targeting_key: Option<String>,
     ) -> bool {
         let ctx = match targeting_key {
-            Some(k) => forge::EvalCtx::user(k),
-            None => forge::EvalCtx::new(),
+            Some(k) => forgelib::EvalCtx::user(k),
+            None => forgelib::EvalCtx::new(),
         };
         self.forge.config().flag(&key, default_value, &ctx).await
     }
@@ -507,11 +459,11 @@ impl ForgeClient {
     ) -> Result<JsDecision> {
         let algo = parse_algo(algo.as_deref())?;
         let limit =
-            forge::Limit::per_duration(max, secs("perSeconds", per_seconds)?).with_algo(algo);
+            forgelib::Limit::per_duration(max, secs("perSeconds", per_seconds)?).with_algo(algo);
         let fm = match fail_open {
-            None => forge::FailMode::Default,
-            Some(true) => forge::FailMode::Open,
-            Some(false) => forge::FailMode::Closed,
+            None => forgelib::FailMode::Default,
+            Some(true) => forgelib::FailMode::Open,
+            Some(false) => forgelib::FailMode::Closed,
         };
         let d = self
             .forge
@@ -535,13 +487,13 @@ impl ForgeClient {
         data: String,
         content_type: Option<String>,
     ) -> Result<()> {
-        let mut opts = forge::PutOpts::new();
+        let mut opts = forgelib::PutOpts::new();
         if let Some(ct) = content_type {
             opts = opts.with_content_type(ct);
         }
         self.forge
             .blob()
-            .put(&key, forge::Bytes::from(data), opts)
+            .put(&key, forgelib::Bytes::from(data), opts)
             .await
             .map_err(err)
     }
@@ -553,13 +505,13 @@ impl ForgeClient {
         data: Buffer,
         content_type: Option<String>,
     ) -> Result<()> {
-        let mut opts = forge::PutOpts::new();
+        let mut opts = forgelib::PutOpts::new();
         if let Some(ct) = content_type {
             opts = opts.with_content_type(ct);
         }
         self.forge
             .blob()
-            .put(&key, forge::Bytes::from(data.to_vec()), opts)
+            .put(&key, forgelib::Bytes::from(data.to_vec()), opts)
             .await
             .map_err(err)
     }
@@ -662,7 +614,7 @@ impl ForgeClient {
     pub async fn verify_password(&self, plain: String, hash: String) -> Result<bool> {
         self.forge
             .auth()
-            .verify_password(&plain, &forge::PhcString::new(hash))
+            .verify_password(&plain, &forgelib::PhcString::new(hash))
             .await
             .map_err(err)
     }
@@ -672,7 +624,7 @@ impl ForgeClient {
     /// re-hash the plaintext and persist it. Transparent upgrade, no forced reset.
     #[napi]
     pub fn needs_rehash(&self, hash: String) -> bool {
-        self.forge.auth().needs_rehash(&forge::PhcString::new(hash))
+        self.forge.auth().needs_rehash(&forgelib::PhcString::new(hash))
     }
 
     /// Create a session for `userId`; returns the opaque token (shown once).
@@ -684,7 +636,7 @@ impl ForgeClient {
         idle_seconds: Option<f64>,
         absolute_seconds: Option<f64>,
     ) -> Result<String> {
-        let mut opts = forge::SessionOpts::new();
+        let mut opts = forgelib::SessionOpts::new();
         if let Some(s) = idle_seconds {
             opts = opts.with_idle_timeout(secs("idleSeconds", s)?);
         }
@@ -772,7 +724,7 @@ impl ForgeClient {
         let id = self
             .forge
             .schedule()
-            .at(when, &queue, forge::Bytes::from(payload), schedule_opts(max_attempts))
+            .at(when, &queue, forgelib::Bytes::from(payload), schedule_opts(max_attempts))
             .await
             .map_err(err)?;
         Ok(id.to_string())
@@ -791,7 +743,7 @@ impl ForgeClient {
     ) -> Result<()> {
         self.forge
             .schedule()
-            .cron(&name, &expr, &queue, forge::Bytes::from(payload), schedule_opts(max_attempts))
+            .cron(&name, &expr, &queue, forgelib::Bytes::from(payload), schedule_opts(max_attempts))
             .await
             .map_err(err)
     }
@@ -817,13 +769,13 @@ impl ForgeClient {
     pub async fn pubsub_publish(&self, topic: String, payload: String) -> Result<()> {
         self.forge
             .pubsub()
-            .publish(&topic, forge::Bytes::from(payload))
+            .publish(&topic, forgelib::Bytes::from(payload))
             .await
             .map_err(err)
     }
 
     /// Subscribe to a realtime topic, returning a handle whose `next()` yields each
-    /// payload published *after* this resolves (or `null` when the stream ends).
+    /// payload published after this resolves (or `null` when the stream ends).
     /// Subscriptions share one per-process listener connection; drop the handle to
     /// unsubscribe (the channel is released once it has no remaining subscribers).
     #[napi]
@@ -864,8 +816,8 @@ impl ForgeClient {
             .kv()
             .compare_and_swap(
                 &key,
-                old.map(forge::Bytes::from),
-                forge::Bytes::from(new_value),
+                old.map(forgelib::Bytes::from),
+                forgelib::Bytes::from(new_value),
             )
             .await
             .map_err(err)
@@ -880,7 +832,7 @@ impl ForgeClient {
         cursor: Option<String>,
         limit: u32,
     ) -> Result<JsScanPage> {
-        let cur = cursor.map(forge::Cursor::from_token);
+        let cur = cursor.map(forgelib::Cursor::from_token);
         let (keys, next) = self
             .forge
             .kv()
@@ -922,7 +874,7 @@ impl ForgeClient {
         cursor: Option<String>,
         limit: u32,
     ) -> Result<JsBlobPage> {
-        let cur = cursor.map(forge::Cursor::from_token);
+        let cur = cursor.map(forgelib::Cursor::from_token);
         let page = self
             .forge
             .blob()
@@ -955,7 +907,7 @@ impl ForgeClient {
         content_type: Option<String>,
         metadata: Option<HashMap<String, String>>,
     ) -> Result<()> {
-        let mut opts = forge::PutOpts::new();
+        let mut opts = forgelib::PutOpts::new();
         if let Some(ct) = content_type {
             opts = opts.with_content_type(ct);
         }
@@ -966,7 +918,7 @@ impl ForgeClient {
         }
         self.forge
             .blob()
-            .put(&key, forge::Bytes::from(data.to_vec()), opts)
+            .put(&key, forgelib::Bytes::from(data.to_vec()), opts)
             .await
             .map_err(err)
     }
@@ -998,7 +950,7 @@ impl ForgeClient {
         cursor: Option<String>,
         limit: Option<u32>,
     ) -> Result<JsSchedulePage> {
-        let cur = cursor.map(forge::Cursor::from_token);
+        let cur = cursor.map(forgelib::Cursor::from_token);
         let (items, next) = self
             .forge
             .schedule()
@@ -1009,7 +961,7 @@ impl ForgeClient {
             .into_iter()
             .map(|s| {
                 let (kind, cron_expr) = match s.kind {
-                    forge::ScheduleKind::Cron(e) => ("cron".to_string(), Some(e)),
+                    forgelib::ScheduleKind::Cron(e) => ("cron".to_string(), Some(e)),
                     _ => ("at".to_string(), None),
                 };
                 JsScheduleInfo {
@@ -1033,7 +985,7 @@ impl ForgeClient {
     pub async fn set_flag_on(&self, key: String) -> Result<()> {
         self.forge
             .config()
-            .set_flag(&key, forge::FlagRule::On)
+            .set_flag(&key, forgelib::FlagRule::On)
             .await
             .map_err(err)
     }
@@ -1043,7 +995,7 @@ impl ForgeClient {
     pub async fn set_flag_off(&self, key: String) -> Result<()> {
         self.forge
             .config()
-            .set_flag(&key, forge::FlagRule::Off)
+            .set_flag(&key, forgelib::FlagRule::Off)
             .await
             .map_err(err)
     }
@@ -1053,7 +1005,7 @@ impl ForgeClient {
     pub async fn set_flag_allow_list(&self, key: String, entries: Vec<String>) -> Result<()> {
         self.forge
             .config()
-            .set_flag(&key, forge::FlagRule::AllowList(entries))
+            .set_flag(&key, forgelib::FlagRule::AllowList(entries))
             .await
             .map_err(err)
     }
@@ -1104,7 +1056,7 @@ impl ForgeClient {
 /// unsubscribes (subscriptions share one per-process listener connection).
 #[napi]
 pub struct JsSubscription {
-    inner: Arc<Mutex<forge::Subscription>>,
+    inner: Arc<Mutex<forgelib::Subscription>>,
 }
 
 #[napi]

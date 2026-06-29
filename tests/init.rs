@@ -3,9 +3,8 @@
 #![allow(clippy::unwrap_used, clippy::panic)]
 
 use bytes::Bytes;
-use forge::testing::TestDatabase;
-use forge::{EnqueueOpts, Forge, ForgeConfig, ForgeError};
-use std::time::Duration;
+use forgelib::testing::TestDatabase;
+use forgelib::{EnqueueOpts, Forge, ForgeError};
 
 #[tokio::test]
 async fn init_runs_migrations_and_is_idempotent() {
@@ -20,20 +19,24 @@ async fn init_requires_at_least_two_connections_to_migrate() {
     let db = TestDatabase::new().await.unwrap();
     // Init migrates at startup, holding a lock connection while a second runs the SQL, so
     // max_connections=1 would deadlock; fail loudly at init instead.
-    let res = Forge::init(ForgeConfig::new(db.url()).with_max_connections(1)).await;
+    let res = db.forge_with("max_connections = 1\n").await;
     assert!(matches!(res, Err(ForgeError::Config(_))));
 
     // Two is enough: one for the lock, one for the migration SQL.
-    let ok = Forge::init(ForgeConfig::new(db.url()).with_max_connections(2)).await;
+    let ok = db.forge_with("max_connections = 2\n").await;
     assert!(ok.is_ok());
 }
 
 #[tokio::test]
 async fn bad_connection_string_fails_at_init() {
     // Nothing listens on port 1 → connection refused, surfaced as Config.
-    let cfg = ForgeConfig::new("postgres://postgres:forge@127.0.0.1:1/forge_dev")
-        .with_acquire_timeout(Duration::from_secs(2));
-    assert!(matches!(Forge::init(cfg).await, Err(ForgeError::Config(_))));
+    let cfg = "[postgres]\n\
+        url = \"postgres://postgres:forge@127.0.0.1:1/forge_dev\"\n\
+        acquire_timeout_secs = 2\n";
+    assert!(matches!(
+        Forge::init_from_str(cfg).await,
+        Err(ForgeError::Config(_))
+    ));
 }
 
 #[tokio::test]

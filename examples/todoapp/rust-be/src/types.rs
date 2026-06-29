@@ -118,8 +118,8 @@ impl<'r> Responder<'r, 'static> for ApiError {
     }
 }
 
-impl From<forge::ForgeError> for ApiError {
-    fn from(err: forge::ForgeError) -> Self {
+impl From<forgelib::ForgeError> for ApiError {
+    fn from(err: forgelib::ForgeError) -> Self {
         tracing::warn!(error = %err, "forge operation failed");
         Self::new(Status::InternalServerError, "forge operation failed")
     }

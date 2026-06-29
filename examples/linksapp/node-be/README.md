@@ -9,7 +9,9 @@ bun install        # or npm install
 node src/index.ts  # or bun run start
 ```
 
-Set `FORGE_POSTGRES_URL` to override the default (`postgres://postgres:forge@127.0.0.1:5432/linksapp_node`).
+Forge configures itself from `forge.toml` in this directory. That file references
+`FORGE_POSTGRES_URL` (`${FORGE_POSTGRES_URL:-postgres://postgres:forge@127.0.0.1:5432/linksapp_node}`),
+so setting the env var overrides the default rather than passing the URL to Forge directly.
 
 ## Background workers
 

@@ -1,6 +1,6 @@
 """chatapp Python backend: a pure GraphQL API over Forge primitives.
 
-Forge primitives go through the natively-async `forge_py` binding; the chat tables go
+Forge primitives go through the natively-async `forgelib` binding; the chat tables go
 through an asyncpg pool. Realtime rides Forge pubsub via the binding's Subscription async
 iterator, so there is no separate broker."""
 
@@ -12,7 +12,7 @@ import uuid
 from contextlib import asynccontextmanager
 
 import asyncpg
-import forge_py
+import forgelib
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
@@ -57,13 +57,12 @@ def build_app() -> FastAPI:
             "FORGE_POSTGRES_URL",
             "postgres://postgres:forge@127.0.0.1:5432/chatapp_python_be",
         )
-        secret = env("FORGE_BLOB_SIGNING_SECRET", "dev-secret-change-me")
+        # Point FORGE_POSTGRES_URL at the resolved URL so ./forge.toml's ${FORGE_POSTGRES_URL}
+        # interpolation lands on the same database the app's own pool uses below.
         os.environ.setdefault("FORGE_POSTGRES_URL", pg)
-        os.environ.setdefault("FORGE_BLOB_SIGNING_SECRET", secret)
-        os.environ.setdefault("FORGE_BLOB_BASE_URL", "/api/files")
-        # connect_from_env migrates Forge's system tables and honors backend selectors
-        # such as FORGE_QUEUE_BACKEND / FORGE_BLOB_BACKEND.
-        forge = await forge_py.ForgeClient.connect_from_env()
+        # Forge instantiates from ./forge.toml (it migrates the forge_* tables and honors the
+        # backend selectors); the signing secret and base URL live in that file.
+        forge = await forgelib.ForgeClient.init()
         pool = await asyncpg.create_pool(pg, min_size=1, max_size=10)
         await db.migrate(pool)
 

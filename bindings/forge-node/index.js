@@ -37,7 +37,7 @@ switch (platform) {
           if (localFileExisted) {
             nativeBinding = require('./forge-node.android-arm64.node')
           } else {
-            nativeBinding = require('forge-node-android-arm64')
+            nativeBinding = require('forgelib-android-arm64')
           }
         } catch (e) {
           loadError = e
@@ -49,7 +49,7 @@ switch (platform) {
           if (localFileExisted) {
             nativeBinding = require('./forge-node.android-arm-eabi.node')
           } else {
-            nativeBinding = require('forge-node-android-arm-eabi')
+            nativeBinding = require('forgelib-android-arm-eabi')
           }
         } catch (e) {
           loadError = e
@@ -69,7 +69,7 @@ switch (platform) {
           if (localFileExisted) {
             nativeBinding = require('./forge-node.win32-x64-msvc.node')
           } else {
-            nativeBinding = require('forge-node-win32-x64-msvc')
+            nativeBinding = require('forgelib-win32-x64-msvc')
           }
         } catch (e) {
           loadError = e
@@ -83,7 +83,7 @@ switch (platform) {
           if (localFileExisted) {
             nativeBinding = require('./forge-node.win32-ia32-msvc.node')
           } else {
-            nativeBinding = require('forge-node-win32-ia32-msvc')
+            nativeBinding = require('forgelib-win32-ia32-msvc')
           }
         } catch (e) {
           loadError = e
@@ -97,7 +97,7 @@ switch (platform) {
           if (localFileExisted) {
             nativeBinding = require('./forge-node.win32-arm64-msvc.node')
           } else {
-            nativeBinding = require('forge-node-win32-arm64-msvc')
+            nativeBinding = require('forgelib-win32-arm64-msvc')
           }
         } catch (e) {
           loadError = e
@@ -113,7 +113,7 @@ switch (platform) {
       if (localFileExisted) {
         nativeBinding = require('./forge-node.darwin-universal.node')
       } else {
-        nativeBinding = require('forge-node-darwin-universal')
+        nativeBinding = require('forgelib-darwin-universal')
       }
       break
     } catch {}
@@ -124,7 +124,7 @@ switch (platform) {
           if (localFileExisted) {
             nativeBinding = require('./forge-node.darwin-x64.node')
           } else {
-            nativeBinding = require('forge-node-darwin-x64')
+            nativeBinding = require('forgelib-darwin-x64')
           }
         } catch (e) {
           loadError = e
@@ -138,7 +138,7 @@ switch (platform) {
           if (localFileExisted) {
             nativeBinding = require('./forge-node.darwin-arm64.node')
           } else {
-            nativeBinding = require('forge-node-darwin-arm64')
+            nativeBinding = require('forgelib-darwin-arm64')
           }
         } catch (e) {
           loadError = e
@@ -157,7 +157,7 @@ switch (platform) {
       if (localFileExisted) {
         nativeBinding = require('./forge-node.freebsd-x64.node')
       } else {
-        nativeBinding = require('forge-node-freebsd-x64')
+        nativeBinding = require('forgelib-freebsd-x64')
       }
     } catch (e) {
       loadError = e
@@ -174,7 +174,7 @@ switch (platform) {
             if (localFileExisted) {
               nativeBinding = require('./forge-node.linux-x64-musl.node')
             } else {
-              nativeBinding = require('forge-node-linux-x64-musl')
+              nativeBinding = require('forgelib-linux-x64-musl')
             }
           } catch (e) {
             loadError = e
@@ -187,7 +187,7 @@ switch (platform) {
             if (localFileExisted) {
               nativeBinding = require('./forge-node.linux-x64-gnu.node')
             } else {
-              nativeBinding = require('forge-node-linux-x64-gnu')
+              nativeBinding = require('forgelib-linux-x64-gnu')
             }
           } catch (e) {
             loadError = e
@@ -203,7 +203,7 @@ switch (platform) {
             if (localFileExisted) {
               nativeBinding = require('./forge-node.linux-arm64-musl.node')
             } else {
-              nativeBinding = require('forge-node-linux-arm64-musl')
+              nativeBinding = require('forgelib-linux-arm64-musl')
             }
           } catch (e) {
             loadError = e
@@ -216,7 +216,7 @@ switch (platform) {
             if (localFileExisted) {
               nativeBinding = require('./forge-node.linux-arm64-gnu.node')
             } else {
-              nativeBinding = require('forge-node-linux-arm64-gnu')
+              nativeBinding = require('forgelib-linux-arm64-gnu')
             }
           } catch (e) {
             loadError = e
@@ -232,7 +232,7 @@ switch (platform) {
             if (localFileExisted) {
               nativeBinding = require('./forge-node.linux-arm-musleabihf.node')
             } else {
-              nativeBinding = require('forge-node-linux-arm-musleabihf')
+              nativeBinding = require('forgelib-linux-arm-musleabihf')
             }
           } catch (e) {
             loadError = e
@@ -245,7 +245,7 @@ switch (platform) {
             if (localFileExisted) {
               nativeBinding = require('./forge-node.linux-arm-gnueabihf.node')
             } else {
-              nativeBinding = require('forge-node-linux-arm-gnueabihf')
+              nativeBinding = require('forgelib-linux-arm-gnueabihf')
             }
           } catch (e) {
             loadError = e
@@ -261,7 +261,7 @@ switch (platform) {
             if (localFileExisted) {
               nativeBinding = require('./forge-node.linux-riscv64-musl.node')
             } else {
-              nativeBinding = require('forge-node-linux-riscv64-musl')
+              nativeBinding = require('forgelib-linux-riscv64-musl')
             }
           } catch (e) {
             loadError = e
@@ -274,7 +274,7 @@ switch (platform) {
             if (localFileExisted) {
               nativeBinding = require('./forge-node.linux-riscv64-gnu.node')
             } else {
-              nativeBinding = require('forge-node-linux-riscv64-gnu')
+              nativeBinding = require('forgelib-linux-riscv64-gnu')
             }
           } catch (e) {
             loadError = e
@@ -289,7 +289,7 @@ switch (platform) {
           if (localFileExisted) {
             nativeBinding = require('./forge-node.linux-s390x-gnu.node')
           } else {
-            nativeBinding = require('forge-node-linux-s390x-gnu')
+            nativeBinding = require('forgelib-linux-s390x-gnu')
           }
         } catch (e) {
           loadError = e

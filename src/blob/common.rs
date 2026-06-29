@@ -96,7 +96,7 @@ pub(super) fn like_escape(prefix: &str) -> String {
 fn require_secret(secret: Option<&[u8]>) -> Result<&[u8]> {
     secret.ok_or_else(|| {
         ForgeError::config(
-            "blob signing secret is not configured (set ForgeConfig.blob_signing_secret)",
+            "blob signing secret is not configured (set blob.signing_secret in forge.toml)",
         )
     })
 }

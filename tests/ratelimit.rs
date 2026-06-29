@@ -2,8 +2,8 @@
 #![cfg(feature = "pg-tests")]
 #![allow(clippy::unwrap_used, clippy::panic)]
 
-use forge::testing::TestDatabase;
-use forge::{Algo, ForgeError, Limit};
+use forgelib::testing::TestDatabase;
+use forgelib::{Algo, ForgeError, Limit};
 use std::time::Duration;
 
 #[tokio::test]

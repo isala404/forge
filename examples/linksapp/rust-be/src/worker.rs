@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use forge::{Bytes, DequeueOpts, Forge, NackOpts, SetOpts};
+use forgelib::{Bytes, DequeueOpts, Forge, NackOpts, SetOpts};
 
 use crate::types::{LinkRecord, OwnedLink};
 use crate::util::{click_topic, clicks_key, link_slug_key, owner_key, qr_blob_key};
@@ -80,7 +80,7 @@ pub async fn run_clicks_worker(forge: Forge) {
     }
 }
 
-async fn handle_click(forge: &Forge, job: &forge::Job) -> anyhow::Result<()> {
+async fn handle_click(forge: &Forge, job: &forgelib::Job) -> anyhow::Result<()> {
     let payload: serde_json::Value = job
         .payload_json()
         .map_err(|e| anyhow::anyhow!("bad clicks payload: {e}"))?;
@@ -142,7 +142,7 @@ pub async fn run_expire_worker(forge: Forge) {
     }
 }
 
-async fn handle_expire(forge: &Forge, job: &forge::Job) -> anyhow::Result<()> {
+async fn handle_expire(forge: &Forge, job: &forgelib::Job) -> anyhow::Result<()> {
     let payload: serde_json::Value = job
         .payload_json()
         .map_err(|e| anyhow::anyhow!("bad expire payload: {e}"))?;

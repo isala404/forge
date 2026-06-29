@@ -1,0 +1,17 @@
+# Conformance runner config. The runner varies the database, namespace, and backends per
+# client by setting FORGE_* env vars before each ForgeClient.init_from(); this file maps
+# those env vars onto Forge's config so one process covers every scenario and the backend
+# selection smoke test.
+[postgres]
+url = "${FORGE_POSTGRES_URL}"
+
+[forge]
+namespace = "${FORGE_NAMESPACE:-}"
+
+[blob]
+signing_secret = "${FORGE_BLOB_SIGNING_SECRET:-conformance-signing-secret}"
+backend = "${FORGE_BLOB_BACKEND:-postgres}"
+fs_root = "${FORGE_BLOB_FS_ROOT:-}"
+
+[backends]
+queue = "${FORGE_QUEUE_BACKEND:-postgres}"

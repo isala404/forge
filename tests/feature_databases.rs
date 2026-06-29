@@ -8,8 +8,8 @@
 #![allow(clippy::unwrap_used, clippy::panic, clippy::disallowed_methods)]
 
 use bytes::Bytes;
-use forge::testing::TestDatabase;
-use forge::{DatabaseConfig, Forge, ForgeConfig, Primitive};
+use forgelib::Forge;
+use forgelib::testing::TestDatabase;
 use sqlx::{Connection, PgConnection};
 
 async fn count(url: &str, table: &str) -> i64 {
@@ -28,13 +28,14 @@ async fn feature_override_routes_writes_to_its_own_database() {
     let default_db = TestDatabase::new().await.unwrap();
     let queue_db = TestDatabase::new().await.unwrap();
 
-    let cfg = ForgeConfig::new(default_db.url().to_string())
-        .with_max_connections(4)
-        .with_feature_database(
-            Primitive::Queue,
-            DatabaseConfig::new(queue_db.url().to_string()).with_max_connections(2),
-        );
-    let forge = Forge::init(cfg).await.unwrap();
+    let forge = Forge::init_from_str(&format!(
+        "[postgres]\nurl = \"{}\"\nmax_connections = 4\n\
+         [databases.queue]\nurl = \"{}\"\nmax_connections = 2\n",
+        default_db.url(),
+        queue_db.url(),
+    ))
+    .await
+    .unwrap();
 
     forge
         .kv()
@@ -65,11 +66,13 @@ async fn feature_override_routes_writes_to_its_own_database() {
 async fn same_server_override_uses_a_separate_pool() {
     let db = TestDatabase::new().await.unwrap();
 
-    let cfg = ForgeConfig::new(db.url().to_string()).with_feature_database(
-        Primitive::Kv,
-        DatabaseConfig::new(db.url().to_string()).with_max_connections(2),
-    );
-    let forge = Forge::init(cfg).await.unwrap();
+    let forge = db
+        .forge_with(&format!(
+            "[databases.kv]\nurl = \"{}\"\nmax_connections = 2\n",
+            db.url()
+        ))
+        .await
+        .unwrap();
 
     forge
         .kv()

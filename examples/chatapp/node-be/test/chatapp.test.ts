@@ -10,7 +10,7 @@ import {
   getIntrospectionQuery,
   type IntrospectionQuery,
 } from "graphql";
-import { ForgeClient } from "forge-node";
+import { ForgeClient } from "forgelib";
 
 import { TEST_DB_URL } from "./globalSetup.ts";
 import { startServerProcess, type ServerHandle } from "./serverProcess.ts";
@@ -44,6 +44,10 @@ beforeAll(async () => {
   httpUrl = `http://127.0.0.1:${running.port}/graphql`;
   wsUrl = `ws://127.0.0.1:${running.port}/graphql`;
   anon = new HttpClient(httpUrl);
+  // In-process ForgeClient.init() reads ./forge.toml, whose ${FORGE_POSTGRES_URL} resolves
+  // from the environment; point it at the throwaway test database the server also uses.
+  process.env.FORGE_POSTGRES_URL = TEST_DB_URL;
+  process.env.FORGE_BLOB_SIGNING_SECRET = "test-signing-secret";
 });
 
 afterAll(async () => {
@@ -426,7 +430,7 @@ describe("feature flags + ops", () => {
     // Read the flag through a fresh Forge client each time so no per-client config
     // cache masks the new rollout value.
     const flagFor = async (uid: string): Promise<boolean> => {
-      const c = await ForgeClient.connect(TEST_DB_URL, "test-signing-secret");
+      const c = await ForgeClient.init();
       return c.flag("reactions_v2", false, uid);
     };
     await aHttp.ok(`mutation { setReactionsRollout(percent: 100) }`);

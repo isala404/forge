@@ -3,22 +3,20 @@
 //! `await`s the binding directly:
 //!
 //! ```python
-//! forge = await ForgeClient.connect(url, signing_secret)
+//! forge = await ForgeClient.init()  # reads ./forge.toml
 //! await forge.kv_set("k", "v")
 //! async for payload in await forge.pubsub_subscribe("chat:1"):
 //!     ...
 //! ```
 //!
 //! The binding never blocks the event loop. Forge errors surface as typed exceptions
-//! (`forge_py.NotFound`, `forge_py.Limit`, …, all subclasses of `forge_py.ForgeError`).
+//! (`forgelib.NotFound`, `forgelib.Limit`, …, all subclasses of `forgelib.ForgeError`).
 //! Leased queue jobs are held Rust-side and referenced by delivery-unique receipt, as in
 //! the Node binding.
 
 // `Limit` is intentionally NOT imported by name: the `Limit` exception type below
 // would collide with `forge::Limit`. It is referenced fully-qualified where used.
-use forge::{
-    Algo, EvalCtx, FailMode, FlagRule, Forge, ForgeConfig, PutOpts, SessionOpts, SetMode, SetOpts,
-};
+use forge::{Algo, EvalCtx, FailMode, FlagRule, Forge, PutOpts, SessionOpts, SetMode, SetOpts};
 use futures_util::StreamExt;
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyStopAsyncIteration};
@@ -31,18 +29,18 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
 create_exception!(
-    forge_py,
+    forgelib,
     ForgeError,
     PyException,
     "Base class for all Forge errors."
 );
-create_exception!(forge_py, NotFound, ForgeError);
-create_exception!(forge_py, Invalid, ForgeError);
-create_exception!(forge_py, Limit, ForgeError);
-create_exception!(forge_py, Precondition, ForgeError);
-create_exception!(forge_py, Unavailable, ForgeError);
-create_exception!(forge_py, Config, ForgeError);
-create_exception!(forge_py, Backend, ForgeError);
+create_exception!(forgelib, NotFound, ForgeError);
+create_exception!(forgelib, Invalid, ForgeError);
+create_exception!(forgelib, Limit, ForgeError);
+create_exception!(forgelib, Precondition, ForgeError);
+create_exception!(forgelib, Unavailable, ForgeError);
+create_exception!(forgelib, Config, ForgeError);
+create_exception!(forgelib, Backend, ForgeError);
 
 /// Map a `ForgeError` onto the matching typed Python exception.
 fn pyerr(e: forge::ForgeError) -> PyErr {
@@ -145,7 +143,7 @@ impl Subscription {
 }
 
 /// A Forge client: one Postgres pool, every primitive, driven on a shared async
-/// runtime. Construct with `await ForgeClient.connect(url)`.
+/// runtime. Construct with `await ForgeClient.init()`, which reads `forge.toml`.
 #[pyclass]
 struct ForgeClient {
     forge: Forge,
@@ -160,21 +158,14 @@ struct ForgeClient {
 
 #[pymethods]
 impl ForgeClient {
-    /// Connect, migrate the system database, and ping (mirrors `Forge::init`). Pass
-    /// `signing_secret` to enable presigned blob URLs. `await` it.
+    /// Read `forge.toml` from the current directory and instantiate the runtime from it
+    /// (mirrors Rust's `Forge::init`). The file is the single source of configuration; its
+    /// string values may reference the environment as `${VAR}` / `${VAR:-default}`. Migrates
+    /// the system database at startup. `await` it.
     #[staticmethod]
-    #[pyo3(signature = (postgres_url, signing_secret=None))]
-    fn connect<'py>(
-        py: Python<'py>,
-        postgres_url: String,
-        signing_secret: Option<String>,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    fn init(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
         future_into_py(py, async move {
-            let mut cfg = ForgeConfig::new(postgres_url);
-            if let Some(secret) = signing_secret {
-                cfg = cfg.with_blob_signing_secret(secret);
-            }
-            let forge = Forge::init(cfg).await.map_err(pyerr)?;
+            let forge = Forge::init().await.map_err(pyerr)?;
             Ok(ForgeClient {
                 forge,
                 leased: Arc::new(Mutex::new(HashMap::new())),
@@ -183,14 +174,12 @@ impl ForgeClient {
         })
     }
 
-    /// Connect using the `FORGE_*` environment variables (`FORGE_POSTGRES_URL`,
-    /// `FORGE_KV_NAMESPACE`, `FORGE_BLOB_BACKEND`, …), the same vars that drive the Rust
-    /// crate. `await` it.
+    /// Like `init`, but reads the `forge.toml` at `path` instead of the one in the current
+    /// directory. `await` it.
     #[staticmethod]
-    fn connect_from_env(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+    fn init_from(py: Python<'_>, path: String) -> PyResult<Bound<'_, PyAny>> {
         future_into_py(py, async move {
-            let cfg = ForgeConfig::from_env().map_err(pyerr)?;
-            let forge = Forge::init(cfg).await.map_err(pyerr)?;
+            let forge = Forge::init_from(path).await.map_err(pyerr)?;
             Ok(ForgeClient {
                 forge,
                 leased: Arc::new(Mutex::new(HashMap::new())),
@@ -867,47 +856,6 @@ impl ForgeClient {
         self.forge.pubsub().channel_for(&topic).map_err(pyerr)
     }
 
-    /// Connect with the full per-deployment option surface (namespace, pool size,
-    /// filesystem blob backend, …). `connect_with` migrates the system database at
-    /// startup. `await` the result.
-    #[staticmethod]
-    #[pyo3(signature = (postgres_url, signing_secret=None, kv_namespace=None, max_connections=None, blob_base_url=None, filesystem_blob_root=None))]
-    #[allow(clippy::too_many_arguments)]
-    fn connect_with<'py>(
-        py: Python<'py>,
-        postgres_url: String,
-        signing_secret: Option<String>,
-        kv_namespace: Option<String>,
-        max_connections: Option<u32>,
-        blob_base_url: Option<String>,
-        filesystem_blob_root: Option<String>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        future_into_py(py, async move {
-            let mut cfg = ForgeConfig::new(postgres_url);
-            if let Some(s) = signing_secret {
-                cfg = cfg.with_blob_signing_secret(s);
-            }
-            if let Some(ns) = kv_namespace {
-                cfg = cfg.with_kv_namespace(ns);
-            }
-            if let Some(n) = max_connections {
-                cfg = cfg.with_max_connections(n);
-            }
-            if let Some(base) = blob_base_url {
-                cfg = cfg.with_blob_base_url(base);
-            }
-            if let Some(root) = filesystem_blob_root {
-                cfg = cfg.with_filesystem_blob(root);
-            }
-            let forge = Forge::init(cfg).await.map_err(pyerr)?;
-            Ok(ForgeClient {
-                forge,
-                leased: Arc::new(Mutex::new(HashMap::new())),
-                seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            })
-        })
-    }
-
     /// A backend report: which provider powers each primitive (for health pages/logs).
     fn backend_report(&self) -> Vec<BackendInfo> {
         self.forge
@@ -1265,7 +1213,7 @@ impl ForgeClient {
 }
 
 #[pymodule]
-fn forge_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn forgelib(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Own the Tokio runtime that drives every awaitable this module returns.
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();

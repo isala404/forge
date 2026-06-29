@@ -48,8 +48,11 @@ upload + download) · `pubsub` → all realtime · `queue` → fanout + reap + t
 
 ## Run
 
-A Postgres reachable at `FORGE_POSTGRES_URL` is required. Forge migrates its own
-`forge_*` tables on `init`; the app applies `migrations.sql` on startup.
+A reachable Postgres is required. Forge configures itself from `forge.toml` in this
+directory, which references `FORGE_POSTGRES_URL` and `FORGE_BLOB_SIGNING_SECRET` from the
+environment; setting those env vars overrides the toml defaults rather than passing values to
+Forge directly. Forge migrates its own `forge_*` tables on `init`; the app applies
+`migrations.sql` on startup.
 
 ```sh
 # create the database the default URL points at, then:
@@ -62,6 +65,10 @@ cargo run -- --print-schema   # emit the SDL (no database needed)
 ```
 
 ### Environment
+
+`FORGE_POSTGRES_URL` and `FORGE_BLOB_SIGNING_SECRET` are referenced by `forge.toml` (as
+`${VAR:-default}`) rather than read by Forge directly; the rest configure the HTTP server and
+app loops.
 
 | var | default | meaning |
 | --- | --- | --- |

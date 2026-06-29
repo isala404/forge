@@ -7,8 +7,8 @@
 #![cfg(feature = "pg-tests")]
 #![allow(clippy::unwrap_used, clippy::panic)]
 
-use forge::testing::TestDatabase;
-use forge::{ConfigExt, EvalCtx, FlagRule, ForgeError};
+use forgelib::testing::TestDatabase;
+use forgelib::{ConfigExt, EvalCtx, FlagRule, ForgeError};
 
 #[tokio::test]
 async fn get_set_raw_roundtrip_is_last_write_wins() {

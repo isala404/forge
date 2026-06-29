@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-import forge_py
+import forgelib
 
 from .utils import (
     CLICKS_QUEUE,
@@ -45,7 +45,7 @@ async def clicks_worker(forge, stop: asyncio.Event) -> None:
     while not stop.is_set():
         try:
             job = await forge.queue_dequeue(CLICKS_QUEUE, 30.0, 1.0)
-        except forge_py.ForgeError:
+        except forgelib.ForgeError:
             await asyncio.sleep(0.2)
             continue
         if job is None:
@@ -63,7 +63,7 @@ async def clicks_worker(forge, stop: asyncio.Event) -> None:
             print(f"clicks worker error: {exc}", flush=True)
             try:
                 await forge.queue_nack(job.receipt, 5.0)
-            except forge_py.ForgeError:
+            except forgelib.ForgeError:
                 pass
 
 
@@ -72,7 +72,7 @@ async def expire_worker(forge, stop: asyncio.Event) -> None:
     while not stop.is_set():
         try:
             job = await forge.queue_dequeue(EXPIRE_QUEUE, 30.0, 5.0)
-        except forge_py.ForgeError:
+        except forgelib.ForgeError:
             await asyncio.sleep(0.2)
             continue
         if job is None:
@@ -85,7 +85,7 @@ async def expire_worker(forge, stop: asyncio.Event) -> None:
             print(f"expire worker error: {exc}", flush=True)
             try:
                 await forge.queue_nack(job.receipt, 5.0)
-            except forge_py.ForgeError:
+            except forgelib.ForgeError:
                 pass
 
 

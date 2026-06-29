@@ -19,10 +19,18 @@ This produces `forge-node.<platform>.node` next to the committed `index.js` /
 
 ## Use
 
-```js
-import { ForgeClient } from 'forge-node';
+Configuration lives in a `forge.toml` at the project root; `init()` reads it and
+instantiates the runtime. A minimal one:
 
-const forge = await ForgeClient.connect('postgres://localhost/myapp');
+```toml
+[postgres]
+url = "${DATABASE_URL:-postgres://localhost/myapp}"
+```
+
+```js
+import { ForgeClient } from 'forgelib';
+
+const forge = await ForgeClient.init(); // reads ./forge.toml
 
 // kv (Redis lineage)
 await forge.kvSet('user:42:name', 'Ada', /* ttlSeconds */ null, /* ifNotExists */ false);
@@ -39,19 +47,19 @@ if (job) {
 ```
 
 Leased jobs are held Rust-side and referenced by `id`, so the opaque lease fence never
-crosses into JS. For the full per-deployment option surface (namespace, pool size,
-blob backend, …) use `ForgeClient.connectWith(url, options)`. See `index.d.ts` for the
-full typed surface.
+crosses into JS. Every per-deployment knob (namespace, pool size, blob backend, …) lives
+in `forge.toml`; `ForgeClient.initFrom(path)` loads a file outside the current directory.
+See `index.d.ts` for the full typed surface.
 
 ### Typed projection
 
 `forge-node/typed` binds a name + JSON codec to a type, so you enqueue a typed payload
 instead of a raw queue string + `JSON.stringify` (the Node view of the Rust
-`forge::typed` layer):
+`forgelib::typed` layer):
 
 ```ts
-import { ForgeClient } from 'forge-node';
-import { typedQueue, forgeErrorCode } from 'forge-node/typed';
+import { ForgeClient } from 'forgelib';
+import { typedQueue, forgeErrorCode } from 'forgelib/typed';
 
 interface SendEmail { to: string; template: string }
 const emails = typedQueue<SendEmail>(forge, 'emails');

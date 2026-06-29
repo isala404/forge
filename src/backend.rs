@@ -3,9 +3,9 @@
 //! The primitive traits ([`crate::kv::Kv`], [`crate::queue::Queue`], …) are the operation
 //! contracts; they say nothing about how a backend is initialized, health-checked, or
 //! swept. [`BackendLifecycle`] is that layer: one value per primitive that knows which
-//! provider powers it and how to maintain it. `forge::Forge` holds a
-//! `Vec<Arc<dyn BackendLifecycle>>` and drives them from `forge::Forge::maintain` and
-//! `forge::Forge::backend_report`.
+//! provider powers it and how to maintain it. `forgelib::Forge` holds a
+//! `Vec<Arc<dyn BackendLifecycle>>` and drives them from `forgelib::Forge::maintain` and
+//! `forgelib::Forge::backend_report`.
 //!
 //! In v1 every primitive is Postgres, except that `blob` can store bytes on a local
 //! filesystem instead of `BYTEA`. Adding a second backend for a primitive is a new
@@ -152,7 +152,7 @@ impl BackendInfo {
 
 /// A snapshot of which backend powers each primitive, for logs, health pages, and
 /// debugging. Not needed for request handling; the provider must not leak into app logic.
-/// See `forge::Forge::backend_report`.
+/// See `forgelib::Forge::backend_report`.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct BackendReport {

@@ -4,7 +4,7 @@
 use std::future::Future;
 use std::time::Duration;
 
-use forge::{Bytes, EnqueueOpts, Job};
+use forgelib::{Bytes, EnqueueOpts, Job};
 
 use crate::context::{Ctx, FAIL_QUEUE, FANOUT_QUEUE, MessageJob, REAP_QUEUE};
 use crate::db;

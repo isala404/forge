@@ -1,4 +1,4 @@
-"""Typed projection over the forge_py ForgeClient.
+"""Typed projection over the forgelib ForgeClient.
 
 Bind a name + JSON codec to a type, so app code enqueues a ``SendEmail`` model
 instead of a raw queue string + ``json.dumps``. The Python view of the typed layer

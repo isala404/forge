@@ -5,7 +5,7 @@ import os
 from contextlib import asynccontextmanager
 from typing import Any
 
-import forge_py
+import forgelib
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,11 +31,9 @@ async def maintenance(forge: Any, stop: asyncio.Event) -> None:
 def build_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        os.environ.setdefault(
-            "FORGE_POSTGRES_URL",
-            "postgres://postgres:forge@127.0.0.1:5432/todoapp_python",
-        )
-        forge = await forge_py.ForgeClient.connect_from_env()
+        # Forge instantiates from ./forge.toml; its ${FORGE_POSTGRES_URL} default
+        # resolves from the environment.
+        forge = await forgelib.ForgeClient.init()
         stop = asyncio.Event()
         task = asyncio.create_task(maintenance(forge, stop))
         app.state.forge = forge

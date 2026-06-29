@@ -70,7 +70,7 @@ wheels = [
 ]
 
 [[package]]
-name = "forge-py"
+name = "forgelib"
 version = "1.0.0"
 source = { editable = "../../../bindings/forge-py" }
 
@@ -98,7 +98,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "fastapi" },
-    { name = "forge-py" },
+    { name = "forgelib" },
     { name = "segno" },
     { name = "uvicorn" },
 ]
@@ -111,7 +111,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
-    { name = "forge-py", editable = "../../../bindings/forge-py" },
+    { name = "forgelib", editable = "../../../bindings/forge-py" },
     { name = "segno", specifier = ">=1.6" },
     { name = "uvicorn", specifier = ">=0.34" },
 ]

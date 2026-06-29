@@ -1,7 +1,7 @@
 # chatapp: Python backend
 
 A pure GraphQL API for the chatapp example: FastAPI + Strawberry (code-first schema,
-HTTP + `graphql-transport-ws`), asyncpg for the chat tables, and forge-py for every
+HTTP + `graphql-transport-ws`), asyncpg for the chat tables, and forgelib for every
 infra primitive (auth, blob, pubsub, queue, kv, schedule, ratelimit, config).
 
 It serves exactly the canonical `../schema.graphql`. Strawberry is code-first, so parity is
@@ -20,7 +20,7 @@ app/
   loaders.py         per-request DataLoaders for every relational field
   db.py              asyncpg queries against users/chats/chat_members/messages/receipts
   workers.py         fanout / reap / fail queue workers + scheduler tick (asyncio tasks)
-  blob_router.py     serves Forge presigned blob URLs (forge-py exposes no router)
+  blob_router.py     serves Forge presigned blob URLs (forgelib exposes no router)
   sdl.py             normalized SDL comparison used by the parity test
   schema.graphql     copy of the canonical SDL (parity target)
   migrations.sql     copy of the canonical domain tables (applied on startup)
@@ -48,7 +48,7 @@ tests/               integration suite over real HTTP + WS against a live Postgr
   bumps unread kv, idempotent on message id), a reap worker (deletes a disappearing
   message's row + blob when its scheduled job fires), a fail worker (always nacks to drive
   the DLQ demo), and a scheduler loop (`run_scheduler_once` fires due `at` jobs).
-- **Presigned blob URLs.** forge-py does not expose `blob_router()`, so `blob_router.py`
+- **Presigned blob URLs.** forgelib does not expose `blob_router()`, so `blob_router.py`
   mounts the equivalent route at the default presign prefix (`/_forge/blob`). It verifies
   the HMAC signature + expiry with `blob_verify_presign` (the exact check the Rust router
   performs), then does the get/put. Upload flow: `requestUpload(chatId)` → PUT to the
@@ -56,8 +56,12 @@ tests/               integration suite over real HTTP + WS against a live Postgr
 
 ## Running
 
-Requires a Postgres and a Rust toolchain (uv builds the editable `forge-py` wheel via
+Requires a Postgres and a Rust toolchain (uv builds the editable `forgelib` wheel via
 maturin on first `uv sync`).
+
+Forge configures itself from `forge.toml` in this directory, which references
+`FORGE_POSTGRES_URL` and `FORGE_BLOB_SIGNING_SECRET` from the environment (`${VAR:-default}`),
+so the exports below override the toml defaults rather than passing values to Forge directly.
 
 ```sh
 uv sync
@@ -71,6 +75,9 @@ GraphQL is at `/graphql` (POST for queries/mutations, WS upgrade for subscriptio
 `/healthz` returns `ok`.
 
 ### Environment
+
+`FORGE_POSTGRES_URL` and `FORGE_BLOB_SIGNING_SECRET` are referenced by `forge.toml` (as
+`${VAR:-default}`) rather than read by Forge directly; the rest configure the app loops and CORS.
 
 | var | default | meaning |
 | --- | --- | --- |
@@ -100,4 +107,4 @@ docker compose -f docker-compose.yml up --build
 ```
 
 Brings up Postgres, this backend (8083), and the shared React SPA (5173). The build context
-is the repo root because of the `forge-py` path dependency.
+is the repo root because of the `forgelib` path dependency.

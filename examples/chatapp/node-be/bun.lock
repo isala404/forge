@@ -6,7 +6,7 @@
       "name": "chatapp-node-be",
       "dependencies": {
         "dataloader": "^2.2.3",
-        "forge-node": "file:../../../bindings/forge-node",
+        "forgelib": "file:../../../bindings/forge-node",
         "graphql": "^16.9.0",
         "graphql-ws": "^6.0.4",
         "graphql-yoga": "^5.10.4",
@@ -550,7 +550,7 @@
 
     "flatted": ["flatted@3.4.2", "", {}, "sha512-PjDse7RzhcPkIJwy5t7KPWQSZ9cAbzQXcafsetQoD7sOJRQlGikNbx7yZp2OotDnJyrDcbyRq3Ttb18iYOqkxA=="],
 
-    "forge-node": ["forge-node@file:../../../bindings/forge-node", { "devDependencies": { "@napi-rs/cli": "^2.18.4" } }],
+    "forgelib": ["forgelib@file:../../../bindings/forge-node", { "devDependencies": { "@napi-rs/cli": "^2.18.4" } }],
 
     "formdata-polyfill": ["formdata-polyfill@4.0.10", "", { "dependencies": { "fetch-blob": "^3.1.2" } }, "sha512-buewHzMvYL29jdeQTVILecSaZKnt/RJWjoZCF5OW60Z67/GmSLBkOFM7qh1PI3zFNtJbaZL5eQu1vLfazOwj4g=="],
 

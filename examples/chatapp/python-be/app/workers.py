@@ -13,7 +13,7 @@ import json
 import uuid
 from datetime import UTC, datetime
 
-import forge_py
+import forgelib
 
 from . import db
 
@@ -27,7 +27,7 @@ async def fanout_worker(forge, pool, stop: asyncio.Event) -> None:
     while not stop.is_set():
         try:
             job = await forge.queue_dequeue(FANOUT_QUEUE, 30.0, 1.0)
-        except forge_py.ForgeError:
+        except forgelib.ForgeError:
             await asyncio.sleep(0.2)
             continue
         if job is None:
@@ -43,7 +43,7 @@ async def fanout_worker(forge, pool, stop: asyncio.Event) -> None:
         except Exception:
             try:
                 await forge.queue_nack(job.receipt, 5.0)
-            except forge_py.ForgeError:
+            except forgelib.ForgeError:
                 pass
 
 
@@ -51,7 +51,7 @@ async def reap_worker(forge, pool, stop: asyncio.Event) -> None:
     while not stop.is_set():
         try:
             job = await forge.queue_dequeue(REAP_QUEUE, 30.0, 1.0)
-        except forge_py.ForgeError:
+        except forgelib.ForgeError:
             await asyncio.sleep(0.2)
             continue
         if job is None:
@@ -78,7 +78,7 @@ async def reap_worker(forge, pool, stop: asyncio.Event) -> None:
         except Exception:
             try:
                 await forge.queue_nack(job.receipt, 5.0)
-            except forge_py.ForgeError:
+            except forgelib.ForgeError:
                 pass
 
 
@@ -86,7 +86,7 @@ async def fail_worker(forge, stop: asyncio.Event) -> None:
     while not stop.is_set():
         try:
             job = await forge.queue_dequeue(FAIL_QUEUE, 30.0, 1.0)
-        except forge_py.ForgeError:
+        except forgelib.ForgeError:
             await asyncio.sleep(0.2)
             continue
         if job is None:
@@ -95,7 +95,7 @@ async def fail_worker(forge, stop: asyncio.Event) -> None:
             # Nack with retry_in=0 so it redelivers immediately and exhausts attempts
             # into `fail.dlq` quickly.
             await forge.queue_nack(job.receipt, 0.0)
-        except forge_py.ForgeError:
+        except forgelib.ForgeError:
             pass
 
 
@@ -109,7 +109,7 @@ async def reconcile_once(forge, pool) -> None:
         if row["media_key"]:
             try:
                 await forge.blob_delete(row["media_key"])
-            except forge_py.ForgeError:
+            except forgelib.ForgeError:
                 pass
         await db.delete_expired_message(pool, row["id"])
     # Dropped fanout: re-enqueue for messages whose receipts were never delivered.
@@ -124,16 +124,16 @@ async def scheduler_loop(forge, pool, stop: asyncio.Event, interval: float) -> N
     while not stop.is_set():
         try:
             await forge.run_scheduler_once()
-        except forge_py.ForgeError:
+        except forgelib.ForgeError:
             pass
         try:
             await reconcile_once(forge, pool)
         except Exception:
             pass
         try:
-            # Sweep expired kv/queue/ratelimit/auth rows (forge-py now exposes maintain).
+            # Sweep expired kv/queue/ratelimit/auth rows (forgelib now exposes maintain).
             await forge.maintain()
-        except forge_py.ForgeError:
+        except forgelib.ForgeError:
             pass
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval)

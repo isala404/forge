@@ -71,7 +71,7 @@ pub fn sdl() -> String {
 #[cfg(test)]
 mod tests {
     use super::helpers::{forge_error_code, validate_credentials};
-    use forge::ForgeError;
+    use forgelib::ForgeError;
 
     fn normalize(sdl: &str) -> Vec<String> {
         let mut blocks: Vec<String> = Vec::new();

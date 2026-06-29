@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import uuid
 
-import forge_py
+import forgelib
 from starlette.requests import HTTPConnection
 from strawberry.fastapi import BaseContext
 
@@ -92,13 +92,13 @@ async def _principal(forge, pool, token: str) -> dict | None:
     user_id = None
     try:
         user_id = await forge.validate_session(token)
-    except forge_py.ForgeError:
+    except forgelib.ForgeError:
         user_id = None
     revocable = user_id is not None
     if user_id is None:
         try:
             user_id = await forge.verify_api_key(token)
-        except forge_py.ForgeError:
+        except forgelib.ForgeError:
             user_id = None
     if not user_id:
         return None

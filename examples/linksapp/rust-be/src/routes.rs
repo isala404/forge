@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use chrono::Utc;
-use forge::{
+use forgelib::{
     Bytes, EnqueueOpts, EvalCtx, FailMode, Forge, Limit, PhcString, PutOpts, ScheduleOpts,
     SessionOpts, SetMode, SetOpts,
 };
@@ -90,7 +90,7 @@ impl Fairing for Cors {
 async fn validate_session_or_401(
     forge: &Forge,
     auth: &AuthHeader,
-) -> Result<forge::Session, ApiError> {
+) -> Result<forgelib::Session, ApiError> {
     let token = bearer_token(auth.0.as_deref())?;
     forge
         .auth()

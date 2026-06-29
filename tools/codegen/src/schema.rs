@@ -6,7 +6,7 @@
 //! (`Js*`, via napi) and Python (`#[pyclass]`, via pyo3) surfaces are mechanically
 //! identical and cannot drift from each other or from this schema.
 //!
-//! The hand-written `From<forge::…>` conversions in each binding map the core `forge`
+//! The hand-written `From<forgelib::…>` conversions in each binding map the core `forge`
 //! types onto these structs; if a field changes here, those conversions stop compiling
 //! until updated, so the core crate cannot drift silently either.
 

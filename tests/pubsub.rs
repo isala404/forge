@@ -3,11 +3,11 @@
 #![allow(clippy::unwrap_used, clippy::panic)]
 
 use bytes::Bytes;
-use forge::testing::TestDatabase;
+use forgelib::testing::TestDatabase;
 use futures_util::StreamExt;
 use std::time::Duration;
 
-async fn recv(sub: &mut forge::Subscription) -> Option<Bytes> {
+async fn recv(sub: &mut forgelib::Subscription) -> Option<Bytes> {
     tokio::time::timeout(Duration::from_secs(5), sub.next())
         .await
         .expect("timed out waiting for a pubsub message")
@@ -92,15 +92,15 @@ async fn oversized_payload_is_limit_and_bad_utf8_is_invalid() {
     let db = TestDatabase::new().await.unwrap();
     let forge = db.forge().await.unwrap();
 
-    let big = Bytes::from(vec![b'a'; forge::pubsub::MAX_PAYLOAD_BYTES + 1]);
+    let big = Bytes::from(vec![b'a'; forgelib::pubsub::MAX_PAYLOAD_BYTES + 1]);
     assert!(matches!(
         forge.pubsub().publish("t", big).await,
-        Err(forge::ForgeError::Limit(_))
+        Err(forgelib::ForgeError::Limit(_))
     ));
 
     let bad = Bytes::from_static(&[0xff, 0xfe]);
     assert!(matches!(
         forge.pubsub().publish("t", bad).await,
-        Err(forge::ForgeError::Invalid(_))
+        Err(forgelib::ForgeError::Invalid(_))
     ));
 }

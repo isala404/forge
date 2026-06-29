@@ -6,7 +6,7 @@ import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
-import forge_py
+import forgelib
 import strawberry
 from strawberry.types import Info
 
@@ -64,7 +64,7 @@ class MessageMutation:
             decision = await forge.rate_limit_check(
                 "upload", str(u["id"]), UPLOAD_LIMIT[0], UPLOAD_LIMIT[1], fail_open=False
             )
-        except forge_py.ForgeError as e:
+        except forgelib.ForgeError as e:
             raise map_forge(e) from e
         if not decision.allowed:
             raise gqlerr("LIMIT", "too many upload requests; slow down")
@@ -92,7 +92,7 @@ class MessageMutation:
             decision = await forge.rate_limit_check(
                 "send", str(u["id"]), SEND_LIMIT[0], SEND_LIMIT[1], fail_open=True
             )
-        except forge_py.ForgeError as e:
+        except forgelib.ForgeError as e:
             raise map_forge(e) from e
         if not decision.allowed:
             raise gqlerr("LIMIT", "you are sending too fast; slow down")

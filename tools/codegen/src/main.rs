@@ -8,7 +8,7 @@
 //! Outputs (each `// @generated`, committed, never hand-edited):
 //!   - bindings/forge-node/src/types.generated.rs   (`#[napi(object)]` structs → index.d.ts)
 //!   - bindings/forge-py/src/types.generated.rs      (`#[pyclass]` structs)
-//!   - bindings/forge-py/python/forge_py/_generated.pyi (Python type stubs)
+//!   - bindings/forge-py/python/forgelib/_generated.pyi (Python type stubs)
 
 mod schema;
 
@@ -30,7 +30,7 @@ fn main() {
             gen_py(),
         ),
         (
-            root.join("bindings/forge-py/python/forge_py/_generated.pyi"),
+            root.join("bindings/forge-py/python/forgelib/_generated.pyi"),
             gen_pyi(),
         ),
     ];

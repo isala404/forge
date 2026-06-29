@@ -173,7 +173,7 @@ impl<T> QueueName<T> {
 /// type; the typed enqueue/dequeue then need no queue string and no manual JSON.
 ///
 /// ```
-/// use forge::typed::{QueueName, QueuePayload};
+/// use forgelib::typed::{QueueName, QueuePayload};
 /// use serde::{Serialize, Deserialize};
 /// #[derive(Serialize, Deserialize)]
 /// struct SendEmail { to: String, template: String }

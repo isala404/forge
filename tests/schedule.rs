@@ -2,8 +2,8 @@
 #![cfg(feature = "pg-tests")]
 #![allow(clippy::unwrap_used, clippy::panic)]
 
-use forge::testing::TestDatabase;
-use forge::{Bytes, DequeueOpts, ForgeConfig, ForgeError, ScheduleKind, ScheduleOpts};
+use forgelib::testing::TestDatabase;
+use forgelib::{Bytes, DequeueOpts, ForgeError, ScheduleKind, ScheduleOpts};
 use std::time::{Duration, SystemTime};
 
 #[tokio::test]
@@ -171,10 +171,8 @@ async fn concurrent_ticks_fire_each_schedule_once() {
 #[tokio::test]
 async fn scheduler_ticks_are_scoped_to_namespace() {
     let db = TestDatabase::new().await.unwrap();
-    let forge_a = ForgeConfig::new(db.url()).with_kv_namespace("app_a");
-    let forge_b = ForgeConfig::new(db.url()).with_kv_namespace("app_b");
-    let app_a = forge::Forge::init(forge_a).await.unwrap();
-    let app_b = forge::Forge::init(forge_b).await.unwrap();
+    let app_a = db.forge_with("[forge]\nnamespace = \"app_a\"\n").await.unwrap();
+    let app_b = db.forge_with("[forge]\nnamespace = \"app_b\"\n").await.unwrap();
 
     let id = app_a
         .schedule()

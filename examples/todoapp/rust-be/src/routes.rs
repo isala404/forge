@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use chrono::Utc;
-use forge::{Bytes, EnqueueOpts, FailMode, Forge, Limit, PhcString, SessionOpts, SetMode, SetOpts};
+use forgelib::{Bytes, EnqueueOpts, FailMode, Forge, Limit, PhcString, SessionOpts, SetMode, SetOpts};
 use rocket::fairing::{Fairing, Info, Kind};
 use rocket::http::{Header, Status};
 use rocket::request::{FromRequest, Outcome};

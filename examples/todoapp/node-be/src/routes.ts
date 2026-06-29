@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import type { ForgeClient } from "forge-node";
+import type { ForgeClient } from "forgelib";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import type { ContentfulStatusCode } from "hono/utils/http-status";

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import forge_py
+import forgelib
 import strawberry
 from strawberry.types import Info
 
@@ -28,7 +28,7 @@ class OpsQuery:
         forge = info.context["forge"]
         try:
             online = len(await forge.kv_scan("online:", 1000))
-        except forge_py.ForgeError:
+        except forgelib.ForgeError:
             online = 0
         depth = await forge.queue_depth(f"{FAIL_QUEUE}.dlq")
         dlq_count = depth.visible + depth.in_flight + depth.delayed
@@ -45,7 +45,7 @@ class OpsMutation:
         pct = max(0, min(100, percent))
         try:
             await info.context["forge"].set_flag_percent("reactions_v2", pct)
-        except forge_py.ForgeError as e:
+        except forgelib.ForgeError as e:
             raise map_forge(e) from e
         return True
 
@@ -56,6 +56,6 @@ class OpsMutation:
         await require_admin(info)
         try:
             await info.context["forge"].queue_enqueue(FAIL_QUEUE, "boom")
-        except forge_py.ForgeError as e:
+        except forgelib.ForgeError as e:
             raise map_forge(e) from e
         return True

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 
-import forge_py
+import forgelib
 import strawberry
 from strawberry.types import Info
 
@@ -57,7 +57,7 @@ class AuthMutation:
             decision = await forge.rate_limit_check(
                 "otp", username, OTP_LIMIT[0], OTP_LIMIT[1], fail_open=False
             )
-        except forge_py.ForgeError as e:
+        except forgelib.ForgeError as e:
             raise map_forge(e) from e
         if not decision.allowed:
             raise gqlerr("LIMIT", "too many signup attempts; try again later")
@@ -76,7 +76,7 @@ class AuthMutation:
             decision = await forge.rate_limit_check(
                 "otp", username, OTP_LIMIT[0], OTP_LIMIT[1], fail_open=False
             )
-        except forge_py.ForgeError as e:
+        except forgelib.ForgeError as e:
             raise map_forge(e) from e
         if not decision.allowed:
             raise gqlerr("LIMIT", "too many login attempts; try again later")
@@ -86,7 +86,7 @@ class AuthMutation:
             # time as a real one; otherwise the timing gap enumerates valid usernames.
             try:
                 await forge.verify_password(password, info.context["decoy_hash"])
-            except forge_py.ForgeError:
+            except forgelib.ForgeError:
                 pass
             raise gqlerr("UNAUTHENTICATED", "invalid username or password")
         user_id, hash_str = creds
@@ -125,12 +125,12 @@ class AuthMutation:
             decision = await forge.rate_limit_check(
                 "apikey", str(u["id"]), APIKEY_LIMIT[0], APIKEY_LIMIT[1], fail_open=False
             )
-        except forge_py.ForgeError as e:
+        except forgelib.ForgeError as e:
             raise map_forge(e) from e
         if not decision.allowed:
             raise gqlerr("LIMIT", "too many API keys created; try again later")
         try:
             key = await forge.create_api_key(str(u["id"]), label)
-        except forge_py.ForgeError as e:
+        except forgelib.ForgeError as e:
             raise map_forge(e) from e
         return ApiKeyPayload(id=key.id, secret=key.secret)

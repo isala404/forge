@@ -8,7 +8,7 @@ todoapp/
   SPEC.md            shared REST contract
   rust-be/           Rocket + forge crate                     :9081
   node-be/           Hono + forge-node                         :9082
-  python-be/         FastAPI + forge-py                        :9083
+  python-be/         FastAPI + forgelib                        :9083
   react-fe/          Vite + React shared across all backends   :5174
 ```
 
@@ -44,6 +44,10 @@ Start Postgres from the repo root:
 ```sh
 docker compose up -d db
 ```
+
+Each backend reads its own `forge.toml` at `<app>/<lang>-be/forge.toml`, which is where
+Forge gets its config now. The `FORGE_POSTGRES_URL=... <run cmd>` prefix below still works
+because that toml interpolates the variable (`${FORGE_POSTGRES_URL:-...}`).
 
 Then run any backend with its own database name:
 

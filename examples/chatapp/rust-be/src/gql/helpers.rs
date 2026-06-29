@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use async_graphql::dataloader::DataLoader;
 use async_graphql::{Context, Error, ErrorExtensions, ID, Result};
-use forge::{Bytes, ForgeError};
+use forgelib::{Bytes, ForgeError};
 use futures_util::Stream;
 use uuid::Uuid;
 
@@ -51,8 +51,8 @@ pub(crate) fn err(code: &str, msg: impl Into<String>) -> Error {
     Error::new(msg.into()).extend_with(move |_, e| e.set("code", code.clone()))
 }
 
-pub(crate) fn forge_error_code(e: &forge::ForgeError) -> &'static str {
-    use forge::ForgeError as F;
+pub(crate) fn forge_error_code(e: &forgelib::ForgeError) -> &'static str {
+    use forgelib::ForgeError as F;
     match e {
         F::NotFound => "NOT_FOUND",
         F::Invalid(_) => "INVALID",
@@ -65,7 +65,7 @@ pub(crate) fn forge_error_code(e: &forge::ForgeError) -> &'static str {
     }
 }
 
-pub(crate) fn map_forge(e: forge::ForgeError) -> Error {
+pub(crate) fn map_forge(e: forgelib::ForgeError) -> Error {
     err(forge_error_code(&e), e.to_string())
 }
 

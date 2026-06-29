@@ -27,7 +27,7 @@ pub enum Algo {
     SlidingWindow,
 }
 
-/// Per-check override of what happens when the limiter *backend* errors (not when a
+/// Per-check override of what happens when the limiter backend errors (not when a
 /// request is merely denied, which is always `Ok(Decision { allowed: false })`).
 /// A backend outage should fail-open for a high-volume best-effort bucket (a chat
 /// message) but fail-closed for an abuse- or payment-sensitive one (login, OTP), so
@@ -35,7 +35,7 @@ pub enum Algo {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FailMode {
-    /// Use the Forge-instance default (`ForgeConfig.ratelimit_fail_open`).
+    /// Use the Forge-instance default (`forge.toml`'s `ratelimit.fail_open`).
     #[default]
     Default,
     /// On a soft/transient backend error, allow the request (and warn).
@@ -60,7 +60,7 @@ pub struct Limit {
 
 impl Limit {
     /// `max` units per `per`, token-bucket (the common default). `const` so a typed
-    /// `forge::RateBucket` policy can be declared as a `const`/`static`.
+    /// `forgelib::RateBucket` policy can be declared as a `const`/`static`.
     pub const fn per_duration(max: u32, per: Duration) -> Self {
         Self {
             max,
@@ -120,7 +120,7 @@ impl Decision {
 #[async_trait]
 pub trait RateLimit: Send + Sync {
     /// Atomic check-and-consume of one unit against `limit` for subject `key` under
-    /// namespace `bucket`. A *denied* request is `Ok(Decision { allowed: false, .. })`,
+    /// namespace `bucket`. A denied request is `Ok(Decision { allowed: false, .. })`,
     /// never an `Err`. On a backend error the configured failure mode applies
     /// (fail-open by default: returns a synthetic allow and logs a warning).
     async fn check(&self, bucket: &str, key: &str, limit: Limit) -> Result<Decision> {

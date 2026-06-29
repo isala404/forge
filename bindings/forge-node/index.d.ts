@@ -104,39 +104,22 @@ export interface JsBackendInfo {
   caveats: string
 }
 /**
- * Connection options for `ForgeClient.connectWith`. Every field optional;
- * omitted fields take Forge's defaults.
- */
-export interface JsConnectOptions {
-  signingSecret?: string
-  kvNamespace?: string
-  maxConnections?: number
-  blobBaseUrl?: string
-  /** Set to store blob bytes on a local directory instead of in Postgres `BYTEA`. */
-  filesystemBlobRoot?: string
-}
-/**
  * A Forge client: one Postgres pool, every primitive. Construct with
- * `ForgeClient.connect(url)`.
+ * `ForgeClient.init()`, which reads `forge.toml`.
  */
 export declare class ForgeClient {
   /**
-   * Connect, migrate the system database, and ping; mirrors `Forge::init`. Pass
-   * `signingSecret` to enable presigned blob URLs.
+   * Read `forge.toml` from the current directory and instantiate the runtime from it;
+   * mirrors Rust's `Forge::init`. The file is the single source of configuration; its
+   * string values may reference the environment as `${VAR}` / `${VAR:-default}`. Migrates
+   * the system database at startup.
    */
-  static connect(postgresUrl: string, signingSecret?: string | undefined | null): Promise<ForgeClient>
+  static init(): Promise<ForgeClient>
   /**
-   * Connect using the `FORGE_*` environment variables (`FORGE_POSTGRES_URL`,
-   * `FORGE_KV_NAMESPACE`, `FORGE_BLOB_BACKEND`, …), the same vars that drive the
-   * Rust crate, so config is identical across all three languages.
+   * Like `init`, but reads the `forge.toml` at `path` instead of the one in the current
+   * directory.
    */
-  static connectFromEnv(): Promise<ForgeClient>
-  /**
-   * Connect with the full per-deployment option surface (namespace, pool size,
-   * blob backend, …) instead of just a URL + signing secret. `connect` migrates the
-   * system database at startup.
-   */
-  static connectWith(postgresUrl: string, options: JsConnectOptions): Promise<ForgeClient>
+  static initFrom(path: string): Promise<ForgeClient>
   /** A backend report: which provider powers each primitive (for health pages/logs). */
   backendReport(): Array<JsBackendInfo>
   /**

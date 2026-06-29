@@ -18,6 +18,8 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build /out/release/chatapp-rust-be /app/chatapp-rust-be
+# Forge::init() reads ./forge.toml from the working dir, so ship it alongside the binary.
+COPY --from=build /src/examples/chatapp/rust-be/forge.toml /app/forge.toml
 # Domain migrations live in src and bake into the binary (db::migrate runs on start),
 # so nothing else needs copying.
 ENV PORT=8081 BIND=0.0.0.0

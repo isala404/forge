@@ -2,8 +2,8 @@
 #![cfg(feature = "pg-tests")]
 #![allow(clippy::unwrap_used, clippy::panic)]
 
-use forge::testing::TestDatabase;
-use forge::{Bytes, Forge, ForgeConfig, ForgeError, PutOpts};
+use forgelib::testing::TestDatabase;
+use forgelib::{Bytes, ForgeError, PutOpts};
 use std::time::Duration;
 
 #[tokio::test]
@@ -95,7 +95,8 @@ async fn presign_requires_secret_and_signs() {
     ));
 
     // With a secret: presign produces signed URLs against the same database.
-    let signed = Forge::init(ForgeConfig::new(db.url()).with_blob_signing_secret("test-secret"))
+    let signed = db
+        .forge_with("[blob]\nsigning_secret = \"test-secret\"\n")
         .await
         .unwrap();
     let dl = signed
@@ -131,7 +132,8 @@ async fn presign_requires_secret_and_signs() {
 #[tokio::test]
 async fn verify_presigned_matches_what_presign_mints() {
     let db = TestDatabase::new().await.unwrap();
-    let forge = Forge::init(ForgeConfig::new(db.url()).with_blob_signing_secret("test-secret"))
+    let forge = db
+        .forge_with("[blob]\nsigning_secret = \"test-secret\"\n")
         .await
         .unwrap();
     let b = forge.blob();

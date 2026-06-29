@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use forge::{Bytes, Forge};
+use forgelib::{Bytes, Forge};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -30,7 +30,7 @@ pub struct AppCtx {
     /// submitted password against it when the username doesn't exist, so the
     /// username-miss path spends the same argon2 time as a real verify and the
     /// timing no longer reveals which usernames are registered.
-    pub decoy_hash: forge::PhcString,
+    pub decoy_hash: forgelib::PhcString,
 }
 
 pub type Ctx = Arc<AppCtx>;
@@ -115,14 +115,14 @@ impl AppCtx {
             .set(
                 &format!("online:{user_id}"),
                 Bytes::from_static(b"1"),
-                forge::SetOpts::new().with_ttl(presence_ttl()),
+                forgelib::SetOpts::new().with_ttl(presence_ttl()),
             )
             .await?;
         Ok(())
     }
 
     pub async fn max_upload_bytes(&self) -> u64 {
-        use forge::ConfigExt;
+        use forgelib::ConfigExt;
         self.forge
             .config()
             .get::<u64>("max_upload_bytes")
@@ -135,7 +135,7 @@ impl AppCtx {
     pub async fn set_reactions_rollout(&self, percent: u8) -> Result<()> {
         self.forge
             .config()
-            .set_flag("reactions_v2", forge::FlagRule::Percent(percent))
+            .set_flag("reactions_v2", forgelib::FlagRule::Percent(percent))
             .await?;
         Ok(())
     }
@@ -148,7 +148,7 @@ impl AppCtx {
             .flag(
                 "reactions_v2",
                 false,
-                &forge::EvalCtx::user(user_id.to_string()),
+                &forgelib::EvalCtx::user(user_id.to_string()),
             )
             .await
     }
@@ -168,7 +168,7 @@ impl AppCtx {
             .enqueue(
                 FAIL_QUEUE,
                 Bytes::from_static(b"boom"),
-                forge::EnqueueOpts::new().with_max_attempts(1),
+                forgelib::EnqueueOpts::new().with_max_attempts(1),
             )
             .await?;
         Ok(())

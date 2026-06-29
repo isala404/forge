@@ -1,16 +1,16 @@
 [project]
 name = "todoapp-python-be"
 version = "0.1.0"
-description = "todoapp Python REST backend (FastAPI + forge-py)"
+description = "todoapp Python REST backend (FastAPI + forgelib)"
 requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn>=0.34",
-    "forge-py",
+    "forgelib",
 ]
 
 [tool.uv.sources]
-forge-py = { path = "../../../bindings/forge-py", editable = true }
+forgelib = { path = "../../../bindings/forge-py", editable = true }
 
 [dependency-groups]
 dev = [

@@ -4,7 +4,7 @@ mod util;
 
 use std::time::Duration;
 
-use forge::{Forge, ForgeConfig};
+use forgelib::Forge;
 use rocket::{Build, Rocket};
 
 use crate::routes::AppState;
@@ -40,11 +40,8 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let pg = env_or(
-        "FORGE_POSTGRES_URL",
-        "postgres://postgres:forge@127.0.0.1:5432/todoapp_rust",
-    );
-    let forge = Forge::init(ForgeConfig::new(pg).with_env_overrides()?).await?;
+    // Reads ./forge.toml (the connection string and any ${VAR} references live there).
+    let forge = Forge::init().await?;
     tokio::spawn(maintenance(forge.clone()));
 
     let port = env_or("PORT", "9081").parse::<u16>()?;

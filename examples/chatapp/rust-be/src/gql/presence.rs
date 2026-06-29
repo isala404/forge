@@ -143,6 +143,6 @@ impl PresenceSubscription {
     }
 }
 
-fn map_forge(e: forge::ForgeError) -> async_graphql::Error {
+fn map_forge(e: forgelib::ForgeError) -> async_graphql::Error {
     crate::gql::helpers::map_forge(e)
 }

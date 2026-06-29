@@ -1,6 +1,6 @@
-# Forge
+# Forge - the standard library for agent-built SaaS
 
-Every web app needs the same plumbing, and the usual answer is a separate service for each piece:
+Every app needs the same plumbing, and the usual answer is a separate service for each piece:
 
 - Redis for caching and sessions
 - a queue for background jobs
@@ -16,13 +16,23 @@ Forge does all of it in one library, with the same API in Rust, Node, and Python
 ## One connection, eight primitives
 
 ```bash
-npm install forge-node
+npm install forgelib
 ```
 
-```ts
-import { ForgeClient } from "forge-node";
+Configuration lives in a `forge.toml` at your project root. `init()` reads it and
+instantiates the runtime; string values may reference the environment as `${VAR}`:
 
-const forge = await ForgeClient.connect("postgres://localhost/myapp");
+```toml
+[postgres]
+url = "${DATABASE_URL:-postgres://localhost/myapp}"
+```
+
+[`forge.example.toml`](./forge.example.toml) documents every option with its default.
+
+```ts
+import { ForgeClient } from "forgelib";
+
+const forge = await ForgeClient.init(); // instantiates the runtime from ./forge.toml
 
 // auth: argon2 password hashing and sessions
 const hash = await forge.hashPassword(password);
@@ -58,17 +68,17 @@ const newUi = await forge.flag("new-ui", false, userId);
 <summary>The same in Rust</summary>
 
 ```bash
-cargo add forge
+cargo add forgelib
 ```
 
 ```rust
 use std::time::Duration;
-use forge::{
-    Forge, ForgeConfig, Bytes, SetOpts, EnqueueOpts, PutOpts,
+use forgelib::{
+    Forge, Bytes, SetOpts, EnqueueOpts, PutOpts,
     ScheduleOpts, SessionOpts, Limit, FlagRule, EvalCtx,
 };
 
-let forge = Forge::init(ForgeConfig::new("postgres://localhost/myapp")).await?;
+let forge = Forge::init().await?; // instantiates the runtime from ./forge.toml
 
 // auth
 let hash = forge.auth().hash_password(&password).await?;
@@ -107,14 +117,14 @@ let new_ui = forge.config().flag("new-ui", false, &EvalCtx::user(user_id)).await
 <summary>The same in Python</summary>
 
 ```bash
-pip install forge-py
+pip install forgelib
 ```
 
 ```python
 import json
-import forge_py
+import forgelib
 
-forge = await forge_py.ForgeClient.connect("postgres://localhost/myapp")
+forge = await forgelib.ForgeClient.init()  # instantiates the runtime from ./forge.toml
 
 # auth
 hash = await forge.hash_password(password)
@@ -167,11 +177,14 @@ By default every primitive runs on one Postgres database, so there's nothing els
 
 ## Test on memory, ship on Postgres
 
-The memory and Postgres backends pass the same conformance suite, so tests run in-process with no database and behave the way production will. Switch backends with one environment variable.
+The memory and Postgres backends pass the same conformance suite, so tests run in-process with no database and behave the way production will. Pick the backend in `forge.toml`, using a `${VAR}` reference so the same file flips between tests and production from the environment.
 
-```bash
-FORGE_DEFAULT_BACKEND=memory       # tests
-FORGE_POSTGRES_URL=postgres://...  # production
+```toml
+[backends]
+default = "${FORGE_BACKEND:-postgres}"  # FORGE_BACKEND=memory in tests
+
+[postgres]
+url = "${DATABASE_URL:-postgres://localhost/myapp}"
 ```
 
 ## Build it with an agent

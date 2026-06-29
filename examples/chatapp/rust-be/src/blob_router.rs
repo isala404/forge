@@ -14,8 +14,8 @@ use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use forge::ForgeError;
-use forge::blob::{DEFAULT_CONTENT_TYPE, MAX_CONTENT_TYPE_BYTES, MAX_OBJECT_BYTES};
+use forgelib::ForgeError;
+use forgelib::blob::{DEFAULT_CONTENT_TYPE, MAX_CONTENT_TYPE_BYTES, MAX_OBJECT_BYTES};
 use serde::Deserialize;
 
 use crate::context::Ctx;
@@ -156,7 +156,7 @@ async fn upload(
         )
             .into_response();
     }
-    let mut opts = forge::PutOpts::new();
+    let mut opts = forgelib::PutOpts::new();
     if let Some(ct) = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())

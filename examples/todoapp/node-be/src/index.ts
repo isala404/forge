@@ -1,12 +1,11 @@
 import { serve } from "@hono/node-server";
-import { ForgeClient } from "forge-node";
+import { ForgeClient } from "forgelib";
 
 import { api, type Bindings } from "./routes.ts";
 import { envOr } from "./utils.ts";
 
 async function start(): Promise<void> {
-  process.env.FORGE_POSTGRES_URL ||= "postgres://postgres:forge@127.0.0.1:5432/todoapp_node";
-  const forge = await ForgeClient.connectFromEnv();
+  const forge = await ForgeClient.init(); // reads ./forge.toml
   const bindings = { forge } satisfies Bindings;
 
   setInterval(() => {

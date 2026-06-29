@@ -3,8 +3,8 @@
 #![allow(clippy::unwrap_used, clippy::panic)]
 
 use bytes::Bytes;
-use forge::testing::TestDatabase;
-use forge::{DequeueOpts, EnqueueOpts, ForgeError, JobId, NackOpts};
+use forgelib::testing::TestDatabase;
+use forgelib::{DequeueOpts, EnqueueOpts, ForgeError, JobId, NackOpts};
 use std::collections::HashSet;
 use std::time::Duration;
 

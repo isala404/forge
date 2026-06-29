@@ -17,11 +17,11 @@ a brand-new divergence fails CI as an unexpected red. Both directions are caught
 ## Layout
 
 The scenario matrix ships with the crate (so external backend authors can run it
-against their own `forge::Forge`); the language runners live under `tools/`.
+against their own `forgelib::Forge`); the language runners live under `tools/`.
 
 ```
 src/conformance/
-  mod.rs               # the scenario interpreter (forge::conformance), shipped with the crate
+  mod.rs               # the scenario interpreter (forgelib::conformance), shipped with the crate
   scenarios/*.json     # the matrix, one file per primitive (source of truth)
   known_gaps.json      # (primitive, scenario, language) pairs expected to fail today
 
@@ -29,9 +29,9 @@ tools/conformance/
   README.md            # this file, schema + how to run
   run-all.sh           # builds both bindings and runs all three runners
   node/                # Node runner (forge-node binding)
-  python/              # Python runner (forge_py binding)
+  python/              # Python runner (forgelib binding)
 
-tests/conformance.rs   # the Rust runner: drives forge::conformance against throwaway DBs
+tests/conformance.rs   # the Rust runner: drives forgelib::conformance against throwaway DBs
 ```
 
 The scenario JSON is the normative content behind `docs/contracts/bindings.md`

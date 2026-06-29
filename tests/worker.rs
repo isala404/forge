@@ -3,8 +3,8 @@
 #![allow(clippy::unwrap_used, clippy::panic)]
 
 use bytes::Bytes;
-use forge::EnqueueOpts;
-use forge::testing::TestDatabase;
+use forgelib::EnqueueOpts;
+use forgelib::testing::TestDatabase;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -54,7 +54,7 @@ async fn worker_processes_jobs_and_acks_them() {
     assert!(
         forge
             .queue()
-            .dequeue("jobs", forge::DequeueOpts::new().with_wait(Duration::ZERO))
+            .dequeue("jobs", forgelib::DequeueOpts::new().with_wait(Duration::ZERO))
             .await
             .unwrap()
             .is_none()

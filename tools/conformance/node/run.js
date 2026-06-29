@@ -21,6 +21,21 @@ const LANG = 'node'
 const BACKEND = 'postgres'
 // Enables the blob presign/verify scenarios; harmless for the rest.
 const SIGNING_SECRET = 'conformance-signing-secret'
+// Forge reads this forge.toml; its ${FORGE_*} references resolve from the env vars the
+// runner sets before each init, so one file drives every per-namespace/per-backend client.
+const CONFIG_PATH = path.join(__dirname, 'forge.toml')
+
+// A client whose system database is `url` and whose namespace is `ns`, on the default
+// Postgres backends. Sets the env the toml interpolates, then loads it fresh.
+async function connectNs(url, ns) {
+  process.env.FORGE_POSTGRES_URL = url
+  process.env.FORGE_NAMESPACE = ns
+  process.env.FORGE_BLOB_SIGNING_SECRET = SIGNING_SECRET
+  delete process.env.FORGE_QUEUE_BACKEND
+  delete process.env.FORGE_BLOB_BACKEND
+  delete process.env.FORGE_BLOB_FS_ROOT
+  return ForgeClient.initFrom(CONFIG_PATH)
+}
 // Sentinel a pubsub.receive race resolves to when the 2s bound elapses with no message.
 const TIMEOUT = Symbol('timeout')
 
@@ -59,7 +74,7 @@ async function withTestDb(fn) {
   await admin.end()
   try {
     const url = swapDb(ADMIN_URL, name)
-    // connect/connectWith migrates the throwaway DB's schema before use.
+    // init migrates the throwaway DB's schema before use.
     return await fn(url)
   } finally {
     admin = new Client({ connectionString: ADMIN_URL })
@@ -104,6 +119,7 @@ async function runBackendSelectionSmoke() {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-node-blob-'))
     const keys = [
       'FORGE_POSTGRES_URL',
+      'FORGE_NAMESPACE',
       'FORGE_BLOB_SIGNING_SECRET',
       'FORGE_QUEUE_BACKEND',
       'FORGE_BLOB_BACKEND',
@@ -112,12 +128,13 @@ async function runBackendSelectionSmoke() {
     const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]))
     try {
       process.env.FORGE_POSTGRES_URL = url
+      process.env.FORGE_NAMESPACE = ''
       process.env.FORGE_BLOB_SIGNING_SECRET = SIGNING_SECRET
       process.env.FORGE_QUEUE_BACKEND = 'memory'
       process.env.FORGE_BLOB_BACKEND = 'filesystem'
       process.env.FORGE_BLOB_FS_ROOT = root
 
-      const client = await ForgeClient.connectFromEnv()
+      const client = await ForgeClient.initFrom(CONFIG_PATH)
       const report = client.backendReport()
       if (provider(report, 'queue') !== 'memory') throw new Error('queue backend was not memory')
       if (provider(report, 'blob') !== 'filesystem') throw new Error('blob backend was not filesystem')
@@ -400,7 +417,7 @@ async function runScenario(scenario) {
       const step = scenario.steps[i]
       const ns = step.namespace ?? ''
       if (!clients.has(ns)) {
-        clients.set(ns, await ForgeClient.connectWith(url, { kvNamespace: ns, signingSecret: SIGNING_SECRET }))
+        clients.set(ns, await connectNs(url, ns))
       }
       const client = clients.get(ns)
       const args = resolve(step.args ?? {}, captures)

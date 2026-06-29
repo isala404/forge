@@ -4,8 +4,8 @@
 #![cfg(feature = "pg-tests")]
 #![allow(clippy::unwrap_used, clippy::panic, clippy::disallowed_methods)]
 
-use forge::testing::TestDatabase;
-use forge::{Bytes, Forge, ForgeConfig, ForgeError, PutOpts};
+use forgelib::testing::TestDatabase;
+use forgelib::{Bytes, Forge, ForgeError, PutOpts};
 use sqlx::{Connection, PgConnection};
 use std::time::Duration;
 
@@ -17,11 +17,10 @@ fn temp_root(db: &TestDatabase) -> std::path::PathBuf {
 }
 
 async fn fs_forge(db: &TestDatabase, root: &std::path::Path) -> Forge {
-    Forge::init(
-        ForgeConfig::new(db.url())
-            .with_filesystem_blob(root.to_path_buf())
-            .with_blob_signing_secret("test-secret"),
-    )
+    Forge::init_from_str(&db.config_toml(&format!(
+        "[blob]\nbackend = \"fs\"\nfs_root = \"{}\"\nsigning_secret = \"test-secret\"\n",
+        root.display()
+    )))
     .await
     .unwrap()
 }
@@ -210,9 +209,12 @@ async fn fs_presign_and_verify() {
     );
 
     // No secret on a filesystem backend => Config, same as the Postgres backend.
-    let plain = Forge::init(ForgeConfig::new(db.url()).with_filesystem_blob(&root))
-        .await
-        .unwrap();
+    let plain = Forge::init_from_str(&db.config_toml(&format!(
+        "[blob]\nbackend = \"fs\"\nfs_root = \"{}\"\n",
+        root.display()
+    )))
+    .await
+    .unwrap();
     assert!(matches!(
         plain
             .blob()
@@ -233,13 +235,13 @@ async fn fs_backend_report_and_maintain() {
     let blob = report
         .backends
         .iter()
-        .find(|b| b.primitive == forge::Primitive::Blob)
+        .find(|b| b.primitive == forgelib::Primitive::Blob)
         .unwrap();
     assert_eq!(blob.provider, "filesystem");
     let kv = report
         .backends
         .iter()
-        .find(|b| b.primitive == forge::Primitive::Kv)
+        .find(|b| b.primitive == forgelib::Primitive::Kv)
         .unwrap();
     assert_eq!(kv.provider, "postgres");
     assert_eq!(report.backends.len(), 8, "one backend entry per primitive");

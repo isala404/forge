@@ -1,4 +1,4 @@
-import type { ForgeClient } from "forge-node";
+import type { ForgeClient } from "forgelib";
 
 import type { LinkRecord, OwnedLink } from "./types.ts";
 import {

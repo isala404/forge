@@ -3,7 +3,7 @@
 //!
 //! A thin layer over [`crate::queue`]: a due tick enqueues a job, so the queue's
 //! at-least-once / retry / DLQ semantics are inherited. A scheduled job is delivered
-//! **at least once**, so consumers must be idempotent.
+//! at least once, so consumers must be idempotent.
 
 use crate::error::Result;
 use crate::queue::JobId;
@@ -18,7 +18,7 @@ pub const MAX_NAME_BYTES: usize = 256;
 /// Largest accepted `at` horizon: ~100 years from now, in days (365.25 × 100). A `when`
 /// past this is [`crate::error::ForgeError::Limit`]: a time a century out is effectively
 /// always a bug, and a fixed ceiling keeps backends in agreement (same rationale as the
-/// kv TTL ceiling). A past/now `when` is *not* rejected: it fires on the next tick if
+/// kv TTL ceiling). A past/now `when` is not rejected: it fires on the next tick if
 /// within the missed-tick grace, else is skipped and logged.
 pub const MAX_AT_HORIZON_DAYS: i64 = 36525;
 
@@ -145,8 +145,8 @@ pub trait Schedule: Send + Sync {
     ) -> Result<(Vec<ScheduleInfo>, Option<Cursor>)>;
 
     /// Run one scheduler pass: fire every due schedule once, returning how many jobs
-    /// were enqueued. Drive it via `forge::Forge::run_scheduler` /
-    /// `forge::Forge::run_scheduler_once`; safe to run concurrently across replicas,
+    /// were enqueued. Drive it via `forgelib::Forge::run_scheduler` /
+    /// `forgelib::Forge::run_scheduler_once`; safe to run concurrently across replicas,
     /// since each due row is claimed exactly once.
     async fn process_due(&self) -> Result<u64>;
 }

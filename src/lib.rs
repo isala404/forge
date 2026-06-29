@@ -3,15 +3,17 @@
 //! `docs/contracts/`.
 //!
 //! Forge owns a system database: a Postgres database kept separate from your application's.
-//! [`Forge::init`] connects and migrates its `forge_*` tables at startup. Primitives can
-//! point at their own database via [`ForgeConfig::with_feature_database`], but the system
-//! database is always required.
+//! [`Forge::init`] reads a `forge.toml` from the current directory, then connects and
+//! migrates its `forge_*` tables at startup. Every customizable point (the system
+//! database, namespace, backends, per-feature databases) lives in that `forge.toml`.
+//! Primitives can point at their own database via a `[databases.<feature>]` table, but the
+//! system database is always required.
 //!
 //! ```no_run
-//! # async fn demo() -> forge::Result<()> {
-//! use forge::{Forge, ForgeConfig};
-//! // A database Forge owns, not the one holding your application tables.
-//! let forge = Forge::init(ForgeConfig::new("postgres://localhost/myapp_forge")).await?;
+//! # async fn demo() -> forgelib::Result<()> {
+//! use forgelib::Forge;
+//! // Reads ./forge.toml and instantiates the runtime from it.
+//! let forge = Forge::init().await?;
 //! forge.kv().set("greeting", "hi".into(), Default::default()).await?;
 //! let id = forge.queue().enqueue("emails", b"payload".to_vec().into(), Default::default()).await?;
 //! # let _ = id; Ok(())
@@ -22,7 +24,6 @@
 pub mod auth;
 pub mod backend;
 pub mod blob;
-pub mod config;
 pub mod config_store;
 pub mod error;
 pub mod kv;
@@ -33,6 +34,7 @@ pub mod schedule;
 pub mod typed;
 pub mod types;
 
+mod config;
 mod obs;
 mod util;
 
@@ -45,7 +47,10 @@ pub mod testing;
 pub mod conformance;
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
+
+use config::{Backend, BlobBackendConfig, ForgeConfig};
 
 pub use auth::{
     ApiKey, ApiKeyInfo, ApiKeySecret, Auth, PhcString, Session, SessionOpts, SessionToken,
@@ -55,7 +60,6 @@ pub use backend::{
     KvBackend, Primitive, PubsubBackend, QueueBackend, RateLimitBackend, ScheduleBackend,
 };
 pub use blob::{Blob, BlobInfo, ListPage, PutOpts};
-pub use config::{Backend, BlobBackendConfig, DatabaseConfig, ForgeConfig};
 pub use config_store::{ConfigExt, ConfigStore, EvalCtx, FlagRule};
 pub use error::{ForgeError, Result};
 pub use kv::{Kv, SetMode, SetOpts};
@@ -146,20 +150,31 @@ impl Injected {
 }
 
 impl Forge {
-    /// Validate, connect, migrate, and construct every primitive. Migrates the system
-    /// database (and each distinct feature database) at startup; idempotent and safe to run
-    /// concurrently across replicas, with an advisory lock serializing it and checksums
-    /// guarding immutability. Misconfiguration fails here with [`ForgeError::Config`], never
-    /// lazily on first use.
-    pub async fn init(cfg: ForgeConfig) -> Result<Self> {
-        Self::build_from(cfg, Injected::default()).await
+    /// Read `forge.toml` from the current directory and instantiate the runtime from it.
+    /// The file is the single source of configuration; its string values may reference the
+    /// environment as `${VAR}` / `${VAR:-default}`. See [`init_from`](Self::init_from) for an
+    /// explicit path and [`init_from_str`](Self::init_from_str) for an in-memory config.
+    pub async fn init() -> Result<Self> {
+        Self::init_from("forge.toml").await
+    }
+
+    /// Like [`init`](Self::init), but reads the `forge.toml` at `path` instead of the one in
+    /// the current directory.
+    pub async fn init_from(path: impl AsRef<Path>) -> Result<Self> {
+        Self::build_from(ForgeConfig::from_toml_file(path)?, Injected::default()).await
+    }
+
+    /// Like [`init`](Self::init), but parses the `forge.toml` schema from an in-memory string
+    /// rather than a file. For embedding the config or constructing it in tests.
+    pub async fn init_from_str(toml: &str) -> Result<Self> {
+        Self::build_from(ForgeConfig::from_toml_str(toml)?, Injected::default()).await
     }
 
     /// Builder for swapping in externally-implemented backends per primitive while leaving
     /// the rest on their config-selected built-in. See [`ForgeBuilder`].
     pub fn builder() -> ForgeBuilder {
         ForgeBuilder {
-            cfg: ForgeConfig::default(),
+            cfg: None,
             injected: Injected::default(),
         }
     }
@@ -487,9 +502,10 @@ impl Forge {
 ///
 /// ```no_run
 /// # use std::sync::Arc;
-/// # async fn demo(custom_kv: Arc<dyn forge::KvBackend>) -> forge::Result<()> {
-/// let forge = forge::Forge::builder()
-///     .postgres("postgres://localhost/myapp_forge")
+/// # async fn demo(custom_kv: Arc<dyn forgelib::KvBackend>) -> forgelib::Result<()> {
+/// let forge = forgelib::Forge::builder()
+///     .config_str(r#"[postgres]
+/// url = "postgres://localhost/myapp_forge""#)?
 ///     .kv(custom_kv) // kv runs on your backend; the other seven stay on Postgres
 ///     .build()
 ///     .await?;
@@ -498,28 +514,28 @@ impl Forge {
 /// ```
 ///
 /// An injected primitive supplies its own state and lifecycle, so Forge never connects or
-/// migrates Postgres on its behalf. Other knobs (namespaces, per-feature databases, blob
-/// signing) come from a [`ForgeConfig`] passed to [`config`](ForgeBuilder::config); the
-/// builder itself stays small.
+/// migrates Postgres on its behalf. Every other knob (the system database, namespaces,
+/// per-feature databases, blob signing) comes from the `forge.toml` supplied via
+/// [`config_str`](ForgeBuilder::config_str) / [`config_path`](ForgeBuilder::config_path), or
+/// the `./forge.toml` loaded by default; the builder itself stays small.
 pub struct ForgeBuilder {
-    cfg: ForgeConfig,
+    cfg: Option<ForgeConfig>,
     injected: Injected,
 }
 
 impl ForgeBuilder {
-    /// Set the mandatory system database connection string. Equivalent to setting `postgres`
-    /// on the inner [`ForgeConfig`]; required unless [`config`](Self::config) carries one.
-    pub fn postgres(mut self, url: impl Into<String>) -> Self {
-        self.cfg.postgres = url.into();
-        self
+    /// Supply the `forge.toml` config as an in-memory string. Replaces any previously set
+    /// config. When neither this nor [`config_path`](Self::config_path) is called,
+    /// [`build`](Self::build) reads `./forge.toml`.
+    pub fn config_str(mut self, toml: &str) -> Result<Self> {
+        self.cfg = Some(ForgeConfig::from_toml_str(toml)?);
+        Ok(self)
     }
 
-    /// Supply the full base [`ForgeConfig`]. Replaces the builder's config wholesale, so set
-    /// it before [`postgres`](Self::postgres) if you use both, or just set `postgres` on the
-    /// config you pass here.
-    pub fn config(mut self, cfg: ForgeConfig) -> Self {
-        self.cfg = cfg;
-        self
+    /// Supply the `forge.toml` config from a file path. Replaces any previously set config.
+    pub fn config_path(mut self, path: impl AsRef<Path>) -> Result<Self> {
+        self.cfg = Some(ForgeConfig::from_toml_file(path)?);
+        Ok(self)
     }
 
     /// Inject the key/value backend.
@@ -535,7 +551,7 @@ impl ForgeBuilder {
     }
 
     /// Inject the config-store backend. Named `config_store` so it does not collide with
-    /// [`config`](Self::config), which supplies the base [`ForgeConfig`].
+    /// [`config_str`](Self::config_str), which supplies the `forge.toml`.
     pub fn config_store(mut self, b: Arc<dyn ConfigStoreBackend>) -> Self {
         self.injected.config = Some(b);
         self
@@ -572,18 +588,18 @@ impl ForgeBuilder {
     }
 
     /// Validate, connect, migrate, and construct the [`Forge`] through the same path as
-    /// [`Forge::init`]. Fails with [`ForgeError::Config`] if no system database was set.
+    /// [`Forge::init`]. When no config was supplied, reads `./forge.toml`.
     pub async fn build(self) -> Result<Forge> {
-        if self.cfg.postgres.trim().is_empty() {
-            return Err(ForgeError::config(
-                "Forge::builder requires a system database; call .postgres(url) (or .config(cfg) with one set)",
-            ));
-        }
-        Forge::build_from(self.cfg, self.injected).await
+        let cfg = match self.cfg {
+            Some(cfg) => cfg,
+            None => ForgeConfig::from_toml_file("forge.toml")?,
+        };
+        Forge::build_from(cfg, self.injected).await
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -591,9 +607,12 @@ mod tests {
     /// resolve to memory, regardless of order, with no database.
     #[test]
     fn non_durable_warnings_flags_memory_pubsub_and_ratelimit() {
-        // default_backend(Memory) makes every primitive memory; only pubsub and ratelimit
+        // `default = "memory"` makes every primitive memory; only pubsub and ratelimit
         // should be flagged, proving the helper filters rather than echoing the config.
-        let cfg = ForgeConfig::new("postgres://x/y").default_backend(Backend::Memory);
+        let cfg = ForgeConfig::from_toml_str(
+            "[postgres]\nurl = \"postgres://x/y\"\n[backends]\ndefault = \"memory\"\n",
+        )
+        .unwrap();
         let mut got = non_durable_warnings(&cfg);
         got.sort_by_key(|p| p.as_str());
         let mut want = [Primitive::Pubsub, Primitive::RateLimit];
@@ -603,7 +622,7 @@ mod tests {
 
     #[test]
     fn non_durable_warnings_empty_for_all_postgres() {
-        let cfg = ForgeConfig::new("postgres://x/y");
+        let cfg = ForgeConfig::from_toml_str("[postgres]\nurl = \"postgres://x/y\"\n").unwrap();
         assert!(non_durable_warnings(&cfg).is_empty());
     }
 }

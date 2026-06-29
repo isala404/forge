@@ -18,7 +18,7 @@ chatapp/
   SPEC.md            the build contract all four projects conform to
   rust-be/           axum + async-graphql + forge crate              :8081
   node-be/           GraphQL Yoga + graphql-ws + forge-node          :8082
-  python-be/         FastAPI + Strawberry + forge-py                 :8083
+  python-be/         FastAPI + Strawberry + forgelib                 :8083
   react-fe/          Vite + React + urql (shared across backends)    :5173 dev
 ```
 
@@ -56,7 +56,10 @@ cross-origin SPA.
 ## Run a backend (dev)
 
 Each backend needs Postgres. From the repo root: `docker compose up -d db` (postgres:18, user
-`postgres`, password `forge`). Then create the per-app database and start one backend, for example:
+`postgres`, password `forge`). Each backend reads its own `forge.toml` at `<lang>-be/forge.toml`,
+which is where Forge gets its config now; the `FORGE_POSTGRES_URL=... <run cmd>` prefixes below
+still work because that toml interpolates the variable (`${FORGE_POSTGRES_URL:-...}`, and likewise
+`FORGE_BLOB_SIGNING_SECRET`). Then create the per-app database and start one backend, for example:
 
 ```sh
 # Rust

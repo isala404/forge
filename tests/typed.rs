@@ -3,10 +3,10 @@
 #![cfg(feature = "pg-tests")]
 #![allow(clippy::unwrap_used, clippy::panic)]
 
-use forge::testing::TestDatabase;
-use forge::{
-    BlobKey, ConfigKey, ConfigTyped, DequeueOpts, Forge, ForgeConfig, KvKey, KvTyped, PubsubTyped,
-    QueueName, QueuePayload, QueueTyped, RateBucket, SetOpts, Topic,
+use forgelib::testing::TestDatabase;
+use forgelib::{
+    BlobKey, ConfigKey, ConfigTyped, DequeueOpts, KvKey, KvTyped, PubsubTyped, QueueName,
+    QueuePayload, QueueTyped, RateBucket, SetOpts, Topic,
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -103,8 +103,8 @@ async fn ratelimit_typed_bucket_enforces_policy() {
 
     const LOGIN: RateBucket<str> = RateBucket::new(
         "login",
-        forge::Limit::per_duration(2, Duration::from_secs(60)),
-        forge::FailMode::Closed,
+        forgelib::Limit::per_duration(2, Duration::from_secs(60)),
+        forgelib::FailMode::Closed,
     );
 
     assert!(
@@ -147,14 +147,14 @@ async fn blob_typed_key_roundtrips() {
 
     key.put(
         forge.blob(),
-        forge::Bytes::from_static(b"png-bytes"),
-        forge::PutOpts::new(),
+        forgelib::Bytes::from_static(b"png-bytes"),
+        forgelib::PutOpts::new(),
     )
     .await
     .unwrap();
     assert_eq!(
         key.get(forge.blob()).await.unwrap().unwrap(),
-        forge::Bytes::from_static(b"png-bytes")
+        forgelib::Bytes::from_static(b"png-bytes")
     );
     assert!(key.head(forge.blob()).await.unwrap().is_some());
     assert!(key.delete(forge.blob()).await.unwrap());
@@ -163,7 +163,7 @@ async fn blob_typed_key_roundtrips() {
 #[tokio::test]
 async fn pubsub_typed_publishes_and_receives() {
     let db = TestDatabase::new().await.unwrap();
-    let forge = Forge::init(ForgeConfig::new(db.url())).await.unwrap();
+    let forge = db.forge().await.unwrap();
     let topic: Topic<Profile> = Topic::new("profiles.updated");
 
     let mut sub = forge.pubsub().subscribe_typed(&topic).await.unwrap();

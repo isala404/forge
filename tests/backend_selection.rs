@@ -9,11 +9,10 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use forge::testing::TestDatabase;
-use forge::{
-    Backend, BackendLifecycle, Cursor, DatabaseConfig, DequeueOpts, EnqueueOpts, Forge,
-    ForgeConfig, Kv, Limit, Primitive, PutOpts, Result, ScheduleOpts, SessionOpts, SetMode,
-    SetOpts,
+use forgelib::testing::TestDatabase;
+use forgelib::{
+    BackendLifecycle, Cursor, DequeueOpts, EnqueueOpts, Forge, Kv, Limit, Primitive, PutOpts,
+    Result, ScheduleOpts, SessionOpts, SetMode, SetOpts,
 };
 use futures_util::StreamExt;
 use std::collections::HashMap;
@@ -130,14 +129,11 @@ async fn memory_kv_ignores_its_bogus_postgres_feature_database() {
     // wrongly connected it, init would fail. Init succeeding proves the override is ignored
     // because kv is memory-backed (no connect, no migrate to that target). The system
     // database is still connected and migrated as always.
-    let cfg = ForgeConfig::new(db.url())
-        .with_backend(Primitive::Kv, Backend::Memory)
-        .with_feature_database(
-            Primitive::Kv,
-            DatabaseConfig::new("postgres://doesnotexist:1/x"),
-        );
-
-    let forge = Forge::init(cfg)
+    let forge = db
+        .forge_with(
+            "[backends]\nkv = \"memory\"\n\
+             [databases.kv]\nurl = \"postgres://doesnotexist:1/x\"\n",
+        )
         .await
         .expect("init must succeed: the bogus kv feature-db is ignored for a memory kv");
 
@@ -176,7 +172,8 @@ async fn builder_injects_kv_while_the_rest_stay_postgres() {
     let probe = injected.clone();
 
     let forge = Forge::builder()
-        .postgres(db.url())
+        .config_str(&db.config_toml(""))
+        .unwrap()
         .kv(injected)
         .build()
         .await
@@ -225,9 +222,7 @@ async fn builder_injects_kv_while_the_rest_stay_postgres() {
 async fn init_default_config_is_all_postgres() {
     let db = TestDatabase::new().await.unwrap();
 
-    let forge = Forge::init(ForgeConfig::new(db.url()))
-        .await
-        .expect("default init must succeed");
+    let forge = db.forge().await.expect("default init must succeed");
 
     let report = forge.backend_report();
     for x in &report.backends {
@@ -248,15 +243,14 @@ async fn init_default_config_is_all_postgres() {
     assert_eq!(forge.kv().get("k").await.unwrap(), Some(b("v")));
 }
 
-/// Every primitive on its in-process backend at once (`default_backend(Memory)` plus `with_memory_blob`) on the mandatory system database.
+/// Every primitive on its in-process backend at once (`[backends] default = "memory"` plus
+/// `blob = "memory"`) on the mandatory system database.
 #[tokio::test]
 async fn all_memory_backends_init_and_operate_in_process() {
     let db = TestDatabase::new().await.unwrap();
 
-    let cfg = ForgeConfig::new(db.url())
-        .default_backend(Backend::Memory)
-        .with_memory_blob();
-    let forge = Forge::init(cfg)
+    let forge = db
+        .forge_with("[backends]\ndefault = \"memory\"\nblob = \"memory\"\n")
         .await
         .expect("init must succeed with every primitive in-process on the system database");
 
@@ -374,8 +368,8 @@ async fn all_memory_backends_init_and_operate_in_process() {
 async fn postgres_schedule_enqueues_through_memory_queue() {
     let db = TestDatabase::new().await.unwrap();
 
-    let cfg = ForgeConfig::new(db.url()).with_backend(Primitive::Queue, Backend::Memory);
-    let forge = Forge::init(cfg)
+    let forge = db
+        .forge_with("[backends]\nqueue = \"memory\"\n")
         .await
         .expect("init must succeed with Postgres schedule and memory queue");
 

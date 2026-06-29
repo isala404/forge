@@ -6,7 +6,7 @@
       "name": "todoapp-node-be",
       "dependencies": {
         "@hono/node-server": "^1.19.14",
-        "forge-node": "file:../../../bindings/forge-node",
+        "forgelib": "file:../../../bindings/forge-node",
         "hono": "^4.12.27",
       },
       "devDependencies": {
@@ -22,7 +22,7 @@
 
     "@types/node": ["@types/node@24.13.2", "", { "dependencies": { "undici-types": "~7.18.0" } }, "sha512-fRa09kZTgu8o71KFcDjUFuc7F+dEbZYZmkI0mg5YBTRs0yMKjYHsq/c0urDKeDb+D5qVgXOdFcuu+DZPKOITwA=="],
 
-    "forge-node": ["forge-node@file:../../../bindings/forge-node", { "devDependencies": { "@napi-rs/cli": "^2.18.4" } }],
+    "forgelib": ["forgelib@file:../../../bindings/forge-node", { "devDependencies": { "@napi-rs/cli": "^2.18.4" } }],
 
     "hono": ["hono@4.12.27", "", {}, "sha512-1yrb/+w6HWQJrUCLkJ2IF5jNIPvvFkblV5RNOYl6bV+OA6p9GLcMpHFFGTosSvHvcAUibuUukRqhlYI4z32C7Q=="],
 

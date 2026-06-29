@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use async_graphql::{Context, ID, Object, Result, Subscription};
 use chrono::Utc;
-use forge::Bytes;
+use forgelib::Bytes;
 use futures_util::{Stream, StreamExt};
 use uuid::Uuid;
 
@@ -55,7 +55,7 @@ impl MessageMutation {
                 "upload",
                 &user.id.to_string(),
                 upload_limit(),
-                forge::FailMode::Closed,
+                forgelib::FailMode::Closed,
             )
             .await
             .map_err(map_forge)?;
@@ -98,7 +98,7 @@ impl MessageMutation {
                 "send",
                 &user.id.to_string(),
                 send_limit(),
-                forge::FailMode::Open,
+                forgelib::FailMode::Open,
             )
             .await
             .map_err(map_forge)?;
@@ -141,9 +141,9 @@ impl MessageMutation {
                 .set(
                     &key,
                     Bytes::from(msg_id.to_string()),
-                    forge::SetOpts::new()
+                    forgelib::SetOpts::new()
                         .with_ttl(Duration::from_secs(86_400))
-                        .with_mode(forge::SetMode::IfNotExists),
+                        .with_mode(forgelib::SetMode::IfNotExists),
                 )
                 .await
                 .map_err(map_forge)?;
@@ -189,7 +189,7 @@ impl MessageMutation {
                     when.into(),
                     REAP_QUEUE,
                     Bytes::from(payload),
-                    forge::ScheduleOpts::new(),
+                    forgelib::ScheduleOpts::new(),
                 )
                 .await
                 .map_err(map_forge)?;
@@ -274,17 +274,17 @@ async fn enqueue_fanout(c: &crate::context::Ctx, message_id: Uuid) -> Result<()>
         .enqueue(
             FANOUT_QUEUE,
             Bytes::from(payload),
-            forge::EnqueueOpts::new().with_dedup_id(message_id.to_string()),
+            forgelib::EnqueueOpts::new().with_dedup_id(message_id.to_string()),
         )
         .await
         .map_err(map_forge)?;
     Ok(())
 }
 
-fn send_limit() -> forge::Limit {
-    forge::Limit::per_duration(5, Duration::from_secs(10))
+fn send_limit() -> forgelib::Limit {
+    forgelib::Limit::per_duration(5, Duration::from_secs(10))
 }
 
-fn upload_limit() -> forge::Limit {
-    forge::Limit::per_duration(30, Duration::from_secs(60))
+fn upload_limit() -> forgelib::Limit {
+    forgelib::Limit::per_duration(30, Duration::from_secs(60))
 }
