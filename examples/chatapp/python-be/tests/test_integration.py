@@ -1,6 +1,3 @@
-"""End-to-end integration suite driving the GraphQL API over HTTP + WS against a live
-Postgres. Covers every SPEC scenario; no skips."""
-
 from __future__ import annotations
 
 import asyncio
@@ -309,7 +306,6 @@ async def test_receipt_changed_subscription(client, server):
 
 async def test_logout_all_revokes_other_sessions(client):
     alice = await signup(client, "Alice")
-    # Second session for the same user via login.
     second = await gql_data(
         client,
         "mutation($u:String!,$p:String!){login(username:$u,password:$p){token}}",

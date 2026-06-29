@@ -1,6 +1,3 @@
-/* App layout and component styles. One accent, one radius scale (sm/md/lg/pill),
-   one neutral ramp, all from the tokens in index.css. */
-
 .avatar {
   display: inline-flex;
   align-items: center;

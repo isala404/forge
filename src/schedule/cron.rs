@@ -1,8 +1,3 @@
-//! A minimal 5-field cron parser (UTC, 1-minute resolution): `minute hour
-//! day-of-month month day-of-week`. Supports `*`, `*/n`, `a`, `a-b`, and `a-b/n`,
-//! comma-separated. Day-of-week is `0..=7` with both `0` and `7` meaning Sunday.
-//! Pure (no DB), so it is unit-tested directly.
-
 use crate::error::{ForgeError, Result};
 use chrono::{DateTime, Datelike, Timelike, Utc};
 
@@ -23,7 +18,7 @@ pub(crate) struct Cron {
 impl Cron {
     /// Parse a standard 5-field cron expression. Invalid syntax/range => `Invalid`.
     pub(crate) fn parse(expr: &str) -> Result<Self> {
-        // Nonstandard but ubiquitous macros (Quartz/Vixie cron); agents emit them constantly.
+        // Nonstandard but ubiquitous macros from Quartz/Vixie cron.
         let src = expand_macro(expr).unwrap_or(expr);
         let fields: Vec<&str> = src.split_whitespace().collect();
         if fields.len() != 5 {

@@ -1,12 +1,3 @@
-//! Postgres `blob` backend. Contract: docs/contracts/blob.md.
-//!
-//! One `forge_blobs` row per object, body in `BYTEA` (whole-body, ≤ 50 MiB in v1).
-//! Presigned URLs carry the key + expiry + size cap as query params and an
-//! HMAC-SHA256 signature (see [`super::sign`]); the host app serves them and verifies
-//! the signature via [`Blob::verify_presigned`] before the equivalent get/put.
-//! Shared, backend-agnostic helpers (key checks, namespace mapping, presign/verify)
-//! live in [`super::common`].
-
 use super::common;
 use super::{Blob, BlobInfo, DEFAULT_CONTENT_TYPE, ListPage, PutOpts};
 use crate::error::Result;

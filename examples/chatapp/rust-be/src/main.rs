@@ -1,6 +1,3 @@
-//! chatapp Rust backend: a pure GraphQL API over Forge. axum 0.8 + async-graphql 7
-//! (code-first, with DataLoader) sharing Forge's Postgres pool.
-
 mod blob_router;
 mod context;
 mod db;

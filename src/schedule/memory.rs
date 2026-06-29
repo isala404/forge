@@ -1,19 +1,3 @@
-//! In-process `schedule` backend. Contract: docs/contracts/schedule.md.
-//!
-//! A `Mutex<HashMap>` of registered schedules keyed by name. Each instance is scoped to
-//! one app, so the app is not part of the key (separate instances are separate maps). The
-//! target-queue name is stored with the same `<app>:<queue>` prefix the Postgres backend
-//! uses and stripped back to the logical name on [`Schedule::list`].
-//!
-//! Timing and the observable contract match [`super::PgSchedule`]: `cron`/`at` register a
-//! schedule, [`Schedule::process_due`] computes due ticks with the shared
-//! [`Cron`](super::cron::Cron) evaluator (same missed-tick grace window), advances a
-//! recurring schedule to its next tick, and drops a one-shot once it has fired.
-//!
-//! Delivery is real: the backend holds an [`Arc<dyn Queue>`](super::super::Queue) and
-//! `process_due` enqueues a job through it for every due tick, carrying the schedule's
-//! stored payload, job id, and `max_attempts`.
-
 use super::cron::Cron;
 use super::{
     MAX_AT_HORIZON_DAYS, MAX_NAME_BYTES, Schedule, ScheduleInfo, ScheduleKind, ScheduleOpts,

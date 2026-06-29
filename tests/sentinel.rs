@@ -1,5 +1,3 @@
-//! Fails loudly when `pg-tests` is on but `TEST_DATABASE_URL` is unset, so DB
-//! suites can't silently skip and pass as "0 tests".
 #![cfg(feature = "pg-tests")]
 #![allow(clippy::panic)]
 

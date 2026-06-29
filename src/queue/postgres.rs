@@ -1,16 +1,3 @@
-//! Postgres `queue` backend. Contract: docs/contracts/queue.md.
-//!
-//! One table `forge_jobs` with a `available -> leased -> done` state machine,
-//! claimed via `FOR UPDATE SKIP LOCKED`. At-least-once: a lease that expires
-//! (crash) or is nacked returns the job to `available` with `attempts` bumped;
-//! on exhaustion the row is re-homed to the `"<queue>.dlq"` queue. A per-claim
-//! `lease_token` fences stale `ack`/`nack`/`heartbeat` calls.
-//!
-//! Redelivery timing: an explicit `nack` applies the configured backoff (with
-//! jitter, computed in Rust); a lease-expiry reclaim makes the job available
-//! immediately, because a lease expiry means a worker likely crashed and prompt
-//! retry by a healthy worker beats delay.
-
 use super::{
     Backoff, DequeueOpts, EnqueueOpts, Job, JobId, MAX_PAYLOAD_BYTES, MAX_VISIBILITY_TIMEOUT,
     MAX_WAIT, NackOpts, Queue, QueueDepth,
@@ -429,7 +416,7 @@ impl Queue for PgQueue {
         let token = job.lease_token();
         let seed = seed_from_id(id);
         // A job already in a *.dlq queue must not re-home into an unwatched .dlq.dlq;
-        // exhaustion there is terminal (P1-4).
+        // exhaustion there is terminal.
         let in_dlq = job.queue.ends_with(".dlq");
         let span = tracing::info_span!(
             "forge.queue.nack",

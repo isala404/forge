@@ -1,10 +1,3 @@
-"""Serves Forge presigned blob URLs.
-
-forgelib does not expose `blob_router()`, so this mounts the equivalent route at the
-default presign prefix (`/api/files`). It verifies the HMAC signature and expiry with
-`blob_verify_presign` (the exact check the built-in Rust router performs), then does the
-get/put against blob storage. Without this, presigned URLs would not resolve."""
-
 from __future__ import annotations
 
 from fastapi import APIRouter, Request, Response

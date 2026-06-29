@@ -1,8 +1,3 @@
-// Typed projection over the napi ForgeClient: bind a name + JSON codec to a type, so
-// app code enqueues `SendEmail` instead of a raw queue string + JSON.stringify. The
-// Node view of the typed layer in the Rust crate (src/typed.rs) and Python binding
-// (forgelib/typed.py). Plain JS (no build step); the types live in typed.d.ts.
-
 'use strict'
 
 /** Parse the stable error code the binding prefixes onto a thrown error's message

@@ -1,11 +1,3 @@
-//! Forge configuration. Every customizable point lives in one `forge.toml`, loaded by
-//! [`Forge::init`](crate::Forge::init) from the current directory (or an explicit path via
-//! [`Forge::init_from`](crate::Forge::init_from)). String values may embed `${VAR}` /
-//! `${VAR:-default}` references, resolved from the environment at load, so secrets and
-//! per-deploy connection strings stay out of the committed file. There is no separate
-//! code-builder or `FORGE_*` override layer: the file (with its `${VAR}` references) is the
-//! single source of truth.
-
 use crate::backend::Primitive;
 use crate::error::{ForgeError, Result};
 use serde::Deserialize;

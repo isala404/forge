@@ -1,17 +1,3 @@
-//! In-process `queue` backend. Contract: docs/contracts/queue.md.
-//!
-//! A single `Mutex`-guarded map of jobs keyed by id, mirroring the `forge_jobs`
-//! `available -> leased -> done` state machine the Postgres backend runs, plus a
-//! dedup map keyed by `(<namespace>:<queue>, dedup_id)`. The same physical queue
-//! name (`crate::util::namespaced`) is used, so namespacing is identical. Leasing,
-//! attempt counting, default-backoff redelivery, and `.dlq` redrive match
-//! [`super::PgQueue`]; only the storage differs: no SQL, nothing survives a restart.
-//!
-//! Redelivery timing follows the same rule as Postgres: an explicit `nack` applies
-//! [`Backoff::default`] (with per-job jitter), while a lease-expiry reclaim makes the
-//! job available immediately, since a lapsed lease means a worker likely crashed and
-//! prompt retry beats delay.
-
 use super::{
     Backoff, DequeueOpts, EnqueueOpts, Job, JobId, MAX_PAYLOAD_BYTES, MAX_VISIBILITY_TIMEOUT,
     MAX_WAIT, NackOpts, Queue, QueueDepth,

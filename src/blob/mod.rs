@@ -1,13 +1,3 @@
-//! `blob`. Lineage: AWS S3 API. See `docs/contracts/blob.md`.
-//!
-//! Object storage keyed by `/`-delimited path strings. Whole-body `put`/`get` (no
-//! streaming/multipart in v1), `head`/`delete`/`list`, and HMAC-signed presigned
-//! URLs the host app serves and verifies via [`Blob::verify_presigned`].
-//!
-//! The contract (the [`Blob`] trait, [`BlobInfo`], [`PutOpts`], [`ListPage`], the
-//! limits) lives in this module, which also wires the Postgres and filesystem backends
-//! plus the backend-agnostic signing helpers.
-
 use crate::error::Result;
 use crate::types::Cursor;
 use async_trait::async_trait;

@@ -1,12 +1,3 @@
-//! Reusable conformance kit for Forge backends.
-//!
-//! The cross-language contract is encoded as a declarative scenario matrix
-//! (`src/conformance/scenarios/*.json`). This module embeds that matrix and runs it
-//! against any [`crate::Forge`] handed to it through a [`ForgeFactory`], so an
-//! external backend author can run the contract against their own implementation.
-//!
-//! Build a `Forge` over your primitives, implement [`ForgeFactory`], call
-//! [`run_all`], and read the returned [`Report`].
 // Scenario JSON is trusted, compiled-in input, so this harness allows unwrap/panic/
 // indexing. `unreachable_patterns` is allowed because the interpreter keeps wildcard
 // arms for the `#[non_exhaustive]` ScheduleKind and ForgeError enums.

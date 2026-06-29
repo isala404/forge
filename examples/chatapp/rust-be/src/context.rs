@@ -1,6 +1,3 @@
-//! Shared application context, the realtime event envelope carried over Forge
-//! `pubsub`, and the kv-backed presence helper.
-
 use std::sync::Arc;
 use std::time::Duration;
 

@@ -1,10 +1,3 @@
-//! `schedule`. Lineage: cron + Unix `at` + Kubernetes CronJob. See
-//! `docs/contracts/schedule.md`.
-//!
-//! A thin layer over [`crate::queue`]: a due tick enqueues a job, so the queue's
-//! at-least-once / retry / DLQ semantics are inherited. A scheduled job is delivered
-//! at least once, so consumers must be idempotent.
-
 use crate::error::Result;
 use crate::queue::JobId;
 use crate::types::Cursor;

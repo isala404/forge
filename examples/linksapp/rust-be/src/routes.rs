@@ -85,8 +85,6 @@ impl Fairing for Cors {
     }
 }
 
-// helpers
-
 async fn validate_session_or_401(
     forge: &Forge,
     auth: &AuthHeader,
@@ -109,8 +107,6 @@ fn generate_qr_svg(text: &str) -> Result<String, ApiError> {
         .min_dimensions(120, 120)
         .build())
 }
-
-// auth
 
 #[post("/api/signup", data = "<input>")]
 async fn signup(
@@ -264,8 +260,6 @@ async fn me(state: &State<AppState>, auth: AuthHeader) -> Result<Json<MeResponse
     }))
 }
 
-// links
-
 #[get("/api/links")]
 async fn list_links(
     state: &State<AppState>,
@@ -406,7 +400,7 @@ async fn create_link(
         }
     };
 
-    // Prepend to the owner list (newest first).
+    // Owner lists are stored newest-first for the dashboard.
     owned.insert(
         0,
         OwnedLink {
@@ -426,7 +420,6 @@ async fn create_link(
         )
         .await?;
 
-    // Generate a QR code for the redirect path and persist to blob.
     let qr_text = format!("/{slug}");
     let svg = generate_qr_svg(&qr_text)?;
     state
@@ -439,7 +432,6 @@ async fn create_link(
         )
         .await?;
 
-    // Schedule deletion if a TTL was requested.
     if let Some(ttl) = input.ttl_seconds.filter(|&s| s > 0) {
         let when = SystemTime::now() + Duration::from_secs(ttl);
         let payload = serde_json::json!({"slug": &slug});
@@ -487,8 +479,6 @@ async fn delete_link(
     Ok(Status::NoContent)
 }
 
-// qr & live
-
 #[get("/api/links/<slug>/qr.svg")]
 async fn link_qr(state: &State<AppState>, slug: &str) -> Result<(ContentType, Vec<u8>), ApiError> {
     let Some(data) = state.forge.blob().get(&qr_blob_key(slug)).await? else {
@@ -521,8 +511,6 @@ fn link_live(state: &State<AppState>, slug: &str) -> EventStream![] {
         }
     }
 }
-
-// redirect hot path
 
 /// Matches any single path segment at low priority. Returns 302 on success,
 /// 404/429 on failure. Must be ranked after all /api/* routes.
@@ -578,8 +566,6 @@ async fn redirect(state: &State<AppState>, slug: &str) -> Result<Redirect, ApiEr
     Ok(Redirect::found(rec.url))
 }
 
-// meta & health
-
 #[get("/api/meta")]
 async fn meta(state: &State<AppState>) -> Result<Json<MetaResponse>, ApiError> {
     let depth = state.forge.queue().depth(CLICKS_QUEUE).await?;
@@ -618,14 +604,10 @@ fn healthz() -> &'static str {
     "ok"
 }
 
-// CORS preflight
-
 #[options("/<_path..>")]
 fn preflight(_path: PathBuf) -> Status {
     Status::NoContent
 }
-
-// error catcher
 
 #[catch(default)]
 fn default_catcher(status: Status, _request: &Request<'_>) -> status::Custom<Json<ErrorBody>> {

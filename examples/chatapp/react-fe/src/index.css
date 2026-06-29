@@ -1,6 +1,3 @@
-/* Design tokens. One accent (teal), one radius scale, one neutral ramp. Light is
-   the default; dark mirrors every token under prefers-color-scheme so hierarchy and
-   contrast survive the switch. No pure black or pure white. */
 :root {
   color-scheme: light dark;
 

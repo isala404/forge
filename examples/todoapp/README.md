@@ -5,7 +5,6 @@ plus one shared React frontend.
 
 ```
 todoapp/
-  SPEC.md            shared REST contract
   rust-be/           Rocket + forge crate                     :9081
   node-be/           Hono + forge-node                         :9082
   python-be/         FastAPI + forgelib                        :9083
@@ -34,8 +33,7 @@ only pure HTTP/key/validation helpers.
 
 ## REST contract
 
-All three backends serve the same JSON API. See [`SPEC.md`](SPEC.md) for the exact
-routes and payloads.
+All three backends serve the same JSON API.
 
 ## Run
 

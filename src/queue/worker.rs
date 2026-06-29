@@ -1,9 +1,3 @@
-//! Managed queue consumer: the `worker()` half of the queue contract.
-//!
-//! Dequeues up to `concurrency` jobs, runs a handler per job, auto-heartbeats
-//! while it runs, acks on success / nacks on error or panic, and drains
-//! in-flight work on shutdown. Backend-agnostic: drives `Arc<dyn Queue>` only.
-
 use super::{DequeueOpts, Job, NackOpts, Queue};
 use std::future::Future;
 use std::sync::Arc;

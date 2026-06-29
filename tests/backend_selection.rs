@@ -1,9 +1,3 @@
-//! Backend selection at init. Run with `cargo test --features pg-tests` (needs TEST_DATABASE_URL).
-//!
-//! Proves D5: a memory-backed primitive does not connect or migrate its Postgres
-//! feature-database override. The override here points at a host that does not exist, so
-//! a successful init is the proof: had memory selection tried to connect it, init would
-//! fail loudly.
 #![cfg(feature = "pg-tests")]
 #![allow(clippy::unwrap_used, clippy::panic)]
 
@@ -254,11 +248,9 @@ async fn all_memory_backends_init_and_operate_in_process() {
         .await
         .expect("init must succeed with every primitive in-process on the system database");
 
-    // kv: set then get.
     assert!(forge.kv().set("k", b("v"), SetOpts::new()).await.unwrap());
     assert_eq!(forge.kv().get("k").await.unwrap(), Some(b("v")));
 
-    // queue: enqueue, dequeue, ack.
     let id = forge
         .queue()
         .enqueue("jobs", b("payload"), EnqueueOpts::new())
@@ -288,14 +280,12 @@ async fn all_memory_backends_init_and_operate_in_process() {
         .unwrap();
     assert!(decision.allowed, "first call in a fresh bucket is allowed");
 
-    // config: set then get.
     forge.config().set_raw("retries", "3").await.unwrap();
     assert_eq!(
         forge.config().get_raw("retries").await.unwrap(),
         Some("3".to_string())
     );
 
-    // auth: create a session, then validate it back to its subject.
     let token = forge
         .auth()
         .create_session("user-1", SessionOpts::new())
@@ -336,7 +326,6 @@ async fn all_memory_backends_init_and_operate_in_process() {
         "the due one-shot fires once"
     );
 
-    // blob: put then get.
     forge
         .blob()
         .put("exports/data.csv", b("a,b,c"), PutOpts::new())

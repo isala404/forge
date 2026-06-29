@@ -1,10 +1,3 @@
-//! Serves Forge presigned blob URLs. Forge ships no built-in HTTP router, so this
-//! mounts the equivalent route at the configured presign prefix (`/api/files`). Each
-//! request carries the key, expiry, size cap, and HMAC signature as query params; we
-//! verify them with `Blob::verify_presigned` (the exact check the signer enforces) and
-//! then do the get/put against blob storage. The node and python backends carry the
-//! same hand-rolled route. See their `server.ts` / `blob_router.py`.
-
 // Returning the axum `Response` in a `Result::Err` is the idiomatic short-circuit for
 // these handlers.
 #![allow(clippy::result_large_err)]

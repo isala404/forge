@@ -1,11 +1,3 @@
-//! In-process `kv` backend. Contract: docs/contracts/kv.md.
-//!
-//! A `Mutex<HashMap>` keyed by the same `<namespace>:<key>` physical key the
-//! Postgres backend uses, so namespacing is identical. TTL is honored in-process:
-//! expired entries read as absent and are purged lazily on read (and in bulk by
-//! `maintain`). The observable contract matches [`super::PgKv`]; only the storage
-//! differs: there is no SQL and nothing survives a restart.
-
 use super::{Kv, MAX_KEY_BYTES, MAX_VALUE_BYTES, SetMode, SetOpts};
 use crate::error::{ForgeError, Result};
 use crate::types::Cursor;

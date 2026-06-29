@@ -1,5 +1,3 @@
-"""GraphQL request + graphql-transport-ws helpers for the integration tests."""
-
 from __future__ import annotations
 
 import json

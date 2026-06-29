@@ -1,7 +1,3 @@
-# Conformance runner config. The runner varies the database, namespace, and backends per
-# client by setting FORGE_* env vars before each ForgeClient.initFrom(); this file maps
-# those env vars onto Forge's config so one binary covers every scenario and the backend
-# selection smoke test.
 [postgres]
 url = "${FORGE_POSTGRES_URL}"
 

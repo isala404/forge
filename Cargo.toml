@@ -31,15 +31,13 @@ otel = [
 # DB-backed integration tests. A sentinel test fails loudly if TEST_DATABASE_URL is unset,
 # so "0 tests ran" cannot masquerade as a pass.
 pg-tests = []
-# Exposes `forge::conformance` for external backend authors / the cross-language runner; cfg(test) otherwise.
+# Exposes `forge::conformance` for external backend authors and the cross-language runner.
 conformance = []
 
 [dependencies]
-# Async + runtime
 tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
 async-trait = "0.1"
 
-# Database
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio",
     "postgres",
@@ -49,7 +47,6 @@ sqlx = { version = "0.8", default-features = false, features = [
     "macros",
 ] }
 
-# Values + serialization
 bytes = "1.10"
 # Streams: the pubsub primitive returns a boxed Stream of LISTEN/NOTIFY messages.
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
@@ -61,10 +58,8 @@ toml = "0.8"
 uuid = { version = "1.19", features = ["v4", "serde"] }
 chrono = { version = "0.4", default-features = false, features = ["serde", "std", "clock"] }
 
-# Errors
 thiserror = "2.0"
 
-# Hashing (migration checksums, key hashing in spans)
 sha2 = "0.10"
 
 # Blob presigned URLs: HMAC-SHA256 signing + percent-encoding the key into the URL.
@@ -79,7 +74,6 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 tracing = "0.1"
 metrics = "0.24"
 
-# OTLP export (feature = "otel")
 opentelemetry = { version = "0.27", optional = true, features = ["trace"] }
 opentelemetry_sdk = { version = "0.27", optional = true, features = ["rt-tokio", "trace"] }
 opentelemetry-otlp = { version = "0.27", optional = true, default-features = false, features = ["http-json", "reqwest-rustls", "trace"] }

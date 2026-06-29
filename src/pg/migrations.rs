@@ -1,7 +1,3 @@
-//! Embedded migration runner with mesh-safe locking. One advisory lock serializes
-//! nodes; checksums are re-verified each boot, and a schema ahead of the binary
-//! refuses to start.
-
 // Embedded DDL runs via runtime `sqlx::query` (can't be macro-typechecked); all
 // `forge_system_migrations` bookkeeping uses the checked macros.
 #![allow(clippy::disallowed_methods)]

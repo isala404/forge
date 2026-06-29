@@ -15,7 +15,6 @@ without hiding the production concerns.
 chatapp/
   schema.graphql     canonical GraphQL contract (source of truth)
   migrations.sql     domain tables (users, chats, chat_members, messages, receipts)
-  SPEC.md            the build contract all four projects conform to
   rust-be/           axum + async-graphql + forge crate              :8081
   node-be/           GraphQL Yoga + graphql-ws + forge-node          :8082
   python-be/         FastAPI + Strawberry + forgelib                 :8083

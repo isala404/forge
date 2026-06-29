@@ -1,4 +1,3 @@
-//! Worker behavior. Run with `cargo test --features pg-tests`.
 #![cfg(feature = "pg-tests")]
 #![allow(clippy::unwrap_used, clippy::panic)]
 

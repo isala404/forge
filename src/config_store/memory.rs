@@ -1,11 +1,3 @@
-//! In-process `config` (+ flags) backend. Contract: docs/contracts/config.md.
-//!
-//! Two `Mutex<HashMap>` maps keyed by the same `<namespace>:<key>` physical key the
-//! Postgres backend uses (so namespacing is identical): one for raw values, one for
-//! [`FlagRule`]s. The map is the source of truth, so a committed write is visible to
-//! every reader immediately. The `FORGE_CFG_<KEY>` env override, key/value limits, and
-//! flag-rule evaluation all match [`super::PgConfig`]; nothing survives a restart.
-
 use super::{
     ConfigStore, EvalCtx, FlagRule, MAX_ALLOWLIST_ENTRIES, MAX_KEY_BYTES, MAX_VALUE_BYTES,
 };

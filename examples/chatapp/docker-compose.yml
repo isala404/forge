@@ -1,7 +1,3 @@
-# The same chat app, three ways: the Rust, Node, and Python backends side by side,
-# each with its own Postgres and a React SPA built against it. One forge surface per
-# language, all up at once so you can compare them behaving identically.
-#
 #   docker compose up --build        (run from this directory)
 #
 #   Rust    backend http://127.0.0.1:8081/graphql   SPA http://127.0.0.1:8091

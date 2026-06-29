@@ -1,12 +1,3 @@
-//! In-process `auth` backend. Contract: docs/contracts/auth.md.
-//!
-//! Passwords are stateless: [`MemAuth`] hashes and verifies argon2id PHC strings with the
-//! same Forge-pinned parameters as [`super::PgAuth`] (Forge never owns the users table), so
-//! a hash minted here verifies under Postgres and vice versa. Sessions and API keys live in
-//! `Mutex<HashMap>`s keyed by the SHA-256 of the secret; only digests are stored, as in the
-//! SQL backend. The observable contract matches [`super::PgAuth`]; only the storage differs.
-//! Nothing survives a restart.
-
 use super::{
     ApiKey, ApiKeyInfo, ApiKeySecret, Auth, MAX_ID_BYTES, MAX_LABEL_BYTES, MAX_PASSWORD_BYTES,
     MAX_PHC_BYTES, PhcString, Session, SessionOpts, SessionToken,

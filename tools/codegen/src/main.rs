@@ -1,15 +1,3 @@
-//! Generate the cross-language binding DTO definitions from one schema.
-//!
-//! ```text
-//! cargo run --manifest-path tools/codegen/Cargo.toml            # regenerate
-//! cargo run --manifest-path tools/codegen/Cargo.toml -- --check # CI drift guard
-//! ```
-//!
-//! Outputs (each `// @generated`, committed, never hand-edited):
-//!   - bindings/forge-node/src/types.generated.rs   (`#[napi(object)]` structs → index.d.ts)
-//!   - bindings/forge-py/src/types.generated.rs      (`#[pyclass]` structs)
-//!   - bindings/forge-py/python/forgelib/_generated.pyi (Python type stubs)
-
 mod schema;
 
 use schema::SCHEMA;

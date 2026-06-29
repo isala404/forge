@@ -1,10 +1,3 @@
-//! Node.js bindings for Forge via napi-rs.
-//!
-//! Exposes the Forge primitive surface to JavaScript. Async Rust methods become JS `Promise`s
-//! (snake_case → camelCase). The queue is exposed as raw `enqueue`/`dequeue`/`ack`/
-//! `nack`: leased jobs are held Rust-side in a map and referenced from JS by
-//! delivery-unique receipt, so the opaque lease fence never crosses the boundary.
-
 use futures_util::StreamExt;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;

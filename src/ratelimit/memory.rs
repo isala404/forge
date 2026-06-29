@@ -1,10 +1,3 @@
-//! In-process `ratelimit` backend. Contract: docs/contracts/ratelimit.md.
-//!
-//! Per-process limiter state behind a `Mutex<HashMap>`, keyed by the same namespaced
-//! `(bucket, subject)` the Postgres backend keys its row on, running the same pure
-//! algorithm step. Nothing survives a restart and buckets are not shared across
-//! processes; the observable [`Decision`] contract matches [`super::PgRateLimit`].
-
 use super::{Algo, Decision, FailMode, Limit, MAX_BUCKET_BYTES, MAX_KEY_BYTES, RateLimit};
 use crate::backend::{BackendLifecycle, Primitive};
 use crate::error::{ForgeError, Result};

@@ -15,7 +15,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 // fanout: marks each recipient's receipt delivered, idempotent on message id.
-// Unread now derives from receipts.read_at, so there is no counter to bump.
+// Unread derives from receipts.read_at, so there is no counter to bump.
 async function handleFanout(app: AppCtx, payload: string): Promise<void> {
   const { message_id } = JSON.parse(payload) as MessageJob;
   const msg = await db.messageById(app.pool, message_id);
@@ -90,7 +90,7 @@ export function runReapWorker(app: AppCtx, stopped: Stopped): void {
         try {
           await app.forge.queueNack(job.receipt);
         } catch {
-          /* ignore */
+          /* redelivery is the queue's job */
         }
       }
     }
@@ -156,7 +156,7 @@ export function runScheduler(app: AppCtx, stopped: Stopped): void {
       try {
         await app.forge.runSchedulerOnce();
         await reconcileOnce(app);
-        // forge-node now exposes maintain
+        // Sweep expired Forge storage rows.
         await app.forge.maintain();
       } catch (e) {
         console.warn("scheduler tick failed:", (e as Error).message);

@@ -1,9 +1,3 @@
-//! `config` (+ flags). Lineage: 12-factor env precedence + OpenFeature. See
-//! `docs/contracts/config.md`.
-//!
-//! The trait is [`ConfigStore`] (module `config_store`) so it never collides with Forge's
-//! own `forge.toml` configuration; the facade accessor is `forge.config()`.
-
 use crate::error::{ForgeError, Result};
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;

@@ -1,10 +1,4 @@
--- Forge schema — the full set of forge_* tables, in one baseline migration.
---
--- This is the consolidated v1 schema (it folds what were once the per-primitive
--- migrations v001–v012 into a single file). The migration-tracking table itself
--- (forge_system_migrations) is created by the bootstrap step; everything else lives
--- here. All statements are idempotent (IF NOT EXISTS) and run in one transaction.
--- Per-primitive semantic contracts live in docs/contracts/.
+-- Forge schema: the full set of forge_* tables, idempotent in one transaction.
 
 -- kv — lineage: Redis. Contract: docs/contracts/kv.md
 -- key uses C collation so prefix scans and scan keyset pagination are byte-wise/exact.

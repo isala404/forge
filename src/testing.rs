@@ -1,10 +1,3 @@
-//! Test support: per-test isolated databases. Enabled by `feature = "pg-tests"`.
-//!
-//! Each [`TestDatabase`] creates a uniquely-named database (off `TEST_DATABASE_URL`,
-//! never `DATABASE_URL`, so a test run can never touch a real database) and drops
-//! it on `Drop`, even on panic, via a dedicated thread + runtime. The contract
-//! test suites in `tests/` build a fresh [`crate::Forge`] per test on top of one.
-
 // CREATE/DROP DATABASE take a dynamic database name and run against a database
 // that does not exist yet, so the compile-time query macros cannot apply here.
 #![allow(clippy::disallowed_methods)]

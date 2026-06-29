@@ -1,11 +1,3 @@
-//! Postgres `ratelimit` backend. Contract: docs/contracts/ratelimit.md.
-//!
-//! Each `check` is atomic against its one `(bucket, subject)` row: the row is locked
-//! `FOR UPDATE` inside a transaction, the algorithm math runs in Rust against the
-//! locked state, and the new state is written before commit, so concurrent checks on
-//! one key serialize and never double-spend. The math is pure (see `*_step`), so it is
-//! unit-tested without a database.
-
 use super::{Algo, Decision, FailMode, Limit, MAX_BUCKET_BYTES, MAX_KEY_BYTES, RateLimit};
 use crate::error::{ForgeError, Result};
 use crate::obs;

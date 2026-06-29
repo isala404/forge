@@ -1,7 +1,3 @@
-//! The chat domain over the unprefixed `users`/`chats`/`chat_members`/`messages`/
-//! `receipts` tables. Forge owns and migrates the `forge_*` tables; this owns these,
-//! sharing Forge's pool. Batch reads (`*_by_ids`, `*_for_chats`) back the DataLoaders.
-
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;

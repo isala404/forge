@@ -1,13 +1,3 @@
-"""Typed projection over the forgelib ForgeClient.
-
-Bind a name + JSON codec to a type, so app code enqueues a ``SendEmail`` model
-instead of a raw queue string + ``json.dumps``. The Python view of the typed layer
-the Rust crate (``src/typed.rs``) and Node binding (``forge-node/typed``) expose.
-
-Each handle takes the compiled ``ForgeClient`` plus optional ``loads``/``dumps`` so a
-Pydantic/attrs model can supply its own codec; the defaults use ``json``.
-"""
-
 from __future__ import annotations
 
 import asyncio

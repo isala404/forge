@@ -1,6 +1,6 @@
 # linksapp: Node/Hono backend
 
-URL shortener backend implementing the [linksapp spec](../SPEC.md). Runs on port **9092**, uses `linksapp_node` as its Postgres database, and stores all data in Forge KV/blob/queue/pubsub, no separate database.
+URL shortener backend for linksapp. Runs on port **9092**, uses `linksapp_node` as its Postgres database, and stores all data in Forge KV/blob/queue/pubsub, no separate database.
 
 ## Start
 

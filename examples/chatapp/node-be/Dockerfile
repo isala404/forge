@@ -12,7 +12,6 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 WORKDIR /src
 COPY . .
 
-# Compile the native binding for this platform.
 WORKDIR /src/bindings/forge-node
 RUN npm install && npm run build
 

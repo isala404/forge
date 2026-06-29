@@ -1,14 +1,3 @@
-//! `pubsub`: lightweight publish/subscribe for live fan-out to connected clients.
-//! Lineage: Postgres `LISTEN`/`NOTIFY`, with Redis pub/sub delivery semantics
-//! (fire-and-forget, no persistence, delivered only to currently-connected
-//! subscribers). See `docs/contracts/pubsub.md`.
-//!
-//! A request handler `publish`es an event, and every open `subscribe` stream for that
-//! topic receives it. Not a queue: no durability, ordering across connections, or
-//! redelivery. Use [`crate::queue::Queue`] when a message must not be lost.
-//!
-//! The [`Pubsub`] trait and [`Subscription`] live here, alongside the Postgres backend.
-
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::stream::BoxStream;

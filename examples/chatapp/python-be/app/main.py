@@ -1,9 +1,3 @@
-"""chatapp Python backend: a pure GraphQL API over Forge primitives.
-
-Forge primitives go through the natively-async `forgelib` binding; the chat tables go
-through an asyncpg pool. Realtime rides Forge pubsub via the binding's Subscription async
-iterator, so there is no separate broker."""
-
 from __future__ import annotations
 
 import asyncio

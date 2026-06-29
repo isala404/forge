@@ -1,7 +1,3 @@
-// Typed projection over ForgeClient (see typed.js). Generic handles bind a name +
-// JSON codec to a payload/value/event type, so callers never touch a raw queue
-// string or JSON.stringify. Mirrors the Rust typed layer (src/typed.rs).
-
 import { ForgeClient, JsQueueDepth } from './index'
 
 /** The stable error code the binding prefixes onto a thrown error's message. */

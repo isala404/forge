@@ -1,7 +1,3 @@
-//! Shared Postgres backend infrastructure: pool construction, init-time probes, and the
-//! embedded migration runner. Every connection failure is a [`ForgeError::Config`], so
-//! misconfiguration fails in `Forge::init`, never lazily on first use.
-
 mod migrations;
 pub(crate) use migrations::MigrationRunner;
 

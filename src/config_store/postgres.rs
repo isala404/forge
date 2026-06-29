@@ -1,10 +1,3 @@
-//! Postgres `config` backend. Contract: docs/contracts/config.md.
-//!
-//! Two tables: `forge_config` (raw string values) and `forge_flags` (JSONB rules).
-//! Both layers sit behind a per-process cache with a 30s TTL (the contract's
-//! staleness bound); a local write updates the cache so the writer reads its own
-//! write immediately, while other instances converge within the TTL.
-
 use super::{
     CACHE_TTL_SECS, ConfigStore, EvalCtx, FlagRule, MAX_ALLOWLIST_ENTRIES, MAX_KEY_BYTES,
     MAX_VALUE_BYTES,

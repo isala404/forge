@@ -1,6 +1,3 @@
-//! Background worker loops. Each loop is idempotent and recovers from transient
-//! errors without crashing the process.
-
 use std::time::Duration;
 
 use forgelib::{Bytes, DequeueOpts, Forge, NackOpts, SetOpts};

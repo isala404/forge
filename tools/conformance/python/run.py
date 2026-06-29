@@ -1,13 +1,3 @@
-"""Cross-language conformance runner, Python side.
-
-Reads the shared scenario matrix in src/conformance/scenarios/*.json and runs
-each scenario against the forgelib binding on a throwaway database. Asserts the
-observed failure set equals exactly the ``python`` entries in
-src/conformance/known_gaps.json. See ../README.md.
-
-    TEST_DATABASE_URL=postgres://… python tools/conformance/python/run.py
-"""
-
 import asyncio
 import json
 import os

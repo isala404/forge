@@ -1,10 +1,3 @@
-//! Per-request DataLoaders. Every relational GraphQL field resolves through one of
-//! these so a query over N rows issues O(1) batched DB round-trips, not O(N).
-//!
-//! Distinct key newtypes select distinct `Loader` impls on the single `AppLoader`,
-//! batching by id within a request. Online presence is keyed by user id and answered
-//! from kv (one membership-free lookup per distinct user per batch).
-
 use std::collections::HashMap;
 use std::sync::Arc;
 

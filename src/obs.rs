@@ -1,7 +1,3 @@
-//! Automatic observability: every primitive op runs in a `tracing` span
-//! `forge.<primitive>.<op>` and emits `metrics`. Spans carry only metadata (key
-//! *hashes*, sizes, counts, outcome), never raw keys, payloads, or tokens.
-
 use crate::error::{ForgeError, Result};
 use std::future::Future;
 use std::time::Instant;

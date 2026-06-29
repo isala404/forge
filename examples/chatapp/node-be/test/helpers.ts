@@ -30,7 +30,6 @@ export class HttpClient {
     return (await res.json()) as GqlResult<T>;
   }
 
-  // Asserts no errors and returns data.
   async ok<T = Record<string, unknown>>(
     query: string,
     variables: Record<string, unknown> = {},

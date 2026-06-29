@@ -1,5 +1,3 @@
-//! Typed-layer contract tests: the strongly-typed surface round-trips through the same
-//! backends as the stringly-typed primitives. Run with `cargo test --features pg-tests`.
 #![cfg(feature = "pg-tests")]
 #![allow(clippy::unwrap_used, clippy::panic)]
 

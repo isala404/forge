@@ -1,17 +1,3 @@
-//! In-process `pubsub` backend. Contract: docs/contracts/pubsub.md.
-//!
-//! A `Mutex<HashMap>` of `channel -> tokio::sync::broadcast::Sender`, keyed by the
-//! same hashed `<namespace>:<topic>` channel the Postgres backend derives, so
-//! namespacing and topic-to-channel mapping match. `publish` fans a message out to
-//! every receiver currently live on that channel; `subscribe` hands back a stream of
-//! payloads published *after* it returns. Delivery is fire-and-forget and
-//! connected-only like [`super::PgPubsub`], the difference being that the broadcast
-//! never leaves this process: no cross-process / cross-replica delivery, where
-//! `LISTEN`/`NOTIFY` would have it.
-//!
-//! Subscriberless channels are reclaimed lazily on the hot path (a `publish` whose
-//! send finds no receivers drops the channel) and in bulk by `maintain`.
-
 use super::{MAX_PAYLOAD_BYTES, MAX_TOPIC_BYTES, Pubsub, Subscription};
 use crate::backend::{BackendLifecycle, Primitive};
 use crate::error::{ForgeError, Result};

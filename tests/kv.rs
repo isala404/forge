@@ -1,4 +1,3 @@
-//! kv contract tests. Run with: `cargo test --features pg-tests` (needs TEST_DATABASE_URL).
 #![cfg(feature = "pg-tests")]
 #![allow(clippy::unwrap_used, clippy::panic)]
 
@@ -240,7 +239,7 @@ async fn colon_keys_are_allowed_redis_style() {
     let forge = db.forge().await.unwrap();
     let kv = forge.kv();
 
-    // Redis idiom `entity:id:field` must work; agents generate it constantly.
+    // Common Redis-style keys must work.
     kv.set("user:42:session", b("tok"), SetOpts::new())
         .await
         .unwrap();

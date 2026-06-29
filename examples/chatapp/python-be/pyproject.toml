@@ -8,7 +8,7 @@ dependencies = [
     "uvicorn>=0.34",
     # uvicorn needs a WebSocket backend to serve GraphQL subscriptions; without it the
     # server rejects every WS upgrade with a 400 and live subscriptions silently break.
-    # It's a runtime dependency, not dev-only — the Docker image installs with --no-dev.
+    # Runtime dependency: the Docker image installs with --no-dev.
     "websockets>=14",
     "strawberry-graphql[fastapi]>=0.260",
     "asyncpg>=0.30",

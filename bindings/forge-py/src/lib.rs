@@ -1,19 +1,3 @@
-//! Python bindings for Forge via pyo3. Natively async: every method returns a Python
-//! awaitable driven on a shared Tokio runtime (`pyo3-async-runtimes`), so an asyncio app
-//! `await`s the binding directly:
-//!
-//! ```python
-//! forge = await ForgeClient.init()  # reads ./forge.toml
-//! await forge.kv_set("k", "v")
-//! async for payload in await forge.pubsub_subscribe("chat:1"):
-//!     ...
-//! ```
-//!
-//! The binding never blocks the event loop. Forge errors surface as typed exceptions
-//! (`forgelib.NotFound`, `forgelib.Limit`, …, all subclasses of `forgelib.ForgeError`).
-//! Leased queue jobs are held Rust-side and referenced by delivery-unique receipt, as in
-//! the Node binding.
-
 // `Limit` is intentionally NOT imported by name: the `Limit` exception type below
 // would collide with `forge::Limit`. It is referenced fully-qualified where used.
 use forge::{Algo, EvalCtx, FailMode, FlagRule, Forge, PutOpts, SessionOpts, SetMode, SetOpts};

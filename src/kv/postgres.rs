@@ -1,10 +1,3 @@
-//! Postgres `kv` backend. Contract: docs/contracts/kv.md.
-//!
-//! Counters are stored as string values (Redis semantics), so `incr` is an
-//! atomic SQL update over the same column `get` reads. Expiry is lazy: every
-//! read path filters `expires_at <= now()`, so a `get` after expiry returns
-//! `None` regardless of when the sweep runs.
-
 use super::{Kv, MAX_KEY_BYTES, MAX_VALUE_BYTES, SetMode, SetOpts};
 use crate::error::{ForgeError, Result};
 use crate::obs;

@@ -1,9 +1,3 @@
-"""Boots the real ASGI app under uvicorn on a free port so tests drive the GraphQL API
-over real HTTP (httpx) and real WS (websockets) against a live Postgres.
-
-Test env shortens presence/disappearing/scheduler timers so TTL-driven scenarios finish
-in seconds. Each test database is the dedicated `chatapp_python_be_test`."""
-
 from __future__ import annotations
 
 import asyncio

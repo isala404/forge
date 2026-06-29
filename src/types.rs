@@ -1,5 +1,3 @@
-//! Value types shared across primitives.
-
 /// Opaque pagination token: pass back what a `scan`/`list` returned; never construct or inspect it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cursor(pub(crate) String);

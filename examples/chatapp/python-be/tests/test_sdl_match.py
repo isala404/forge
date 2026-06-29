@@ -1,7 +1,3 @@
-"""The parity guarantee: the Strawberry-emitted SDL equals the canonical schema.graphql
-under the normalized comparison (sort types + fields, ignore descriptions, treat an
-absent default as equal to `= null`)."""
-
 from pathlib import Path
 
 from app.gql import schema

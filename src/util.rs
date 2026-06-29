@@ -1,5 +1,3 @@
-//! Small helpers shared across the crate.
-
 use sha2::{Digest, Sha256};
 
 /// SHA-256 of `bytes` as a lowercase hex string. Stable across binaries/deploys (unlike `DefaultHasher`), so safe for migration checksums.

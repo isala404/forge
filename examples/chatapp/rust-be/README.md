@@ -91,7 +91,7 @@ cargo test
 validation) and one integration suite (`tests/integration.rs`). The integration suite
 creates a uniquely-named Postgres database at
 `postgres://postgres:forge@127.0.0.1:5432`, boots the real binary against it on an
-ephemeral port, drives the GraphQL API over HTTP and WS through every SPEC scenario
+ephemeral port, drives the GraphQL API over HTTP and WS through every integration scenario
 (signup → session; two users see a group chat; live message over a subscription; typing
 event; presence online → offline via kv TTL; attachment presign → PUT → send → download;
 unread increments then clears on `markRead`; read receipt turns read; rate-limit throttles

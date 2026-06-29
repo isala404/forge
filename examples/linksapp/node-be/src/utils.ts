@@ -17,7 +17,6 @@ export function envOr(key: string, fallback: string): string {
   return process.env[key] || fallback;
 }
 
-// KV key helpers
 export function userEmailKey(email: string): string {
   return `link:user:email:${email}`;
 }

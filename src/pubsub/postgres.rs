@@ -1,14 +1,3 @@
-//! Postgres `pubsub` backend over `LISTEN`/`NOTIFY`. Contract: docs/contracts/pubsub.md.
-//!
-//! `publish` is one `pg_notify($channel, $payload)` on a pooled connection.
-//! `subscribe` registers a topic's channel on a single shared `LISTEN` connection
-//! (a per-process broker task) and hands back an in-process fan-out stream. One shared
-//! connection across every subscription, instead of one per `subscribe`, keeps `N`
-//! subscribers on `M` topics at one Postgres connection rather than `N×M`. The broker
-//! awaits `LISTEN` registration before a `subscribe` resolves, so a publish can never
-//! race ahead of its own subscription. Topics are mapped to a valid, fixed-length
-//! channel identifier by hash.
-
 use super::{MAX_PAYLOAD_BYTES, MAX_TOPIC_BYTES, Pubsub, Subscription};
 use crate::error::{ForgeError, Result};
 use crate::obs;

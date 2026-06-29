@@ -1,21 +1,3 @@
-//! Cross-language conformance runner (Rust side).
-//!
-//! Reads `src/conformance/scenarios/*.json` and runs each scenario against a fresh
-//! throwaway Forge, asserting the observable result matches the canonical
-//! contract. The Node and Python runners execute the same JSON. See
-//! `tools/conformance/README.md`.
-//!
-//! The scenario interpreter itself lives in the in-crate `forgelib::conformance`
-//! module; this test is a thin caller that supplies a `ForgeFactory` backed by a
-//! throwaway Postgres database and layers the rust `known_gaps.json`
-//! bookkeeping on top.
-//!
-//! Rust is the reference shape, so `known_gaps.json` lists no `rust` gaps and
-//! this test asserts every scenario passes. A failure here means either a real
-//! core bug or a scenario that does not match the implemented contract.
-//!
-//! Run with: `cargo test --features pg-tests,conformance --test conformance` (needs
-//! `TEST_DATABASE_URL`).
 #![cfg(all(feature = "pg-tests", feature = "conformance"))]
 #![allow(
     clippy::unwrap_used,

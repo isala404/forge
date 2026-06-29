@@ -1,6 +1,3 @@
-# Canonical GraphQL contract: the single source of truth all three backends serve and the
-# React client generates against. Parity is checked by normalized SDL comparison.
-
 "RFC3339 / ISO-8601 UTC timestamp, serialized as a string."
 scalar DateTime
 

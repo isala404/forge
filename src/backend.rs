@@ -1,21 +1,3 @@
-//! The backend seam: provider lifecycle plus a per-primitive backend report.
-//!
-//! The primitive traits ([`crate::kv::Kv`], [`crate::queue::Queue`], …) are the operation
-//! contracts; they say nothing about how a backend is initialized, health-checked, or
-//! swept. [`BackendLifecycle`] is that layer: one value per primitive that knows which
-//! provider powers it and how to maintain it. `forgelib::Forge` holds a
-//! `Vec<Arc<dyn BackendLifecycle>>` and drives them from `forgelib::Forge::maintain` and
-//! `forgelib::Forge::backend_report`.
-//!
-//! In v1 every primitive is Postgres, except that `blob` can store bytes on a local
-//! filesystem instead of `BYTEA`. Adding a second backend for a primitive is a new
-//! [`BackendLifecycle`] impl plus a new config variant, nothing more.
-//!
-//! The [`BackendLifecycle`] impls for the crate-local `Pg*`/`FsBlob` types live here
-//! rather than in the per-primitive modules, so each primitive module stays focused on
-//! its operation contract. Backends with nothing to sweep inherit the no-op `maintain`
-//! default.
-
 use crate::error::Result;
 use async_trait::async_trait;
 use std::fmt;

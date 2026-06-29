@@ -43,4 +43,4 @@ configure the HTTP server.
 
 ## API summary
 
-See [SPEC.md](../SPEC.md) for the normative contract shared across all three backends.
+The same REST contract is implemented by all three backends.

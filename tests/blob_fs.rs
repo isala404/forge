@@ -1,6 +1,3 @@
-//! Filesystem blob backend held to the same `Blob` contract as the Postgres (`BYTEA`)
-//! backend, plus the filesystem-specific orphan sweep and binary-safety guarantees.
-//! Run with `cargo test --features pg-tests` (needs TEST_DATABASE_URL).
 #![cfg(feature = "pg-tests")]
 #![allow(clippy::unwrap_used, clippy::panic, clippy::disallowed_methods)]
 

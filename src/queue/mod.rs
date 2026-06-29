@@ -1,8 +1,3 @@
-//! `queue`. Lineage: AWS SQS. See `docs/contracts/queue.md`.
-//!
-//! AT-LEAST-ONCE delivery: a job may be delivered more than once. Consumers
-//! MUST be idempotent. Attempts increment on redelivery, never on claim.
-
 use crate::error::{ForgeError, Result};
 use async_trait::async_trait;
 use bytes::Bytes;

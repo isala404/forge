@@ -1,10 +1,3 @@
-"""Per-request DataLoaders for every relational field. Built fresh per request in the
-context so batching and caching never leak across requests.
-
-DB-backed loaders (users, members, last message, receipts, unread) collapse N lookups
-into one query. The kv-backed loader (online) collapses N keys into one `kv_mget`
-round-trip."""
-
 from __future__ import annotations
 
 import uuid

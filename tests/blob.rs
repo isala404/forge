@@ -1,4 +1,3 @@
-//! blob contract tests. Run with: `cargo test --features pg-tests` (needs TEST_DATABASE_URL).
 #![cfg(feature = "pg-tests")]
 #![allow(clippy::unwrap_used, clippy::panic)]
 
@@ -119,7 +118,7 @@ async fn presign_requires_secret_and_signs() {
         Err(ForgeError::Invalid(_))
     ));
 
-    // A 0-byte upload cap admits only empty bodies, so it's rejected (P2-5).
+    // A 0-byte upload cap admits only empty bodies, so it is rejected.
     assert!(matches!(
         signed
             .blob()

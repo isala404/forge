@@ -1,7 +1,3 @@
-//! The GraphQL surface: types, queries, mutations, subscriptions. async-graphql is
-//! code-first; the SDL it emits (`Schema::sdl`) is asserted equal to the canonical
-//! `schema.graphql` by a test. Every relational field resolves through a DataLoader.
-
 mod auth;
 mod chat;
 mod helpers;

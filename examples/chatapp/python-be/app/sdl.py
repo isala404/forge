@@ -1,11 +1,3 @@
-"""Normalized SDL comparison: the parity guarantee that this code-first schema serves
-exactly the canonical schema.graphql.
-
-Strawberry is code-first, so there is no SDL-to-code tool; instead the emitted SDL is
-compared to the canonical file under a normalization that sorts types + fields, ignores
-descriptions, and treats an absent default as equal to an explicit `= null` (the two are
-semantically identical for a nullable input)."""
-
 from __future__ import annotations
 
 from graphql import build_schema, lexicographic_sort_schema, parse, print_ast, print_schema

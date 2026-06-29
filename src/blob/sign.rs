@@ -1,7 +1,3 @@
-//! Presigned-URL signing: HMAC-SHA256 over a canonical `(method, key, expiry,
-//! max_bytes)` string. Shared by `presign_*` (signing) and the router (verifying), so
-//! the two can never drift. No axum/HTTP dependency lives here, only the crypto.
-
 use crate::error::{ForgeError, Result};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;

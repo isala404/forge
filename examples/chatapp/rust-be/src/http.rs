@@ -1,9 +1,3 @@
-//! HTTP surface: GET and POST /graphql both serve queries (the SPA's urql client sends
-//! queries over GET), and a GET with an `Upgrade` header is the graphql-transport-ws
-//! subscription handshake, all on one endpoint, Bearer-authenticated, plus permissive
-//! CORS for the cross-origin SPA. A bearer validates as either a Forge session (sliding
-//! idle) or an API key → `user_id`.
-
 use async_graphql::Data;
 use async_graphql::http::ALL_WEBSOCKET_PROTOCOLS;
 use async_graphql_axum::{GraphQLProtocol, GraphQLRequest, GraphQLResponse, GraphQLWebSocket};

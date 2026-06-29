@@ -1,10 +1,3 @@
-//! Postgres `schedule` backend + ticker. Contract: docs/contracts/schedule.md.
-//!
-//! `cron`/`at` register rows in `forge_schedules`. The ticker ([`PgSchedule::process_due`],
-//! driven by `forge.run_scheduler()`) claims due rows with `FOR UPDATE SKIP LOCKED`, then
-//! delivers through the Forge instance's resolved queue backend. Postgres is only the
-//! schedule coordinator here; the target queue can be Postgres, memory, or injected.
-
 use super::cron::Cron;
 use super::{
     MAX_AT_HORIZON_DAYS, MAX_NAME_BYTES, Schedule, ScheduleInfo, ScheduleKind, ScheduleOpts,
@@ -100,10 +93,9 @@ impl PgSchedule {
 
     /// Fire every due schedule once. Returns how many jobs were enqueued. Idempotent
     /// and safe to run concurrently on many replicas (per-row claim).
-    // NOTE (P2-11): up to TICK_BATCH due schedules are processed in one transaction.
-    // A single failing enqueue rolls back schedule advancement and retries the whole
-    // batch on the next pass. Fine for v1; a per-row savepoint (or a smaller batch)
-    // would contain a poison row so one bad schedule can't stall the others. Revisit at scale.
+    // Up to TICK_BATCH due schedules are processed in one transaction. A single
+    // failing enqueue rolls back schedule advancement and retries the whole batch
+    // on the next pass; per-row savepoints would isolate a poison schedule.
     // Runtime SQL until offline sqlx metadata is regenerated for namespace-scoped ticks.
     #[allow(clippy::disallowed_methods)]
     async fn process_due_inner(&self) -> Result<u64> {

@@ -7,7 +7,6 @@ features, is what pulls them in.
 
 ```
 linksapp/
-  SPEC.md            shared REST contract (normative)
   rust-be/           Rocket + forge crate                     :9091
   node-be/           Hono + forge-node                         :9092
   python-be/         FastAPI + forgelib                        :9093
@@ -56,8 +55,7 @@ Start with a backend's route file, then its worker file:
 - [`python-be/app/routes.py`](python-be/app/routes.py) · [`python-be/app/worker.py`](python-be/app/worker.py)
 
 The route files call Forge directly inside the handlers; the neighboring `types` and
-`util`/`utils` files hold only DTOs and pure helpers. The exact JSON API is in
-[`SPEC.md`](SPEC.md).
+`util`/`utils` files hold only DTOs and pure helpers.
 
 ## Run
 

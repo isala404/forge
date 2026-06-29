@@ -1,5 +1,3 @@
-"""Background workers: clicks drain, link expiry, and the scheduler/maintenance loop."""
-
 from __future__ import annotations
 
 import asyncio

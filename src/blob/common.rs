@@ -1,8 +1,3 @@
-//! Backend-agnostic blob helpers shared by the Postgres (`BYTEA`) and filesystem
-//! backends: namespace mapping, key/size validation, and the HMAC presign/verify
-//! scheme. Keeping the signing code in one place means both backends sign and verify
-//! presigned URLs identically (the security-sensitive part must not diverge).
-
 use super::sign::{self, Method};
 use super::{
     MAX_CONTENT_TYPE_BYTES, MAX_KEY_BYTES, MAX_METADATA_BYTES, MAX_OBJECT_BYTES,

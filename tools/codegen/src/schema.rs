@@ -1,15 +1,3 @@
-//! The single source of truth for Forge's cross-language binding DTOs.
-//!
-//! Every value type that crosses the FFI boundary (a queue `Job`, a rate-limit
-//! `Decision`, object metadata, a paginated list) is declared here once. The generator
-//! turns this list into the Rust struct definitions for both bindings, so the Node
-//! (`Js*`, via napi) and Python (`#[pyclass]`, via pyo3) surfaces are mechanically
-//! identical and cannot drift from each other or from this schema.
-//!
-//! The hand-written `From<forgelib::…>` conversions in each binding map the core `forge`
-//! types onto these structs; if a field changes here, those conversions stop compiling
-//! until updated, so the core crate cannot drift silently either.
-
 /// A field's logical type, rendered to a concrete Rust (per binding) or Python type.
 ///
 /// A few types render differently per language on purpose: a `Count` is `u32` in Node

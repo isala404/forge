@@ -1,10 +1,3 @@
-//! Postgres `auth` backend. Contract: docs/contracts/auth.md.
-//!
-//! Passwords: argon2id PHC strings (Forge-owned params), hashed on a blocking thread.
-//! Sessions/API keys: high-entropy random secrets, stored only as their SHA-256;
-//! validation hashes the presented secret and looks it up by that indexed digest, so
-//! no raw secret is ever compared in app code (and a DB leak yields only digests).
-
 use super::{
     ApiKey, ApiKeyInfo, ApiKeySecret, Auth, MAX_ID_BYTES, MAX_LABEL_BYTES, MAX_PASSWORD_BYTES,
     MAX_PHC_BYTES, PhcString, Session, SessionOpts, SessionToken,

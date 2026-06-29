@@ -1,8 +1,3 @@
-//! Test harness: create a uniquely-named Postgres database, boot the real
-//! `chatapp-rust-be` binary against it on an ephemeral port, and drop the database on
-//! teardown. Tests drive the live process over HTTP/WS, so this exercises the full
-//! stack (axum + async-graphql + Forge + workers), not an in-process schema.
-
 use std::process::Stdio;
 use std::time::Duration;
 

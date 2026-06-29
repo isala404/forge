@@ -1,11 +1,3 @@
-//! The public error type: [`ForgeError`] and [`Result`].
-//!
-//! The taxonomy is small and every variant says what the caller should do (retry, fix
-//! config, treat as a caller bug); retryability is part of the contract. `Display` never
-//! renders secrets, payloads, keys, or raw backend text. The underlying cause (which may
-//! name constraints or schemas) stays reachable via [`std::error::Error::source`] for
-//! logging but is never shown.
-
 use thiserror::Error;
 
 /// Forge's public error type. See `docs/contracts/*` for the per-primitive

@@ -1,11 +1,3 @@
-"""In-process background workers, run as asyncio tasks alongside the API.
-
-- fanout: marks receipts delivered, idempotent on message id.
-- reap: deletes a disappearing message's blob + row when its scheduled job fires.
-- fail: always nacks to drive the DLQ demo.
-- scheduler: fires due `at` jobs into their queues, then runs a reconciliation sweep
-  that heals fanout/reap work whose post-commit enqueue was dropped."""
-
 from __future__ import annotations
 
 import asyncio
@@ -131,7 +123,7 @@ async def scheduler_loop(forge, pool, stop: asyncio.Event, interval: float) -> N
         except Exception:
             pass
         try:
-            # Sweep expired kv/queue/ratelimit/auth rows (forgelib now exposes maintain).
+            # Sweep expired Forge storage rows.
             await forge.maintain()
         except forgelib.ForgeError:
             pass

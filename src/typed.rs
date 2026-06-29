@@ -1,11 +1,3 @@
-//! A thin, strongly-typed surface over the stringly-typed primitive traits, so generated
-//! app code binds a *name + codec + defaults* to a Rust type instead of inventing key strings
-//! and JSON conventions per app. The low-level traits stay the contract; prefer this surface.
-//!
-//! The same definitions are the source of truth the Node and Python typed handles mirror, so
-//! a `SendEmail` job is expressed once per language from one shape rather than redeclared
-//! three times.
-
 use crate::blob::{Blob, BlobInfo, PutOpts};
 use crate::config_store::ConfigStore;
 use crate::error::{ForgeError, Result};

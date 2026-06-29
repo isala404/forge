@@ -193,7 +193,6 @@ api.post("/api/links", async (c) => {
   const ownerList: OwnedLink[] = rawOwner ? (JSON.parse(rawOwner) as OwnedLink[]) : [];
   if (ownerList.length >= maxLinks) throw new HttpError(409, "link limit reached");
 
-  // Resolve the slug and reserve it atomically with SET NX.
   const customSlugsEnabled = await forge.flag("custom_slugs", false, userId);
 
   const now = new Date();
@@ -209,13 +208,11 @@ api.post("/api/links", async (c) => {
     input.slug.trim() !== "" &&
     customSlugsEnabled
   ) {
-    // Custom slug path: validate once, attempt SET NX once
     resolvedSlug = validateSlug(input.slug.trim());
     const linkRec: LinkRecord = { slug: resolvedSlug, url, ownerId: userId, createdAt, expiresAt };
     const ok = await forge.kvSet(slugKey(resolvedSlug), JSON.stringify(linkRec), null, true);
     if (!ok) throw new HttpError(409, "slug already taken");
   } else {
-    // Random slug path: retry up to 5 times
     let reserved = false;
     for (let attempt = 0; attempt < 5; attempt++) {
       resolvedSlug = randomSlug();
@@ -228,7 +225,7 @@ api.post("/api/links", async (c) => {
     if (!reserved) throw new HttpError(409, "slug already taken");
   }
 
-  // Prepend to keep the list newest-first.
+  // Owner lists are stored newest-first for the dashboard.
   const ownedLink: OwnedLink = { slug: resolvedSlug, url, createdAt, expiresAt };
   ownerList.unshift(ownedLink);
   await forge.kvSet(ownerKey(userId), JSON.stringify(ownerList));

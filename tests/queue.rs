@@ -1,4 +1,3 @@
-//! queue contract tests. Run with: `cargo test --features pg-tests` (needs TEST_DATABASE_URL).
 #![cfg(feature = "pg-tests")]
 #![allow(clippy::unwrap_used, clippy::panic)]
 

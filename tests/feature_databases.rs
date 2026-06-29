@@ -1,7 +1,3 @@
-//! Per-feature database isolation. Each feature can hold its own connection pool and
-//! point at its own Postgres server; an override gives that feature a dedicated, isolated
-//! backend while everything else shares the default pool. Run with:
-//! `cargo test --features pg-tests` (needs TEST_DATABASE_URL).
 #![cfg(feature = "pg-tests")]
 // Dynamic table-name counts run against throwaway DBs, so the compile-time query macros
 // don't apply; same exception the test harness takes.

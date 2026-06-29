@@ -1,6 +1,3 @@
-//! In-process queue workers. All run on Forge's at-least-once queue, so every handler
-//! is idempotent on the message id. Safe to run on every replica.
-
 use std::future::Future;
 use std::time::Duration;
 

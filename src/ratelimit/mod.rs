@@ -1,12 +1,3 @@
-//! `ratelimit`. Lineage: token bucket / GCRA + IETF RateLimit fields. See
-//! `docs/contracts/ratelimit.md`.
-//!
-//! One op, [`RateLimit::check`], an atomic check-and-consume. There is deliberately
-//! no peek (that is the classic TOCTOU race).
-//!
-//! The contract (the [`RateLimit`] trait, [`Limit`], [`Decision`], [`Algo`],
-//! [`FailMode`]) lives in this module, which also wires the Postgres backend.
-
 use crate::error::Result;
 use async_trait::async_trait;
 use std::time::Duration;

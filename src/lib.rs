@@ -1,24 +1,3 @@
-//! Forge: the standard library for agent-built SaaS. One crate, every backend primitive an
-//! app needs, on interfaces the industry already trusts. Per-primitive contracts live in
-//! `docs/contracts/`.
-//!
-//! Forge owns a system database: a Postgres database kept separate from your application's.
-//! [`Forge::init`] reads a `forge.toml` from the current directory, then connects and
-//! migrates its `forge_*` tables at startup. Every customizable point (the system
-//! database, namespace, backends, per-feature databases) lives in that `forge.toml`.
-//! Primitives can point at their own database via a `[databases.<feature>]` table, but the
-//! system database is always required.
-//!
-//! ```no_run
-//! # async fn demo() -> forgelib::Result<()> {
-//! use forgelib::Forge;
-//! // Reads ./forge.toml and instantiates the runtime from it.
-//! let forge = Forge::init().await?;
-//! forge.kv().set("greeting", "hi".into(), Default::default()).await?;
-//! let id = forge.queue().enqueue("emails", b"payload".to_vec().into(), Default::default()).await?;
-//! # let _ = id; Ok(())
-//! # }
-//! ```
 #![forbid(unsafe_code)]
 
 pub mod auth;

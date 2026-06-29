@@ -1,9 +1,3 @@
-"""Queries against the unprefixed chat tables over an asyncpg pool. Forge owns the
-forge_* tables; this module owns users/chats/chat_members/messages/receipts.
-
-Read paths used behind DataLoaders take id lists and return batched rows, so a query
-selecting N messages issues one query per relational field, not N."""
-
 from __future__ import annotations
 
 import uuid

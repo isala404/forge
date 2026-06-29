@@ -1,18 +1,3 @@
-//! Filesystem `blob` backend. Contract: docs/contracts/blob.md.
-//!
-//! Metadata lives in Postgres (`forge_fs_blobs`); the bytes live in a configured local
-//! directory. This keeps large objects out of the WAL (smaller backups, less
-//! replication/vacuum pressure) at two costs: `put` is no longer atomic with surrounding
-//! app SQL (the file is written outside the DB transaction), and a multi-replica
-//! deployment needs a shared mount (or sticky routing) since each replica resolves bytes
-//! from its own filesystem.
-//!
-//! Crash windows are bounded: the file is written before the metadata row commits, so a
-//! crash in between leaves an orphan file (reclaimed by the maintenance sweep), never a
-//! row pointing at a missing file. A row that does point at a missing file is treated as
-//! not-found. Presign/verify and key checks are shared with the Postgres backend via
-//! [`super::common`], so signing is identical.
-
 use super::common;
 use super::{Blob, BlobInfo, DEFAULT_CONTENT_TYPE, ListPage, PutOpts};
 use crate::error::{ForgeError, Result};

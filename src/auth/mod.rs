@@ -1,10 +1,3 @@
-//! `auth`. Lineage: OWASP + PHC + PHP `password_*` + Stripe/GitHub keys. See
-//! `docs/contracts/auth.md`. Primitives, not a product: passwords (argon2id PHC),
-//! opaque hashed sessions (idle + absolute timeouts), and `fk_`-prefixed API keys.
-//!
-//! Only hashes are ever stored or logged. The secret newtypes ([`PhcString`],
-//! [`SessionToken`], [`ApiKeySecret`]) have redacted `Debug`.
-
 use crate::error::Result;
 use async_trait::async_trait;
 use std::fmt;

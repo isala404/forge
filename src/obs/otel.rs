@@ -1,9 +1,3 @@
-//! `feature = "otel"`: one-call OTLP trace export.
-//!
-//! Without this feature, Forge's spans still flow to whatever `tracing`
-//! subscriber the application installs; [`install_otlp`] adds an OTLP HTTP
-//! exporter plus a fmt+env-filter console layer in one call.
-
 use crate::error::{ForgeError, Result};
 
 /// Install a global tracing subscriber that exports spans to the OTLP endpoint

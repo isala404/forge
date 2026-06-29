@@ -191,7 +191,6 @@ async def create_link(
 
     url = validate_url(body.url)
 
-    # Enforce per-user link cap.
     max_links_raw = await forge.config_get("max_links_per_user")
     max_links = int(max_links_raw) if max_links_raw is not None else DEFAULT_MAX_LINKS
     raw_owner = await forge.kv_get(owner_key(user_id))
@@ -199,7 +198,6 @@ async def create_link(
     if len(owned_raw) >= max_links:
         raise HTTPException(status_code=409, detail="link limit reached")
 
-    # Resolve slug.
     custom_slugs_on = await forge.flag("custom_slugs", False, user_id)
     if body.slug and custom_slugs_on:
         slug = validate_slug(body.slug)
@@ -235,7 +233,7 @@ async def create_link(
         else:
             raise HTTPException(status_code=409, detail="slug already taken")
 
-    # Prepend to owner list (newest-first).
+    # Owner lists are stored newest-first for the dashboard.
     owned_raw.insert(0, {"slug": slug, "url": url, "createdAt": now, "expiresAt": expires_at})
     await forge.kv_set(
         owner_key(user_id),
@@ -247,7 +245,6 @@ async def create_link(
     segno.make(f"/{slug}", error="m").save(buf, kind="svg", scale=4, border=1)
     await forge.blob_put(qr_key(slug), buf.getvalue(), "image/svg+xml")
 
-    # Schedule expiry if TTL is set.
     if expires_at is not None:
         exp_epoch_ms = (
             datetime.fromisoformat(expires_at.replace("Z", "+00:00")).timestamp() * 1000

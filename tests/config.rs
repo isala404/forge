@@ -1,9 +1,3 @@
-//! config contract tests. Run with: `cargo test --features pg-tests` (needs TEST_DATABASE_URL).
-//!
-//! Env-precedence (`FORGE_CFG_<KEY>` over the store) is not exercised here: setting a
-//! process-global env var needs `unsafe` under edition 2024, which the package's
-//! `unsafe_code = "forbid"` lint disallows. The resolution is a single env read ahead of
-//! the store lookup in `get_raw`.
 #![cfg(feature = "pg-tests")]
 #![allow(clippy::unwrap_used, clippy::panic)]
 

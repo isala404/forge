@@ -1,10 +1,3 @@
-//! In-process `blob` backend. Contract: docs/contracts/blob.md.
-//!
-//! Bytes and metadata live in a `Mutex<HashMap>` keyed by the same `<namespace>:<key>`
-//! physical key the Postgres backend uses, so namespacing and the HMAC presign/verify
-//! scheme (shared via [`super::common`]) stay identical. Observable behavior matches
-//! [`super::PgBlob`]; only storage differs, and nothing survives a restart.
-
 use super::common;
 use super::{Blob, BlobInfo, DEFAULT_CONTENT_TYPE, ListPage, PutOpts};
 use crate::backend::{BackendLifecycle, Primitive};

@@ -1,14 +1,3 @@
-"""Bearer-auth GraphQL context for both transports.
-
-HTTP carries the token in `Authorization: Bearer <token>`; the graphql-transport-ws
-socket carries it in the `connection_init` payload as `{"authorization": "Bearer <token>"}`.
-A token authenticates if it validates as a Forge session (sliding the idle deadline) or
-verifies as a Forge API key (which maps to the owning user id).
-
-The principal is resolved lazily: on a WS connection Strawberry only populates
-`connection_params` after the context getter returns, so the user is loaded on first
-`auth()` call and cached for the request/socket lifetime."""
-
 from __future__ import annotations
 
 import uuid

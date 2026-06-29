@@ -1,9 +1,34 @@
-# Forge instantiates its runtime from this file. String values may reference the
-# environment as ${VAR} / ${VAR:-default}, so secrets and per-deploy connection
-# strings stay out of the committed file.
 [postgres]
-url = "${FORGE_POSTGRES_URL:-postgres://postgres:forge@127.0.0.1:5432/chatapp_rust}"
+url = "${FORGE_POSTGRES_URL:-postgres://postgres:forge@localhost:5432/chatapp_rust}"
+max_connections = 10
+acquire_timeout_secs = 30
+statement_timeout_ms = 15000
+lock_timeout_ms = 5000
+idle_in_transaction_timeout_ms = 15000
+
+[forge]
+namespace = ""
+
+[queue]
+dedup_window_secs = 300
+retention_secs = 604800
+
+[ratelimit]
+fail_open = true
 
 [blob]
-signing_secret = "${FORGE_BLOB_SIGNING_SECRET:-dev-secret-change-me}"
+backend = "postgres"
+fs_root = "./.forge/blobs"
+signing_secret = "${FORGE_BLOB_SIGNING_SECRET:-chatapp-rust-local-signing-secret}"
 base_url = "/api/files"
+
+[backends]
+default = "postgres"
+kv = "postgres"
+queue = "postgres"
+blob = "postgres"
+auth = "postgres"
+config = "postgres"
+ratelimit = "postgres"
+schedule = "postgres"
+pubsub = "postgres"

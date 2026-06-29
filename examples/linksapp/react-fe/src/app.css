@@ -167,7 +167,6 @@ button:disabled {
   cursor: pointer;
 }
 
-/* Links layout */
 .links-layout {
   width: min(920px, 100%);
   justify-self: center;
@@ -242,7 +241,6 @@ button:disabled {
   padding: 0 16px;
 }
 
-/* Links list */
 .links-list {
   display: grid;
   gap: 10px;

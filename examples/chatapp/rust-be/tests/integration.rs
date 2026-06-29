@@ -1,9 +1,3 @@
-//! End-to-end suite: boots the real backend (axum + async-graphql + Forge) against a
-//! freshly created Postgres database, drives the GraphQL API over HTTP and over the
-//! graphql-transport-ws socket, then drops the database. Covers every scenario in the
-//! SPEC "Per-backend test suite". No skips: a single ordered run shares one server so
-//! realtime fan-out between two principals is exercised against the live process.
-
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
