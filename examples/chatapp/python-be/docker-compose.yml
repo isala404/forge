@@ -25,7 +25,7 @@ services:
     networks: [pybe-net]
 
   pybe-backend:
-    # Build context is the repo root — the backend has path deps on bindings/forge-py.
+    # Build context is the repo root — the backend has path deps on bindings/python.
     build:
       context: ../../..
       dockerfile: examples/chatapp/python-be/Dockerfile

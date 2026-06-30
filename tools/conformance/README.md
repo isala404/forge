@@ -28,7 +28,7 @@ src/conformance/
 tools/conformance/
   README.md            # this file, schema + how to run
   run-all.sh           # builds both bindings and runs all three runners
-  node/                # Node runner (forge-node binding)
+  node/                # Node runner (forgelib binding)
   python/              # Python runner (forgelib binding)
 
 tests/conformance.rs   # the Rust runner: drives forgelib::conformance against throwaway DBs
@@ -120,13 +120,13 @@ Postgres, then:
 # Rust
 TEST_DATABASE_URL=postgres://… cargo test --features pg-tests,conformance --test conformance
 
-# Node   (after `cd bindings/forge-node && napi build --platform --release`
+# Node   (after `cd bindings/node && napi build --platform --release`
 #         and `cd tools/conformance/node && npm install`)
 TEST_DATABASE_URL=postgres://… node tools/conformance/node/run.js
 
-# Python (after `uvx maturin build -i python3 --out bindings/forge-py/dist`
+# Python (after `uvx maturin build -i python3 --out bindings/python/dist`
 #         and `uv venv tools/conformance/python/.venv && uv pip install --python
-#         tools/conformance/python/.venv bindings/forge-py/dist/*.whl 'psycopg[binary]'`)
+#         tools/conformance/python/.venv bindings/python/dist/*.whl 'psycopg[binary]'`)
 TEST_DATABASE_URL=postgres://… tools/conformance/python/.venv/bin/python tools/conformance/python/run.py
 ```
 

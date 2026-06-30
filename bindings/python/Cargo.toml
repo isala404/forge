@@ -1,9 +1,11 @@
 [package]
-name = "forge-py"
+name = "forgelib-python"
 version = "1.0.0"
 edition = "2021"
 publish = false
 description = "Python (pyo3) bindings for Forge — hardened infra primitives on Postgres"
+license = "MIT"
+repository = "https://github.com/isala404/forge"
 
 # Build with maturin: `maturin develop` (dev) or `maturin build --release`.
 [lib]

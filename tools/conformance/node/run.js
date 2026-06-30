@@ -1,7 +1,7 @@
 'use strict'
 // Cross-language conformance runner, Node side. Reads the shared scenario
 // matrix in src/conformance/scenarios/*.json and runs each scenario against the
-// forge-node binding on a throwaway database. Asserts the observed failure set
+// forgelib binding on a throwaway database. Asserts the observed failure set
 // equals exactly the `node` entries in src/conformance/known_gaps.json. See
 // ../README.md.
 //
@@ -12,7 +12,7 @@ const path = require('path')
 const crypto = require('crypto')
 const os = require('os')
 const { Client } = require('pg')
-const { ForgeClient } = require('../../../bindings/forge-node')
+const { ForgeClient } = require('../../../bindings/node')
 
 const SCENARIO_DIR = path.join(__dirname, '..', '..', '..', 'src', 'conformance', 'scenarios')
 const GAPS_FILE = path.join(__dirname, '..', '..', '..', 'src', 'conformance', 'known_gaps.json')
@@ -116,7 +116,7 @@ function restoreEnv(saved) {
 
 async function runBackendSelectionSmoke() {
   await withTestDb(async (url) => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-node-blob-'))
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forgelib-blob-'))
     const keys = [
       'FORGE_POSTGRES_URL',
       'FORGE_NAMESPACE',

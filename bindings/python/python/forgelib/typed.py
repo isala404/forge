@@ -21,7 +21,7 @@ def forge_error_code(exc: BaseException) -> str:
 
 
 def forge_error_retryable(exc: BaseException) -> bool:
-    """Whether a raised Forge error is retryable, per docs/contracts/errors.md. Only
+    """Whether a raised Forge error is retryable. Only
     ``Unavailable`` is retryable from the class; a retryable ``Backend`` error is not
     distinguishable here (the flag is not surfaced), so it reads False.
     """

@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-forgelib = { path = "../../../bindings/forge-py", editable = true }
+forgelib = { path = "../../../bindings/python", editable = true }
 
 [dependency-groups]
 dev = [

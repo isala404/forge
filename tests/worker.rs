@@ -53,7 +53,10 @@ async fn worker_processes_jobs_and_acks_them() {
     assert!(
         forge
             .queue()
-            .dequeue("jobs", forgelib::DequeueOpts::new().with_wait(Duration::ZERO))
+            .dequeue(
+                "jobs",
+                forgelib::DequeueOpts::new().with_wait(Duration::ZERO)
+            )
             .await
             .unwrap()
             .is_none()

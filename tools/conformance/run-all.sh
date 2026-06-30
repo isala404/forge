@@ -15,18 +15,18 @@ echo "== rust =="
 cargo test --features pg-tests,conformance --test conformance -- --nocapture
 
 echo "== node: build binding + run =="
-(cd bindings/forge-node && npm install --no-audit --no-fund --silent && ./node_modules/.bin/napi build --platform --release)
+(cd bindings/node && npm install --no-audit --no-fund --silent && ./node_modules/.bin/napi build --platform --release)
 (cd tools/conformance/node && npm install --no-audit --no-fund --silent)
 node tools/conformance/node/run.js
 
 echo "== python: build wheel + run =="
-rm -f bindings/forge-py/dist/*.whl
+rm -f bindings/python/dist/*.whl
 # maturin must run from the binding crate so it detects the pyo3 bindings (the repo
 # root Cargo.toml is the Rust lib, not a Python extension).
-(cd bindings/forge-py && uvx maturin build -i python3 --out dist --quiet)
+(cd bindings/python && uvx maturin build -i python3 --out dist --quiet)
 uv venv tools/conformance/python/.venv --clear --quiet
 uv pip install --python tools/conformance/python/.venv --quiet \
-  bindings/forge-py/dist/*.whl 'psycopg[binary]'
+  bindings/python/dist/*.whl 'psycopg[binary]'
 tools/conformance/python/.venv/bin/python tools/conformance/python/run.py
 
 echo "== conformance: all runners green =="

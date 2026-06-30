@@ -32,10 +32,10 @@ switch (platform) {
   case 'android':
     switch (arch) {
       case 'arm64':
-        localFileExisted = existsSync(join(__dirname, 'forge-node.android-arm64.node'))
+        localFileExisted = existsSync(join(__dirname, 'forgelib.android-arm64.node'))
         try {
           if (localFileExisted) {
-            nativeBinding = require('./forge-node.android-arm64.node')
+            nativeBinding = require('./forgelib.android-arm64.node')
           } else {
             nativeBinding = require('forgelib-android-arm64')
           }
@@ -44,10 +44,10 @@ switch (platform) {
         }
         break
       case 'arm':
-        localFileExisted = existsSync(join(__dirname, 'forge-node.android-arm-eabi.node'))
+        localFileExisted = existsSync(join(__dirname, 'forgelib.android-arm-eabi.node'))
         try {
           if (localFileExisted) {
-            nativeBinding = require('./forge-node.android-arm-eabi.node')
+            nativeBinding = require('./forgelib.android-arm-eabi.node')
           } else {
             nativeBinding = require('forgelib-android-arm-eabi')
           }
@@ -63,11 +63,11 @@ switch (platform) {
     switch (arch) {
       case 'x64':
         localFileExisted = existsSync(
-          join(__dirname, 'forge-node.win32-x64-msvc.node')
+          join(__dirname, 'forgelib.win32-x64-msvc.node')
         )
         try {
           if (localFileExisted) {
-            nativeBinding = require('./forge-node.win32-x64-msvc.node')
+            nativeBinding = require('./forgelib.win32-x64-msvc.node')
           } else {
             nativeBinding = require('forgelib-win32-x64-msvc')
           }
@@ -77,11 +77,11 @@ switch (platform) {
         break
       case 'ia32':
         localFileExisted = existsSync(
-          join(__dirname, 'forge-node.win32-ia32-msvc.node')
+          join(__dirname, 'forgelib.win32-ia32-msvc.node')
         )
         try {
           if (localFileExisted) {
-            nativeBinding = require('./forge-node.win32-ia32-msvc.node')
+            nativeBinding = require('./forgelib.win32-ia32-msvc.node')
           } else {
             nativeBinding = require('forgelib-win32-ia32-msvc')
           }
@@ -91,11 +91,11 @@ switch (platform) {
         break
       case 'arm64':
         localFileExisted = existsSync(
-          join(__dirname, 'forge-node.win32-arm64-msvc.node')
+          join(__dirname, 'forgelib.win32-arm64-msvc.node')
         )
         try {
           if (localFileExisted) {
-            nativeBinding = require('./forge-node.win32-arm64-msvc.node')
+            nativeBinding = require('./forgelib.win32-arm64-msvc.node')
           } else {
             nativeBinding = require('forgelib-win32-arm64-msvc')
           }
@@ -108,10 +108,10 @@ switch (platform) {
     }
     break
   case 'darwin':
-    localFileExisted = existsSync(join(__dirname, 'forge-node.darwin-universal.node'))
+    localFileExisted = existsSync(join(__dirname, 'forgelib.darwin-universal.node'))
     try {
       if (localFileExisted) {
-        nativeBinding = require('./forge-node.darwin-universal.node')
+        nativeBinding = require('./forgelib.darwin-universal.node')
       } else {
         nativeBinding = require('forgelib-darwin-universal')
       }
@@ -119,10 +119,10 @@ switch (platform) {
     } catch {}
     switch (arch) {
       case 'x64':
-        localFileExisted = existsSync(join(__dirname, 'forge-node.darwin-x64.node'))
+        localFileExisted = existsSync(join(__dirname, 'forgelib.darwin-x64.node'))
         try {
           if (localFileExisted) {
-            nativeBinding = require('./forge-node.darwin-x64.node')
+            nativeBinding = require('./forgelib.darwin-x64.node')
           } else {
             nativeBinding = require('forgelib-darwin-x64')
           }
@@ -132,11 +132,11 @@ switch (platform) {
         break
       case 'arm64':
         localFileExisted = existsSync(
-          join(__dirname, 'forge-node.darwin-arm64.node')
+          join(__dirname, 'forgelib.darwin-arm64.node')
         )
         try {
           if (localFileExisted) {
-            nativeBinding = require('./forge-node.darwin-arm64.node')
+            nativeBinding = require('./forgelib.darwin-arm64.node')
           } else {
             nativeBinding = require('forgelib-darwin-arm64')
           }
@@ -152,10 +152,10 @@ switch (platform) {
     if (arch !== 'x64') {
       throw new Error(`Unsupported architecture on FreeBSD: ${arch}`)
     }
-    localFileExisted = existsSync(join(__dirname, 'forge-node.freebsd-x64.node'))
+    localFileExisted = existsSync(join(__dirname, 'forgelib.freebsd-x64.node'))
     try {
       if (localFileExisted) {
-        nativeBinding = require('./forge-node.freebsd-x64.node')
+        nativeBinding = require('./forgelib.freebsd-x64.node')
       } else {
         nativeBinding = require('forgelib-freebsd-x64')
       }
@@ -168,11 +168,11 @@ switch (platform) {
       case 'x64':
         if (isMusl()) {
           localFileExisted = existsSync(
-            join(__dirname, 'forge-node.linux-x64-musl.node')
+            join(__dirname, 'forgelib.linux-x64-musl.node')
           )
           try {
             if (localFileExisted) {
-              nativeBinding = require('./forge-node.linux-x64-musl.node')
+              nativeBinding = require('./forgelib.linux-x64-musl.node')
             } else {
               nativeBinding = require('forgelib-linux-x64-musl')
             }
@@ -181,11 +181,11 @@ switch (platform) {
           }
         } else {
           localFileExisted = existsSync(
-            join(__dirname, 'forge-node.linux-x64-gnu.node')
+            join(__dirname, 'forgelib.linux-x64-gnu.node')
           )
           try {
             if (localFileExisted) {
-              nativeBinding = require('./forge-node.linux-x64-gnu.node')
+              nativeBinding = require('./forgelib.linux-x64-gnu.node')
             } else {
               nativeBinding = require('forgelib-linux-x64-gnu')
             }
@@ -197,11 +197,11 @@ switch (platform) {
       case 'arm64':
         if (isMusl()) {
           localFileExisted = existsSync(
-            join(__dirname, 'forge-node.linux-arm64-musl.node')
+            join(__dirname, 'forgelib.linux-arm64-musl.node')
           )
           try {
             if (localFileExisted) {
-              nativeBinding = require('./forge-node.linux-arm64-musl.node')
+              nativeBinding = require('./forgelib.linux-arm64-musl.node')
             } else {
               nativeBinding = require('forgelib-linux-arm64-musl')
             }
@@ -210,11 +210,11 @@ switch (platform) {
           }
         } else {
           localFileExisted = existsSync(
-            join(__dirname, 'forge-node.linux-arm64-gnu.node')
+            join(__dirname, 'forgelib.linux-arm64-gnu.node')
           )
           try {
             if (localFileExisted) {
-              nativeBinding = require('./forge-node.linux-arm64-gnu.node')
+              nativeBinding = require('./forgelib.linux-arm64-gnu.node')
             } else {
               nativeBinding = require('forgelib-linux-arm64-gnu')
             }
@@ -226,11 +226,11 @@ switch (platform) {
       case 'arm':
         if (isMusl()) {
           localFileExisted = existsSync(
-            join(__dirname, 'forge-node.linux-arm-musleabihf.node')
+            join(__dirname, 'forgelib.linux-arm-musleabihf.node')
           )
           try {
             if (localFileExisted) {
-              nativeBinding = require('./forge-node.linux-arm-musleabihf.node')
+              nativeBinding = require('./forgelib.linux-arm-musleabihf.node')
             } else {
               nativeBinding = require('forgelib-linux-arm-musleabihf')
             }
@@ -239,11 +239,11 @@ switch (platform) {
           }
         } else {
           localFileExisted = existsSync(
-            join(__dirname, 'forge-node.linux-arm-gnueabihf.node')
+            join(__dirname, 'forgelib.linux-arm-gnueabihf.node')
           )
           try {
             if (localFileExisted) {
-              nativeBinding = require('./forge-node.linux-arm-gnueabihf.node')
+              nativeBinding = require('./forgelib.linux-arm-gnueabihf.node')
             } else {
               nativeBinding = require('forgelib-linux-arm-gnueabihf')
             }
@@ -255,11 +255,11 @@ switch (platform) {
       case 'riscv64':
         if (isMusl()) {
           localFileExisted = existsSync(
-            join(__dirname, 'forge-node.linux-riscv64-musl.node')
+            join(__dirname, 'forgelib.linux-riscv64-musl.node')
           )
           try {
             if (localFileExisted) {
-              nativeBinding = require('./forge-node.linux-riscv64-musl.node')
+              nativeBinding = require('./forgelib.linux-riscv64-musl.node')
             } else {
               nativeBinding = require('forgelib-linux-riscv64-musl')
             }
@@ -268,11 +268,11 @@ switch (platform) {
           }
         } else {
           localFileExisted = existsSync(
-            join(__dirname, 'forge-node.linux-riscv64-gnu.node')
+            join(__dirname, 'forgelib.linux-riscv64-gnu.node')
           )
           try {
             if (localFileExisted) {
-              nativeBinding = require('./forge-node.linux-riscv64-gnu.node')
+              nativeBinding = require('./forgelib.linux-riscv64-gnu.node')
             } else {
               nativeBinding = require('forgelib-linux-riscv64-gnu')
             }
@@ -283,11 +283,11 @@ switch (platform) {
         break
       case 's390x':
         localFileExisted = existsSync(
-          join(__dirname, 'forge-node.linux-s390x-gnu.node')
+          join(__dirname, 'forgelib.linux-s390x-gnu.node')
         )
         try {
           if (localFileExisted) {
-            nativeBinding = require('./forge-node.linux-s390x-gnu.node')
+            nativeBinding = require('./forgelib.linux-s390x-gnu.node')
           } else {
             nativeBinding = require('forgelib-linux-s390x-gnu')
           }

@@ -1,6 +1,6 @@
 # todoapp Node backend
 
-A Hono REST API using `forge-node`.
+A Hono REST API using `forgelib`.
 
 ```sh
 bun install

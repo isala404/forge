@@ -3,7 +3,7 @@
 The Node/TypeScript GraphQL backend for the chatapp example. It serves exactly the
 canonical `../schema.graphql` over GraphQL Yoga (HTTP) and graphql-ws (subscriptions),
 builds the executable schema with `@graphql-tools/schema`, and uses
-[`forge-node`](../../../bindings/forge-node) for all infrastructure: auth, blob,
+[`forgelib`](../../../bindings/node) for all infrastructure: auth, blob,
 pubsub, queue, kv, schedule, ratelimit, config. Domain data lives in the unprefixed
 `users`/`chats`/`chat_members`/`messages`/`receipts` tables (see `../migrations.sql`),
 which the server applies on startup.
@@ -34,7 +34,7 @@ which the server applies on startup.
   `fail` (always nacks → exercises `fail.dlq`), and a scheduler tick that fires due
   `schedule().at` jobs.
 - **Errors** map Forge variants to `extensions.code` in the contract's taxonomy. The
-  forge-node binding prefixes every error with `<CODE>: message`; `src/errors.ts` recovers
+  forgelib binding prefixes every error with `<CODE>: message`; `src/errors.ts` recovers
   the code from that prefix.
 
 ## Layout
@@ -90,14 +90,14 @@ disappearing-message expiry, the reactions feature flag, API-key auth, and `opsS
 docker compose -f docker-compose.yml up --build
 ```
 
-Brings up Postgres 18, the backend (which compiles the `forge-node` native addon from
+Brings up Postgres 18, the backend (which compiles the `forgelib` native addon from
 source; the repo-root `.dockerignore` strips committed `*.node` binaries), and the shared
 React SPA pointed at the backend. SPA at http://127.0.0.1:5173, backend at
 http://127.0.0.1:8082/graphql.
 
 ## Known gap
 
-The `forge-node` binding does not expose Forge's `maintain()` sweep, so the maintenance
+The `forgelib` binding does not expose Forge's `maintain()` sweep, so the maintenance
 tick runs only `runSchedulerOnce()`. KV TTLs and queue leases still expire lazily at read
 time in the Postgres backend, so behaviour is unaffected; only the proactive background
 purge is unavailable from Node.

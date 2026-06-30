@@ -16,7 +16,7 @@ chatapp/
   schema.graphql     canonical GraphQL contract (source of truth)
   migrations.sql     domain tables (users, chats, chat_members, messages, receipts)
   rust-be/           axum + async-graphql + forge crate              :8081
-  node-be/           GraphQL Yoga + graphql-ws + forge-node          :8082
+  node-be/           GraphQL Yoga + graphql-ws + forgelib          :8082
   python-be/         FastAPI + Strawberry + forgelib                 :8083
   react-fe/          Vite + React + urql (shared across backends)    :5173 dev
 ```

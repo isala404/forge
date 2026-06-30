@@ -1,0 +1,330 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, without v prefix"
+        required: true
+        default: "1.0.0"
+      release_tag:
+        description: "Git tag to release from"
+        required: true
+        default: "v1.0.0"
+      dry_run:
+        description: "Build/package only; do not publish"
+        required: true
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+      publish_crates:
+        description: "Publish Rust crate to crates.io"
+        required: true
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+      publish_npm:
+        description: "Publish Node packages to npm"
+        required: true
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+      publish_pypi:
+        description: "Publish Python artifacts to PyPI"
+        required: true
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+      baseline_ref:
+        description: "Optional previous release ref for cargo-semver-checks"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  SQLX_OFFLINE: "true"
+
+jobs:
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.19.5,cargo-audit@0.22.1
+      - name: Confirm release ref and versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ inputs.version }}"
+          TAG="${{ inputs.release_tag }}"
+          test "$TAG" = "v$VERSION"
+          grep -q '^version = "'$VERSION'"$' Cargo.toml
+          grep -q '"version": "'$VERSION'"' bindings/node/package.json
+          grep -q '^version = "'$VERSION'"$' bindings/python/pyproject.toml
+          if [[ "${{ inputs.dry_run }}" != "true" && "$GITHUB_REF" != "refs/tags/$TAG" ]]; then
+            echo "Real releases must be dispatched from $TAG; current ref is $GITHUB_REF" >&2
+            exit 1
+          fi
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo build --all-features
+      - run: cargo test
+      - run: cargo run --manifest-path tools/codegen/Cargo.toml -- --check
+      - run: cargo deny check
+      - run: cargo audit --deny warnings
+      - run: cargo package --no-verify
+      - name: Optional Rust public API compatibility check
+        if: ${{ inputs.baseline_ref != '' }}
+        run: |
+          cargo install cargo-semver-checks --locked
+          cargo semver-checks check-release --baseline-rev "${{ inputs.baseline_ref }}"
+
+  postgres-tests:
+    name: Postgres Integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: preflight
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: forge
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/forge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: "false"
+      - run: cargo test --features pg-tests -- --test-threads=4
+
+  conformance:
+    name: Cross-Language Conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    needs: preflight
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: forge
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/forge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+      - run: bash tools/conformance/run-all.sh
+
+  crates:
+    name: crates.io
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [postgres-tests, conformance]
+    if: ${{ inputs.publish_crates == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo publish --dry-run
+      - name: Publish crate
+        if: ${{ inputs.dry_run == 'false' }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish
+
+  node-native:
+    name: Node Native (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    needs: preflight
+    if: ${{ inputs.publish_npm == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x64-gnu
+            zig: false
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            platform: linux-x64-musl
+            zig: true
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            platform: linux-arm64-gnu
+            zig: true
+          - os: macos-13
+            target: x86_64-apple-darwin
+            platform: darwin-x64
+            zig: false
+          - os: macos-14
+            target: aarch64-apple-darwin
+            platform: darwin-arm64
+            zig: false
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: win32-x64-msvc
+            zig: false
+    defaults:
+      run:
+        working-directory: bindings/node
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: goto-bus-stop/setup-zig@v2
+        if: ${{ matrix.zig }}
+      - run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Build native addon
+        shell: bash
+        run: |
+          if [[ "${{ matrix.zig }}" == "true" ]]; then
+            npm run build -- --target ${{ matrix.target }} --zig
+          else
+            npm run build -- --target ${{ matrix.target }}
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: forgelib-${{ matrix.platform }}
+          path: bindings/node/forgelib.${{ matrix.platform }}.node
+          if-no-files-found: error
+
+  npm:
+    name: npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [node-native, postgres-tests, conformance]
+    if: ${{ inputs.publish_npm == 'true' }}
+    defaults:
+      run:
+        working-directory: bindings/node
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - run: npm install --ignore-scripts --no-audit --no-fund
+      - run: npm run create-npm-dir
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: forgelib-*
+          path: bindings/node/artifacts
+          merge-multiple: true
+      - run: npm run artifacts
+      - name: Pack main package
+        run: npm pack --dry-run --ignore-scripts
+      - name: Publish native packages
+        if: ${{ inputs.dry_run == 'false' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm run prepublishOnly
+      - name: Publish main package
+        if: ${{ inputs.dry_run == 'false' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
+
+  pypi:
+    name: PyPI
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [postgres-tests, conformance]
+    if: ${{ inputs.publish_pypi == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip twine maturin
+      - run: maturin build --manifest-path bindings/python/Cargo.toml --release --sdist --out dist
+      - run: twine check dist/*
+      - name: Publish Python artifacts
+        if: ${{ inputs.dry_run == 'false' }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+
+  future-registries:
+    name: Future Registry (${{ matrix.registry }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - registry: pub.dev
+            marker: bindings/dart/pubspec.yaml
+          - registry: Maven Central
+            marker: bindings/jvm/build.gradle.kts
+          - registry: NuGet
+            marker: bindings/dotnet
+          - registry: RubyGems
+            marker: bindings/ruby
+          - registry: Go modules
+            marker: bindings/go/go.mod
+    steps:
+      - uses: actions/checkout@v4
+      - name: Confirm registry lane status
+        shell: bash
+        run: |
+          if [[ -e "${{ matrix.marker }}" ]]; then
+            echo "::warning title=${{ matrix.registry }} lane needs implementation::Found ${{ matrix.marker }}; replace this no-op with the real publish command before releasing that language package."
+          else
+            echo "${{ matrix.registry }} skipped: no language package marker at ${{ matrix.marker }}."
+          fi

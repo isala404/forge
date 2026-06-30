@@ -42,7 +42,8 @@ async fn main() -> Result<()> {
     // startup. The connection string and blob signing secret live in that file.
     let forge = Forge::init().await?;
 
-    // Reuse Forge's pool for the domain tables rather than opening a second one.
+    // Example shortcut: co-locate domain tables with Forge's system tables so the
+    // demo has one database. Production apps can keep their domain DB separate.
     let pool = forge.pool().clone();
     db::migrate(&pool).await?;
 

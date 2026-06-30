@@ -4,13 +4,15 @@ on:
   pull_request:
     paths:
       - "examples/chatapp/**"
-      - "bindings/**"
+      - "bindings/node/**"
+      - "bindings/python/**"
       - ".github/workflows/examples.yml"
   push:
     branches: [main, rewrite]
     paths:
       - "examples/chatapp/**"
-      - "bindings/**"
+      - "bindings/node/**"
+      - "bindings/python/**"
       - ".github/workflows/examples.yml"
 
 concurrency:
@@ -80,9 +82,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: bindings/forge-node
-      - name: Build forge-node binding
-        working-directory: bindings/forge-node
+          workspaces: bindings/node
+      - name: Build forgelib Node package
+        working-directory: bindings/node
         run: npm install && npm run build
       - name: Install
         working-directory: examples/chatapp/node-be
@@ -124,9 +126,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: bindings/forge-py
+          workspaces: bindings/python
       - uses: astral-sh/setup-uv@v6
-      - name: Sync (builds the forge-py wheel)
+      - name: Sync (builds the forgelib wheel)
         run: uv sync
       - run: uv run ruff check
       - run: uv run pytest -q

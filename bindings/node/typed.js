@@ -8,7 +8,7 @@ function forgeErrorCode(err) {
   return m ? m[1] : 'UNKNOWN'
 }
 
-/** Whether a thrown Forge error is retryable per docs/contracts/errors.md. Only
+/** Whether a thrown Forge error is retryable. Only
  *  UNAVAILABLE is retryable from the message surface; a retryable BACKEND error is
  *  indistinguishable here (the flag is not in the message), so it reads as false. */
 function forgeErrorRetryable(err) {

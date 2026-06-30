@@ -45,6 +45,7 @@ impl Kv for InjectedKv {
             SetMode::Always => true,
             SetMode::IfNotExists => !present,
             SetMode::IfExists => present,
+            _ => false,
         };
         if write {
             g.insert(key.to_string(), value);

@@ -109,7 +109,7 @@ async def run_backend_selection_smoke():
     name = "forge_conf_" + uuid.uuid4().hex[:12]
     admin_exec(f'CREATE DATABASE "{name}"')
     url = swap_db(ADMIN_URL, name)
-    root = tempfile.mkdtemp(prefix="forge-py-blob-")
+    root = tempfile.mkdtemp(prefix="forgelib-blob-")
     keys = [
         "FORGE_POSTGRES_URL",
         "FORGE_NAMESPACE",

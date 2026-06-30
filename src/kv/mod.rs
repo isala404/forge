@@ -11,6 +11,7 @@ pub const MAX_KEY_BYTES: usize = 512;
 pub const MAX_VALUE_BYTES: usize = 1024 * 1024;
 
 /// Condition under which a `set` writes. Mirrors Redis `SET` / `SET NX` / `SET XX`.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SetMode {
     /// Unconditional write (Redis `SET`).

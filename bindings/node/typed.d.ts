@@ -24,7 +24,10 @@ export interface DequeueOptions {
 }
 export interface TypedJob<T> {
   id: string
+  receipt: string
   attempt: number
+  maxAttempts: number
+  leasedUntilMs: number
   payload: T
 }
 
@@ -33,9 +36,9 @@ export class TypedQueue<T> {
   constructor(client: ForgeClient, name: string)
   enqueue(payload: T, opts?: EnqueueOptions): Promise<string>
   dequeue(opts?: DequeueOptions): Promise<TypedJob<T> | null>
-  ack(id: string): Promise<void>
-  nack(id: string, retrySeconds?: number): Promise<void>
-  heartbeat(id: string): Promise<void>
+  ack(receipt: string): Promise<void>
+  nack(receipt: string, retrySeconds?: number): Promise<void>
+  heartbeat(receipt: string): Promise<void>
   depth(): Promise<JsQueueDepth>
 }
 

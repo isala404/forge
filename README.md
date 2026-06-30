@@ -27,7 +27,7 @@ instantiates the runtime; string values may reference the environment as `${VAR}
 url = "${DATABASE_URL:-postgres://localhost/myapp}"
 ```
 
-[`forge.example.toml`](./forge.example.toml) documents every option with its default.
+Omit settings you do not need; Forge applies production-safe defaults for the rest.
 
 ```ts
 import { ForgeClient } from "forgelib";
@@ -158,8 +158,6 @@ new_ui = await forge.flag("new-ui", False, user_id)
 ```
 </details>
 
-More Coming Soon...
-
 ## What you get
 
 | Primitive | What it does |
@@ -217,7 +215,7 @@ MIT. Do whatever you want.
 
 <p align="center">
   <strong>Postgres is enough.</strong><br>
-  <a href="https://tryforge.dev/docs/quick-start">Get Started</a> ·
-  <a href="https://tryforge.dev/docs">Documentation</a> ·
+  <a href="#quick-start">Quick Start</a> ·
+  <a href="#examples">Examples</a> ·
   <a href="https://github.com/isala404/forge/discussions">Discussions</a>
 </p>

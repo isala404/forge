@@ -6,6 +6,7 @@ build-backend = "maturin"
 name = "forgelib"
 version = "1.0.0"
 description = "Python bindings for Forge — hardened infra primitives on Postgres"
+readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
 classifiers = [

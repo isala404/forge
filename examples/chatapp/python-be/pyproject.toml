@@ -24,7 +24,7 @@ dev = [
 ]
 
 [tool.uv.sources]
-forgelib = { path = "../../../bindings/forge-py", editable = true }
+forgelib = { path = "../../../bindings/python", editable = true }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

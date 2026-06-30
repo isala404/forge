@@ -170,8 +170,14 @@ async fn concurrent_ticks_fire_each_schedule_once() {
 #[tokio::test]
 async fn scheduler_ticks_are_scoped_to_namespace() {
     let db = TestDatabase::new().await.unwrap();
-    let app_a = db.forge_with("[forge]\nnamespace = \"app_a\"\n").await.unwrap();
-    let app_b = db.forge_with("[forge]\nnamespace = \"app_b\"\n").await.unwrap();
+    let app_a = db
+        .forge_with("[forge]\nnamespace = \"app_a\"\n")
+        .await
+        .unwrap();
+    let app_b = db
+        .forge_with("[forge]\nnamespace = \"app_b\"\n")
+        .await
+        .unwrap();
 
     let id = app_a
         .schedule()

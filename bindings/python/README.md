@@ -16,7 +16,7 @@ Built against the stable ABI (`abi3-py39`), so one wheel runs on CPython ≥ 3.9
 ```sh
 docker compose up -d db          # a Postgres for local use
 
-cd bindings/forge-py
+cd bindings/python
 python -m venv .venv && . .venv/bin/activate
 pip install maturin
 maturin develop                  # compiles + installs `forgelib` into the venv
@@ -63,11 +63,11 @@ await emails.enqueue({"to": "a@b.c", "template": "welcome"}, max_attempts=3)
 job = await emails.dequeue(wait_seconds=1.0)
 if job:
     handle(job.payload)            # already decoded
-    await emails.ack(job.id)
+    await emails.ack(job.receipt)
 
 profile = TypedKvKey(forge, "user:1:profile")
 await profile.set({"name": "Ada"})
 ```
 
-The full method surface is in [`src/lib.rs`](src/lib.rs); per-primitive semantics live in
-[`docs/contracts/`](../../docs/contracts/) and recipes in [`docs/cookbook/`](../../docs/cookbook/).
+The full method surface is in [`src/lib.rs`](src/lib.rs) and the packaged
+`forgelib/_generated.pyi` stubs.

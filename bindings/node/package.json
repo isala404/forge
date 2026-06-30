@@ -6,7 +6,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/isala404/forge.git",
-    "directory": "bindings/forge-node"
+    "directory": "bindings/node"
   },
   "main": "index.js",
   "types": "index.d.ts",
@@ -15,8 +15,7 @@
     "index.js",
     "index.d.ts",
     "typed.js",
-    "typed.d.ts",
-    "forge-node.*.node"
+    "typed.d.ts"
   ],
   "exports": {
     ".": {
@@ -29,12 +28,29 @@
     }
   },
   "napi": {
-    "name": "forge-node"
+    "name": "forgelib",
+    "triples": {
+      "additional": [
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl"
+      ]
+    }
   },
   "scripts": {
+    "artifacts": "napi artifacts",
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
-    "prepack": "npm run build"
+    "create-npm-dir": "napi create-npm-dir -t .",
+    "prepublishOnly": "napi prepublish -t npm --skip-gh-release"
+  },
+  "optionalDependencies": {
+    "forgelib-darwin-arm64": "1.0.0",
+    "forgelib-darwin-x64": "1.0.0",
+    "forgelib-linux-arm64-gnu": "1.0.0",
+    "forgelib-linux-x64-gnu": "1.0.0",
+    "forgelib-linux-x64-musl": "1.0.0",
+    "forgelib-win32-x64-msvc": "1.0.0"
   },
   "devDependencies": {
     "@napi-rs/cli": "^2.18.4"

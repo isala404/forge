@@ -26,7 +26,7 @@ function send(res: ServerResponse, status: number, body: string): void {
   res.end(body);
 }
 
-// The forge-node binding has no built-in HTTP router, so /api/files is served
+// The forgelib binding has no built-in HTTP router, so /api/files is served
 // here against the same presign contract. Binary goes through put/getBytes intact.
 const BLOB_BODY_LIMIT = 50 * 1024 * 1024;
 

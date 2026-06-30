@@ -25,7 +25,7 @@ services:
 
   node-app:
     build:
-      # Repo root: node-be has path deps on bindings/forge-node and forge.
+      # Repo root: node-be has path deps on bindings/node and forge.
       context: ../../..
       dockerfile: examples/chatapp/node-be/Dockerfile
     environment:

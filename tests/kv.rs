@@ -251,8 +251,14 @@ async fn colon_keys_are_allowed_redis_style() {
 #[tokio::test]
 async fn namespaces_isolate_keys() {
     let db = TestDatabase::new().await.unwrap();
-    let a = db.forge_with("[forge]\nnamespace = \"app_a\"\n").await.unwrap();
-    let bb = db.forge_with("[forge]\nnamespace = \"app_b\"\n").await.unwrap();
+    let a = db
+        .forge_with("[forge]\nnamespace = \"app_a\"\n")
+        .await
+        .unwrap();
+    let bb = db
+        .forge_with("[forge]\nnamespace = \"app_b\"\n")
+        .await
+        .unwrap();
 
     a.kv()
         .set("shared", b("from-a"), SetOpts::new())
@@ -296,8 +302,14 @@ async fn mget_returns_values_in_input_order_with_holes() {
 #[tokio::test]
 async fn mget_respects_namespaces() {
     let db = TestDatabase::new().await.unwrap();
-    let a = db.forge_with("[forge]\nnamespace = \"ns_a\"\n").await.unwrap();
-    let bb = db.forge_with("[forge]\nnamespace = \"ns_b\"\n").await.unwrap();
+    let a = db
+        .forge_with("[forge]\nnamespace = \"ns_a\"\n")
+        .await
+        .unwrap();
+    let bb = db
+        .forge_with("[forge]\nnamespace = \"ns_b\"\n")
+        .await
+        .unwrap();
     a.kv().set("k", b("from-a"), SetOpts::new()).await.unwrap();
     bb.kv().set("k", b("from-b"), SetOpts::new()).await.unwrap();
 

@@ -8,7 +8,7 @@ repository = "https://github.com/isala404/forge"
 description = "The standard library for agent-built SaaS: hardened infra primitives on Postgres"
 keywords = ["postgres", "queue", "kv", "primitives", "backend"]
 categories = ["database", "asynchronous"]
-# Ship only the crate itself; the bindings, examples, language runners, and CI
+# Ship only the crate itself; the language packages, examples, runners, and CI
 # config build under their own lockfiles and must not bloat the published package.
 exclude = ["/bindings", "/examples", "/tools", "/.github"]
 

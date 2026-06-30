@@ -8,7 +8,7 @@ features, is what pulls them in.
 ```
 linksapp/
   rust-be/           Rocket + forge crate                     :9091
-  node-be/           Hono + forge-node                         :9092
+  node-be/           Hono + forgelib                         :9092
   python-be/         FastAPI + forgelib                        :9093
   react-fe/          Vite + React shared across all backends   :5175
 ```

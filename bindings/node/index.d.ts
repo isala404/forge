@@ -161,7 +161,7 @@ export declare class ForgeClient {
   queueEnqueue(queue: string, payload: string, maxAttempts?: number | undefined | null, dedupId?: string | undefined | null, delaySeconds?: number | undefined | null): Promise<string>
   /**
    * Lease one job for `visibilitySeconds`, long-polling up to `waitSeconds`.
-   * `null` if none arrived. `ack`/`nack` it by the returned `id`.
+   * `null` if none arrived. `ack`/`nack`/`heartbeat` it by the returned `receipt`.
    */
   queueDequeue(queue: string, visibilitySeconds: number, waitSeconds: number): Promise<JsJob | null>
   /** Ack a leased job by its `receipt` (idempotent: a no-op if already settled). */
@@ -270,7 +270,7 @@ export declare class ForgeClient {
   pubsubPublish(topic: string, payload: string): Promise<void>
   /**
    * Subscribe to a realtime topic, returning a handle whose `next()` yields each
-   * payload published *after* this resolves (or `null` when the stream ends).
+   * payload published after this resolves (or `null` when the stream ends).
    * Subscriptions share one per-process listener connection; drop the handle to
    * unsubscribe (the channel is released once it has no remaining subscribers).
    */

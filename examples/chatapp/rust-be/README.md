@@ -25,6 +25,10 @@ owner). `me` returns null when unauthenticated; every other authed resolver rais
 
 ## Architecture
 
+This example intentionally co-locates its domain tables with Forge's system tables and
+reuses `forge.pool()` to keep the demo to one Postgres database. Production apps can keep
+their application database separate and use Forge only for its `forge_*` tables/primitives.
+
 | file | responsibility |
 | --- | --- |
 | `src/db.rs` | the domain tables (`users`/`chats`/`chat_members`/`messages`/`receipts`) over Forge's pool, including the batched reads that back the loaders |

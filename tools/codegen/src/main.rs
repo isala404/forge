@@ -10,15 +10,15 @@ fn main() {
 
     let outputs = [
         (
-            root.join("bindings/forge-node/src/types.generated.rs"),
+            root.join("bindings/node/src/types.generated.rs"),
             gen_node(),
         ),
         (
-            root.join("bindings/forge-py/src/types.generated.rs"),
+            root.join("bindings/python/src/types.generated.rs"),
             gen_py(),
         ),
         (
-            root.join("bindings/forge-py/python/forgelib/_generated.pyi"),
+            root.join("bindings/python/python/forgelib/_generated.pyi"),
             gen_pyi(),
         ),
     ];

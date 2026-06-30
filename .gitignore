@@ -9,4 +9,4 @@ node_modules
 # conformance runner artifacts
 tools/conformance/python/.venv/
 tools/conformance/python/__pycache__/
-bindings/forge-py/dist/
+bindings/python/dist/

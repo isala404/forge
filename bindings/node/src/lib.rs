@@ -291,7 +291,7 @@ impl ForgeClient {
     }
 
     /// Lease one job for `visibilitySeconds`, long-polling up to `waitSeconds`.
-    /// `null` if none arrived. `ack`/`nack` it by the returned `id`.
+    /// `null` if none arrived. `ack`/`nack`/`heartbeat` it by the returned `receipt`.
     #[napi]
     pub async fn queue_dequeue(
         &self,

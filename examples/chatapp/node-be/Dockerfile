@@ -1,7 +1,7 @@
-# Build context is the REPO ROOT — node-be has path deps on bindings/forge-node:
+# Build context is the REPO ROOT — node-be has path deps on bindings/node:
 #   docker build -f examples/chatapp/node-be/Dockerfile .
 #
-# The forge-node native addon is compiled here with napi-rs (needs Rust); the
+# The forgelib native addon is compiled here with napi-rs (needs Rust); the
 # repo-root .dockerignore strips committed *.node binaries, so we always rebuild it.
 FROM node:22-bookworm
 
@@ -12,7 +12,7 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 WORKDIR /src
 COPY . .
 
-WORKDIR /src/bindings/forge-node
+WORKDIR /src/bindings/node
 RUN npm install && npm run build
 
 WORKDIR /src/examples/chatapp/node-be

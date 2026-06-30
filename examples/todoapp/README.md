@@ -6,7 +6,7 @@ plus one shared React frontend.
 ```
 todoapp/
   rust-be/           Rocket + forge crate                     :9081
-  node-be/           Hono + forge-node                         :9082
+  node-be/           Hono + forgelib                         :9082
   python-be/         FastAPI + forgelib                        :9083
   react-fe/          Vite + React shared across all backends   :5174
 ```

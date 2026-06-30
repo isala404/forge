@@ -1,4 +1,4 @@
-# Build context is the REPO ROOT — this project has path deps on bindings/forge-py:
+# Build context is the REPO ROOT — this project has path deps on bindings/python:
 #   docker build -f examples/chatapp/python-be/Dockerfile .
 #
 # Single stage: uv builds the editable forgelib wheel with maturin, which needs the Rust

@@ -8,9 +8,9 @@
 )]
 
 use async_trait::async_trait;
+use forgelib::Forge;
 use forgelib::conformance::ForgeFactory;
 use forgelib::testing::TestDatabase;
-use forgelib::Forge;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Mutex as StdMutex;

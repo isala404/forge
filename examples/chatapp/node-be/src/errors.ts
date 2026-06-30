@@ -30,7 +30,7 @@ function errMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-// The forge-node binding prefixes every error with "<CODE>: message"; recover the
+// The forgelib binding prefixes every error with "<CODE>: message"; recover the
 // code from that prefix. An unrecognized prefix maps to BACKEND.
 export function forgeErrorCode(e: unknown): ForgeCode {
   const msg = errMessage(e);
