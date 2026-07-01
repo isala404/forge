@@ -1,0 +1,95 @@
+/* Forge theme: a warm amber accent matching the brand mark. */
+
+:root {
+	--sl-color-accent-low: #3d1a00;
+	--sl-color-accent: #ff7700;
+	--sl-color-accent-high: #ffd9b3;
+}
+
+:root[data-theme='light'] {
+	--sl-color-accent-low: #ffe8d1;
+	--sl-color-accent: #c2410c;
+	--sl-color-accent-high: #7c2d12;
+}
+
+/* A soft amber glow behind the splash hero. */
+.hero {
+	position: relative;
+}
+.hero::before {
+	content: '';
+	position: absolute;
+	inset: -10% -20% 30% -20%;
+	z-index: -1;
+	background: radial-gradient(60% 60% at 50% 30%, rgba(255, 119, 0, 0.16), transparent 70%);
+	pointer-events: none;
+}
+.hero h1 {
+	background: linear-gradient(180deg, var(--sl-color-white), color-mix(in srgb, var(--sl-color-white) 70%, var(--sl-color-accent)));
+	-webkit-background-clip: text;
+	background-clip: text;
+	color: transparent;
+	letter-spacing: -0.02em;
+}
+.hero .tagline {
+	max-width: 34ch;
+}
+
+/* Callouts: quiet annotations, not loud boxes. A thin leading rule, a small
+   colored label, and muted body text. */
+.starlight-aside {
+	background: transparent;
+	border: 0;
+	border-inline-start: 2px solid var(--sl-color-asides-border);
+	border-radius: 0;
+	padding: 0.1rem 0 0.1rem 1rem;
+	margin-block: 1.5rem;
+}
+.starlight-aside__title {
+	font-size: var(--sl-text-xs);
+	font-weight: 600;
+	letter-spacing: 0.01em;
+	color: var(--sl-color-asides-text-accent);
+	gap: 0.4rem;
+}
+.starlight-aside__content {
+	margin-top: 0.35rem;
+	font-size: var(--sl-text-sm);
+	color: var(--sl-color-gray-2);
+}
+.starlight-aside__content a {
+	color: var(--sl-color-white);
+}
+
+/* Cards and link cards: rounded, with a gentle lift and an accent edge on hover. */
+.card-grid {
+	gap: 1rem;
+}
+.card,
+.sl-link-card {
+	border-radius: 0.75rem;
+	border-color: var(--sl-color-gray-5);
+	transition: border-color 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+}
+.card:hover,
+.sl-link-card:hover {
+	border-color: var(--sl-color-accent);
+	transform: translateY(-2px);
+	box-shadow: 0 8px 24px -16px rgba(0, 0, 0, 0.6);
+}
+.card .icon {
+	color: var(--sl-color-accent);
+	background: color-mix(in srgb, var(--sl-color-accent) 14%, transparent);
+}
+.sl-link-card .icon {
+	color: var(--sl-color-accent);
+}
+
+/* The active sidebar item: a quiet tint with accent text, not a filled pill. */
+.sidebar-content a[aria-current='page'],
+.sidebar-content a[aria-current='page']:hover,
+.sidebar-content a[aria-current='page']:focus {
+	color: var(--sl-color-text-accent);
+	background-color: color-mix(in srgb, var(--sl-color-accent) 12%, transparent);
+	font-weight: 600;
+}

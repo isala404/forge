@@ -1,0 +1,173 @@
+---
+title: Quickstart
+description: Install Forge, point it at a Postgres database, and make your first calls in Rust, Node, or Python.
+---
+
+import { Tabs, TabItem, Aside, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Forge is one dependency. You point it at a Postgres database it can own, call
+`init()`, and you have all eight primitives on a single client. This page gets you
+from nothing to your first calls.
+
+## Install
+
+<Tabs syncKey="lang">
+	<TabItem label="Rust" icon="seti:rust">
+
+		```sh
+		cargo add forgelib
+		```
+
+	</TabItem>
+	<TabItem label="Node" icon="seti:javascript">
+
+		```sh
+		npm install forgelib
+		```
+
+	</TabItem>
+	<TabItem label="Python" icon="seti:python">
+
+		```sh
+		pip install forgelib
+		```
+
+	</TabItem>
+</Tabs>
+
+## Give Forge a database
+
+Forge keeps its own state in Postgres. It owns its `forge_*` tables and runs its
+migrations for you when the app starts, so give it a database (or its own schema)
+and keep your product tables separate.
+
+```sh
+# any Postgres works; create one for Forge to own
+createdb myapp
+```
+
+<Aside type="tip">
+	No Postgres handy? Set the backend to `memory` and Forge runs entirely
+	in-process, which is how the test suite runs. See [Configuration](/configuration/#backends).
+</Aside>
+
+## Write forge.toml
+
+Configuration lives in a `forge.toml` at your project root. It's the single source
+of config: `init()` reads it and builds the runtime. String values can read the
+environment with `${VAR}` or `${VAR:-default}`, so the same file works in tests and
+in production.
+
+```toml title="forge.toml"
+[postgres]
+url = "${DATABASE_URL:-postgres://localhost/myapp}"
+```
+
+Everything else has a production-safe default, so this is enough to start. The full
+list of settings is in [Configuration](/configuration/).
+
+## Make your first calls
+
+`init()` reads `forge.toml`, migrates the system database, and returns a client.
+The same calls look like this in each language. (Pick a language once and the tabs
+on this site follow your choice.)
+
+<Tabs syncKey="lang">
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		use std::time::Duration;
+		use forgelib::{Forge, SessionOpts, EnqueueOpts, Limit};
+
+		let forge = Forge::init().await?; // reads ./forge.toml, runs migrations
+
+		// auth: hash a password, open a session
+		let hash = forge.auth().hash_password(&password).await?;
+		let token = forge.auth().create_session(&user_id, SessionOpts::default()).await?;
+
+		// key/value: an atomic counter
+		let views = forge.kv().incr(&format!("views:{user_id}"), 1).await?;
+
+		// queue: hand work to the background
+		forge.queue().enqueue("emails", payload.into(), EnqueueOpts::new()).await?;
+
+		// rate limit: 20 attempts per minute, keyed by email
+		let limit = forge.ratelimit()
+		    .check("login", &email, Limit::per_duration(20, Duration::from_secs(60)))
+		    .await?;
+		if !limit.allowed { /* return 429 */ }
+		```
+
+	</TabItem>
+	<TabItem label="Node" icon="seti:javascript">
+
+		```ts
+		import { ForgeClient } from "forgelib";
+
+		const forge = await ForgeClient.init(); // reads ./forge.toml, runs migrations
+
+		// auth: hash a password, open a session
+		const hash = await forge.hashPassword(password);
+		const token = await forge.createSession(userId);
+
+		// key/value: an atomic counter
+		const views = await forge.kvIncr(`views:${userId}`, 1);
+
+		// queue: hand work to the background
+		await forge.queueEnqueue("emails", JSON.stringify({ to: email }));
+
+		// rate limit: 20 attempts per minute, keyed by email
+		const limit = await forge.rateLimitCheck("login", email, 20, 60);
+		if (!limit.allowed) throw new Error("slow down");
+		```
+
+	</TabItem>
+	<TabItem label="Python" icon="seti:python">
+
+		```python
+		import json
+		import forgelib
+
+		forge = await forgelib.ForgeClient.init()  # reads ./forge.toml, runs migrations
+
+		# auth: hash a password, open a session
+		hash = await forge.hash_password(password)
+		token = await forge.create_session(user_id)
+
+		# key/value: an atomic counter
+		views = await forge.kv_incr(f"views:{user_id}", 1)
+
+		# queue: hand work to the background
+		await forge.queue_enqueue("emails", json.dumps({"to": email}))
+
+		# rate limit: 20 attempts per minute, keyed by email
+		limit = await forge.rate_limit_check("login", email, 20, 60)
+		if not limit.allowed:
+		    raise RuntimeError("slow down")
+		```
+
+	</TabItem>
+</Tabs>
+
+One shape difference is worth noting. Rust reaches each primitive through an accessor
+and uses option structs, like `forge.kv().set(key, value, SetOpts::new())`. Node and
+Python put every method on the client with plain arguments, like `forge.kvSet(...)`
+and `forge.kv_set(...)`. Same primitives, same behavior, one less layer in the dynamic
+languages.
+
+## Run the background work
+
+Forge doesn't start any threads of its own. Enqueued jobs sit in the queue until a
+worker leases them, and schedules only fire when something ticks them. In a typical
+app you run a worker for each queue and one loop that ticks the scheduler and does
+housekeeping. [Operations](/operations/) covers both, and [Recipes](/recipes/) shows
+them inside real handlers.
+
+## Next steps
+
+<CardGrid>
+	<LinkCard title="Primitives" href="/primitives/" description="What each of the eight does, and the methods you'll actually call." />
+	<LinkCard title="Recipes" href="/recipes/" description="Sign-up and login, background jobs, presigned uploads, live updates." />
+	<LinkCard title="Configuration" href="/configuration/" description="Every forge.toml setting and its default." />
+	<LinkCard title="Operations" href="/operations/" description="Workers, the scheduler, health, and going to production." />
+</CardGrid>

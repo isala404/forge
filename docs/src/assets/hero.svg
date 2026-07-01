@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 440" role="img" aria-label="Eight primitives on one Postgres connection">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="42%" r="55%">
+      <stop offset="0%" stop-color="#ff7700" stop-opacity="0.45"/>
+      <stop offset="55%" stop-color="#ea580c" stop-opacity="0.10"/>
+      <stop offset="100%" stop-color="#ea580c" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="heat" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ff9a3c"/>
+      <stop offset="100%" stop-color="#ff7700"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="20" y="16" width="480" height="408" rx="28" fill="#0b1120"/>
+  <rect width="520" height="440" fill="url(#glow)"/>
+
+  <!-- eight primitives feeding in -->
+  <g fill="#1e293b" stroke="#334155" stroke-width="1.5">
+    <rect x="44"  y="58" width="86" height="34" rx="9"/>
+    <rect x="150" y="58" width="86" height="34" rx="9"/>
+    <rect x="256" y="58" width="86" height="34" rx="9"/>
+    <rect x="362" y="58" width="86" height="34" rx="9"/>
+    <rect x="97"  y="108" width="86" height="34" rx="9"/>
+    <rect x="203" y="108" width="86" height="34" rx="9"/>
+    <rect x="309" y="108" width="86" height="34" rx="9"/>
+    <rect x="415" y="108" width="71" height="34" rx="9"/>
+  </g>
+  <g fill="#cbd5e1" font-family="ui-monospace, monospace" font-size="14" text-anchor="middle">
+    <text x="87"  y="80">kv</text>
+    <text x="193" y="80">queue</text>
+    <text x="299" y="80">pubsub</text>
+    <text x="405" y="80">blob</text>
+    <text x="140" y="130">auth</text>
+    <text x="246" y="130">ratelimit</text>
+    <text x="352" y="130">schedule</text>
+    <text x="450" y="130">config</text>
+  </g>
+
+  <!-- converge into the mark -->
+  <g stroke="#ff7700" stroke-width="1.5" opacity="0.5" fill="none">
+    <path d="M87 142 C 150 215, 215 225, 250 250"/>
+    <path d="M246 142 C 252 200, 256 225, 260 250"/>
+    <path d="M352 142 C 320 215, 290 225, 272 250"/>
+    <path d="M140 142 C 195 218, 228 228, 252 252"/>
+  </g>
+
+  <!-- the Forge mark -->
+  <g transform="translate(176 250)">
+    <rect width="168" height="120" rx="22" fill="#111827" stroke="#334155" stroke-width="1.5"/>
+    <g transform="translate(21 23) scale(0.44)">
+      <path d="M111 88.5L76 91L100.5 0H288L257.5 31.5H146L133 58H183L91 148L111 88.5Z" fill="url(#heat)"/>
+      <path d="M186 58L108.5 134L114.88 134.242C135.693 135.033 154.875 145.719 166.5 163H214V142L201.748 136.478C187.598 130.1 178.5 116.021 178.5 100.5L143 105L168.735 96.5657C190.784 89.3395 210.307 75.9581 225 58H186Z" fill="#e2e8f0"/>
+      <path d="M108 90.5L87.5 92L76 114.5L73.6623 118.483C66.3221 130.988 56.1654 141.609 44 149.5V169.5H81.5L108 90.5Z" fill="#e2e8f0"/>
+      <path d="M93.719 18H0C5.6625 55.2533 34.7049 84.6031 71.8965 90.6576L74 91L93.719 18Z" fill="#e2e8f0"/>
+    </g>
+  </g>
+
+  <!-- one Postgres connection -->
+  <g stroke="#334155" stroke-width="1.5"><path d="M260 372 V 386"/></g>
+  <rect x="120" y="386" width="280" height="30" rx="9" fill="#0f172a" stroke="#334155" stroke-width="1.5"/>
+  <text x="260" y="406" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="14" text-anchor="middle">one Postgres connection</text>
+</svg>

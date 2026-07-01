@@ -1,0 +1,224 @@
+---
+title: Reference
+description: Cross-language method index, return types, the error taxonomy, and limits.
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+A compact map of the surface. The method names line up across languages: Rust groups
+them under an accessor and takes option structs, while Node and Python put each one
+on the client with plain arguments. Where a binary-safe variant exists (for example
+`kvGetBytes`), it's noted but not given its own row.
+
+## Creating a client
+
+<Tabs syncKey="lang">
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		let forge = forgelib::Forge::init().await?;          // reads ./forge.toml
+		let forge = forgelib::Forge::init_from("path/forge.toml").await?;
+		let forge = forgelib::Forge::init_from_str(toml).await?;
+
+		// inject your own backend for one primitive, leave the rest on Postgres
+		let forge = forgelib::Forge::builder().kv(custom_kv).build().await?;
+		```
+
+	</TabItem>
+	<TabItem label="Node" icon="seti:javascript">
+
+		```ts
+		import { ForgeClient } from "forgelib";
+
+		const forge = await ForgeClient.init();              // reads ./forge.toml
+		const forge2 = await ForgeClient.initFrom("path/forge.toml");
+		```
+
+	</TabItem>
+	<TabItem label="Python" icon="seti:python">
+
+		```python
+		import forgelib
+
+		forge = await forgelib.ForgeClient.init()            # reads ./forge.toml
+		forge = await forgelib.ForgeClient.init_from("path/forge.toml")
+		```
+
+	</TabItem>
+</Tabs>
+
+## Methods by primitive
+
+### Key/value
+
+| Operation | Rust | Node | Python |
+| --- | --- | --- | --- |
+| Get | `kv().get` | `kvGet` | `kv_get` |
+| Set (TTL, NX, XX) | `kv().set` | `kvSet` | `kv_set` |
+| Get many | `kv().mget` | `kvMget` | `kv_mget` |
+| Increment | `kv().incr` | `kvIncr` | `kv_incr` |
+| Delete | `kv().delete` | `kvDelete` | `kv_delete` |
+| Exists | `kv().exists` | `kvExists` | `kv_exists` |
+| Set TTL | `kv().expire` | `kvExpire` | `kv_expire` |
+| Compare and swap | `kv().compare_and_swap` | `kvCompareAndSwap` | `kv_compare_and_swap` |
+| Prefix scan | `kv().scan` | `kvScan`, `kvScanPage` | `kv_scan`, `kv_scan_page` |
+
+### Queue
+
+| Operation | Rust | Node | Python |
+| --- | --- | --- | --- |
+| Enqueue | `queue().enqueue` | `queueEnqueue` | `queue_enqueue` |
+| Lease a job | `queue().dequeue` | `queueDequeue` | `queue_dequeue` |
+| Ack | `queue().ack` | `queueAck` | `queue_ack` |
+| Nack | `queue().nack` | `queueNack` | `queue_nack` |
+| Extend the lease | `queue().heartbeat` | `queueHeartbeat` | `queue_heartbeat` |
+| Depth | `queue().depth` | `queueDepth` | `queue_depth` |
+| Managed worker | `worker(name)` | (loop) | `typed.run_worker` |
+
+### Pub/sub
+
+| Operation | Rust | Node | Python |
+| --- | --- | --- | --- |
+| Publish | `pubsub().publish` | `pubsubPublish` | `pubsub_publish` |
+| Subscribe | `pubsub().subscribe` | `pubsubSubscribe` | `pubsub_subscribe` |
+| Channel name | `pubsub().channel_for` | `pubsubChannel` | `pubsub_channel` |
+
+### Blob
+
+| Operation | Rust | Node | Python |
+| --- | --- | --- | --- |
+| Put | `blob().put` | `blobPut`, `blobPutObject` | `blob_put`, `blob_put_object` |
+| Get | `blob().get` | `blobGet` | `blob_get` |
+| Head (metadata) | `blob().head` | `blobHead` | `blob_head` |
+| Delete | `blob().delete` | `blobDelete` | `blob_delete` |
+| List | `blob().list` | `blobList` | `blob_list` |
+| Presign download | `blob().presign_download` | `blobPresignDownload` | `blob_presign_download` |
+| Presign upload | `blob().presign_upload` | `blobPresignUpload` | `blob_presign_upload` |
+
+### Auth
+
+| Operation | Rust | Node | Python |
+| --- | --- | --- | --- |
+| Hash password | `auth().hash_password` | `hashPassword` | `hash_password` |
+| Verify password | `auth().verify_password` | `verifyPassword` | `verify_password` |
+| Needs rehash | `auth().needs_rehash` | `needsRehash` | `needs_rehash` |
+| Create session | `auth().create_session` | `createSession` | `create_session` |
+| Validate session | `auth().validate_session` | `validateSession` | `validate_session` |
+| Revoke session | `auth().revoke_session` | `revokeSession` | `revoke_session` |
+| Create API key | `auth().create_api_key` | `createApiKey` | `create_api_key` |
+| Verify API key | `auth().verify_api_key` | `verifyApiKey` | `verify_api_key` |
+
+### Rate limit
+
+| Operation | Rust | Node | Python |
+| --- | --- | --- | --- |
+| Check and consume | `ratelimit().check`, `check_with` | `rateLimitCheck` | `rate_limit_check` |
+
+### Schedule
+
+| Operation | Rust | Node | Python |
+| --- | --- | --- | --- |
+| Cron | `schedule().cron` | `scheduleCron` | `schedule_cron` |
+| One-off | `schedule().at` | `scheduleAt` | `schedule_at` |
+| Cancel | `schedule().cancel` | `scheduleCancel` | `schedule_cancel` |
+| List | `schedule().list` | `scheduleList` | `schedule_list` |
+| Tick once | `run_scheduler_once` | `runSchedulerOnce` | `run_scheduler_once` |
+
+### Config and flags
+
+| Operation | Rust | Node | Python |
+| --- | --- | --- | --- |
+| Get value | `config().get_raw` | `configGet` | `config_get` |
+| Set value | `config().set_raw` | `configSet` | `config_set` |
+| Evaluate a flag | `config().flag` | `flag` | `flag` |
+| Set a flag | `config().set_flag` | `setFlagPercent`, `setFlagOn`, `setFlagOff`, `setFlagAllowList` | `set_flag_percent`, `set_flag_on`, `set_flag_off`, `set_flag_allow_list` |
+
+### Client
+
+| Operation | Rust | Node | Python |
+| --- | --- | --- | --- |
+| Backend report | `backend_report` | `backendReport` | `backend_report` |
+| Scheduler loop | `run_scheduler` | (interval) | (interval) |
+| Maintenance sweep | `maintain` | `maintain` | `maintain` |
+
+## Return types
+
+A few methods return small records. The field names match the table; Node uses
+camelCase and times end in `Ms`.
+
+- **Decision** (rate limit): `allowed`, `limit`, `remaining`, `resetAfter`, `retryAfter`.
+- **Job** (queue): `id`, `receipt`, `payload`, `attempt`, `maxAttempts`, plus the queue and lease deadline.
+- **QueueDepth**: `visible`, `inFlight`, `delayed`.
+- **BlobInfo** (head): `key`, `size`, `contentType`, `etag`, `lastModified`, `metadata`.
+- **Session**: `userId`, `createdAt`, `expiresAt`.
+- **ApiKey** (on create): `id`, `secret` (shown once), `label`, `createdAt`.
+- **BackendInfo**: `primitive`, `provider`, `durable`, `caveats`.
+
+## Errors
+
+Every failure maps onto one of these. The retryable column says whether trying again
+might succeed.
+
+| Error | Retryable | Meaning |
+| --- | --- | --- |
+| `Config` | no | Bad configuration. Only happens during `init()`. |
+| `Unavailable` | yes | A transient backend outage (timeout, dropped connection). |
+| `NotFound` | no | The requested entity doesn't exist. |
+| `Precondition` | no | A condition failed: a CAS mismatch, a lost lease, a duplicate `dedup_id`. Re-read state and decide. |
+| `Limit` | no | A size or quota limit was exceeded. |
+| `Invalid` | no | A bad argument or malformed input. |
+| `Backend` | sometimes | Anything else, carrying its own retryable flag. |
+
+In Rust these are variants of `ForgeError` with an `is_retryable()` method. Node
+throws an `Error`. Python raises typed exceptions that subclass `forgelib.ForgeError`
+(`NotFound`, `Invalid`, `Limit`, `Precondition`, `Unavailable`, `Config`, `Backend`).
+
+<Aside>
+	Error messages are written so you can show or log them safely. The underlying
+	cause, which might name a constraint or table, is kept on the error's source and
+	never put in the displayed text.
+</Aside>
+
+## Limits
+
+Oversized input is rejected with a `Limit` error rather than truncated.
+
+| Thing | Limit |
+| --- | --- |
+| Key/value key | 512 bytes |
+| Key/value value | 1 MiB |
+| Queue payload | 256 KiB |
+| Blob object | 50 MiB |
+| Blob key | 1024 bytes |
+| Pub/sub payload | ~7 KB, UTF-8 |
+| Config value | 64 KiB |
+| Password input | 4096 bytes |
+
+## Custom backends
+
+Forge ships memory and Postgres for every primitive, plus filesystem for blob. If
+you need something else, like Redis or S3, implement that primitive's trait and
+inject it with the Rust builder. Every other primitive stays on its configured
+backend.
+
+```rust
+let forge = forgelib::Forge::builder()
+    .kv(my_redis_kv)   // kv runs on your backend; the rest stay on Postgres
+    .build()
+    .await?;
+```
+
+## Building with an agent
+
+Forge's API isn't in any model's training data, so a coding agent won't know it
+cold. Install the companion skill and the agent learns which primitive fits which
+task and the idioms for each language before it writes Forge code.
+
+```sh
+npx skills add isala404/forge
+```
+
+## More
+
+- [Example apps](https://github.com/isala404/forge/tree/main/examples): a todo app, a URL shortener, and a chat app, each on all three bindings.
+- [Source and issues](https://github.com/isala404/forge) on GitHub.

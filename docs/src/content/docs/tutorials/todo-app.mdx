@@ -1,0 +1,481 @@
+---
+title: Build a to-do app (Rust)
+description: A complete Rust and Rocket REST API for a multi-user to-do app, built end to end on Forge's auth, key/value, rate limit, and queue primitives.
+---
+
+import { FileTree, LinkCard } from '@astrojs/starlight/components';
+
+You'll build a working REST API in Rust with [Rocket](https://rocket.rs): people sign
+up, log in, and keep their own to-do list, and every change drops an event on a
+background audit queue that a worker drains. It's the smallest app that still uses
+four primitives, so it's a good first build.
+
+It uses **auth** for password hashing and sessions, **key/value** for user records
+and each person's list, **rate limit** to throttle sign-up and login, and **queue**
+for the audit trail.
+
+This is the Rust version. The same app exists in Node and Python in the
+[todoapp example](https://github.com/isala404/forge/tree/main/examples/todoapp), where
+every method has a `forge.kvSet(...)` or `forge.kv_set(...)` equivalent.
+
+## Start the project
+
+Create a binary crate and add the dependencies. Forge is `forgelib`; the rest is a
+normal Rocket setup.
+
+```toml title="Cargo.toml"
+[package]
+name = "todoapp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+forgelib = "1"
+rocket = { version = "0.5", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+```
+
+Forge reads its config from a `forge.toml` next to the crate. One connection string
+is enough; everything else takes a default.
+
+```toml title="forge.toml"
+[postgres]
+url = "${DATABASE_URL:-postgres://postgres:forge@localhost:5432/todoapp}"
+```
+
+The code lives in a few small modules:
+
+<FileTree>
+- src
+  - main.rs init Forge, mount routes, spawn the worker
+  - routes.rs the handlers
+  - types.rs request/response types and the error type
+  - util.rs validation and key helpers
+- Cargo.toml
+- forge.toml
+</FileTree>
+
+## The error type
+
+Handlers return `Result<T, ApiError>`. The trick that keeps them readable is teaching
+`ApiError` to convert from a `ForgeError`, so a failed Forge call propagates with `?`
+and turns into a 500 with a safe message. Validation paths build an `ApiError`
+directly with the right status.
+
+```rust title="src/types.rs"
+use rocket::http::Status;
+use rocket::response::{status, Responder};
+use rocket::serde::json::Json;
+use rocket::Request;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize)]
+pub struct ErrorBody { pub error: String }
+
+#[derive(Debug)]
+pub struct ApiError { pub status: Status, pub message: String }
+
+impl ApiError {
+    pub fn new(status: Status, msg: impl Into<String>) -> Self {
+        Self { status, message: msg.into() }
+    }
+    pub fn bad_request(m: impl Into<String>) -> Self { Self::new(Status::BadRequest, m) }
+    pub fn unauthorized() -> Self { Self::new(Status::Unauthorized, "authentication required") }
+    pub fn conflict(m: impl Into<String>) -> Self { Self::new(Status::Conflict, m) }
+    pub fn not_found(m: impl Into<String>) -> Self { Self::new(Status::NotFound, m) }
+}
+
+impl<'r> Responder<'r, 'static> for ApiError {
+    fn respond_to(self, req: &'r Request<'_>) -> rocket::response::Result<'static> {
+        status::Custom(self.status, Json(ErrorBody { error: self.message })).respond_to(req)
+    }
+}
+
+// `?` on a Forge call now yields a 500 without leaking the cause.
+impl From<forgelib::ForgeError> for ApiError {
+    fn from(err: forgelib::ForgeError) -> Self {
+        tracing::warn!(error = %err, "forge call failed");
+        Self::new(Status::InternalServerError, "internal error")
+    }
+}
+impl From<serde_json::Error> for ApiError {
+    fn from(_: serde_json::Error) -> Self {
+        Self::new(Status::InternalServerError, "internal error")
+    }
+}
+```
+
+The data types are plain structs. The list is stored as one JSON array per user.
+
+```rust title="src/types.rs (continued)"
+#[derive(Serialize, Deserialize, Clone)]
+pub struct UserRecord { pub id: String, pub email: String, pub password_hash: String }
+
+#[derive(Deserialize)]
+pub struct Credentials { pub email: String, pub password: String }
+
+#[derive(Serialize)]
+pub struct AuthResponse { pub token: String, pub email: String }
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Todo {
+    pub id: String,
+    pub title: String,
+    pub completed: bool,
+}
+
+#[derive(Deserialize)]
+pub struct TodoCreate { pub title: String }
+
+#[derive(Deserialize)]
+pub struct TodoPatch { pub title: Option<String>, pub completed: Option<bool> }
+```
+
+## Helpers
+
+A handful of small functions: validate input, pull the bearer token off the header,
+and build the key/value keys. Namespacing the keys (`todo:...`) keeps them tidy if
+this database is ever shared.
+
+```rust title="src/util.rs"
+use crate::types::{ApiError, Credentials};
+
+pub fn validate_credentials(c: &Credentials) -> Result<(String, String), ApiError> {
+    let email = c.email.trim().to_ascii_lowercase();
+    let password = c.password.trim().to_string();
+    if !email.contains('@') || email.len() > 254 {
+        return Err(ApiError::bad_request("enter a valid email"));
+    }
+    if password.len() < 8 {
+        return Err(ApiError::bad_request("password must be at least 8 characters"));
+    }
+    Ok((email, password))
+}
+
+pub fn validate_title(raw: &str) -> Result<String, ApiError> {
+    let title = raw.trim();
+    if title.is_empty() || title.len() > 160 {
+        return Err(ApiError::bad_request("title must be 1 to 160 characters"));
+    }
+    Ok(title.to_string())
+}
+
+pub fn bearer_token(raw: Option<&str>) -> Result<String, ApiError> {
+    let raw = raw.ok_or_else(ApiError::unauthorized)?;
+    let token = raw.strip_prefix("Bearer ").unwrap_or(raw).trim();
+    if token.is_empty() { return Err(ApiError::unauthorized()); }
+    Ok(token.to_string())
+}
+
+pub fn user_email_key(email: &str) -> String { format!("todo:user:email:{email}") }
+pub fn user_id_key(id: &str) -> String { format!("todo:user:id:{id}") }
+pub fn todos_key(uid: &str) -> String { format!("todo:list:{uid}") }
+```
+
+## Sign up and log in
+
+Sign-up throttles by email first, hashes the password, then writes the user under its
+email key with `SetMode::IfNotExists`. That write is the uniqueness check: it returns
+`false` if the email is taken, so there's no read-then-write race. Then it opens a
+session and returns the token.
+
+```rust title="src/routes.rs"
+use std::time::Duration;
+
+use forgelib::{Bytes, FailMode, Forge, Limit, PhcString, SessionOpts, SetMode, SetOpts};
+use rocket::http::{Header, Status};
+use rocket::request::{FromRequest, Outcome};
+use rocket::response::status;
+use rocket::serde::json::Json;
+use rocket::{delete, get, patch, post, Request, State};
+use uuid::Uuid;
+
+use crate::types::*;
+use crate::util::*;
+
+pub struct AppState { pub forge: Forge }
+
+const AUDIT_QUEUE: &str = "todo-audit";
+
+#[post("/api/signup", data = "<input>")]
+async fn signup(state: &State<AppState>, input: Json<Credentials>)
+    -> Result<status::Custom<Json<AuthResponse>>, ApiError>
+{
+    let (email, password) = validate_credentials(&input)?;
+
+    let limit = state.forge.ratelimit()
+        .check_with("todo-auth", &email,
+            Limit::per_duration(20, Duration::from_secs(60)), FailMode::Open).await?;
+    if !limit.allowed {
+        return Err(ApiError::new(Status::TooManyRequests, "too many attempts; slow down"));
+    }
+
+    let user = UserRecord {
+        id: Uuid::new_v4().to_string(),
+        email: email.clone(),
+        password_hash: state.forge.auth().hash_password(&password).await?.as_str().to_string(),
+    };
+    let body = Bytes::from(serde_json::to_vec(&user)?);
+
+    let created = state.forge.kv()
+        .set(&user_email_key(&email), body.clone(), SetOpts::new().with_mode(SetMode::IfNotExists))
+        .await?;
+    if !created { return Err(ApiError::conflict("email already registered")); }
+    state.forge.kv().set(&user_id_key(&user.id), body, SetOpts::new()).await?;
+
+    let token = state.forge.auth()
+        .create_session(&user.id, SessionOpts::new()
+            .with_idle_timeout(Duration::from_secs(30 * 60))
+            .with_absolute_timeout(Duration::from_secs(7 * 24 * 60 * 60)))
+        .await?;
+
+    Ok(status::Custom(Status::Created,
+        Json(AuthResponse { token: token.as_str().to_string(), email })))
+}
+```
+
+Login is the same throttle, then read the user, verify the password against the
+stored hash, and start a session.
+
+```rust title="src/routes.rs (continued)"
+#[post("/api/login", data = "<input>")]
+async fn login(state: &State<AppState>, input: Json<Credentials>)
+    -> Result<Json<AuthResponse>, ApiError>
+{
+    let (email, password) = validate_credentials(&input)?;
+
+    let limit = state.forge.ratelimit()
+        .check_with("todo-auth", &email,
+            Limit::per_duration(20, Duration::from_secs(60)), FailMode::Open).await?;
+    if !limit.allowed {
+        return Err(ApiError::new(Status::TooManyRequests, "too many attempts; slow down"));
+    }
+
+    let Some(raw) = state.forge.kv().get(&user_email_key(&email)).await? else {
+        return Err(ApiError::new(Status::Unauthorized, "invalid email or password"));
+    };
+    let user: UserRecord = serde_json::from_slice(&raw)?;
+
+    let ok = state.forge.auth()
+        .verify_password(&password, &PhcString::new(user.password_hash.clone())).await?;
+    if !ok {
+        return Err(ApiError::new(Status::Unauthorized, "invalid email or password"));
+    }
+
+    let token = state.forge.auth()
+        .create_session(&user.id, SessionOpts::default()).await?;
+    Ok(Json(AuthResponse { token: token.as_str().to_string(), email: user.email }))
+}
+```
+
+## A request guard for auth
+
+Every list route needs the same thing: read the `Authorization` header, validate the
+session, and get the user id. A small Rocket request guard reads the header, and a
+helper turns it into a user id or a 401.
+
+```rust title="src/routes.rs (continued)"
+pub struct AuthHeader(Option<String>);
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for AuthHeader {
+    type Error = std::convert::Infallible;
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        Outcome::Success(Self(req.headers().get_one("Authorization").map(str::to_string)))
+    }
+}
+
+async fn require_user(state: &AppState, auth: &AuthHeader) -> Result<String, ApiError> {
+    let token = bearer_token(auth.0.as_deref())?;
+    match state.forge.auth().validate_session(&token).await? {
+        Some(session) => Ok(session.user_id),
+        None => Err(ApiError::unauthorized()),
+    }
+}
+```
+
+## The to-do routes
+
+The list lives under one key as a JSON array. Each route reads it, changes it, and
+writes it back, then enqueues an audit event. The `dedup_id` is the action plus the
+todo id, so a double-submit collapses to one audit record, and `max_attempts(3)` caps
+retries.
+
+```rust title="src/routes.rs (continued)"
+async fn load_todos(state: &AppState, uid: &str) -> Result<Vec<Todo>, ApiError> {
+    Ok(match state.forge.kv().get(&todos_key(uid)).await? {
+        Some(bytes) => serde_json::from_slice(&bytes)?,
+        None => Vec::new(),
+    })
+}
+
+async fn save_todos(state: &AppState, uid: &str, todos: &[Todo]) -> Result<(), ApiError> {
+    state.forge.kv()
+        .set(&todos_key(uid), Bytes::from(serde_json::to_vec(todos)?), SetOpts::new()).await?;
+    Ok(())
+}
+
+async fn audit(state: &AppState, uid: &str, action: &str, todo_id: &str) -> Result<(), ApiError> {
+    use forgelib::EnqueueOpts;
+    let event = serde_json::json!({ "userId": uid, "action": action, "todoId": todo_id });
+    state.forge.queue()
+        .enqueue(AUDIT_QUEUE, Bytes::from(event.to_string()),
+            EnqueueOpts::new().with_max_attempts(3).with_dedup_id(format!("{action}:{todo_id}")))
+        .await?;
+    Ok(())
+}
+
+#[get("/api/todos")]
+async fn list_todos(state: &State<AppState>, auth: AuthHeader) -> Result<Json<Vec<Todo>>, ApiError> {
+    let uid = require_user(state, &auth).await?;
+    Ok(Json(load_todos(state, &uid).await?))
+}
+
+#[post("/api/todos", data = "<input>")]
+async fn create_todo(state: &State<AppState>, auth: AuthHeader, input: Json<TodoCreate>)
+    -> Result<status::Custom<Json<Todo>>, ApiError>
+{
+    let uid = require_user(state, &auth).await?;
+    let mut todos = load_todos(state, &uid).await?;
+
+    let todo = Todo { id: Uuid::new_v4().to_string(), title: validate_title(&input.title)?, completed: false };
+    todos.insert(0, todo.clone());
+    save_todos(state, &uid, &todos).await?;
+    audit(state, &uid, "created", &todo.id).await?;
+
+    Ok(status::Custom(Status::Created, Json(todo)))
+}
+
+#[patch("/api/todos/<id>", data = "<input>")]
+async fn update_todo(state: &State<AppState>, auth: AuthHeader, id: &str, input: Json<TodoPatch>)
+    -> Result<Json<Todo>, ApiError>
+{
+    let uid = require_user(state, &auth).await?;
+    let mut todos = load_todos(state, &uid).await?;
+
+    let todo = todos.iter_mut().find(|t| t.id == id)
+        .ok_or_else(|| ApiError::not_found("todo not found"))?;
+    if let Some(title) = &input.title { todo.title = validate_title(title)?; }
+    if let Some(done) = input.completed { todo.completed = done; }
+    let updated = todo.clone();
+
+    save_todos(state, &uid, &todos).await?;
+    audit(state, &uid, "updated", &updated.id).await?;
+    Ok(Json(updated))
+}
+
+#[delete("/api/todos/<id>")]
+async fn delete_todo(state: &State<AppState>, auth: AuthHeader, id: &str) -> Result<Status, ApiError> {
+    let uid = require_user(state, &auth).await?;
+    let mut todos = load_todos(state, &uid).await?;
+    let before = todos.len();
+    todos.retain(|t| t.id != id);
+    if todos.len() == before { return Err(ApiError::not_found("todo not found")); }
+
+    save_todos(state, &uid, &todos).await?;
+    audit(state, &uid, "deleted", id).await?;
+    Ok(Status::NoContent)
+}
+```
+
+## Drain the audit queue
+
+The handlers only enqueue. Something has to drain the queue, and Forge doesn't run
+that loop for you. Rust ships a managed worker that leases jobs, runs your handler,
+acks on `Ok` and nacks on `Err`, and shuts down cleanly. Here it just logs each event,
+but this is where you'd write to an audit table or ship it off.
+
+```rust title="src/worker.rs"
+use forgelib::{Forge, Job};
+
+pub async fn run_audit_worker(forge: Forge) {
+    forge.worker("todo-audit")
+        .run(|job: Job| async move {
+            let event: serde_json::Value = job.payload_json()?;
+            tracing::info!(?event, "audit");
+            Ok::<(), serde_json::Error>(())
+        })
+        .await;
+}
+```
+
+## Wire it up and run
+
+`main.rs` reads `forge.toml`, spawns the worker and a maintenance loop, and launches
+Rocket with the `Forge` handle in shared state.
+
+```rust title="src/main.rs"
+mod routes;
+mod types;
+mod util;
+mod worker;
+
+use std::time::Duration;
+use forgelib::Forge;
+use routes::AppState;
+
+#[rocket::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt().with_env_filter("info,sqlx=warn").init();
+
+    let forge = Forge::init().await?;                 // reads ./forge.toml, runs migrations
+    tokio::spawn(worker::run_audit_worker(forge.clone()));
+    tokio::spawn({
+        let forge = forge.clone();
+        async move {
+            loop {
+                let _ = forge.run_scheduler_once().await;
+                let _ = forge.maintain().await;
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+        }
+    });
+
+    rocket::build()
+        .manage(AppState { forge })
+        .mount("/", rocket::routes![
+            routes::signup, routes::login,
+            routes::list_todos, routes::create_todo, routes::update_todo, routes::delete_todo,
+        ])
+        .launch()
+        .await?;
+    Ok(())
+}
+```
+
+Start Postgres, then run it:
+
+```sh
+createdb todoapp
+cargo run
+```
+
+And exercise it:
+
+```sh title="Terminal"
+# sign up, capture the token
+TOKEN=$(curl -s localhost:8000/api/signup \
+  -H 'content-type: application/json' \
+  -d '{"email":"a@b.com","password":"supersecret"}' | jq -r .token)
+
+# add a todo
+curl -s localhost:8000/api/todos \
+  -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"title":"write the docs"}'
+
+# list them
+curl -s localhost:8000/api/todos -H "authorization: Bearer $TOKEN"
+```
+
+That's the whole app: accounts, a per-user list, throttled auth, and a drained audit
+queue, all on one Postgres connection. The URL shortener pulls in the other four
+primitives, in Python.
+
+<LinkCard title="Build a URL shortener (Python)" href="/tutorials/url-shortener/" description="Blob, pub/sub, schedule, and config, end to end in FastAPI." />

@@ -1,0 +1,349 @@
+---
+title: Build a chat app (Node)
+description: A complete Node and Hono REST API for a realtime group chat with presence, typing, attachments, and disappearing messages, on six Forge primitives.
+---
+
+import { FileTree, LinkCard } from '@astrojs/starlight/components';
+
+You'll build a realtime group chat in TypeScript with [Hono](https://hono.dev):
+messages arrive live over server-sent events, people see who's online and who's
+typing, files upload straight to storage, and messages can disappear on a timer.
+
+Pub/sub carries everything live, a queue fans each message out to update unread
+counts, key/value stores messages and presence and de-duplicates sends, blob holds
+attachments, schedule runs the disappearing timer, and rate limiting guards sending
+and uploading.
+
+This is the Node version, built as a REST and SSE API. The example app in the repo is
+the [chatapp](https://github.com/isala404/forge/tree/main/examples/chatapp), which does
+the same thing over GraphQL subscriptions.
+
+## Start the project
+
+```json title="package.json"
+{
+  "name": "chatapp",
+  "type": "module",
+  "dependencies": {
+    "@hono/node-server": "^1",
+    "hono": "^4",
+    "forgelib": "^1"
+  }
+}
+```
+
+The presigned upload URLs need a signing secret, so set one in `forge.toml`.
+
+```toml title="forge.toml"
+[postgres]
+url = "${DATABASE_URL:-postgres://postgres:forge@localhost:5432/chatapp}"
+
+[blob]
+signing_secret = "${BLOB_SIGNING_SECRET:-dev-secret-change-me}"
+```
+
+The whole app is two files plus config:
+
+<FileTree>
+- src
+  - server.ts init Forge, the routes, start the workers
+  - worker.ts the background workers
+- package.json
+- forge.toml
+</FileTree>
+
+## The server
+
+Initialize Forge once, start a worker and the scheduler loop, and wire up Hono. A
+top-level `await` works because this is an ES module. The handlers below all close
+over this `forge` handle.
+
+```ts title="src/server.ts"
+import { randomUUID } from "node:crypto";
+import { serve } from "@hono/node-server";
+import { Hono } from "hono";
+import { cors } from "hono/cors";
+import { streamSSE } from "hono/streaming";
+import { ForgeClient } from "forgelib";
+import { runFanoutWorker, runReapWorker, runScheduler } from "./worker.ts";
+
+const forge = await ForgeClient.init();   // reads ./forge.toml, runs migrations
+runFanoutWorker(forge);
+runReapWorker(forge);
+runScheduler(forge);
+
+const app = new Hono();
+app.use("*", cors());
+
+function bearer(c: { req: { header: (k: string) => string | undefined } }): string {
+  return (c.req.header("authorization") ?? "").replace(/^Bearer /i, "").trim();
+}
+async function requireUser(c: any): Promise<string | null> {
+  return forge.validateSession(bearer(c));
+}
+
+// ... routes go here ...
+
+serve({ fetch: app.fetch, port: 8787 });
+console.log("chat on http://localhost:8787");
+```
+
+## Accounts
+
+Sign-up and login are the same shape as the other tutorials: throttle by email, hash
+the password, claim the email with a "set if not present" write, and open a session.
+
+```ts title="src/server.ts (continued)"
+app.post("/api/signup", async (c) => {
+  const { email, password } = await c.req.json();
+
+  const limit = await forge.rateLimitCheck("chat-auth", email, 20, 60, true);
+  if (!limit.allowed) return c.json({ error: "slow down" }, 429);
+
+  const user = { id: randomUUID(), email, passwordHash: await forge.hashPassword(password) };
+  const created = await forge.kvSet(`user:email:${email}`, JSON.stringify(user), null, true);
+  if (!created) return c.json({ error: "email already registered" }, 409);
+  await forge.kvSet(`user:id:${user.id}`, JSON.stringify(user));
+
+  const token = await forge.createSession(user.id);
+  return c.json({ token, userId: user.id }, 201);
+});
+
+app.post("/api/login", async (c) => {
+  const { email, password } = await c.req.json();
+
+  const limit = await forge.rateLimitCheck("chat-auth", email, 20, 60, true);
+  if (!limit.allowed) return c.json({ error: "slow down" }, 429);
+
+  const raw = await forge.kvGet(`user:email:${email}`);
+  if (!raw) return c.json({ error: "invalid email or password" }, 401);
+  const user = JSON.parse(raw);
+  if (!(await forge.verifyPassword(password, user.passwordHash)))
+    return c.json({ error: "invalid email or password" }, 401);
+
+  return c.json({ token: await forge.createSession(user.id), userId: user.id });
+});
+```
+
+## Send a message
+
+Sending throttles the sender (fail open, so a limiter blip never blocks chat),
+de-duplicates with an idempotency key so a retried request can't post twice, stores
+the message, publishes it live to the room, and queues the fan-out work. If the room
+has disappearing messages on, it also schedules the message's deletion.
+
+```ts title="src/server.ts (continued)"
+const roomMsgsKey = (room: string) => `room:${room}:msgs`;
+
+app.post("/api/rooms/:room/messages", async (c) => {
+  const userId = await requireUser(c);
+  if (!userId) return c.json({ error: "authentication required" }, 401);
+  const room = c.req.param("room");
+  const { body, idempotencyKey, mediaKey } = await c.req.json();
+
+  const d = await forge.rateLimitCheck("send", userId, 30, 10, true);
+  if (!d.allowed) return c.json({ error: "you are sending too fast" }, 429);
+
+  const id = randomUUID();
+  if (idempotencyKey) {
+    const won = await forge.kvSet(`idem:${userId}:${idempotencyKey}`, id, 86400, true);
+    if (!won) return c.json({ error: "duplicate send" }, 409);
+  }
+
+  const msg = { id, room, userId, body, mediaKey: mediaKey ?? null, at: Date.now() };
+
+  // keep the last 50 messages per room in key/value
+  const recent = JSON.parse((await forge.kvGet(roomMsgsKey(room))) ?? "[]");
+  recent.push(msg);
+  await forge.kvSet(roomMsgsKey(room), JSON.stringify(recent.slice(-50)));
+
+  // live now, fan-out later; dedup the queue job on the message id
+  await forge.pubsubPublish(`chat:${room}`, JSON.stringify({ type: "message", message: msg }));
+  await forge.queueEnqueue("fanout", JSON.stringify({ room, id }), undefined, id);
+
+  // disappearing messages: schedule a delete if the room has a TTL set
+  const ttl = await forge.kvGet(`room:${room}:ttl`);
+  if (ttl) await forge.scheduleAt(Date.now() + Number(ttl) * 1000, "reap", JSON.stringify({ room, id }));
+
+  return c.json(msg, 201);
+});
+
+app.get("/api/rooms/:room/messages", async (c) => {
+  if (!(await requireUser(c))) return c.json({ error: "authentication required" }, 401);
+  const recent = JSON.parse((await forge.kvGet(roomMsgsKey(c.req.param("room")))) ?? "[]");
+  return c.json({ messages: recent });
+});
+```
+
+## Stream a room
+
+The client opens an SSE stream per room. The route subscribes to the room topic and
+forwards each event (a new message, a typing flag) until the client disconnects, then
+drops the subscription.
+
+```ts title="src/server.ts (continued)"
+app.get("/api/rooms/:room/stream", async (c) => {
+  if (!(await requireUser(c))) return c.json({ error: "authentication required" }, 401);
+  const room = c.req.param("room");
+
+  return streamSSE(c, async (stream) => {
+    const sub = await forge.pubsubSubscribe(`chat:${room}`);
+    stream.onAbort(() => sub.close());
+    for (;;) {
+      const payload = await sub.next();
+      if (payload === null) break;
+      await stream.writeSSE({ data: payload.toString("utf8") });
+    }
+  });
+});
+```
+
+## Typing and presence
+
+Typing is purely live, so it's a publish with nothing stored. Presence is a key/value
+key with a short TTL that a heartbeat refreshes: someone is online while their key is
+alive, and it expires on its own when the heartbeats stop.
+
+```ts title="src/server.ts (continued)"
+app.post("/api/rooms/:room/typing", async (c) => {
+  const userId = await requireUser(c);
+  if (!userId) return c.json({ error: "authentication required" }, 401);
+  await forge.pubsubPublish(`chat:${c.req.param("room")}`,
+    JSON.stringify({ type: "typing", userId }));
+  return c.body(null, 204);
+});
+
+app.post("/api/heartbeat", async (c) => {
+  const userId = await requireUser(c);
+  if (!userId) return c.json({ error: "authentication required" }, 401);
+  await forge.kvSet(`presence:${userId}`, "1", 30);   // expires in 30s
+  await forge.pubsubPublish("presence", JSON.stringify({ userId, online: true }));
+  return c.body(null, 204);
+});
+
+app.get("/api/presence/:userId", async (c) => {
+  const online = await forge.kvExists(`presence:${c.req.param("userId")}`);
+  return c.json({ online });
+});
+```
+
+## Attach a file
+
+Uploads go straight to storage, not through your server. The client asks for a
+presigned upload URL, PUTs the file to it, then sends a message that references the
+key. Throttle this one fail-closed, since minting upload URLs is more expensive than a
+normal request, and read the size cap from config so you can change it without a
+deploy.
+
+```ts title="src/server.ts (continued)"
+app.post("/api/rooms/:room/upload-url", async (c) => {
+  const userId = await requireUser(c);
+  if (!userId) return c.json({ error: "authentication required" }, 401);
+  const room = c.req.param("room");
+
+  const rl = await forge.rateLimitCheck("upload", userId, 10, 60, false); // fail closed
+  if (!rl.allowed) return c.json({ error: "too many uploads" }, 429);
+
+  const maxBytes = Number(await forge.configGet("max_upload_bytes")) || 10 * 1024 * 1024;
+  const key = `media/${room}/${randomUUID()}`;
+  const uploadUrl = await forge.blobPresignUpload(key, 600, maxBytes);
+  return c.json({ key, uploadUrl, maxBytes });
+});
+```
+
+## The workers
+
+Two background jobs finish the picture. The `fanout` worker takes each sent message
+and bumps an unread counter for every room member except the sender. The `reap`
+worker, fed by the disappearing-message schedules, removes a message when its timer
+fires. The scheduler loop ticks the timers and runs the maintenance sweep.
+
+```ts title="src/worker.ts"
+import type { ForgeClient } from "forgelib";
+
+const roomMsgsKey = (room: string) => `room:${room}:msgs`;
+
+export function runFanoutWorker(forge: ForgeClient): void {
+  void (async () => {
+    for (;;) {
+      const job = await forge.queueDequeue("fanout", 30, 20).catch(() => null);
+      if (!job) continue;
+      try {
+        const { room, id } = JSON.parse(job.payload);
+        const recent = JSON.parse((await forge.kvGet(roomMsgsKey(room))) ?? "[]");
+        const msg = recent.find((m: any) => m.id === id);
+        const members = JSON.parse((await forge.kvGet(`room:${room}:members`)) ?? "[]");
+        for (const member of members) {
+          if (member !== msg?.userId) await forge.kvIncr(`unread:${member}:${room}`, 1);
+        }
+        await forge.queueAck(job.receipt);
+      } catch {
+        await forge.queueNack(job.receipt);
+      }
+    }
+  })();
+}
+
+export function runReapWorker(forge: ForgeClient): void {
+  void (async () => {
+    for (;;) {
+      const job = await forge.queueDequeue("reap", 30, 20).catch(() => null);
+      if (!job) continue;
+      try {
+        const { room, id } = JSON.parse(job.payload);
+        const recent = JSON.parse((await forge.kvGet(roomMsgsKey(room))) ?? "[]");
+        await forge.kvSet(roomMsgsKey(room), JSON.stringify(recent.filter((m: any) => m.id !== id)));
+        await forge.pubsubPublish(`chat:${room}`, JSON.stringify({ type: "deleted", id }));
+        await forge.queueAck(job.receipt);
+      } catch {
+        await forge.queueNack(job.receipt);
+      }
+    }
+  })();
+}
+
+export function runScheduler(forge: ForgeClient): void {
+  void (async () => {
+    for (;;) {
+      try {
+        await forge.runSchedulerOnce();
+        await forge.maintain();
+      } catch (e) {
+        console.warn("scheduler tick failed:", e);
+      }
+      await new Promise((r) => setTimeout(r, 30_000));
+    }
+  })();
+}
+```
+
+The reap worker publishes a `deleted` event too, so open clients drop the message from
+view the moment it disappears.
+
+## Run it
+
+```sh
+createdb chatapp
+npm install
+node src/server.ts
+```
+
+```sh title="Terminal"
+TOKEN=$(curl -s localhost:8787/api/signup -H 'content-type: application/json' \
+  -d '{"email":"a@b.com","password":"supersecret"}' | jq -r .token)
+
+# open a live stream in one terminal
+curl -N localhost:8787/api/rooms/general/stream -H "authorization: Bearer $TOKEN"
+
+# send a message in another and watch it arrive on the stream
+curl -s localhost:8787/api/rooms/general/messages \
+  -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"body":"hello"}'
+```
+
+That's a realtime app where the live layer, the durable layer, and the background work
+all run on one Postgres connection. From here, the [Primitives](/primitives/) page has
+the details behind each call, and [Operations](/operations/) covers running the workers
+and scheduler in production.
+
+<LinkCard title="All the primitives" href="/primitives/" description="The methods and gotchas behind everything you just used." />
