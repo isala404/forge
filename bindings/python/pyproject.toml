@@ -1,0 +1,22 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "forgelib"
+version = "1.0.0"
+description = "Python bindings for Forge — hardened infra primitives on Postgres"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Rust",
+]
+
+[tool.maturin]
+module-name = "forgelib"
+# Mixed layout: ship the Python-native convenience API alongside the compiled extension.
+python-source = "python"
+auditwheel = "repair"

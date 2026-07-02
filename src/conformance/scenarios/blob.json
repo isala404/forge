@@ -1,0 +1,89 @@
+{
+  "primitive": "blob",
+  "scenarios": [
+    {
+      "name": "put_head_get_roundtrips",
+      "steps": [
+        { "op": "blob.put", "args": { "key": "greeting", "value": "hello", "content_type": "text/plain", "metadata": { "owner": "alice" } } },
+        { "op": "blob.head", "args": { "key": "greeting" },
+          "expect": { "shape": { "size": 5, "content_type": "text/plain", "etag": { "$type": "string" }, "metadata": { "owner": "alice" } } } },
+        { "op": "blob.get", "args": { "key": "greeting" }, "expect": { "value": "hello" } },
+        { "op": "blob.head", "args": { "key": "missing" }, "expect": { "value": null } },
+        { "op": "blob.get", "args": { "key": "missing" }, "expect": { "value": null } }
+      ]
+    },
+    {
+      "name": "binary_body_roundtrips_losslessly",
+      "note": "Non-UTF-8 object bodies survive put/get through the bytes surface.",
+      "steps": [
+        { "op": "blob.put", "args": { "key": "bin", "value": { "$bytes": [0, 255, 0, 254] } } },
+        { "op": "blob.head", "args": { "key": "bin" }, "expect": { "shape": { "size": 4 } } },
+        { "op": "blob.get", "args": { "key": "bin" }, "expect": { "bytes": { "$bytes": [0, 255, 0, 254] } } }
+      ]
+    },
+    {
+      "name": "list_paginates_by_prefix_with_cursor",
+      "note": "A small page limit + cursor follow must cover every key under the prefix exactly once, in lexicographic order, and never spill keys outside it.",
+      "steps": [
+        { "op": "blob.put", "args": { "key": "page/a", "value": "x" } },
+        { "op": "blob.put", "args": { "key": "page/b", "value": "x" } },
+        { "op": "blob.put", "args": { "key": "page/c", "value": "x" } },
+        { "op": "blob.put", "args": { "key": "other/z", "value": "x" } },
+        { "op": "blob.list", "args": { "prefix": "page/", "limit": 2 }, "as": "p1",
+          "expect": { "shape": { "keys": ["page/a", "page/b"], "cursor": { "$type": "string" } } } },
+        { "op": "blob.list", "args": { "prefix": "page/", "limit": 2, "cursor": { "$ref": "p1.cursor" } },
+          "expect": { "shape": { "keys": ["page/c"], "cursor": null } } }
+      ]
+    },
+    {
+      "name": "delete_then_head_is_absent",
+      "steps": [
+        { "op": "blob.put", "args": { "key": "doomed", "value": "bye" } },
+        { "op": "blob.head", "args": { "key": "doomed" }, "expect": { "shape": { "size": 3 } } },
+        { "op": "blob.delete", "args": { "key": "doomed" }, "expect": { "value": true } },
+        { "op": "blob.head", "args": { "key": "doomed" }, "expect": { "value": null } },
+        { "op": "blob.delete", "args": { "key": "doomed" }, "expect": { "value": false } }
+      ]
+    },
+    {
+      "name": "namespace_isolation",
+      "note": "Two namespaces over one backing store must not see each other's objects.",
+      "steps": [
+        { "op": "blob.put", "args": { "key": "shared", "value": "from-a" }, "namespace": "app-a" },
+        { "op": "blob.head", "args": { "key": "shared" }, "namespace": "app-b", "expect": { "value": null } },
+        { "op": "blob.get", "args": { "key": "shared" }, "namespace": "app-b", "expect": { "value": null } },
+        { "op": "blob.head", "args": { "key": "shared" }, "namespace": "app-a", "expect": { "shape": { "size": 6 } } },
+        { "op": "blob.get", "args": { "key": "shared" }, "namespace": "app-a", "expect": { "value": "from-a" } }
+      ]
+    },
+    {
+      "name": "presign_download_verifies_and_rejects_tampering",
+      "note": "A freshly signed download URL verifies; a tampered signature or an expired URL is rejected.",
+      "steps": [
+        { "op": "blob.presign_download", "args": { "key": "docs/report.pdf", "expires_seconds": 300 }, "as": "dl" },
+        { "op": "blob.verify_presigned",
+          "args": { "method": "GET", "key": { "$ref": "dl.key" }, "expires_epoch": { "$ref": "dl.expires_epoch" }, "max_bytes": { "$ref": "dl.max_bytes" }, "sig": { "$ref": "dl.sig" } },
+          "expect": { "value": true } },
+        { "op": "blob.verify_presigned",
+          "args": { "method": "GET", "key": { "$ref": "dl.key" }, "expires_epoch": { "$ref": "dl.expires_epoch" }, "max_bytes": { "$ref": "dl.max_bytes" }, "sig": "0000000000000000000000000000000000000000000000000000000000000000" },
+          "expect": { "value": false } },
+        { "op": "blob.verify_presigned",
+          "args": { "method": "GET", "key": { "$ref": "dl.key" }, "expires_epoch": 1000, "max_bytes": { "$ref": "dl.max_bytes" }, "sig": { "$ref": "dl.sig" } },
+          "expect": { "value": false } }
+      ]
+    },
+    {
+      "name": "presign_upload_signs_the_size_cap",
+      "note": "A presigned upload URL binds the max-bytes cap into the signature; verifying with a different cap fails.",
+      "steps": [
+        { "op": "blob.presign_upload", "args": { "key": "uploads/x.bin", "expires_seconds": 300, "max_bytes": 4096 }, "as": "ul" },
+        { "op": "blob.verify_presigned",
+          "args": { "method": "PUT", "key": { "$ref": "ul.key" }, "expires_epoch": { "$ref": "ul.expires_epoch" }, "max_bytes": { "$ref": "ul.max_bytes" }, "sig": { "$ref": "ul.sig" } },
+          "expect": { "value": true } },
+        { "op": "blob.verify_presigned",
+          "args": { "method": "PUT", "key": { "$ref": "ul.key" }, "expires_epoch": { "$ref": "ul.expires_epoch" }, "max_bytes": 8192, "sig": { "$ref": "ul.sig" } },
+          "expect": { "value": false } }
+      ]
+    }
+  ]
+}

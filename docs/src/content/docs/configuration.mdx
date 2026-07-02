@@ -1,0 +1,160 @@
+---
+title: Configuration
+description: Every forge.toml setting, its default, and what it changes. One file configures the whole runtime.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+`forge.toml` at your project root is the single source of configuration. `init()`
+reads it, builds the runtime, and migrates the system database. Anything you leave
+out keeps a production-safe default, so a real file can be as short as a connection
+string.
+
+```toml title="forge.toml"
+[postgres]
+# The database Forge owns. Required.
+url = "${DATABASE_URL:-postgres://localhost/myapp}"
+max_connections = 10
+acquire_timeout_secs = 30
+statement_timeout_ms = 15000
+lock_timeout_ms = 5000
+idle_in_transaction_timeout_ms = 15000
+
+[forge]
+# Prefix every key, name, and channel so several apps can share one database.
+namespace = ""
+
+[backends]
+# "postgres" (durable, shared) or "memory" (in-process, for tests).
+default = "${FORGE_BACKEND:-postgres}"
+
+[queue]
+dedup_window_secs = 300      # 5 minutes
+retention_secs = 604800      # 7 days
+
+[ratelimit]
+fail_open = true
+
+[blob]
+backend = "postgres"         # "postgres", "fs", or "memory"
+signing_secret = "${FORGE_BLOB_SIGNING_SECRET:-}"
+base_url = "/api/files"
+```
+
+An unknown key is an error rather than a silent typo, so a misspelled setting fails
+loudly at startup.
+
+## Environment variables
+
+Any string value can read the environment. `${VAR}` substitutes the variable, and
+`${VAR:-default}` falls back to `default` when it isn't set. This is how one file
+serves both tests and production: point the backend at `memory` from the environment
+in tests and `postgres` in production, with the same `forge.toml`.
+
+```toml
+[postgres]
+url = "${DATABASE_URL:-postgres://localhost/myapp}"
+
+[backends]
+default = "${FORGE_BACKEND:-postgres}"   # FORGE_BACKEND=memory in tests
+```
+
+A `${VAR}` with no value and no default is a hard error, so a missing secret stops
+startup instead of quietly resolving to an empty string. Interpolation only runs on
+string values, so numbers and booleans (the timeouts, `fail_open`) are written as
+plain literals.
+
+## Postgres
+
+The system database is the one Forge fully owns. It creates its `forge_*` tables
+there and runs its migrations at startup. Give it its own database or schema and
+keep your product tables elsewhere.
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `url` | required | Connection string for the database Forge owns. The one setting with no usable default. |
+| `max_connections` | `10` | Pool size. At least 2, since a migration holds one connection while another runs the SQL. |
+| `acquire_timeout_secs` | `30` | Seconds to wait for a free connection before erroring. |
+| `statement_timeout_ms` | `15000` | Server-side statement timeout for runtime queries. `0` disables it. |
+| `lock_timeout_ms` | `5000` | Server-side lock timeout. `0` disables it. |
+| `idle_in_transaction_timeout_ms` | `15000` | Server-side idle-in-transaction timeout. `0` disables it. |
+
+<Aside>
+	Watch the units. The three server-side timeouts are in milliseconds, while
+	`acquire_timeout_secs` and the queue windows are in seconds. Setting a millisecond
+	timeout to `0` removes that ceiling.
+</Aside>
+
+## Backends
+
+Every non-blob primitive runs on one of two backends. `postgres` is durable and
+shared across processes and replicas. `memory` keeps state in this process only, so
+it's fast and needs no database, but it's lost on restart and not shared. Memory is
+meant for tests; the two pass the same conformance suite.
+
+Set a `default` for everything, then override individual primitives as needed.
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `default` | `"postgres"` | Backend for any primitive without its own entry. |
+| `kv` `queue` `auth` `config` `ratelimit` `schedule` `pubsub` | inherits `default` | Override one primitive. `"postgres"` or `"memory"`. |
+| `blob` | inherits `default` | `"postgres"` or `"memory"` here. For the filesystem backend, set it under `[blob]`. |
+
+<Aside type="caution">
+	`pubsub` and `ratelimit` lean on cross-process delivery, so running them on
+	`memory` outside of tests logs a warning. In a multi-replica deployment they
+	should be on `postgres`.
+</Aside>
+
+## Namespaces
+
+`namespace` prefixes every key, queue name, topic, and stored row so multiple apps
+can share one database without colliding. It's empty by default, which means no
+prefixing. The only rule is that it can't contain a colon, which Forge reserves as
+its separator.
+
+```toml
+[forge]
+namespace = "${APP_NAME:-}"
+```
+
+## Blob storage
+
+Blob bytes can live in Postgres, on the local filesystem, or in memory. The metadata
+always stays in Postgres regardless.
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `backend` | `"postgres"` | Where object bytes go: `"postgres"`, `"fs"`, or `"memory"`. |
+| `fs_root` | none | Directory for bytes when `backend = "fs"`. Required for that backend. |
+| `signing_secret` | none | HMAC secret that turns on presigned URLs. CRUD works without it. |
+| `base_url` | `"/api/files"` | URL prefix your presigned links point at, where your app serves them. |
+
+The filesystem backend keeps large files out of the database, but a write is no
+longer atomic with your app's SQL and multiple replicas need a shared mount.
+
+## Queue and rate limit
+
+A couple of primitives have their own knobs.
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `queue.dedup_window_secs` | `300` | How long a repeated `dedup_id` is treated as the same job. |
+| `queue.retention_secs` | `604800` | How long finished jobs are kept before the maintenance sweep removes them. |
+| `ratelimit.fail_open` | `true` | Whether a limiter backend outage allows the request (and warns) instead of failing it. Set `false` for sensitive buckets. |
+
+## A separate database per feature
+
+A primitive can run on its own Postgres database, isolated from the rest, for
+bulkheading or because one piece (say the queue) needs different capacity. Add a
+`[databases.<feature>]` table where `<feature>` is one of the eight primitive names.
+Only `url` is required; the pool settings inherit the top-level `[postgres]` values.
+
+```toml
+[databases.queue]
+url = "${QUEUE_DATABASE_URL}"
+max_connections = 20
+```
+
+That feature gets its own pool, and Forge migrates each distinct database at startup
+like it does the system one. Your application code doesn't change.

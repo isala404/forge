@@ -1,0 +1,31 @@
+[package]
+name = "forgelib-python"
+version = "1.0.0"
+edition = "2021"
+publish = false
+description = "Python (pyo3) bindings for Forge — hardened infra primitives on Postgres"
+license = "MIT"
+repository = "https://github.com/isala404/forge"
+
+# Build with maturin: `maturin develop` (dev) or `maturin build --release`.
+[lib]
+name = "forgelib"
+crate-type = ["cdylib"]
+
+[dependencies]
+# Enable OTLP export so the prebuilt wheel ships with observability wired in.
+# Aliased to `forge` because this crate's own lib is named `forgelib` (the Python
+# module name), which would otherwise collide with the core crate's name.
+forge = { package = "forgelib", path = "../..", features = ["otel"] }
+# abi3-py39: build against the stable ABI so one wheel runs on CPython >= 3.9
+# (including newer interpreters than this pyo3 release knows about).
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }
+# Native async: every method returns a Python awaitable driven on a shared Tokio
+# runtime, so callers `await` the binding directly (no thread-pool wrapper).
+pyo3-async-runtimes = { version = "0.23", features = ["tokio-runtime"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+futures-util = { version = "0.3", default-features = false }
+
+[profile.release]
+lto = true
+strip = "symbols"

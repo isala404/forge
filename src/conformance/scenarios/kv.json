@@ -1,0 +1,90 @@
+{
+  "primitive": "kv",
+  "scenarios": [
+    {
+      "name": "set_then_get_roundtrips",
+      "steps": [
+        { "op": "kv.set", "args": { "key": "greeting", "value": "hello" }, "expect": { "value": true } },
+        { "op": "kv.get", "args": { "key": "greeting" }, "expect": { "value": "hello" } },
+        { "op": "kv.get", "args": { "key": "missing" }, "expect": { "value": null } }
+      ]
+    },
+    {
+      "name": "set_nx_blocks_a_live_key",
+      "steps": [
+        { "op": "kv.set", "args": { "key": "k", "value": "first", "if_not_exists": true }, "expect": { "value": true } },
+        { "op": "kv.set", "args": { "key": "k", "value": "second", "if_not_exists": true }, "expect": { "value": false } },
+        { "op": "kv.get", "args": { "key": "k" }, "expect": { "value": "first" } }
+      ]
+    },
+    {
+      "name": "set_xx_writes_only_when_present",
+      "note": "SET XX (if_exists) writes only a live key and is exposed in every language binding.",
+      "steps": [
+        { "op": "kv.set", "args": { "key": "x", "value": "v", "if_exists": true }, "expect": { "value": false } },
+        { "op": "kv.set", "args": { "key": "x", "value": "v" }, "expect": { "value": true } },
+        { "op": "kv.set", "args": { "key": "x", "value": "w", "if_exists": true }, "expect": { "value": true } },
+        { "op": "kv.get", "args": { "key": "x" }, "expect": { "value": "w" } }
+      ]
+    },
+    {
+      "name": "delete_and_exists",
+      "steps": [
+        { "op": "kv.set", "args": { "key": "d", "value": "v" }, "expect": { "value": true } },
+        { "op": "kv.exists", "args": { "key": "d" }, "expect": { "value": true } },
+        { "op": "kv.delete", "args": { "key": "d" }, "expect": { "value": true } },
+        { "op": "kv.exists", "args": { "key": "d" }, "expect": { "value": false } },
+        { "op": "kv.delete", "args": { "key": "d" }, "expect": { "value": false } }
+      ]
+    },
+    {
+      "name": "incr_accumulates",
+      "steps": [
+        { "op": "kv.incr", "args": { "key": "n", "by": 5 }, "expect": { "value": 5 } },
+        { "op": "kv.incr", "args": { "key": "n", "by": -2 }, "expect": { "value": 3 } }
+      ]
+    },
+    {
+      "name": "compare_and_swap_guards_old_value",
+      "steps": [
+        { "op": "kv.set", "args": { "key": "c", "value": "a" }, "expect": { "value": true } },
+        { "op": "kv.compare_and_swap", "args": { "key": "c", "old": "a", "new": "b" }, "expect": { "value": true } },
+        { "op": "kv.compare_and_swap", "args": { "key": "c", "old": "a", "new": "z" }, "expect": { "value": false } },
+        { "op": "kv.get", "args": { "key": "c" }, "expect": { "value": "b" } }
+      ]
+    },
+    {
+      "name": "scan_page_returns_keys_and_cursor_shape",
+      "steps": [
+        { "op": "kv.set", "args": { "key": "p:1", "value": "x" } },
+        { "op": "kv.set", "args": { "key": "p:2", "value": "x" } },
+        { "op": "kv.scan_page", "args": { "prefix": "p:", "limit": 100 },
+          "expect": { "shape": { "keys": { "$type": "array" }, "cursor": null } } }
+      ]
+    },
+    {
+      "name": "ttl_zero_is_rejected",
+      "note": "Forge rejects ttl<=0 as Invalid, and bindings pass that invalid value through rather than silently persisting forever.",
+      "steps": [
+        { "op": "kv.set", "args": { "key": "t", "value": "v", "ttl_seconds": 0 }, "expect": { "error": "Invalid" } }
+      ]
+    },
+    {
+      "name": "binary_value_roundtrips_losslessly",
+      "note": "Non-UTF-8 bytes survive the FFI via the dedicated bytes API. The string surface (kv.set/kv.get) is UTF-8-only by contract.",
+      "steps": [
+        { "op": "kv.set_bytes", "args": { "key": "bin", "value": { "$bytes": [0, 255, 0, 254] } }, "expect": { "value": true } },
+        { "op": "kv.get_bytes", "args": { "key": "bin" }, "expect": { "bytes": { "$bytes": [0, 255, 0, 254] } } }
+      ]
+    },
+    {
+      "name": "namespace_isolation",
+      "note": "Two namespaces over one database must not see each other's keys.",
+      "steps": [
+        { "op": "kv.set", "args": { "key": "shared", "value": "ns-a" }, "namespace": "app-a", "expect": { "value": true } },
+        { "op": "kv.get", "args": { "key": "shared" }, "namespace": "app-b", "expect": { "value": null } },
+        { "op": "kv.get", "args": { "key": "shared" }, "namespace": "app-a", "expect": { "value": "ns-a" } }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,127 @@
+"RFC3339 / ISO-8601 UTC timestamp, serialized as a string."
+scalar DateTime
+
+enum ChatKind {
+  DIRECT
+  GROUP
+}
+
+type User {
+  id: ID!
+  username: String!
+  displayName: String!
+  "Live presence, backed by a kv key with a short TTL refreshed by heartbeat."
+  online: Boolean!
+}
+
+type Chat {
+  id: ID!
+  kind: ChatKind!
+  "Group title; null for direct chats (the UI derives a name from the other member)."
+  title: String
+  members: [User!]!
+  lastMessage: Message
+  "Unread count for the requesting user, tracked in kv."
+  unread: Int!
+  "Disappearing-message lifetime in seconds, or null when off (forge schedule)."
+  disappearingSeconds: Int
+}
+
+type Message {
+  id: ID!
+  body: String!
+  createdAt: DateTime!
+  chatId: ID!
+  sender: User!
+  media: Media
+  receipts: [Receipt!]!
+}
+
+"An attachment stored in blob storage, exposed via a short-lived presigned download URL."
+type Media {
+  key: String!
+  downloadUrl: String!
+  contentType: String
+}
+
+type Receipt {
+  messageId: ID!
+  user: User!
+  deliveredAt: DateTime
+  readAt: DateTime
+}
+
+type TypingEvent {
+  user: User!
+  typing: Boolean!
+}
+
+"A presigned PUT ticket. The client uploads attachment bytes directly to blob storage."
+type UploadTicket {
+  key: String!
+  uploadUrl: String!
+  maxBytes: Int!
+}
+
+"Returned by signup/login. The token authenticates HTTP (Authorization: Bearer) and WS."
+type SessionPayload {
+  token: String!
+  user: User!
+}
+
+"A freshly minted API key (forge auth). The secret is shown exactly once."
+type ApiKeyPayload {
+  id: String!
+  secret: String!
+}
+
+"Developer-tools gauges for the settings page."
+type OpsStats {
+  "Users currently online, counted via a kv scan of the `online:` prefix."
+  onlineCount: Int!
+  "Jobs sitting in the `fail.dlq` dead-letter queue."
+  dlqCount: Int!
+}
+
+type Query {
+  "The authenticated user, or null when unauthenticated."
+  me: User
+  chats: [Chat!]!
+  chat(id: ID!): Chat
+  messages(chatId: ID!, before: DateTime, limit: Int! = 50): [Message!]!
+  presence(userIds: [ID!]!): [User!]!
+  "Whether the `reactions_v2` feature flag is enabled for the current user (forge config)."
+  reactionsEnabled: Boolean!
+  opsStats: OpsStats!
+}
+
+type Mutation {
+  signup(username: String!, displayName: String!, password: String!): SessionPayload!
+  login(username: String!, password: String!): SessionPayload!
+  logout: Boolean!
+  logoutAll: Boolean!
+  createChat(kind: ChatKind!, title: String, memberUsernames: [String!]!): Chat!
+  addMember(chatId: ID!, username: String!): Chat!
+  "Hand the client a presigned PUT URL to upload an attachment directly to blob storage."
+  requestUpload(chatId: ID!): UploadTicket!
+  sendMessage(chatId: ID!, body: String!, mediaKey: String, idempotencyKey: String): Message!
+  "Turn disappearing messages on/off for a chat (forge schedule)."
+  setDisappearing(chatId: ID!, enabled: Boolean!): Chat!
+  setTyping(chatId: ID!, typing: Boolean!): Boolean!
+  markRead(chatId: ID!, messageId: ID!): Boolean!
+  heartbeat: Boolean!
+  "Mint a personal API key (forge auth). The secret is returned exactly once."
+  createApiKey(label: String!): ApiKeyPayload!
+  "Set the `reactions_v2` feature-flag rollout percentage (forge config)."
+  setReactionsRollout(percent: Int!): Boolean!
+  "Enqueue a job destined to dead-letter (forge queue DLQ demo)."
+  triggerFailingJob: Boolean!
+}
+
+type Subscription {
+  "New messages in a chat (live)."
+  messageAdded(chatId: ID!): Message!
+  typing(chatId: ID!): TypingEvent!
+  receiptChanged(chatId: ID!): Receipt!
+  presenceChanged(userIds: [ID!]!): User!
+}

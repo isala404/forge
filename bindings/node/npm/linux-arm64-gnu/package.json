@@ -1,0 +1,27 @@
+{
+  "name": "forgelib-linux-arm64-gnu",
+  "version": "1.0.0",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "main": "forgelib.linux-arm64-gnu.node",
+  "files": [
+    "forgelib.linux-arm64-gnu.node"
+  ],
+  "description": "Node.js bindings for Forge: hardened infra primitives on Postgres",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/isala404/forge.git",
+    "directory": "bindings/node"
+  },
+  "libc": [
+    "glibc"
+  ]
+}

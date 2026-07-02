@@ -1,0 +1,16 @@
+#   docker compose up --build        (run from this directory)
+#
+#   Rust    backend http://127.0.0.1:8081/graphql   SPA http://127.0.0.1:8091
+#   Node    backend http://127.0.0.1:8082/graphql   SPA http://127.0.0.1:8092
+#   Python  backend http://127.0.0.1:8083/graphql   SPA http://127.0.0.1:8093
+#
+# Each stack lives in its own compose file with prefixed service/network/volume names
+# (rs-, node-, pybe-) and a private network, so `include` merges them without clashing.
+# Bring up a single backend instead with, e.g., `docker compose -f rust-be/docker-compose.yml up`.
+# Requires Docker Compose v2.20+ (the `include` directive).
+name: chatapp
+
+include:
+  - rust-be/docker-compose.yml
+  - node-be/docker-compose.yml
+  - python-be/docker-compose.yml

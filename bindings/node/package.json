@@ -1,0 +1,57 @@
+{
+  "name": "forgelib",
+  "version": "1.0.0",
+  "description": "Node.js bindings for Forge: hardened infra primitives on Postgres",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/isala404/forge.git",
+    "directory": "bindings/node"
+  },
+  "main": "client.js",
+  "types": "client.d.ts",
+  "files": [
+    "README.md",
+    "client.js",
+    "client.d.ts",
+    "index.js",
+    "index.d.ts"
+  ],
+  "exports": {
+    ".": {
+      "types": "./client.d.ts",
+      "default": "./client.js"
+    }
+  },
+  "napi": {
+    "name": "forgelib",
+    "triples": {
+      "additional": [
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl"
+      ]
+    }
+  },
+  "scripts": {
+    "artifacts": "napi artifacts",
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "create-npm-dir": "napi create-npm-dir -t .",
+    "prepublishOnly": "napi prepublish -t npm --skip-gh-release"
+  },
+  "optionalDependencies": {
+    "forgelib-darwin-arm64": "1.0.0",
+    "forgelib-darwin-x64": "1.0.0",
+    "forgelib-linux-arm64-gnu": "1.0.0",
+    "forgelib-linux-x64-gnu": "1.0.0",
+    "forgelib-linux-x64-musl": "1.0.0",
+    "forgelib-win32-x64-msvc": "1.0.0"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.4"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

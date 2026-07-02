@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE forge_jobs SET leased_until = now() + make_interval(secs => lease_secs) WHERE id = $1 AND lease_token = $2 AND status = 'leased' RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "038fb0bbe46605b4f97b48a35079c14655d74f1da8af616fc2273d35992d8715"
+}

@@ -1,0 +1,73 @@
+# Self-contained node-be stack: Postgres + the GraphQL backend + the shared React SPA.
+#   docker compose -f examples/chatapp/node-be/docker-compose.yml up --build
+# Backend on http://127.0.0.1:8082/graphql ; SPA on http://127.0.0.1:8092
+# Service/network/volume names are prefixed so this file composes cleanly alongside
+# the other backends' stacks (run several at once without name clashes).
+name: chatapp-node-be
+
+services:
+  node-db:
+    image: postgres:18
+    shm_size: 512m
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: forge
+      POSTGRES_DB: chatapp
+    volumes:
+      # pg18 expects its data under /var/lib/postgresql; mounting at /data crash-loops.
+      - node_pg:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d chatapp"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    networks: [node-net]
+
+  node-app:
+    build:
+      # Repo root: node-be has path deps on bindings/node and forge.
+      context: ../../..
+      dockerfile: examples/chatapp/node-be/Dockerfile
+    environment:
+      # initAppCtx() applies Forge's and the chat domain's migrations on boot.
+      FORGE_POSTGRES_URL: postgres://postgres:forge@node-db:5432/chatapp
+      FORGE_BLOB_SIGNING_SECRET: dev-secret-change-me
+      PORT: "8082"
+      HOST: "0.0.0.0"
+      CORS_ORIGIN: "*"
+      APP_PRESENCE_TTL_SECS: "30"
+      APP_SCHEDULER_MS: "1000"
+      APP_DISAPPEARING_SECS: "86400"
+    ports:
+      - "127.0.0.1:8082:8082"
+    depends_on:
+      node-db:
+        condition: service_healthy
+    networks: [node-net]
+
+  react-fe:
+    build:
+      # Multi-stage: vite build -> nginx serving the static bundle.
+      context: ../react-fe
+    environment:
+      # The SPA runs in the host browser, so it must reach the backend at its
+      # published URL. docker-entrypoint.sh bakes these into env.js at start.
+      # Override via the environment (e.g. `--env-file .env.orb`) when 127.0.0.1 ports
+      # aren't host-reachable, as on OrbStack; the defaults suit Docker Desktop.
+      VITE_GRAPHQL_HTTP: ${NODE_GRAPHQL_HTTP:-http://127.0.0.1:8082/graphql}
+      VITE_GRAPHQL_WS: ${NODE_GRAPHQL_WS:-ws://127.0.0.1:8082/graphql}
+      # Presigned blob URLs are relative (`/api/files`), so nginx proxies them to
+      # the backend on the internal network — reachable regardless of host port
+      # forwarding, so uploads work on both Docker Desktop and OrbStack unchanged.
+      BACKEND_ORIGIN: http://node-app:8082
+    ports:
+      - "127.0.0.1:8092:80"
+    depends_on:
+      - node-app
+    networks: [node-net]
+
+networks:
+  node-net:
+
+volumes:
+  node_pg:

@@ -1,0 +1,82 @@
+---
+title: Forge
+description: The standard library for agent-built SaaS. Eight backend primitives on one Postgres connection, with the same API in Rust, Node, and Python.
+template: splash
+hero:
+  tagline: One library for the plumbing every app needs. Eight backend primitives on a single Postgres connection, with the same API in Rust, Node, and Python.
+  image:
+    file: ../../assets/hero.svg
+    alt: Eight primitives feeding into one Postgres connection
+  actions:
+    - text: Get started
+      link: /quickstart/
+      icon: right-arrow
+      variant: primary
+    - text: View on GitHub
+      link: https://github.com/isala404/forge
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Every app needs the same plumbing, and the usual answer is a separate service for
+each piece: Redis for caching and sessions, a queue for background jobs, object
+storage for uploads, something for auth, a cron runner, a rate limiter. That's six
+things to provision, secure, mock in tests, and learn before you ship a feature.
+Forge gives you all of it in one library.
+
+## Eight primitives, one connection
+
+<CardGrid>
+	<LinkCard title="Key/value" href="/primitives/#key-value" description="Get, set, counters, compare-and-swap, prefix scan, TTLs. Lineage: Redis." />
+	<LinkCard title="Queue" href="/primitives/#queue" description="Background jobs with acks, retries, delays, dedup, and dead letters. Lineage: SQS." />
+	<LinkCard title="Pub/sub" href="/primitives/#pubsub" description="Live fan-out to connected clients for presence and updates. Lineage: Postgres LISTEN/NOTIFY." />
+	<LinkCard title="Blob" href="/primitives/#blob" description="Put, get, delete, and presigned upload and download URLs. Lineage: S3." />
+	<LinkCard title="Auth" href="/primitives/#auth" description="argon2 password hashing, sessions, and API keys. Lineage: OWASP and PHC." />
+	<LinkCard title="Rate limit" href="/primitives/#rate-limit" description="Token-bucket or sliding-window checks with IETF headers." />
+	<LinkCard title="Schedule" href="/primitives/#schedule" description="Recurring cron jobs and one-off work at a future time." />
+	<LinkCard title="Config and flags" href="/primitives/#config-and-flags" description="Runtime settings and feature flags with percentage rollout." />
+</CardGrid>
+
+## Why Forge
+
+<CardGrid stagger>
+	<Card title="One library, not six services" icon="puzzle">
+		By default every primitive runs on one Postgres database, so there's nothing
+		else to provision or operate. When one piece needs to scale, move it onto its
+		own backend without changing your code.
+	</Card>
+	<Card title="The same API in three languages" icon="rocket">
+		Rust is the reference implementation. The Node and Python bindings wrap the
+		same core and are checked against the same conformance suite, so behavior
+		matches across all three.
+	</Card>
+	<Card title="Test on memory, ship on Postgres" icon="approve-check">
+		The memory and Postgres backends pass the same conformance tests, so your
+		suite runs in-process with no database and still behaves the way production
+		will. Flip between them from an environment variable.
+	</Card>
+	<Card title="Made to hand to an agent" icon="setting">
+		The API isn't in any model's training data. Install the companion skill and a
+		coding agent learns which primitive fits which task before it writes a line.
+	</Card>
+</CardGrid>
+
+## Postgres is enough
+
+```toml title="forge.toml"
+[postgres]
+url = "${DATABASE_URL:-postgres://localhost/myapp}"
+```
+
+One connection string is the whole setup. `init()` reads `forge.toml`, runs Forge's
+own migrations, and hands you a client with all eight primitives on it. Omit any
+setting you don't need and Forge fills in production-safe defaults.
+
+<CardGrid>
+	<LinkCard title="Quickstart" href="/quickstart/" description="Install Forge and make your first calls in five minutes." />
+	<LinkCard title="Tutorials" href="/tutorials/todo-app/" description="Build a to-do app, a URL shortener, and a chat app, step by step." />
+	<LinkCard title="Primitives" href="/primitives/" description="The eight building blocks, with the methods that matter for each." />
+	<LinkCard title="Recipes" href="/recipes/" description="Auth, background jobs, presigned uploads, and live updates from real apps." />
+</CardGrid>

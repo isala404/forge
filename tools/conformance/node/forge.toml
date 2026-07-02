@@ -1,0 +1,13 @@
+[postgres]
+url = "${FORGE_POSTGRES_URL}"
+
+[forge]
+namespace = "${FORGE_NAMESPACE:-}"
+
+[blob]
+signing_secret = "${FORGE_BLOB_SIGNING_SECRET:-conformance-signing-secret}"
+backend = "${FORGE_BLOB_BACKEND:-postgres}"
+fs_root = "${FORGE_BLOB_FS_ROOT:-}"
+
+[backends]
+queue = "${FORGE_QUEUE_BACKEND:-postgres}"

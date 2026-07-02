@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'docs/**'
+      - '.github/workflows/deploy-docs.yml'
   workflow_dispatch:
 
 permissions:
@@ -23,22 +24,25 @@ jobs:
       run:
         working-directory: docs
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v4
 
-      - uses: oven-sh/setup-bun@v2.0.2
+      - uses: actions/setup-node@v4
         with:
-          bun-version: 1.1.34
+          node-version: 22
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: npm ci
 
       - name: Build
-        run: bun run build
+        run: npm run build
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3.0.1
         with:
-          path: docs/build
+          # Astro (Starlight) builds to docs/dist.
+          path: docs/dist
 
   deploy:
     environment:

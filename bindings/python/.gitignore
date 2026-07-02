@@ -1,0 +1,7 @@
+/target
+/.venv
+/dist
+*.so
+*.pyd
+__pycache__/
+/uv.lock

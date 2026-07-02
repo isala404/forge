@@ -1,0 +1,34 @@
+[postgres]
+url = "${FORGE_POSTGRES_URL:-postgres://postgres:forge@localhost:5432/chatapp_python_be}"
+max_connections = 10
+acquire_timeout_secs = 30
+statement_timeout_ms = 15000
+lock_timeout_ms = 5000
+idle_in_transaction_timeout_ms = 15000
+
+[forge]
+namespace = ""
+
+[queue]
+dedup_window_secs = 300
+retention_secs = 604800
+
+[ratelimit]
+fail_open = true
+
+[blob]
+backend = "postgres"
+fs_root = "./.forge/blobs"
+signing_secret = "${FORGE_BLOB_SIGNING_SECRET:-chatapp-python-local-signing-secret}"
+base_url = "/api/files"
+
+[backends]
+default = "postgres"
+kv = "postgres"
+queue = "postgres"
+blob = "postgres"
+auth = "postgres"
+config = "postgres"
+ratelimit = "postgres"
+schedule = "postgres"
+pubsub = "postgres"

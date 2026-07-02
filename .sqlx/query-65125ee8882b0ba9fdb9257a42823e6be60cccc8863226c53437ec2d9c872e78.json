@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT key FROM forge_kv\n                           WHERE key LIKE $1 ESCAPE '\\'\n                             AND (expires_at IS NULL OR expires_at > now())\n                           ORDER BY key\n                           LIMIT $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "key",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "65125ee8882b0ba9fdb9257a42823e6be60cccc8863226c53437ec2d9c872e78"
+}

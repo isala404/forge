@@ -1,0 +1,445 @@
+---
+title: Build a URL shortener (Python)
+description: A complete Python and FastAPI REST API for a link shortener with click analytics, QR codes, expiry, and live counts, touching all eight Forge primitives.
+---
+
+import { FileTree, LinkCard } from '@astrojs/starlight/components';
+
+You'll build a link shortener in Python with [FastAPI](https://fastapi.tiangolo.com):
+people create short links, every redirect bumps a counter, a dashboard updates live,
+each link carries a QR image, links can expire, and a feature flag gates custom slugs.
+This one touches all eight primitives.
+
+The idea that ties it together is the redirect path. It does the cheap work inline
+(bump the counter, check a rate limit) and hands everything else to a queue, so the
+redirect stays fast and a worker fans out the rest.
+
+This is the Python version. The same app exists in Rust and Node in the
+[linksapp example](https://github.com/isala404/forge/tree/main/examples/linksapp).
+
+## Start the project
+
+```toml title="pyproject.toml"
+[project]
+name = "linksapp"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.34",
+    "forgelib",
+    "segno>=1.6",   # QR codes
+]
+```
+
+Forge reads `forge.toml`. The connection string is the only required setting; the
+`signing_secret` turns on presigned blob URLs, which you'll want if you later hand out
+direct links to stored files.
+
+```toml title="forge.toml"
+[postgres]
+url = "${DATABASE_URL:-postgres://postgres:forge@localhost:5432/linksapp}"
+
+[blob]
+signing_secret = "${BLOB_SIGNING_SECRET:-dev-secret-change-me}"
+```
+
+The app is a handful of modules:
+
+<FileTree>
+- app
+  - main.py init Forge, start the workers, wire up FastAPI
+  - routes.py the handlers
+  - utils.py validation and key helpers
+  - worker.py the background workers
+- pyproject.toml
+- forge.toml
+</FileTree>
+
+## The app and its background loops
+
+The whole runtime starts in a FastAPI lifespan: `init()` builds the Forge client, and
+three background tasks run for the life of the app, a worker per queue plus a loop
+that ticks the scheduler. The client is stashed on `app.state` so handlers can reach
+it.
+
+```python title="app/main.py"
+import asyncio
+from contextlib import asynccontextmanager
+
+import forgelib
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from .routes import api
+from .worker import clicks_worker, expire_worker, scheduler_loop
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    forge = await forgelib.ForgeClient.init()   # reads ./forge.toml, runs migrations
+    stop = asyncio.Event()
+    tasks = [
+        asyncio.create_task(clicks_worker(forge, stop)),
+        asyncio.create_task(expire_worker(forge, stop)),
+        asyncio.create_task(scheduler_loop(forge, stop)),
+    ]
+    app.state.forge = forge
+    try:
+        yield
+    finally:
+        stop.set()
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+app = FastAPI(lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.include_router(api)
+
+
+@app.exception_handler(HTTPException)
+async def on_http_error(_req: Request, exc: HTTPException) -> JSONResponse:
+    return JSONResponse({"error": str(exc.detail)}, status_code=exc.status_code)
+```
+
+## Helpers
+
+Validation, the bearer token, the key builders, and a slug generator.
+
+```python title="app/utils.py"
+import random
+import re
+import string
+
+from fastapi import HTTPException
+
+SLUG_RE = re.compile(r"^[A-Za-z0-9_-]{3,32}$")
+RESERVED = {"api", "healthz"}
+_CHARS = string.ascii_letters + string.digits
+
+
+def random_slug(n: int = 7) -> str:
+    return "".join(random.choices(_CHARS, k=n))
+
+
+def bearer_token(authorization: str | None) -> str:
+    if not authorization:
+        raise HTTPException(401, "authentication required")
+    token = authorization.removeprefix("Bearer ").strip()
+    if not token:
+        raise HTTPException(401, "authentication required")
+    return token
+
+
+def validate_url(raw: str) -> str:
+    url = raw.strip()
+    if not url.startswith(("http://", "https://")) or len(url) > 2048:
+        raise HTTPException(400, "enter a valid http(s) url")
+    return url
+
+
+def user_email_key(email: str) -> str: return f"link:user:email:{email}"
+def user_id_key(uid: str) -> str: return f"link:user:id:{uid}"
+def slug_key(slug: str) -> str: return f"link:slug:{slug}"
+def owner_key(uid: str) -> str: return f"link:owner:{uid}"
+def clicks_key(slug: str) -> str: return f"clicks:{slug}"
+def qr_key(slug: str) -> str: return f"qr:{slug}"
+def click_topic(slug: str) -> str: return f"clicks:{slug}"
+```
+
+## Accounts
+
+Sign-up throttles by email, hashes the password, and claims the email with a
+"set if not present" write that returns `False` when it's taken. Login verifies the
+password and starts a session. Protected routes validate the bearer token up front.
+
+```python title="app/routes.py"
+import io
+import json
+import uuid
+from datetime import UTC, datetime, timedelta
+from typing import Annotated, Any
+
+import segno
+from fastapi import APIRouter, Header, HTTPException, Request, Response
+from fastapi.responses import RedirectResponse, StreamingResponse
+from pydantic import BaseModel
+
+from .utils import (RESERVED, SLUG_RE, bearer_token, click_topic, clicks_key,
+                    owner_key, qr_key, random_slug, slug_key, user_email_key,
+                    user_id_key, validate_url)
+from .worker import delete_link
+
+api = APIRouter()
+AuthH = Annotated[str | None, Header(alias="Authorization")]
+
+
+class Credentials(BaseModel):
+    email: str
+    password: str
+
+
+class LinkCreate(BaseModel):
+    url: str
+    slug: str | None = None
+    ttl_seconds: int | None = None
+
+
+@api.post("/api/signup", status_code=201)
+async def signup(request: Request, body: Credentials) -> dict[str, Any]:
+    forge = request.app.state.forge
+    email = body.email.strip().lower()
+
+    limit = await forge.rate_limit_check("links-auth", email, 20, 60.0, True)
+    if not limit.allowed:
+        raise HTTPException(429, "too many attempts; slow down")
+
+    user = {"id": str(uuid.uuid4()), "email": email,
+            "password_hash": await forge.hash_password(body.password)}
+    body_json = json.dumps(user)
+
+    if not await forge.kv_set(user_email_key(email), body_json, None, True):
+        raise HTTPException(409, "email already registered")
+    await forge.kv_set(user_id_key(user["id"]), body_json)
+
+    token = await forge.create_session(user["id"], 1800.0, 604800.0)
+    return {"token": token, "user": {"id": user["id"], "email": email}}
+
+
+@api.post("/api/login")
+async def login(request: Request, body: Credentials) -> dict[str, Any]:
+    forge = request.app.state.forge
+    email = body.email.strip().lower()
+
+    limit = await forge.rate_limit_check("links-auth", email, 20, 60.0, True)
+    if not limit.allowed:
+        raise HTTPException(429, "too many attempts; slow down")
+
+    raw = await forge.kv_get(user_email_key(email))
+    if raw is None:
+        raise HTTPException(401, "invalid email or password")
+    user = json.loads(raw)
+    if not await forge.verify_password(body.password, user["password_hash"]):
+        raise HTTPException(401, "invalid email or password")
+
+    token = await forge.create_session(user["id"], 1800.0, 604800.0)
+    return {"token": token, "user": {"id": user["id"], "email": email}}
+
+
+async def require_user(forge, authorization: str | None) -> str:
+    user_id = await forge.validate_session(bearer_token(authorization))
+    if user_id is None:
+        raise HTTPException(401, "authentication required")
+    return user_id
+```
+
+## Create a link
+
+This is where five primitives come together. A feature flag decides whether this user
+may pick a custom slug. A config value supplies the per-user quota. Reserving the slug
+is a "set if not present" write, so the slug key is its own collision check, with a
+retry loop for the random case. Then store a QR image in blob, and if the link has a
+TTL, schedule its deletion.
+
+```python title="app/routes.py (continued)"
+DEFAULT_MAX_LINKS = 100
+
+
+@api.post("/api/links", status_code=201)
+async def create_link(request: Request, body: LinkCreate, authorization: AuthH = None) -> dict[str, Any]:
+    forge = request.app.state.forge
+    user_id = await require_user(forge, authorization)
+    url = validate_url(body.url)
+
+    # config: per-user quota, with a code default when unset
+    raw_max = await forge.config_get("max_links_per_user")
+    max_links = int(raw_max) if raw_max else DEFAULT_MAX_LINKS
+    owned = json.loads(await forge.kv_get(owner_key(user_id)) or "[]")
+    if len(owned) >= max_links:
+        raise HTTPException(409, "link limit reached")
+
+    # feature flag: custom slugs, evaluated for this user
+    custom_on = await forge.flag("custom_slugs", False, user_id)
+    now = datetime.now(UTC).isoformat()
+    expires_at = None
+    if body.ttl_seconds and body.ttl_seconds > 0:
+        expires_at = (datetime.now(UTC) + timedelta(seconds=body.ttl_seconds)).isoformat()
+
+    def record(s: str) -> str:
+        return json.dumps({"slug": s, "url": url, "ownerId": user_id,
+                           "createdAt": now, "expiresAt": expires_at})
+
+    # reserve the slug; a "set if not present" miss means it's taken
+    if body.slug and custom_on:
+        slug = body.slug
+        if not SLUG_RE.match(slug) or slug in RESERVED:
+            raise HTTPException(400, "invalid slug")
+        if not await forge.kv_set(slug_key(slug), record(slug), None, True):
+            raise HTTPException(409, "slug already taken")
+    else:
+        for _ in range(5):
+            slug = random_slug()
+            if await forge.kv_set(slug_key(slug), record(slug), None, True):
+                break
+        else:
+            raise HTTPException(409, "could not allocate a slug")
+
+    owned.insert(0, {"slug": slug, "url": url, "createdAt": now, "expiresAt": expires_at})
+    await forge.kv_set(owner_key(user_id), json.dumps(owned))
+
+    # render a QR image and store it in blob
+    buf = io.BytesIO()
+    segno.make(f"/{slug}", error="m").save(buf, kind="svg", scale=4, border=1)
+    await forge.blob_put(qr_key(slug), buf.getvalue(), "image/svg+xml")
+
+    # schedule a one-shot delete at the TTL
+    if expires_at:
+        when_ms = datetime.fromisoformat(expires_at).timestamp() * 1000
+        await forge.schedule_at(when_ms, "link-expire", json.dumps({"slug": slug}))
+
+    return {"slug": slug, "url": url, "createdAt": now, "expiresAt": expires_at, "clicks": 0}
+```
+
+## Redirect fast
+
+The redirect is the hot path, so keep it lean: look up the link, honor its expiry,
+check a per-slug rate limit so one link can't be used to flood you, bump the atomic
+counter, queue the rest, and redirect. The counter increment is cheap and stays
+inline; everything derived from the click is deferred to the worker.
+
+```python title="app/routes.py (continued)"
+# registered last so it never shadows /api/... routes
+@api.get("/{slug}")
+async def redirect(request: Request, slug: str) -> Response:
+    if not SLUG_RE.match(slug) or slug in RESERVED:
+        raise HTTPException(404, "link not found")
+    forge = request.app.state.forge
+
+    raw = await forge.kv_get(slug_key(slug))
+    if raw is None:
+        raise HTTPException(404, "link not found")
+    link = json.loads(raw)
+
+    if link["expiresAt"] and datetime.fromisoformat(link["expiresAt"]) <= datetime.now(UTC):
+        raise HTTPException(404, "link not found")
+
+    rl = await forge.rate_limit_check("redirect", slug, 600, 60.0, True)
+    if not rl.allowed:
+        raise HTTPException(429, "too many requests")
+
+    await forge.kv_incr(clicks_key(slug), 1)
+    await forge.queue("clicks").enqueue({"slug": slug}, max_attempts=3)
+
+    return RedirectResponse(link["url"], status_code=302)
+```
+
+## Live counts and the QR image
+
+The dashboard opens a server-sent events stream; the route subscribes to the slug's
+topic and forwards each message, closing the subscription when the client leaves. The
+QR image is just a blob read.
+
+```python title="app/routes.py (continued)"
+@api.get("/api/links/{slug}/live")
+async def live(request: Request, slug: str) -> StreamingResponse:
+    forge = request.app.state.forge
+
+    async def events():
+        async for event in forge.topic(click_topic(slug)).subscribe():
+            yield f"data: {json.dumps(event)}\n\n"
+
+    return StreamingResponse(events(), media_type="text/event-stream")
+
+
+@api.get("/api/links/{slug}/qr.svg")
+async def qr(request: Request, slug: str) -> Response:
+    svg = await request.app.state.forge.blob_get(qr_key(slug))
+    if svg is None:
+        raise HTTPException(404, "not found")
+    return Response(content=svg, media_type="image/svg+xml")
+```
+
+## The workers
+
+Two queues need draining. The `clicks` worker reads the current count and publishes it
+so live dashboards update. The `link-expire` worker deletes a link when its scheduled
+TTL fires. The scheduler loop turns due `schedule_at` jobs into queue work and runs the
+maintenance sweep. The delete is idempotent, which is what makes at-least-once
+redelivery safe.
+
+```python title="app/worker.py"
+import asyncio
+import json
+
+from .utils import click_topic, clicks_key, owner_key, qr_key, slug_key
+
+
+async def delete_link(forge, slug: str) -> None:
+    raw = await forge.kv_get(slug_key(slug))
+    if raw is None:
+        return                      # already gone; idempotent
+    owner_id = json.loads(raw).get("ownerId")
+    if owner_id:
+        owned = json.loads(await forge.kv_get(owner_key(owner_id)) or "[]")
+        owned = [x for x in owned if x.get("slug") != slug]
+        await forge.kv_set(owner_key(owner_id), json.dumps(owned))
+    await forge.kv_delete(slug_key(slug))
+    await forge.kv_delete(clicks_key(slug))
+    await forge.blob_delete(qr_key(slug))
+
+
+async def clicks_worker(forge, stop: asyncio.Event) -> None:
+    async def handle(job):
+        slug = job.payload["slug"]
+        total = int(await forge.kv_get(clicks_key(slug)) or "0")
+        await forge.topic(click_topic(slug)).publish({"slug": slug, "clicks": total})
+
+    await forge.worker("clicks", handle, wait_seconds=1.0, stop=stop)
+
+
+async def expire_worker(forge, stop: asyncio.Event) -> None:
+    async def handle(job):
+        await delete_link(forge, job.payload["slug"])
+
+    await forge.worker("link-expire", handle, wait_seconds=5.0, stop=stop)
+
+
+async def scheduler_loop(forge, stop: asyncio.Event) -> None:
+    while not stop.is_set():
+        try:
+            await forge.run_scheduler_once()
+            await forge.maintain()
+        except Exception as exc:
+            print("scheduler:", exc, flush=True)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=30.0)
+        except TimeoutError:
+            pass
+```
+
+## Run it
+
+```sh
+createdb linksapp
+uvicorn app.main:app --reload
+```
+
+```sh title="Terminal"
+TOKEN=$(curl -s localhost:8000/api/signup -H 'content-type: application/json' \
+  -d '{"email":"a@b.com","password":"supersecret"}' | jq -r .token)
+
+# create a link
+curl -s localhost:8000/api/links -H "authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' -d '{"url":"https://example.com"}'
+
+# follow the slug it returns and watch the counter
+curl -is localhost:8000/<slug>
+```
+
+That's all eight primitives in one app. The chat tutorial uses the same pieces for a
+realtime app, in Node.
+
+<LinkCard title="Build a chat app (Node)" href="/tutorials/chat-app/" description="Realtime messages, presence, typing, and attachments in Hono." />

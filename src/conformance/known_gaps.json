@@ -1,0 +1,4 @@
+{
+  "comment": "Each entry is a (scenario, op?, language) expected to FAIL today. CI asserts the observed failure set equals exactly this set. When a fix lands, delete its entry here so CI flips green. See conformance/README.md.",
+  "gaps": []
+}

@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO forge_sessions (token_hash, user_id, idle_secs, idle_deadline, abs_deadline, app) VALUES ($1, $2, $3, now() + make_interval(secs => $3), now() + make_interval(secs => $4), $5)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Float8",
+        "Float8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8c823e5d36c2cb379dd84dd42c91bd316aacae9a2bc9bda04700741a1cc1d659"
+}

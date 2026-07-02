@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT tokens,\n                      EXTRACT(EPOCH FROM (now() - updated_at))::float8 AS \"elapsed!\"\n               FROM forge_ratelimit WHERE bucket = $1 AND subject = $2 FOR UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "tokens",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 1,
+        "name": "elapsed!",
+        "type_info": "Float8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      true,
+      null
+    ]
+  },
+  "hash": "4563091dbceff822964ee1aaafae15872e162873cff31f9a97257d881d08798d"
+}

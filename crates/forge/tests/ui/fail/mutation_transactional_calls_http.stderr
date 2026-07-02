@@ -1,5 +1,0 @@
-error: `risky_http` calls ctx.http() inside a transactional mutation. The HTTP request cannot be rolled back if the transaction fails, and the database connection is held open for the full HTTP round-trip. To fix: move the HTTP call outside the transaction by using `#[mutation(transactional = false)]` and dispatching a job for the DB write, or restructure so http() is called after the mutation returns. If the HTTP call is intentionally safe un-rolled-back (e.g. an idempotent read-only request), suppress with `#[mutation(allow_http = true)]`.
- --> tests/ui/fail/mutation_transactional_calls_http.rs:9:14
-  |
-9 | pub async fn risky_http(ctx: &MutationContext) -> Result<()> {
-  |              ^^^^^^^^^^

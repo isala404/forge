@@ -1,0 +1,23 @@
+{
+  "primitive": "pubsub",
+  "scenarios": [
+    {
+      "name": "publish_delivers_to_active_subscriber",
+      "note": "In-process: a payload published after a subscribe reaches that live subscriber. Durability and cross-process delivery are caveats(), out of the matrix.",
+      "steps": [
+        { "op": "pubsub.subscribe", "args": { "topic": "chat" }, "as": "sub1" },
+        { "op": "pubsub.publish", "args": { "topic": "chat", "payload": "hello" } },
+        { "op": "pubsub.receive", "args": { "from": "sub1" }, "expect": { "value": "hello" } }
+      ]
+    },
+    {
+      "name": "namespace_isolation_blocks_delivery",
+      "note": "A subscriber in namespace app-a must not receive a publish made in namespace app-b; the receive bounded-waits and reports a timeout instead of hanging.",
+      "steps": [
+        { "op": "pubsub.subscribe", "args": { "topic": "shared" }, "as": "subA", "namespace": "app-a" },
+        { "op": "pubsub.publish", "args": { "topic": "shared", "payload": "from-b" }, "namespace": "app-b" },
+        { "op": "pubsub.receive", "args": { "from": "subA" }, "namespace": "app-a", "expect": { "shape": { "timeout": true } } }
+      ]
+    }
+  ]
+}

@@ -1,382 +1,221 @@
-# FORGE
+# Forge - the standard library for agent-built SaaS
 
-**The full-stack Rust framework that compiles your backend into one binary, powered by PostgreSQL.**
+Every app needs the same plumbing, and the usual answer is a separate service for each piece:
 
-Queries, mutations, background jobs, cron, durable workflows, real-time subscriptions, webhooks, and MCP tools — all written as plain Rust functions, all served from a single process, all backed by the database you already know.
+- Redis for caching and sessions
+- a queue for background jobs
+- object storage for uploads
+- an auth service for logins and sessions
+- a cron runner for scheduled work
+- a rate limiter
 
-> [!IMPORTANT]
-> **Forge is changing direction.** The full-stack framework described below is no longer where the project is headed. Forge is being rebuilt as a *standard library for agent-built SaaS*: one crate, one Postgres connection, and a small frozen set of hardened infrastructure primitives — `kv`, `queue`, `schedule`, `blob`, `config`/flags, `ratelimit`, `auth`, and `llm` — that an AI agent targets once and reuses everywhere, with pluggable backends (Postgres by default) behind a stable interface.
->
-> Active development now happens on the [`rewrite`](../../tree/rewrite) branch. This `main` branch stays available but is no longer maintained.
+Six things to provision, secure, mock in tests, and learn before you ship a feature. It's worse for an AI agent building the app, where each service is more to wire up and another API to get wrong.
+
+Forge does all of it in one library, with the same API in Rust, Node, and Python.
+
+## One connection, eight primitives
 
 ```bash
-curl -fsSL https://tryforge.dev/install.sh | sh  # or: cargo install forgex
-forge new my-app --template with-svelte/minimal && cd my-app
-docker compose up --build
+npm install forgelib
 ```
 
-[![Crates.io](https://img.shields.io/crates/v/forgex.svg)](https://crates.io/crates/forgex)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Docs](https://img.shields.io/badge/docs-tryforge.dev-blue)](https://tryforge.dev/docs)
+Configuration lives in a `forge.toml` at your project root. `init()` reads it and
+instantiates the runtime; string values may reference the environment as `${VAR}`:
 
-![Real-time sync between iOS and web](docs/static/demo/web-ios-sync.gif)
-
-One mutation. Both clients update instantly. No manual cache busting, no fetch wrappers, no pub/sub to configure.
-
----
-
-## What You Get
-
-- **One binary, one database.** Gateway, workers, scheduler, and daemons run in the same process. PostgreSQL is the only moving part.
-- **Type safety from SQL to UI.** `sqlx` checks your queries at compile time. `#[forge::model]` generates the matching TypeScript or Rust types for your frontend.
-- **Real-time by default.** Compile-time SQL parsing extracts table dependencies. PostgreSQL `LISTEN/NOTIFY` invalidates affected subscriptions. SSE pushes diffs to clients.
-- **Durable by design.** Jobs and workflow state live in PostgreSQL. They survive restarts, deployments, and crashes.
-- **Frontends as first-class targets.** SvelteKit and Dioxus today, more to come. Same Rust source of truth generates bindings for whichever you pick.
-
----
-
-## Write a Function, Get an API
-
-### Queries and Mutations
-
-```rust
-#[forge::query(cache = "30s")]
-pub async fn get_user(ctx: &QueryContext, id: Uuid) -> Result<User> {
-    sqlx::query_as!(User, "SELECT * FROM users WHERE id = $1", id)
-        .fetch_one(ctx.db())
-        .await
-        .map_err(Into::into)
-}
-
-#[forge::mutation(transactional)]
-pub async fn create_user(ctx: &MutationContext, input: CreateUser) -> Result<User> {
-    let mut conn = ctx.conn().await?;
-    let user = sqlx::query_as!(User, "INSERT INTO users (email) VALUES ($1) RETURNING *", &input.email)
-        .fetch_one(&mut *conn)
-        .await?;
-
-    ctx.dispatch_job("send_welcome_email", json!({ "user_id": user.id })).await?;
-
-    Ok(user)
-}
+```toml
+[postgres]
+url = "${DATABASE_URL:-postgres://localhost/myapp}"
 ```
 
-These become typed RPC endpoints automatically. The same Rust source generates frontend bindings — TypeScript for SvelteKit, Rust plus hooks for Dioxus — so your client is always in sync. Transactional mutations buffer `dispatch_job` calls and insert them atomically when the transaction commits. If the mutation fails, the job never exists.
+Omit settings you do not need; Forge applies production-safe defaults for the rest.
 
-### Background Jobs
+```ts
+import { ForgeClient } from "forgelib";
 
-```rust
-#[forge::job(retry(max_attempts = 3, backoff = "exponential"))]
-pub async fn send_welcome_email(ctx: &JobContext, input: EmailInput) -> Result<()> {
-    ctx.progress(0, "Starting...")?;
+const forge = await ForgeClient.init(); // instantiates the runtime from ./forge.toml
 
-    let user = fetch_user(ctx.db(), input.user_id).await?;
-    send_email(&user.email, "Welcome!").await?;
+// auth: argon2 password hashing and sessions
+const hash = await forge.hashPassword(password);
+const session = await forge.createSession(userId);
 
-    ctx.progress(100, "Sent")?;
-    Ok(())
-}
+// rate limit: 20 attempts per minute, keyed by email
+const limit = await forge.rateLimitCheck("login", email, 20, 60);
+if (!limit.allowed) throw new Error("slow down");
+
+// key/value: TTL cache and atomic counters
+await forge.kv<typeof profile>(`user:${userId}`).set(profile, { ttlSeconds: 3600 });
+const views = await forge.kvIncr(`views:${userId}`, 1);
+
+// queue: background jobs
+await forge.queue<{ to: string }>("emails").enqueue({ to: email });
+
+// pub/sub: fan an event out to subscribers
+await forge.topic<{ userId: string }>("user.created").publish({ userId });
+
+// blob: store a file, hand back a link that expires in an hour
+await forge.blobPut(`exports/${userId}.csv`, csv, "text/csv");
+const link = await forge.blobPresignDownload(`exports/${userId}.csv`, 3600);
+
+// schedule: recurring work on a cron
+await forge.scheduleCron("nightly-report", "0 0 * * *", "reports", "{}");
+
+// feature flags: roll a feature out to 25% of users
+await forge.setFlagPercent("new-ui", 25);
+const newUi = await forge.flag("new-ui", false, userId);
 ```
 
-Persisted in PostgreSQL, claimed with `SKIP LOCKED`, bounded by a worker semaphore. Survive restarts. Retry with backoff. Report progress in real-time to any client that wants to watch.
-
-### Cron
-
-```rust
-#[forge::cron("0 9 * * *")]
-#[timezone = "America/New_York"]
-pub async fn daily_digest(ctx: &CronContext) -> Result<()> {
-    if ctx.is_late() {
-        ctx.log.warn("Running late", json!({ "delay": ctx.delay() }));
-    }
-
-    generate_and_send_digest(ctx.db()).await
-}
-```
-
-Cron expressions validated at compile time. Timezone-aware. Leader-elected so it runs exactly once across all instances, with catch-up for missed runs.
-
-### Durable Workflows
-
-```rust
-#[forge::workflow(name = "free_trial", version = "2026-03", active, timeout = "60d")]
-pub async fn free_trial_flow(ctx: &WorkflowContext, user: User) -> Result<()> {
-    ctx.step("start_trial")
-        .run(|| activate_trial(&user))
-        .compensate(|_| deactivate_trial(&user))
-        .await?;
-
-    ctx.step("send_welcome").run(|| send_email(&user, "Welcome!")).await?;
-
-    ctx.sleep(Duration::from_days(45)).await;  // Survives deployments.
-
-    ctx.step("trial_ending").run(|| send_email(&user, "3 days left!")).await?;
-
-    let decision: Value = ctx
-        .wait_for_event("plan_selected", Some(Duration::from_days(3)))
-        .await?;
-
-    ctx.step("convert_or_expire")
-        .run(|| resolve_trial(&user, &decision))
-        .await?;
-
-    Ok(())
-}
-```
-
-Workflows are versioned and signature-guarded. New runs pin to the active version; in-flight runs resume only on exact version and signature match. Sleep for 45 days, deploy new code, restart servers, scale up — the workflow picks up exactly where it left off. Compensation runs automatically in reverse order if a later step fails.
-
-### Real-Time Subscriptions
-
-```svelte
-<script lang="ts">
-  import { listUsersStore$ } from '$lib/forge';
-
-  const users = listUsersStore$();
-</script>
-
-{#each $users.data ?? [] as user}
-  <div>{user.email}</div>
-{/each}
-```
-
-Compile-time SQL parsing extracts table dependencies (including JOINs and subqueries). PostgreSQL triggers fire `NOTIFY` on changes. Forge re-runs affected queries, hashes the results, and pushes diffs to subscribed clients over SSE. No cache to invalidate, no channels to wire up.
-
-### Webhooks
-
-```rust
-#[forge::webhook(
-    path = "/hooks/stripe",
-    signature = WebhookSignature::hmac_sha256("Stripe-Signature", "STRIPE_WEBHOOK_SECRET"),
-    idempotency = "header:Idempotency-Key",
-)]
-pub async fn stripe(ctx: &WebhookContext, payload: Value) -> Result<WebhookResult> {
-    ctx.dispatch_job("process_payment", payload.clone()).await?;
-    Ok(WebhookResult::Accepted)
-}
-```
-
-Signature validation, idempotency tracking, and job dispatch in a single handler.
-
-### MCP Tools
-
-```rust
-#[forge::mcp_tool(name = "tickets.list", title = "List Support Tickets", read_only)]
-pub async fn list_tickets(ctx: &McpToolContext) -> Result<Vec<Ticket>> {
-    sqlx::query_as("SELECT * FROM tickets")
-        .fetch_all(ctx.db())
-        .await
-        .map_err(Into::into)
-}
-```
-
-Expose any function as an MCP tool with the same auth, rate limiting, and validation as your API. AI agents get first-class access alongside your human users.
-
----
-
-## Type Safety, End to End
-
-```rust
-#[forge::model]
-pub struct User {
-    pub id: Uuid,
-    pub email: String,
-    pub role: UserRole,
-    pub created_at: DateTime<Utc>,
-}
-
-#[forge::model]
-pub enum UserRole { Admin, Member, Guest }
-```
-
-```typescript
-// Generated automatically
-export interface User {
-  id: string;
-  email: string;
-  role: UserRole;
-  created_at: string;
-}
-
-export type UserRole = "Admin" | "Member" | "Guest";
-
-import { api } from "$lib/forge";
-const user = await api.get_user({ id: "..." }); // Fully typed
-```
-
-If your Rust code compiles, your frontend types are correct and your SQL is valid.
-
-`forge migrate prepare` runs pending migrations and then refreshes the `.sqlx/` offline cache so CI can build without a live database. `forge check` verifies that the cache is up to date.
-
----
-
-## Built for Real Workloads
-
-Forge ships an adaptive capacity benchmark that ramps concurrent users until the system breaks. Every user holds a live SSE subscription while continuously making RPC calls; 30% of traffic is writes that trigger the full reactivity pipeline.
-
-On a 12-core laptop with PostgreSQL 18 in Docker and two Forge instances:
-
-- **12,535 req/s** peak throughput with p90 under 50ms
-- **2,250 concurrent SSE users** with zero errors, each maintaining a live subscription plus 10 req/s
-- **30% writes**, each propagated through `NOTIFY` → invalidation → re-execution → SSE fan-out
-
-Scaling to ~10,000 concurrent SSE users on dedicated infrastructure (4× Forge + primary + 2 replicas) projects to roughly $1,200/month on AWS on-demand pricing. Full methodology, tuning knobs, and a reproducible benchmark are in [`benchmarks/app/`](benchmarks/app) and [the performance docs](https://tryforge.dev/docs/scale/performance).
-
----
-
-## Architecture
-
-```
-┌──────────────────────────────────────────┐
-│                forge run                 │
-├─────────────┬─────────────┬──────────────┤
-│   Gateway   │   Workers   │  Scheduler   │
-│ (HTTP/SSE)  │   (Jobs)    │    (Cron)    │
-└──────┬──────┴──────┬──────┴──────┬───────┘
-       │             │             │
-       └─────────────┼─────────────┘
-                     │
-              ┌──────▼──────┐
-              │ PostgreSQL  │
-              └─────────────┘
-```
-
-One process, multiple subsystems:
-
-- **Gateway** — HTTP and SSE server built on [Axum](https://github.com/tokio-rs/axum)
-- **Workers** — Pull jobs from PostgreSQL using `FOR UPDATE SKIP LOCKED`
-- **Scheduler** — Leader-elected cron runner via advisory locks
-- **Daemons** — Long-running singleton processes with leader election
-
-Scale horizontally by running more instances. They coordinate through PostgreSQL: `SKIP LOCKED` for queues, `LISTEN/NOTIFY` for fan-out, advisory locks for leadership. No service mesh, no gossip protocol, no extra cluster to operate.
-
-```
-forge              → Public API, Forge::builder(), prelude, CLI
-├── forge-runtime  → Gateway, function router, job worker, workflow executor, cron scheduler
-│   ├── forge-core → Types, traits, errors, contexts, schema definitions
-│   └── forge-macros → #[query], #[mutation], #[job], #[workflow], #[cron], ...
-└── forge-codegen  → Framework binding generators (SvelteKit, Dioxus)
-```
-
----
-
-## CLI
-
-Development runs through `docker compose up --build`, which starts PostgreSQL, a cargo-watch backend, and the selected frontend. `forge new` takes an explicit template id such as `with-svelte/minimal`, `with-svelte/demo`, or `with-dioxus/realtime-todo-list`.
+<details>
+<summary>The same in Rust</summary>
 
 ```bash
-forge generate                   # generate frontend bindings from backend code
-forge generate --target dioxus   # force a specific target when detection isn't enough
-forge check                      # validate config, migrations, project health
-forge migrate status             # check which migrations have run
-forge migrate up                 # apply pending migrations (forward-only)
-forge migrate prepare            # refresh the .sqlx offline cache
+cargo add forgelib
 ```
 
-### Deploy
+```rust
+use std::time::Duration;
+use forgelib::{
+    Forge, Bytes, SetOpts, EnqueueOpts, PutOpts,
+    ScheduleOpts, SessionOpts, Limit, FlagRule, EvalCtx,
+};
+
+let forge = Forge::init().await?; // instantiates the runtime from ./forge.toml
+
+// auth
+let hash = forge.auth().hash_password(&password).await?;
+let session = forge.auth().create_session(&user_id, SessionOpts::default()).await?;
+
+// rate limit
+let limit = forge.ratelimit()
+    .check("login", &email, Limit::per_duration(20, Duration::from_secs(60)))
+    .await?;
+
+// key/value
+forge.kv().set(&format!("user:{user_id}"), profile.into(),
+    SetOpts::new().with_ttl(Duration::from_secs(3600))).await?;
+let views = forge.kv().incr(&format!("views:{user_id}"), 1).await?;
+
+// queue
+forge.queue().enqueue("emails", payload.into(), EnqueueOpts::new()).await?;
+
+// pub/sub
+forge.pubsub().publish("user.created", Bytes::from(event)).await?;
+
+// blob
+forge.blob().put(&key, body, PutOpts::new()).await?;
+let link = forge.blob().presign_download(&key, Duration::from_secs(3600)).await?;
+
+// schedule
+forge.schedule().cron("nightly-report", "0 0 * * *", "reports", Bytes::new(), ScheduleOpts::new()).await?;
+
+// feature flags
+forge.config().set_flag("new-ui", FlagRule::Percent(25)).await?;
+let new_ui = forge.config().flag("new-ui", false, &EvalCtx::user(user_id)).await;
+```
+</details>
+
+<details>
+<summary>The same in Python</summary>
 
 ```bash
-cargo build --release
-./target/release/my-app
+pip install forgelib
 ```
 
-One binary, embedding the frontend build and the entire runtime. Point it at PostgreSQL and it runs. See [the deployment guide](https://tryforge.dev/docs/ship/deploy) for Docker, Kubernetes, graceful shutdown, and rolling updates.
+```python
+import forgelib
 
----
+forge = await forgelib.ForgeClient.init()  # instantiates the runtime from ./forge.toml
 
-## Debugging
+# auth
+hash = await forge.hash_password(password)
+session = await forge.create_session(user_id)
 
-Everything runs through PostgreSQL, which means everything is queryable.
+# rate limit
+limit = await forge.rate_limit_check("login", email, 20, 60)
+if not limit.allowed:
+    raise RuntimeError("slow down")
 
-### Health Endpoints
+# key/value
+await forge.kv(f"user:{user_id}").set(profile, ttl_seconds=3600)
+views = await forge.kv_incr(f"views:{user_id}", 1)
 
+# queue
+await forge.queue("emails").enqueue({"to": email})
+
+# pub/sub
+await forge.topic("user.created").publish({"user_id": user_id})
+
+# blob
+await forge.blob_put(f"exports/{user_id}.csv", csv, "text/csv")
+link = await forge.blob_presign_download(f"exports/{user_id}.csv", 3600)
+
+# schedule
+await forge.schedule_cron("nightly-report", "0 0 * * *", "reports", "{}")
+
+# feature flags
+await forge.set_flag_percent("new-ui", 25)
+new_ui = await forge.flag("new-ui", False, user_id)
 ```
-GET /_api/health    → { "status": "healthy", "version": "0.4.1" }
-GET /_api/ready     → { "ready": true, "database": true, "reactor": true, "workflows": true }
+</details>
+
+## What you get
+
+| Primitive | What it does |
+| --- | --- |
+| key/value | get, set, mget, incr, compare-and-swap, prefix scan, TTLs |
+| queue | enqueue and dequeue with acks, retries, delays, dedup, depth |
+| pub/sub | publish and subscribe on topics |
+| blob | put, get, delete, presigned upload and download URLs |
+| auth | password hashing, sessions, API keys |
+| rate limit | token-bucket or sliding-window checks |
+| schedule | cron and one-off jobs |
+| config | settings and feature flags with percentage rollout |
+
+By default every primitive runs on one Postgres database, so there's nothing else to operate. When one needs to scale, move that piece onto its own backend without changing your code.
+
+## Test on memory, ship on Postgres
+
+The memory and Postgres backends pass the same conformance suite, so tests run in-process with no database and behave the way production will. Pick the backend in `forge.toml`, using a `${VAR}` reference so the same file flips between tests and production from the environment.
+
+```toml
+[backends]
+default = "${FORGE_BACKEND:-postgres}"  # FORGE_BACKEND=memory in tests
+
+[postgres]
+url = "${DATABASE_URL:-postgres://localhost/myapp}"
 ```
 
-### Inspect Jobs and Workflows
+## Build it with an agent
 
-```sql
--- pending jobs
-SELECT id, job_type, status, attempts, scheduled_at
-FROM forge_jobs WHERE status = 'pending' ORDER BY scheduled_at;
-
--- in-flight workflows
-SELECT id, workflow_name, workflow_version, status, current_step, started_at
-FROM forge_workflow_runs WHERE status IN ('created', 'running');
-
--- blocked workflows (version/signature mismatches after a deploy)
-SELECT id, workflow_name, blocking_reason
-FROM forge_workflow_runs WHERE status LIKE 'blocked_%';
-```
-
-### System Tables
-
-| Table                        | What it tracks                      |
-| ---------------------------- | ----------------------------------- |
-| `forge_jobs`                 | Job queue, status, errors, progress |
-| `forge_cron_runs`            | Cron execution history              |
-| `forge_workflow_definitions` | Registered workflow versions        |
-| `forge_workflow_runs`        | Workflow instances and state        |
-| `forge_workflow_steps`       | Individual step results             |
-| `forge_nodes`                | Cluster node registry               |
-| `forge_leaders`              | Leader election state               |
-| `forge_daemons`              | Long-running process status         |
-| `forge_sessions`             | Active SSE connections              |
-| `forge_subscriptions`        | Live query subscriptions            |
-| `forge_rate_limits`          | Token bucket state                  |
-| `forge_webhook_events`       | Webhook idempotency tracking        |
-
-Distributed tracing is built in via OpenTelemetry (OTLP over HTTP). Queries slower than 500ms are logged as warnings automatically. Signals — built-in product analytics — correlate every frontend event to the backend RPC call that caused it via a shared `x-correlation-id`.
-
----
-
-## Who It's For
-
-Forge is opinionated. It's a great fit if you're:
-
-- A **solo developer or small team** shipping a SaaS product and want to spend your time on the product
-- A team that **values correctness** and wants errors at compile time rather than 3 AM
-- Someone who prefers **boring, well-understood infrastructure** (a database, a binary) over a distributed system you have to operate
-
-Less of a fit if you:
-
-- Need to integrate deeply with cloud-native primitives like Lambda, DynamoDB, or Pub/Sub
-- Are building for millions of concurrent connections out of the gate (Forge targets tens of thousands of concurrent SSE users per cluster)
-- Have a platform team that wants fine-grained control over each component in isolation
-
----
-
-## AI Agents
-
-Building with an AI coding agent? Install the [`forge-idiomatic-engineer`](docs/skills/forge-idiomatic-engineer) skill for Forge-aware code generation:
+Forge's API isn't in any model's training data, so a coding agent won't know it cold. Install the `forge-idiomatic-developer` skill so your agent learns the conventions before it writes any Forge code.
 
 ```bash
-bunx skills add https://github.com/isala404/forge/tree/main/docs/skills/forge-idiomatic-engineer
+npx skills add isala404/forge
 ```
 
-It's installed automatically when you run `forge new`.
+It teaches which primitive fits which task and the idioms for each language, so you get working code instead of guesses.
 
----
+## Not in scope
 
-## Project Maturity
+- The APIs are a shared subset, not a full reimplementation. key/value covers the Redis commands most apps use, not Lua scripts or sorted sets. blob does CRUD and presigned URLs, not S3 lifecycle rules.
+- auth is the essentials: password hashing, sessions, and API keys, enough to have working auth in minutes while you prototype. For OAuth, 2FA, or email verification, bring Clerk, Firebase, or a dedicated provider.
+- Forge ships two backends, memory and Postgres, plus local disk for blob. If you need Redis or S3, implement the primitive's trait and inject it, or use that service directly.
+- Not an ORM or a web framework. Your tables and routes stay yours.
 
-Forge is pre-1.0. Breaking changes happen between releases and are documented in [CHANGELOG.md](CHANGELOG.md) — pin your version if you need stability. Great for side projects, internal tools, and early-stage products. Once the core API settles, we cut 1.0 and commit to semver.
+## Examples
 
-[Contributions welcome](CONTRIBUTING.md).
+Three full apps in [`examples/`](./examples), each built on the Rust, Node, and Python backends with a React frontend.
 
----
+- todo: accounts, lists, and a background audit queue
+- links: a URL shortener with click counts, QR images, and analytics
+- chat: real-time messaging with presence
 
 ## License
 
 MIT. Do whatever you want.
 
----
-
 <p align="center">
-  <strong>PostgreSQL is enough.</strong><br>
-  <a href="https://tryforge.dev/docs/quick-start">Get Started</a> ·
-  <a href="https://tryforge.dev/docs">Documentation</a> ·
+  <strong>Postgres is enough.</strong><br>
+  <a href="#one-connection-eight-primitives">Quick Start</a> ·
+  <a href="#examples">Examples</a> ·
   <a href="https://github.com/isala404/forge/discussions">Discussions</a>
 </p>

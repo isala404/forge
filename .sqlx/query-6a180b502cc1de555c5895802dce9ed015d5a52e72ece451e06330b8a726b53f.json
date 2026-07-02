@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE forge_jobs SET status = 'dead', attempts = $2, lease_token = NULL, leased_until = NULL, lease_secs = NULL WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6a180b502cc1de555c5895802dce9ed015d5a52e72ece451e06330b8a726b53f"
+}

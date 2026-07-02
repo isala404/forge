@@ -1,0 +1,224 @@
+---
+title: Operations
+description: "Running Forge in production: the system database, workers, the scheduler, health checks, durability, and error handling."
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+Forge runs inside your process. It doesn't start threads or daemons on its own, so
+the background work, the scheduler, and the maintenance sweep are loops you run. This
+page covers what to run and what to watch once Forge is behind real traffic.
+
+## The system database
+
+At `init()` Forge connects to the database in `[postgres]`, takes a lock, and runs
+its migrations. It owns its `forge_*` tables and nothing else should write to them.
+Point it at a database or schema that's Forge's alone and keep your product tables
+separate.
+
+Because `init()` migrates, the system pool needs at least two connections: one holds
+the migration lock while another runs the SQL. That's the default, so it only
+matters if you lower `max_connections`.
+
+## Workers
+
+A queue holds jobs until a worker leases them. Run a worker per queue. Each binding
+has a managed worker that handles leasing, heartbeats, acks, retries, and graceful
+shutdown.
+
+<Tabs syncKey="lang">
+	<TabItem label="Node" icon="seti:javascript">
+
+		```ts
+		type SendEmail = { to: string };
+
+		await forge.worker<SendEmail>("emails", async (job) => {
+		  await send(job.payload);
+		});
+		```
+
+	</TabItem>
+	<TabItem label="Python" icon="seti:python">
+
+		```python
+		# leases, heartbeats, acks on return, nacks on exception
+		await forge.worker("emails", handle)
+		```
+
+	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		// bounded concurrency, auto-heartbeat, ack on Ok / nack on Err, drains on shutdown
+		forge.worker("emails")
+		    .concurrency(8)
+		    .run(|job| async move { send(&job).await })  // returns Result<(), E>
+		    .await;
+		```
+
+	</TabItem>
+</Tabs>
+
+Run as many worker processes as you need; jobs are leased, so two workers never get
+the same job at once. A handler that crashes lets the lease expire and the job comes
+back, which is why handlers need to be safe to run twice. Jobs that exhaust their
+attempts move to `"<queue>.dlq"`, and `queueDepth("emails.dlq")` tells you how big
+that backlog is.
+
+## The scheduler
+
+Cron and one-off schedules only fire when something ticks the scheduler. The example
+apps run one loop that ticks the scheduler and then runs the maintenance sweep, on
+every replica. Each due job is claimed once no matter how many replicas tick at the
+same time.
+
+<Tabs syncKey="lang">
+	<TabItem label="Node" icon="seti:javascript">
+
+		```ts
+		setInterval(async () => {
+		  try {
+		    await forge.runSchedulerOnce();
+		    await forge.maintain();
+		  } catch (e) {
+		    console.warn("scheduler tick failed:", e);
+		  }
+		}, 30_000);
+		```
+
+	</TabItem>
+	<TabItem label="Python" icon="seti:python">
+
+		```python
+		async def scheduler():
+		    while True:
+		        try:
+		            await forge.run_scheduler_once()
+		            await forge.maintain()
+		        except Exception as e:
+		            log.warning("scheduler tick failed: %s", e)
+		        await asyncio.sleep(30)
+		```
+
+	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		use std::time::Duration;
+
+		loop {
+		    if let Err(e) = forge.run_scheduler_once().await {
+		        tracing::warn!(error = %e, "scheduler tick failed");
+		    }
+		    if let Err(e) = forge.maintain().await {
+		        tracing::warn!(error = %e, "maintenance failed");
+		    }
+		    tokio::time::sleep(Duration::from_secs(30)).await;
+		}
+		```
+
+	</TabItem>
+</Tabs>
+
+`maintain()` is the housekeeping sweep: it purges expired key/value rows and old
+finished jobs, reclaims leases left behind by crashed workers, drops stale rate-limit
+and dedup rows, and expires dead sessions. It's idempotent, so running it on every
+replica is fine. Rust also has `run_scheduler()`, a managed loop that ticks every 30
+seconds on its own if you'd rather run the sweep separately.
+
+## Durability
+
+The Postgres backend is durable and shared. The memory backend is neither, which is
+the point for tests but a trap in production. Pub/sub and rate limiting in particular
+depend on every replica seeing the same state, so on `memory` they only work within
+one process. Forge logs a warning when either resolves to memory, since that's almost
+always a misconfiguration outside of tests. Keep production on `postgres` unless you
+have injected your own backend.
+
+## Health checks
+
+`backendReport()` lists which provider backs each primitive, whether it's durable,
+and any caveats. It's a cheap, synchronous call that's handy on a health or status
+endpoint.
+
+<Tabs syncKey="lang">
+	<TabItem label="Node" icon="seti:javascript">
+
+		```ts
+		const report = forge.backendReport();
+		// [{ primitive, provider, durable, caveats }]
+		```
+
+	</TabItem>
+	<TabItem label="Python" icon="seti:python">
+
+		```python
+		report = forge.backend_report()  # synchronous; do not await
+		# [BackendInfo(primitive, provider, durable, caveats), ...]
+		```
+
+	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		let report = forge.backend_report();
+		// each entry: primitive, provider, durable, caveats
+		```
+
+	</TabItem>
+</Tabs>
+
+## Errors and retries
+
+Forge failures map onto a small set of errors, and each one tells you whether a
+retry might help. Only `Unavailable` (a transient backend outage) and a `Backend`
+error flagged retryable are worth retrying. `NotFound`, `Invalid`, `Limit`, and
+`Precondition` won't change on a retry, so handle them instead of looping. Error
+messages are written to be safe to surface; the raw cause stays out of the displayed
+text. The full table is in the [Reference](/reference/#errors).
+
+<Aside>
+	A rate-limit denial and an expired session are not errors. `rateLimitCheck`
+	returns a decision with `allowed: false`, and `validateSession` returns nothing
+	for a bad token. Check the return value rather than catching an exception.
+</Aside>
+
+## Scaling a primitive out
+
+When one primitive outgrows the shared database, give it its own. Point it at a
+separate Postgres in `forge.toml` with a `[databases.<feature>]` table and it runs on
+an isolated pool, on its own server if you want, with no change to your code. See
+[Configuration](/configuration/#a-separate-database-per-feature).
+
+## Known limitations
+
+A few sharp edges worth knowing before they surprise you in production.
+
+**Queue receipts are process-local in Node and Python.** A receipt is only meaningful
+inside the process that dequeued the job: the binding holds the lease in an in-process
+map, so `queueAck`, `queueNack`, and `queueHeartbeat` must run in that same process.
+You can't hand a receipt to another worker or persist it and settle the job later. A
+job left unsettled is reclaimed the usual way, by lease expiry on the server, and
+redelivered. The Rust core carries the lease in the `Job` value itself and has no such
+restriction.
+
+**Rate limiting on `memory` counts per process.** Each process keeps its own buckets,
+so across replicas the limit is effectively multiplied by the replica count and every
+check under-counts. Use `postgres` for any limit that has to hold across processes.
+
+**Pub/sub is at-most-once and non-durable on every backend.** A message reaches only
+the subscribers connected at publish time; there's no persistence, replay, or delivery
+guarantee. On `memory` it's in-process only, so nothing crosses replicas. Treat it as a
+notification, not a log, and reconcile durable state through the database.
+
+**Filesystem blob splits bytes from metadata.** Objects live as files under the
+configured root while their metadata rows live in Postgres, so a `put` is two writes
+and is not atomic with your application's SQL. A crash between them leaves a metadata
+row pointing at a missing file until the maintenance sweep reclaims it. Multiple
+replicas need a shared mount, since one replica can't read files another wrote to local
+disk.
+
+**Node `kvIncr` returns a JavaScript number.** The counter is an `i64` in the core, but
+JS numbers are `f64`, so a value past 2^53 loses precision on the way back. Real
+counters never reach that range; if yours might, read it back losslessly with
+`kvGetBytes`. The Python binding returns the exact integer.

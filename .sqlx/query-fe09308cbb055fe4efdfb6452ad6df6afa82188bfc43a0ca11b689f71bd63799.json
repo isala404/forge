@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT data_ref FROM forge_fs_blobs",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "data_ref",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "fe09308cbb055fe4efdfb6452ad6df6afa82188bfc43a0ca11b689f71bd63799"
+}

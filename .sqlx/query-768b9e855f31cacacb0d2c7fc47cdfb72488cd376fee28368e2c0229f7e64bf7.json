@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE forge_jobs SET status = 'available', attempts = attempts + 1, available_at = now(), lease_token = NULL, leased_until = NULL, lease_secs = NULL WHERE queue = $1 AND status = 'leased' AND leased_until <= now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "768b9e855f31cacacb0d2c7fc47cdfb72488cd376fee28368e2c0229f7e64bf7"
+}

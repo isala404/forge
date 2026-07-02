@@ -1,10 +1,7 @@
-[alias]
-example = "run -p"
-
 [env]
 SQLX_OFFLINE = "true"
 
-# Faster linkers cut incremental rebuild times by 40-70% on this workspace.
+# Faster linkers cut incremental rebuild times by 40-70% on this project.
 # These targets opt-in via env if the linker is installed; otherwise cargo
 # falls back to the system default. Keeping this commented avoids forcing a
 # tool install on contributors who don't have mold/lld locally.

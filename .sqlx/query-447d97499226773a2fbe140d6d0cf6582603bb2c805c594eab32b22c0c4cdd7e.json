@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO forge_ratelimit (bucket, subject) VALUES ($1, $2) ON CONFLICT (bucket, subject) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "447d97499226773a2fbe140d6d0cf6582603bb2c805c594eab32b22c0c4cdd7e"
+}

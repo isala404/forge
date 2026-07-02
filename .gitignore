@@ -4,6 +4,9 @@ node_modules
 .env
 !examples/**/.env
 .agents/
-crates/forge/generated/
-forge.schema.json
 **/test-results/**
+
+# conformance runner artifacts
+tools/conformance/python/.venv/
+tools/conformance/python/__pycache__/
+bindings/python/dist/

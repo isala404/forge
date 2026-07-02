@@ -1,0 +1,48 @@
+---
+title: API stability
+description: How the Forge API evolves, what stays fixed, and the patterns that keep your code compiling across minor versions.
+---
+
+This page is the contract for how the Forge API changes between releases: what you
+can rely on, and the handful of patterns that keep your code compiling as new
+versions land.
+
+## Semver, in lockstep
+
+The Rust crate, the Node package, and the Python package share one version number and
+move together. A `1.x` release never breaks a `1.y` caller; breaking changes wait for a
+`2.0`. Because the three packages release in lockstep, a given version means the same
+surface in every language, so you can pin all three to the same number.
+
+## Enums and option structs are open
+
+Every public enum and every options struct is `#[non_exhaustive]`. A new error
+variant, a new rate-limit algorithm, or a new field on `SetOpts` can arrive in a minor
+version without breaking your build.
+
+The cost is small and one-directional. In Rust you match enums with a `_ => ...` arm
+and build option structs with their constructors and `with_*` methods rather than a
+struct literal. Node and Python pass plain arguments, so nothing changes there. In
+return, new capabilities land as additions instead of breaks.
+
+## New trait methods come with defaults
+
+The backend traits (`KvBackend`, `QueueBackend`, and the rest, all built on
+`BackendLifecycle`) are the injection point for your own storage. When a new method is
+added to one of these traits, it ships with a default implementation, so a backend you
+wrote against an earlier version keeps compiling. Override the new method when you want
+the behavior; ignore it when the default is fine.
+
+## New primitives and config sections are additive
+
+A new primitive, or a new section in `forge.toml`, arrives as an additive minor
+version with a safe default. Configuration you already have keeps working untouched,
+and the new piece stays inert until you opt into it. You never have to edit
+`forge.toml` just to move up a minor version.
+
+## Queue receipts are opaque
+
+A queue receipt is an opaque string. Its format is an implementation detail and will
+change; never parse it, split it, or read meaning into it. Pass it back to `queueAck`,
+`queueNack`, or `queueHeartbeat` verbatim and nothing else. The same holds for the
+pagination cursors returned by the scan and list methods.

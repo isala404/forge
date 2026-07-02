@@ -1,0 +1,9 @@
+{
+  "name": "forge-conformance-node",
+  "private": true,
+  "type": "commonjs",
+  "description": "Node runner for the Forge cross-language conformance suite.",
+  "dependencies": {
+    "pg": "^8.13.1"
+  }
+}

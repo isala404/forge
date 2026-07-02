@@ -1,5 +1,0 @@
-error: Mutation functions must be async
- --> tests/ui/fail/mutation_not_async.rs:8:5
-  |
-8 | pub fn sync_mutation(_ctx: &MutationContext) -> Result<()> {
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

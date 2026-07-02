@@ -1,0 +1,568 @@
+---
+title: Primitives
+description: The eight Forge primitives, what each one is for, and the methods you'll actually call in Rust, Node, and Python.
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+Forge gives you eight primitives on one client. Each one covers the part of a
+familiar service that most apps actually use, with the same behavior across Rust,
+Node, and Python. This page is the tour. Every method, return type, and limit is in
+the [Reference](/reference/).
+
+A few things hold for all of them. Keys and names are byte-limited and oversized
+input is an error rather than a silent truncation. Every primitive can be prefixed
+with a [namespace](/configuration/#namespaces) so several apps share one database.
+Failures map to a small [error taxonomy](/reference/#errors) that tells you whether
+a retry might help.
+
+## Key-value
+
+Small values, counters, and cached state. Strings up to 1 MiB with optional TTLs,
+atomic counters, compare-and-swap, and prefix scans. Lineage: Redis.
+
+<Tabs syncKey="lang">
+	<TabItem label="Node" icon="seti:javascript">
+
+		```ts
+		// set with a one-hour TTL
+		await forge.kvSet("session:abc", token, 3600);
+
+		const value = await forge.kvGet("session:abc");   // string | null
+		const n = await forge.kvIncr("views:42", 1);       // atomic
+
+		// write only if absent: a one-line uniqueness guard
+		const claimed = await forge.kvSet("slug:abc", body, null, true); // false if taken
+		```
+
+	</TabItem>
+	<TabItem label="Python" icon="seti:python">
+
+		```python
+		# set with a one-hour TTL
+		await forge.kv_set("session:abc", token, 3600)
+
+		value = await forge.kv_get("session:abc")   # str | None
+		n = await forge.kv_incr("views:42", 1)        # atomic
+
+		# write only if absent: a one-line uniqueness guard
+		claimed = await forge.kv_set("slug:abc", body, None, True)  # False if taken
+		```
+
+	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		use std::time::Duration;
+		use forgelib::{SetOpts, SetMode};
+
+		// set with a one-hour TTL
+		forge.kv().set("session:abc", token.into(),
+		    SetOpts::new().with_ttl(Duration::from_secs(3600))).await?;
+
+		let value = forge.kv().get("session:abc").await?;   // Option<Bytes>
+		let n = forge.kv().incr("views:42", 1).await?;       // atomic, returns i64
+
+		// write only if absent: a one-line uniqueness guard
+		let claimed = forge.kv()
+		    .set("slug:abc", body.into(), SetOpts::new().with_mode(SetMode::IfNotExists))
+		    .await?;                                          // false if already taken
+		```
+
+	</TabItem>
+</Tabs>
+
+Keys go up to 512 bytes, values up to 1 MiB. It's a string and counter store, not a
+blob store. Expired keys read as missing. `incr` on a non-numeric value is an error.
+For binary values that aren't valid UTF-8, use the bytes variants (`kvSetBytes` /
+`kv_set_bytes` and their getters).
+
+## Queue
+
+Durable background jobs. At-least-once delivery, visibility-timeout leasing, retries
+with a dead-letter queue, delays, and dedup. Lineage: AWS SQS.
+
+<Tabs syncKey="lang">
+	<TabItem label="Node" icon="seti:javascript">
+
+		```ts
+		const emails = forge.queue<typeof msg>("emails");
+
+		// producer
+		await emails.enqueue(msg, { maxAttempts: 5 });
+
+		// consumer: lease a job, do the work, settle it by receipt
+		const job = await emails.dequeue({ visibilitySeconds: 30, waitSeconds: 20 });
+		if (job) {
+		  try {
+		    await send(job.payload);
+		    await emails.ack(job.receipt);
+		  } catch {
+		    await emails.nack(job.receipt);
+		  }
+		}
+		```
+
+	</TabItem>
+	<TabItem label="Python" icon="seti:python">
+
+		```python
+		emails = forge.queue("emails")
+
+		# producer
+		await emails.enqueue(msg, max_attempts=5)
+
+		# consumer: lease a job, do the work, settle it by receipt
+		job = await emails.dequeue(visibility_seconds=30, wait_seconds=20)
+		if job:
+		    try:
+		        await send(job.payload)
+		        await emails.ack(job.receipt)
+		    except Exception:
+		        await emails.nack(job.receipt)
+		```
+
+	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		use forgelib::{EnqueueOpts, DequeueOpts, NackOpts};
+
+		// producer
+		forge.queue().enqueue("emails", body.into(),
+		    EnqueueOpts::new().with_max_attempts(5)).await?;
+
+		// consumer: lease a job, do the work, settle it
+		if let Some(job) = forge.queue().dequeue("emails", DequeueOpts::new()).await? {
+		    match send(&job).await {
+		        Ok(()) => forge.queue().ack(&job).await?,
+		        Err(_) => forge.queue().nack(&job, NackOpts::default()).await?,
+		    }
+		}
+		```
+
+	</TabItem>
+</Tabs>
+
+<Aside type="caution" title="At-least-once, so handlers must be idempotent">
+	A job can be delivered more than once (a worker that crashes mid-job lets the
+	lease expire and the job comes back). Write handlers that are safe to run twice.
+	A job that fails its `max_attempts` (5 by default) lands on `"<queue>.dlq"`. In
+	Node and Python you settle a job by its `receipt`, which is unique per delivery;
+	the `id` is stable across redeliveries and makes a good idempotency key.
+</Aside>
+
+Payloads go up to 256 KiB. A handler that might outlive its lease should
+`heartbeat` to extend it. `dedup_id` collapses repeated enqueues within a window.
+Each binding also ships a managed worker (`forge.worker("emails", handler)` in
+Node/Python, `forge.worker("emails")` in Rust) covered in [Operations](/operations/#workers).
+
+## Pub/sub
+
+Live fan-out to whoever is connected: presence, typing indicators, a counter that
+updates on a dashboard. It is not durable. Delivery is at-most-once and only reaches
+current subscribers. Lineage: Postgres LISTEN/NOTIFY and Redis pub/sub. When a
+message must not be lost, use the queue.
+
+<Tabs syncKey="lang">
+	<TabItem label="Node" icon="seti:javascript">
+
+		```ts
+		const room = forge.topic<typeof msg>("room:42");
+		await room.publish(msg);
+
+		for await (const event of await room.subscribe()) {
+		  // forward payload to the connected client
+		}
+		```
+
+	</TabItem>
+	<TabItem label="Python" icon="seti:python">
+
+		```python
+		room = forge.topic("room:42")
+		await room.publish(msg)
+
+		async for event in room.subscribe():
+		    ...                       # forward payload to the connected client
+		```
+
+	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		use futures_util::StreamExt;
+
+		forge.pubsub().publish("room:42", msg.into()).await?;
+
+		let mut sub = forge.pubsub().subscribe("room:42").await?;
+		while let Some(Ok(payload)) = sub.next().await {
+		    // forward payload to the connected client
+		}
+		```
+
+	</TabItem>
+</Tabs>
+
+Payloads are UTF-8 and capped near 7 KB, the Postgres NOTIFY limit. For anything
+larger, publish a reference such as a row id and let the subscriber read it. A
+message sent while a subscriber is offline is not kept for it.
+
+## Blob
+
+Object storage for uploads and generated files: put, get, delete, list, and
+presigned upload and download URLs. Lineage: S3. Bytes live in Postgres by default
+or on the local filesystem; the metadata always stays in Postgres.
+
+<Tabs syncKey="lang">
+	<TabItem label="Node" icon="seti:javascript">
+
+		```ts
+		await forge.blobPut("avatars/42.png", png, "image/png");
+
+		const data = await forge.blobGet("avatars/42.png");   // string | null
+		// for binary, blobGetBytes returns a Buffer
+
+		const url = await forge.blobPresignDownload("avatars/42.png", 3600);
+		```
+
+	</TabItem>
+	<TabItem label="Python" icon="seti:python">
+
+		```python
+		await forge.blob_put("avatars/42.png", png, "image/png")  # png is bytes
+
+		data = await forge.blob_get("avatars/42.png")   # bytes | None
+
+		url = await forge.blob_presign_download("avatars/42.png", 3600)
+		```
+
+	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		use std::time::Duration;
+		use forgelib::PutOpts;
+
+		forge.blob().put("avatars/42.png", bytes,
+		    PutOpts::new().with_content_type("image/png")).await?;
+
+		let data = forge.blob().get("avatars/42.png").await?;   // Option<Bytes>
+
+		// a link the browser can use directly, good for an hour
+		let url = forge.blob()
+		    .presign_download("avatars/42.png", Duration::from_secs(3600)).await?;
+		```
+
+	</TabItem>
+</Tabs>
+
+Presigned URLs need a `signing_secret` in `forge.toml`. Without one, ordinary CRUD
+still works but the presign calls return a config error. Objects go up to 50 MiB,
+and a presigned upload URL is capped by a `max_bytes` you choose. The filesystem
+backend keeps large files out of the database but needs a shared mount across
+replicas.
+
+## Auth
+
+Passwords, sessions, and API keys. argon2id hashing, opaque session tokens with
+sliding idle and hard absolute deadlines, and `fk_` API keys. Lineage: OWASP, the
+PHC string format, and the Stripe/GitHub key style. Forge stores only hashes and
+never owns your users table.
+
+<Tabs syncKey="lang">
+	<TabItem label="Node" icon="seti:javascript">
+
+		```ts
+		const hash = await forge.hashPassword(password);   // store this
+		const ok = await forge.verifyPassword(password, hash);
+
+		const token = await forge.createSession(userId);
+		const userId2 = await forge.validateSession(token);   // string | null
+		```
+
+	</TabItem>
+	<TabItem label="Python" icon="seti:python">
+
+		```python
+		hash = await forge.hash_password(password)   # store this
+		ok = await forge.verify_password(password, hash)
+
+		token = await forge.create_session(user_id)
+		user_id2 = await forge.validate_session(token)   # str | None
+		```
+
+	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		use forgelib::SessionOpts;
+
+		let hash = forge.auth().hash_password(&password).await?;   // store this
+		let ok = forge.auth().verify_password(&password, &hash).await?;
+
+		let token = forge.auth().create_session(&user_id, SessionOpts::default()).await?;
+		let session = forge.auth().validate_session(token.as_str()).await?; // Option<Session>
+		```
+
+	</TabItem>
+</Tabs>
+
+Only the hash of a session token or API key is stored, and the plaintext is shown
+once. `validate_session` slides the idle deadline and returns nothing for an
+unknown, expired, or revoked token rather than erroring. After a password check
+passes, `needs_rehash` tells you whether to re-hash and upgrade an old hash quietly.
+The `user_id` is whatever opaque id your app already uses.
+
+## Rate limit
+
+An atomic check-and-consume against a limit, returning a decision carrying the IETF
+RateLimit header fields. Token bucket by default, or sliding window. Lineage: token
+bucket and GCRA, with the IETF RateLimit headers.
+
+<Tabs syncKey="lang">
+	<TabItem label="Node" icon="seti:javascript">
+
+		```ts
+		const d = await forge.rateLimitCheck("login", email, 20, 60);
+		if (!d.allowed) {
+		  // d.retryAfterSeconds says when the client can try again
+		}
+		```
+
+	</TabItem>
+	<TabItem label="Python" icon="seti:python">
+
+		```python
+		d = await forge.rate_limit_check("login", email, 20, 60)
+		if not d.allowed:
+		    ...  # d.retry_after_seconds says when the client can try again
+		```
+
+	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		use std::time::Duration;
+		use forgelib::Limit;
+
+		let d = forge.ratelimit()
+		    .check("login", &email, Limit::per_duration(20, Duration::from_secs(60)))
+		    .await?;
+		if !d.allowed {
+		    // d.retry_after says when the client can try again
+		}
+		```
+
+	</TabItem>
+</Tabs>
+
+A denied request is a normal decision with `allowed: false`, not an error. By
+default the limiter fails open: if its backend is unavailable it allows the request
+and logs a warning, so an outage doesn't lock everyone out. Turn that off (per call
+or in `forge.toml`) for payment- or abuse-sensitive buckets. The policy lives in the
+call you make, the limit and the window, not in server config.
+
+## Schedule
+
+Recurring cron jobs and one-off work at a future time. A schedule enqueues onto a
+normal queue when it fires, so an ordinary worker drains it. Lineage: cron, Unix
+`at`, and Kubernetes CronJob.
+
+<Aside type="tip" title="Schedules do not store callbacks">
+	A schedule stores the queue name and payload to enqueue later. The code to run
+	lives in the worker for that queue. Use one queue per task type, or put a
+	`type` field in the payload and dispatch inside one worker.
+</Aside>
+
+<Tabs syncKey="lang">
+	<TabItem label="Node" icon="seti:javascript">
+
+		```ts
+		// every day at midnight UTC, enqueue onto "reports"
+		await forge.scheduleCron("nightly", "0 0 * * *", "reports", "{}");
+
+		// once, at a specific time
+		await forge.scheduleAt(Date.now() + 3600_000, "reminders", payload);
+		```
+
+	</TabItem>
+	<TabItem label="Python" icon="seti:python">
+
+		```python
+		# every day at midnight UTC, enqueue onto "reports"
+		await forge.schedule_cron("nightly", "0 0 * * *", "reports", "{}")
+
+		# once, at a specific time (epoch milliseconds)
+		await forge.schedule_at(now_ms + 3_600_000, "reminders", payload)
+		```
+
+	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		use std::time::{Duration, SystemTime};
+		use forgelib::ScheduleOpts;
+
+		// every day at midnight UTC, enqueue onto "reports"
+		forge.schedule().cron("nightly", "0 0 * * *", "reports",
+		    b"{}".to_vec().into(), ScheduleOpts::new()).await?;
+
+		// once, an hour from now
+		let when = SystemTime::now() + Duration::from_secs(3600);
+		forge.schedule().at(when, "reminders", payload.into(), ScheduleOpts::new()).await?;
+		```
+
+	</TabItem>
+</Tabs>
+
+For example, to delete an expiring link, schedule a payload onto an `expire-link`
+queue, run a worker for that queue, and keep a scheduler loop ticking in the
+background.
+
+<Tabs syncKey="lang">
+	<TabItem label="Node" icon="seti:javascript">
+
+		```ts
+		const EXPIRE_QUEUE = "expire-link";
+
+		// Producer: register future work. This does not run deleteLink yet.
+		await forge.scheduleAt(
+		  Date.now() + 3600_000,
+		  EXPIRE_QUEUE,
+		  JSON.stringify({ slug }), // schedule payloads use the raw queue contract
+		);
+
+		// Worker: this is the code that runs when the scheduled job is delivered.
+		void forge.worker<{ slug: string }>(EXPIRE_QUEUE, async (job) => {
+		  await deleteLink(job.payload.slug);
+		});
+
+		// Scheduler: turns due schedules into queue jobs.
+		setInterval(async () => {
+		  await forge.runSchedulerOnce();
+		}, 30_000);
+
+		```
+
+	</TabItem>
+	<TabItem label="Python" icon="seti:python">
+
+		```python
+		EXPIRE_QUEUE = "expire-link"
+
+		# Producer: register future work. This does not run delete_link yet.
+		await forge.schedule_at(
+		    now_ms() + 3_600_000,
+		    EXPIRE_QUEUE,
+		    json.dumps({"slug": slug}),  # schedule payloads use the raw queue contract
+		)
+
+		# Worker: this is the code that runs when the scheduled job is delivered.
+		async def handle_expire(job):
+		    await delete_link(job.payload["slug"])
+
+		# Scheduler: turns due schedules into queue jobs.
+		async def scheduler():
+		    while True:
+		        await forge.run_scheduler_once()
+		        await asyncio.sleep(30)
+
+		asyncio.create_task(forge.worker(EXPIRE_QUEUE, handle_expire))
+		asyncio.create_task(scheduler())
+		```
+
+	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		use std::time::{Duration, SystemTime};
+		use forgelib::ScheduleOpts;
+
+		// Producer: register future work. This does not run delete_link yet.
+		let payload = serde_json::json!({ "slug": slug }).to_string();
+		let when = SystemTime::now() + Duration::from_secs(3600);
+		forge.schedule().at(when, "expire-link", payload.into(), ScheduleOpts::new()).await?;
+
+		// Worker: this is the code that runs when the scheduled job is delivered.
+		let worker_forge = forge.clone();
+		tokio::spawn(async move {
+		    worker_forge.worker("expire-link").run(move |job| async move {
+		        let payload: serde_json::Value =
+		            serde_json::from_slice(&job.payload).map_err(|e| e.to_string())?;
+		        let slug = payload["slug"].as_str().ok_or("missing slug")?;
+		        delete_link(slug).await.map_err(|e| e.to_string())
+		    }).await;
+		});
+
+		// Scheduler: turns due schedules into queue jobs.
+		tokio::spawn({
+		    let forge = forge.clone();
+		    async move {
+		        loop {
+		            if let Err(e) = forge.run_scheduler_once().await {
+		                tracing::warn!(error = %e, "scheduler tick failed");
+		            }
+		            tokio::time::sleep(Duration::from_secs(30)).await;
+		        }
+		    }
+		});
+		```
+
+	</TabItem>
+</Tabs>
+
+Nothing fires until something ticks the scheduler. Run the managed loop
+(`run_scheduler()` in Rust) or call `run_scheduler_once()` on an interval, as shown
+in [Operations](/operations/#the-scheduler). Ticking is safe on every replica; each
+due job is claimed once. Cron expressions are 5-field and UTC.
+
+## Config and flags
+
+Runtime settings and boolean feature flags. Flags can be always on, always off, a
+percentage rollout, or an allow-list, evaluated per user. Lineage: 12-factor config
+and OpenFeature.
+
+<Tabs syncKey="lang">
+	<TabItem label="Node" icon="seti:javascript">
+
+		```ts
+		await forge.setFlagPercent("new-ui", 25);
+		const on = await forge.flag("new-ui", false, userId);
+
+		await forge.configSet("max_upload_mb", "25");
+		const raw = await forge.configGet("max_upload_mb");   // string | null
+		```
+
+	</TabItem>
+	<TabItem label="Python" icon="seti:python">
+
+		```python
+		await forge.set_flag_percent("new-ui", 25)
+		on = await forge.flag("new-ui", False, user_id)
+
+		await forge.config_set("max_upload_mb", "25")
+		raw = await forge.config_get("max_upload_mb")   # str | None
+		```
+
+	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		use forgelib::{FlagRule, EvalCtx};
+
+		forge.config().set_flag("new-ui", FlagRule::Percent(25)).await?;
+		let on = forge.config().flag("new-ui", false, &EvalCtx::user(&user_id)).await;
+
+		forge.config().set_raw("max_upload_mb", "25").await?;
+		let raw = forge.config().get_raw("max_upload_mb").await?;   // Option<String>
+		```
+
+	</TabItem>
+</Tabs>
+
+`flag` never throws. If the flag is missing or the backend is down it returns the
+default you passed and logs why, so a flag check can't take down a request. Reads
+are cached in-process for about 30 seconds, so a change is visible everywhere within
+that window rather than instantly. An environment variable `FORGE_CFG_<KEY>`
+overrides a stored config value, which is useful for an ops override.
