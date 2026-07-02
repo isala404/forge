@@ -275,14 +275,13 @@ api.get("/api/links/:slug/live", async (c) => {
   const slug = c.req.param("slug");
 
   return streamSSE(c, async (stream) => {
-    const sub = await forge.pubsubSubscribe(clickTopic(slug));
+    const events = await forge.topic<{ slug: string; clicks: number }>(clickTopic(slug))
+      .subscribe();
     stream.onAbort(() => {
-      void sub.close();
+      void events.return?.();
     });
-    for (;;) {
-      const buf = await sub.next();
-      if (buf === null) break;
-      await stream.writeSSE({ data: buf.toString("utf8") });
+    for await (const event of events) {
+      await stream.writeSSE({ data: JSON.stringify(event) });
     }
   });
 });
@@ -310,7 +309,7 @@ api.get("/:slug", async (c) => {
   if (!rl.allowed) return c.json({ error: "too many requests" }, 429);
 
   await forge.kvIncr(clicksKey(slug), 1);
-  await forge.queueEnqueue(CLICKS_QUEUE, JSON.stringify({ slug }), 3);
+  await forge.queue<{ slug: string }>(CLICKS_QUEUE).enqueue({ slug }, { maxAttempts: 3 });
 
   return c.redirect(rec.url, 302);
 });

@@ -22,34 +22,27 @@ matters if you lower `max_connections`.
 
 ## Workers
 
-A queue holds jobs until a worker leases them. Run a worker per queue. Rust ships a
-managed worker that handles leasing, heartbeats, acks, concurrency, and graceful
-shutdown. Node uses a plain loop, and Python has a managed `run_worker` helper.
+A queue holds jobs until a worker leases them. Run a worker per queue. Each binding
+has a managed worker that handles leasing, heartbeats, acks, retries, and graceful
+shutdown.
 
 <Tabs syncKey="lang">
 	<TabItem label="Node" icon="seti:javascript">
 
 		```ts
-		for (;;) {
-		  const job = await forge.queueDequeue("emails", 30, 20);
-		  if (!job) continue;
-		  try {
-		    await send(JSON.parse(job.payload));
-		    await forge.queueAck(job.receipt);
-		  } catch {
-		    await forge.queueNack(job.receipt);
-		  }
-		}
+		type SendEmail = { to: string };
+
+		await forge.worker<SendEmail>("emails", async (job) => {
+		  await send(job.payload);
+		});
 		```
 
 	</TabItem>
 	<TabItem label="Python" icon="seti:python">
 
 		```python
-		from forgelib.typed import run_worker
-
 		# leases, heartbeats, acks on return, nacks on exception
-		await run_worker(forge, "emails", handle)
+		await forge.worker("emails", handle)
 		```
 
 	</TabItem>

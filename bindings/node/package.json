@@ -8,23 +8,19 @@
     "url": "git+https://github.com/isala404/forge.git",
     "directory": "bindings/node"
   },
-  "main": "index.js",
-  "types": "index.d.ts",
+  "main": "client.js",
+  "types": "client.d.ts",
   "files": [
     "README.md",
+    "client.js",
+    "client.d.ts",
     "index.js",
-    "index.d.ts",
-    "typed.js",
-    "typed.d.ts"
+    "index.d.ts"
   ],
   "exports": {
     ".": {
-      "types": "./index.d.ts",
-      "default": "./index.js"
-    },
-    "./typed": {
-      "types": "./typed.d.ts",
-      "default": "./typed.js"
+      "types": "./client.d.ts",
+      "default": "./client.js"
     }
   },
   "napi": {

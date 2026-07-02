@@ -525,12 +525,11 @@ async fn redirect(state: &State<AppState>, slug: &str) -> Result<Redirect, ApiEr
     };
     let rec: LinkRecord = serde_json::from_slice(&bytes)?;
 
-    if let Some(ref exp) = rec.expires_at {
-        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(exp) {
-            if dt < Utc::now() {
-                return Err(ApiError::not_found("link not found"));
-            }
-        }
+    if let Some(ref exp) = rec.expires_at
+        && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(exp)
+        && dt < Utc::now()
+    {
+        return Err(ApiError::not_found("link not found"));
     }
 
     let rl = state

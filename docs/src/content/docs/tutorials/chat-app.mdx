@@ -158,8 +158,9 @@ app.post("/api/rooms/:room/messages", async (c) => {
   await forge.kvSet(roomMsgsKey(room), JSON.stringify(recent.slice(-50)));
 
   // live now, fan-out later; dedup the queue job on the message id
-  await forge.pubsubPublish(`chat:${room}`, JSON.stringify({ type: "message", message: msg }));
-  await forge.queueEnqueue("fanout", JSON.stringify({ room, id }), undefined, id);
+  await forge.topic<{ type: "message"; message: typeof msg }>(`chat:${room}`)
+    .publish({ type: "message", message: msg });
+  await forge.queue<{ room: string; id: string }>("fanout").enqueue({ room, id }, { dedupId: id });
 
   // disappearing messages: schedule a delete if the room has a TTL set
   const ttl = await forge.kvGet(`room:${room}:ttl`);
@@ -187,12 +188,10 @@ app.get("/api/rooms/:room/stream", async (c) => {
   const room = c.req.param("room");
 
   return streamSSE(c, async (stream) => {
-    const sub = await forge.pubsubSubscribe(`chat:${room}`);
-    stream.onAbort(() => sub.close());
-    for (;;) {
-      const payload = await sub.next();
-      if (payload === null) break;
-      await stream.writeSSE({ data: payload.toString("utf8") });
+    const events = await forge.topic(`chat:${room}`).subscribe();
+    stream.onAbort(() => { void events.return?.(); });
+    for await (const event of events) {
+      await stream.writeSSE({ data: JSON.stringify(event) });
     }
   });
 });
@@ -208,8 +207,8 @@ alive, and it expires on its own when the heartbeats stop.
 app.post("/api/rooms/:room/typing", async (c) => {
   const userId = await requireUser(c);
   if (!userId) return c.json({ error: "authentication required" }, 401);
-  await forge.pubsubPublish(`chat:${c.req.param("room")}`,
-    JSON.stringify({ type: "typing", userId }));
+  await forge.topic<{ type: "typing"; userId: string }>(`chat:${c.req.param("room")}`)
+    .publish({ type: "typing", userId });
   return c.body(null, 204);
 });
 
@@ -217,7 +216,7 @@ app.post("/api/heartbeat", async (c) => {
   const userId = await requireUser(c);
   if (!userId) return c.json({ error: "authentication required" }, 401);
   await forge.kvSet(`presence:${userId}`, "1", 30);   // expires in 30s
-  await forge.pubsubPublish("presence", JSON.stringify({ userId, online: true }));
+  await forge.topic<{ userId: string; online: boolean }>("presence").publish({ userId, online: true });
   return c.body(null, 204);
 });
 
@@ -264,42 +263,24 @@ import type { ForgeClient } from "forgelib";
 const roomMsgsKey = (room: string) => `room:${room}:msgs`;
 
 export function runFanoutWorker(forge: ForgeClient): void {
-  void (async () => {
-    for (;;) {
-      const job = await forge.queueDequeue("fanout", 30, 20).catch(() => null);
-      if (!job) continue;
-      try {
-        const { room, id } = JSON.parse(job.payload);
-        const recent = JSON.parse((await forge.kvGet(roomMsgsKey(room))) ?? "[]");
-        const msg = recent.find((m: any) => m.id === id);
-        const members = JSON.parse((await forge.kvGet(`room:${room}:members`)) ?? "[]");
-        for (const member of members) {
-          if (member !== msg?.userId) await forge.kvIncr(`unread:${member}:${room}`, 1);
-        }
-        await forge.queueAck(job.receipt);
-      } catch {
-        await forge.queueNack(job.receipt);
-      }
+  void forge.worker<{ room: string; id: string }>("fanout", async (job) => {
+    const { room, id } = job.payload;
+    const recent = JSON.parse((await forge.kvGet(roomMsgsKey(room))) ?? "[]");
+    const msg = recent.find((m: any) => m.id === id);
+    const members = JSON.parse((await forge.kvGet(`room:${room}:members`)) ?? "[]");
+    for (const member of members) {
+      if (member !== msg?.userId) await forge.kvIncr(`unread:${member}:${room}`, 1);
     }
-  })();
+  });
 }
 
 export function runReapWorker(forge: ForgeClient): void {
-  void (async () => {
-    for (;;) {
-      const job = await forge.queueDequeue("reap", 30, 20).catch(() => null);
-      if (!job) continue;
-      try {
-        const { room, id } = JSON.parse(job.payload);
-        const recent = JSON.parse((await forge.kvGet(roomMsgsKey(room))) ?? "[]");
-        await forge.kvSet(roomMsgsKey(room), JSON.stringify(recent.filter((m: any) => m.id !== id)));
-        await forge.pubsubPublish(`chat:${room}`, JSON.stringify({ type: "deleted", id }));
-        await forge.queueAck(job.receipt);
-      } catch {
-        await forge.queueNack(job.receipt);
-      }
-    }
-  })();
+  void forge.worker<{ room: string; id: string }>("reap", async (job) => {
+    const { room, id } = job.payload;
+    const recent = JSON.parse((await forge.kvGet(roomMsgsKey(room))) ?? "[]");
+    await forge.kvSet(roomMsgsKey(room), JSON.stringify(recent.filter((m: any) => m.id !== id)));
+    await forge.topic<{ type: "deleted"; id: string }>(`chat:${room}`).publish({ type: "deleted", id });
+  });
 }
 
 export function runScheduler(forge: ForgeClient): void {

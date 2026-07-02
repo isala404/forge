@@ -331,7 +331,7 @@ async def redirect(request: Request, slug: str) -> Response:
         raise HTTPException(429, "too many requests")
 
     await forge.kv_incr(clicks_key(slug), 1)
-    await forge.queue_enqueue("clicks", json.dumps({"slug": slug}), 3)
+    await forge.queue("clicks").enqueue({"slug": slug}, max_attempts=3)
 
     return RedirectResponse(link["url"], status_code=302)
 ```
@@ -348,12 +348,8 @@ async def live(request: Request, slug: str) -> StreamingResponse:
     forge = request.app.state.forge
 
     async def events():
-        sub = await forge.pubsub_subscribe(click_topic(slug))
-        try:
-            async for payload in sub:
-                yield f"data: {payload.decode()}\n\n"
-        finally:
-            await sub.aclose()
+        async for event in forge.topic(click_topic(slug)).subscribe():
+            yield f"data: {json.dumps(event)}\n\n"
 
     return StreamingResponse(events(), media_type="text/event-stream")
 
@@ -378,8 +374,6 @@ redelivery safe.
 import asyncio
 import json
 
-import forgelib
-
 from .utils import click_topic, clicks_key, owner_key, qr_key, slug_key
 
 
@@ -398,39 +392,19 @@ async def delete_link(forge, slug: str) -> None:
 
 
 async def clicks_worker(forge, stop: asyncio.Event) -> None:
-    while not stop.is_set():
-        try:
-            job = await forge.queue_dequeue("clicks", 30.0, 1.0)
-        except forgelib.ForgeError:
-            await asyncio.sleep(0.2)
-            continue
-        if job is None:
-            continue
-        try:
-            slug = json.loads(job.payload)["slug"]
-            total = int(await forge.kv_get(clicks_key(slug)) or "0")
-            await forge.pubsub_publish(click_topic(slug), json.dumps({"slug": slug, "clicks": total}))
-            await forge.queue_ack(job.receipt)
-        except Exception as exc:
-            print("clicks worker:", exc, flush=True)
-            await forge.queue_nack(job.receipt, 5.0)
+    async def handle(job):
+        slug = job.payload["slug"]
+        total = int(await forge.kv_get(clicks_key(slug)) or "0")
+        await forge.topic(click_topic(slug)).publish({"slug": slug, "clicks": total})
+
+    await forge.worker("clicks", handle, wait_seconds=1.0, stop=stop)
 
 
 async def expire_worker(forge, stop: asyncio.Event) -> None:
-    while not stop.is_set():
-        try:
-            job = await forge.queue_dequeue("link-expire", 30.0, 5.0)
-        except forgelib.ForgeError:
-            await asyncio.sleep(0.2)
-            continue
-        if job is None:
-            continue
-        try:
-            await delete_link(forge, json.loads(job.payload)["slug"])
-            await forge.queue_ack(job.receipt)
-        except Exception as exc:
-            print("expire worker:", exc, flush=True)
-            await forge.queue_nack(job.receipt, 5.0)
+    async def handle(job):
+        await delete_link(forge, job.payload["slug"])
+
+    await forge.worker("link-expire", handle, wait_seconds=5.0, stop=stop)
 
 
 async def scheduler_loop(forge, stop: asyncio.Event) -> None:

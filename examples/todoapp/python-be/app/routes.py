@@ -25,6 +25,25 @@ from .utils import (
 api = APIRouter()
 
 
+def user_store(forge: Any, key: str) -> Any:
+    return forge.kv(
+        key,
+        loads=UserRecord.model_validate_json,
+        dumps=lambda user: user.model_dump_json(),
+    )
+
+
+def todos_store(forge: Any, key: str) -> Any:
+    return forge.kv(
+        key,
+        loads=lambda raw: [Todo.model_validate(item) for item in json.loads(raw)],
+        dumps=lambda todos: json.dumps(
+            [item.model_dump(by_alias=True) for item in todos],
+            separators=(",", ":"),
+        ),
+    )
+
+
 @api.get("/healthz", response_class=PlainTextResponse)
 async def healthz() -> str:
     return "ok"
@@ -68,16 +87,11 @@ async def signup(request: Request, input: Credentials) -> dict[str, Any]:
         password_hash=await forge.hash_password(password),
     )
 
-    inserted = await forge.kv_set(
-        user_email_key(email),
-        user.model_dump_json(),
-        None,
-        True,
-    )
+    inserted = await user_store(forge, user_email_key(email)).set(user, if_not_exists=True)
     if not inserted:
         raise HTTPException(status_code=409, detail="email already registered")
 
-    await forge.kv_set(user_id_key(user.id), user.model_dump_json())
+    await user_store(forge, user_id_key(user.id)).set(user)
 
     token = await forge.create_session(
         user.id,
@@ -96,10 +110,9 @@ async def login(request: Request, input: Credentials) -> dict[str, Any]:
     if not auth_limit.allowed:
         raise HTTPException(status_code=429, detail="too many auth attempts; try again soon")
 
-    raw_user = await forge.kv_get(user_email_key(email))
-    if raw_user is None:
+    user = await user_store(forge, user_email_key(email)).get()
+    if user is None:
         raise HTTPException(status_code=401, detail="invalid email or password")
-    user = UserRecord.model_validate(json.loads(raw_user))
 
     if not await forge.verify_password(password, user.password_hash):
         raise HTTPException(status_code=401, detail="invalid email or password")
@@ -131,11 +144,10 @@ async def me(
     if user_id is None:
         raise HTTPException(status_code=401, detail="authentication required")
 
-    raw_user = await forge.kv_get(user_id_key(user_id))
-    if raw_user is None:
+    user = await user_store(forge, user_id_key(user_id)).get()
+    if user is None:
         raise HTTPException(status_code=401, detail="authentication required")
 
-    user = UserRecord.model_validate(json.loads(raw_user))
     return {"user": public_user(user)}
 
 
@@ -149,8 +161,7 @@ async def list_todos(
     if user_id is None:
         raise HTTPException(status_code=401, detail="authentication required")
 
-    raw_todos = await forge.kv_get(todos_key(user_id))
-    todos = [Todo.model_validate(item) for item in json.loads(raw_todos or "[]")]
+    todos = await todos_store(forge, todos_key(user_id)).get_or_default([])
     return {"todos": [todo.model_dump(by_alias=True) for todo in todos]}
 
 
@@ -165,8 +176,8 @@ async def create_todo(
     if user_id is None:
         raise HTTPException(status_code=401, detail="authentication required")
 
-    raw_todos = await forge.kv_get(todos_key(user_id))
-    todos = [Todo.model_validate(item) for item in json.loads(raw_todos or "[]")]
+    todos_handle = todos_store(forge, todos_key(user_id))
+    todos = await todos_handle.get_or_default([])
 
     now = now_iso()
     todo = Todo(
@@ -178,19 +189,11 @@ async def create_todo(
     )
     todos.insert(0, todo)
 
-    await forge.kv_set(
-        todos_key(user_id),
-        json.dumps([item.model_dump(by_alias=True) for item in todos], separators=(",", ":")),
-    )
-    await forge.queue_enqueue(
-        AUDIT_QUEUE,
-        json.dumps(
-            {"userId": user_id, "action": "created", "todoId": todo.id, "at": now_iso()},
-            separators=(",", ":"),
-        ),
-        3,
-        f"created:{todo.id}",
-        None,
+    await todos_handle.set(todos)
+    await forge.queue(AUDIT_QUEUE).enqueue(
+        {"userId": user_id, "action": "created", "todoId": todo.id, "at": now_iso()},
+        max_attempts=3,
+        dedup_id=f"created:{todo.id}",
     )
 
     return todo.model_dump(by_alias=True)
@@ -208,8 +211,8 @@ async def update_todo(
     if user_id is None:
         raise HTTPException(status_code=401, detail="authentication required")
 
-    raw_todos = await forge.kv_get(todos_key(user_id))
-    todos = [Todo.model_validate(item) for item in json.loads(raw_todos or "[]")]
+    todos_handle = todos_store(forge, todos_key(user_id))
+    todos = await todos_handle.get_or_default([])
 
     todo = next((item for item in todos if item.id == todo_id), None)
     if todo is None:
@@ -220,19 +223,11 @@ async def update_todo(
         todo.completed = bool(input.completed)
     todo.updated_at = now_iso()
 
-    await forge.kv_set(
-        todos_key(user_id),
-        json.dumps([item.model_dump(by_alias=True) for item in todos], separators=(",", ":")),
-    )
-    await forge.queue_enqueue(
-        AUDIT_QUEUE,
-        json.dumps(
-            {"userId": user_id, "action": "updated", "todoId": todo.id, "at": now_iso()},
-            separators=(",", ":"),
-        ),
-        3,
-        f"updated:{todo.id}",
-        None,
+    await todos_handle.set(todos)
+    await forge.queue(AUDIT_QUEUE).enqueue(
+        {"userId": user_id, "action": "updated", "todoId": todo.id, "at": now_iso()},
+        max_attempts=3,
+        dedup_id=f"updated:{todo.id}",
     )
 
     return todo.model_dump(by_alias=True)
@@ -249,28 +244,17 @@ async def delete_todo(
     if user_id is None:
         raise HTTPException(status_code=401, detail="authentication required")
 
-    raw_todos = await forge.kv_get(todos_key(user_id))
-    todos = [Todo.model_validate(item) for item in json.loads(raw_todos or "[]")]
+    todos_handle = todos_store(forge, todos_key(user_id))
+    todos = await todos_handle.get_or_default([])
     next_todos = [todo for todo in todos if todo.id != todo_id]
     if len(next_todos) == len(todos):
         raise HTTPException(status_code=404, detail="todo not found")
 
-    await forge.kv_set(
-        todos_key(user_id),
-        json.dumps(
-            [item.model_dump(by_alias=True) for item in next_todos],
-            separators=(",", ":"),
-        ),
-    )
-    await forge.queue_enqueue(
-        AUDIT_QUEUE,
-        json.dumps(
-            {"userId": user_id, "action": "deleted", "todoId": todo_id, "at": now_iso()},
-            separators=(",", ":"),
-        ),
-        3,
-        f"deleted:{todo_id}",
-        None,
+    await todos_handle.set(next_todos)
+    await forge.queue(AUDIT_QUEUE).enqueue(
+        {"userId": user_id, "action": "deleted", "todoId": todo_id, "at": now_iso()},
+        max_attempts=3,
+        dedup_id=f"deleted:{todo_id}",
     )
 
     return Response(status_code=204)

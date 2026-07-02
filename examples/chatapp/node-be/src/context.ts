@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import DataLoader from "dataloader";
-import { ForgeClient, type JsSubscription } from "forgelib";
+import { ForgeClient } from "forgelib";
 
 import * as db from "./db.ts";
 import type { MessageRow, ReceiptRow, UserRow } from "./db.ts";
@@ -133,31 +133,26 @@ export class AppCtx {
   }
 
   subscribe(topic: string): AsyncIterableIterator<RealtimeEvent> {
-    let sub: JsSubscription | null = null;
-    const ready = this.forge.pubsubSubscribe(topic).then((s) => {
-      sub = s;
+    let events: AsyncIterableIterator<RealtimeEvent> | null = null;
+    const ready = this.forge.topic<RealtimeEvent>(topic).subscribe().then((s) => {
+      events = s;
     });
     let done = false;
     const it: AsyncIterableIterator<RealtimeEvent> = {
       async next(): Promise<IteratorResult<RealtimeEvent>> {
         await ready;
-        for (;;) {
-          if (done || !sub) return { value: undefined, done: true };
-          const buf = await sub.next();
-          if (buf === null) {
-            done = true;
-            return { value: undefined, done: true };
-          }
-          try {
-            return { value: JSON.parse(buf.toString("utf8")) as RealtimeEvent, done: false };
-          } catch {
-            continue;
-          }
+        if (done || !events) return { value: undefined, done: true };
+        const next = await events.next();
+        if (next.done) {
+          done = true;
+          return { value: undefined, done: true };
         }
+        return next;
       },
       async return(): Promise<IteratorResult<RealtimeEvent>> {
         done = true;
-        sub = null; // drop the handle -> unsubscribe + release the connection
+        await events?.return?.();
+        events = null;
         return { value: undefined, done: true };
       },
       [Symbol.asyncIterator]() {
@@ -169,7 +164,7 @@ export class AppCtx {
 
   async publish(topic: string, event: RealtimeEvent): Promise<void> {
     try {
-      await this.forge.pubsubPublish(topic, JSON.stringify(event));
+      await this.forge.topic<RealtimeEvent>(topic).publish(event);
     } catch (e) {
       console.warn(`pubsub publish failed (${topic}):`, (e as Error).message);
     }
@@ -212,7 +207,7 @@ export class AppCtx {
   }
 
   async enqueueFailing(): Promise<void> {
-    await this.forge.queueEnqueue(FAIL_QUEUE, "boom", 1);
+    await this.forge.queue<string>(FAIL_QUEUE).enqueue("boom", { maxAttempts: 1 });
   }
 
   async dlqCount(): Promise<number> {

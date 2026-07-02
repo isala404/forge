@@ -5,10 +5,11 @@ description: Cross-language method index, return types, the error taxonomy, and 
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 
-A compact map of the surface. The method names line up across languages: Rust groups
-them under an accessor and takes option structs, while Node and Python put each one
-on the client with plain arguments. Where a binary-safe variant exists (for example
-`kvGetBytes`), it's noted but not given its own row.
+A compact map of the surface. The raw method names line up across languages: Rust
+groups them under an accessor and takes option structs, while Node and Python put
+each one on the client with plain arguments. Node and Python also expose native JSON
+handles from the main import (`forge.queue<T>("emails")`, `forge.queue("emails")`)
+so app payloads stay typed without a separate overlay.
 
 ## Creating a client
 
@@ -73,7 +74,7 @@ on the client with plain arguments. Where a binary-safe variant exists (for exam
 | Nack | `queue().nack` | `queueNack` | `queue_nack` |
 | Extend the lease | `queue().heartbeat` | `queueHeartbeat` | `queue_heartbeat` |
 | Depth | `queue().depth` | `queueDepth` | `queue_depth` |
-| Managed worker | `worker(name)` | (loop) | `typed.run_worker` |
+| Managed worker | `worker(name)` | `worker(name, handler)` | `worker(name, handler)` |
 
 ### Pub/sub
 
@@ -130,8 +131,10 @@ on the client with plain arguments. Where a binary-safe variant exists (for exam
 | --- | --- | --- | --- |
 | Get value | `config().get_raw` | `configGet` | `config_get` |
 | Set value | `config().set_raw` | `configSet` | `config_set` |
+| Delete value | `config().delete_raw` | `configDelete` | `config_delete` |
 | Evaluate a flag | `config().flag` | `flag` | `flag` |
 | Set a flag | `config().set_flag` | `setFlagPercent`, `setFlagOn`, `setFlagOff`, `setFlagAllowList` | `set_flag_percent`, `set_flag_on`, `set_flag_off`, `set_flag_allow_list` |
+| Delete a flag | `config().delete_flag` | `deleteFlag` | `delete_flag` |
 
 ### Client
 
@@ -141,12 +144,68 @@ on the client with plain arguments. Where a binary-safe variant exists (for exam
 | Scheduler loop | `run_scheduler` | (interval) | (interval) |
 | Maintenance sweep | `maintain` | `maintain` | `maintain` |
 
+## Native JSON handles
+
+Use raw methods for bytes and exact cross-language contracts. Use handles when the
+payload is app JSON and you want the name, codec, and type to stay together.
+
+<Tabs syncKey="lang">
+	<TabItem label="Node" icon="seti:javascript">
+
+		```ts
+		type SendEmail = { to: string; template: string };
+
+		const emails = forge.queue<SendEmail>("emails");
+		await emails.enqueue({ to: "a@b.c", template: "welcome" });
+
+		const profile = forge.kv<{ name: string }>("user:42:profile");
+		await profile.set({ name: "Ada" });
+
+		const events = forge.topic<{ type: "created"; userId: string }>("user.created");
+		await events.publish({ type: "created", userId: "42" });
+		```
+
+	</TabItem>
+	<TabItem label="Python" icon="seti:python">
+
+		```python
+		emails = forge.queue("emails")
+		await emails.enqueue({"to": "a@b.c", "template": "welcome"})
+
+		profile = forge.kv("user:42:profile")
+		await profile.set({"name": "Ada"})
+
+		events = forge.topic("user.created")
+		await events.publish({"type": "created", "user_id": "42"})
+		```
+
+	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		use forgelib::{KvKey, KvTyped, QueuePayload, QueueTyped, QueueName, SetOpts};
+
+		#[derive(Serialize, Deserialize)]
+		struct SendEmail { to: String, template: String }
+
+		impl QueuePayload for SendEmail {
+		    const QUEUE: QueueName<Self> = QueueName::new("emails");
+		}
+
+		let profile_key = KvKey::<Profile>::new("user:42:profile");
+		forge.queue().enqueue_typed(&email).await?;
+		forge.kv().set_typed(&profile_key, &profile, SetOpts::new()).await?;
+		```
+
+	</TabItem>
+</Tabs>
+
 ## Return types
 
 A few methods return small records. The field names match the table; Node uses
 camelCase and times end in `Ms`.
 
-- **Decision** (rate limit): `allowed`, `limit`, `remaining`, `resetAfter`, `retryAfter`.
+- **Decision** (rate limit): `allowed`, `limit`, `remaining`, `resetAfterSeconds`, `retryAfterSeconds`.
 - **Job** (queue): `id`, `receipt`, `payload`, `attempt`, `maxAttempts`, plus the queue and lease deadline.
 - **QueueDepth**: `visible`, `inFlight`, `delayed`.
 - **BlobInfo** (head): `key`, `size`, `contentType`, `etag`, `lastModified`, `metadata`.

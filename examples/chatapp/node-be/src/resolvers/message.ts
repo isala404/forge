@@ -146,7 +146,8 @@ export const mutation: Required<Pick<MutationResolvers, "requestUpload" | "sendM
     await app.publish(chatTopic(id), { type: "message", message_id: msgId });
     try {
       // Dedup on the message id so a retried sendMessage resolver can't double-enqueue.
-      await app.forge.queueEnqueue(FANOUT_QUEUE, JSON.stringify({ message_id: msgId }), undefined, msgId);
+      await app.forge.queue<{ message_id: string }>(FANOUT_QUEUE)
+        .enqueue({ message_id: msgId }, { dedupId: msgId });
     } catch (e) {
       throw mapForge(e);
     }

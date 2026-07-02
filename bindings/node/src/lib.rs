@@ -410,6 +410,12 @@ impl ForgeClient {
         self.forge.config().get_raw(&key).await.map_err(err)
     }
 
+    /// Delete a stored config value. Env `FORGE_CFG_<KEY>` still shadows reads.
+    #[napi]
+    pub async fn config_delete(&self, key: String) -> Result<bool> {
+        self.forge.config().delete_raw(&key).await.map_err(err)
+    }
+
     /// Set a percentage-rollout flag (`0..=100`).
     #[napi]
     pub async fn set_flag_percent(&self, key: String, percent: u8) -> Result<()> {
@@ -617,7 +623,9 @@ impl ForgeClient {
     /// re-hash the plaintext and persist it. Transparent upgrade, no forced reset.
     #[napi]
     pub fn needs_rehash(&self, hash: String) -> bool {
-        self.forge.auth().needs_rehash(&forgelib::PhcString::new(hash))
+        self.forge
+            .auth()
+            .needs_rehash(&forgelib::PhcString::new(hash))
     }
 
     /// Create a session for `userId`; returns the opaque token (shown once).
@@ -717,7 +725,12 @@ impl ForgeClient {
         let id = self
             .forge
             .schedule()
-            .at(when, &queue, forgelib::Bytes::from(payload), schedule_opts(max_attempts))
+            .at(
+                when,
+                &queue,
+                forgelib::Bytes::from(payload),
+                schedule_opts(max_attempts),
+            )
             .await
             .map_err(err)?;
         Ok(id.to_string())
@@ -736,7 +749,13 @@ impl ForgeClient {
     ) -> Result<()> {
         self.forge
             .schedule()
-            .cron(&name, &expr, &queue, forgelib::Bytes::from(payload), schedule_opts(max_attempts))
+            .cron(
+                &name,
+                &expr,
+                &queue,
+                forgelib::Bytes::from(payload),
+                schedule_opts(max_attempts),
+            )
             .await
             .map_err(err)
     }
@@ -1001,6 +1020,12 @@ impl ForgeClient {
             .set_flag(&key, forgelib::FlagRule::AllowList(entries))
             .await
             .map_err(err)
+    }
+
+    /// Delete a flag rule. Later `flag` calls fall back to their caller default.
+    #[napi]
+    pub async fn delete_flag(&self, key: String) -> Result<bool> {
+        self.forge.config().delete_flag(&key).await.map_err(err)
     }
 
     /// Validate a session token; returns full session metadata (user id + times), or

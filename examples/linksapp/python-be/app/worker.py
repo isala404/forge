@@ -3,8 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 
-import forgelib
-
 from .utils import (
     CLICKS_QUEUE,
     EXPIRE_QUEUE,
@@ -40,51 +38,21 @@ async def delete_link(forge, slug: str) -> None:
 
 async def clicks_worker(forge, stop: asyncio.Event) -> None:
     """Drain the clicks queue; for each job publish the updated count via pubsub."""
-    while not stop.is_set():
-        try:
-            job = await forge.queue_dequeue(CLICKS_QUEUE, 30.0, 1.0)
-        except forgelib.ForgeError:
-            await asyncio.sleep(0.2)
-            continue
-        if job is None:
-            continue
-        try:
-            slug = json.loads(job.payload)["slug"]
-            raw_count = await forge.kv_get(clicks_key(slug))
-            total = int(raw_count) if raw_count is not None else 0
-            await forge.pubsub_publish(
-                click_topic(slug),
-                json.dumps({"slug": slug, "clicks": total}, separators=(",", ":")),
-            )
-            await forge.queue_ack(job.receipt)
-        except Exception as exc:  # noqa: BLE001
-            print(f"clicks worker error: {exc}", flush=True)
-            try:
-                await forge.queue_nack(job.receipt, 5.0)
-            except forgelib.ForgeError:
-                pass
+    async def handle(job) -> None:
+        slug = job.payload["slug"]
+        raw_count = await forge.kv_get(clicks_key(slug))
+        total = int(raw_count) if raw_count is not None else 0
+        await forge.topic(click_topic(slug)).publish({"slug": slug, "clicks": total})
+
+    await forge.worker(CLICKS_QUEUE, handle, wait_seconds=1.0, stop=stop)
 
 
 async def expire_worker(forge, stop: asyncio.Event) -> None:
     """Drain the expire queue; delete each link when its scheduled TTL fires."""
-    while not stop.is_set():
-        try:
-            job = await forge.queue_dequeue(EXPIRE_QUEUE, 30.0, 5.0)
-        except forgelib.ForgeError:
-            await asyncio.sleep(0.2)
-            continue
-        if job is None:
-            continue
-        try:
-            slug = json.loads(job.payload)["slug"]
-            await delete_link(forge, slug)
-            await forge.queue_ack(job.receipt)
-        except Exception as exc:  # noqa: BLE001
-            print(f"expire worker error: {exc}", flush=True)
-            try:
-                await forge.queue_nack(job.receipt, 5.0)
-            except forgelib.ForgeError:
-                pass
+    async def handle(job) -> None:
+        await delete_link(forge, job.payload["slug"])
+
+    await forge.worker(EXPIRE_QUEUE, handle, wait_seconds=5.0, stop=stop)
 
 
 async def scheduler_loop(forge, stop: asyncio.Event) -> None:

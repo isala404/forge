@@ -17,6 +17,6 @@ classifiers = [
 
 [tool.maturin]
 module-name = "forgelib"
-# Mixed layout: ship the pure-Python typed projection alongside the compiled extension.
+# Mixed layout: ship the Python-native convenience API alongside the compiled extension.
 python-source = "python"
 auditwheel = "repair"

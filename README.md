@@ -43,14 +43,14 @@ const limit = await forge.rateLimitCheck("login", email, 20, 60);
 if (!limit.allowed) throw new Error("slow down");
 
 // key/value: TTL cache and atomic counters
-await forge.kvSet(`user:${userId}`, JSON.stringify(profile), 3600);
+await forge.kv<typeof profile>(`user:${userId}`).set(profile, { ttlSeconds: 3600 });
 const views = await forge.kvIncr(`views:${userId}`, 1);
 
 // queue: background jobs
-await forge.queueEnqueue("emails", JSON.stringify({ to: email }));
+await forge.queue<{ to: string }>("emails").enqueue({ to: email });
 
 // pub/sub: fan an event out to subscribers
-await forge.pubsubPublish("user.created", JSON.stringify({ userId }));
+await forge.topic<{ userId: string }>("user.created").publish({ userId });
 
 // blob: store a file, hand back a link that expires in an hour
 await forge.blobPut(`exports/${userId}.csv`, csv, "text/csv");
@@ -121,7 +121,6 @@ pip install forgelib
 ```
 
 ```python
-import json
 import forgelib
 
 forge = await forgelib.ForgeClient.init()  # instantiates the runtime from ./forge.toml
@@ -136,14 +135,14 @@ if not limit.allowed:
     raise RuntimeError("slow down")
 
 # key/value
-await forge.kv_set(f"user:{user_id}", json.dumps(profile), 3600)
+await forge.kv(f"user:{user_id}").set(profile, ttl_seconds=3600)
 views = await forge.kv_incr(f"views:{user_id}", 1)
 
 # queue
-await forge.queue_enqueue("emails", json.dumps({"to": email}))
+await forge.queue("emails").enqueue({"to": email})
 
 # pub/sub
-await forge.pubsub_publish("user.created", json.dumps({"user_id": user_id}))
+await forge.topic("user.created").publish({"user_id": user_id})
 
 # blob
 await forge.blob_put(f"exports/{user_id}.csv", csv, "text/csv")

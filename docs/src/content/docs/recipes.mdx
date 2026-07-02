@@ -228,7 +228,7 @@ else, so the user gets their redirect immediately.
 		```ts
 		// in the redirect handler: cheap now, the rest later
 		await forge.kvIncr(`clicks:${slug}`, 1);
-		await forge.queueEnqueue("clicks", JSON.stringify({ slug }), 3);
+		await forge.queue<{ slug: string }>("clicks").enqueue({ slug }, { maxAttempts: 3 });
 		```
 
 	</TabItem>
@@ -237,7 +237,7 @@ else, so the user gets their redirect immediately.
 		```python
 		# in the redirect handler: cheap now, the rest later
 		await forge.kv_incr(f"clicks:{slug}", 1)
-		await forge.queue_enqueue("clicks", json.dumps({"slug": slug}), 3)
+		await forge.queue("clicks").enqueue({"slug": slug}, max_attempts=3)
 		```
 
 	</TabItem>
@@ -264,31 +264,16 @@ for a managed version).
 	<TabItem label="Node" icon="seti:javascript">
 
 		```ts
-		for (;;) {
-		  const job = await forge.queueDequeue("clicks", 30, 20);
-		  if (!job) continue;
-		  try {
-		    await handle(forge, job);
-		    await forge.queueAck(job.receipt);
-		  } catch {
-		    await forge.queueNack(job.receipt);
-		  }
-		}
+		await forge.worker<{ slug: string }>("clicks", async (job) => {
+		  await handle(forge, job.payload);
+		});
 		```
 
 	</TabItem>
 	<TabItem label="Python" icon="seti:python">
 
 		```python
-		while True:
-		    job = await forge.queue_dequeue("clicks", 30, 20)
-		    if not job:
-		        continue
-		    try:
-		        await handle(forge, job)
-		        await forge.queue_ack(job.receipt)
-		    except Exception:
-		        await forge.queue_nack(job.receipt)
+		await forge.worker("clicks", lambda job: handle(forge, job.payload))
 		```
 
 	</TabItem>
@@ -320,16 +305,16 @@ client, then drops the subscription when the client disconnects.
 
 		```ts
 		// in the worker handler, after reading the new count
-		await forge.pubsubPublish(`clicks:${slug}`, JSON.stringify({ slug, clicks: total }));
+		await forge.topic<{ slug: string; clicks: number }>(`clicks:${slug}`)
+		  .publish({ slug, clicks: total });
 
 		// in the SSE route (Hono)
 		return streamSSE(c, async (stream) => {
-		  const sub = await forge.pubsubSubscribe(`clicks:${slug}`);
-		  stream.onAbort(() => sub.close());
-		  for (;;) {
-		    const payload = await sub.next();
-		    if (payload === null) break;
-		    await stream.writeSSE({ data: payload.toString("utf8") });
+		  const events = await forge.topic<{ slug: string; clicks: number }>(`clicks:${slug}`)
+		    .subscribe();
+		  stream.onAbort(() => { void events.return?.(); });
+		  for await (const event of events) {
+		    await stream.writeSSE({ data: JSON.stringify(event) });
 		  }
 		});
 		```
@@ -339,17 +324,14 @@ client, then drops the subscription when the client disconnects.
 
 		```python
 		# in the worker handler, after reading the new count
-		await forge.pubsub_publish(f"clicks:{slug}", json.dumps({"slug": slug, "clicks": total}))
+		await forge.topic(f"clicks:{slug}").publish({"slug": slug, "clicks": total})
 
 		# in the SSE route (FastAPI)
 		async def live(slug: str):
-		    sub = await forge.pubsub_subscribe(f"clicks:{slug}")
+		    topic = forge.topic(f"clicks:{slug}")
 		    async def events():
-		        try:
-		            async for payload in sub:
-		                yield f"data: {payload.decode()}\n\n"
-		        finally:
-		            await sub.aclose()
+		        async for event in topic.subscribe():
+		            yield f"data: {json.dumps(event)}\n\n"
 		    return StreamingResponse(events(), media_type="text/event-stream")
 		```
 

@@ -1,9 +1,11 @@
 # Forge — Node reference
 
-The package is `forgelib`. Every method lives directly on `ForgeClient` in flat
-camelCase and returns a `Promise`; there are no accessor objects. Optional trailing
-arguments are positional — pass `null` (or `undefined`) to skip one and set a later
-one. Verified against `bindings/node/index.d.ts`.
+The package is `forgelib`. Raw contract methods live directly on `ForgeClient` in
+flat camelCase and return a `Promise`. Native JSON handles also hang off the client
+(`forge.queue<T>()`, `forge.kv<T>()`, `forge.config<T>()`, `forge.topic<T>()`) for
+app payloads. Optional trailing raw arguments are positional — pass `null` (or
+`undefined`) to skip one and set a later one. Verified against
+`bindings/node/client.d.ts`.
 
 ```ts
 import { ForgeClient } from "forgelib";
@@ -112,10 +114,12 @@ instead of waiting for GC — call it when a client's socket closes).
 | --- | --- |
 | `configGet()` | Resolve a value: env `FORGE_CFG_<KEY>` > store > `null`. |
 | `configSet()` | `configSet(key, value)`. |
+| `configDelete()` | Delete a stored value; env `FORGE_CFG_<KEY>` still shadows reads. |
 | `flag()` | `flag(key, defaultValue, targetingKey?)`. Never throws; falls back to the default. |
 | `setFlagPercent()` | Percentage rollout, `0..=100`. |
 | `setFlagOn()` / `setFlagOff()` | Always-on / always-off. |
 | `setFlagAllowList()` | `setFlagAllowList(key, entries)` — on only for those targeting keys. |
+| `deleteFlag()` | Delete a flag rule; later `flag()` calls use the caller default. |
 
 ## Client
 
@@ -124,28 +128,26 @@ instead of waiting for GC — call it when a client's socket closes).
 | `backendReport()` | Which provider powers each primitive (for a health page). Synchronous. |
 | `maintain()` | One housekeeping sweep (expired kv, settled/dead jobs, stale buckets, expired sessions). |
 
-## Typed layer — `forgelib/typed`
+## Native JSON handles
 
-Bind a JSON codec once instead of stringifying at every call site.
+Bind a JSON codec once instead of stringifying at every call site. These are exported
+from the main `forgelib` package and installed as methods on `ForgeClient`.
 
 ```ts
-import {
-  typedQueue, typedKv, typedConfig, typedTopic,
-  runWorker, forgeErrorCode, forgeErrorRetryable,
-} from "forgelib/typed";
+import { ForgeClient, forgeErrorCode, forgeErrorRetryable } from "forgelib";
 
-const emails = typedQueue<{ to: string }>(forge, "emails");
+const forge = await ForgeClient.init();
+
+const emails = forge.queue<{ to: string }>("emails");
 await emails.enqueue({ to: "a@b.c" }, { maxAttempts: 5 });
 
-const profile = typedKv<Profile>(forge, `user:${id}`);
+const profile = forge.kv<Profile>(`user:${id}`);
 await profile.set(value, { ttlSeconds: 3600 });
 ```
 
-- `TypedQueue<T>`: `enqueue()`, `dequeue()`, `ack()`, `nack()`, `heartbeat()`, `depth()`.
-- `TypedKvKey<T>`: `get()`, `set()`, `delete()`.
-- `TypedConfigKey<T>`: `get()`, `getOrDefault()`, `set()`.
-- `TypedTopic<T>`: `publish()`, `subscribe()` (an `AsyncIterable<T>`).
-- `runWorker(client, queue, handler, opts?)` — managed loop; abort `opts.signal` to drain.
+- `Queue<T>` from `forge.queue<T>(name)`: `enqueue()`, `dequeue()`, `ack()`, `nack()`, `heartbeat()`, `depth()`, `worker()`.
+- `KvKey<T>` from `forge.kv<T>(key)`: `get()`, `getOrDefault(default)`, `set()`, `delete()`, `exists()`, `expire()`, `compareAndSwap()`.
+- `ConfigKey<T>` from `forge.config<T>(key, defaultValue)`: `get()`, `getOrDefault()`, `set()`.
+- `Topic<T>` from `forge.topic<T>(name)`: `publish()`, `subscribe()` (an `AsyncIterable<T>`).
+- `forge.worker<T>(queue, handler, opts?)` / `runWorker(client, queue, handler, opts?)` — managed loop; abort `opts.signal` to drain.
 - `forgeErrorCode(err)` / `forgeErrorRetryable(err)` — parse the code Forge prefixes onto the message.
-</content>
-</invoke>

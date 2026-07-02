@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import time
 import uuid
@@ -102,7 +101,7 @@ async def require_member(info: Info, chat_id: uuid.UUID, user_id: uuid.UUID) -> 
 
 async def publish_event(info: Info, topic: str, event: dict) -> None:
     try:
-        await info.context["forge"].pubsub_publish(topic, json.dumps(event))
+        await info.context["forge"].topic(topic).publish(event)
     except forgelib.ForgeError:
         pass
 
@@ -121,17 +120,14 @@ REAUTH_INTERVAL_SECS = 60.0
 
 
 async def sub_events(info: Info, topic: str) -> AsyncIterator[dict]:
-    sub = await info.context["forge"].pubsub_subscribe(topic)
+    events = info.context["forge"].topic(topic)
     # Re-validate the principal at most once per interval so a revoked session ends
     # the stream instead of streaming forever.
     next_check = time.monotonic() + REAUTH_INTERVAL_SECS
     revalidate = info.context.has_token()
-    async for payload in sub:
+    async for event in events.subscribe():
         if revalidate and time.monotonic() >= next_check:
             if await info.context.revalidate() is None:
                 return
             next_check = time.monotonic() + REAUTH_INTERVAL_SECS
-        try:
-            yield json.loads(payload)
-        except (ValueError, TypeError):
-            continue
+        yield event

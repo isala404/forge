@@ -251,12 +251,20 @@ async function dispatch(client, op, args, subscriptions, captureAs) {
       return await client.configSet(args.key, args.value)
     case 'config.get':
       return await client.configGet(args.key)
+    case 'config.delete':
+      return await client.configDelete(args.key)
     case 'config.flag':
       return await client.flag(args.key, args.default ?? false, args.targeting_key ?? null)
     case 'config.set_flag_on':
       return await client.setFlagOn(args.key)
     case 'config.set_flag_off':
       return await client.setFlagOff(args.key)
+    case 'config.set_flag_percent':
+      return await client.setFlagPercent(args.key, args.percent)
+    case 'config.set_flag_allow_list':
+      return await client.setFlagAllowList(args.key, args.entries)
+    case 'config.delete_flag':
+      return await client.deleteFlag(args.key)
     case 'auth.create_session':
       return await client.createSession(args.user_id, args.idle_seconds ?? null, args.absolute_seconds ?? null)
     case 'auth.validate_session':

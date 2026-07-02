@@ -288,19 +288,11 @@ async def get_qr(request: Request, slug: str) -> Response:
 @api.get("/api/links/{slug}/live")
 async def live_clicks(request: Request, slug: str) -> StreamingResponse:
     forge = request.app.state.forge
-    topic = click_topic(slug)
+    topic = forge.topic(click_topic(slug))
 
     async def gen():
-        sub = await forge.pubsub_subscribe(topic)
-        try:
-            async for payload in sub:
-                data = payload.decode("utf-8") if isinstance(payload, bytes) else payload
-                yield f"data: {data}\n\n"
-        finally:
-            try:
-                await sub.aclose()
-            except Exception:  # noqa: BLE001
-                pass
+        async for event in topic.subscribe():
+            yield f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -329,12 +321,6 @@ async def redirect_slug(request: Request, slug: str) -> Response:
         raise HTTPException(status_code=429, detail="too many requests")
 
     await forge.kv_incr(clicks_key(slug), 1)
-    await forge.queue_enqueue(
-        CLICKS_QUEUE,
-        json.dumps({"slug": slug}, separators=(",", ":")),
-        3,    # max_attempts
-        None, # no dedup, every click counts
-        None, # no delay
-    )
+    await forge.queue(CLICKS_QUEUE).enqueue({"slug": slug}, max_attempts=3)
 
     return RedirectResponse(url=link["url"], status_code=302)

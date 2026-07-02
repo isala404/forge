@@ -75,7 +75,6 @@ fn parse_algo(name: Option<&str>) -> PyResult<Algo> {
     }
 }
 
-
 /// Epoch milliseconds for a `SystemTime` (saturating).
 fn epoch_ms(t: SystemTime) -> f64 {
     t.duration_since(UNIX_EPOCH)
@@ -319,6 +318,13 @@ impl ForgeClient {
         })
     }
 
+    fn config_delete<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, PyAny>> {
+        let forge = self.forge.clone();
+        future_into_py(py, async move {
+            forge.config().delete_raw(&key).await.map_err(pyerr)
+        })
+    }
+
     fn set_flag_percent<'py>(
         &self,
         py: Python<'py>,
@@ -409,11 +415,7 @@ impl ForgeClient {
         future_into_py(py, async move {
             forge
                 .blob()
-                .presign_upload(
-                    &key,
-                    secs("expires_seconds", expires_seconds)?,
-                    max_bytes,
-                )
+                .presign_upload(&key, secs("expires_seconds", expires_seconds)?, max_bytes)
                 .await
                 .map_err(pyerr)
         })
@@ -602,7 +604,12 @@ impl ForgeClient {
             let when = UNIX_EPOCH + Duration::from_millis(when_epoch_ms.max(0.0) as u64);
             let id = forge
                 .schedule()
-                .at(when, &queue, forge::Bytes::from(payload), schedule_opts(max_attempts))
+                .at(
+                    when,
+                    &queue,
+                    forge::Bytes::from(payload),
+                    schedule_opts(max_attempts),
+                )
                 .await
                 .map_err(pyerr)?;
             Ok(id.to_string())
@@ -625,7 +632,13 @@ impl ForgeClient {
         future_into_py(py, async move {
             forge
                 .schedule()
-                .cron(&name, &expr, &queue, forge::Bytes::from(payload), schedule_opts(max_attempts))
+                .cron(
+                    &name,
+                    &expr,
+                    &queue,
+                    forge::Bytes::from(payload),
+                    schedule_opts(max_attempts),
+                )
                 .await
                 .map_err(pyerr)
         })
@@ -1140,6 +1153,13 @@ impl ForgeClient {
                 .set_flag(&key, FlagRule::AllowList(entries))
                 .await
                 .map_err(pyerr)
+        })
+    }
+
+    fn delete_flag<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, PyAny>> {
+        let forge = self.forge.clone();
+        future_into_py(py, async move {
+            forge.config().delete_flag(&key).await.map_err(pyerr)
         })
     }
 

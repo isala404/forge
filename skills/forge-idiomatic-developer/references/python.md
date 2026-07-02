@@ -1,8 +1,10 @@
 # Forge — Python reference
 
-The package is `forgelib`. Every method lives directly on `ForgeClient` in flat
-snake_case and is awaitable (`await` all of them, including `init`). Optional
-arguments default to `None`. Verified against `bindings/python/src/lib.rs`.
+The package is `forgelib`. Raw contract methods live directly on `ForgeClient` in
+flat snake_case and are awaitable (`await` all of them, including `init`). Native
+JSON handles also hang off the client (`forge.queue()`, `forge.kv()`,
+`forge.config()`, `forge.topic()`) for app payloads. Optional raw arguments default
+to `None`. Verified against `bindings/python/src/lib.rs`.
 
 ```python
 import forgelib
@@ -109,10 +111,12 @@ Blob is bytes-native in Python: `blob_put`/`blob_get` already take and return
 | --- | --- |
 | `config_get()` | Resolve a value: env `FORGE_CFG_<KEY>` > store > `None`. |
 | `config_set()` | `config_set(key, value)`. |
+| `config_delete()` | Delete a stored value; env `FORGE_CFG_<KEY>` still shadows reads. |
 | `flag()` | `flag(key, default, targeting_key=None)`. Never raises; falls back to the default. |
 | `set_flag_percent()` | Percentage rollout, `0..=100`. |
 | `set_flag_on()` / `set_flag_off()` | Always-on / always-off. |
 | `set_flag_allow_list()` | `set_flag_allow_list(key, entries)`. |
+| `delete_flag()` | Delete a flag rule; later `flag()` calls use the caller default. |
 
 ## Client
 
@@ -121,27 +125,26 @@ Blob is bytes-native in Python: `blob_put`/`blob_get` already take and return
 | `backend_report()` | Which provider powers each primitive. Synchronous. |
 | `maintain()` | One housekeeping sweep. Call on an interval alongside `run_scheduler_once`. |
 
-## Typed layer — `forgelib.typed`
+## Native JSON handles
 
-Bind a JSON codec once (the codec defaults to `json`; pass `loads=`/`dumps=` to swap).
+Bind a JSON codec once from the main package (the codec defaults to `json`; pass
+`loads=`/`dumps=` to swap).
 
 ```python
-from forgelib.typed import (
-    TypedQueue, TypedKvKey, TypedConfigKey, TypedTopic,
-    run_worker, forge_error_code, forge_error_retryable,
-)
+import forgelib
 
-emails = TypedQueue(forge, "emails")
+forge = await forgelib.ForgeClient.init()
+
+emails = forge.queue("emails")
 await emails.enqueue({"to": "a@b.c"}, max_attempts=5)
 
-profile = TypedKvKey(forge, f"user:{user_id}")
+profile = forge.kv(f"user:{user_id}")
 await profile.set(value, ttl_seconds=3600)
 ```
 
-- `TypedQueue`: `enqueue()`, `dequeue()`, `ack()`, `nack()`, `heartbeat()`, `depth()`.
-- `TypedKvKey`: `get()`, `set()`, `delete()`.
-- `TypedConfigKey`: `get()`, `get_or_default()`, `set()`.
-- `TypedTopic`: `publish()`, `subscribe()` (`async for event in topic.subscribe():`).
-- `run_worker(client, queue, handler, *, stop=..., visibility_seconds=30.0, wait_seconds=20.0)` — managed loop; set the `stop` event to drain.
+- `Queue` from `forge.queue(name)`: `enqueue()`, `dequeue()`, `ack()`, `nack()`, `heartbeat()`, `depth()`, `worker()`.
+- `KvKey` from `forge.kv(key)`: `get()`, `get_or_default(default)`, `set()`, `delete()`, `exists()`, `expire()`, `compare_and_swap()`.
+- `ConfigKey` from `forge.config(key, default)`: `get()`, `get_or_default()`, `set()`.
+- `Topic` from `forge.topic(name)`: `publish()`, `subscribe()` (`async for event in topic.subscribe():`).
+- `forge.worker(queue, handler, *, stop=..., visibility_seconds=30.0, wait_seconds=20.0)` / `run_worker(...)` — managed loop; set the `stop` event to drain.
 - `forge_error_code(exc)` / `forge_error_retryable(exc)` — the code is the exception class name.
-</content>

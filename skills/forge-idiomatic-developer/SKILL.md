@@ -19,7 +19,7 @@ which reads a `forge.toml`, and every primitive hangs off the returned client.
 
 The API is small and consistent, but the exact names differ per language and are not
 in any model's training data. **Do not invent method names.** Use the tables in this
-skill, or read `bindings/node/index.d.ts` and `bindings/python/src/lib.rs` in the
+skill, or read `bindings/node/client.d.ts` and `bindings/python/src/lib.rs` in the
 repo — those files are the contract.
 
 ## Pick the primitive first
@@ -50,9 +50,9 @@ Two rules that catch people:
 
 ## The three bindings at a glance
 
-Same primitives, three surface styles. The core client also carries the payloads as
-strings/bytes; a thin **typed layer** wraps a key/queue/topic with a codec so you work
-in real objects.
+Same primitives, three surface styles. The raw contract methods carry strings/bytes
+1:1 across languages; Node and Python also expose native JSON handles on the main
+client so app payloads are real objects without a second import path.
 
 **Rust** — namespaced accessors plus option-struct builders. Fallible calls return
 `Result`, so `?` them.
@@ -91,58 +91,62 @@ n = await forge.kv_incr("hits", 1)
 Full per-language method tables and idioms:
 
 - **[references/rust.md](references/rust.md)** — accessors, option builders, worker.
-- **[references/node.md](references/node.md)** — every `ForgeClient` method + typed layer.
-- **[references/python.md](references/python.md)** — every client method + typed layer.
+- **[references/node.md](references/node.md)** — raw `ForgeClient` methods + native JSON handles.
+- **[references/python.md](references/python.md)** — raw client methods + native JSON handles.
 
-## The typed layer (use it for JSON payloads)
+## Native JSON handles (use them for app payloads)
 
-Instead of stringifying by hand at every call site, bind a codec once. It lives in
-`forgelib/typed` (Node) and `forgelib.typed` (Python); in Rust the typed handles are
-re-exported from the crate root.
+Instead of stringifying by hand at every call site, bind a codec once from the main
+client. Rust's typed handles are re-exported from the crate root.
 
 Node:
 
 ```ts
-import { typedQueue, typedKv, runWorker } from "forgelib/typed";
+import { ForgeClient } from "forgelib";
 
-const emails = typedQueue<{ to: string }>(forge, "emails");
+const forge = await ForgeClient.init();
+const emails = forge.queue<{ to: string }>("emails");
 await emails.enqueue({ to: "a@b.c" });            // JSON-encoded for you
+
+const profile = forge.kv<{ name: string }>("user:1:profile");
+await profile.set({ name: "Ada" });
 ```
 
 Python:
 
 ```python
-from forgelib.typed import TypedQueue, run_worker
+import forgelib
 
-emails = TypedQueue(forge, "emails")
+forge = await forgelib.ForgeClient.init()
+emails = forge.queue("emails")
 await emails.enqueue({"to": "a@b.c"})
+
+profile = forge.kv("user:1:profile")
+await profile.set({"name": "Ada"})
 ```
 
 ## Running a worker
 
-Do not hand-roll the dequeue loop. The typed layer ships a managed worker that
-dequeues, heartbeats at a third of the visibility window, acks on success, nacks on a
-thrown error, and abandons the job if the lease is lost.
+Do not hand-roll the dequeue loop. The client ships a managed worker that dequeues,
+heartbeats at a third of the visibility window, acks on success, nacks on a thrown
+error, and abandons the job if the lease is lost.
 
-Node — `runWorker(client, queue, handler, opts?)`; abort the `signal` to drain:
+Node — `forge.worker<T>(queue, handler, opts?)`; abort the `signal` to drain:
 
 ```ts
-import { runWorker } from "forgelib/typed";
-
 const stop = new AbortController();
-runWorker(forge, "emails", async (job) => {
-  await send(JSON.parse(job.payload));            // throw to nack + retry
+void forge.worker<{ to: string }>("emails", async (job) => {
+  await send(job.payload);                        // throw to nack + retry
 }, { signal: stop.signal });
 ```
 
-Python — `run_worker(client, queue, handler, *, stop=...)`:
+Python — `forge.worker(queue, handler, *, stop=...)`:
 
 ```python
 import asyncio
-from forgelib.typed import run_worker
 
 stop = asyncio.Event()
-await run_worker(forge, "emails", handle, stop=stop)
+await forge.worker("emails", handle, stop=stop)
 ```
 
 Rust — the builder off the client, `forge.worker(queue).run(handler)` (or
@@ -206,10 +210,10 @@ differs.
 
 - **Node** prefixes the code onto the thrown `Error`'s message, e.g.
   `"PRECONDITION: ..."`. Parse it with `forgeErrorCode(err)` / test retryability with
-  `forgeErrorRetryable(err)` from `forgelib/typed`.
+  `forgeErrorRetryable(err)` from `forgelib`.
 - **Python** raises a typed exception hierarchy; the code is the class name
   (`Invalid`, `Unavailable`, …). Use `forge_error_code(exc)` /
-  `forge_error_retryable(exc)` from `forgelib.typed`.
+  `forge_error_retryable(exc)` from `forgelib`.
 - **Rust** returns `Err(forgelib::ForgeError)`; match the variant, or call
   `.is_retryable()`.
 
@@ -244,6 +248,6 @@ Only `UNAVAILABLE` (and some `BACKEND`) errors are worth retrying. Retrying an
 ## Before you finish
 
 Every method you call must exist in the binding. If you are unsure of a name, grep the
-contract (`bindings/node/index.d.ts`, `bindings/python/src/lib.rs`, `src/lib.rs`) or
+contract (`bindings/node/client.d.ts`, `bindings/python/src/lib.rs`, `src/lib.rs`) or
 the per-language reference here. The repo's `tools/skill-check` guard verifies the
 names in this skill against those files, so a name here is real for the committed API.

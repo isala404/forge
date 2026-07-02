@@ -20,6 +20,27 @@
       ]
     },
     {
+      "name": "delete_raw_and_flags_revert",
+      "steps": [
+        { "op": "config.set", "args": { "key": "temp", "value": "stored" } },
+        { "op": "config.delete", "args": { "key": "temp" }, "expect": { "value": true } },
+        { "op": "config.get", "args": { "key": "temp" }, "expect": { "value": null } },
+        { "op": "config.delete", "args": { "key": "temp" }, "expect": { "value": false } },
+        { "op": "config.set_flag_on", "args": { "key": "gone" } },
+        { "op": "config.flag", "args": { "key": "gone", "default": false }, "expect": { "value": true } },
+        { "op": "config.delete_flag", "args": { "key": "gone" }, "expect": { "value": true } },
+        { "op": "config.flag", "args": { "key": "gone", "default": false }, "expect": { "value": false } },
+        { "op": "config.delete_flag", "args": { "key": "gone" }, "expect": { "value": false } },
+        { "op": "config.set_flag_allow_list", "args": { "key": "allow", "entries": ["u1"] } },
+        { "op": "config.flag", "args": { "key": "allow", "default": false, "targeting_key": "u1" }, "expect": { "value": true } },
+        { "op": "config.flag", "args": { "key": "allow", "default": false, "targeting_key": "u2" }, "expect": { "value": false } },
+        { "op": "config.set_flag_percent", "args": { "key": "pct0", "percent": 0 } },
+        { "op": "config.flag", "args": { "key": "pct0", "default": false, "targeting_key": "u" }, "expect": { "value": false } },
+        { "op": "config.set_flag_percent", "args": { "key": "pct100", "percent": 100 } },
+        { "op": "config.flag", "args": { "key": "pct100", "default": false, "targeting_key": "u" }, "expect": { "value": true } }
+      ]
+    },
+    {
       "name": "namespace_isolation",
       "note": "Config keys are scoped by Forge namespace. A value set under one namespace must not be visible under another.",
       "steps": [

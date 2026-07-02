@@ -42,32 +42,35 @@ signing_secret = "${BLOB_SIGNING_SECRET:-dev-secret}"  # enables presigned blob 
 import forgelib
 
 forge = await forgelib.ForgeClient.init()  # reads ./forge.toml
-await forge.kv_set("greeting", "hi")
-print(await forge.kv_get("greeting"))
 
-# Realtime: a Subscription is an async iterator yielding bytes.
-async for payload in await forge.pubsub_subscribe("chat:1"):
-    handle(payload)
+greeting = forge.kv("greeting")
+await greeting.set("hi")
+print(await greeting.get())
+
+# Realtime: topic handles decode JSON events for you.
+async for event in forge.topic("chat:1").subscribe():
+    handle(event)
 ```
 
-### Typed projection
+### Native typed handles
 
-`forgelib.typed` binds a name + JSON codec to a type, so you enqueue a model instead of
-a raw queue string + `json.dumps` (the Python view of the Rust `forgelib::typed` layer):
+The main `forgelib` package binds names to JSON value types directly on the client,
+so most app code does not need raw queue strings plus `json.dumps`:
 
 ```python
-from forgelib.typed import TypedQueue, TypedKvKey
+import forgelib
 
-emails = TypedQueue(forge, "emails")
+emails = forge.queue("emails")
 await emails.enqueue({"to": "a@b.c", "template": "welcome"}, max_attempts=3)
 job = await emails.dequeue(wait_seconds=1.0)
 if job:
     handle(job.payload)            # already decoded
     await emails.ack(job.receipt)
 
-profile = TypedKvKey(forge, "user:1:profile")
+profile = forge.kv("user:1:profile")
 await profile.set({"name": "Ada"})
 ```
 
-The full method surface is in [`src/lib.rs`](src/lib.rs) and the packaged
-`forgelib/_generated.pyi` stubs.
+The raw methods (`kv_set`, `queue_enqueue`, ...) remain available for exact
+cross-language parity and string/byte contracts. The packaged stubs include both the
+raw client and the typed handles.

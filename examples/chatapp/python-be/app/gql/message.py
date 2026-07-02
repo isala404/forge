@@ -133,9 +133,7 @@ class MessageMutation:
 
         await publish_event(info, chat_topic(cid), {"type": "message", "message_id": str(msg_id)})
         # Dedup on the message id so a retried sendMessage resolver can't double-enqueue.
-        await forge.queue_enqueue(
-            FANOUT_QUEUE, json.dumps({"message_id": str(msg_id)}), dedup_id=str(msg_id)
-        )
+        await forge.queue(FANOUT_QUEUE).enqueue({"message_id": str(msg_id)}, dedup_id=str(msg_id))
 
         if expires_at is not None:
             await forge.schedule_at(

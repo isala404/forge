@@ -31,6 +31,13 @@ export type Bindings = {
   forge: ForgeClient;
 };
 
+type AuditEvent = {
+  userId: string;
+  action: "created" | "updated" | "deleted";
+  todoId: string;
+  at: string;
+};
+
 export const api = new Hono<{ Bindings: Bindings }>();
 
 async function readJson<T>(request: Request): Promise<T> {
@@ -93,10 +100,12 @@ api.post("/api/signup", async (c) => {
     password_hash: await forge.hashPassword(password),
   };
 
-  const inserted = await forge.kvSet(userEmailKey(email), JSON.stringify(user), null, true);
+  const inserted = await forge.kv<UserRecord>(userEmailKey(email)).set(user, {
+    ifNotExists: true,
+  });
   if (!inserted) throw new HttpError(409, "email already registered");
 
-  await forge.kvSet(userIdKey(user.id), JSON.stringify(user));
+  await forge.kv<UserRecord>(userIdKey(user.id)).set(user);
 
   const token = await forge.createSession(user.id, SESSION_IDLE_SECS, SESSION_ABSOLUTE_SECS);
   return c.json({ token, user: publicUser(user) }, 201);
@@ -109,9 +118,8 @@ api.post("/api/login", async (c) => {
   const authLimit = await forge.rateLimitCheck("todo-auth", email, 20, 60, true);
   if (!authLimit.allowed) throw new HttpError(429, "too many auth attempts; try again soon");
 
-  const rawUser = await forge.kvGet(userEmailKey(email));
-  if (!rawUser) throw new HttpError(401, "invalid email or password");
-  const user = JSON.parse(rawUser) as UserRecord;
+  const user = await forge.kv<UserRecord>(userEmailKey(email)).get();
+  if (!user) throw new HttpError(401, "invalid email or password");
 
   const passwordOk = await forge.verifyPassword(password, user.password_hash);
   if (!passwordOk) throw new HttpError(401, "invalid email or password");
@@ -130,10 +138,10 @@ api.get("/api/me", async (c) => {
   const userId = await forge.validateSession(bearerToken(c.req.header("authorization")));
   if (!userId) throw new HttpError(401, "authentication required");
 
-  const rawUser = await forge.kvGet(userIdKey(userId));
-  if (!rawUser) throw new HttpError(401, "authentication required");
+  const user = await forge.kv<UserRecord>(userIdKey(userId)).get();
+  if (!user) throw new HttpError(401, "authentication required");
 
-  return c.json({ user: publicUser(JSON.parse(rawUser) as UserRecord) });
+  return c.json({ user: publicUser(user) });
 });
 
 api.get("/api/todos", async (c) => {
@@ -141,8 +149,7 @@ api.get("/api/todos", async (c) => {
   const userId = await forge.validateSession(bearerToken(c.req.header("authorization")));
   if (!userId) throw new HttpError(401, "authentication required");
 
-  const rawTodos = await forge.kvGet(todosKey(userId));
-  const todos = rawTodos ? (JSON.parse(rawTodos) as Todo[]) : [];
+  const todos = (await forge.kv<Todo[]>(todosKey(userId)).get()) ?? [];
   return c.json({ todos });
 });
 
@@ -152,8 +159,8 @@ api.post("/api/todos", async (c) => {
   if (!userId) throw new HttpError(401, "authentication required");
 
   const input = await readJson<TodoCreate>(c.req.raw);
-  const rawTodos = await forge.kvGet(todosKey(userId));
-  const todos = rawTodos ? (JSON.parse(rawTodos) as Todo[]) : [];
+  const todosKeyHandle = forge.kv<Todo[]>(todosKey(userId));
+  const todos = (await todosKeyHandle.get()) ?? [];
 
   const now = new Date().toISOString();
   const todo: Todo = {
@@ -165,17 +172,15 @@ api.post("/api/todos", async (c) => {
   };
   todos.unshift(todo);
 
-  await forge.kvSet(todosKey(userId), JSON.stringify(todos));
-  await forge.queueEnqueue(
-    AUDIT_QUEUE,
-    JSON.stringify({
+  await todosKeyHandle.set(todos);
+  await forge.queue<AuditEvent>(AUDIT_QUEUE).enqueue(
+    {
       userId,
       action: "created",
       todoId: todo.id,
       at: new Date().toISOString(),
-    }),
-    3,
-    `created:${todo.id}`,
+    },
+    { maxAttempts: 3, dedupId: `created:${todo.id}` },
   );
 
   return c.json(todo, 201);
@@ -188,8 +193,8 @@ api.patch("/api/todos/:id", async (c) => {
   if (!userId) throw new HttpError(401, "authentication required");
 
   const input = await readJson<TodoPatch>(c.req.raw);
-  const rawTodos = await forge.kvGet(todosKey(userId));
-  const todos = rawTodos ? (JSON.parse(rawTodos) as Todo[]) : [];
+  const todosKeyHandle = forge.kv<Todo[]>(todosKey(userId));
+  const todos = (await todosKeyHandle.get()) ?? [];
 
   const todo = todos.find((candidate) => candidate.id === id);
   if (!todo) throw new HttpError(404, "todo not found");
@@ -197,17 +202,15 @@ api.patch("/api/todos/:id", async (c) => {
   if (input.completed !== undefined) todo.completed = Boolean(input.completed);
   todo.updatedAt = new Date().toISOString();
 
-  await forge.kvSet(todosKey(userId), JSON.stringify(todos));
-  await forge.queueEnqueue(
-    AUDIT_QUEUE,
-    JSON.stringify({
+  await todosKeyHandle.set(todos);
+  await forge.queue<AuditEvent>(AUDIT_QUEUE).enqueue(
+    {
       userId,
       action: "updated",
       todoId: todo.id,
       at: new Date().toISOString(),
-    }),
-    3,
-    `updated:${todo.id}`,
+    },
+    { maxAttempts: 3, dedupId: `updated:${todo.id}` },
   );
 
   return c.json(todo);
@@ -219,22 +222,20 @@ api.delete("/api/todos/:id", async (c) => {
   const userId = await forge.validateSession(bearerToken(c.req.header("authorization")));
   if (!userId) throw new HttpError(401, "authentication required");
 
-  const rawTodos = await forge.kvGet(todosKey(userId));
-  const todos = rawTodos ? (JSON.parse(rawTodos) as Todo[]) : [];
+  const todosKeyHandle = forge.kv<Todo[]>(todosKey(userId));
+  const todos = (await todosKeyHandle.get()) ?? [];
   const next = todos.filter((todo) => todo.id !== id);
   if (next.length === todos.length) throw new HttpError(404, "todo not found");
 
-  await forge.kvSet(todosKey(userId), JSON.stringify(next));
-  await forge.queueEnqueue(
-    AUDIT_QUEUE,
-    JSON.stringify({
+  await todosKeyHandle.set(next);
+  await forge.queue<AuditEvent>(AUDIT_QUEUE).enqueue(
+    {
       userId,
       action: "deleted",
       todoId: id,
       at: new Date().toISOString(),
-    }),
-    3,
-    `deleted:${id}`,
+    },
+    { maxAttempts: 3, dedupId: `deleted:${id}` },
   );
 
   return c.body(null, 204);

@@ -14,10 +14,22 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+function signalFromStopped(stopped: Stopped): AbortSignal {
+  const stop = new AbortController();
+  const timer = setInterval(() => {
+    if (stopped()) {
+      stop.abort();
+      clearInterval(timer);
+    }
+  }, 500);
+  timer.unref();
+  return stop.signal;
+}
+
 // fanout: marks each recipient's receipt delivered, idempotent on message id.
 // Unread derives from receipts.read_at, so there is no counter to bump.
-async function handleFanout(app: AppCtx, payload: string): Promise<void> {
-  const { message_id } = JSON.parse(payload) as MessageJob;
+async function handleFanout(app: AppCtx, payload: MessageJob): Promise<void> {
+  const { message_id } = payload;
   const msg = await db.messageById(app.pool, message_id);
   if (!msg) return; // disappeared before delivery
   const recipients = await db.otherMemberIds(app.pool, msg.chat_id, msg.sender_id);
@@ -27,38 +39,19 @@ async function handleFanout(app: AppCtx, payload: string): Promise<void> {
 }
 
 export function runFanoutWorker(app: AppCtx, stopped: Stopped): void {
-  void (async () => {
-    while (!stopped()) {
-      let job;
-      try {
-        job = await app.forge.queueDequeue(FANOUT_QUEUE, VISIBILITY, WAIT);
-      } catch (e) {
-        console.warn("fanout dequeue failed:", (e as Error).message);
-        await sleep(200);
-        continue;
-      }
-      if (!job) continue;
-      try {
-        await handleFanout(app, job.payload);
-        await app.forge.queueAck(job.receipt);
-      } catch (e) {
-        console.warn("fanout handler failed:", (e as Error).message);
-        try {
-          await app.forge.queueNack(job.receipt);
-        } catch {
-          /* redelivery is the queue's job */
-        }
-      }
-    }
-  })();
+  void app.forge.worker<MessageJob>(
+    FANOUT_QUEUE,
+    async (job) => handleFanout(app, job.payload),
+    { visibilitySeconds: VISIBILITY, waitSeconds: WAIT, signal: signalFromStopped(stopped) },
+  );
 }
 
 // reap: hard-deletes a disappearing message's row + blob when its scheduled job
 // fires. Blob goes BEFORE the row, and a blob-delete failure propagates so the
 // at-least-once queue redelivers instead of orphaning the object. Idempotent:
 // already-gone or recalled (toggled off / not yet due) messages succeed cleanly.
-async function reapMessage(app: AppCtx, payload: string): Promise<void> {
-  const { message_id } = JSON.parse(payload) as MessageJob;
+async function reapMessage(app: AppCtx, payload: MessageJob): Promise<void> {
+  const { message_id } = payload;
   const target = await db.reapTarget(app.pool, message_id);
   if (!target) return; // already gone
   // expires_at cleared (toggled off) or in the future (recalled / not yet due).
@@ -71,53 +64,27 @@ async function reapMessage(app: AppCtx, payload: string): Promise<void> {
 }
 
 export function runReapWorker(app: AppCtx, stopped: Stopped): void {
-  void (async () => {
-    while (!stopped()) {
-      let job;
-      try {
-        job = await app.forge.queueDequeue(REAP_QUEUE, VISIBILITY, WAIT);
-      } catch (e) {
-        console.warn("reap dequeue failed:", (e as Error).message);
-        await sleep(200);
-        continue;
-      }
-      if (!job) continue;
-      try {
-        await reapMessage(app, job.payload);
-        await app.forge.queueAck(job.receipt);
-      } catch (e) {
-        console.warn("reap handler failed:", (e as Error).message);
-        try {
-          await app.forge.queueNack(job.receipt);
-        } catch {
-          /* redelivery is the queue's job */
-        }
-      }
-    }
-  })();
+  void app.forge.worker<MessageJob>(
+    REAP_QUEUE,
+    async (job) => reapMessage(app, job.payload),
+    { visibilitySeconds: VISIBILITY, waitSeconds: WAIT, signal: signalFromStopped(stopped) },
+  );
 }
 
 // fail: always nacks, so a triggered job exhausts its single attempt and
 // dead-letters into `fail.dlq` (the opsStats DLQ demo).
 export function runFailWorker(app: AppCtx, stopped: Stopped): void {
-  void (async () => {
-    while (!stopped()) {
-      let job;
-      try {
-        job = await app.forge.queueDequeue(FAIL_QUEUE, VISIBILITY, WAIT);
-      } catch (e) {
-        console.warn("fail dequeue failed:", (e as Error).message);
-        await sleep(200);
-        continue;
-      }
-      if (!job) continue;
-      try {
-        await app.forge.queueNack(job.receipt);
-      } catch {
-        /* ignore; DLQ transition is the contract's job */
-      }
-    }
-  })();
+  void app.forge.worker<string>(
+    FAIL_QUEUE,
+    async () => {
+      throw new Error("intentional failure for DLQ demo");
+    },
+    {
+      visibilitySeconds: VISIBILITY,
+      waitSeconds: WAIT,
+      signal: signalFromStopped(stopped),
+    },
+  );
 }
 
 // Reconciliation heals work dropped after commit. The app and Forge hold separate
@@ -143,7 +110,7 @@ async function reconcileOnce(app: AppCtx): Promise<void> {
   // Dropped fanout: re-enqueue fanout for older messages with undelivered receipts.
   // Fanout is idempotent on mark_delivered, so a re-enqueue is always safe.
   for (const id of await db.undeliveredMessageIds(app.pool, RECONCILE_LIMIT)) {
-    await app.forge.queueEnqueue(FANOUT_QUEUE, JSON.stringify({ message_id: id }), undefined, id);
+    await app.forge.queue<MessageJob>(FANOUT_QUEUE).enqueue({ message_id: id }, { dedupId: id });
   }
 }
 

@@ -245,12 +245,20 @@ async def dispatch(client, op, args, subscriptions, capture_as):
         return await client.config_set(args["key"], args["value"])
     if op == "config.get":
         return await client.config_get(args["key"])
+    if op == "config.delete":
+        return await client.config_delete(args["key"])
     if op == "config.flag":
         return await client.flag(args["key"], args.get("default", False), args.get("targeting_key"))
     if op == "config.set_flag_on":
         return await client.set_flag_on(args["key"])
     if op == "config.set_flag_off":
         return await client.set_flag_off(args["key"])
+    if op == "config.set_flag_percent":
+        return await client.set_flag_percent(args["key"], args["percent"])
+    if op == "config.set_flag_allow_list":
+        return await client.set_flag_allow_list(args["key"], args["entries"])
+    if op == "config.delete_flag":
+        return await client.delete_flag(args["key"])
     if op == "auth.create_session":
         return await client.create_session(args["user_id"], args.get("idle_seconds"), args.get("absolute_seconds"))
     if op == "auth.validate_session":

@@ -33,8 +33,7 @@ pub const RESERVED_SLUGS: &[&str] = &["api", "healthz", "favicon.ico"];
 /// Validates slug format: 3-32 chars, [A-Za-z0-9_-], not reserved.
 pub fn valid_slug(slug: &str) -> bool {
     let len = slug.len();
-    len >= 3
-        && len <= 32
+    (3..=32).contains(&len)
         && slug
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')

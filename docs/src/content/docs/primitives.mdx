@@ -86,17 +86,19 @@ with a dead-letter queue, delays, and dedup. Lineage: AWS SQS.
 	<TabItem label="Node" icon="seti:javascript">
 
 		```ts
+		const emails = forge.queue<typeof msg>("emails");
+
 		// producer
-		await forge.queueEnqueue("emails", JSON.stringify(msg), 5);
+		await emails.enqueue(msg, { maxAttempts: 5 });
 
 		// consumer: lease a job, do the work, settle it by receipt
-		const job = await forge.queueDequeue("emails", 30, 20);
+		const job = await emails.dequeue({ visibilitySeconds: 30, waitSeconds: 20 });
 		if (job) {
 		  try {
-		    await send(JSON.parse(job.payload));
-		    await forge.queueAck(job.receipt);
+		    await send(job.payload);
+		    await emails.ack(job.receipt);
 		  } catch {
-		    await forge.queueNack(job.receipt);
+		    await emails.nack(job.receipt);
 		  }
 		}
 		```
@@ -105,17 +107,19 @@ with a dead-letter queue, delays, and dedup. Lineage: AWS SQS.
 	<TabItem label="Python" icon="seti:python">
 
 		```python
+		emails = forge.queue("emails")
+
 		# producer
-		await forge.queue_enqueue("emails", json.dumps(msg), 5)
+		await emails.enqueue(msg, max_attempts=5)
 
 		# consumer: lease a job, do the work, settle it by receipt
-		job = await forge.queue_dequeue("emails", 30, 20)
+		job = await emails.dequeue(visibility_seconds=30, wait_seconds=20)
 		if job:
 		    try:
-		        await send(json.loads(job.payload))
-		        await forge.queue_ack(job.receipt)
+		        await send(job.payload)
+		        await emails.ack(job.receipt)
 		    except Exception:
-		        await forge.queue_nack(job.receipt)
+		        await emails.nack(job.receipt)
 		```
 
 	</TabItem>
@@ -150,8 +154,8 @@ with a dead-letter queue, delays, and dedup. Lineage: AWS SQS.
 
 Payloads go up to 256 KiB. A handler that might outlive its lease should
 `heartbeat` to extend it. `dedup_id` collapses repeated enqueues within a window.
-Rust also ships a managed worker (`forge.worker("emails")`) covered in
-[Operations](/operations/#workers).
+Each binding also ships a managed worker (`forge.worker("emails", handler)` in
+Node/Python, `forge.worker("emails")` in Rust) covered in [Operations](/operations/#workers).
 
 ## Pub/sub
 
@@ -164,27 +168,23 @@ message must not be lost, use the queue.
 	<TabItem label="Node" icon="seti:javascript">
 
 		```ts
-		await forge.pubsubPublish("room:42", JSON.stringify(msg));
+		const room = forge.topic<typeof msg>("room:42");
+		await room.publish(msg);
 
-		const sub = await forge.pubsubSubscribe("room:42");
-		for (;;) {
-		  const payload = await sub.next();   // Buffer | null
-		  if (payload === null) break;
+		for await (const event of await room.subscribe()) {
 		  // forward payload to the connected client
 		}
-		sub.close();
 		```
 
 	</TabItem>
 	<TabItem label="Python" icon="seti:python">
 
 		```python
-		await forge.pubsub_publish("room:42", json.dumps(msg))
+		room = forge.topic("room:42")
+		await room.publish(msg)
 
-		sub = await forge.pubsub_subscribe("room:42")
-		async for payload in sub:    # bytes
+		async for event in room.subscribe():
 		    ...                       # forward payload to the connected client
-		await sub.aclose()
 		```
 
 	</TabItem>
@@ -430,31 +430,19 @@ background.
 		await forge.scheduleAt(
 		  Date.now() + 3600_000,
 		  EXPIRE_QUEUE,
-		  JSON.stringify({ slug }),
+		  JSON.stringify({ slug }), // schedule payloads use the raw queue contract
 		);
 
 		// Worker: this is the code that runs when the scheduled job is delivered.
-		async function runExpireWorker() {
-		  for (;;) {
-		    const job = await forge.queueDequeue(EXPIRE_QUEUE, 30, 20);
-		    if (!job) continue;
-
-		    try {
-		      const { slug } = JSON.parse(job.payload);
-		      await deleteLink(slug);
-		      await forge.queueAck(job.receipt);
-		    } catch {
-		      await forge.queueNack(job.receipt);
-		    }
-		  }
-		}
+		void forge.worker<{ slug: string }>(EXPIRE_QUEUE, async (job) => {
+		  await deleteLink(job.payload.slug);
+		});
 
 		// Scheduler: turns due schedules into queue jobs.
 		setInterval(async () => {
 		  await forge.runSchedulerOnce();
 		}, 30_000);
 
-		void runExpireWorker();
 		```
 
 	</TabItem>
@@ -467,22 +455,12 @@ background.
 		await forge.schedule_at(
 		    now_ms() + 3_600_000,
 		    EXPIRE_QUEUE,
-		    json.dumps({"slug": slug}),
+		    json.dumps({"slug": slug}),  # schedule payloads use the raw queue contract
 		)
 
 		# Worker: this is the code that runs when the scheduled job is delivered.
-		async def run_expire_worker():
-		    while True:
-		        job = await forge.queue_dequeue(EXPIRE_QUEUE, 30, 20)
-		        if job is None:
-		            continue
-
-		        try:
-		            payload = json.loads(job.payload)
-		            await delete_link(payload["slug"])
-		            await forge.queue_ack(job.receipt)
-		        except Exception:
-		            await forge.queue_nack(job.receipt)
+		async def handle_expire(job):
+		    await delete_link(job.payload["slug"])
 
 		# Scheduler: turns due schedules into queue jobs.
 		async def scheduler():
@@ -490,7 +468,7 @@ background.
 		        await forge.run_scheduler_once()
 		        await asyncio.sleep(30)
 
-		asyncio.create_task(run_expire_worker())
+		asyncio.create_task(forge.worker(EXPIRE_QUEUE, handle_expire))
 		asyncio.create_task(scheduler())
 		```
 

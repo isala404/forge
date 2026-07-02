@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import uuid
 from datetime import UTC, datetime
 
@@ -16,79 +15,37 @@ RECONCILE_LIMIT = 100
 
 
 async def fanout_worker(forge, pool, stop: asyncio.Event) -> None:
-    while not stop.is_set():
-        try:
-            job = await forge.queue_dequeue(FANOUT_QUEUE, 30.0, 1.0)
-        except forgelib.ForgeError:
-            await asyncio.sleep(0.2)
-            continue
-        if job is None:
-            continue
-        payload = job.payload
-        try:
-            mid = uuid.UUID(json.loads(payload)["message_id"])
-            msg = await db.message(pool, mid)
-            if msg is not None:
-                for recipient in await db.other_member_ids(pool, msg["chat_id"], msg["sender_id"]):
-                    await db.mark_delivered(pool, mid, recipient)
-            await forge.queue_ack(job.receipt)
-        except Exception:
-            try:
-                await forge.queue_nack(job.receipt, 5.0)
-            except forgelib.ForgeError:
-                pass
+    async def handle(job) -> None:
+        mid = uuid.UUID(job.payload["message_id"])
+        msg = await db.message(pool, mid)
+        if msg is not None:
+            for recipient in await db.other_member_ids(pool, msg["chat_id"], msg["sender_id"]):
+                await db.mark_delivered(pool, mid, recipient)
+
+    await forge.worker(FANOUT_QUEUE, handle, wait_seconds=1.0, stop=stop)
 
 
 async def reap_worker(forge, pool, stop: asyncio.Event) -> None:
-    while not stop.is_set():
-        try:
-            job = await forge.queue_dequeue(REAP_QUEUE, 30.0, 1.0)
-        except forgelib.ForgeError:
-            await asyncio.sleep(0.2)
-            continue
-        if job is None:
-            continue
-        payload = job.payload
-        try:
-            mid = uuid.UUID(json.loads(payload)["message_id"])
-            row = await db.message_for_reap(pool, mid)
-            if row is None:
-                # Already gone (a previous reap or the reconciliation sweep handled it).
-                await forge.queue_ack(job.receipt)
-                continue
-            expires_at = row["expires_at"]
-            if expires_at is None or expires_at > datetime.now(UTC):
-                # Recalled (disappearing toggled off) or not yet due: leave the row.
-                await forge.queue_ack(job.receipt)
-                continue
-            # Delete the blob first and let any failure propagate (nack): an at-least-once
-            # redelivery is cheaper than orphaning the object behind a deleted row.
-            if row["media_key"]:
-                await forge.blob_delete(row["media_key"])
-            await db.delete_expired_message(pool, mid)
-            await forge.queue_ack(job.receipt)
-        except Exception:
-            try:
-                await forge.queue_nack(job.receipt, 5.0)
-            except forgelib.ForgeError:
-                pass
+    async def handle(job) -> None:
+        mid = uuid.UUID(job.payload["message_id"])
+        row = await db.message_for_reap(pool, mid)
+        if row is None:
+            return
+        expires_at = row["expires_at"]
+        if expires_at is None or expires_at > datetime.now(UTC):
+            return
+        if row["media_key"]:
+            await forge.blob_delete(row["media_key"])
+        await db.delete_expired_message(pool, mid)
+
+    await forge.worker(REAP_QUEUE, handle, wait_seconds=1.0, stop=stop)
 
 
 async def fail_worker(forge, stop: asyncio.Event) -> None:
-    while not stop.is_set():
-        try:
-            job = await forge.queue_dequeue(FAIL_QUEUE, 30.0, 1.0)
-        except forgelib.ForgeError:
-            await asyncio.sleep(0.2)
-            continue
-        if job is None:
-            continue
-        try:
-            # Nack with retry_in=0 so it redelivers immediately and exhausts attempts
-            # into `fail.dlq` quickly.
-            await forge.queue_nack(job.receipt, 0.0)
-        except forgelib.ForgeError:
-            pass
+    async def fail(_job) -> None:
+        raise RuntimeError("intentional failure for DLQ demo")
+
+    await forge.worker(FAIL_QUEUE, fail, wait_seconds=1.0, stop=stop, loads=lambda raw: raw)
 
 
 async def reconcile_once(forge, pool) -> None:
@@ -107,9 +64,7 @@ async def reconcile_once(forge, pool) -> None:
     # Dropped fanout: re-enqueue for messages whose receipts were never delivered.
     # Fanout is idempotent on mark_delivered, so a duplicate job is harmless.
     for mid in await db.undelivered_message_ids(pool, RECONCILE_LIMIT):
-        await forge.queue_enqueue(
-            FANOUT_QUEUE, json.dumps({"message_id": str(mid)}), dedup_id=str(mid)
-        )
+        await forge.queue(FANOUT_QUEUE).enqueue({"message_id": str(mid)}, dedup_id=str(mid))
 
 
 async def scheduler_loop(forge, pool, stop: asyncio.Event, interval: float) -> None:

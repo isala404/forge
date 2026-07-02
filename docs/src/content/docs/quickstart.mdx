@@ -88,7 +88,7 @@ on this site follow your choice.)
 		const views = await forge.kvIncr(`views:${userId}`, 1);
 
 		// queue: hand work to the background
-		await forge.queueEnqueue("emails", JSON.stringify({ to: email }));
+		await forge.queue<{ to: string }>("emails").enqueue({ to: email });
 
 		// rate limit: 20 attempts per minute, keyed by email
 		const limit = await forge.rateLimitCheck("login", email, 20, 60);
@@ -99,7 +99,6 @@ on this site follow your choice.)
 	<TabItem label="Python" icon="seti:python">
 
 		```python
-		import json
 		import forgelib
 
 		forge = await forgelib.ForgeClient.init()  # reads ./forge.toml, runs migrations
@@ -112,7 +111,7 @@ on this site follow your choice.)
 		views = await forge.kv_incr(f"views:{user_id}", 1)
 
 		# queue: hand work to the background
-		await forge.queue_enqueue("emails", json.dumps({"to": email}))
+		await forge.queue("emails").enqueue({"to": email})
 
 		# rate limit: 20 attempts per minute, keyed by email
 		limit = await forge.rate_limit_check("login", email, 20, 60)
@@ -151,9 +150,10 @@ on this site follow your choice.)
 
 One shape difference is worth noting. Rust reaches each primitive through an accessor
 and uses option structs, like `forge.kv().set(key, value, SetOpts::new())`. Node and
-Python put every method on the client with plain arguments, like `forge.kvSet(...)`
-and `forge.kv_set(...)`. Same primitives, same behavior, one less layer in the dynamic
-languages.
+Python keep the exact raw methods on the client (`forge.kvSet(...)`, `forge.kv_set(...)`)
+for contract parity, and add native JSON handles (`forge.kv<T>(key)`,
+`forge.queue<T>(name)`, `forge.kv(key)`, `forge.queue(name)`) for the app values you
+want typed in day-to-day code.
 
 ## Run the background work
 

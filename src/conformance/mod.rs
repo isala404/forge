@@ -420,6 +420,11 @@ async fn dispatch(
             Some(s) => Value::String(s),
             None => Value::Null,
         }),
+        "config.delete" => forge
+            .config()
+            .delete_raw(arg_str(args, "key"))
+            .await
+            .map(Value::Bool),
         "config.flag" => {
             let ctx = match args.get("targeting_key").and_then(Value::as_str) {
                 Some(k) => crate::EvalCtx::user(k),
@@ -443,6 +448,37 @@ async fn dispatch(
             .set_flag(arg_str(args, "key"), crate::FlagRule::Off)
             .await
             .map(|()| Value::Null),
+        "config.set_flag_percent" => forge
+            .config()
+            .set_flag(
+                arg_str(args, "key"),
+                crate::FlagRule::Percent(arg_u64(args, "percent") as u8),
+            )
+            .await
+            .map(|()| Value::Null),
+        "config.set_flag_allow_list" => {
+            let entries = args
+                .get("entries")
+                .and_then(Value::as_array)
+                .ok_or_else(|| ForgeError::invalid("missing entries"))?
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| ForgeError::invalid("entry is not a string"))
+                })
+                .collect::<std::result::Result<Vec<_>, ForgeError>>()?;
+            forge
+                .config()
+                .set_flag(arg_str(args, "key"), crate::FlagRule::AllowList(entries))
+                .await
+                .map(|()| Value::Null)
+        }
+        "config.delete_flag" => forge
+            .config()
+            .delete_flag(arg_str(args, "key"))
+            .await
+            .map(Value::Bool),
         "auth.create_session" => {
             let token = forge
                 .auth()
@@ -645,6 +681,12 @@ fn arg_str<'a>(args: &'a Value, name: &str) -> &'a str {
     args[name]
         .as_str()
         .unwrap_or_else(|| panic!("arg {name:?} must be a string"))
+}
+
+fn arg_u64(args: &Value, name: &str) -> u64 {
+    args[name]
+        .as_u64()
+        .unwrap_or_else(|| panic!("arg {name:?} must be an unsigned integer"))
 }
 
 fn arg_bytes(args: &Value, name: &str) -> Bytes {

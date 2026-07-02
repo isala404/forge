@@ -55,7 +55,7 @@ class OpsMutation:
     async def trigger_failing_job(self, info: Info) -> bool:
         await require_admin(info)
         try:
-            await info.context["forge"].queue_enqueue(FAIL_QUEUE, "boom")
+            await info.context["forge"].queue(FAIL_QUEUE).enqueue("boom", max_attempts=1)
         except forgelib.ForgeError as e:
             raise map_forge(e) from e
         return True

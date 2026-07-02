@@ -189,6 +189,8 @@ export declare class ForgeClient {
   configSet(key: string, value: string): Promise<void>
   /** Resolve a config value (env `FORGE_CFG_<KEY>` > store > `null`). */
   configGet(key: string): Promise<string | null>
+  /** Delete a stored config value. Env `FORGE_CFG_<KEY>` still shadows reads. */
+  configDelete(key: string): Promise<boolean>
   /** Set a percentage-rollout flag (`0..=100`). */
   setFlagPercent(key: string, percent: number): Promise<void>
   /**
@@ -324,6 +326,8 @@ export declare class ForgeClient {
   setFlagOff(key: string): Promise<void>
   /** Set a flag to an allow-list of targeting keys. */
   setFlagAllowList(key: string, entries: Array<string>): Promise<void>
+  /** Delete a flag rule. Later `flag` calls fall back to their caller default. */
+  deleteFlag(key: string): Promise<boolean>
   /**
    * Validate a session token; returns full session metadata (user id + times), or
    * `null`. Use `validateSession` when only the user id is needed.

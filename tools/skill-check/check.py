@@ -13,8 +13,8 @@ Rust is compiler-checked (and uses namespaced accessors like `forge.kv()` that d
 map to a flat method list), so rust.md and rust fences are not machine-checked here.
 
 Sources of truth:
-  * Node   -> bindings/node/index.d.ts + typed.d.ts + typed.js
-  * Python -> bindings/python/src/lib.rs (the PyO3 #[pymethods]) + typed.py
+  * Node   -> bindings/node/client.d.ts + client.js + generated index.d.ts
+  * Python -> bindings/python/src/lib.rs (the PyO3 #[pymethods]) + package root helpers
     (the generated _generated.pyi only declares data classes, not client methods, so
     the PyO3 source is the real method surface.)
 """
@@ -29,13 +29,13 @@ ROOT = Path(__file__).resolve().parents[2]
 SKILL_DIR = ROOT / "skills" / "forge-idiomatic-developer"
 
 NODE_SOURCES = [
+    ROOT / "bindings" / "node" / "client.d.ts",
+    ROOT / "bindings" / "node" / "client.js",
     ROOT / "bindings" / "node" / "index.d.ts",
-    ROOT / "bindings" / "node" / "typed.d.ts",
-    ROOT / "bindings" / "node" / "typed.js",
 ]
 PY_SOURCES = [
     ROOT / "bindings" / "python" / "src" / "lib.rs",
-    ROOT / "bindings" / "python" / "python" / "forgelib" / "typed.py",
+    ROOT / "bindings" / "python" / "python" / "forgelib" / "__init__.py",
 ]
 
 NODE_FENCE_LANGS = {"ts", "tsx", "typescript", "js", "jsx", "javascript"}
