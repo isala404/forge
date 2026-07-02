@@ -22,26 +22,6 @@ Small values, counters, and cached state. Strings up to 1 MiB with optional TTLs
 atomic counters, compare-and-swap, and prefix scans. Lineage: Redis.
 
 <Tabs syncKey="lang">
-	<TabItem label="Rust" icon="seti:rust">
-
-		```rust
-		use std::time::Duration;
-		use forgelib::{SetOpts, SetMode};
-
-		// set with a one-hour TTL
-		forge.kv().set("session:abc", token.into(),
-		    SetOpts::new().with_ttl(Duration::from_secs(3600))).await?;
-
-		let value = forge.kv().get("session:abc").await?;   // Option<Bytes>
-		let n = forge.kv().incr("views:42", 1).await?;       // atomic, returns i64
-
-		// write only if absent: a one-line uniqueness guard
-		let claimed = forge.kv()
-		    .set("slug:abc", body.into(), SetOpts::new().with_mode(SetMode::IfNotExists))
-		    .await?;                                          // false if already taken
-		```
-
-	</TabItem>
 	<TabItem label="Node" icon="seti:javascript">
 
 		```ts
@@ -70,6 +50,26 @@ atomic counters, compare-and-swap, and prefix scans. Lineage: Redis.
 		```
 
 	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		use std::time::Duration;
+		use forgelib::{SetOpts, SetMode};
+
+		// set with a one-hour TTL
+		forge.kv().set("session:abc", token.into(),
+		    SetOpts::new().with_ttl(Duration::from_secs(3600))).await?;
+
+		let value = forge.kv().get("session:abc").await?;   // Option<Bytes>
+		let n = forge.kv().incr("views:42", 1).await?;       // atomic, returns i64
+
+		// write only if absent: a one-line uniqueness guard
+		let claimed = forge.kv()
+		    .set("slug:abc", body.into(), SetOpts::new().with_mode(SetMode::IfNotExists))
+		    .await?;                                          // false if already taken
+		```
+
+	</TabItem>
 </Tabs>
 
 Keys go up to 512 bytes, values up to 1 MiB. It's a string and counter store, not a
@@ -83,25 +83,6 @@ Durable background jobs. At-least-once delivery, visibility-timeout leasing, ret
 with a dead-letter queue, delays, and dedup. Lineage: AWS SQS.
 
 <Tabs syncKey="lang">
-	<TabItem label="Rust" icon="seti:rust">
-
-		```rust
-		use forgelib::{EnqueueOpts, DequeueOpts, NackOpts};
-
-		// producer
-		forge.queue().enqueue("emails", body.into(),
-		    EnqueueOpts::new().with_max_attempts(5)).await?;
-
-		// consumer: lease a job, do the work, settle it
-		if let Some(job) = forge.queue().dequeue("emails", DequeueOpts::new()).await? {
-		    match send(&job).await {
-		        Ok(()) => forge.queue().ack(&job).await?,
-		        Err(_) => forge.queue().nack(&job, NackOpts::default()).await?,
-		    }
-		}
-		```
-
-	</TabItem>
 	<TabItem label="Node" icon="seti:javascript">
 
 		```ts
@@ -138,6 +119,25 @@ with a dead-letter queue, delays, and dedup. Lineage: AWS SQS.
 		```
 
 	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		use forgelib::{EnqueueOpts, DequeueOpts, NackOpts};
+
+		// producer
+		forge.queue().enqueue("emails", body.into(),
+		    EnqueueOpts::new().with_max_attempts(5)).await?;
+
+		// consumer: lease a job, do the work, settle it
+		if let Some(job) = forge.queue().dequeue("emails", DequeueOpts::new()).await? {
+		    match send(&job).await {
+		        Ok(()) => forge.queue().ack(&job).await?,
+		        Err(_) => forge.queue().nack(&job, NackOpts::default()).await?,
+		    }
+		}
+		```
+
+	</TabItem>
 </Tabs>
 
 <Aside type="caution" title="At-least-once, so handlers must be idempotent">
@@ -161,20 +161,6 @@ current subscribers. Lineage: Postgres LISTEN/NOTIFY and Redis pub/sub. When a
 message must not be lost, use the queue.
 
 <Tabs syncKey="lang">
-	<TabItem label="Rust" icon="seti:rust">
-
-		```rust
-		use futures_util::StreamExt;
-
-		forge.pubsub().publish("room:42", msg.into()).await?;
-
-		let mut sub = forge.pubsub().subscribe("room:42").await?;
-		while let Some(Ok(payload)) = sub.next().await {
-		    // forward payload to the connected client
-		}
-		```
-
-	</TabItem>
 	<TabItem label="Node" icon="seti:javascript">
 
 		```ts
@@ -202,6 +188,20 @@ message must not be lost, use the queue.
 		```
 
 	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		use futures_util::StreamExt;
+
+		forge.pubsub().publish("room:42", msg.into()).await?;
+
+		let mut sub = forge.pubsub().subscribe("room:42").await?;
+		while let Some(Ok(payload)) = sub.next().await {
+		    // forward payload to the connected client
+		}
+		```
+
+	</TabItem>
 </Tabs>
 
 Payloads are UTF-8 and capped near 7 KB, the Postgres NOTIFY limit. For anything
@@ -215,23 +215,6 @@ presigned upload and download URLs. Lineage: S3. Bytes live in Postgres by defau
 or on the local filesystem; the metadata always stays in Postgres.
 
 <Tabs syncKey="lang">
-	<TabItem label="Rust" icon="seti:rust">
-
-		```rust
-		use std::time::Duration;
-		use forgelib::PutOpts;
-
-		forge.blob().put("avatars/42.png", bytes,
-		    PutOpts::new().with_content_type("image/png")).await?;
-
-		let data = forge.blob().get("avatars/42.png").await?;   // Option<Bytes>
-
-		// a link the browser can use directly, good for an hour
-		let url = forge.blob()
-		    .presign_download("avatars/42.png", Duration::from_secs(3600)).await?;
-		```
-
-	</TabItem>
 	<TabItem label="Node" icon="seti:javascript">
 
 		```ts
@@ -255,6 +238,23 @@ or on the local filesystem; the metadata always stays in Postgres.
 		```
 
 	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		use std::time::Duration;
+		use forgelib::PutOpts;
+
+		forge.blob().put("avatars/42.png", bytes,
+		    PutOpts::new().with_content_type("image/png")).await?;
+
+		let data = forge.blob().get("avatars/42.png").await?;   // Option<Bytes>
+
+		// a link the browser can use directly, good for an hour
+		let url = forge.blob()
+		    .presign_download("avatars/42.png", Duration::from_secs(3600)).await?;
+		```
+
+	</TabItem>
 </Tabs>
 
 Presigned URLs need a `signing_secret` in `forge.toml`. Without one, ordinary CRUD
@@ -271,19 +271,6 @@ PHC string format, and the Stripe/GitHub key style. Forge stores only hashes and
 never owns your users table.
 
 <Tabs syncKey="lang">
-	<TabItem label="Rust" icon="seti:rust">
-
-		```rust
-		use forgelib::SessionOpts;
-
-		let hash = forge.auth().hash_password(&password).await?;   // store this
-		let ok = forge.auth().verify_password(&password, &hash).await?;
-
-		let token = forge.auth().create_session(&user_id, SessionOpts::default()).await?;
-		let session = forge.auth().validate_session(token.as_str()).await?; // Option<Session>
-		```
-
-	</TabItem>
 	<TabItem label="Node" icon="seti:javascript">
 
 		```ts
@@ -306,6 +293,19 @@ never owns your users table.
 		```
 
 	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		use forgelib::SessionOpts;
+
+		let hash = forge.auth().hash_password(&password).await?;   // store this
+		let ok = forge.auth().verify_password(&password, &hash).await?;
+
+		let token = forge.auth().create_session(&user_id, SessionOpts::default()).await?;
+		let session = forge.auth().validate_session(token.as_str()).await?; // Option<Session>
+		```
+
+	</TabItem>
 </Tabs>
 
 Only the hash of a session token or API key is stored, and the plaintext is shown
@@ -321,21 +321,6 @@ RateLimit header fields. Token bucket by default, or sliding window. Lineage: to
 bucket and GCRA, with the IETF RateLimit headers.
 
 <Tabs syncKey="lang">
-	<TabItem label="Rust" icon="seti:rust">
-
-		```rust
-		use std::time::Duration;
-		use forgelib::Limit;
-
-		let d = forge.ratelimit()
-		    .check("login", &email, Limit::per_duration(20, Duration::from_secs(60)))
-		    .await?;
-		if !d.allowed {
-		    // d.retry_after says when the client can try again
-		}
-		```
-
-	</TabItem>
 	<TabItem label="Node" icon="seti:javascript">
 
 		```ts
@@ -352,6 +337,21 @@ bucket and GCRA, with the IETF RateLimit headers.
 		d = await forge.rate_limit_check("login", email, 20, 60)
 		if not d.allowed:
 		    ...  # d.retry_after_seconds says when the client can try again
+		```
+
+	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		use std::time::Duration;
+		use forgelib::Limit;
+
+		let d = forge.ratelimit()
+		    .check("login", &email, Limit::per_duration(20, Duration::from_secs(60)))
+		    .await?;
+		if !d.allowed {
+		    // d.retry_after says when the client can try again
+		}
 		```
 
 	</TabItem>
@@ -376,22 +376,6 @@ normal queue when it fires, so an ordinary worker drains it. Lineage: cron, Unix
 </Aside>
 
 <Tabs syncKey="lang">
-	<TabItem label="Rust" icon="seti:rust">
-
-		```rust
-		use std::time::{Duration, SystemTime};
-		use forgelib::ScheduleOpts;
-
-		// every day at midnight UTC, enqueue onto "reports"
-		forge.schedule().cron("nightly", "0 0 * * *", "reports",
-		    b"{}".to_vec().into(), ScheduleOpts::new()).await?;
-
-		// once, an hour from now
-		let when = SystemTime::now() + Duration::from_secs(3600);
-		forge.schedule().at(when, "reminders", payload.into(), ScheduleOpts::new()).await?;
-		```
-
-	</TabItem>
 	<TabItem label="Node" icon="seti:javascript">
 
 		```ts
@@ -414,6 +398,22 @@ normal queue when it fires, so an ordinary worker drains it. Lineage: cron, Unix
 		```
 
 	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		use std::time::{Duration, SystemTime};
+		use forgelib::ScheduleOpts;
+
+		// every day at midnight UTC, enqueue onto "reports"
+		forge.schedule().cron("nightly", "0 0 * * *", "reports",
+		    b"{}".to_vec().into(), ScheduleOpts::new()).await?;
+
+		// once, an hour from now
+		let when = SystemTime::now() + Duration::from_secs(3600);
+		forge.schedule().at(when, "reminders", payload.into(), ScheduleOpts::new()).await?;
+		```
+
+	</TabItem>
 </Tabs>
 
 For example, to delete an expiring link, schedule a payload onto an `expire-link`
@@ -421,43 +421,6 @@ queue, run a worker for that queue, and keep a scheduler loop ticking in the
 background.
 
 <Tabs syncKey="lang">
-	<TabItem label="Rust" icon="seti:rust">
-
-		```rust
-		use std::time::{Duration, SystemTime};
-		use forgelib::ScheduleOpts;
-
-		// Producer: register future work. This does not run delete_link yet.
-		let payload = serde_json::json!({ "slug": slug }).to_string();
-		let when = SystemTime::now() + Duration::from_secs(3600);
-		forge.schedule().at(when, "expire-link", payload.into(), ScheduleOpts::new()).await?;
-
-		// Worker: this is the code that runs when the scheduled job is delivered.
-		let worker_forge = forge.clone();
-		tokio::spawn(async move {
-		    worker_forge.worker("expire-link").run(move |job| async move {
-		        let payload: serde_json::Value =
-		            serde_json::from_slice(&job.payload).map_err(|e| e.to_string())?;
-		        let slug = payload["slug"].as_str().ok_or("missing slug")?;
-		        delete_link(slug).await.map_err(|e| e.to_string())
-		    }).await;
-		});
-
-		// Scheduler: turns due schedules into queue jobs.
-		tokio::spawn({
-		    let forge = forge.clone();
-		    async move {
-		        loop {
-		            if let Err(e) = forge.run_scheduler_once().await {
-		                tracing::warn!(error = %e, "scheduler tick failed");
-		            }
-		            tokio::time::sleep(Duration::from_secs(30)).await;
-		        }
-		    }
-		});
-		```
-
-	</TabItem>
 	<TabItem label="Node" icon="seti:javascript">
 
 		```ts
@@ -532,6 +495,43 @@ background.
 		```
 
 	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		use std::time::{Duration, SystemTime};
+		use forgelib::ScheduleOpts;
+
+		// Producer: register future work. This does not run delete_link yet.
+		let payload = serde_json::json!({ "slug": slug }).to_string();
+		let when = SystemTime::now() + Duration::from_secs(3600);
+		forge.schedule().at(when, "expire-link", payload.into(), ScheduleOpts::new()).await?;
+
+		// Worker: this is the code that runs when the scheduled job is delivered.
+		let worker_forge = forge.clone();
+		tokio::spawn(async move {
+		    worker_forge.worker("expire-link").run(move |job| async move {
+		        let payload: serde_json::Value =
+		            serde_json::from_slice(&job.payload).map_err(|e| e.to_string())?;
+		        let slug = payload["slug"].as_str().ok_or("missing slug")?;
+		        delete_link(slug).await.map_err(|e| e.to_string())
+		    }).await;
+		});
+
+		// Scheduler: turns due schedules into queue jobs.
+		tokio::spawn({
+		    let forge = forge.clone();
+		    async move {
+		        loop {
+		            if let Err(e) = forge.run_scheduler_once().await {
+		                tracing::warn!(error = %e, "scheduler tick failed");
+		            }
+		            tokio::time::sleep(Duration::from_secs(30)).await;
+		        }
+		    }
+		});
+		```
+
+	</TabItem>
 </Tabs>
 
 Nothing fires until something ticks the scheduler. Run the managed loop
@@ -546,19 +546,6 @@ percentage rollout, or an allow-list, evaluated per user. Lineage: 12-factor con
 and OpenFeature.
 
 <Tabs syncKey="lang">
-	<TabItem label="Rust" icon="seti:rust">
-
-		```rust
-		use forgelib::{FlagRule, EvalCtx};
-
-		forge.config().set_flag("new-ui", FlagRule::Percent(25)).await?;
-		let on = forge.config().flag("new-ui", false, &EvalCtx::user(&user_id)).await;
-
-		forge.config().set_raw("max_upload_mb", "25").await?;
-		let raw = forge.config().get_raw("max_upload_mb").await?;   // Option<String>
-		```
-
-	</TabItem>
 	<TabItem label="Node" icon="seti:javascript">
 
 		```ts
@@ -578,6 +565,19 @@ and OpenFeature.
 
 		await forge.config_set("max_upload_mb", "25")
 		raw = await forge.config_get("max_upload_mb")   # str | None
+		```
+
+	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		use forgelib::{FlagRule, EvalCtx};
+
+		forge.config().set_flag("new-ui", FlagRule::Percent(25)).await?;
+		let on = forge.config().flag("new-ui", false, &EvalCtx::user(&user_id)).await;
+
+		forge.config().set_raw("max_upload_mb", "25").await?;
+		let raw = forge.config().get_raw("max_upload_mb").await?;   // Option<String>
 		```
 
 	</TabItem>

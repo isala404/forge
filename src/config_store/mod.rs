@@ -57,7 +57,7 @@ pub enum FlagRule {
 /// Typed, runtime configuration and boolean feature flags. Lineage: 12-factor +
 /// OpenFeature. Object-safe; the facade hands out `Arc<dyn ConfigStore>`.
 ///
-/// Exact resolution order, caching, and flag evaluation: `docs/contracts/config.md`.
+/// Exact resolution order, caching, and flag evaluation: <https://tryforge.dev/primitives/#config-and-flags>.
 #[async_trait]
 pub trait ConfigStore: Send + Sync {
     /// Resolved string value: env `FORGE_CFG_<KEY>` over the stored value over `None`.

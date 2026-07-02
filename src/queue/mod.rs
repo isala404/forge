@@ -308,7 +308,7 @@ impl Job {
 /// `maxReceiveCount`-to-DLQ redrive. Mirrors AWS SQS.
 ///
 /// Object-safe; the facade hands out `Arc<dyn Queue>`. Exact semantics live in
-/// `docs/contracts/queue.md`.
+/// <https://tryforge.dev/primitives/#queue>.
 #[async_trait]
 pub trait Queue: Send + Sync {
     /// SQS `SendMessage`. Returns the assigned [`JobId`]. With `opts.dedup_id`,

@@ -105,7 +105,7 @@ impl ListPage {
 
 /// S3-shaped object storage. Object-safe; the facade hands out `Arc<dyn Blob>`.
 ///
-/// Exact semantics, limits, presign scheme, and error mapping: `docs/contracts/blob.md`.
+/// Exact semantics, limits, presign scheme, and error mapping: <https://tryforge.dev/primitives/#blob>.
 #[async_trait]
 pub trait Blob: Send + Sync {
     /// `PutObject`. Buffered (≤ 50 MiB), last-write-wins. The new `etag` is read via

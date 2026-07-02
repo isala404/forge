@@ -89,7 +89,7 @@ impl ScheduleInfo {
 /// The ticker that fires due schedules runs via `forge.run_scheduler()` (managed
 /// loop) or `forge.run_scheduler_once()` (one pass). Built-in backends use stable queue
 /// job ids so retrying a claimed tick is idempotent; custom queue backends must honor
-/// `EnqueueOpts::job_id`. Exact semantics: `docs/contracts/schedule.md`.
+/// `EnqueueOpts::job_id`. Exact semantics: <https://tryforge.dev/primitives/#schedule>.
 #[async_trait]
 pub trait Schedule: Send + Sync {
     /// Upsert a recurring cron schedule by `name` (re-registering replaces it). The

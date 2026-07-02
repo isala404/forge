@@ -1,6 +1,6 @@
 -- Forge schema: the full set of forge_* tables, idempotent in one transaction.
 
--- kv — lineage: Redis. Contract: docs/contracts/kv.md
+-- kv — lineage: Redis. Contract: https://tryforge.dev/primitives/#key-value
 -- key uses C collation so prefix scans and scan keyset pagination are byte-wise/exact.
 CREATE TABLE IF NOT EXISTS forge_kv (
     key        TEXT COLLATE "C" PRIMARY KEY,
@@ -13,7 +13,7 @@ CREATE INDEX IF NOT EXISTS forge_kv_expires_at_idx
     ON forge_kv (expires_at)
     WHERE expires_at IS NOT NULL;
 
--- queue — lineage: AWS SQS. Contract: docs/contracts/queue.md
+-- queue — lineage: AWS SQS. Contract: https://tryforge.dev/primitives/#queue
 -- State machine (`status`): available -> leased -> done. Failed delivery (nack or
 -- lease expiry) returns to available with `attempts` bumped; on exhaustion the row is
 -- re-homed to "<queue>.dlq" as a fresh available job. A job that exhausts its attempts
@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS forge_job_dedup (
 CREATE INDEX IF NOT EXISTS forge_job_dedup_expires_idx
     ON forge_job_dedup (expires_at);
 
--- config (+ flags) — lineage: 12-factor + OpenFeature. Contract: docs/contracts/config.md
+-- config (+ flags) — lineage: 12-factor + OpenFeature. Contract: https://tryforge.dev/primitives/#config-and-flags
 -- Raw string values; resolution layers env > store > default live in app code.
 CREATE TABLE IF NOT EXISTS forge_config (
     key   TEXT PRIMARY KEY,
@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS forge_flags (
     rule JSONB NOT NULL
 );
 
--- ratelimit — lineage: token bucket / GCRA + IETF RateLimit fields. Contract: docs/contracts/ratelimit.md
+-- ratelimit — lineage: token bucket / GCRA + IETF RateLimit fields. Contract: https://tryforge.dev/primitives/#rate-limit
 -- One row per (bucket, subject). Token-bucket uses `tokens` + `updated_at`; the
 -- sliding window uses `window_start` (epoch seconds) + `cur_count`/`prev_count`.
 -- The algo-specific columns are nullable; a missing value means "fresh".
@@ -103,7 +103,7 @@ CREATE TABLE IF NOT EXISTS forge_ratelimit (
 -- Index for the idle-row sweep.
 CREATE INDEX IF NOT EXISTS forge_ratelimit_updated_idx ON forge_ratelimit (updated_at);
 
--- blob — lineage: AWS S3 API. Contract: docs/contracts/blob.md
+-- blob — lineage: AWS S3 API. Contract: https://tryforge.dev/primitives/#blob
 -- One row per object. Body in BYTEA (fine at the v1 50 MiB cap). key uses C collation
 -- so prefix scans + keyset pagination are byte-wise/exact (matches the S3 list order).
 CREATE TABLE IF NOT EXISTS forge_blobs (
@@ -116,7 +116,7 @@ CREATE TABLE IF NOT EXISTS forge_blobs (
     last_modified TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- blob (filesystem backend) — Contract: docs/contracts/blob.md
+-- blob (filesystem backend) — Contract: https://tryforge.dev/primitives/#blob
 -- Metadata for objects whose BYTES live on a local filesystem directory instead of in
 -- BYTEA. Same columns as forge_blobs, minus the body: `data_ref` is the bytes' path
 -- relative to the configured blob root. Always created (cheap, empty when the
@@ -131,7 +131,7 @@ CREATE TABLE IF NOT EXISTS forge_fs_blobs (
     last_modified TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- auth — lineage: OWASP + PHC + Stripe/GitHub keys. Contract: docs/contracts/auth.md
+-- auth — lineage: OWASP + PHC + Stripe/GitHub keys. Contract: https://tryforge.dev/primitives/#auth
 -- Forge does NOT own users; user_id/owner_id are opaque app strings. Only hashes stored.
 -- The `app` column namespaces sessions/keys per app sharing a database (default '' =
 -- the unnamespaced app), since a token/id lookup can't be prefix-scoped like kv.
@@ -161,7 +161,7 @@ CREATE TABLE IF NOT EXISTS forge_api_keys (
 );
 CREATE INDEX IF NOT EXISTS forge_api_keys_owner_idx ON forge_api_keys (owner_id);
 
--- schedule — lineage: cron + Unix at + k8s CronJob. Contract: docs/contracts/schedule.md
+-- schedule — lineage: cron + Unix at + k8s CronJob. Contract: https://tryforge.dev/primitives/#schedule
 -- A thin layer over the queue: due rows are claimed (FOR UPDATE SKIP LOCKED) and a job
 -- is inserted into forge_jobs in the same transaction, so a tick enqueues exactly once.
 -- A schedule name is unique per `app` (PK is (name, app)), so two apps can both register

@@ -388,48 +388,48 @@ impl Forge {
         &self.inner.pool
     }
 
-    /// The key/value store. Lineage: Redis. See `docs/contracts/kv.md`.
+    /// The key/value store. Lineage: Redis. See <https://tryforge.dev/primitives/#key-value>.
     pub fn kv(&self) -> &dyn Kv {
         self.inner.kv.as_ref()
     }
 
-    /// The job queue. Lineage: AWS SQS. See `docs/contracts/queue.md`.
+    /// The job queue. Lineage: AWS SQS. See <https://tryforge.dev/primitives/#queue>.
     pub fn queue(&self) -> &dyn Queue {
         self.inner.queue.as_ref()
     }
 
     /// Live publish/subscribe for realtime fan-out (subscriptions, presence). Lineage:
-    /// Postgres LISTEN/NOTIFY + Redis pub/sub. See `docs/contracts/pubsub.md`. Not durable;
+    /// Postgres LISTEN/NOTIFY + Redis pub/sub. See <https://tryforge.dev/primitives/#pubsub>. Not durable;
     /// use [`Forge::queue`] when a message must not be lost.
     pub fn pubsub(&self) -> &dyn Pubsub {
         self.inner.pubsub.as_ref()
     }
 
     /// Runtime config + feature flags. Lineage: 12-factor + OpenFeature. See
-    /// `docs/contracts/config.md`.
+    /// <https://tryforge.dev/primitives/#config-and-flags>.
     pub fn config(&self) -> &dyn ConfigStore {
         self.inner.config.as_ref()
     }
 
     /// Rate limiter. Lineage: token bucket / GCRA + IETF RateLimit headers. See
-    /// `docs/contracts/ratelimit.md`.
+    /// <https://tryforge.dev/primitives/#rate-limit>.
     pub fn ratelimit(&self) -> &dyn RateLimit {
         self.inner.ratelimit.as_ref()
     }
 
-    /// Object storage. Lineage: AWS S3. See `docs/contracts/blob.md`.
+    /// Object storage. Lineage: AWS S3. See <https://tryforge.dev/primitives/#blob>.
     pub fn blob(&self) -> &dyn Blob {
         self.inner.blob.as_ref()
     }
 
     /// Auth primitives: passwords, sessions, API keys. Lineage: OWASP + PHC + Stripe/GitHub
-    /// keys. See `docs/contracts/auth.md`.
+    /// keys. See <https://tryforge.dev/primitives/#auth>.
     pub fn auth(&self) -> &dyn Auth {
         self.inner.auth.as_ref()
     }
 
     /// Recurring + one-shot scheduling. Lineage: cron + Unix `at` + k8s CronJob. See
-    /// `docs/contracts/schedule.md`. Register work here; drive ticks with
+    /// <https://tryforge.dev/primitives/#schedule>. Register work here; drive ticks with
     /// [`Forge::run_scheduler`].
     pub fn schedule(&self) -> &dyn Schedule {
         self.inner.schedule.as_ref()

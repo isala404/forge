@@ -1,9 +1,11 @@
-name: examples (chatapp)
+name: examples
 
 on:
   pull_request:
     paths:
       - "examples/chatapp/**"
+      - "examples/todoapp/**"
+      - "examples/linksapp/**"
       - "bindings/node/**"
       - "bindings/python/**"
       - ".github/workflows/examples.yml"
@@ -11,6 +13,8 @@ on:
     branches: [main, rewrite]
     paths:
       - "examples/chatapp/**"
+      - "examples/todoapp/**"
+      - "examples/linksapp/**"
       - "bindings/node/**"
       - "bindings/python/**"
       - ".github/workflows/examples.yml"
@@ -27,7 +31,7 @@ env:
 
 jobs:
   rust-be:
-    name: rust-be (fmt · clippy · build · test)
+    name: chatapp · rust-be (fmt · clippy · build · test)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
@@ -61,7 +65,7 @@ jobs:
       - run: cargo test
 
   node-be:
-    name: node-be (codegen · tsc · lint · vitest)
+    name: chatapp · node-be (codegen · tsc · lint · vitest)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
@@ -103,7 +107,7 @@ jobs:
         run: bun run test
 
   python-be:
-    name: python-be (ruff · sdl · pytest)
+    name: chatapp · python-be (ruff · sdl · pytest)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
@@ -134,7 +138,7 @@ jobs:
       - run: uv run pytest -q
 
   react-fe:
-    name: react-fe (codegen · tsc · build)
+    name: chatapp · react-fe (codegen · tsc · build)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -148,7 +152,7 @@ jobs:
       - run: bun run build
 
   browser-e2e:
-    name: browser e2e (all chatapp stacks)
+    name: chatapp · browser e2e (all stacks)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     needs: [rust-be, node-be, python-be, react-fe]
@@ -175,3 +179,198 @@ jobs:
       - name: Stop stacks
         if: always()
         run: docker compose down -v
+
+  # todoapp and linksapp share one shape (per-app rust/node/python/react-fe plus a
+  # browser e2e), so they run as a matrix instead of two copy-pasted sets of jobs.
+  # They are simpler than chatapp: no GraphQL codegen, no backend unit tests, so the
+  # steps here stop at fmt/clippy/build (Rust), tsc (Node), ruff (Python), and build
+  # (frontend).
+  example-rust-be:
+    name: ${{ matrix.app }} · rust-be (fmt · clippy · build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [todoapp, linksapp]
+    defaults:
+      run:
+        working-directory: examples/${{ matrix.app }}/rust-be
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: examples/${{ matrix.app }}/rust-be
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo build
+
+  example-node-be:
+    name: ${{ matrix.app }} · node-be (tsc)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [todoapp, linksapp]
+    defaults:
+      run:
+        working-directory: examples/${{ matrix.app }}/node-be
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      # The committed forgelib type stubs are enough to type-check against; the native
+      # addon is only needed at runtime (built in the e2e job).
+      - run: bun install
+      - run: bun run typecheck
+
+  example-python-be:
+    name: ${{ matrix.app }} · python-be (ruff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [todoapp, linksapp]
+    defaults:
+      run:
+        working-directory: examples/${{ matrix.app }}/python-be
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings/python
+      - uses: astral-sh/setup-uv@v6
+      - name: Sync (builds the forgelib wheel)
+        run: uv sync
+      - run: uv run ruff check
+
+  example-react-fe:
+    name: ${{ matrix.app }} · react-fe (tsc · build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [todoapp, linksapp]
+    defaults:
+      run:
+        working-directory: examples/${{ matrix.app }}/react-fe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - run: bun run build
+
+  example-e2e:
+    name: ${{ matrix.app }} · browser e2e (all stacks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: [example-rust-be, example-node-be, example-python-be, example-react-fe]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - app: todoapp
+            fe_port: 5174
+            rust_port: 9081
+            node_port: 9082
+            python_port: 9083
+          - app: linksapp
+            fe_port: 5175
+            rust_port: 9091
+            node_port: 9092
+            python_port: 9093
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: forge
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      PGPASSWORD: forge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      # Node 24 runs the backend's `node src/index.ts` (TypeScript stripped natively);
+      # the runner's default Node is older and would choke on the type annotations.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: examples/${{ matrix.app }}/rust-be
+      - uses: astral-sh/setup-uv@v6
+      # These apps have no docker-compose; boot each stack the way the app READMEs
+      # document (one database per backend, all three plus the SPA on fixed ports),
+      # then drive the existing Playwright spec against them.
+      - name: Create per-backend databases
+        run: |
+          for db in rust node python; do
+            createdb -h 127.0.0.1 -U postgres "${{ matrix.app }}_${db}"
+          done
+      - name: Build forgelib Node package
+        working-directory: bindings/node
+        run: npm install && npm run build
+      - name: Start Rust backend
+        working-directory: examples/${{ matrix.app }}/rust-be
+        run: |
+          cargo build
+          FORGE_POSTGRES_URL=postgres://postgres:forge@127.0.0.1:5432/${{ matrix.app }}_rust \
+          PORT=${{ matrix.rust_port }} \
+            cargo run > /tmp/rust-be.log 2>&1 &
+      - name: Start Node backend
+        working-directory: examples/${{ matrix.app }}/node-be
+        run: |
+          bun install
+          FORGE_POSTGRES_URL=postgres://postgres:forge@127.0.0.1:5432/${{ matrix.app }}_node \
+          PORT=${{ matrix.node_port }} \
+            bun run start > /tmp/node-be.log 2>&1 &
+      - name: Start Python backend
+        working-directory: examples/${{ matrix.app }}/python-be
+        run: |
+          uv sync
+          FORGE_POSTGRES_URL=postgres://postgres:forge@127.0.0.1:5432/${{ matrix.app }}_python \
+            uv run uvicorn app.main:app --host 127.0.0.1 --port ${{ matrix.python_port }} \
+            > /tmp/python-be.log 2>&1 &
+      - name: Start frontend
+        working-directory: examples/${{ matrix.app }}/react-fe
+        run: |
+          bun install
+          bun run dev --host 127.0.0.1 --port ${{ matrix.fe_port }} > /tmp/fe.log 2>&1 &
+      - name: Wait for the stack
+        run: |
+          for port in ${{ matrix.rust_port }} ${{ matrix.node_port }} ${{ matrix.python_port }}; do
+            for _ in $(seq 1 60); do
+              curl -fsS "http://127.0.0.1:${port}/healthz" >/dev/null 2>&1 && break
+              sleep 2
+            done
+          done
+          for _ in $(seq 1 60); do
+            curl -fsS "http://127.0.0.1:${{ matrix.fe_port }}" >/dev/null 2>&1 && break
+            sleep 2
+          done
+      - name: Install Playwright browsers
+        working-directory: examples/${{ matrix.app }}/react-fe
+        run: bunx playwright install --with-deps chromium
+      - name: Run Playwright
+        working-directory: examples/${{ matrix.app }}/react-fe
+        run: bun run test:e2e
+      - name: Dump backend logs
+        if: failure()
+        run: |
+          for name in rust node python fe; do
+            echo "--- ${name} ---"
+            cat "/tmp/${name}-be.log" 2>/dev/null || cat "/tmp/${name}.log" 2>/dev/null || true
+          done

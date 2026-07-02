@@ -27,17 +27,6 @@ managed worker that handles leasing, heartbeats, acks, concurrency, and graceful
 shutdown. Node uses a plain loop, and Python has a managed `run_worker` helper.
 
 <Tabs syncKey="lang">
-	<TabItem label="Rust" icon="seti:rust">
-
-		```rust
-		// bounded concurrency, auto-heartbeat, ack on Ok / nack on Err, drains on shutdown
-		forge.worker("emails")
-		    .concurrency(8)
-		    .run(|job| async move { send(&job).await })  // returns Result<(), E>
-		    .await;
-		```
-
-	</TabItem>
 	<TabItem label="Node" icon="seti:javascript">
 
 		```ts
@@ -64,6 +53,17 @@ shutdown. Node uses a plain loop, and Python has a managed `run_worker` helper.
 		```
 
 	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		// bounded concurrency, auto-heartbeat, ack on Ok / nack on Err, drains on shutdown
+		forge.worker("emails")
+		    .concurrency(8)
+		    .run(|job| async move { send(&job).await })  // returns Result<(), E>
+		    .await;
+		```
+
+	</TabItem>
 </Tabs>
 
 Run as many worker processes as you need; jobs are leased, so two workers never get
@@ -80,23 +80,6 @@ every replica. Each due job is claimed once no matter how many replicas tick at 
 same time.
 
 <Tabs syncKey="lang">
-	<TabItem label="Rust" icon="seti:rust">
-
-		```rust
-		use std::time::Duration;
-
-		loop {
-		    if let Err(e) = forge.run_scheduler_once().await {
-		        tracing::warn!(error = %e, "scheduler tick failed");
-		    }
-		    if let Err(e) = forge.maintain().await {
-		        tracing::warn!(error = %e, "maintenance failed");
-		    }
-		    tokio::time::sleep(Duration::from_secs(30)).await;
-		}
-		```
-
-	</TabItem>
 	<TabItem label="Node" icon="seti:javascript">
 
 		```ts
@@ -125,6 +108,23 @@ same time.
 		```
 
 	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		use std::time::Duration;
+
+		loop {
+		    if let Err(e) = forge.run_scheduler_once().await {
+		        tracing::warn!(error = %e, "scheduler tick failed");
+		    }
+		    if let Err(e) = forge.maintain().await {
+		        tracing::warn!(error = %e, "maintenance failed");
+		    }
+		    tokio::time::sleep(Duration::from_secs(30)).await;
+		}
+		```
+
+	</TabItem>
 </Tabs>
 
 `maintain()` is the housekeeping sweep: it purges expired key/value rows and old
@@ -149,14 +149,6 @@ and any caveats. It's a cheap, synchronous call that's handy on a health or stat
 endpoint.
 
 <Tabs syncKey="lang">
-	<TabItem label="Rust" icon="seti:rust">
-
-		```rust
-		let report = forge.backend_report();
-		// each entry: primitive, provider, durable, caveats
-		```
-
-	</TabItem>
 	<TabItem label="Node" icon="seti:javascript">
 
 		```ts
@@ -170,6 +162,14 @@ endpoint.
 		```python
 		report = forge.backend_report()  # synchronous; do not await
 		# [BackendInfo(primitive, provider, durable, caveats), ...]
+		```
+
+	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		let report = forge.backend_report();
+		// each entry: primitive, provider, durable, caveats
 		```
 
 	</TabItem>
@@ -196,3 +196,36 @@ When one primitive outgrows the shared database, give it its own. Point it at a
 separate Postgres in `forge.toml` with a `[databases.<feature>]` table and it runs on
 an isolated pool, on its own server if you want, with no change to your code. See
 [Configuration](/configuration/#a-separate-database-per-feature).
+
+## Known limitations
+
+A few sharp edges worth knowing before they surprise you in production.
+
+**Queue receipts are process-local in Node and Python.** A receipt is only meaningful
+inside the process that dequeued the job: the binding holds the lease in an in-process
+map, so `queueAck`, `queueNack`, and `queueHeartbeat` must run in that same process.
+You can't hand a receipt to another worker or persist it and settle the job later. A
+job left unsettled is reclaimed the usual way, by lease expiry on the server, and
+redelivered. The Rust core carries the lease in the `Job` value itself and has no such
+restriction.
+
+**Rate limiting on `memory` counts per process.** Each process keeps its own buckets,
+so across replicas the limit is effectively multiplied by the replica count and every
+check under-counts. Use `postgres` for any limit that has to hold across processes.
+
+**Pub/sub is at-most-once and non-durable on every backend.** A message reaches only
+the subscribers connected at publish time; there's no persistence, replay, or delivery
+guarantee. On `memory` it's in-process only, so nothing crosses replicas. Treat it as a
+notification, not a log, and reconcile durable state through the database.
+
+**Filesystem blob splits bytes from metadata.** Objects live as files under the
+configured root while their metadata rows live in Postgres, so a `put` is two writes
+and is not atomic with your application's SQL. A crash between them leaves a metadata
+row pointing at a missing file until the maintenance sweep reclaims it. Multiple
+replicas need a shared mount, since one replica can't read files another wrote to local
+disk.
+
+**Node `kvIncr` returns a JavaScript number.** The counter is an `i64` in the core, but
+JS numbers are `f64`, so a value past 2^53 loses precision on the way back. Real
+counters never reach that range; if yours might, read it back losslessly with
+`kvGetBytes`. The Python binding returns the exact integer.

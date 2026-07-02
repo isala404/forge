@@ -13,18 +13,6 @@ on the client with plain arguments. Where a binary-safe variant exists (for exam
 ## Creating a client
 
 <Tabs syncKey="lang">
-	<TabItem label="Rust" icon="seti:rust">
-
-		```rust
-		let forge = forgelib::Forge::init().await?;          // reads ./forge.toml
-		let forge = forgelib::Forge::init_from("path/forge.toml").await?;
-		let forge = forgelib::Forge::init_from_str(toml).await?;
-
-		// inject your own backend for one primitive, leave the rest on Postgres
-		let forge = forgelib::Forge::builder().kv(custom_kv).build().await?;
-		```
-
-	</TabItem>
 	<TabItem label="Node" icon="seti:javascript">
 
 		```ts
@@ -42,6 +30,18 @@ on the client with plain arguments. Where a binary-safe variant exists (for exam
 
 		forge = await forgelib.ForgeClient.init()            # reads ./forge.toml
 		forge = await forgelib.ForgeClient.init_from("path/forge.toml")
+		```
+
+	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		let forge = forgelib::Forge::init().await?;          // reads ./forge.toml
+		let forge = forgelib::Forge::init_from("path/forge.toml").await?;
+		let forge = forgelib::Forge::init_from_str(toml).await?;
+
+		// inject your own backend for one primitive, leave the rest on Postgres
+		let forge = forgelib::Forge::builder().kv(custom_kv).build().await?;
 		```
 
 	</TabItem>

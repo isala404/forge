@@ -12,13 +12,6 @@ from nothing to your first calls.
 ## Install
 
 <Tabs syncKey="lang">
-	<TabItem label="Rust" icon="seti:rust">
-
-		```sh
-		cargo add forgelib
-		```
-
-	</TabItem>
 	<TabItem label="Node" icon="seti:javascript">
 
 		```sh
@@ -30,6 +23,13 @@ from nothing to your first calls.
 
 		```sh
 		pip install forgelib
+		```
+
+	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```sh
+		cargo add forgelib
 		```
 
 	</TabItem>
@@ -73,32 +73,6 @@ The same calls look like this in each language. (Pick a language once and the ta
 on this site follow your choice.)
 
 <Tabs syncKey="lang">
-	<TabItem label="Rust" icon="seti:rust">
-
-		```rust
-		use std::time::Duration;
-		use forgelib::{Forge, SessionOpts, EnqueueOpts, Limit};
-
-		let forge = Forge::init().await?; // reads ./forge.toml, runs migrations
-
-		// auth: hash a password, open a session
-		let hash = forge.auth().hash_password(&password).await?;
-		let token = forge.auth().create_session(&user_id, SessionOpts::default()).await?;
-
-		// key/value: an atomic counter
-		let views = forge.kv().incr(&format!("views:{user_id}"), 1).await?;
-
-		// queue: hand work to the background
-		forge.queue().enqueue("emails", payload.into(), EnqueueOpts::new()).await?;
-
-		// rate limit: 20 attempts per minute, keyed by email
-		let limit = forge.ratelimit()
-		    .check("login", &email, Limit::per_duration(20, Duration::from_secs(60)))
-		    .await?;
-		if !limit.allowed { /* return 429 */ }
-		```
-
-	</TabItem>
 	<TabItem label="Node" icon="seti:javascript">
 
 		```ts
@@ -144,6 +118,32 @@ on this site follow your choice.)
 		limit = await forge.rate_limit_check("login", email, 20, 60)
 		if not limit.allowed:
 		    raise RuntimeError("slow down")
+		```
+
+	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		use std::time::Duration;
+		use forgelib::{Forge, SessionOpts, EnqueueOpts, Limit};
+
+		let forge = Forge::init().await?; // reads ./forge.toml, runs migrations
+
+		// auth: hash a password, open a session
+		let hash = forge.auth().hash_password(&password).await?;
+		let token = forge.auth().create_session(&user_id, SessionOpts::default()).await?;
+
+		// key/value: an atomic counter
+		let views = forge.kv().incr(&format!("views:{user_id}"), 1).await?;
+
+		// queue: hand work to the background
+		forge.queue().enqueue("emails", payload.into(), EnqueueOpts::new()).await?;
+
+		// rate limit: 20 attempts per minute, keyed by email
+		let limit = forge.ratelimit()
+		    .check("login", &email, Limit::per_duration(20, Duration::from_secs(60)))
+		    .await?;
+		if !limit.allowed { /* return 429 */ }
 		```
 
 	</TabItem>

@@ -36,7 +36,7 @@ pub type Subscription = BoxStream<'static, Result<Bytes>>;
 /// Publish/subscribe over a single Postgres connection. Reached via `forgelib::Forge::pubsub`.
 ///
 /// Delivery semantics (at-most-once, connected-only, no persistence) are in
-/// `docs/contracts/pubsub.md`.
+/// <https://tryforge.dev/primitives/#pubsub>.
 #[async_trait]
 pub trait Pubsub: Send + Sync {
     /// The backend channel a topic maps to. For Postgres, the `LISTEN`/`NOTIFY`

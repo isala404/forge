@@ -6,9 +6,8 @@ cross-language contract executable: if Node and Python ever drift on units,
 shapes, defaults, or error codes, a scenario goes red instead of slipping
 through review.
 
-This is the anti-regression backbone for the pre-1.0 fixes (see
-`.agents/PROGRESS.md`, 2026-06-13, and `PRE-1.0-REVIEW.md`). Scenarios encode the
-target unified contract: Rust's shape is the reference. Where a binding does
+This is the anti-regression backbone for the cross-language contract. Scenarios
+encode the target unified contract: Rust's shape is the reference. Where a binding does
 not yet conform, the gap is registered in `known_gaps.json` so CI stays honest:
 it asserts that *exactly* the registered gaps fail. Fixing a gap (without
 removing it from the registry) fails CI ("known gap now passes, remove it"), and
@@ -34,8 +33,9 @@ tools/conformance/
 tests/conformance.rs   # the Rust runner: drives forgelib::conformance against throwaway DBs
 ```
 
-The scenario JSON is the normative content behind `docs/contracts/bindings.md`
-and `docs/contracts/errors.md`; those docs render the same facts for humans.
+The scenario JSON in `src/conformance/scenarios/` is the normative, executable
+form of the cross-language contract; the error taxonomy it asserts is defined in
+`src/error.rs`, and <https://tryforge.dev> renders the same facts for humans.
 
 ## Scenario schema
 

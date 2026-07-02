@@ -10,20 +10,72 @@ These are the patterns that show up in the [example apps](https://github.com/isa
 Node, and Python bindings). The code is trimmed to the Forge calls so the shape is
 easy to lift into your own handlers.
 
-## Sign up, log in, and protect a route
+## Password auth
+
+Email and password auth is about thirty lines of Forge calls per handler: hash on the
+way in, verify on the way out, and issue sessions you can revoke. There's no separate
+users table to wire up first: `kv` stores the user record and `auth` owns the hashing
+and the sessions.
+
+<Aside type="note" title="Know the boundary">
+	This is the "email and password, done right" baseline. OAuth, magic links, 2FA, and
+	password reset are their own product surface; reach for a dedicated auth provider once
+	you need them rather than growing this into one.
+</Aside>
 
 Sign-up does four things: throttle by email, hash the password, claim the email
-atomically, and open a session. The email key doubles as the uniqueness check.
-Writing it with "set if not present" means there's no read-then-write race.
+atomically, and open a session. Writing the email key with "set if not present" makes it
+its own uniqueness check, so there's no read-then-write race.
 
 <Tabs syncKey="lang">
+	<TabItem label="Node" icon="seti:javascript">
+
+		```ts
+		// throttle by email, fail open so a limiter outage doesn't lock people out
+		const limit = await forge.rateLimitCheck("auth", email, 20, 60, true);
+		if (!limit.allowed) return c.json({ error: "slow down" }, 429);
+
+		const user = { id: randomUUID(), email, passwordHash: await forge.hashPassword(password) };
+		const body = JSON.stringify(user);
+
+		// the email key is its own uniqueness guard: false means already taken
+		const created = await forge.kvSet(`user:email:${email}`, body, null, true);
+		if (!created) return c.json({ error: "email already registered" }, 409);
+		await forge.kvSet(`user:id:${user.id}`, body);
+
+		const token = await forge.createSession(user.id, 86_400, 30 * 86_400);
+		```
+
+	</TabItem>
+	<TabItem label="Python" icon="seti:python">
+
+		```python
+		# throttle by email, fail open so a limiter outage doesn't lock people out
+		limit = await forge.rate_limit_check("auth", email, 20, 60.0, True)
+		if not limit.allowed:
+		    raise HTTPException(429, "slow down")
+
+		user = {"id": uuid4().hex, "email": email,
+		        "password_hash": await forge.hash_password(password)}
+		body = json.dumps(user)
+
+		# the email key is its own uniqueness guard: False means already taken
+		created = await forge.kv_set(f"user:email:{email}", body, None, True)
+		if not created:
+		    raise HTTPException(409, "email already registered")
+		await forge.kv_set(f"user:id:{user['id']}", body)
+
+		token = await forge.create_session(user["id"], 86_400, 30 * 86_400)
+		```
+
+	</TabItem>
 	<TabItem label="Rust" icon="seti:rust">
 
 		```rust
 		use std::time::Duration;
 		use forgelib::{Bytes, Limit, FailMode, SetOpts, SetMode, SessionOpts};
 
-		// throttle by email, fail open so a limiter outage doesn't block sign-ups
+		// throttle by email, fail open so a limiter outage doesn't lock people out
 		let limit = forge.ratelimit()
 		    .check_with("auth", &email, Limit::per_duration(20, Duration::from_secs(60)), FailMode::Open)
 		    .await?;
@@ -46,20 +98,26 @@ Writing it with "set if not present" means there's no read-then-write race.
 		```
 
 	</TabItem>
+</Tabs>
+
+Logging in runs the same throttle, verifies the password against the stored hash, then
+opens a fresh session. Keep the rate-limit check ahead of `verifyPassword` so a stuffing
+run can't burn CPU on hashing.
+
+<Tabs syncKey="lang">
 	<TabItem label="Node" icon="seti:javascript">
 
 		```ts
-		// throttle by email, fail open so a limiter outage doesn't block sign-ups
 		const limit = await forge.rateLimitCheck("auth", email, 20, 60, true);
 		if (!limit.allowed) return c.json({ error: "slow down" }, 429);
 
-		const user = { id: randomUUID(), email, passwordHash: await forge.hashPassword(password) };
-		const body = JSON.stringify(user);
+		const stored = await forge.kvGet(`user:email:${email}`);
+		if (!stored) return c.json({ error: "invalid email or password" }, 401);
+		const user = JSON.parse(stored);
 
-		// the email key is its own uniqueness guard: false means already taken
-		const created = await forge.kvSet(`user:email:${email}`, body, null, true);
-		if (!created) return c.json({ error: "email already registered" }, 409);
-		await forge.kvSet(`user:id:${user.id}`, body);
+		// the throttle runs before verifyPassword, so credential stuffing can't burn CPU on hashing
+		if (!(await forge.verifyPassword(password, user.passwordHash)))
+		  return c.json({ error: "invalid email or password" }, 401);
 
 		const token = await forge.createSession(user.id, 86_400, 30 * 86_400);
 		```
@@ -68,56 +126,91 @@ Writing it with "set if not present" means there's no read-then-write race.
 	<TabItem label="Python" icon="seti:python">
 
 		```python
-		# throttle by email, fail open so a limiter outage doesn't block sign-ups
-		limit = await forge.rate_limit_check("auth", email, 20, 60, True)
+		limit = await forge.rate_limit_check("auth", email, 20, 60.0, True)
 		if not limit.allowed:
 		    raise HTTPException(429, "slow down")
 
-		user = {"id": uuid4().hex, "email": email,
-		        "password_hash": await forge.hash_password(password)}
-		body = json.dumps(user)
+		stored = await forge.kv_get(f"user:email:{email}")
+		if not stored:
+		    raise HTTPException(401, "invalid email or password")
+		user = json.loads(stored)
 
-		# the email key is its own uniqueness guard: False means already taken
-		created = await forge.kv_set(f"user:email:{email}", body, None, True)
-		if not created:
-		    raise HTTPException(409, "email already registered")
-		await forge.kv_set(f"user:id:{user['id']}", body)
+		# the throttle runs before verify_password, so credential stuffing can't burn CPU on hashing
+		if not await forge.verify_password(password, user["password_hash"]):
+		    raise HTTPException(401, "invalid email or password")
 
 		token = await forge.create_session(user["id"], 86_400, 30 * 86_400)
 		```
 
 	</TabItem>
-</Tabs>
-
-Logging in is the same throttle, then `verifyPassword` against the stored hash, then
-a new session. Every protected route starts by validating the bearer token and
-bailing out when it comes back empty.
-
-<Tabs syncKey="lang">
 	<TabItem label="Rust" icon="seti:rust">
 
 		```rust
-		let Some(session) = forge.auth().validate_session(bearer).await? else {
-		    return unauthorized();
+		use forgelib::PhcString;
+
+		let limit = forge.ratelimit()
+		    .check_with("auth", &email, Limit::per_duration(20, Duration::from_secs(60)), FailMode::Open)
+		    .await?;
+		if !limit.allowed { return too_many_requests(); }
+
+		let Some(bytes) = forge.kv().get(&format!("user:email:{email}")).await? else {
+		    return invalid_login();
 		};
-		let user_id = session.user_id;
+		let user: User = serde_json::from_slice(&bytes)?;
+
+		// the throttle runs before verify_password, so credential stuffing can't burn CPU on hashing
+		if !forge.auth().verify_password(&password, &PhcString::new(user.password_hash.clone())).await? {
+		    return invalid_login();
+		}
+
+		let token = forge.auth().create_session(&user.id, SessionOpts::new()
+		    .with_idle_timeout(Duration::from_secs(86_400))
+		    .with_absolute_timeout(Duration::from_secs(30 * 86_400))).await?;
 		```
 
 	</TabItem>
+</Tabs>
+
+Every protected route resolves the caller's token to a user (or 401s), and logout revokes
+the session so the token stops working immediately.
+
+<Tabs syncKey="lang">
 	<TabItem label="Node" icon="seti:javascript">
 
 		```ts
+		// middleware: resolve the bearer token (or session cookie) to a user id, else 401
 		const userId = await forge.validateSession(bearerToken(c.req.header("authorization")));
 		if (!userId) return c.json({ error: "authentication required" }, 401);
+
+		// logout: revoke the session so the token stops resolving
+		await forge.revokeSession(bearerToken(c.req.header("authorization")));
 		```
 
 	</TabItem>
 	<TabItem label="Python" icon="seti:python">
 
 		```python
+		# middleware: resolve the bearer token (or session cookie) to a user id, else 401
 		user_id = await forge.validate_session(bearer)
 		if not user_id:
 		    raise HTTPException(401, "authentication required")
+
+		# logout: revoke the session so the token stops resolving
+		await forge.revoke_session(bearer)
+		```
+
+	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		// middleware: resolve the bearer token (or session cookie) to a session, else 401
+		let Some(session) = forge.auth().validate_session(bearer).await? else {
+		    return unauthorized();
+		};
+		let user_id = session.user_id;
+
+		// logout: revoke the session so the token stops resolving
+		forge.auth().revoke_session(bearer).await?;
 		```
 
 	</TabItem>
@@ -130,19 +223,6 @@ queue. The URL shortener bumps a click counter on the redirect and queues everyt
 else, so the user gets their redirect immediately.
 
 <Tabs syncKey="lang">
-	<TabItem label="Rust" icon="seti:rust">
-
-		```rust
-		use forgelib::{Bytes, EnqueueOpts};
-		use serde_json::json;
-
-		// in the redirect handler: cheap now, the rest later
-		forge.kv().incr(&format!("clicks:{slug}"), 1).await?;
-		forge.queue().enqueue("clicks", Bytes::from(json!({ "slug": slug }).to_string()),
-		    EnqueueOpts::new().with_max_attempts(3)).await?;
-		```
-
-	</TabItem>
 	<TabItem label="Node" icon="seti:javascript">
 
 		```ts
@@ -161,6 +241,19 @@ else, so the user gets their redirect immediately.
 		```
 
 	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		use forgelib::{Bytes, EnqueueOpts};
+		use serde_json::json;
+
+		// in the redirect handler: cheap now, the rest later
+		forge.kv().incr(&format!("clicks:{slug}"), 1).await?;
+		forge.queue().enqueue("clicks", Bytes::from(json!({ "slug": slug }).to_string()),
+		    EnqueueOpts::new().with_max_attempts(3)).await?;
+		```
+
+	</TabItem>
 </Tabs>
 
 A worker leases jobs, does the work, and acks on success or nacks on failure so the
@@ -168,21 +261,6 @@ job is retried. Run one of these per queue (see [Operations](/operations/#worker
 for a managed version).
 
 <Tabs syncKey="lang">
-	<TabItem label="Rust" icon="seti:rust">
-
-		```rust
-		use forgelib::{DequeueOpts, NackOpts};
-
-		loop {
-		    let Some(job) = forge.queue().dequeue("clicks", DequeueOpts::new()).await? else { continue };
-		    match handle(&forge, &job).await {
-		        Ok(()) => { forge.queue().ack(&job).await?; }
-		        Err(_) => { forge.queue().nack(&job, NackOpts::default()).await?; }
-		    }
-		}
-		```
-
-	</TabItem>
 	<TabItem label="Node" icon="seti:javascript">
 
 		```ts
@@ -214,6 +292,21 @@ for a managed version).
 		```
 
 	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		use forgelib::{DequeueOpts, NackOpts};
+
+		loop {
+		    let Some(job) = forge.queue().dequeue("clicks", DequeueOpts::new()).await? else { continue };
+		    match handle(&forge, &job).await {
+		        Ok(()) => { forge.queue().ack(&job).await?; }
+		        Err(_) => { forge.queue().nack(&job, NackOpts::default()).await?; }
+		    }
+		}
+		```
+
+	</TabItem>
 </Tabs>
 
 ## Push live updates to the browser
@@ -223,23 +316,6 @@ SSE route subscribes to that topic and forwards each message to the connected
 client, then drops the subscription when the client disconnects.
 
 <Tabs syncKey="lang">
-	<TabItem label="Rust" icon="seti:rust">
-
-		```rust
-		use futures_util::StreamExt;
-
-		// in the worker handler, after reading the new count
-		forge.pubsub().publish(&format!("clicks:{slug}"),
-		    Bytes::from(json!({ "slug": slug, "clicks": total }).to_string())).await?;
-
-		// in the SSE route
-		let mut sub = forge.pubsub().subscribe(&format!("clicks:{slug}")).await?;
-		while let Some(Ok(payload)) = sub.next().await {
-		    // write `payload` to the response as an SSE `data:` line
-		}
-		```
-
-	</TabItem>
 	<TabItem label="Node" icon="seti:javascript">
 
 		```ts
@@ -278,6 +354,23 @@ client, then drops the subscription when the client disconnects.
 		```
 
 	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		use futures_util::StreamExt;
+
+		// in the worker handler, after reading the new count
+		forge.pubsub().publish(&format!("clicks:{slug}"),
+		    Bytes::from(json!({ "slug": slug, "clicks": total }).to_string())).await?;
+
+		// in the SSE route
+		let mut sub = forge.pubsub().subscribe(&format!("clicks:{slug}")).await?;
+		while let Some(Ok(payload)) = sub.next().await {
+		    // write `payload` to the response as an SSE `data:` line
+		}
+		```
+
+	</TabItem>
 </Tabs>
 
 <Aside>
@@ -292,22 +385,6 @@ Put generated or uploaded bytes under a key with a content type, read them back 
 serve them, or hand the client a presigned link so it can fetch the file directly.
 
 <Tabs syncKey="lang">
-	<TabItem label="Rust" icon="seti:rust">
-
-		```rust
-		use std::time::Duration;
-		use forgelib::{Bytes, PutOpts};
-
-		forge.blob().put(&format!("qr/{slug}.svg"), Bytes::from(svg),
-		    PutOpts::new().with_content_type("image/svg+xml")).await?;
-
-		let svg = forge.blob().get(&format!("qr/{slug}.svg")).await?;   // Option<Bytes>
-
-		let url = forge.blob()
-		    .presign_download(&format!("qr/{slug}.svg"), Duration::from_secs(3600)).await?;
-		```
-
-	</TabItem>
 	<TabItem label="Node" icon="seti:javascript">
 
 		```ts
@@ -330,6 +407,22 @@ serve them, or hand the client a presigned link so it can fetch the file directl
 		```
 
 	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		use std::time::Duration;
+		use forgelib::{Bytes, PutOpts};
+
+		forge.blob().put(&format!("qr/{slug}.svg"), Bytes::from(svg),
+		    PutOpts::new().with_content_type("image/svg+xml")).await?;
+
+		let svg = forge.blob().get(&format!("qr/{slug}.svg")).await?;   // Option<Bytes>
+
+		let url = forge.blob()
+		    .presign_download(&format!("qr/{slug}.svg"), Duration::from_secs(3600)).await?;
+		```
+
+	</TabItem>
 </Tabs>
 
 Presigned links need a `signing_secret` set in `forge.toml`. For uploads, hand back
@@ -342,22 +435,6 @@ Schedule a one-shot for delayed work, like expiring a link at its TTL, or a cron
 recurring jobs. Both land on a normal queue, so the same workers drain them.
 
 <Tabs syncKey="lang">
-	<TabItem label="Rust" icon="seti:rust">
-
-		```rust
-		use std::time::{Duration, SystemTime};
-		use forgelib::ScheduleOpts;
-
-		// expire this link in an hour
-		let when = SystemTime::now() + Duration::from_secs(3600);
-		forge.schedule().at(when, "expire", payload.into(), ScheduleOpts::new()).await?;
-
-		// a daily report
-		forge.schedule().cron("nightly-report", "0 0 * * *", "reports",
-		    b"{}".to_vec().into(), ScheduleOpts::new()).await?;
-		```
-
-	</TabItem>
 	<TabItem label="Node" icon="seti:javascript">
 
 		```ts
@@ -377,6 +454,22 @@ recurring jobs. Both land on a normal queue, so the same workers drain them.
 
 		# a daily report
 		await forge.schedule_cron("nightly-report", "0 0 * * *", "reports", "{}")
+		```
+
+	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		use std::time::{Duration, SystemTime};
+		use forgelib::ScheduleOpts;
+
+		// expire this link in an hour
+		let when = SystemTime::now() + Duration::from_secs(3600);
+		forge.schedule().at(when, "expire", payload.into(), ScheduleOpts::new()).await?;
+
+		// a daily report
+		forge.schedule().cron("nightly-report", "0 0 * * *", "reports",
+		    b"{}".to_vec().into(), ScheduleOpts::new()).await?;
 		```
 
 	</TabItem>

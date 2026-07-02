@@ -298,33 +298,3 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
-
-  future-registries:
-    name: Future Registry (${{ matrix.registry }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    needs: preflight
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - registry: pub.dev
-            marker: bindings/dart/pubspec.yaml
-          - registry: Maven Central
-            marker: bindings/jvm/build.gradle.kts
-          - registry: NuGet
-            marker: bindings/dotnet
-          - registry: RubyGems
-            marker: bindings/ruby
-          - registry: Go modules
-            marker: bindings/go/go.mod
-    steps:
-      - uses: actions/checkout@v4
-      - name: Confirm registry lane status
-        shell: bash
-        run: |
-          if [[ -e "${{ matrix.marker }}" ]]; then
-            echo "::warning title=${{ matrix.registry }} lane needs implementation::Found ${{ matrix.marker }}; replace this no-op with the real publish command before releasing that language package."
-          else
-            echo "${{ matrix.registry }} skipped: no language package marker at ${{ matrix.marker }}."
-          fi

@@ -107,7 +107,7 @@ impl Decision {
 /// An atomic check-and-consume rate limiter. Lineage: token bucket / GCRA + IETF
 /// RateLimit headers. Object-safe; the facade hands out `Arc<dyn RateLimit>`.
 ///
-/// Exact algorithm math, failure modes, and limits: `docs/contracts/ratelimit.md`.
+/// Exact algorithm math, failure modes, and limits: <https://tryforge.dev/primitives/#rate-limit>.
 #[async_trait]
 pub trait RateLimit: Send + Sync {
     /// Atomic check-and-consume of one unit against `limit` for subject `key` under

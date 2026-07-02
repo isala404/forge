@@ -199,7 +199,7 @@ impl ApiKeyInfo {
 /// Object-safe; the facade hands out `Arc<dyn Auth>`.
 ///
 /// Forge does NOT own the users table; `user_id`/`owner_id` are opaque app strings.
-/// Exact semantics, timeouts, and error mapping: `docs/contracts/auth.md`.
+/// Exact semantics, timeouts, and error mapping: <https://tryforge.dev/primitives/#auth>.
 #[async_trait]
 pub trait Auth: Send + Sync {
     /// Hash a password with argon2id at Forge-owned current params (fresh salt).

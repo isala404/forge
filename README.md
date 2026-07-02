@@ -5,7 +5,7 @@ Every app needs the same plumbing, and the usual answer is a separate service fo
 - Redis for caching and sessions
 - a queue for background jobs
 - object storage for uploads
-- a service for auth
+- an auth service for logins and sessions
 - a cron runner for scheduled work
 - a rate limiter
 
@@ -198,6 +198,7 @@ It teaches which primitive fits which task and the idioms for each language, so 
 ## Not in scope
 
 - The APIs are a shared subset, not a full reimplementation. key/value covers the Redis commands most apps use, not Lua scripts or sorted sets. blob does CRUD and presigned URLs, not S3 lifecycle rules.
+- auth is the essentials: password hashing, sessions, and API keys, enough to have working auth in minutes while you prototype. For OAuth, 2FA, or email verification, bring Clerk, Firebase, or a dedicated provider.
 - Forge ships two backends, memory and Postgres, plus local disk for blob. If you need Redis or S3, implement the primitive's trait and inject it, or use that service directly.
 - Not an ORM or a web framework. Your tables and routes stay yours.
 
@@ -215,7 +216,7 @@ MIT. Do whatever you want.
 
 <p align="center">
   <strong>Postgres is enough.</strong><br>
-  <a href="#quick-start">Quick Start</a> ·
+  <a href="#one-connection-eight-primitives">Quick Start</a> ·
   <a href="#examples">Examples</a> ·
   <a href="https://github.com/isala404/forge/discussions">Discussions</a>
 </p>

@@ -1,7 +1,7 @@
 use thiserror::Error;
 
-/// Forge's public error type. See `docs/contracts/*` for the per-primitive
-/// mapping of failures onto these variants.
+/// Forge's public error type. See <https://tryforge.dev/primitives/> for the
+/// per-primitive mapping of failures onto these variants.
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum ForgeError {

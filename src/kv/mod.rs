@@ -51,7 +51,7 @@ impl SetOpts {
 
 /// A Redis-shaped key/value store: caching, sessions, counters, ephemeral state.
 ///
-/// Object-safe (facade hands out `Arc<dyn Kv>`). Exact semantics, limits, and error mapping: `docs/contracts/kv.md`.
+/// Object-safe (facade hands out `Arc<dyn Kv>`). Exact semantics, limits, and error mapping: <https://tryforge.dev/primitives/#key-value>.
 #[async_trait]
 pub trait Kv: Send + Sync {
     /// `GET`. `Some(value)` if present and unexpired, else `None`. An expired key returns `None`, guaranteed.
