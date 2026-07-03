@@ -11,6 +11,7 @@ T = TypeVar("T")
 
 Loads = Callable[[str], Any]
 Dumps = Callable[[Any], str]
+OnError = Callable[[BaseException, Optional["QueueJob[Any]"]], Awaitable[None]]
 
 
 def forge_error_code(exc: BaseException) -> str:
@@ -108,6 +109,7 @@ class Queue(Generic[T]):
         visibility_seconds: float = 30.0,
         wait_seconds: float = 20.0,
         stop: Optional[asyncio.Event] = None,
+        on_error: Optional[OnError] = None,
     ) -> None:
         await run_worker(
             self._c,
@@ -117,6 +119,7 @@ class Queue(Generic[T]):
             wait_seconds=wait_seconds,
             stop=stop,
             loads=self._loads,
+            on_error=on_error,
         )
 
 
@@ -204,6 +207,9 @@ class ConfigKey(Generic[T]):
     async def delete(self) -> bool:
         return await self._c.config_delete(self._key)
 
+    async def flag(self, targeting_key: Optional[str] = None) -> bool:
+        return await self._c.flag(self._key, bool(self._default), targeting_key)
+
 
 class Topic(Generic[T]):
     """A pub/sub topic bound to a JSON event type."""
@@ -232,6 +238,9 @@ class Topic(Generic[T]):
         finally:
             await sub.aclose()
 
+    def channel(self) -> str:
+        return self._c.pubsub_channel(self._topic)
+
 
 async def run_worker(
     client: Any,
@@ -242,14 +251,25 @@ async def run_worker(
     wait_seconds: float = 20.0,
     stop: Optional[asyncio.Event] = None,
     loads: Loads = json.loads,
+    on_error: Optional[OnError] = None,
 ) -> None:
-    """Run a managed worker loop for a JSON queue. Set ``stop`` to drain."""
+    """Run a managed worker loop for a JSON queue. Set ``stop`` to drain.
+
+    ``on_error`` is awaited with (exception, job) for every failure the loop
+    absorbs — dequeue errors, undecodable payloads (job is None for both), and
+    handler/ack failures — so failures are observable instead of silent.
+    """
+
+    async def report(exc: BaseException, job: Optional[QueueJob[Any]]) -> None:
+        if on_error is not None:
+            await on_error(exc, job)
 
     hb_every = max(1.0, visibility_seconds / 3.0)
     while not (stop is not None and stop.is_set()):
         try:
             raw = await client.queue_dequeue(queue_name, visibility_seconds, wait_seconds)
-        except Exception:  # transient backend blip; back off and retry  # noqa: BLE001
+        except Exception as exc:  # transient backend blip; back off and retry  # noqa: BLE001
+            await report(exc, None)
             await asyncio.sleep(0.25)
             continue
         if raw is None:
@@ -258,11 +278,12 @@ async def run_worker(
         lease_lost = asyncio.Event()
         try:
             payload = loads(raw.payload)
-        except Exception:  # bad payload; let retries/DLQ handle it  # noqa: BLE001
+        except Exception as exc:  # bad payload; let retries/DLQ handle it  # noqa: BLE001
             try:
                 await client.queue_nack(raw.receipt)
             except Exception:  # noqa: BLE001
                 pass
+            await report(exc, None)
             continue
 
         job: QueueJob[Any] = QueueJob(
@@ -292,15 +313,16 @@ async def run_worker(
             if not lease_lost.is_set():
                 try:
                     await client.queue_ack(job.receipt)
-                except Exception:  # noqa: BLE001
-                    pass
-        except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    await report(exc, job)
+        except Exception as exc:  # noqa: BLE001
             beat.cancel()
             if not lease_lost.is_set():
                 try:
                     await client.queue_nack(job.receipt)
                 except Exception:  # noqa: BLE001
                     pass
+            await report(exc, job)
 
 
 def queue(client: Any, name: str, *, loads: Loads = json.loads, dumps: Dumps = json.dumps) -> Queue[Any]:
@@ -366,6 +388,7 @@ async def _client_worker(
     wait_seconds: float = 20.0,
     stop: Optional[asyncio.Event] = None,
     loads: Loads = json.loads,
+    on_error: Optional[OnError] = None,
 ) -> None:
     await run_worker(
         self,
@@ -375,17 +398,18 @@ async def _client_worker(
         wait_seconds=wait_seconds,
         stop=stop,
         loads=loads,
+        on_error=on_error,
     )
 
 
-try:
-    ForgeClient.queue = _client_queue  # type: ignore[name-defined,attr-defined]
-    ForgeClient.kv = _client_kv  # type: ignore[name-defined,attr-defined]
-    ForgeClient.config = _client_config  # type: ignore[name-defined,attr-defined]
-    ForgeClient.topic = _client_topic  # type: ignore[name-defined,attr-defined]
-    ForgeClient.worker = _client_worker  # type: ignore[name-defined,attr-defined]
-except (AttributeError, TypeError):
-    pass
+# If installing these ever fails (e.g. the native class becomes non-patchable),
+# the whole idiomatic surface would vanish — that must be an import error, not
+# a silent downgrade.
+ForgeClient.queue = _client_queue  # type: ignore[name-defined,attr-defined]
+ForgeClient.kv = _client_kv  # type: ignore[name-defined,attr-defined]
+ForgeClient.config = _client_config  # type: ignore[name-defined,attr-defined]
+ForgeClient.topic = _client_topic  # type: ignore[name-defined,attr-defined]
+ForgeClient.worker = _client_worker  # type: ignore[name-defined,attr-defined]
 
 
 __all__ = [

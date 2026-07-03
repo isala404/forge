@@ -34,6 +34,7 @@
     }
   },
   "scripts": {
+    "test": "node --test test/*.test.js",
     "artifacts": "napi artifacts",
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",

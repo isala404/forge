@@ -1,18 +1,14 @@
 const native = require('./index.js');
 
+// Strict JSON on both sides, matching the Python binding's json.dumps/json.loads
+// defaults: a value written by one language must decode identically in the other.
 const jsonCodec = {
   encode(value) {
-    if (typeof value === 'string') return value;
-    if (Buffer.isBuffer(value)) return value.toString('utf8');
     return JSON.stringify(value);
   },
   decode(value) {
     const text = Buffer.isBuffer(value) ? value.toString('utf8') : value;
-    try {
-      return JSON.parse(text);
-    } catch {
-      return text;
-    }
+    return JSON.parse(text);
   },
 };
 
@@ -25,6 +21,7 @@ class QueueJob {
     this._client = client;
     this._codec = codec;
     this._settled = false;
+    this._leaseLost = false;
     this.id = raw.id;
     this.receipt = raw.receipt;
     this.payload = codec.decode(raw.payload);
@@ -36,6 +33,10 @@ class QueueJob {
 
   get settled() {
     return this._settled;
+  }
+
+  get leaseLost() {
+    return this._leaseLost;
   }
 
   async ack() {
@@ -224,13 +225,27 @@ class Topic {
   }
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 async function runWorker(client, name, handler, opts = {}) {
   const codec = codecOrDefault(opts.codec);
   const visibilitySeconds = opts.visibilitySeconds ?? 30;
   const waitSeconds = opts.waitSeconds ?? 20;
+  const heartbeatMs = Math.max(1, visibilitySeconds / 3) * 1000;
+  const report = async (error, job) => {
+    if (opts.onError) await opts.onError(error, job);
+  };
 
   while (!opts.signal?.aborted) {
-    const raw = await client.queueDequeue(name, visibilitySeconds, waitSeconds);
+    let raw;
+    try {
+      raw = await client.queueDequeue(name, visibilitySeconds, waitSeconds);
+    } catch (error) {
+      // Transient backend blip; report, back off, retry (same as the Python worker).
+      await report(error, undefined);
+      await sleep(250);
+      continue;
+    }
     if (!raw) continue;
 
     let job;
@@ -238,18 +253,33 @@ async function runWorker(client, name, handler, opts = {}) {
       job = new QueueJob(client, raw, codec);
     } catch (error) {
       await client.queueNack(raw.receipt, opts.retrySeconds).catch(() => {});
-      if (opts.onError) await opts.onError(error, undefined);
+      await report(error, undefined);
       continue;
     }
 
+    // Keep the lease alive while the handler runs; a failed heartbeat means the
+    // lease is gone and the job will be redelivered, so stop settling it here.
+    const beat = setInterval(() => {
+      client.queueHeartbeat(job.receipt).catch(() => {
+        job._leaseLost = true;
+        clearInterval(beat);
+      });
+    }, heartbeatMs);
+
     try {
       await handler(job);
-      if (!job.settled) await job.ack();
+      try {
+        if (!job.settled && !job.leaseLost) await job.ack();
+      } catch (error) {
+        await report(error, job);
+      }
     } catch (error) {
-      if (!job.settled) {
+      if (!job.settled && !job.leaseLost) {
         await job.nack({ retrySeconds: opts.retrySeconds }).catch(() => {});
       }
-      if (opts.onError) await opts.onError(error, job);
+      await report(error, job);
+    } finally {
+      clearInterval(beat);
     }
   }
 }
@@ -270,12 +300,31 @@ function topic(client, name, codec) {
   return new Topic(client, name, codec);
 }
 
+const FORGE_CODES = new Set([
+  'NOT_FOUND',
+  'INVALID',
+  'LIMIT',
+  'PRECONDITION',
+  'UNAVAILABLE',
+  'CONFIG',
+  'BACKEND',
+]);
+
+// The napi layer cannot set custom properties on thrown errors, so the Forge
+// error class travels as a "CODE: message" prefix; recover it from there.
 function forgeErrorCode(error) {
-  return error && typeof error === 'object' ? error.code : undefined;
+  const message =
+    error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+  const sep = message.indexOf(': ');
+  if (sep > 0) {
+    const head = message.slice(0, sep);
+    if (FORGE_CODES.has(head)) return head;
+  }
+  return undefined;
 }
 
 function forgeErrorRetryable(error) {
-  return Boolean(error && typeof error === 'object' && error.retryable);
+  return forgeErrorCode(error) === 'UNAVAILABLE';
 }
 
 const { ForgeClient } = native;

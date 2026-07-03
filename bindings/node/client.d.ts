@@ -65,6 +65,8 @@ export declare class QueueJob<T> {
   readonly leasedUntilMs: number;
   readonly queue: string;
   readonly settled: boolean;
+  /** Set by the managed worker when a heartbeat fails: the job will be redelivered. */
+  readonly leaseLost: boolean;
   ack(): Promise<void>;
   nack(opts?: NackOptions): Promise<void>;
   heartbeat(): Promise<void>;
@@ -179,5 +181,16 @@ export declare function topic<T = unknown>(
   codec?: Codec<T>,
 ): Topic<T>;
 
-export declare function forgeErrorCode(error: unknown): string | undefined;
+export type ForgeErrorCode =
+  | 'NOT_FOUND'
+  | 'INVALID'
+  | 'LIMIT'
+  | 'PRECONDITION'
+  | 'UNAVAILABLE'
+  | 'CONFIG'
+  | 'BACKEND';
+
+/** The Forge error class parsed from the `CODE: message` prefix, if the error is one. */
+export declare function forgeErrorCode(error: unknown): ForgeErrorCode | undefined;
+/** Whether the error is worth retrying (`UNAVAILABLE`: the backend was unreachable). */
 export declare function forgeErrorRetryable(error: unknown): boolean;
