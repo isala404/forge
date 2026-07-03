@@ -60,7 +60,13 @@ async fn default_backend_report_is_all_postgres() {
         report.backends.iter().all(|b| b.provider == "postgres"),
         "default config powers every primitive with Postgres"
     );
-    assert!(report.backends.iter().all(|b| b.durable));
+    assert!(
+        report
+            .backends
+            .iter()
+            .all(|b| b.durable == (b.primitive != forgelib::Primitive::Pubsub)),
+        "everything but pubsub (LISTEN/NOTIFY stores nothing) is durable"
+    );
     // Display renders one line per primitive plus a header.
     let rendered = report.to_string();
     assert!(rendered.contains("forge backend report:"));

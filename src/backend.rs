@@ -265,6 +265,11 @@ impl BackendLifecycle for crate::pubsub::PgPubsub {
     fn primitive(&self) -> Primitive {
         Primitive::Pubsub
     }
+    // LISTEN/NOTIFY stores nothing: a message published while a subscriber is
+    // down (or across a restart) is gone, so the report must not say durable.
+    fn durable(&self) -> bool {
+        false
+    }
     fn caveats(&self) -> &'static str {
         "at-most-once, non-durable"
     }

@@ -153,7 +153,12 @@ async fn memory_kv_ignores_its_bogus_postgres_feature_database() {
                 "{:?} should remain postgres",
                 x.primitive
             );
-            assert!(x.durable, "{:?} should remain durable", x.primitive);
+            assert_eq!(
+                x.durable,
+                x.primitive != Primitive::Pubsub,
+                "{:?}: only pubsub (LISTEN/NOTIFY stores nothing) is non-durable on Postgres",
+                x.primitive
+            );
         }
     }
 }
@@ -196,7 +201,12 @@ async fn builder_injects_kv_while_the_rest_stay_postgres() {
                 "{:?} should remain postgres",
                 x.primitive
             );
-            assert!(x.durable, "{:?} should remain durable", x.primitive);
+            assert_eq!(
+                x.durable,
+                x.primitive != Primitive::Pubsub,
+                "{:?}: only pubsub (LISTEN/NOTIFY stores nothing) is non-durable on Postgres",
+                x.primitive
+            );
         }
     }
 
@@ -226,9 +236,10 @@ async fn init_default_config_is_all_postgres() {
             "{:?} must be postgres on the default path",
             x.primitive
         );
-        assert!(
+        assert_eq!(
             x.durable,
-            "{:?} must be durable on the default path",
+            x.primitive != Primitive::Pubsub,
+            "{:?}: everything but pubsub (LISTEN/NOTIFY stores nothing) is durable on the default path",
             x.primitive
         );
     }

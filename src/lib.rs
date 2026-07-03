@@ -468,10 +468,24 @@ impl Forge {
     /// rate-limit rows, expire dead sessions, and reclaim orphaned filesystem blobs.
     /// Idempotent; call it on a schedule.
     pub async fn maintain(&self) -> Result<()> {
+        // Run every sweep even when one fails: a transient error in one backend
+        // must not starve the rest of maintenance, sweep after sweep.
+        let mut first_err = None;
         for backend in &self.inner.lifecycle {
-            backend.maintain().await?;
+            if let Err(e) = backend.maintain().await {
+                tracing::warn!(
+                    primitive = backend.primitive().as_str(),
+                    provider = backend.name(),
+                    error = %e,
+                    "maintenance sweep failed; continuing with remaining backends"
+                );
+                first_err.get_or_insert(e);
+            }
         }
-        Ok(())
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 }
 
