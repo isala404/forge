@@ -16,7 +16,7 @@ crate-type = ["cdylib"]
 # Enable OTLP export so the prebuilt wheel ships with observability wired in.
 # Aliased to `forge` because this crate's own lib is named `forgelib` (the Python
 # module name), which would otherwise collide with the core crate's name.
-forge = { package = "forgelib", path = "../..", features = ["otel"] }
+forge = { package = "forgelib", path = "../..", features = ["otel", "embedded-postgres"] }
 # abi3-py39: build against the stable ABI so one wheel runs on CPython >= 3.9
 # (including newer interpreters than this pyo3 release knows about).
 pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }

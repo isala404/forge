@@ -29,6 +29,18 @@ url = "${DATABASE_URL:-postgres://localhost/myapp}"
 
 Omit settings you do not need; Forge applies production-safe defaults for the rest.
 
+Don't have a database to point at? Set `url = "embedded"` and Forge runs its own real
+Postgres — it downloads a native build once (cached), starts it on an auto-assigned free
+port so nothing collides, and keeps the data across restarts. Great for getting started or
+local dev; swap `url` for a managed Postgres in production (`${DATABASE_URL:-embedded}`
+flips between them from the environment). The Node and Python packages ship with it on; the
+Rust crate enables it with `--features embedded-postgres`.
+
+```toml
+[postgres]
+url = "embedded"   # no external database required
+```
+
 ```ts
 import { ForgeClient } from "forgelib";
 

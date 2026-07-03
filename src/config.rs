@@ -15,6 +15,22 @@ const DEFAULT_STATEMENT_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_IDLE_IN_TX_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// The magic `[postgres] url` value that asks Forge to run its own native Postgres instead
+/// of connecting to one you provide. Resolved to a real DSN at [`Forge::init`] once the
+/// embedded server is up (see the `embedded-postgres` feature). Any other value is treated
+/// as an ordinary connection string, so bringing your own Postgres is unchanged.
+pub(crate) const EMBEDDED_SENTINEL: &str = "embedded";
+
+/// Where the embedded server keeps its data when `[postgres] embedded_data_dir` is unset.
+/// Project-local and durable so state survives restarts; add it to `.gitignore`.
+#[cfg(feature = "embedded-postgres")]
+const DEFAULT_EMBEDDED_DATA_DIR: &str = ".forge/pgdata";
+
+/// Whether a connection string is the embedded-Postgres request rather than a real DSN.
+pub(crate) fn is_embedded_url(url: &str) -> bool {
+    url.trim().eq_ignore_ascii_case(EMBEDDED_SENTINEL)
+}
+
 /// Every primitive, for iterating per-feature config (e.g. `[databases.<feature>]`).
 const ALL_PRIMITIVES: [Primitive; 8] = [
     Primitive::Kv,
@@ -160,6 +176,11 @@ pub(crate) struct ForgeConfig {
     /// `postgres` / `max_connections` / `acquire_timeout`. Empty by default. Set via
     /// `[databases.<feature>]`.
     pub feature_databases: HashMap<Primitive, DatabaseConfig>,
+    /// Data directory for the embedded Postgres server (only consulted when a connection
+    /// string is `"embedded"`). `None` uses a project-local default; the directory is
+    /// created if missing and its contents persist across restarts. Set via
+    /// `[postgres] embedded_data_dir`.
+    pub embedded_data_dir: Option<PathBuf>,
 }
 
 impl Default for ForgeConfig {
@@ -181,6 +202,7 @@ impl Default for ForgeConfig {
             default_backend: Backend::Postgres,
             backends: HashMap::new(),
             feature_databases: HashMap::new(),
+            embedded_data_dir: None,
         }
     }
 }
@@ -347,6 +369,7 @@ struct TomlPostgres {
     statement_timeout_ms: Option<u64>,
     lock_timeout_ms: Option<u64>,
     idle_in_transaction_timeout_ms: Option<u64>,
+    embedded_data_dir: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -440,6 +463,9 @@ impl ForgeConfig {
         }
         if let Some(ms) = p.idle_in_transaction_timeout_ms {
             self.idle_in_transaction_timeout = Duration::from_millis(ms);
+        }
+        if let Some(dir) = p.embedded_data_dir {
+            self.embedded_data_dir = Some(dir.into());
         }
 
         if let Some(ns) = t.forge.namespace {
@@ -577,6 +603,41 @@ impl ForgeConfig {
             .unwrap_or(self.default_backend)
     }
 
+    /// Whether any database target (the system database or a feature override) asks for the
+    /// embedded server rather than a real DSN. When true, `Forge::init` starts one native
+    /// Postgres and resolves every such target to it via [`resolve_embedded_urls`](Self::resolve_embedded_urls).
+    pub(crate) fn embedded_requested(&self) -> bool {
+        is_embedded_url(&self.postgres)
+            || self
+                .feature_databases
+                .values()
+                .any(|db| is_embedded_url(&db.postgres))
+    }
+
+    /// The data directory for the embedded server: the configured path, else a project-local
+    /// default. Durable across restarts.
+    #[cfg(feature = "embedded-postgres")]
+    pub(crate) fn embedded_data_dir(&self) -> PathBuf {
+        self.embedded_data_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_EMBEDDED_DATA_DIR))
+    }
+
+    /// Repoint every `"embedded"` target at `dsn`, the real connection string of the started
+    /// embedded server. All embedded targets share the one server, so migration de-duplication
+    /// in `init` collapses them to a single migrated database.
+    #[cfg(feature = "embedded-postgres")]
+    pub(crate) fn resolve_embedded_urls(&mut self, dsn: &str) {
+        if is_embedded_url(&self.postgres) {
+            self.postgres = dsn.to_string();
+        }
+        for db in self.feature_databases.values_mut() {
+            if is_embedded_url(&db.postgres) {
+                db.postgres = dsn.to_string();
+            }
+        }
+    }
+
     /// Validate the statically-checkable fields with a precise message;
     /// connection/migration failures surface later in `Forge::init`.
     pub(crate) fn validate(&self) -> Result<()> {
@@ -631,6 +692,7 @@ impl std::fmt::Debug for ForgeConfig {
             .field("default_backend", &self.default_backend)
             .field("backends", &self.backends)
             .field("feature_databases", &self.feature_databases)
+            .field("embedded_data_dir", &self.embedded_data_dir)
             .finish()
     }
 }
@@ -858,6 +920,68 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.blob_signing_secret.as_deref(), Some("devsecret"));
+    }
+
+    #[test]
+    fn embedded_sentinel_is_recognized_case_insensitively() {
+        assert!(is_embedded_url("embedded"));
+        assert!(is_embedded_url("  Embedded "));
+        assert!(is_embedded_url("EMBEDDED"));
+        assert!(!is_embedded_url("postgres://localhost/db"));
+        assert!(!is_embedded_url("embeddedx"));
+    }
+
+    #[test]
+    fn embedded_requested_detects_system_and_feature_targets() {
+        let sys = cfg("embedded");
+        assert!(sys.embedded_requested());
+
+        let feat = ForgeConfig::from_toml_str(
+            "[postgres]\nurl = \"postgres://default/db\"\n\
+             [databases.kv]\nurl = \"embedded\"\n",
+        )
+        .unwrap();
+        assert!(feat.embedded_requested());
+
+        let none = cfg("postgres://localhost/db");
+        assert!(!none.embedded_requested());
+    }
+
+    #[cfg(feature = "embedded-postgres")]
+    #[test]
+    fn resolve_embedded_urls_repoints_only_embedded_targets() {
+        let mut cfg = ForgeConfig::from_toml_str(
+            "[postgres]\nurl = \"embedded\"\n\
+             [databases.kv]\nurl = \"embedded\"\n\
+             [databases.queue]\nurl = \"postgres://queue-server/db\"\n",
+        )
+        .unwrap();
+        let dsn = "postgres://postgres:pw@127.0.0.1:54321/forge";
+        cfg.resolve_embedded_urls(dsn);
+        assert_eq!(cfg.postgres, dsn);
+        assert_eq!(cfg.database_for(Primitive::Kv).postgres, dsn);
+        // A real feature URL is left untouched.
+        assert_eq!(
+            cfg.database_for(Primitive::Queue).postgres,
+            "postgres://queue-server/db"
+        );
+    }
+
+    #[cfg(feature = "embedded-postgres")]
+    #[test]
+    fn embedded_data_dir_defaults_when_unset_and_honors_override() {
+        assert_eq!(
+            cfg("embedded").embedded_data_dir(),
+            std::path::PathBuf::from(DEFAULT_EMBEDDED_DATA_DIR)
+        );
+        let custom = ForgeConfig::from_toml_str(
+            "[postgres]\nurl = \"embedded\"\nembedded_data_dir = \"/var/lib/forge-pg\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            custom.embedded_data_dir(),
+            std::path::PathBuf::from("/var/lib/forge-pg")
+        );
     }
 
     #[test]

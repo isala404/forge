@@ -33,6 +33,12 @@ otel = [
 pg-tests = []
 # Exposes `forge::conformance` for external backend authors and the cross-language runner.
 conformance = []
+# Zero-config durable default database. With this on, `url = "embedded"` in
+# `[postgres]` makes `init` download (once, cached) and run a real native Postgres
+# as a child process on an auto-assigned port, so a user need not bring their own
+# database. Opt-in and off by default: builds that always point at an external
+# Postgres URL pay none of the download/reqwest/tar dependency surface.
+embedded-postgres = ["dep:postgresql_embedded"]
 
 [dependencies]
 tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
@@ -79,6 +85,7 @@ opentelemetry_sdk = { version = "0.27", optional = true, features = ["rt-tokio",
 opentelemetry-otlp = { version = "0.27", optional = true, default-features = false, features = ["http-json", "reqwest-rustls", "trace"] }
 tracing-opentelemetry = { version = "0.28", optional = true }
 tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter", "fmt"] }
+postgresql_embedded = { version = "0.20.2", default-features = false, features = ["tokio", "theseus"], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "test-util"] }

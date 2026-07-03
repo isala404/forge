@@ -1,6 +1,11 @@
 mod migrations;
 pub(crate) use migrations::MigrationRunner;
 
+#[cfg(feature = "embedded-postgres")]
+mod embedded;
+#[cfg(feature = "embedded-postgres")]
+pub(crate) use embedded::EmbeddedPostgres;
+
 use crate::config::DatabaseConfig;
 use crate::error::{ForgeError, Result};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};

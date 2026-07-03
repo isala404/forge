@@ -24,6 +24,10 @@ allow = [
     "Zlib",
     "BSL-1.0",
     "CDLA-Permissive-2.0",
+    # The `postgresql_*` crates behind the `embedded-postgres` feature are
+    # `(Apache-2.0 OR MIT) AND PostgreSQL`. The PostgreSQL License is OSI-approved and
+    # permissive (BSD/MIT-style).
+    "PostgreSQL",
 ]
 confidence-threshold = 0.8
 

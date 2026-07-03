@@ -20,3 +20,9 @@ crate (`forgelib`) exposing eight infrastructure primitives behind stable traits
   `src/conformance/scenarios/` run by a native runner in each language, so the
   bindings cannot drift on units, shapes, defaults, or error codes.
 - `forge.toml` as the single source of configuration.
+- Embedded Postgres: set `[postgres] url = "embedded"` to have Forge run its own
+  native Postgres (downloaded once and cached, started on an auto-assigned free
+  port, data persisted across restarts) so there is no external database to
+  provision. Behind the crate's `embedded-postgres` feature; the Node and Python
+  packages ship with it enabled. `FORGE_EMBEDDED_POSTGRES_DIR` points at a
+  pre-installed Postgres for air-gapped or download-blocked hosts.

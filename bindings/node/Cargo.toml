@@ -9,8 +9,10 @@ description = "Node.js (napi-rs) bindings for Forge — hardened infra primitive
 crate-type = ["cdylib"]
 
 [dependencies]
-# Enable OTLP export so the prebuilt binding ships with observability wired in.
-forgelib = { path = "../..", features = ["otel"] }
+# Enable OTLP export so the prebuilt binding ships with observability wired in, and the
+# embedded Postgres backend so `url = "embedded"` works with no external database (an
+# external Postgres URL still works exactly as before — embedded is opt-in per app).
+forgelib = { path = "../..", features = ["otel", "embedded-postgres"] }
 futures-util = "0.3"
 napi = { version = "2", default-features = false, features = ["napi6", "tokio_rt"] }
 napi-derive = "2"

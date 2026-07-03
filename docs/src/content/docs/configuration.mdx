@@ -78,11 +78,46 @@ keep your product tables elsewhere.
 | `statement_timeout_ms` | `15000` | Server-side statement timeout for runtime queries. `0` disables it. |
 | `lock_timeout_ms` | `5000` | Server-side lock timeout. `0` disables it. |
 | `idle_in_transaction_timeout_ms` | `15000` | Server-side idle-in-transaction timeout. `0` disables it. |
+| `embedded_data_dir` | `.forge/pgdata` | Data directory when `url = "embedded"` (see below). Persists across restarts. |
 
 <Aside>
 	Watch the units. The three server-side timeouts are in milliseconds, while
 	`acquire_timeout_secs` and the queue windows are in seconds. Setting a millisecond
 	timeout to `0` removes that ceiling.
+</Aside>
+
+## Embedded Postgres (no database to bring)
+
+Set `url = "embedded"` and Forge runs its own real Postgres, so there's nothing to
+provision to get started. On the first `init()` it downloads a native Postgres build
+(once, then cached under `~/.theseus/postgresql`), starts it on an **auto-assigned free
+port** — a busy `5432` never collides — and creates and migrates its database. The data
+directory persists, so your data survives restarts.
+
+```toml title="forge.toml"
+[postgres]
+url = "embedded"
+# Optional: where the server keeps its data. Defaults to .forge/pgdata (add to .gitignore).
+embedded_data_dir = ".forge/pgdata"
+```
+
+This is a **real Postgres over the wire**, so every primitive, migration, and
+`LISTEN`/`NOTIFY` behaves exactly as against an external database — it is not an
+emulation. It's meant for local development and getting started; for production and
+multi-replica deployments, point `url` at a managed Postgres. Because that's just a
+different `url`, moving between them is a one-line change (use `${DATABASE_URL:-embedded}`
+to flip from the environment).
+
+| Concern | How it's handled |
+| --- | --- |
+| Port conflicts | The server binds an OS-assigned free port; nothing to reserve. |
+| Feature flag | Embedded lives behind the crate's `embedded-postgres` feature; the prebuilt Node and Python packages ship with it on. For the Rust crate, build with `--features embedded-postgres`. |
+| No network / air-gapped | Set `FORGE_EMBEDDED_POSTGRES_DIR` to a directory whose `bin/` holds `initdb`/`postgres`/`pg_ctl` (e.g. `/usr/lib/postgresql/16`) to run a pre-installed Postgres instead of downloading one. |
+
+<Aside type="caution">
+	If `url = "embedded"` but the crate was built without the `embedded-postgres`
+	feature, `init()` fails with a clear message rather than trying to connect to a host
+	literally named `embedded`.
 </Aside>
 
 ## Backends

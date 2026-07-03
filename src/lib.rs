@@ -79,6 +79,10 @@ struct ForgeInner {
     lifecycle: Vec<Arc<dyn BackendLifecycle>>,
     /// The Postgres pool every primitive is built on.
     pool: sqlx::PgPool,
+    /// When `[postgres] url = "embedded"`, the native Postgres process Forge started.
+    /// Held only to keep it alive for the runtime's lifetime; dropping it stops the server.
+    #[cfg(feature = "embedded-postgres")]
+    _embedded: Option<pg::EmbeddedPostgres>,
 }
 
 /// Primitives whose correctness needs cross-process delivery (pubsub, ratelimit) but that
@@ -161,11 +165,32 @@ impl Forge {
     /// The single construction path behind [`Forge::init`] and [`Forge::builder`]. Each
     /// primitive uses its injected backend if present, else its config-selected built-in;
     /// the pool/migration plan covers only the Postgres-backed built-ins.
-    async fn build_from(cfg: ForgeConfig, injected: Injected) -> Result<Self> {
+    #[cfg_attr(not(feature = "embedded-postgres"), allow(unused_mut))]
+    async fn build_from(mut cfg: ForgeConfig, injected: Injected) -> Result<Self> {
         cfg.validate()?;
 
         for p in non_durable_warnings(&cfg) {
             warn_non_durable(p);
+        }
+
+        // Resolve `url = "embedded"` before any connection: start one native Postgres and
+        // repoint every embedded target at its real DSN, so the pool/migration plan below
+        // sees ordinary connection strings. Held past init to keep the server alive.
+        #[cfg(feature = "embedded-postgres")]
+        let embedded = if cfg.embedded_requested() {
+            let server = pg::EmbeddedPostgres::start(cfg.embedded_data_dir()).await?;
+            cfg.resolve_embedded_urls(&server.url());
+            Some(server)
+        } else {
+            None
+        };
+        #[cfg(not(feature = "embedded-postgres"))]
+        if cfg.embedded_requested() {
+            return Err(ForgeError::config(
+                "postgres url is \"embedded\" but forgelib was built without the \
+                 `embedded-postgres` feature; rebuild with that feature enabled, or set a real \
+                 Postgres connection URL",
+            ));
         }
 
         // In-process, injected, and (for blob) memory backends never connect or migrate
@@ -364,6 +389,8 @@ impl Forge {
                 pubsub,
                 lifecycle,
                 pool: system_pool,
+                #[cfg(feature = "embedded-postgres")]
+                _embedded: embedded,
             }),
         })
     }
