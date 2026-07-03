@@ -1,14 +1,15 @@
-use super::{Algo, Decision, FailMode, Limit, MAX_BUCKET_BYTES, MAX_KEY_BYTES, RateLimit};
+use super::algo::{
+    SlidingState, check_bucket, check_key, check_limit, is_soft_error, resolve_fail_open,
+    sliding_step, synthetic_allow, token_bucket_step,
+};
+use super::{Algo, Decision, FailMode, Limit, RateLimit};
 use crate::backend::{BackendLifecycle, Primitive};
-use crate::error::{ForgeError, Result};
+use crate::error::Result;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-/// Upper bound on `Limit.per` (~100 years), matching the Postgres backend so a policy
-/// that fits one fits the other. Over => `Limit`.
-const MAX_PER_SECS: f64 = 100.0 * 365.0 * 24.0 * 60.0 * 60.0;
 /// Entries untouched this long are dropped by `maintain`. An idle bucket has refilled
 /// to full or its window has aged out by then, so dropping it is observably identical to
 /// keeping it: a re-check starts from a fresh full bucket either way. Mirrors the
@@ -129,15 +130,7 @@ impl RateLimit for MemRateLimit {
         limit: Limit,
         fail: FailMode,
     ) -> Result<Decision> {
-        let fail_open = match fail {
-            FailMode::Default => self.fail_open,
-            FailMode::Open => true,
-            FailMode::Closed => false,
-            // `FailMode` is `#[non_exhaustive]`; an unknown mode falls back to the
-            // instance default.
-            #[allow(unreachable_patterns)]
-            _ => self.fail_open,
-        };
+        let fail_open = resolve_fail_open(fail, self.fail_open);
         // Caller bugs (`Invalid`/`Limit`) always surface, regardless of fail mode.
         check_bucket(bucket)?;
         check_key(key)?;
@@ -184,136 +177,12 @@ impl BackendLifecycle for MemRateLimit {
     }
 }
 
-/// Soft errors (transient/backend) are swallowed by fail-open; `Invalid`/`Limit` (caller
-/// bugs) always surface regardless of failure mode.
-fn is_soft_error(e: &ForgeError) -> bool {
-    matches!(e, ForgeError::Unavailable(_) | ForgeError::Backend { .. })
-}
-
-fn synthetic_allow(limit: Limit) -> Decision {
-    Decision::new(true, limit.max, limit.max, limit.per, None)
-}
-
-fn check_bucket(bucket: &str) -> Result<()> {
-    if bucket.is_empty() {
-        return Err(ForgeError::invalid("ratelimit bucket must not be empty"));
-    }
-    if bucket.len() > MAX_BUCKET_BYTES {
-        return Err(ForgeError::limit(format!(
-            "bucket is {} bytes; max is {MAX_BUCKET_BYTES}",
-            bucket.len()
-        )));
-    }
-    Ok(())
-}
-
-fn check_key(key: &str) -> Result<()> {
-    if key.is_empty() {
-        return Err(ForgeError::invalid("ratelimit key must not be empty"));
-    }
-    if key.len() > MAX_KEY_BYTES {
-        return Err(ForgeError::limit(format!(
-            "key is {} bytes; max is {MAX_KEY_BYTES}",
-            key.len()
-        )));
-    }
-    Ok(())
-}
-
-fn check_limit(limit: &Limit) -> Result<()> {
-    if limit.max == 0 {
-        return Err(ForgeError::invalid("Limit.max must be > 0"));
-    }
-    if limit.per.is_zero() {
-        return Err(ForgeError::invalid("Limit.per must be > 0"));
-    }
-    if limit.per.as_secs_f64() > MAX_PER_SECS {
-        return Err(ForgeError::limit("Limit.per exceeds the maximum"));
-    }
-    Ok(())
-}
-
-/// One token-bucket step. `stored` is the current token count (`None` = fresh full
-/// bucket). Returns the tokens to persist and the resulting `Decision`. Identical to the
-/// Postgres backend's step so a given `(state, elapsed, limit)` yields the same decision.
-fn token_bucket_step(stored: Option<f64>, elapsed_secs: f64, limit: Limit) -> (f64, Decision) {
-    let max = f64::from(limit.max);
-    let per = limit.per.as_secs_f64().max(1.0);
-    let rate = max / per;
-    let tokens = stored.unwrap_or(max);
-    let refilled = (tokens + elapsed_secs.max(0.0) * rate).min(max);
-    let allowed = refilled >= 1.0;
-    let new_tokens = if allowed { refilled - 1.0 } else { refilled };
-    let remaining = new_tokens.max(0.0).floor() as u32;
-    let reset_after = Duration::from_secs_f64(((max - new_tokens) / rate).max(0.0));
-    let retry_after =
-        (!allowed).then(|| Duration::from_secs_f64(((1.0 - refilled) / rate).max(0.0)));
-    (
-        new_tokens,
-        Decision::new(allowed, limit.max, remaining, reset_after, retry_after),
-    )
-}
-
-/// Sliding-window state for one subject. Mirrors the Postgres row's window columns.
-#[derive(Clone)]
-struct SlidingState {
-    window_start: f64,
-    cur: i64,
-    prev: i64,
-}
-
-/// One sliding-window step (fixed window with weighted prior, the standard approximate
-/// sliding count). Returns the state to persist and the `Decision`. Identical to the
-/// Postgres backend's step.
-fn sliding_step(
-    stored: Option<SlidingState>,
-    now_epoch: f64,
-    limit: Limit,
-) -> (SlidingState, Decision) {
-    let max = f64::from(limit.max);
-    let per = limit.per.as_secs_f64().max(1.0);
-    let cur_index = (now_epoch / per).floor() as i64;
-    let window_start = cur_index as f64 * per;
-
-    let (mut cur, prev) = match stored {
-        Some(s) => {
-            let stored_index = (s.window_start / per).floor() as i64;
-            if stored_index == cur_index {
-                (s.cur, s.prev)
-            } else if stored_index == cur_index - 1 {
-                (0, s.cur)
-            } else {
-                (0, 0)
-            }
-        }
-        None => (0, 0),
-    };
-
-    let elapsed_in_win = (now_epoch - window_start).clamp(0.0, per);
-    let weight = ((per - elapsed_in_win) / per).clamp(0.0, 1.0);
-    let weighted = prev as f64 * weight + cur as f64;
-    let allowed = weighted < max;
-    if allowed {
-        cur += 1;
-    }
-    let used = weighted + if allowed { 1.0 } else { 0.0 };
-    let remaining = (max - used).max(0.0).floor() as u32;
-    let reset_after = Duration::from_secs_f64((per - elapsed_in_win).max(0.0));
-    let retry_after = (!allowed).then_some(reset_after);
-    (
-        SlidingState {
-            window_start,
-            cur,
-            prev,
-        },
-        Decision::new(allowed, limit.max, remaining, reset_after, retry_after),
-    )
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
+    use super::super::{MAX_BUCKET_BYTES, MAX_KEY_BYTES};
     use super::*;
+    use crate::error::ForgeError;
 
     fn tb(max: u32, per_secs: u64) -> Limit {
         Limit::per_duration(max, Duration::from_secs(per_secs))
@@ -436,29 +305,6 @@ mod tests {
             rl.check("api", &big_key, limit).await,
             Err(ForgeError::Limit(_))
         ));
-    }
-
-    #[test]
-    fn token_bucket_step_refills_over_time() {
-        // 60 tokens / 60s = 1 token/sec; from empty, 5s of refill yields 5 tokens, one of
-        // which this call consumes.
-        let limit = tb(60, 60);
-        let (_t, d) = token_bucket_step(Some(0.0), 5.0, limit);
-        assert!(d.allowed);
-        assert_eq!(d.remaining, 4);
-    }
-
-    #[test]
-    fn sliding_step_resets_in_a_later_window() {
-        let limit = sw(1, 100);
-        let t = 1_000_000.0;
-        let (s1, d1) = sliding_step(None, t, limit);
-        assert!(d1.allowed);
-        let (_s2, d2) = sliding_step(Some(s1.clone()), t, limit);
-        assert!(!d2.allowed, "second call in the same window is denied");
-        // A gap larger than one window is treated as fresh and allowed again.
-        let (_s3, d3) = sliding_step(Some(s1), t + 10_000.0, limit);
-        assert!(d3.allowed);
     }
 
     #[tokio::test]

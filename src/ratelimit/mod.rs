@@ -131,6 +131,7 @@ pub trait RateLimit: Send + Sync {
     ) -> Result<Decision>;
 }
 
+mod algo;
 mod memory;
 mod postgres;
 pub(crate) use memory::MemRateLimit;
