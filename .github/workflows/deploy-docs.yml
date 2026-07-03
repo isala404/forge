@@ -6,6 +6,12 @@ on:
     paths:
       - 'docs/**'
       - '.github/workflows/deploy-docs.yml'
+  # PRs get the build (a broken Starlight build should fail before merge, not
+  # during the Pages deploy) but never the deploy.
+  pull_request:
+    paths:
+      - 'docs/**'
+      - '.github/workflows/deploy-docs.yml'
   workflow_dispatch:
 
 permissions:
@@ -39,12 +45,14 @@ jobs:
         run: npm run build
 
       - name: Upload artifact
+        if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3.0.1
         with:
           # Astro (Starlight) builds to docs/dist.
           path: docs/dist
 
   deploy:
+    if: github.event_name != 'pull_request'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

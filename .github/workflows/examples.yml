@@ -1,5 +1,7 @@
 name: examples
 
+# src/** and Cargo.* are included because the example backends build the
+# bindings from the local path, which compile the core crate.
 on:
   pull_request:
     paths:
@@ -8,6 +10,9 @@ on:
       - "examples/linksapp/**"
       - "bindings/node/**"
       - "bindings/python/**"
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/examples.yml"
   push:
     branches: [main, rewrite]
@@ -17,6 +22,9 @@ on:
       - "examples/linksapp/**"
       - "bindings/node/**"
       - "bindings/python/**"
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/examples.yml"
 
 concurrency:
@@ -351,16 +359,19 @@ jobs:
           bun run dev --host 127.0.0.1 --port ${{ matrix.fe_port }} > /tmp/fe.log 2>&1 &
       - name: Wait for the stack
         run: |
-          for port in ${{ matrix.rust_port }} ${{ matrix.node_port }} ${{ matrix.python_port }}; do
+          wait_for() {
+            local url="$1" label="$2"
             for _ in $(seq 1 60); do
-              curl -fsS "http://127.0.0.1:${port}/healthz" >/dev/null 2>&1 && break
+              curl -fsS "$url" >/dev/null 2>&1 && return 0
               sleep 2
             done
-          done
-          for _ in $(seq 1 60); do
-            curl -fsS "http://127.0.0.1:${{ matrix.fe_port }}" >/dev/null 2>&1 && break
-            sleep 2
-          done
+            echo "::error::${label} never became healthy at ${url}" >&2
+            return 1
+          }
+          wait_for "http://127.0.0.1:${{ matrix.rust_port }}/healthz" "rust backend"
+          wait_for "http://127.0.0.1:${{ matrix.node_port }}/healthz" "node backend"
+          wait_for "http://127.0.0.1:${{ matrix.python_port }}/healthz" "python backend"
+          wait_for "http://127.0.0.1:${{ matrix.fe_port }}" "frontend"
       - name: Install Playwright browsers
         working-directory: examples/${{ matrix.app }}/react-fe
         run: bunx playwright install --with-deps chromium

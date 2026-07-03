@@ -1,0 +1,32 @@
+# ci.yml ignores "**.md", so a PR touching only the skill's markdown would skip
+# the drift guards that exist precisely for those files. This workflow fills that
+# gap; it is cheap (no toolchain, no build) and overlaps ci.yml harmlessly.
+name: Drift Guards
+
+on:
+  pull_request:
+    paths:
+      - "skills/**"
+      - "tools/skill-check/**"
+      - "tools/api-contract/**"
+  push:
+    branches: [main]
+    paths:
+      - "skills/**"
+      - "tools/skill-check/**"
+      - "tools/api-contract/**"
+
+permissions:
+  contents: read
+
+jobs:
+  drift-guards:
+    name: Skill and API contract guards
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: client libraries match the core API contract
+        run: python3 tools/api-contract/check.py
+      - name: skill names match the bindings (skill drift guard)
+        run: python3 tools/skill-check/check.py

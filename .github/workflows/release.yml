@@ -92,6 +92,8 @@ jobs:
       - run: cargo build --all-features
       - run: cargo test
       - run: cargo run --manifest-path tools/codegen/Cargo.toml -- --check
+      - run: python3 tools/api-contract/check.py
+      - run: python3 tools/skill-check/check.py
       - run: cargo deny check
       - run: cargo audit --deny warnings
       - run: cargo package --no-verify
@@ -202,7 +204,7 @@ jobs:
             target: aarch64-unknown-linux-gnu
             platform: linux-arm64-gnu
             zig: true
-          - os: macos-13
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             platform: darwin-x64
             zig: false
@@ -278,11 +280,62 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public
 
+  # One abi3 wheel per platform, mirroring the node-native matrix, so
+  # `pip install forgelib` never falls back to compiling the sdist (which
+  # needs a Rust toolchain) on the platforms we support.
+  python-wheels:
+    name: Python Wheel (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    needs: preflight
+    if: ${{ inputs.publish_pypi == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x64-gnu
+            manylinux: auto
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            platform: linux-arm64-gnu
+            manylinux: auto
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            platform: linux-x64-musl
+            manylinux: musllinux_1_2
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            platform: darwin-x64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            platform: darwin-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: win32-x64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --manifest-path bindings/python/Cargo.toml --release --out dist
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.platform }}
+          path: dist/*.whl
+          if-no-files-found: error
+
   pypi:
     name: PyPI
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: [postgres-tests, conformance]
+    needs: [python-wheels, postgres-tests, conformance]
     if: ${{ inputs.publish_pypi == 'true' }}
     steps:
       - uses: actions/checkout@v4
@@ -291,7 +344,13 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install --upgrade pip twine maturin
-      - run: maturin build --manifest-path bindings/python/Cargo.toml --release --sdist --out dist
+      - name: Build sdist
+        run: maturin sdist --manifest-path bindings/python/Cargo.toml --out dist
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
       - run: twine check dist/*
       - name: Publish Python artifacts
         if: ${{ inputs.dry_run == 'false' }}

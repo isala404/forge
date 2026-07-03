@@ -124,13 +124,18 @@ jobs:
         run: git diff --exit-code .sqlx/
 
   integration:
-    name: Integration (pg-tests)
+    name: Integration (pg-tests, PG ${{ matrix.postgres }})
     runs-on: ubuntu-latest
     timeout-minutes: 25
     needs: [validate]
+    strategy:
+      fail-fast: false
+      matrix:
+        # 14 is the documented minimum server version; 18 is current.
+        postgres: [14, 18]
     services:
       postgres:
-        image: postgres:18
+        image: postgres:${{ matrix.postgres }}
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -195,3 +200,7 @@ jobs:
       # exits non-zero iff its failure set differs from src/conformance/known_gaps.json.
       - name: run all conformance runners
         run: bash tools/conformance/run-all.sh
+      # The native addon was just built by run-all.sh; exercise the pure-JS wrapper.
+      - name: node wrapper unit tests
+        run: npm test
+        working-directory: bindings/node
