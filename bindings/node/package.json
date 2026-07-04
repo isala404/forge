@@ -1,6 +1,6 @@
 {
   "name": "forgelib",
-  "version": "1.0.0",
+  "version": "0.0.1",
   "description": "Node.js bindings for Forge: hardened infra primitives on Postgres",
   "license": "MIT",
   "repository": {
@@ -15,7 +15,8 @@
     "client.js",
     "client.d.ts",
     "index.js",
-    "index.d.ts"
+    "index.d.ts",
+    "*.node"
   ],
   "exports": {
     ".": {
@@ -35,19 +36,8 @@
   },
   "scripts": {
     "test": "node --test test/*.test.js",
-    "artifacts": "napi artifacts",
     "build": "napi build --platform --release",
-    "build:debug": "napi build --platform",
-    "create-npm-dir": "napi create-npm-dir -t .",
-    "prepublishOnly": "napi prepublish -t npm --skip-gh-release"
-  },
-  "optionalDependencies": {
-    "forgelib-darwin-arm64": "1.0.0",
-    "forgelib-darwin-x64": "1.0.0",
-    "forgelib-linux-arm64-gnu": "1.0.0",
-    "forgelib-linux-x64-gnu": "1.0.0",
-    "forgelib-linux-x64-musl": "1.0.0",
-    "forgelib-win32-x64-msvc": "1.0.0"
+    "build:debug": "napi build --platform"
   },
   "devDependencies": {
     "@napi-rs/cli": "^2.18.4"

@@ -52,7 +52,7 @@ _FORGE_CODE_BY_TYPE = {
 
 
 def map_forge(err: forgelib.ForgeError) -> GraphQLError:
-    return gqlerr(_FORGE_CODE_BY_TYPE.get(type(err).__name__, "BACKEND"), str(err))
+    return gqlerr(_FORGE_CODE_BY_TYPE.get(forgelib.forge_error_code(err), "BACKEND"), str(err))
 
 
 def valid_credentials(username: str, password: str) -> bool:

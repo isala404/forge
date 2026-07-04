@@ -27,9 +27,18 @@ test('forgeErrorCode parses the message prefix, not error.code', () => {
   assert.equal(forgeErrorCode(null), undefined);
 });
 
-test('forgeErrorRetryable is true only for UNAVAILABLE', () => {
+test('forgeErrorCode strips the retryable marker from backend errors', () => {
+  assert.equal(forgeErrorCode(new Error('BACKEND(retryable): deadlock detected')), 'BACKEND');
+  assert.equal(forgeErrorCode(new Error('BACKEND: broke')), 'BACKEND');
+  // The marker only counts on a known code.
+  assert.equal(forgeErrorCode(new Error('WEIRD(retryable): nope')), undefined);
+});
+
+test('forgeErrorRetryable honors UNAVAILABLE and the backend retryable marker', () => {
   assert.equal(forgeErrorRetryable(new Error('UNAVAILABLE: down')), true);
+  assert.equal(forgeErrorRetryable(new Error('BACKEND(retryable): deadlock detected')), true);
   assert.equal(forgeErrorRetryable(new Error('BACKEND: broke')), false);
+  assert.equal(forgeErrorRetryable(new Error('WEIRD(retryable): nope')), false);
   assert.equal(forgeErrorRetryable(new Error('nope')), false);
 });
 

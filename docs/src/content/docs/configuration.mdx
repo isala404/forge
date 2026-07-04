@@ -70,9 +70,13 @@ The system database is the one Forge fully owns. It creates its `forge_*` tables
 there and runs its migrations at startup. Give it its own database or schema and
 keep your product tables elsewhere.
 
+Forge supports Postgres 17 and newer.
+
 | Key | Default | What it does |
 | --- | --- | --- |
-| `url` | required | Connection string for the database Forge owns. The one setting with no usable default. |
+| `url` | required* | Connection string for the database Forge owns. (*Or set `embedded`.) |
+| `embedded` | `false` | Provision an embedded Postgres when no `url` is set. See below. |
+| `embedded_dir` | `.forge/pg` | Where the embedded server keeps its data, relative to the working directory. |
 | `max_connections` | `10` | Pool size. At least 2, since a migration holds one connection while another runs the SQL. |
 | `acquire_timeout_secs` | `30` | Seconds to wait for a free connection before erroring. |
 | `statement_timeout_ms` | `15000` | Server-side statement timeout for runtime queries. `0` disables it. |
@@ -83,6 +87,46 @@ keep your product tables elsewhere.
 	Watch the units. The three server-side timeouts are in milliseconds, while
 	`acquire_timeout_secs` and the queue windows are in seconds. Setting a millisecond
 	timeout to `0` removes that ceiling.
+</Aside>
+
+### Embedded Postgres
+
+For local development without installing Postgres, let Forge run one for you:
+
+```toml title="forge.toml"
+[postgres]
+embedded = true
+```
+
+`init()` downloads the Postgres 17 binaries once per machine (to
+`~/.theseus/postgresql`), boots a server on a free port, and connects to it. Data
+persists in `embedded_dir` across restarts; the server stops when the process's
+last Forge handle is dropped.
+
+A non-empty `url` wins over `embedded`, so one file covers both modes:
+
+```toml title="forge.toml"
+[postgres]
+url = "${DATABASE_URL:-}"   # deploys against $DATABASE_URL when set...
+embedded = true             # ...and runs embedded when it isn't
+```
+
+If your app keeps its own tables on the same database, build your pool from
+`forge.postgresUrl()` / `forge.postgres_url()` (Rust also has `forge.pool()`) —
+that is the only way to reach an embedded server's runtime-minted connection
+string.
+
+The Node and Python packages ship with this built in. In Rust it's behind the
+`embedded` cargo feature:
+
+```toml title="Cargo.toml"
+forgelib = { version = "1", features = ["embedded"] }
+```
+
+<Aside type="caution">
+	Embedded mode is for development and single-machine apps: one process owns the
+	server, and anything needing the first boot's download needs network access. For
+	production replicas, point `url` at a managed Postgres.
 </Aside>
 
 ## Backends

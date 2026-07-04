@@ -37,35 +37,29 @@ All three backends serve the same JSON API.
 
 ## Run
 
-Start Postgres from the repo root:
+No database setup needed: each backend reads its own `forge.toml` at
+`<app>/<lang>-be/forge.toml`, which boots an embedded Postgres out of the box (data
+persists in that backend's `.forge/pg`). Setting `FORGE_POSTGRES_URL` — interpolated by
+that file — wins when you'd rather use your own server (e.g. `docker compose up -d db`
+from the repo root, then `createdb` a database per backend and prefix the run command
+with `FORGE_POSTGRES_URL=postgres://postgres:forge@127.0.0.1:5432/todoapp_<lang>`).
 
-```sh
-docker compose up -d db
-```
-
-Each backend reads its own `forge.toml` at `<app>/<lang>-be/forge.toml`, which is where
-Forge gets its config now. The `FORGE_POSTGRES_URL=... <run cmd>` prefix below still works
-because that toml interpolates the variable (`${FORGE_POSTGRES_URL:-...}`).
-
-Then run any backend with its own database name:
+Run any backend:
 
 ```sh
 # Rust
-createdb -h 127.0.0.1 -U postgres todoapp_rust
 cd examples/todoapp/rust-be
-FORGE_POSTGRES_URL=postgres://postgres:forge@127.0.0.1:5432/todoapp_rust cargo run
+cargo run
 
 # Node
-createdb -h 127.0.0.1 -U postgres todoapp_node
 cd examples/todoapp/node-be
 bun install
-FORGE_POSTGRES_URL=postgres://postgres:forge@127.0.0.1:5432/todoapp_node bun run start
+bun run start
 
 # Python
-createdb -h 127.0.0.1 -U postgres todoapp_python
 cd examples/todoapp/python-be
 uv sync
-FORGE_POSTGRES_URL=postgres://postgres:forge@127.0.0.1:5432/todoapp_python uv run uvicorn app.main:app --port 9083
+uv run uvicorn app.main:app --port 9083
 ```
 
 Run the frontend once and point it at any backend:

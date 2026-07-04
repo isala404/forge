@@ -53,12 +53,12 @@ def admin_exec(sql: str) -> None:
         conn.execute(sql)
 
 
-# error mapping: exception class name is the canonical code
+# error mapping: exception classes are named canonical code + "Error"
 CODES = {"Config", "Unavailable", "NotFound", "Precondition", "Limit", "Invalid", "Backend"}
 
 
 def canonical_error_code(exc: BaseException) -> str:
-    name = type(exc).__name__
+    name = forgelib.forge_error_code(exc)
     return name if name in CODES else "Backend"
 
 

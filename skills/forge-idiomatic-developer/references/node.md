@@ -93,7 +93,7 @@ instead of waiting for GC — call it when a client's socket closes).
 
 | Method | Notes |
 | --- | --- |
-| `rateLimitCheck()` | `rateLimitCheck(bucket, key, max, perSeconds, failOpen?, algo?)` → `JsDecision`. `algo` is `"token_bucket"` (default) or `"sliding_window"`. |
+| `rateLimitCheck()` | `rateLimitCheck(bucket, key, max, perSeconds, failOpen?, algo?)` → `JsDecision`. `algo` is `"token_bucket"` (default) or `"sliding_window"`. `perSeconds` must be ≥ 1 (a sub-second window is `INVALID`). |
 
 `JsDecision`: `{ allowed, limit, remaining, resetAfterSeconds, retryAfterSeconds? }`.
 
@@ -126,6 +126,7 @@ instead of waiting for GC — call it when a client's socket closes).
 | Method | Notes |
 | --- | --- |
 | `backendReport()` | Which provider powers each primitive (for a health page). Synchronous. |
+| `postgresUrl()` | The resolved system DSN (embedded servers mint theirs at init) for the app's own pool. Contains credentials. Synchronous. |
 | `maintain()` | One housekeeping sweep (expired kv, settled/dead jobs, stale buckets, expired sessions). |
 
 ## Native JSON handles
@@ -150,4 +151,6 @@ await profile.set(value, { ttlSeconds: 3600 });
 - `ConfigKey<T>` from `forge.config<T>(key, defaultValue)`: `get()`, `getOrDefault()`, `set()`.
 - `Topic<T>` from `forge.topic<T>(name)`: `publish()`, `subscribe()` (an `AsyncIterable<T>`).
 - `forge.worker<T>(queue, handler, opts?)` / `runWorker(client, queue, handler, opts?)` — managed loop; abort `opts.signal` to drain.
-- `forgeErrorCode(err)` / `forgeErrorRetryable(err)` — parse the code Forge prefixes onto the message.
+- `forgeErrorCode(err)` / `forgeErrorRetryable(err)` — parse the code Forge prefixes onto
+  the message; a retryable backend error is prefixed `BACKEND(retryable):` and
+  `forgeErrorRetryable` reports it (alongside `UNAVAILABLE`).

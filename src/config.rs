@@ -99,7 +99,8 @@ pub(crate) enum BlobBackendConfig {
 
 /// The parsed `forge.toml`, holding every resolved customizable point. Constructed only by
 /// the TOML loader ([`from_toml_str`](Self::from_toml_str) / [`from_toml_file`](Self::from_toml_file));
-/// there is no public builder. The one required field is `postgres`.
+/// there is no public builder. The Postgres URL may be empty only when embedded
+/// Postgres is selected.
 ///
 /// `Debug` is hand-written to redact the password-bearing connection string; never derive it.
 pub(crate) struct ForgeConfig {
@@ -107,7 +108,19 @@ pub(crate) struct ForgeConfig {
     /// owns, separate from your application's own. Forge creates and migrates its `forge_*`
     /// tables here at [`Forge::init`](crate::Forge::init); nothing else should write to it.
     /// Give Forge its own database or schema; don't point it at your application tables.
+    /// May be empty when `embedded` is selected: the embedded server mints the
+    /// DSN at init.
     pub postgres: String,
+    /// Provision an embedded Postgres server at init instead of connecting to `postgres`
+    /// (requires the `embedded` cargo feature; both language bindings ship with it).
+    /// A non-empty `postgres` wins over this flag, so `url = "${VAR:-}"` +
+    /// `embedded = true` means "use $VAR when set, else run embedded".
+    /// Set via `[postgres] embedded`.
+    pub embedded: bool,
+    /// Where the embedded server keeps its data directory and password file.
+    /// Default `.forge/pg`, relative to the working directory. Set via
+    /// `[postgres] embedded_dir`.
+    pub embedded_dir: PathBuf,
     /// Maximum pooled connections. Default 10. Must be >= 2: init migrates the system
     /// database at startup, holding one connection for the migration lock while a second
     /// runs the SQL.
@@ -166,6 +179,8 @@ impl Default for ForgeConfig {
     fn default() -> Self {
         Self {
             postgres: String::new(),
+            embedded: false,
+            embedded_dir: PathBuf::from(".forge/pg"),
             max_connections: 10,
             acquire_timeout: Duration::from_secs(30),
             statement_timeout: DEFAULT_STATEMENT_TIMEOUT,
@@ -194,6 +209,12 @@ fn validate_database(db: &DatabaseConfig, migrates: bool, label: &str) -> Result
             "{label} connection string is empty (set the connection URL for this database)"
         )));
     }
+    validate_pool_shape(db, migrates, label)
+}
+
+/// The pool-sizing half of [`validate_database`], usable alone for the embedded
+/// system database, whose DSN is minted at init rather than configured.
+fn validate_pool_shape(db: &DatabaseConfig, migrates: bool, label: &str) -> Result<()> {
     if db.max_connections == 0 {
         return Err(ForgeError::config(format!(
             "{label} max_connections must be >= 1"
@@ -342,6 +363,8 @@ struct TomlBackends {
 #[serde(deny_unknown_fields)]
 struct TomlPostgres {
     url: Option<String>,
+    embedded: Option<bool>,
+    embedded_dir: Option<String>,
     max_connections: Option<u32>,
     acquire_timeout_secs: Option<f64>,
     statement_timeout_ms: Option<u64>,
@@ -425,6 +448,12 @@ impl ForgeConfig {
         let p = t.postgres;
         if let Some(url) = p.url {
             self.postgres = url;
+        }
+        if let Some(b) = p.embedded {
+            self.embedded = b;
+        }
+        if let Some(dir) = p.embedded_dir {
+            self.embedded_dir = PathBuf::from(dir);
         }
         if let Some(n) = p.max_connections {
             self.max_connections = n;
@@ -577,11 +606,23 @@ impl ForgeConfig {
             .unwrap_or(self.default_backend)
     }
 
+    /// Whether init should boot an embedded server: the flag is set and no explicit
+    /// connection string outranks it.
+    pub(crate) fn use_embedded(&self) -> bool {
+        self.embedded && self.postgres.trim().is_empty()
+    }
+
     /// Validate the statically-checkable fields with a precise message;
     /// connection/migration failures surface later in `Forge::init`.
     pub(crate) fn validate(&self) -> Result<()> {
         // The system database is always migrated at init, so it always needs >= 2.
-        validate_database(&self.system_database(), true, "postgres")?;
+        // With an embedded server the DSN is minted at init, so only the pool shape
+        // is statically checkable.
+        if self.use_embedded() {
+            validate_pool_shape(&self.system_database(), true, "postgres")?;
+        } else {
+            validate_database(&self.system_database(), true, "postgres")?;
+        }
         for (feature, db) in &self.feature_databases {
             // A feature override on the same target as the system database is
             // deduplicated in `init` (the system pool migrates it), so it never holds the
@@ -610,6 +651,8 @@ impl std::fmt::Debug for ForgeConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ForgeConfig")
             .field("postgres", &"<redacted>")
+            .field("embedded", &self.embedded)
+            .field("embedded_dir", &self.embedded_dir)
             .field("max_connections", &self.max_connections)
             .field("acquire_timeout", &self.acquire_timeout)
             .field("statement_timeout", &self.statement_timeout)

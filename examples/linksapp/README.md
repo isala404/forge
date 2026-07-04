@@ -59,35 +59,36 @@ The route files call Forge directly inside the handlers; the neighboring `types`
 
 ## Run
 
-Start Postgres from the repo root:
+No database setup is required for local dev. Each backend reads its own
+`forge.toml` at `<app>/<lang>-be/forge.toml`, which boots an embedded Postgres by
+default (data persists in that backend's `.forge/pg`). Set
+`FORGE_POSTGRES_URL` to use a dedicated server instead.
 
-```sh
-docker compose up -d db
-```
-
-Each backend reads its own `forge.toml` at `<app>/<lang>-be/forge.toml`, which is where
-Forge gets its config now. The `FORGE_POSTGRES_URL=... <run cmd>` prefix below still works
-because that toml interpolates the variable (`${FORGE_POSTGRES_URL:-...}`).
-
-Then create each backend's database and run it:
+Run one backend:
 
 ```sh
 # Rust
-createdb -h 127.0.0.1 -U postgres linksapp_rust
 cd examples/linksapp/rust-be
-FORGE_POSTGRES_URL=postgres://postgres:forge@127.0.0.1:5432/linksapp_rust cargo run
+cargo run
 
 # Node
-createdb -h 127.0.0.1 -U postgres linksapp_node
 cd examples/linksapp/node-be
 bun install
-FORGE_POSTGRES_URL=postgres://postgres:forge@127.0.0.1:5432/linksapp_node bun run start
+bun run start
 
 # Python
-createdb -h 127.0.0.1 -U postgres linksapp_python
 cd examples/linksapp/python-be
 uv sync
-FORGE_POSTGRES_URL=postgres://postgres:forge@127.0.0.1:5432/linksapp_python uv run uvicorn app.main:app --port 9093
+uv run uvicorn app.main:app --port 9093
+```
+
+Or point a backend at your own Postgres:
+
+```sh
+docker compose up -d db
+createdb -h 127.0.0.1 -U postgres linksapp_node
+cd examples/linksapp/node-be
+FORGE_POSTGRES_URL=postgres://postgres:forge@127.0.0.1:5432/linksapp_node bun run start
 ```
 
 Run the frontend once and point it at any backend:

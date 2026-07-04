@@ -6,8 +6,9 @@ shared Tokio runtime, so an asyncio app `await`s the binding directly: no thread
 wrapper, the event loop is never blocked. The full primitive surface is exposed (kv,
 queue, config, ratelimit, blob, auth, schedule, pubsub), plus `backend_report`.
 
-Forge errors surface as a typed exception hierarchy (`forgelib.NotFound`,
-`forgelib.Invalid`, `forgelib.Limit`, … all subclasses of `forgelib.ForgeError`).
+Forge errors surface as a typed exception hierarchy (`forgelib.NotFoundError`,
+`forgelib.InvalidError`, `forgelib.LimitError`, … all subclasses of
+`forgelib.ForgeError`), and every raised instance carries a `retryable` attribute.
 
 Built against the stable ABI (`abi3-py39`), so one wheel runs on CPython ≥ 3.9.
 

@@ -1,5 +1,8 @@
 [postgres]
-url = "${FORGE_POSTGRES_URL:-postgres://postgres:forge@localhost:5432/linksapp_node}"
+# Runs an embedded Postgres out of the box (data in .forge/pg); setting
+# FORGE_POSTGRES_URL (as docker-compose and CI do) wins over `embedded`.
+url = "${FORGE_POSTGRES_URL:-}"
+embedded = true
 max_connections = 10
 acquire_timeout_secs = 30
 statement_timeout_ms = 15000

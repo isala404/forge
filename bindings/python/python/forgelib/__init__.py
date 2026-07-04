@@ -15,15 +15,27 @@ OnError = Callable[[BaseException, Optional["QueueJob[Any]"]], Awaitable[None]]
 
 
 def forge_error_code(exc: BaseException) -> str:
-    """Return the Forge error class name for a raised exception."""
+    """Return the canonical Forge error code (e.g. ``"NotFound"``, ``"Limit"``) for a
+    raised exception. Leaf exception classes are named code + ``Error``, so this is
+    the class name with the suffix stripped; non-Forge exceptions return their
+    class name unchanged."""
 
-    return type(exc).__name__
+    name = type(exc).__name__
+    if isinstance(exc, ForgeError) and name != "ForgeError" and name.endswith("Error"):
+        return name.removesuffix("Error")
+    return name
 
 
 def forge_error_retryable(exc: BaseException) -> bool:
-    """Return whether a raised Forge error is retryable from Python's exception type."""
+    """Return whether a raised Forge error is safe to retry.
 
-    return type(exc).__name__ == "Unavailable"
+    Every Forge exception carries a ``retryable`` attribute set by the core
+    (``UnavailableError`` is always retryable; ``BackendError`` sometimes is)."""
+
+    retryable = getattr(exc, "retryable", None)
+    if isinstance(retryable, bool):
+        return retryable
+    return forge_error_code(exc) == "Unavailable"
 
 
 def _decode_payload(raw: Any) -> str:
@@ -416,13 +428,13 @@ __all__ = [
     "ForgeClient",
     "Subscription",
     "ForgeError",
-    "NotFound",
-    "Invalid",
-    "Limit",
-    "Precondition",
-    "Unavailable",
-    "Config",
-    "Backend",
+    "NotFoundError",
+    "InvalidError",
+    "LimitError",
+    "PreconditionError",
+    "UnavailableError",
+    "ConfigError",
+    "BackendError",
     "BlobInfo",
     "ScheduleInfo",
     "SchedulePage",

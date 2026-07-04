@@ -310,21 +310,30 @@ const FORGE_CODES = new Set([
   'BACKEND',
 ]);
 
+const RETRYABLE_MARKER = '(retryable)';
+
 // The napi layer cannot set custom properties on thrown errors, so the Forge
-// error class travels as a "CODE: message" prefix; recover it from there.
-function forgeErrorCode(error) {
+// error class travels as a "CODE: message" prefix ("CODE(retryable): message"
+// for backend errors that are safe to retry); recover it from there.
+function forgeErrorHead(error) {
   const message =
     error instanceof Error ? error.message : typeof error === 'string' ? error : '';
   const sep = message.indexOf(': ');
-  if (sep > 0) {
-    const head = message.slice(0, sep);
-    if (FORGE_CODES.has(head)) return head;
-  }
-  return undefined;
+  return sep > 0 ? message.slice(0, sep) : undefined;
+}
+
+function forgeErrorCode(error) {
+  let head = forgeErrorHead(error);
+  if (head === undefined) return undefined;
+  if (head.endsWith(RETRYABLE_MARKER)) head = head.slice(0, -RETRYABLE_MARKER.length);
+  return FORGE_CODES.has(head) ? head : undefined;
 }
 
 function forgeErrorRetryable(error) {
-  return forgeErrorCode(error) === 'UNAVAILABLE';
+  const code = forgeErrorCode(error);
+  if (code === 'UNAVAILABLE') return true;
+  const head = forgeErrorHead(error);
+  return code !== undefined && head !== undefined && head.endsWith(RETRYABLE_MARKER);
 }
 
 const { ForgeClient } = native;

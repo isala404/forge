@@ -1,6 +1,6 @@
 [package]
 name = "forgelib-python"
-version = "1.0.0"
+version = "0.0.1"
 edition = "2021"
 publish = false
 description = "Python (pyo3) bindings for Forge — hardened infra primitives on Postgres"
@@ -13,10 +13,11 @@ name = "forgelib"
 crate-type = ["cdylib"]
 
 [dependencies]
-# Enable OTLP export so the prebuilt wheel ships with observability wired in.
+# Enable OTLP export and the embedded Postgres server so the prebuilt wheel ships
+# with both wired in ([postgres] embedded = true works out of the box).
 # Aliased to `forge` because this crate's own lib is named `forgelib` (the Python
 # module name), which would otherwise collide with the core crate's name.
-forge = { package = "forgelib", path = "../..", features = ["otel"] }
+forge = { package = "forgelib", path = "../..", features = ["otel", "embedded"] }
 # abi3-py39: build against the stable ABI so one wheel runs on CPython >= 3.9
 # (including newer interpreters than this pyo3 release knows about).
 pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }

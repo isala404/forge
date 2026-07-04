@@ -222,21 +222,13 @@ export interface GqlContext {
   currentUser: CurrentUser | null;
 }
 
-export function postgresUrl(): string {
-  return (
-    process.env.FORGE_POSTGRES_URL ||
-    "postgres://postgres:forge@127.0.0.1:5432/chatapp_node"
-  );
-}
-
 export async function initAppCtx(pgUrl?: string): Promise<AppCtx> {
-  // Forge instantiates from ./forge.toml, whose ${FORGE_POSTGRES_URL} default flows from the
-  // environment. A caller-supplied pgUrl (tests) points both Forge and the app's own pool at
-  // the same throwaway database; production leaves it to the env / forge.toml default.
+  // Forge instantiates from ./forge.toml: FORGE_POSTGRES_URL when set (compose, CI,
+  // tests via pgUrl), else an embedded Postgres. The app's own pool then follows
+  // forge.postgresUrl() — the only way to reach an embedded server's minted DSN.
   if (pgUrl) process.env.FORGE_POSTGRES_URL = pgUrl;
-  const resolvedPgUrl = postgresUrl();
   const forge = await ForgeClient.init();
-  const pool = new pg.Pool({ connectionString: resolvedPgUrl, max: 10 });
+  const pool = new pg.Pool({ connectionString: forge.postgresUrl(), max: 10 });
   await db.migrate(pool);
   // Mint the login decoy hash once, via forge's own hasher so its argon2 params
   // always match real password hashes. `login` verifies against it on a username

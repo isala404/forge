@@ -17,8 +17,8 @@ from .worker import clicks_worker, expire_worker, scheduler_loop
 def build_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # Forge instantiates from ./forge.toml; its ${FORGE_POSTGRES_URL} /
-        # ${FORGE_BLOB_SIGNING_SECRET} references resolve from the environment.
+        # Forge instantiates from ./forge.toml: FORGE_POSTGRES_URL when set,
+        # else an embedded Postgres. BLOB_SIGNING_SECRET also resolves there.
         forge = await forgelib.ForgeClient.init()
         stop = asyncio.Event()
         tasks = [

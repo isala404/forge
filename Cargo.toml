@@ -1,8 +1,8 @@
 [package]
 name = "forgelib"
-version = "1.0.0"
+version = "0.0.1"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.94"
 license = "MIT"
 repository = "https://github.com/isala404/forge"
 description = "The standard library for agent-built SaaS: hardened infra primitives on Postgres"
@@ -27,6 +27,11 @@ otel = [
     "dep:tracing-opentelemetry",
     "dep:tracing-subscriber",
 ]
+# Provisions a real Postgres server on demand when forge.toml sets
+# `[postgres] embedded = true`: binaries download once per machine (to
+# ~/.theseus/postgresql), data persists under `.forge/pg`. Local dev without
+# installing Postgres; both language bindings ship with it enabled.
+embedded = ["dep:postgresql_embedded"]
 # Enables the `forge::testing` harness (per-test isolated databases) and gates the
 # DB-backed integration tests. A sentinel test fails loudly if TEST_DATABASE_URL is unset,
 # so "0 tests ran" cannot masquerade as a pass.
@@ -73,6 +78,11 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 # Observability — always-on spans + metrics facade; no exporter required.
 tracing = "0.1"
 metrics = "0.24"
+
+# Embedded Postgres provisioning. rustls (not native-tls) to match the otel export
+# stack; its internal sqlx 0.9 duplicates our 0.8 in the build graph, which
+# cargo-deny only warns on — accepted over forking to keep crates.io publishability.
+postgresql_embedded = { version = "0.20.4", optional = true, default-features = false, features = ["theseus", "rustls", "tokio"] }
 
 opentelemetry = { version = "0.27", optional = true, features = ["trace"] }
 opentelemetry_sdk = { version = "0.27", optional = true, features = ["rt-tokio", "trace"] }

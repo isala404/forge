@@ -11,6 +11,18 @@ crate (`forgelib`) exposing eight infrastructure primitives behind stable traits
 
 ### Added
 
+- Embedded Postgres: `[postgres] embedded = true` provisions a real PG 17 server
+  on demand (binaries download once per machine, data persists in
+  `.forge/pg`), behind the `embedded` cargo feature. The Node and Python
+  packages ship with it enabled, so local dev needs no Postgres install. A
+  non-empty `url` wins over the flag, so `url = "${VAR:-}"` + `embedded = true`
+  deploys against `$VAR` and runs embedded otherwise; the example apps use
+  exactly that. `postgres_url()` / `postgresUrl()` expose the resolved DSN for
+  an app's own tables (Rust also has `forge.pool()`).
+- Every raised Python exception carries a `retryable` attribute, and Node
+  prefixes retryable backend errors as `BACKEND(retryable): ...`, so the core's
+  per-error retryable flag survives the FFI boundary in both bindings
+  (`forge_error_retryable` / `forgeErrorRetryable` report it).
 - Eight primitives: kv, queue, pubsub, blob, auth, ratelimit, schedule, and
   config/flags, each with a Postgres backend and an in-memory backend for tests
   and local runs. Blob also has a filesystem backend.
@@ -30,6 +42,15 @@ crate (`forgelib`) exposing eight infrastructure primitives behind stable traits
 
 ### Changed
 
+- Python exceptions are named canonical code + `Error` (`NotFoundError`,
+  `InvalidError`, `LimitError`, `PreconditionError`, `UnavailableError`,
+  `ConfigError`, `BackendError`); the old bare names (`Limit`, `Config`,
+  `Backend`, …) collided with common identifiers under
+  `from forgelib import *`. `forge_error_code()` still returns the bare code.
+- Supported Postgres floor raised from 14 to 17; init refuses older servers.
+- Prebuilt packages for macOS are Apple-silicon only (`darwin-arm64`); the
+  `darwin-x64` npm package and wheel are no longer published.
+- MSRV raised from 1.92 to 1.94 (required by the embedded-Postgres dependency).
 - Node `jsonCodec` is now strict JSON on both sides (`JSON.stringify` /
   `JSON.parse`), matching Python's `json.dumps`/`json.loads` defaults. A bare
   string is stored quoted; a payload one language writes decodes identically in

@@ -1,5 +1,3 @@
-// `Limit` is intentionally NOT imported by name: the `Limit` exception type below
-// would collide with `forge::Limit`. It is referenced fully-qualified where used.
 use forge::{Algo, EvalCtx, FailMode, FlagRule, Forge, PutOpts, SessionOpts, SetMode, SetOpts};
 use futures_util::StreamExt;
 use pyo3::create_exception;
@@ -16,30 +14,41 @@ create_exception!(
     forgelib,
     ForgeError,
     PyException,
-    "Base class for all Forge errors."
+    "Base class for all Forge errors. Every raised instance carries a `retryable: bool` attribute."
 );
-create_exception!(forgelib, NotFound, ForgeError);
-create_exception!(forgelib, Invalid, ForgeError);
-create_exception!(forgelib, Limit, ForgeError);
-create_exception!(forgelib, Precondition, ForgeError);
-create_exception!(forgelib, Unavailable, ForgeError);
-create_exception!(forgelib, Config, ForgeError);
-create_exception!(forgelib, Backend, ForgeError);
+// Leaf names are the canonical error code + "Error" (LimitError <-> "Limit"), so the
+// class taxonomy maps mechanically onto forge_error_code() and never shadows common
+// names like `Config`/`Limit`/`Backend` under `from forgelib import *`.
+create_exception!(forgelib, NotFoundError, ForgeError);
+create_exception!(forgelib, InvalidError, ForgeError);
+create_exception!(forgelib, LimitError, ForgeError);
+create_exception!(forgelib, PreconditionError, ForgeError);
+create_exception!(forgelib, UnavailableError, ForgeError);
+create_exception!(forgelib, ConfigError, ForgeError);
+create_exception!(forgelib, BackendError, ForgeError);
 
-/// Map a `ForgeError` onto the matching typed Python exception.
+/// Map a `ForgeError` onto the matching typed Python exception, carrying the
+/// core-side retryable flag across as a `retryable` attribute (the class alone
+/// cannot express it: `BackendError` is only sometimes retryable).
 fn pyerr(e: forge::ForgeError) -> PyErr {
     use forge::ForgeError as F;
     let msg = e.to_string();
-    match e {
-        F::NotFound => NotFound::new_err(msg),
-        F::Invalid(_) => Invalid::new_err(msg),
-        F::Limit(_) => Limit::new_err(msg),
-        F::Precondition(_) => Precondition::new_err(msg),
-        F::Unavailable(_) => Unavailable::new_err(msg),
-        F::Config(_) => Config::new_err(msg),
-        F::Backend { .. } => Backend::new_err(msg),
-        _ => Backend::new_err(msg),
-    }
+    let retryable = e.is_retryable();
+    let err = match e {
+        F::NotFound => NotFoundError::new_err(msg),
+        F::Invalid(_) => InvalidError::new_err(msg),
+        F::Limit(_) => LimitError::new_err(msg),
+        F::Precondition(_) => PreconditionError::new_err(msg),
+        F::Unavailable(_) => UnavailableError::new_err(msg),
+        F::Config(_) => ConfigError::new_err(msg),
+        F::Backend { .. } => BackendError::new_err(msg),
+        _ => BackendError::new_err(msg),
+    };
+    Python::with_gil(|py| {
+        // Best-effort: a failed setattr must not replace the real error being raised.
+        let _ = err.value(py).setattr("retryable", retryable);
+    });
+    err
 }
 
 /// Convert `f64` seconds to a `Duration`, raising `Invalid` on negative or non-finite
@@ -853,6 +862,14 @@ impl ForgeClient {
         self.forge.pubsub().channel_for(&topic).map_err(pyerr)
     }
 
+    /// The resolved connection string of Forge's system database — the configured
+    /// `[postgres] url`, or the DSN an embedded server minted at init. Contains
+    /// credentials; use it to point the app's own tables/pool at the same database
+    /// (the only way to reach an embedded server from outside Forge).
+    fn postgres_url(&self) -> String {
+        self.forge.postgres_url().to_string()
+    }
+
     /// A backend report: which provider powers each primitive (for health pages/logs).
     fn backend_report(&self) -> Vec<BackendInfo> {
         self.forge
@@ -1240,12 +1257,12 @@ fn forgelib(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     let py = m.py();
     m.add("ForgeError", py.get_type::<ForgeError>())?;
-    m.add("NotFound", py.get_type::<NotFound>())?;
-    m.add("Invalid", py.get_type::<Invalid>())?;
-    m.add("Limit", py.get_type::<Limit>())?;
-    m.add("Precondition", py.get_type::<Precondition>())?;
-    m.add("Unavailable", py.get_type::<Unavailable>())?;
-    m.add("Config", py.get_type::<Config>())?;
-    m.add("Backend", py.get_type::<Backend>())?;
+    m.add("NotFoundError", py.get_type::<NotFoundError>())?;
+    m.add("InvalidError", py.get_type::<InvalidError>())?;
+    m.add("LimitError", py.get_type::<LimitError>())?;
+    m.add("PreconditionError", py.get_type::<PreconditionError>())?;
+    m.add("UnavailableError", py.get_type::<UnavailableError>())?;
+    m.add("ConfigError", py.get_type::<ConfigError>())?;
+    m.add("BackendError", py.get_type::<BackendError>())?;
     Ok(())
 }

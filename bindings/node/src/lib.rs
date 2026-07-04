@@ -21,7 +21,15 @@ fn code_of(e: &forgelib::ForgeError) -> &'static str {
 }
 
 fn err(e: forgelib::ForgeError) -> napi::Error {
-    napi::Error::from_reason(format!("{}: {}", code_of(&e), e))
+    // `UNAVAILABLE` is always retryable, but `BACKEND` errors carry a per-error
+    // retryable flag that only exists core-side; surface it as a prefix marker so
+    // `forgeErrorRetryable` in client.js can report it without a structured channel.
+    let marker = if e.is_retryable() && matches!(e, forgelib::ForgeError::Backend { .. }) {
+        "(retryable)"
+    } else {
+        ""
+    };
+    napi::Error::from_reason(format!("{}{}: {}", code_of(&e), marker, e))
 }
 
 /// Convert an `f64` seconds value into a `Duration`, raising `Invalid` on a
@@ -125,6 +133,15 @@ impl ForgeClient {
     pub async fn init_from(path: String) -> Result<ForgeClient> {
         let forge = forgelib::Forge::init_from(path).await.map_err(err)?;
         Ok(ForgeClient::from_forge(forge))
+    }
+
+    /// The resolved connection string of Forge's system database — the configured
+    /// `[postgres] url`, or the DSN an embedded server minted at init. Contains
+    /// credentials; use it to point the app's own tables/pool at the same database
+    /// (the only way to reach an embedded server from outside Forge).
+    #[napi]
+    pub fn postgres_url(&self) -> String {
+        self.forge.postgres_url().to_string()
     }
 
     /// A backend report: which provider powers each primitive (for health pages/logs).

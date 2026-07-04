@@ -283,12 +283,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # One app runs the out-of-the-box path (embedded Postgres, no
+          # FORGE_POSTGRES_URL), the other a dedicated server, so a regression on
+          # either side of the `url`-wins-over-`embedded` split fails CI.
           - app: todoapp
+            database: embedded
             fe_port: 5174
             rust_port: 9081
             node_port: 9082
             python_port: 9083
           - app: linksapp
+            database: dedicated
             fe_port: 5175
             rust_port: 9091
             node_port: 9092
@@ -324,6 +329,7 @@ jobs:
       # document (one database per backend, all three plus the SPA on fixed ports),
       # then drive the existing Playwright spec against them.
       - name: Create per-backend databases
+        if: matrix.database == 'dedicated'
         run: |
           for db in rust node python; do
             createdb -h 127.0.0.1 -U postgres "${{ matrix.app }}_${db}"
@@ -335,22 +341,39 @@ jobs:
         working-directory: examples/${{ matrix.app }}/rust-be
         run: |
           cargo build
-          FORGE_POSTGRES_URL=postgres://postgres:forge@127.0.0.1:5432/${{ matrix.app }}_rust \
+          if [ "${{ matrix.database }}" = "dedicated" ]; then
+            export FORGE_POSTGRES_URL=postgres://postgres:forge@127.0.0.1:5432/${{ matrix.app }}_rust
+          fi
           PORT=${{ matrix.rust_port }} \
             cargo run > /tmp/rust-be.log 2>&1 &
+      - name: Wait for the Rust backend before starting the rest
+        # Embedded servers share the ~/.theseus binary cache; letting the first
+        # backend finish its download/extract avoids three concurrent installs.
+        if: matrix.database == 'embedded'
+        run: |
+          for _ in $(seq 1 90); do
+            curl -fsS "http://127.0.0.1:${{ matrix.rust_port }}/healthz" >/dev/null 2>&1 && exit 0
+            sleep 2
+          done
+          echo "::error::rust backend (embedded) never became healthy" >&2
+          exit 1
       - name: Start Node backend
         working-directory: examples/${{ matrix.app }}/node-be
         run: |
           bun install
-          FORGE_POSTGRES_URL=postgres://postgres:forge@127.0.0.1:5432/${{ matrix.app }}_node \
+          if [ "${{ matrix.database }}" = "dedicated" ]; then
+            export FORGE_POSTGRES_URL=postgres://postgres:forge@127.0.0.1:5432/${{ matrix.app }}_node
+          fi
           PORT=${{ matrix.node_port }} \
             bun run start > /tmp/node-be.log 2>&1 &
       - name: Start Python backend
         working-directory: examples/${{ matrix.app }}/python-be
         run: |
           uv sync
-          FORGE_POSTGRES_URL=postgres://postgres:forge@127.0.0.1:5432/${{ matrix.app }}_python \
-            uv run uvicorn app.main:app --host 127.0.0.1 --port ${{ matrix.python_port }} \
+          if [ "${{ matrix.database }}" = "dedicated" ]; then
+            export FORGE_POSTGRES_URL=postgres://postgres:forge@127.0.0.1:5432/${{ matrix.app }}_python
+          fi
+          uv run uvicorn app.main:app --host 127.0.0.1 --port ${{ matrix.python_port }} \
             > /tmp/python-be.log 2>&1 &
       - name: Start frontend
         working-directory: examples/${{ matrix.app }}/react-fe

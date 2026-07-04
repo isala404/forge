@@ -8,7 +8,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
-forgelib = { path = "../../../" }
+forgelib = { path = "../../../", features = ["embedded"] }
 futures-util = "0.3"
 qrcode = "0.14"
 rocket = { version = "0.5", features = ["json"] }

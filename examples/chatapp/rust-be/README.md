@@ -52,31 +52,34 @@ upload + download) · `pubsub` → all realtime · `queue` → fanout + reap + t
 
 ## Run
 
-A reachable Postgres is required. Forge configures itself from `forge.toml` in this
-directory, which references `FORGE_POSTGRES_URL` and `FORGE_BLOB_SIGNING_SECRET` from the
-environment; setting those env vars overrides the toml defaults rather than passing values to
-Forge directly. Forge migrates its own `forge_*` tables on `init`; the app applies
-`migrations.sql` on startup.
+Forge configures itself from `forge.toml` in this directory: with no configuration it
+boots an embedded Postgres (data persists in `.forge/pg`); a set `FORGE_POSTGRES_URL`
+(interpolated by that file) wins when you'd rather use your own server. Forge migrates
+its own `forge_*` tables on `init`; the app applies `migrations.sql` on startup
+against the same database (it follows `forge.pool()`).
 
 ```sh
-# create the database the default URL points at, then:
+cargo run                     # no database needed: boots an embedded Postgres
+# -> listening on http://127.0.0.1:8081
+
+# ...or against your own server:
 FORGE_POSTGRES_URL=postgres://postgres:forge@127.0.0.1:5432/chatapp_rust \
 FORGE_BLOB_SIGNING_SECRET=dev-secret-change-me \
 cargo run
-# -> listening on http://127.0.0.1:8081
 
 cargo run -- --print-schema   # emit the SDL (no database needed)
 ```
 
 ### Environment
 
-`FORGE_POSTGRES_URL` and `FORGE_BLOB_SIGNING_SECRET` are referenced by `forge.toml` (as
-`${VAR:-default}`) rather than read by Forge directly; the rest configure the HTTP server and
-app loops.
+`FORGE_POSTGRES_URL` and `FORGE_BLOB_SIGNING_SECRET` are referenced by `forge.toml`
+rather than read by Forge directly. The Postgres URL defaults empty so embedded
+mode can boot; the signing secret has a local default. The rest configure the
+HTTP server and app loops.
 
 | var | default | meaning |
 | --- | --- | --- |
-| `FORGE_POSTGRES_URL` | `postgres://postgres:forge@127.0.0.1:5432/chatapp_rust` | Postgres DSN (shared by Forge + the app) |
+| `FORGE_POSTGRES_URL` | unset (embedded Postgres) | Postgres DSN (shared by Forge + the app); wins over `embedded` |
 | `PORT` | `8081` | listen port |
 | `BIND` | `127.0.0.1` | bind address (set `0.0.0.0` in containers) |
 | `FORGE_BLOB_SIGNING_SECRET` | `dev-secret-change-me` | HMAC secret for presigned blob URLs |

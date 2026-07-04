@@ -120,6 +120,13 @@ export declare class ForgeClient {
    * directory.
    */
   static initFrom(path: string): Promise<ForgeClient>
+  /**
+   * The resolved connection string of Forge's system database — the configured
+   * `[postgres] url`, or the DSN an embedded server minted at init. Contains
+   * credentials; use it to point the app's own tables/pool at the same database
+   * (the only way to reach an embedded server from outside Forge).
+   */
+  postgresUrl(): string
   /** A backend report: which provider powers each primitive (for health pages/logs). */
   backendReport(): Array<JsBackendInfo>
   /**

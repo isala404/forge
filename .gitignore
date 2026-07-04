@@ -1,5 +1,7 @@
 target
 node_modules
+# embedded Postgres state ([postgres] embedded = true)
+.forge/
 .svelte-kit
 .env
 !examples/**/.env

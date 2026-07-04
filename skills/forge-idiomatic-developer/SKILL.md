@@ -94,75 +94,18 @@ Full per-language method tables and idioms:
 - **[references/node.md](references/node.md)** — raw `ForgeClient` methods + native JSON handles.
 - **[references/python.md](references/python.md)** — raw client methods + native JSON handles.
 
-## Native JSON handles (use them for app payloads)
+Two idioms to reach for by default (full examples live in the references above):
 
-Instead of stringifying by hand at every call site, bind a codec once from the main
-client. Rust's typed handles are re-exported from the crate root.
-
-Node:
-
-```ts
-import { ForgeClient } from "forgelib";
-
-const forge = await ForgeClient.init();
-const emails = forge.queue<{ to: string }>("emails");
-await emails.enqueue({ to: "a@b.c" });            // JSON-encoded for you
-
-const profile = forge.kv<{ name: string }>("user:1:profile");
-await profile.set({ name: "Ada" });
-```
-
-Python:
-
-```python
-import forgelib
-
-forge = await forgelib.ForgeClient.init()
-emails = forge.queue("emails")
-await emails.enqueue({"to": "a@b.c"})
-
-profile = forge.kv("user:1:profile")
-await profile.set({"name": "Ada"})
-```
-
-## Running a worker
-
-Do not hand-roll the dequeue loop. The client ships a managed worker that dequeues,
-heartbeats at a third of the visibility window, acks on success, nacks on a thrown
-error, and abandons the job if the lease is lost.
-
-Node — `forge.worker<T>(queue, handler, opts?)`; abort the `signal` to drain:
-
-```ts
-const stop = new AbortController();
-void forge.worker<{ to: string }>("emails", async (job) => {
-  await send(job.payload);                        // throw to nack + retry
-}, { signal: stop.signal });
-```
-
-Python — `forge.worker(queue, handler, *, stop=...)`:
-
-```python
-import asyncio
-
-stop = asyncio.Event()
-await forge.worker("emails", handle, stop=stop)
-```
-
-Rust — the builder off the client, `forge.worker(queue).run(handler)` (or
-`run_until(shutdown, handler)`); the handler returns a `Result`:
-
-```rust
-forge.worker("emails")
-    .concurrency(8)
-    .run(|job| async move { handle(job).await })  // Ok => ack, Err => nack
-    .await;
-```
-
-If you cannot use the helper, you must heartbeat manually: dequeue leases a job for
-`visibility_seconds`; call the heartbeat method (`queueHeartbeat` / `queue_heartbeat` /
-`forge.queue().heartbeat`) before the lease expires for any handler that might outlive
-its visibility window, or the job gets redelivered mid-flight.
+- **Native JSON handles for app payloads.** Bind a codec once instead of
+  stringifying at every call site: `forge.queue(name)` / `forge.kv(key)` /
+  `forge.config(key, default)` / `forge.topic(name)` return typed handles in Node and
+  Python; Rust re-exports typed handles from the crate root.
+- **The managed worker instead of a hand-rolled dequeue loop.** Node
+  `forge.worker(queue, handler, { signal })` (abort to drain), Python
+  `forge.worker(queue, handler, stop=event)`, Rust `forge.worker(queue).run(handler)`.
+  It dequeues, heartbeats at a third of the visibility window, acks on success, nacks
+  on a thrown error, and abandons the job if the lease is lost. If you must hand-roll,
+  heartbeat before the lease expires or the job is redelivered mid-flight.
 
 ## forge.toml conventions
 
@@ -172,7 +115,10 @@ key is a startup error, not a silent typo.
 
 ```toml
 [postgres]
-url = "${DATABASE_URL:-postgres://localhost/myapp}"
+# A set url wins; when it resolves empty, embedded = true downloads and runs a
+# local PG 17 (data persists in .forge/pg) — no Postgres install needed.
+url = "${DATABASE_URL:-}"
+embedded = true
 
 [backends]
 default = "${FORGE_BACKEND:-postgres}"   # set FORGE_BACKEND=memory in tests
@@ -209,16 +155,18 @@ differs.
 | `BACKEND` | A backend error that is none of the above | Sometimes |
 
 - **Node** prefixes the code onto the thrown `Error`'s message, e.g.
-  `"PRECONDITION: ..."`. Parse it with `forgeErrorCode(err)` / test retryability with
+  `"PRECONDITION: ..."` (a retryable backend error reads `"BACKEND(retryable): ..."`).
+  Parse it with `forgeErrorCode(err)` / test retryability with
   `forgeErrorRetryable(err)` from `forgelib`.
-- **Python** raises a typed exception hierarchy; the code is the class name
-  (`Invalid`, `Unavailable`, …). Use `forge_error_code(exc)` /
+- **Python** raises a typed exception hierarchy named code + `Error`
+  (`InvalidError`, `UnavailableError`, …, all subclassing `ForgeError`), each
+  carrying a `retryable` attribute. Use `forge_error_code(exc)` /
   `forge_error_retryable(exc)` from `forgelib`.
 - **Rust** returns `Err(forgelib::ForgeError)`; match the variant, or call
   `.is_retryable()`.
 
-Only `UNAVAILABLE` (and some `BACKEND`) errors are worth retrying. Retrying an
-`INVALID` or `PRECONDITION` just fails again.
+Only `UNAVAILABLE` (and a `BACKEND` error flagged retryable) is worth retrying.
+Retrying an `INVALID` or `PRECONDITION` just fails again.
 
 ## Pitfalls (verified, not folklore)
 

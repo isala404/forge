@@ -54,23 +54,31 @@ cross-origin SPA.
 
 ## Run a backend (dev)
 
-Each backend needs Postgres. From the repo root: `docker compose up -d db` (postgres:18, user
-`postgres`, password `forge`). Each backend reads its own `forge.toml` at `<lang>-be/forge.toml`,
-which is where Forge gets its config now; the `FORGE_POSTGRES_URL=... <run cmd>` prefixes below
-still work because that toml interpolates the variable (`${FORGE_POSTGRES_URL:-...}`, and likewise
-`FORGE_BLOB_SIGNING_SECRET`). Then create the per-app database and start one backend, for example:
+No database setup is required for local dev. Each backend reads its own
+`forge.toml` at `<lang>-be/forge.toml`, which boots an embedded Postgres by
+default (data persists in that backend's `.forge/pg`). Set
+`FORGE_POSTGRES_URL` to use a dedicated server instead; the app's own domain
+tables follow Forge's resolved database.
+
+Start one backend:
 
 ```sh
 # Rust
-createdb -h 127.0.0.1 -U postgres chatapp_rust
-cd rust-be && FORGE_POSTGRES_URL=postgres://postgres:forge@127.0.0.1:5432/chatapp_rust cargo run
+cd rust-be && cargo run
 
 # Node
-cd node-be && bun install && FORGE_POSTGRES_URL=postgres://postgres:forge@127.0.0.1:5432/chatapp_node bun run start
+cd node-be && bun install && bun run start
 
 # Python
-cd python-be && uv sync && FORGE_POSTGRES_URL=postgres://postgres:forge@127.0.0.1:5432/chatapp_python \
-  uv run uvicorn app.main:app --port 8083
+cd python-be && uv sync && uv run uvicorn app.main:app --port 8083
+```
+
+Or point a backend at your own Postgres:
+
+```sh
+docker compose up -d db
+createdb -h 127.0.0.1 -U postgres chatapp_node
+cd node-be && FORGE_POSTGRES_URL=postgres://postgres:forge@127.0.0.1:5432/chatapp_node bun run start
 ```
 
 Then run the frontend against it:

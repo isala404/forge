@@ -13,6 +13,9 @@ use forgelib::{Forge, Bytes, SetOpts, SetMode, EnqueueOpts, DequeueOpts, NackOpt
 
 let forge = Forge::init().await?;                    // reads ./forge.toml
 // Forge::init_from(path) / Forge::init_from_str(toml) also exist.
+// `[postgres] embedded = true` needs the `embedded` cargo feature in Rust
+// (the Node/Python packages ship with it built in). For the app's own tables on
+// the same database use forge.pool() / forge.postgres_url().
 ```
 
 ## Key/value — `forge.kv()`
@@ -107,7 +110,7 @@ forge.auth().revoke_api_key(&key.id).await?;
 
 ```rust
 let d = forge.ratelimit().check("login", &email,
-    Limit::per_duration(20, Duration::from_secs(60))).await?;
+    Limit::per_duration(20, Duration::from_secs(60))).await?;   // per < 1s is Invalid
 if !d.allowed { /* d.retry_after */ }
 // per-call fail mode override:
 forge.ratelimit().check_with("login", &email,
@@ -154,4 +157,3 @@ instead of `Bytes`. Reach for them when a payload is a `#[derive(Serialize)]` ty
 ```rust
 let forge = Forge::builder().kv(my_redis_kv).build().await?;  // one primitive swapped, rest on Postgres
 ```
-</content>

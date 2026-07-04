@@ -18,7 +18,7 @@ forge = await forgelib.ForgeClient.init_from("svc/forge.toml")
 | --- | --- |
 | `kv_get()` | Value as a `str`, or `None`. Lossy for binary — use bytes. |
 | `kv_get_bytes()` | Value as `bytes`, or `None`. Lossless. |
-| `kv_set()` | `kv_set(key, value, ttl_seconds=None, if_not_exists=None)`. Returns whether it wrote. |
+| `kv_set()` | `kv_set(key, value, ttl_seconds=None, if_not_exists=None, if_exists=None)`. Returns whether it wrote. |
 | `kv_set_bytes()` | Same, with a `bytes` value. |
 | `kv_mget()` | Many keys in one round-trip; per-key `str \| None`. |
 | `kv_incr()` | `kv_incr(key, by)` → exact `int` (unlike Node's f64). |
@@ -36,8 +36,8 @@ forge = await forgelib.ForgeClient.init_from("svc/forge.toml")
 | `queue_enqueue()` | `queue_enqueue(queue, payload, max_attempts=None, dedup_id=None, delay_seconds=None)` → id. |
 | `queue_dequeue()` | `queue_dequeue(queue, visibility_seconds, wait_seconds)` → `Job \| None` (long-polls). |
 | `queue_ack()` | Ack by `receipt` (idempotent). |
-| `queue_nack()` | `queue_nack(receipt, retry_seconds=None)`. Raises `Precondition` if the receipt is unknown. |
-| `queue_heartbeat()` | Extend the lease; raises `Precondition` if the lease was lost. |
+| `queue_nack()` | `queue_nack(receipt, retry_seconds=None)`. Raises `PreconditionError` if the receipt is unknown. |
+| `queue_heartbeat()` | Extend the lease; raises `PreconditionError` if the lease was lost. |
 | `queue_depth()` | `QueueDepth(visible, in_flight, delayed)`. Pass `"<queue>.dlq"` for the dead-letter backlog. |
 
 Settle by the delivery-unique `receipt`, never `id` (the `id` is your idempotency
@@ -90,7 +90,7 @@ Blob is bytes-native in Python: `blob_put`/`blob_get` already take and return
 
 | Method | Notes |
 | --- | --- |
-| `rate_limit_check()` | `rate_limit_check(bucket, key, max, per_seconds, fail_open=None, algo=None)` → `Decision`. `algo` is `"token_bucket"` (default) or `"sliding_window"`. |
+| `rate_limit_check()` | `rate_limit_check(bucket, key, max, per_seconds, fail_open=None, algo=None)` → `Decision`. `algo` is `"token_bucket"` (default) or `"sliding_window"`. `per_seconds` must be ≥ 1 (a sub-second window raises `InvalidError`). |
 
 `Decision`: `allowed`, `limit`, `remaining`, `reset_after_seconds`, `retry_after_seconds`.
 
@@ -123,6 +123,7 @@ Blob is bytes-native in Python: `blob_put`/`blob_get` already take and return
 | Method | Notes |
 | --- | --- |
 | `backend_report()` | Which provider powers each primitive. Synchronous. |
+| `postgres_url()` | The resolved system DSN (embedded servers mint theirs at init) for the app's own pool. Contains credentials. Synchronous. |
 | `maintain()` | One housekeeping sweep. Call on an interval alongside `run_scheduler_once`. |
 
 ## Native JSON handles
@@ -147,4 +148,5 @@ await profile.set(value, ttl_seconds=3600)
 - `ConfigKey` from `forge.config(key, default)`: `get()`, `get_or_default()`, `set()`.
 - `Topic` from `forge.topic(name)`: `publish()`, `subscribe()` (`async for event in topic.subscribe():`).
 - `forge.worker(queue, handler, *, stop=..., visibility_seconds=30.0, wait_seconds=20.0)` / `run_worker(...)` — managed loop; set the `stop` event to drain.
-- `forge_error_code(exc)` / `forge_error_retryable(exc)` — the code is the exception class name.
+- `forge_error_code(exc)` / `forge_error_retryable(exc)` — exceptions are named code +
+  `Error` (`LimitError` → code `"Limit"`) and every instance carries a `retryable` attribute.

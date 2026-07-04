@@ -56,16 +56,17 @@ tests/               integration suite over real HTTP + WS against a live Postgr
 
 ## Running
 
-Requires a Postgres and a Rust toolchain (uv builds the editable `forgelib` wheel via
-maturin on first `uv sync`).
-
-Forge configures itself from `forge.toml` in this directory, which references
-`FORGE_POSTGRES_URL` and `FORGE_BLOB_SIGNING_SECRET` from the environment (`${VAR:-default}`),
-so the exports below override the toml defaults rather than passing values to Forge directly.
+Requires a Rust toolchain (uv builds the editable `forgelib` wheel via maturin on
+first `uv sync`). No database needed: with no configuration the app boots an embedded
+Postgres (data persists in `.forge/pg`); the app's own asyncpg pool follows
+`forge.postgres_url()`. Setting `FORGE_POSTGRES_URL` (interpolated by `forge.toml`)
+wins when you'd rather use your own server.
 
 ```sh
 uv sync
-# point at your database; it is created/migrated on startup
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8083
+
+# ...or against your own server:
 export FORGE_POSTGRES_URL=postgres://postgres:forge@127.0.0.1:5432/chatapp_python_be
 export FORGE_BLOB_SIGNING_SECRET=dev-secret-change-me
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8083
@@ -76,12 +77,12 @@ GraphQL is at `/graphql` (POST for queries/mutations, WS upgrade for subscriptio
 
 ### Environment
 
-`FORGE_POSTGRES_URL` and `FORGE_BLOB_SIGNING_SECRET` are referenced by `forge.toml` (as
-`${VAR:-default}`) rather than read by Forge directly; the rest configure the app loops and CORS.
+`FORGE_POSTGRES_URL` and `FORGE_BLOB_SIGNING_SECRET` are referenced by `forge.toml`
+rather than read by Forge directly; the rest configure the app loops and CORS.
 
 | var | default | meaning |
 | --- | --- | --- |
-| `FORGE_POSTGRES_URL` | `postgres://postgres:forge@127.0.0.1:5432/chatapp_python_be` | shared by Forge + asyncpg |
+| `FORGE_POSTGRES_URL` | unset (embedded Postgres) | shared by Forge + asyncpg; wins over `embedded` |
 | `FORGE_BLOB_SIGNING_SECRET` | `dev-secret-change-me` | enables presigned blob URLs |
 | `APP_PRESENCE_TTL_SECS` | `30` | `online:` kv TTL refreshed by heartbeat |
 | `APP_SCHEDULER_MS` | `30000` | scheduler tick cadence |

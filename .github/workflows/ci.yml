@@ -56,16 +56,31 @@ jobs:
         run: cargo test
 
   msrv:
-    name: MSRV (1.92)
+    name: MSRV (1.94)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.92
+      - uses: dtolnay/rust-toolchain@1.94
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: msrv
       - run: cargo check --all-features
+
+  embedded:
+    name: Embedded Postgres smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [validate]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: embedded
+      # Downloads the pinned PG 17 binaries on a cache miss, then boots, migrates,
+      # and re-boots a persistent embedded server.
+      - run: cargo test --features embedded --test embedded
 
   guardrails:
     name: Guardrails
@@ -131,8 +146,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 14 is the documented minimum server version; 18 is current.
-        postgres: [14, 18]
+        # 17 is the documented minimum server version; 18 is current.
+        postgres: [17, 18]
     services:
       postgres:
         image: postgres:${{ matrix.postgres }}

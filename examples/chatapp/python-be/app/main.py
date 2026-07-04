@@ -47,17 +47,13 @@ def build_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        pg = env(
-            "FORGE_POSTGRES_URL",
-            "postgres://postgres:forge@127.0.0.1:5432/chatapp_python_be",
-        )
-        # Point FORGE_POSTGRES_URL at the resolved URL so ./forge.toml's ${FORGE_POSTGRES_URL}
-        # interpolation lands on the same database the app's own pool uses below.
-        os.environ.setdefault("FORGE_POSTGRES_URL", pg)
-        # Forge instantiates from ./forge.toml (it migrates the forge_* tables and honors the
-        # backend selectors); the signing secret and base URL live in that file.
+        # Forge instantiates from ./forge.toml: FORGE_POSTGRES_URL when set (compose,
+        # CI, tests), else an embedded Postgres. It migrates the forge_* tables and
+        # honors the backend selectors; the signing secret and base URL live in that
+        # file. The app's own pool then follows forge.postgres_url() — the only way
+        # to reach an embedded server's minted DSN.
         forge = await forgelib.ForgeClient.init()
-        pool = await asyncpg.create_pool(pg, min_size=1, max_size=10)
+        pool = await asyncpg.create_pool(forge.postgres_url(), min_size=1, max_size=10)
         await db.migrate(pool)
 
         app.state.forge = forge

@@ -1,3 +1,5 @@
+#[cfg(feature = "embedded")]
+pub(crate) mod embedded;
 mod migrations;
 pub(crate) use migrations::MigrationRunner;
 
@@ -6,9 +8,10 @@ use crate::error::{ForgeError, Result};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use std::str::FromStr;
 
-/// Lowest supported `server_version_num` (PG 14): the floor for `SKIP LOCKED`,
-/// advisory locks, partial indexes, and `gen_random_uuid`.
-const MIN_SERVER_VERSION_NUM: i32 = 140_000;
+/// Lowest supported `server_version_num` (PG 17): the supported floor. The SQL itself
+/// only needs PG 14 features (`SKIP LOCKED`, advisory locks, partial indexes,
+/// `gen_random_uuid`), but 17 is the oldest version we test and ship embedded.
+const MIN_SERVER_VERSION_NUM: i32 = 170_000;
 
 /// Returns a probed, ready pool, or a `ForgeError::Config` on any connection or version failure.
 pub(crate) async fn connect(db: &DatabaseConfig) -> Result<sqlx::PgPool> {
@@ -80,7 +83,7 @@ async fn verify_version(pool: &sqlx::PgPool) -> Result<()> {
             })?;
     if num < MIN_SERVER_VERSION_NUM {
         return Err(ForgeError::config(format!(
-            "Postgres server_version_num={num} is too old; Forge requires >= {MIN_SERVER_VERSION_NUM} (PG 14)"
+            "Postgres server_version_num={num} is too old; Forge requires >= {MIN_SERVER_VERSION_NUM} (PG 17)"
         )));
     }
     Ok(())

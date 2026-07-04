@@ -79,6 +79,13 @@ struct ForgeInner {
     lifecycle: Vec<Arc<dyn BackendLifecycle>>,
     /// The Postgres pool every primitive is built on.
     pool: sqlx::PgPool,
+    /// The resolved system DSN backing `pool` (embedded servers mint theirs at
+    /// init), exposed via [`Forge::postgres_url`].
+    postgres_url: String,
+    /// Keeps an embedded server alive for the handle's lifetime; dropping the last
+    /// `Forge` clone stops its postmaster.
+    #[cfg(feature = "embedded")]
+    _embedded: Option<pg::embedded::EmbeddedPg>,
 }
 
 /// Primitives whose correctness needs cross-process delivery (pubsub, ratelimit) but that
@@ -167,6 +174,32 @@ impl Forge {
         for p in non_durable_warnings(&cfg) {
             warn_non_durable(p);
         }
+
+        // An embedded server boots first and mints the system DSN; everything after
+        // this point (pools, feature overrides, migrations) is identical to an
+        // externally-provided Postgres. An explicit connection string outranks the
+        // flag, so `url = "${VAR:-}"` + `embedded = true` deploys against $VAR.
+        if cfg.embedded && !cfg.use_embedded() {
+            tracing::info!(
+                "a [postgres] url is set; connecting to it instead of the embedded server"
+            );
+        }
+        #[cfg(not(feature = "embedded"))]
+        if cfg.use_embedded() {
+            return Err(crate::error::ForgeError::config(
+                "[postgres] embedded = true requires forgelib's `embedded` cargo feature \
+                 (the Node and Python packages ship with it; in Rust enable it explicitly)",
+            ));
+        }
+        #[cfg(feature = "embedded")]
+        let (embedded, cfg) = if cfg.use_embedded() {
+            let (server, url) = pg::embedded::start(&cfg.embedded_dir).await?;
+            let mut cfg = cfg;
+            cfg.postgres = url;
+            (Some(server), cfg)
+        } else {
+            (None, cfg)
+        };
 
         // In-process, injected, and (for blob) memory backends never connect or migrate
         // Postgres, so the pool/migration plan covers only the Postgres-backed built-ins.
@@ -364,6 +397,9 @@ impl Forge {
                 pubsub,
                 lifecycle,
                 pool: system_pool,
+                postgres_url: cfg.postgres.clone(),
+                #[cfg(feature = "embedded")]
+                _embedded: embedded,
             }),
         })
     }
@@ -386,6 +422,14 @@ impl Forge {
     /// to Forge's `sqlx` major version.
     pub fn pool(&self) -> &sqlx::PgPool {
         &self.inner.pool
+    }
+
+    /// The resolved connection string of the system database — the configured
+    /// `[postgres] url`, or the DSN an embedded server minted at init. Contains
+    /// credentials; intended for wiring an application's own pool/tables onto the
+    /// same database (the only way to reach an embedded server from outside Forge).
+    pub fn postgres_url(&self) -> &str {
+        &self.inner.postgres_url
     }
 
     /// The key/value store. Lineage: Redis. See <https://tryforge.dev/primitives/#key-value>.

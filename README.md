@@ -24,8 +24,14 @@ instantiates the runtime; string values may reference the environment as `${VAR}
 
 ```toml
 [postgres]
-url = "${DATABASE_URL:-postgres://localhost/myapp}"
+url = "${DATABASE_URL:-}"
+embedded = true
 ```
+
+Set `DATABASE_URL` to use a managed or shared Postgres. Leave it unset and Forge
+downloads and runs Postgres for you (data persists in `.forge/pg`) — built into
+the Node and Python packages, behind the `embedded` cargo feature in Rust. Forge
+supports Postgres 17+.
 
 Omit settings you do not need; Forge applies production-safe defaults for the rest.
 
@@ -181,7 +187,8 @@ The memory and Postgres backends pass the same conformance suite, so tests run i
 default = "${FORGE_BACKEND:-postgres}"  # FORGE_BACKEND=memory in tests
 
 [postgres]
-url = "${DATABASE_URL:-postgres://localhost/myapp}"
+url = "${DATABASE_URL:-}"
+embedded = true
 ```
 
 ## Build it with an agent

@@ -61,13 +61,13 @@ bun run typecheck      # tsc --noEmit
 bun run start          # node src/server.ts  -> http://127.0.0.1:8082/graphql
 ```
 
-Forge configures itself from `forge.toml` in this directory, which references
-`FORGE_POSTGRES_URL` and `FORGE_BLOB_SIGNING_SECRET` from the environment (`${VAR:-default}`),
-so setting those env vars overrides the toml defaults rather than passing values to Forge
-directly. The remaining knobs are app/server settings via env (see `.env.example`): `PORT`,
-`HOST`, `CORS_ORIGIN`, `APP_PRESENCE_TTL_SECS`, `APP_SCHEDULER_MS`, `APP_DISAPPEARING_SECS`.
-Create your own database first; the server applies `../migrations.sql` on startup but does not
-create the database.
+Forge configures itself from `forge.toml` in this directory: with no configuration it
+boots an embedded Postgres (data persists in `.forge/pg`); setting `FORGE_POSTGRES_URL`
+(and `FORGE_BLOB_SIGNING_SECRET`, both interpolated by that file) wins when you'd rather
+use your own server. The app's own pool follows `forge.postgresUrl()`, and the server
+applies `../migrations.sql` on startup. The remaining knobs are app/server settings via
+env (see `.env.example`): `PORT`, `HOST`, `CORS_ORIGIN`, `APP_PRESENCE_TTL_SECS`,
+`APP_SCHEDULER_MS`, `APP_DISAPPEARING_SECS`.
 
 ## Test
 

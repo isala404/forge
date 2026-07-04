@@ -151,8 +151,9 @@ OPERATIONS = [
 ]
 
 ROOT_RAW = {
-    "node": {"init", "initFrom", "backendReport", "maintain"},
-    "python": {"init", "init_from", "backend_report", "maintain"},
+    # Root client helpers that are not primitive operations.
+    "node": {"init", "initFrom", "backendReport", "maintain", "postgresUrl"},
+    "python": {"init", "init_from", "backend_report", "maintain", "postgres_url"},
 }
 
 NODE_IDIOMATIC = {

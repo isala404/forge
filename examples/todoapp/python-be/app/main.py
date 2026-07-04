@@ -30,8 +30,8 @@ async def maintenance(forge: Any, stop: asyncio.Event) -> None:
 def build_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # Forge instantiates from ./forge.toml; its ${FORGE_POSTGRES_URL} default
-        # resolves from the environment.
+        # Forge instantiates from ./forge.toml: FORGE_POSTGRES_URL when set,
+        # else an embedded Postgres.
         forge = await forgelib.ForgeClient.init()
         stop = asyncio.Event()
         task = asyncio.create_task(maintenance(forge, stop))
