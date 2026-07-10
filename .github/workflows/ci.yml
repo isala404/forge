@@ -42,8 +42,16 @@ jobs:
           shared-key: ci
       - name: fmt
         run: cargo fmt --all --check
+      - name: binding fmt
+        run: |
+          cargo fmt --manifest-path bindings/node/Cargo.toml -- --check
+          cargo fmt --manifest-path bindings/python/Cargo.toml -- --check
       - name: clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: binding clippy
+        run: |
+          cargo clippy --manifest-path bindings/node/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --manifest-path bindings/python/Cargo.toml --all-targets -- -D warnings
       - name: build
         run: cargo build --all-features
       - name: binding types match the schema (codegen drift guard)
@@ -98,6 +106,10 @@ jobs:
         run: cargo deny check
       - name: cargo audit
         run: cargo audit --deny warnings
+      - name: audit Node binding lockfile
+        run: cargo audit --file bindings/node/Cargo.lock --deny warnings
+      - name: audit Python binding lockfile
+        run: cargo audit --file bindings/python/Cargo.lock --deny warnings
 
   sqlx-cache:
     name: SQLx cache integrity

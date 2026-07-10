@@ -1,4 +1,4 @@
-use crate::error::Result;
+use crate::error::{ForgeError, Result};
 use async_trait::async_trait;
 use std::fmt;
 use std::time::{Duration, SystemTime};
@@ -11,6 +11,8 @@ pub const MAX_PHC_BYTES: usize = 1024;
 pub const MAX_ID_BYTES: usize = 255;
 /// Max API-key `label` length.
 pub const MAX_LABEL_BYTES: usize = 255;
+/// Max one-time-token `purpose` length.
+pub const MAX_PURPOSE_BYTES: usize = 255;
 
 /// A PHC-format password hash (`$argon2id$v=19$...`). Portable to/from the wider
 /// `password_hash` ecosystem. `Debug` is redacted.
@@ -56,6 +58,31 @@ impl SessionToken {
 impl fmt::Debug for SessionToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("SessionToken(<redacted>)")
+    }
+}
+
+/// A single-use, purpose-scoped token (≥ 256-bit random) for password reset, email
+/// verification, magic links. The plaintext exists once; only its SHA-256 is stored.
+/// `Debug` is redacted.
+#[derive(Clone)]
+pub struct OneTimeToken(String);
+
+impl OneTimeToken {
+    /// Wrap a freshly minted token. For backend implementors; app code receives this
+    /// from [`Auth::create_token`].
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    /// The raw token, to deliver to the user exactly once (e.g. in an email link).
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for OneTimeToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("OneTimeToken(<redacted>)")
     }
 }
 
@@ -195,8 +222,8 @@ impl ApiKeyInfo {
     }
 }
 
-/// Auth primitives: argon2id passwords, opaque hashed sessions, `fk_` API keys.
-/// Object-safe; the facade hands out `Arc<dyn Auth>`.
+/// Auth primitives: argon2id passwords, opaque hashed sessions, `fk_` API keys, and
+/// single-use one-time tokens. Object-safe; the facade hands out `Arc<dyn Auth>`.
 ///
 /// Forge does NOT own the users table; `user_id`/`owner_id` are opaque app strings.
 /// Exact semantics, timeouts, and error mapping: <https://tryforge.dev/primitives/#auth>.
@@ -234,6 +261,32 @@ pub trait Auth: Send + Sync {
 
     /// Revoke a key by id. `Ok(true)` if removed, `Ok(false)` if unknown.
     async fn revoke_api_key(&self, key_id: &str) -> Result<bool>;
+
+    /// Mint a single-use token scoped to `purpose` (e.g. `"password-reset"`), storing
+    /// only its SHA-256 with a hard expiry. Deliver it out of band (email link, SMS);
+    /// Forge does not send anything. Custom auth backends that do not support one-time
+    /// tokens receive a non-retryable backend error by default.
+    async fn create_token(
+        &self,
+        _user_id: &str,
+        _purpose: &str,
+        _ttl: Duration,
+    ) -> Result<OneTimeToken> {
+        Err(ForgeError::backend(
+            "one-time tokens are not supported by this auth backend",
+        ))
+    }
+
+    /// Atomically consume a token minted for `purpose`: delete it and return its
+    /// `user_id`. Unknown/expired/already-consumed => `Ok(None)`, never an error.
+    /// A live token presented with the wrong `purpose` is left intact. Custom auth
+    /// backends that do not support one-time tokens receive a non-retryable backend
+    /// error by default.
+    async fn consume_token(&self, _token: &str, _purpose: &str) -> Result<Option<String>> {
+        Err(ForgeError::backend(
+            "one-time tokens are not supported by this auth backend",
+        ))
+    }
 }
 
 mod memory;

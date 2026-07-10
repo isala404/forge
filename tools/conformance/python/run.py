@@ -270,6 +270,10 @@ async def dispatch(client, op, args, subscriptions, capture_as):
         return {"id": k.id, "secret": k.secret, "label": k.label, "created_at_ms": k.created_at_ms}
     if op == "auth.verify_api_key":
         return await client.verify_api_key(args["key"])
+    if op == "auth.create_token":
+        return await client.create_token(args["user_id"], args["purpose"], args["ttl_seconds"])
+    if op == "auth.consume_token":
+        return await client.consume_token(args["token"], args["purpose"])
     if op == "blob.put":
         return await client.blob_put_object(args["key"], value_to_bytes(args["value"]), args.get("content_type"), args.get("metadata"))
     if op == "blob.get":

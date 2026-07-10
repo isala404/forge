@@ -11,6 +11,8 @@ Forge errors surface as a typed exception hierarchy (`forgelib.NotFoundError`,
 `forgelib.ForgeError`), and every raised instance carries a `retryable` attribute.
 
 Built against the stable ABI (`abi3-py39`), so one wheel runs on CPython ≥ 3.9.
+The `1.x` release publishes wheels for Linux x64, Linux arm64, macOS arm64, and
+Windows x64, plus a source distribution. Intel macOS installs from source.
 
 ## Build
 

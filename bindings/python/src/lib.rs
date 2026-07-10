@@ -44,7 +44,7 @@ fn pyerr(e: forge::ForgeError) -> PyErr {
         F::Backend { .. } => BackendError::new_err(msg),
         _ => BackendError::new_err(msg),
     };
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         // Best-effort: a failed setattr must not replace the real error being raised.
         let _ = err.value(py).setattr("retryable", retryable);
     });
@@ -101,6 +101,10 @@ include!("types.generated.rs");
 #[pyclass]
 struct Subscription {
     inner: Arc<Mutex<forge::Subscription>>,
+    /// Flipped by `aclose`. A `watch` channel rather than the mutex, so `aclose` can
+    /// interrupt an `__anext__` that is parked on the stream while holding the lock —
+    /// with only the mutex, `aclose` deadlocked until the next message arrived.
+    closed_tx: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
 #[pymethods]
@@ -111,22 +115,33 @@ impl Subscription {
 
     fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
+        let closed_tx = self.closed_tx.clone();
         future_into_py(py, async move {
+            let mut closed_rx = closed_tx.subscribe();
             let mut sub = inner.lock().await;
-            match sub.next().await {
-                Some(Ok(b)) => Ok(Python::with_gil(|py| PyBytes::new(py, &b).unbind())),
-                Some(Err(e)) => Err(pyerr(e)),
-                None => Err(PyStopAsyncIteration::new_err("subscription ended")),
+            tokio::select! {
+                // `wait_for` is level-triggered: it also returns when aclose() already ran.
+                _ = closed_rx.wait_for(|closed| *closed) => {
+                    Err(PyStopAsyncIteration::new_err("subscription closed"))
+                }
+                item = sub.next() => match item {
+                    Some(Ok(b)) => Ok(Python::attach(|py| PyBytes::new(py, &b).unbind())),
+                    Some(Err(e)) => Err(pyerr(e)),
+                    None => Err(PyStopAsyncIteration::new_err("subscription ended")),
+                },
             }
         })
     }
 
     /// Unsubscribe now, releasing the broadcast receiver instead of waiting for GC. Call when a
-    /// client's connection closes (e.g. a GraphQL subscription's WebSocket). Idempotent; the
-    /// iterator then stops.
+    /// client's connection closes (e.g. a GraphQL subscription's WebSocket). Any pending
+    /// `__anext__` stops immediately; idempotent; the iterator then stops.
     fn aclose<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
+        let closed_tx = self.closed_tx.clone();
         future_into_py(py, async move {
+            let _ = closed_tx.send(true);
+            // A parked __anext__ wakes on the send and releases the lock promptly.
             let mut sub = inner.lock().await;
             *sub = futures_util::stream::empty().boxed();
             Ok(())
@@ -252,7 +267,7 @@ impl ForgeClient {
         let forge = self.forge.clone();
         future_into_py(py, async move {
             let v = forge.kv().get(&key).await.map_err(pyerr)?;
-            Ok(v.map(|b| Python::with_gil(|py| PyBytes::new(py, &b).unbind())))
+            Ok(v.map(|b| Python::attach(|py| PyBytes::new(py, &b).unbind())))
         })
     }
 
@@ -393,7 +408,7 @@ impl ForgeClient {
         let forge = self.forge.clone();
         future_into_py(py, async move {
             let v = forge.blob().get(&key).await.map_err(pyerr)?;
-            Ok(v.map(|b| Python::with_gil(|py| PyBytes::new(py, &b).unbind())))
+            Ok(v.map(|b| Python::attach(|py| PyBytes::new(py, &b).unbind())))
         })
     }
 
@@ -595,6 +610,45 @@ impl ForgeClient {
                 .await
                 .map_err(pyerr)?
                 .map(|i| i.owner_id))
+        })
+    }
+
+    /// Mint a single-use token scoped to `purpose` (e.g. "password-reset"), expiring
+    /// after `ttl_seconds`; returns the opaque token (shown once).
+    fn create_token<'py>(
+        &self,
+        py: Python<'py>,
+        user_id: String,
+        purpose: String,
+        ttl_seconds: f64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let forge = self.forge.clone();
+        future_into_py(py, async move {
+            let ttl = secs("ttl_seconds", ttl_seconds)?;
+            let t = forge
+                .auth()
+                .create_token(&user_id, &purpose, ttl)
+                .await
+                .map_err(pyerr)?;
+            Ok(t.as_str().to_string())
+        })
+    }
+
+    /// Atomically consume a token minted for `purpose`; returns its user id, or None
+    /// when unknown/expired/already consumed.
+    fn consume_token<'py>(
+        &self,
+        py: Python<'py>,
+        token: String,
+        purpose: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let forge = self.forge.clone();
+        future_into_py(py, async move {
+            forge
+                .auth()
+                .consume_token(&token, &purpose)
+                .await
+                .map_err(pyerr)
         })
     }
 
@@ -850,8 +904,10 @@ impl ForgeClient {
         let forge = self.forge.clone();
         future_into_py(py, async move {
             let sub = forge.pubsub().subscribe(&topic).await.map_err(pyerr)?;
+            let (closed_tx, _) = tokio::sync::watch::channel(false);
             Ok(Subscription {
                 inner: Arc::new(Mutex::new(sub)),
+                closed_tx: Arc::new(closed_tx),
             })
         })
     }

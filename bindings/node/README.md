@@ -5,6 +5,10 @@ exposing the full primitive surface (kv, queue, config, ratelimit, blob, auth,
 schedule, pubsub) plus `backendReport`. Async Rust methods become JS `Promise`s;
 method names are camelCased.
 
+The `1.x` npm package ships prebuilt addons for Linux x64 (glibc and musl), Linux
+arm64 (glibc), macOS arm64, and Windows x64. Intel macOS is not a supported prebuilt
+target.
+
 ## Build
 
 The platform binary (`*.node`) is not committed; build it from source:

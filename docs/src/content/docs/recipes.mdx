@@ -18,9 +18,11 @@ users table to wire up first: `kv` stores the user record and `auth` owns the ha
 and the sessions.
 
 <Aside type="note" title="Know the boundary">
-	This is the "email and password, done right" baseline. OAuth, magic links, 2FA, and
-	password reset are their own product surface; reach for a dedicated auth provider once
-	you need them rather than growing this into one.
+	This is the "email and password, done right" baseline. Password reset, email
+	verification, and magic links are covered by one-time tokens (below); Forge mints and
+	checks the token, your app sends the email. OAuth and 2FA are their own product
+	surface — reach for a dedicated auth provider once you need those rather than growing
+	this into one.
 </Aside>
 
 Sign-up does four things: throttle by email, hash the password, claim the email
@@ -215,6 +217,78 @@ the session so the token stops working immediately.
 
 	</TabItem>
 </Tabs>
+
+Password reset is a one-time token plus an email your app sends. Mint a short-lived
+token scoped to `"password-reset"`, put it in the link, and consume it when the user
+comes back; the first consume wins and every retry after that returns nothing. Respond
+identically whether or not the email exists so the endpoint doesn't confirm accounts.
+
+<Tabs syncKey="lang">
+	<TabItem label="Node" icon="seti:javascript">
+
+		```ts
+		// request handler: always answer 200; only mint + email when the account exists
+		const found = await forge.kvGet(`user:email:${email}`);
+		if (found) {
+			const user = JSON.parse(found);
+			const token = await forge.createToken(user.id, "password-reset", 900); // 15 min
+			await forge.queue("emails").enqueue({ to: email, resetLink: linkFor(token) });
+		}
+
+		// reset handler: consume exactly once, then re-hash and revoke every session
+		const userId = await forge.consumeToken(token, "password-reset");
+		if (!userId) return c.json({ error: "link expired" }, 400);
+		await updatePasswordHash(userId, await forge.hashPassword(newPassword));
+		await forge.revokeAllSessions(userId);
+		```
+
+	</TabItem>
+	<TabItem label="Python" icon="seti:python">
+
+		```python
+		# request handler: always answer 200; only mint + email when the account exists
+		found = await forge.kv_get(f"user:email:{email}")
+		if found:
+		    user = json.loads(found)
+		    token = await forge.create_token(user["id"], "password-reset", 900)  # 15 min
+		    await forge.queue("emails").enqueue({"to": email, "reset_link": link_for(token)})
+
+		# reset handler: consume exactly once, then re-hash and revoke every session
+		user_id = await forge.consume_token(token, "password-reset")
+		if not user_id:
+		    raise HTTPException(400, "link expired")
+		await update_password_hash(user_id, await forge.hash_password(new_password))
+		await forge.revoke_all_sessions(user_id)
+		```
+
+	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		// request handler: always answer 200; only mint + email when the account exists
+		if let Some(bytes) = forge.kv().get(&format!("user:email:{email}")).await? {
+		    let user: User = serde_json::from_slice(&bytes)?;
+		    let token = forge.auth()
+		        .create_token(&user.id, "password-reset", Duration::from_secs(900)) // 15 min
+		        .await?;
+		    forge.queue().enqueue("emails", email_payload(&email, token.as_str()), EnqueueOpts::default()).await?;
+		}
+
+		// reset handler: consume exactly once, then re-hash and revoke every session
+		let Some(user_id) = forge.auth().consume_token(token, "password-reset").await? else {
+		    return link_expired();
+		};
+		update_password_hash(&user_id, forge.auth().hash_password(&new_password).await?).await?;
+		forge.auth().revoke_all_sessions(&user_id).await?;
+		```
+
+	</TabItem>
+</Tabs>
+
+The same shape does email verification (`"email-verify"` purpose, consume on the
+confirmation link) and magic-link login (consume, then `create_session` for the
+returned user id). The purpose string is what stops a reset token from being replayed
+against the verify endpoint.
 
 ## Offload slow work to a queue
 

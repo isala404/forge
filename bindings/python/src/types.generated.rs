@@ -54,7 +54,7 @@ struct ScanPage {
 }
 
 /// Object metadata (S3 HeadObject). `last_modified_ms` is epoch milliseconds.
-#[pyclass(get_all)]
+#[pyclass(get_all, skip_from_py_object)]
 #[derive(Clone)]
 struct BlobInfo {
     key: String,
@@ -75,7 +75,7 @@ struct BlobListPage {
 
 /// A registered schedule. `kind` is "cron" or "at"; `cron_expr` is set only for crons. Times
 /// are epoch milliseconds.
-#[pyclass(get_all)]
+#[pyclass(get_all, skip_from_py_object)]
 #[derive(Clone)]
 struct ScheduleInfo {
     name: String,

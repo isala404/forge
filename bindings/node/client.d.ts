@@ -54,7 +54,7 @@ export interface SetOptions {
 export interface EnqueueOptions {
   /** Delivery attempts before the job is dead-lettered. Default: 5. */
   maxAttempts?: number | null;
-  /** Idempotency key: enqueueing the same `dedupId` twice raises `PRECONDITION`. */
+  /** Idempotency key: a repeated `dedupId` within the dedup window returns the existing job's id (no error). */
   dedupId?: string | null;
   /** Delay first delivery by this many seconds. Default: deliver immediately. */
   delaySeconds?: number | null;

@@ -91,7 +91,7 @@ class Queue(Generic[T]):
         delay_seconds: Optional[float] = ...,
     ) -> str:
         """Enqueue and return the job id. `max_attempts` defaults to 5; a repeated
-        `dedup_id` within the dedup window raises `PreconditionError`."""
+        `dedup_id` within the dedup window returns the existing job's id (no error)."""
 
     async def dequeue(
         self,
@@ -307,7 +307,7 @@ class ForgeClient:
         delay_seconds: Optional[float] = ...,
     ) -> Awaitable[str]:
         """Enqueue and return the job id. `max_attempts` defaults to 5; a repeated
-        `dedup_id` within the dedup window raises `PreconditionError`."""
+        `dedup_id` within the dedup window returns the existing job's id (no error)."""
 
     def queue_dequeue(
         self, queue: str, visibility_seconds: float, wait_seconds: float
@@ -418,6 +418,13 @@ class ForgeClient:
 
     def verify_api_key_info(self, key: str) -> Awaitable[Optional[ApiKeyInfo]]: ...
     def revoke_api_key(self, id: str) -> Awaitable[bool]: ...
+    def create_token(self, user_id: str, purpose: str, ttl_seconds: float) -> Awaitable[str]:
+        """Single-use token scoped to `purpose`, shown once; only its hash is stored."""
+
+    def consume_token(self, token: str, purpose: str) -> Awaitable[Optional[str]]:
+        """Consume the token and return its user id, or None when unknown/expired/used
+        (not an exception). A wrong `purpose` leaves a live token intact."""
+
     def schedule_at(
         self,
         when_epoch_ms: float,

@@ -32,7 +32,8 @@ use std::sync::Arc;
 use config::{Backend, BlobBackendConfig, ForgeConfig};
 
 pub use auth::{
-    ApiKey, ApiKeyInfo, ApiKeySecret, Auth, PhcString, Session, SessionOpts, SessionToken,
+    ApiKey, ApiKeyInfo, ApiKeySecret, Auth, OneTimeToken, PhcString, Session, SessionOpts,
+    SessionToken,
 };
 pub use backend::{
     AuthBackend, BackendInfo, BackendLifecycle, BackendReport, BlobBackend, ConfigStoreBackend,
@@ -509,8 +510,8 @@ impl Forge {
 
     /// Run the maintenance sweep across every backend: purge expired kv rows and old
     /// completed jobs, reclaim leases orphaned by crashed workers, drop stale dedup and
-    /// rate-limit rows, expire dead sessions, and reclaim orphaned filesystem blobs.
-    /// Idempotent; call it on a schedule.
+    /// rate-limit rows, expire dead sessions and one-time tokens, and reclaim orphaned
+    /// filesystem blobs. Idempotent; call it on a schedule.
     pub async fn maintain(&self) -> Result<()> {
         // Run every sweep even when one fails: a transient error in one backend
         // must not starve the rest of maintenance, sweep after sweep.

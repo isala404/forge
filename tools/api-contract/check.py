@@ -133,6 +133,8 @@ OPERATIONS = [
         ("verify_api_key", "verify_api_key_info"),
     ),
     Operation("auth.revoke_api_key", "Auth", ("revoke_api_key",), ("revokeApiKey",), ("revoke_api_key",)),
+    Operation("auth.create_token", "Auth", ("create_token",), ("createToken",), ("create_token",)),
+    Operation("auth.consume_token", "Auth", ("consume_token",), ("consumeToken",), ("consume_token",)),
     Operation("schedule.cron", "Schedule", ("cron",), ("scheduleCron",), ("schedule_cron",)),
     Operation("schedule.at", "Schedule", ("at",), ("scheduleAt",), ("schedule_at",)),
     Operation("schedule.cancel", "Schedule", ("cancel",), ("scheduleCancel",), ("schedule_cancel",)),

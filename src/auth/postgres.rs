@@ -1,6 +1,6 @@
 use super::{
     ApiKey, ApiKeyInfo, ApiKeySecret, Auth, MAX_ID_BYTES, MAX_LABEL_BYTES, MAX_PASSWORD_BYTES,
-    MAX_PHC_BYTES, PhcString, Session, SessionOpts, SessionToken,
+    MAX_PHC_BYTES, MAX_PURPOSE_BYTES, OneTimeToken, PhcString, Session, SessionOpts, SessionToken,
 };
 use crate::error::{ForgeError, Result};
 use crate::obs;
@@ -10,6 +10,7 @@ use argon2::{Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier};
 use async_trait::async_trait;
 use rand_core::{OsRng, RngCore};
 use sqlx::PgPool;
+use std::time::Duration;
 use tracing::field::Empty;
 use uuid::Uuid;
 
@@ -53,15 +54,18 @@ impl PgAuth {
         Self { pool, app }
     }
 
-    /// Delete expired sessions. Idempotent; call from `maintain`.
+    /// Delete expired sessions and one-time tokens. Idempotent; call from `maintain`.
     pub(crate) async fn sweep(&self) -> Result<u64> {
         // `idle_deadline <= abs_deadline` is an invariant (enforced at create and
         // capped at validate), so the abs_deadline arm is redundant; dropping it lets
         // the delete use the idle_deadline index instead of seq-scanning.
-        let r = sqlx::query!("DELETE FROM forge_sessions WHERE idle_deadline <= now()")
+        let sessions = sqlx::query!("DELETE FROM forge_sessions WHERE idle_deadline <= now()")
             .execute(&self.pool)
             .await?;
-        Ok(r.rows_affected())
+        let tokens = sqlx::query!("DELETE FROM forge_auth_tokens WHERE expires_at <= now()")
+            .execute(&self.pool)
+            .await?;
+        Ok(sessions.rows_affected() + tokens.rows_affected())
     }
 }
 
@@ -104,6 +108,29 @@ fn check_password(plain: &str) -> Result<()> {
             "password is {} bytes; max is {MAX_PASSWORD_BYTES}",
             plain.len()
         )));
+    }
+    Ok(())
+}
+
+fn check_purpose(purpose: &str) -> Result<()> {
+    if purpose.is_empty() {
+        return Err(ForgeError::invalid("purpose must not be empty"));
+    }
+    if purpose.len() > MAX_PURPOSE_BYTES {
+        return Err(ForgeError::limit(format!(
+            "purpose is {} bytes; max is {MAX_PURPOSE_BYTES}",
+            purpose.len()
+        )));
+    }
+    Ok(())
+}
+
+fn check_token_ttl(ttl: Duration) -> Result<()> {
+    if ttl.is_zero() {
+        return Err(ForgeError::invalid("token ttl must be positive"));
+    }
+    if ttl.as_secs_f64() > MAX_ABSOLUTE_SECS {
+        return Err(ForgeError::limit("token ttl exceeds the maximum"));
     }
     Ok(())
 }
@@ -384,6 +411,73 @@ impl Auth for PgAuth {
             .await?
             .is_some();
             Ok(removed)
+        })
+        .await
+    }
+
+    async fn create_token(
+        &self,
+        user_id: &str,
+        purpose: &str,
+        ttl: Duration,
+    ) -> Result<OneTimeToken> {
+        let span = tracing::info_span!(
+            "forge.auth.create_token",
+            auth.user_hash = %key_hash(user_id),
+            auth.purpose = %purpose,
+            auth.ttl_secs = ttl.as_secs(),
+            outcome = Empty,
+            error.variant = Empty,
+        );
+        obs::instrument("auth", "create_token", span, async move {
+            check_id(user_id)?;
+            check_purpose(purpose)?;
+            check_token_ttl(ttl)?;
+            let token = random_token();
+            let token_hash = sha256_hex(token.as_bytes());
+            let ttl_secs = ttl.as_secs_f64();
+            sqlx::query!(
+                "INSERT INTO forge_auth_tokens (token_hash, user_id, purpose, expires_at, app) \
+                 VALUES ($1, $2, $3, now() + make_interval(secs => $4), $5)",
+                token_hash,
+                user_id,
+                purpose,
+                ttl_secs,
+                self.app,
+            )
+            .execute(&self.pool)
+            .await?;
+            Ok(OneTimeToken::new(token))
+        })
+        .await
+    }
+
+    async fn consume_token(&self, token: &str, purpose: &str) -> Result<Option<String>> {
+        let token_hash = sha256_hex(token.as_bytes());
+        let span = tracing::info_span!(
+            "forge.auth.consume_token",
+            auth.token_hash = %token_hash,
+            auth.purpose = %purpose,
+            auth.token_valid = Empty,
+            outcome = Empty,
+            error.variant = Empty,
+        );
+        obs::instrument("auth", "consume_token", span, async move {
+            check_purpose(purpose)?;
+            // Single use: delete iff live and minted for this purpose, atomically. A
+            // purpose mismatch matches no row and leaves the token intact.
+            let user_id = sqlx::query_scalar!(
+                "DELETE FROM forge_auth_tokens \
+                 WHERE token_hash = $1 AND app = $2 AND purpose = $3 AND expires_at > now() \
+                 RETURNING user_id",
+                token_hash,
+                self.app,
+                purpose,
+            )
+            .fetch_optional(&self.pool)
+            .await?;
+            tracing::Span::current().record("auth.token_valid", user_id.is_some());
+            Ok(user_id)
         })
         .await
     }

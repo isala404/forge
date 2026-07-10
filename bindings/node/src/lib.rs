@@ -729,6 +729,37 @@ impl ForgeClient {
             .map(|i| i.owner_id))
     }
 
+    /// Mint a single-use token scoped to `purpose` (e.g. `"password-reset"`), expiring
+    /// after `ttlSeconds`; returns the opaque token (shown once). Deliver it out of
+    /// band (email link, SMS); Forge does not send anything.
+    #[napi]
+    pub async fn create_token(
+        &self,
+        user_id: String,
+        purpose: String,
+        ttl_seconds: f64,
+    ) -> Result<String> {
+        let t = self
+            .forge
+            .auth()
+            .create_token(&user_id, &purpose, secs("ttlSeconds", ttl_seconds)?)
+            .await
+            .map_err(err)?;
+        Ok(t.as_str().to_string())
+    }
+
+    /// Atomically consume a token minted for `purpose`; returns its `userId`, or `null`
+    /// when unknown/expired/already consumed. A live token presented with the wrong
+    /// `purpose` is left intact.
+    #[napi]
+    pub async fn consume_token(&self, token: String, purpose: String) -> Result<Option<String>> {
+        self.forge
+            .auth()
+            .consume_token(&token, &purpose)
+            .await
+            .map_err(err)
+    }
+
     /// Schedule a one-shot enqueue at `whenEpochMs`; returns the future JobId.
     #[napi]
     pub async fn schedule_at(
@@ -810,8 +841,10 @@ impl ForgeClient {
     #[napi]
     pub async fn pubsub_subscribe(&self, topic: String) -> Result<JsSubscription> {
         let sub = self.forge.pubsub().subscribe(&topic).await.map_err(err)?;
+        let (closed_tx, _) = tokio::sync::watch::channel(false);
         Ok(JsSubscription {
             inner: Arc::new(Mutex::new(sub)),
+            closed_tx: Arc::new(closed_tx),
         })
     }
 
@@ -1092,6 +1125,10 @@ impl ForgeClient {
 #[napi]
 pub struct JsSubscription {
     inner: Arc<Mutex<forgelib::Subscription>>,
+    /// Flipped by `close`. A `watch` channel rather than the mutex, so `close` can
+    /// interrupt a `next` that is parked on the stream while holding the lock —
+    /// with only the mutex, `close` deadlocked until the next message arrived.
+    closed_tx: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
 #[napi]
@@ -1099,19 +1136,27 @@ impl JsSubscription {
     /// The next published payload as raw bytes, or `null` when the stream ends.
     #[napi]
     pub async fn next(&self) -> Result<Option<Buffer>> {
+        let mut closed_rx = self.closed_tx.subscribe();
         let mut inner = self.inner.lock().await;
-        match inner.next().await {
-            Some(Ok(b)) => Ok(Some(Buffer::from(b.to_vec()))),
-            Some(Err(e)) => Err(err(e)),
-            None => Ok(None),
+        tokio::select! {
+            // `wait_for` is level-triggered: it also returns when close() already ran.
+            _ = closed_rx.wait_for(|closed| *closed) => Ok(None),
+            item = inner.next() => match item {
+                Some(Ok(b)) => Ok(Some(Buffer::from(b.to_vec()))),
+                Some(Err(e)) => Err(err(e)),
+                None => Ok(None),
+            },
         }
     }
 
     /// Unsubscribe now, releasing the broadcast receiver deterministically instead
-    /// of waiting for GC. Idempotent; subsequent `next()` calls return `null`. A
-    /// GraphQL server should call this when a client's WebSocket closes.
+    /// of waiting for GC. Any pending `next()` resolves to `null` immediately;
+    /// idempotent; subsequent `next()` calls return `null`. A GraphQL server should
+    /// call this when a client's WebSocket closes.
     #[napi]
     pub async fn close(&self) {
+        let _ = self.closed_tx.send(true);
+        // A parked next() wakes on the send and releases the lock promptly.
         let mut inner = self.inner.lock().await;
         *inner = futures_util::stream::empty().boxed();
     }

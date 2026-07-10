@@ -12,6 +12,8 @@ Every app needs the same plumbing, and the usual answer is a separate service fo
 Six things to provision, secure, mock in tests, and learn before you ship a feature. It's worse for an AI agent building the app, where each service is more to wire up and another API to get wrong.
 
 Forge does all of it in one library, with the same API in Rust, Node, and Python.
+The `1.x` line is the stable API: Rust, Node, and Python release in lockstep and
+reserve breaking changes for `2.0`.
 
 ## One connection, eight primitives
 
@@ -40,9 +42,10 @@ import { ForgeClient } from "forgelib";
 
 const forge = await ForgeClient.init(); // instantiates the runtime from ./forge.toml
 
-// auth: argon2 password hashing and sessions
+// auth: argon2 password hashing, sessions, one-time tokens (password reset, magic links)
 const hash = await forge.hashPassword(password);
 const session = await forge.createSession(userId);
+const reset = await forge.createToken(userId, "password-reset", 900); // consumeToken later, once
 
 // rate limit: 20 attempts per minute, keyed by email
 const limit = await forge.rateLimitCheck("login", email, 20, 60);
@@ -89,6 +92,7 @@ let forge = Forge::init().await?; // instantiates the runtime from ./forge.toml
 // auth
 let hash = forge.auth().hash_password(&password).await?;
 let session = forge.auth().create_session(&user_id, SessionOpts::default()).await?;
+let reset = forge.auth().create_token(&user_id, "password-reset", Duration::from_secs(900)).await?;
 
 // rate limit
 let limit = forge.ratelimit()
@@ -134,6 +138,7 @@ forge = await forgelib.ForgeClient.init()  # instantiates the runtime from ./for
 # auth
 hash = await forge.hash_password(password)
 session = await forge.create_session(user_id)
+reset = await forge.create_token(user_id, "password-reset", 900)  # consume_token later, once
 
 # rate limit
 limit = await forge.rate_limit_check("login", email, 20, 60)

@@ -6,17 +6,17 @@ on:
       version:
         description: "Version to release, without v prefix"
         required: true
-        default: "0.0.1"
+        default: "1.0.0"
       release_tag:
         description: "Git tag to release from"
         required: true
-        default: "forgelib-v0.0.1"
+        default: "v1.0.0"
       dry_run:
         description: "Build/package only; do not publish"
         required: true
-        default: "false"
+        default: "true"
         type: choice
-        options: ["false", "true"]
+        options: ["true", "false"]
       publish_crates:
         description: "Publish Rust crate to crates.io"
         required: true
@@ -36,74 +36,72 @@ on:
         type: choice
         options: ["true", "false"]
       publish_pub:
-        description: "Publish Dart package to pub.dev"
+        description: "Publish metadata-only Dart reservation package"
         required: true
-        default: "true"
+        default: "false"
         type: choice
         options: ["true", "false"]
       publish_jsr:
-        description: "Publish TypeScript package to JSR"
+        description: "Publish metadata-only TypeScript reservation package"
         required: true
-        default: "true"
+        default: "false"
         type: choice
         options: ["true", "false"]
       publish_hex:
-        description: "Publish Elixir package to Hex"
+        description: "Publish metadata-only Elixir reservation package"
         required: true
-        default: "true"
+        default: "false"
         type: choice
         options: ["true", "false"]
       publish_rubygems:
-        description: "Publish Ruby gem to RubyGems"
+        description: "Publish metadata-only Ruby reservation package"
         required: true
-        default: "true"
+        default: "false"
         type: choice
         options: ["true", "false"]
       publish_nuget:
-        description: "Publish .NET package to NuGet"
+        description: "Publish metadata-only .NET reservation package"
         required: true
-        default: "true"
+        default: "false"
         type: choice
         options: ["true", "false"]
       publish_maven:
-        description: "Build and deploy JVM package with Maven"
+        description: "Publish metadata-only JVM reservation package"
         required: true
-        default: "true"
+        default: "false"
         type: choice
         options: ["true", "false"]
       publish_cocoapods:
-        description: "Publish Swift podspec to CocoaPods"
+        description: "Publish metadata-only Swift reservation package"
         required: true
-        default: "true"
+        default: "false"
         type: choice
         options: ["true", "false"]
       publish_hackage:
-        description: "Publish Haskell package to Hackage"
+        description: "Publish metadata-only Haskell reservation package"
         required: true
-        default: "true"
+        default: "false"
         type: choice
         options: ["true", "false"]
       publish_packagist:
-        description: "Request Packagist package update"
+        description: "Publish metadata-only PHP reservation package"
         required: true
-        default: "true"
+        default: "false"
         type: choice
         options: ["true", "false"]
       publish_ghcr:
         description: "Publish metadata container image to GHCR"
         required: true
-        default: "true"
+        default: "false"
         type: choice
         options: ["true", "false"]
       baseline_ref:
         description: "Optional previous release ref for cargo-semver-checks"
         required: false
-        default: ""
+        default: "forgelib-v0.0.1"
 
 permissions:
   contents: read
-  id-token: write
-  packages: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -140,30 +138,64 @@ jobs:
           set -euo pipefail
           VERSION="${{ inputs.version }}"
           TAG="${{ inputs.release_tag }}"
-          case "$TAG" in
-            "v$VERSION"|"forgelib-v$VERSION") ;;
-            *)
-              echo "Release tag must be v$VERSION or forgelib-v$VERSION; got $TAG" >&2
-              exit 1
-              ;;
-          esac
+          if [[ "$TAG" != "forgelib-v$VERSION" ]]; then
+            echo "Release tag must be forgelib-v$VERSION; got $TAG" >&2
+            exit 1
+          fi
           grep -q '^version = "'$VERSION'"$' Cargo.toml
           grep -q '"version": "'$VERSION'"' bindings/node/package.json
           grep -q '^version = "'$VERSION'"$' bindings/python/pyproject.toml
-          grep -q '^version: '$VERSION'$' bindings/dart/pubspec.yaml
-          grep -q 'spec.version = "'$VERSION'"' bindings/ruby/forgelib.gemspec
-          grep -q '<Version>'$VERSION'</Version>' bindings/dotnet/ForgeLib.csproj
-          grep -q '<version>'$VERSION'</version>' bindings/java/pom.xml
-          grep -q '"name": "isala404/forgelib"' composer.json
-          grep -q 'spec.version = "'$VERSION'"' bindings/swift/ForgeLib.podspec
-          grep -q 'version: "'$VERSION'"' bindings/elixir/mix.exs
-          grep -q '^version: '$VERSION'$' bindings/haskell/forgelib.cabal
-          grep -q '"version": "'$VERSION'"' bindings/jsr/jsr.json
-          grep -q '^Version: '$VERSION'$' bindings/r/DESCRIPTION
+          grep -q '^version = "'$VERSION'"$' bindings/node/Cargo.toml
+          grep -q '^version = "'$VERSION'"$' bindings/python/Cargo.toml
+
+          # Reservation packages intentionally stay at 0.0.1. Selecting one for a
+          # future publish requires an explicit version bump and therefore fails
+          # here instead of presenting metadata as a stable 1.x API.
+          if [[ "${{ inputs.publish_pub }}" == "true" ]]; then grep -q '^version: '$VERSION'$' bindings/dart/pubspec.yaml; fi
+          if [[ "${{ inputs.publish_rubygems }}" == "true" ]]; then grep -q 'spec.version = "'$VERSION'"' bindings/ruby/forgelib.gemspec; fi
+          if [[ "${{ inputs.publish_nuget }}" == "true" ]]; then grep -q '<Version>'$VERSION'</Version>' bindings/dotnet/ForgeLib.csproj; fi
+          if [[ "${{ inputs.publish_maven }}" == "true" ]]; then grep -q '<version>'$VERSION'</version>' bindings/java/pom.xml; fi
+          if [[ "${{ inputs.publish_packagist }}" == "true" ]]; then grep -q '"name": "isala404/forgelib"' composer.json; fi
+          if [[ "${{ inputs.publish_cocoapods }}" == "true" ]]; then grep -q 'spec.version = "'$VERSION'"' bindings/swift/ForgeLib.podspec; fi
+          if [[ "${{ inputs.publish_hex }}" == "true" ]]; then grep -q 'version: "'$VERSION'"' bindings/elixir/mix.exs; fi
+          if [[ "${{ inputs.publish_hackage }}" == "true" ]]; then grep -q '^version: '$VERSION'$' bindings/haskell/forgelib.cabal; fi
+          if [[ "${{ inputs.publish_jsr }}" == "true" ]]; then grep -q '"version": "'$VERSION'"' bindings/jsr/jsr.json; fi
           if [[ "${{ inputs.dry_run }}" != "true" && "$GITHUB_REF" != "refs/tags/$TAG" ]]; then
             echo "Real releases must be dispatched from $TAG; current ref is $GITHUB_REF" >&2
             exit 1
           fi
+      - name: Confirm crates.io target is publishable
+        if: ${{ inputs.publish_crates == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ inputs.version }}"
+          curl --fail --silent --location \
+            --user-agent "forgelib-release-check/${VERSION}" \
+            https://index.crates.io/fo/rg/forgelib | VERSION="$VERSION" python3 -c '
+          import json
+          import os
+          import sys
+
+          version = os.environ["VERSION"]
+          for line in sys.stdin:
+              if not line.strip():
+                  continue
+              item = json.loads(line)
+              if item.get("vers") != version:
+                  continue
+              if item.get("yanked"):
+                  print(
+                      f"crates.io forgelib@{version} exists but is yanked; "
+                      "crates.io versions are immutable, so this release cannot publish the Rust crate.",
+                      file=sys.stderr,
+                  )
+                  sys.exit(1)
+              print(f"::notice::crates.io forgelib@{version} already exists; publish will be skipped.")
+              sys.exit(0)
+
+          print(f"::notice::crates.io forgelib@{version} is available.")
+          '
       - name: Confirm publish credentials
         if: ${{ inputs.dry_run == 'false' }}
         shell: bash
@@ -211,7 +243,7 @@ jobs:
           registry = os.environ["REGISTRY"]
           package = os.environ.get("PACKAGE", "")
           version = os.environ["VERSION"]
-          headers = {"User-Agent": "forgelib-release-check/0.0.1"}
+          headers = {"User-Agent": f"forgelib-release-check/{version}"}
 
           def fetch_json(url):
               request = urllib.request.Request(url, headers=headers)
@@ -237,7 +269,10 @@ jobs:
                   request = urllib.request.Request("https://index.crates.io/fo/rg/forgelib", headers=headers)
                   with urllib.request.urlopen(request, timeout=15) as response:
                       for line in response:
-                          if line.strip() and json.loads(line).get("vers") == version:
+                          if not line.strip():
+                              continue
+                          item = json.loads(line)
+                          if item.get("vers") == version and not item.get("yanked"):
                               sys.exit(0)
                   sys.exit(1)
               if registry == "npm":
@@ -354,7 +389,11 @@ jobs:
             exit 1
           fi
       - run: cargo fmt --all --check
+      - run: cargo fmt --manifest-path bindings/node/Cargo.toml -- --check
+      - run: cargo fmt --manifest-path bindings/python/Cargo.toml -- --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo clippy --manifest-path bindings/node/Cargo.toml --all-targets -- -D warnings
+      - run: cargo clippy --manifest-path bindings/python/Cargo.toml --all-targets -- -D warnings
       - run: cargo build --all-features
       - run: cargo test
       - run: cargo run --manifest-path tools/codegen/Cargo.toml -- --check
@@ -362,12 +401,19 @@ jobs:
       - run: python3 tools/skill-check/check.py
       - run: cargo deny check
       - run: cargo audit --deny warnings
+      - run: cargo audit --file bindings/node/Cargo.lock --deny warnings
+      - run: cargo audit --file bindings/python/Cargo.lock --deny warnings
       - run: cargo package --no-verify
       - name: Optional Rust public API compatibility check
         if: ${{ inputs.baseline_ref != '' }}
         run: |
-          cargo install cargo-semver-checks --locked
-          cargo semver-checks check-release --baseline-rev "${{ inputs.baseline_ref }}"
+          cargo install cargo-semver-checks --locked --version 0.48.0
+          # The 0.x -> 1.0 version jump is technically a major release, which would
+          # skip compatibility lints. Force a minor-policy comparison so the stable
+          # boundary preserves the already-published Rust API unless reviewed.
+          cargo semver-checks check-release \
+            --release-type minor \
+            --baseline-rev "${{ inputs.baseline_ref }}"
 
   postgres-tests:
     name: Postgres Integration
@@ -447,13 +493,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if curl --fail --silent https://index.crates.io/fo/rg/forgelib | python3 -c '
+          if curl --fail --silent --location \
+            --user-agent "forgelib-release-check/${{ inputs.version }}" \
+            https://index.crates.io/fo/rg/forgelib | python3 -c '
           import json
           import sys
 
           version = "${{ inputs.version }}"
           for line in sys.stdin:
-              if line.strip() and json.loads(line).get("vers") == version:
+              if not line.strip():
+                  continue
+              item = json.loads(line)
+              if item.get("vers") != version:
+                  continue
+              if item.get("yanked"):
+                  print(
+                      f"crates.io forgelib@{version} exists but is yanked; "
+                      "this version cannot be republished.",
+                      file=sys.stderr,
+                  )
+                  sys.exit(2)
+              else:
                   sys.exit(0)
           sys.exit(1)
           '; then
@@ -493,10 +553,6 @@ jobs:
             target: aarch64-apple-darwin
             platform: darwin-arm64
             zig: false
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            platform: darwin-x64
-            zig: false
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             platform: win32-x64-msvc
@@ -535,6 +591,9 @@ jobs:
     timeout-minutes: 20
     needs: [node-native, postgres-tests, conformance]
     if: ${{ inputs.publish_npm == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
     defaults:
       run:
         working-directory: bindings/node
@@ -556,7 +615,6 @@ jobs:
           set -euo pipefail
           for artifact in \
             forgelib.darwin-arm64.node \
-            forgelib.darwin-x64.node \
             forgelib.linux-arm64-gnu.node \
             forgelib.linux-x64-gnu.node \
             forgelib.linux-x64-musl.node \
@@ -633,6 +691,9 @@ jobs:
     timeout-minutes: 30
     needs: [python-wheels, postgres-tests, conformance]
     if: ${{ inputs.publish_pypi == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -1108,7 +1169,7 @@ jobs:
       - name: Build R package
         run: R CMD build bindings/r
       - name: Check R package
-        run: R CMD check --no-manual forgelib_${{ inputs.version }}.tar.gz
+        run: R CMD check --no-manual forgelib_*.tar.gz
 
   go:
     name: Go module
@@ -1143,6 +1204,9 @@ jobs:
     timeout-minutes: 15
     needs: [postgres-tests, conformance]
     if: ${{ inputs.publish_ghcr == 'true' }}
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
       - uses: docker/login-action@v3
@@ -1156,3 +1220,65 @@ jobs:
           context: bindings/container
           tags: ghcr.io/isala404/forgelib:${{ inputs.version }}
           push: ${{ inputs.dry_run == 'false' }}
+
+  github-release:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    needs:
+      - preflight
+      - postgres-tests
+      - conformance
+      - crates
+      - node-native
+      - npm
+      - python-wheels
+      - pypi
+      - dart
+      - jsr
+      - hex
+      - rubygems
+      - nuget
+      - maven
+      - cocoapods
+      - hackage
+      - php
+      - r
+      - go
+      - swift
+      - ghcr
+    if: ${{ always() && inputs.dry_run == 'false' && !cancelled() && !failure() }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create immutable GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::notice::GitHub release $TAG already exists; leaving it unchanged."
+            exit 0
+          fi
+          NOTES="$RUNNER_TEMP/forgelib-release-notes.md"
+          python3 - <<'PY' > "$NOTES"
+          import os
+          from pathlib import Path
+
+          version = os.environ["VERSION"]
+          changelog = Path("CHANGELOG.md").read_text()
+          marker = f"## [{version}]"
+          start = changelog.find(marker)
+          if start < 0:
+              raise SystemExit(f"CHANGELOG.md has no {marker} section")
+          end = changelog.find("\n## [", start + len(marker))
+          print(changelog[start : end if end >= 0 else None].strip())
+          PY
+          gh release create "$TAG" \
+            --verify-tag \
+            --title "Forge $VERSION" \
+            --notes-file "$NOTES" \
+            --latest

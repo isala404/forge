@@ -1,6 +1,6 @@
 [package]
 name = "forgelib-python"
-version = "0.0.1"
+version = "1.0.0"
 edition = "2021"
 publish = false
 description = "Python (pyo3) bindings for Forge — hardened infra primitives on Postgres"
@@ -20,11 +20,11 @@ crate-type = ["cdylib"]
 forge = { package = "forgelib", path = "../..", features = ["otel", "embedded"] }
 # abi3-py39: build against the stable ABI so one wheel runs on CPython >= 3.9
 # (including newer interpreters than this pyo3 release knows about).
-pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py39"] }
 # Native async: every method returns a Python awaitable driven on a shared Tokio
 # runtime, so callers `await` the binding directly (no thread-pool wrapper).
-pyo3-async-runtimes = { version = "0.23", features = ["tokio-runtime"] }
-tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
 futures-util = { version = "0.3", default-features = false }
 
 [profile.release]

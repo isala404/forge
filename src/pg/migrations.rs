@@ -24,6 +24,10 @@ fn embedded_migrations() -> Vec<Migration> {
             "v002_drop_backoff",
             include_str!("../migrations/v002_drop_backoff.sql"),
         ),
+        Migration::parse(
+            "v003_one_time_tokens",
+            include_str!("../migrations/v003_one_time_tokens.sql"),
+        ),
     ]
 }
 
@@ -484,9 +488,10 @@ SELECT 3;
     #[test]
     fn embedded_migrations_parse_and_are_transactional() {
         let m = embedded_migrations();
-        assert_eq!(m.len(), 2);
+        assert_eq!(m.len(), 3);
         assert_eq!(m[0].version, "v001_schema");
         assert_eq!(m[1].version, "v002_drop_backoff");
+        assert_eq!(m[2].version, "v003_one_time_tokens");
         assert!(m.iter().all(|m| m.transactional));
     }
 

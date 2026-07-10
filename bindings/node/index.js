@@ -25,9 +25,6 @@ function bindingFileName() {
       }
       break
     case 'darwin':
-      if (arch === 'x64') {
-        return 'forgelib.darwin-x64.node'
-      }
       if (arch === 'arm64') {
         return 'forgelib.darwin-arm64.node'
       }

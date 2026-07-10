@@ -1,6 +1,6 @@
 use super::{
     ApiKey, ApiKeyInfo, ApiKeySecret, Auth, MAX_ID_BYTES, MAX_LABEL_BYTES, MAX_PASSWORD_BYTES,
-    MAX_PHC_BYTES, PhcString, Session, SessionOpts, SessionToken,
+    MAX_PHC_BYTES, MAX_PURPOSE_BYTES, OneTimeToken, PhcString, Session, SessionOpts, SessionToken,
 };
 use crate::backend::{BackendLifecycle, Primitive};
 use crate::error::{ForgeError, Result};
@@ -83,6 +83,29 @@ fn check_password(plain: &str) -> Result<()> {
     Ok(())
 }
 
+fn check_purpose(purpose: &str) -> Result<()> {
+    if purpose.is_empty() {
+        return Err(ForgeError::invalid("purpose must not be empty"));
+    }
+    if purpose.len() > MAX_PURPOSE_BYTES {
+        return Err(ForgeError::limit(format!(
+            "purpose is {} bytes; max is {MAX_PURPOSE_BYTES}",
+            purpose.len()
+        )));
+    }
+    Ok(())
+}
+
+fn check_token_ttl(ttl: Duration) -> Result<()> {
+    if ttl.is_zero() {
+        return Err(ForgeError::invalid("token ttl must be positive"));
+    }
+    if ttl.as_secs_f64() > MAX_ABSOLUTE_SECS {
+        return Err(ForgeError::limit("token ttl exceeds the maximum"));
+    }
+    Ok(())
+}
+
 fn check_session_opts(opts: &SessionOpts) -> Result<()> {
     if opts.idle_timeout.is_zero() || opts.absolute_timeout.is_zero() {
         return Err(ForgeError::invalid("session timeouts must be positive"));
@@ -132,11 +155,19 @@ struct ApiKeyRecord {
     label: String,
 }
 
+/// A stored one-time token. The map key is the token's SHA-256; the plaintext is never kept.
+struct TokenRecord {
+    user_id: String,
+    purpose: String,
+    expires_at: SystemTime,
+}
+
 /// In-process [`Auth`]. Passwords are stateless; sessions and API keys are held as
 /// digest-keyed maps. Not durable.
 pub(crate) struct MemAuth {
     sessions: Mutex<HashMap<String, SessionRecord>>,
     api_keys: Mutex<HashMap<String, ApiKeyRecord>>,
+    tokens: Mutex<HashMap<String, TokenRecord>>,
     /// App namespace, the in-process analog of `PgAuth`'s `app` column: it scopes every
     /// stored digest so an app sharing a process can neither validate nor revoke another
     /// app's sessions or keys. Empty = the unnamespaced app.
@@ -148,6 +179,7 @@ impl MemAuth {
         Self {
             sessions: Mutex::new(HashMap::new()),
             api_keys: Mutex::new(HashMap::new()),
+            tokens: Mutex::new(HashMap::new()),
             namespace,
         }
     }
@@ -158,15 +190,22 @@ impl MemAuth {
         namespaced(&self.namespace, digest)
     }
 
-    /// Drop expired sessions, mirroring `PgAuth::sweep`. Reads already treat them as
-    /// absent; this reclaims the memory. Returns how many were purged. API keys never
-    /// expire, so they are untouched.
+    /// Drop expired sessions and one-time tokens, mirroring `PgAuth::sweep`. Reads
+    /// already treat them as absent; this reclaims the memory. Returns how many were
+    /// purged. API keys never expire, so they are untouched.
     pub(crate) fn purge_expired(&self) -> u64 {
         let now = SystemTime::now();
-        let mut sessions = lock(&self.sessions);
-        let before = sessions.len();
-        sessions.retain(|_, rec| rec.is_live(now));
-        (before - sessions.len()) as u64
+        let mut purged = {
+            let mut sessions = lock(&self.sessions);
+            let before = sessions.len();
+            sessions.retain(|_, rec| rec.is_live(now));
+            (before - sessions.len()) as u64
+        };
+        let mut tokens = lock(&self.tokens);
+        let before = tokens.len();
+        tokens.retain(|_, rec| rec.expires_at > now);
+        purged += (before - tokens.len()) as u64;
+        purged
     }
 }
 
@@ -324,6 +363,42 @@ impl Auth for MemAuth {
                 Ok(true)
             }
             None => Ok(false),
+        }
+    }
+
+    async fn create_token(
+        &self,
+        user_id: &str,
+        purpose: &str,
+        ttl: Duration,
+    ) -> Result<OneTimeToken> {
+        check_id(user_id)?;
+        check_purpose(purpose)?;
+        check_token_ttl(ttl)?;
+        let token = random_token();
+        let token_hash = sha256_hex(token.as_bytes());
+        let record = TokenRecord {
+            user_id: user_id.to_string(),
+            purpose: purpose.to_string(),
+            expires_at: SystemTime::now() + ttl,
+        };
+        lock(&self.tokens).insert(self.physical(&token_hash), record);
+        Ok(OneTimeToken::new(token))
+    }
+
+    async fn consume_token(&self, token: &str, purpose: &str) -> Result<Option<String>> {
+        check_purpose(purpose)?;
+        let pk = self.physical(&sha256_hex(token.as_bytes()));
+        let now = SystemTime::now();
+        let mut tokens = lock(&self.tokens);
+        // Consume only a live token minted for this purpose; a purpose mismatch leaves
+        // it intact, matching `PgAuth`'s conditional DELETE. Expired records linger
+        // until `purge_expired`, like the unswept SQL rows.
+        match tokens.get(&pk) {
+            Some(rec) if rec.expires_at > now && rec.purpose == purpose => {
+                Ok(tokens.remove(&pk).map(|r| r.user_id))
+            }
+            _ => Ok(None),
         }
     }
 }
@@ -558,6 +633,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn token_create_consume_is_single_use() {
+        let auth = MemAuth::new(String::new());
+        let token = auth
+            .create_token("user-1", "password-reset", Duration::from_secs(900))
+            .await
+            .unwrap();
+        assert_eq!(token.as_str().len(), TOKEN_BYTES * 2);
+
+        // Wrong purpose leaves the token intact.
+        assert!(
+            auth.consume_token(token.as_str(), "email-verify")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        assert_eq!(
+            auth.consume_token(token.as_str(), "password-reset")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("user-1")
+        );
+        // Second consume finds nothing: single use.
+        assert!(
+            auth.consume_token(token.as_str(), "password-reset")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        assert!(
+            auth.consume_token("unknown-token", "password-reset")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn tokens_expire_and_sweep_reclaims_them() {
+        let auth = MemAuth::new(String::new());
+        let token = auth
+            .create_token("u", "magic-link", Duration::from_millis(50))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            auth.consume_token(token.as_str(), "magic-link")
+                .await
+                .unwrap()
+                .is_none(),
+            "expired => absent"
+        );
+        // The expired record lingers (consume does not delete it) until a sweep.
+        assert_eq!(auth.purge_expired(), 1);
+        assert_eq!(auth.purge_expired(), 0, "sweep is idempotent");
+    }
+
+    #[tokio::test]
+    async fn token_input_is_validated() {
+        let auth = MemAuth::new(String::new());
+        assert!(matches!(
+            auth.create_token("", "p", Duration::from_secs(60)).await,
+            Err(ForgeError::Invalid(_))
+        ));
+        assert!(matches!(
+            auth.create_token("u", "", Duration::from_secs(60)).await,
+            Err(ForgeError::Invalid(_))
+        ));
+        assert!(matches!(
+            auth.create_token("u", "p", Duration::ZERO).await,
+            Err(ForgeError::Invalid(_))
+        ));
+        let big = "x".repeat(MAX_PURPOSE_BYTES + 1);
+        assert!(matches!(
+            auth.create_token("u", &big, Duration::from_secs(60)).await,
+            Err(ForgeError::Limit(_))
+        ));
+        assert!(matches!(
+            auth.create_token("u", "p", Duration::from_secs(u64::MAX / 2))
+                .await,
+            Err(ForgeError::Limit(_))
+        ));
+        assert!(matches!(
+            auth.consume_token("t", "").await,
+            Err(ForgeError::Invalid(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn namespaces_isolate_sessions_and_keys() {
         let a = MemAuth::new("app_a".to_string());
         let b = MemAuth::new("app_b".to_string());
@@ -585,6 +751,24 @@ mod tests {
         assert!(
             !b.revoke_api_key(&key.id).await.unwrap(),
             "another app cannot revoke the key"
+        );
+
+        let t = a
+            .create_token("u", "reset", Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert!(
+            b.consume_token(t.as_str(), "reset")
+                .await
+                .unwrap()
+                .is_none(),
+            "another app cannot consume the token"
+        );
+        assert!(
+            a.consume_token(t.as_str(), "reset")
+                .await
+                .unwrap()
+                .is_some()
         );
     }
 

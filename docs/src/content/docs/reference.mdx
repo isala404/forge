@@ -108,6 +108,8 @@ so app payloads stay typed without a separate overlay.
 | Revoke session | `auth().revoke_session` | `revokeSession` | `revoke_session` |
 | Create API key | `auth().create_api_key` | `createApiKey` | `create_api_key` |
 | Verify API key | `auth().verify_api_key` | `verifyApiKey` | `verify_api_key` |
+| Create one-time token | `auth().create_token` | `createToken` | `create_token` |
+| Consume one-time token | `auth().consume_token` | `consumeToken` | `consume_token` |
 
 ### Rate limit
 
@@ -223,7 +225,7 @@ might succeed.
 | `Config` | no | Bad configuration. Only happens during `init()`. |
 | `Unavailable` | yes | A transient backend outage (timeout, dropped connection). |
 | `NotFound` | no | The requested entity doesn't exist. |
-| `Precondition` | no | A condition failed: a CAS mismatch, a lost lease, a duplicate `dedup_id`. Re-read state and decide. |
+| `Precondition` | no | A condition failed: a CAS mismatch, a lost lease, an unknown receipt. Re-read state and decide. (A duplicate `dedup_id` is not an error — enqueue returns the existing job's id.) |
 | `Limit` | no | A size or quota limit was exceeded. |
 | `Invalid` | no | A bad argument or malformed input. |
 | `Backend` | sometimes | Anything else, carrying its own retryable flag. |
@@ -252,6 +254,7 @@ Oversized input is rejected with a `Limit` error rather than truncated.
 | Pub/sub payload | ~7 KB, UTF-8 |
 | Config value | 64 KiB |
 | Password input | 4096 bytes |
+| Token purpose | 255 bytes |
 
 ## Custom backends
 

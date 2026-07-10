@@ -1,9 +1,10 @@
 # Forge language bindings
 
 This directory contains first-party package scaffolds for Forge across package
-registries. Rust, Node.js, and Python are the active bindings today. The other
-packages are minimal metadata releases that reserve the official first-party
-package coordinates while their full bindings are prepared.
+registries. Rust, Node.js, and Python are the active `1.0.0` bindings. The other
+packages are minimal `0.0.1` metadata releases that reserve official first-party
+coordinates while their full bindings are prepared. Metadata-only packages do not
+share the active bindings' version and must not be published as `1.x`.
 
 Package names:
 
@@ -23,17 +24,12 @@ Package names:
 - Go: `github.com/isala404/forge/bindings/go`
 - Container image: `ghcr.io/isala404/forgelib`
 
-Reserved 0.0.1 releases:
+The coordinated `1.0.0` release targets are:
 
-- crates.io: `forgelib` `0.0.1`
-- npm: `forgelib` `0.0.1`
-- pub.dev: `forgelib` `0.0.1`
-- JSR: `@isala404/forgelib` `0.0.1`
-- Hex: `forgelib` `0.0.1`
-- GHCR: `ghcr.io/isala404/forgelib:0.0.1`
+- crates.io: `forgelib`
+- npm: `forgelib`
+- PyPI: `forgelib`
 
-Ready for first publish once registry credentials or registry approval are completed:
-
-- PyPI, RubyGems, NuGet, Maven Central, Packagist, CocoaPods, and Hackage.
-- CRAN, Go, and SwiftPM do not have token-based publish steps in this
-  placeholder workflow; their package scaffolds are checked by CI.
+All other entries above remain reservation scaffolds until their implementations pass
+the same conformance contract as the active bindings. Their package checks stay in CI,
+but publishing them is disabled by default in the release workflow.

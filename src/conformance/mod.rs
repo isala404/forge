@@ -519,6 +519,30 @@ async fn dispatch(
                 None => Value::Null,
             },
         ),
+        "auth.create_token" => {
+            let ttl = args["ttl_seconds"]
+                .as_f64()
+                .unwrap_or_else(|| panic!("arg \"ttl_seconds\" must be a number"));
+            let token = forge
+                .auth()
+                .create_token(
+                    arg_str(args, "user_id"),
+                    arg_str(args, "purpose"),
+                    Duration::from_secs_f64(ttl),
+                )
+                .await?;
+            Ok(json!(token.as_str()))
+        }
+        "auth.consume_token" => Ok(
+            match forge
+                .auth()
+                .consume_token(arg_str(args, "token"), arg_str(args, "purpose"))
+                .await?
+            {
+                Some(user_id) => json!(user_id),
+                None => Value::Null,
+            },
+        ),
         "blob.put" => {
             let mut opts = PutOpts::new();
             if let Some(ct) = args.get("content_type").and_then(Value::as_str) {

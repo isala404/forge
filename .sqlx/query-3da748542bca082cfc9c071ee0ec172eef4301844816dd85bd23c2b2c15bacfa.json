@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM forge_auth_tokens WHERE expires_at <= now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "3da748542bca082cfc9c071ee0ec172eef4301844816dd85bd23c2b2c15bacfa"
+}

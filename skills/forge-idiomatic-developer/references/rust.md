@@ -27,7 +27,7 @@ let v: Option<Bytes> = forge.kv().get("k").await?;
 let many = forge.kv().mget(&["a", "b"]).await?;
 let n = forge.kv().incr("hits", 1).await?;                      // exact i64
 forge.kv().expire("k", Duration::from_secs(30)).await?;
-forge.kv().compare_and_swap("k", Some("v".into()), "w".into()).await?;
+forge.kv().compare_and_swap("k", Some("v".into()), "w".into()).await?; // old = None means "expect absent"
 let (keys, next) = forge.kv().scan("user:", None, 100).await?; // cursor pagination
 forge.kv().delete("k").await?;
 forge.kv().exists("k").await?;
@@ -47,6 +47,7 @@ let depth = forge.queue().depth("emails").await?;    // QueueDepth { visible, in
 ```
 
 `Job::id()` is the stable idempotency key; the lease token settles the delivery.
+A repeated `dedup_id` within the window returns the existing job's id (no error).
 Prefer the managed worker below to a hand-rolled loop.
 
 ## Managed worker — `forge.worker(name)`
@@ -62,7 +63,8 @@ forge.worker("emails")
 
 The builder dequeues, heartbeats within the visibility window, acks on `Ok`, nacks on
 `Err`, and abandons the job if the lease is lost. `.grace(d)` and `.poll_wait(d)` tune
-shutdown drain and long-poll.
+shutdown drain and long-poll. Await `.run_until(...)` to completion before process
+exit; resolving the shutdown future begins the drain rather than completing it.
 
 ## Pub/sub — `forge.pubsub()`
 
@@ -104,6 +106,8 @@ forge.auth().revoke_all_sessions(&user_id).await?;
 let key = forge.auth().create_api_key(&owner_id, "ci").await?;     // key.secret shown once
 let info = forge.auth().verify_api_key(key.secret.as_str()).await?;
 forge.auth().revoke_api_key(&key.id).await?;
+let reset = forge.auth().create_token(&user_id, "password-reset", Duration::from_secs(900)).await?;
+let owner = forge.auth().consume_token(reset.as_str(), "password-reset").await?; // Option<String>, single use
 ```
 
 ## Rate limit — `forge.ratelimit()`
@@ -117,6 +121,9 @@ forge.ratelimit().check_with("login", &email,
     Limit::per_duration(20, Duration::from_secs(60)).with_algo(Algo::SlidingWindow),
     FailMode::Closed).await?;
 ```
+
+Use `FailMode::Closed` for credential, password-reset, invite, and API-key verification
+paths. Reserve fail-open behavior for explicitly low-risk, availability-first traffic.
 
 ## Schedule — `forge.schedule()`
 

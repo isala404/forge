@@ -257,6 +257,18 @@ export declare class ForgeClient {
   createApiKey(ownerId: string, label: string): Promise<JsApiKey>
   /** Verify an API key; returns the `ownerId`, or `null`. */
   verifyApiKey(key: string): Promise<string | null>
+  /**
+   * Mint a single-use token scoped to `purpose` (e.g. `"password-reset"`), expiring
+   * after `ttlSeconds`; returns the opaque token (shown once). Deliver it out of
+   * band (email link, SMS); Forge does not send anything.
+   */
+  createToken(userId: string, purpose: string, ttlSeconds: number): Promise<string>
+  /**
+   * Atomically consume a token minted for `purpose`; returns its `userId`, or `null`
+   * when unknown/expired/already consumed. A live token presented with the wrong
+   * `purpose` is left intact.
+   */
+  consumeToken(token: string, purpose: string): Promise<string | null>
   /** Schedule a one-shot enqueue at `whenEpochMs`; returns the future JobId. */
   scheduleAt(whenEpochMs: number, queue: string, payload: string, maxAttempts?: number | undefined | null): Promise<string>
   /**
@@ -358,8 +370,9 @@ export declare class JsSubscription {
   next(): Promise<Buffer | null>
   /**
    * Unsubscribe now, releasing the broadcast receiver deterministically instead
-   * of waiting for GC. Idempotent; subsequent `next()` calls return `null`. A
-   * GraphQL server should call this when a client's WebSocket closes.
+   * of waiting for GC. Any pending `next()` resolves to `null` immediately;
+   * idempotent; subsequent `next()` calls return `null`. A GraphQL server should
+   * call this when a client's WebSocket closes.
    */
   close(): Promise<void>
 }

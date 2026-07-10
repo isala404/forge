@@ -97,9 +97,13 @@ fn gen_py() -> String {
     for dto in SCHEMA {
         out.push('\n');
         out.push_str(&doc_lines("", dto.doc));
-        out.push_str("#[pyclass(get_all)]\n");
         if dto.clone {
+            // These DTOs implement Clone only because a page getter must return a
+            // copied Vec<T>. They are output values, never Python method inputs.
+            out.push_str("#[pyclass(get_all, skip_from_py_object)]\n");
             out.push_str("#[derive(Clone)]\n");
+        } else {
+            out.push_str("#[pyclass(get_all)]\n");
         }
         out.push_str(&format!("struct {} {{\n", dto.py_name));
         for f in dto.fields {

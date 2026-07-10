@@ -122,8 +122,8 @@ same time.
 
 `maintain()` is the housekeeping sweep: it purges expired key/value rows and old
 finished jobs, reclaims leases left behind by crashed workers, drops stale rate-limit
-and dedup rows, and expires dead sessions. It's idempotent, so running it on every
-replica is fine. Rust also has `run_scheduler()`, a managed loop that ticks every 30
+and dedup rows, and expires dead sessions and one-time tokens. It's idempotent, so
+running it on every replica is fine. Rust also has `run_scheduler()`, a managed loop that ticks every 30
 seconds on its own if you'd rather run the sweep separately.
 
 ## Durability

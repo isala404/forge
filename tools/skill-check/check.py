@@ -117,6 +117,7 @@ def main() -> int:
 
     targets = [
         (SKILL_DIR / "SKILL.md", "any"),
+        (SKILL_DIR / "references" / "application-invariants.md", "any"),
         (SKILL_DIR / "references" / "node.md", "node"),
         (SKILL_DIR / "references" / "python.md", "python"),
         (SKILL_DIR / "references" / "rust.md", "skip"),  # inline tokens not checked

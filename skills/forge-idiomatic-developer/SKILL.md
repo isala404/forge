@@ -29,24 +29,19 @@ Match the job to the primitive before writing anything. Reaching for the wrong o
 
 | You need to… | Use | Never use it for |
 | --- | --- | --- |
-| Cache a value, hold session-ish data, count, dedup, compare-and-swap | **kv** | Large blobs; use blob |
+| Cache a value, store small app-owned records (user rows, indexes), count, dedup, compare-and-swap | **kv** | Large blobs; use blob |
 | Run work in the background, retry on failure, delay, dead-letter | **queue** | Fire-and-forget notifications |
 | Fan a live event out to connected clients (presence, typing, dashboards) | **pubsub** | Anything that must not be lost — it is at-most-once |
 | Store and serve files, hand out presigned upload/download URLs | **blob** | Small hot values; use kv |
-| Hash passwords, issue and validate sessions, mint API keys | **auth** | Rolling your own crypto |
+| Hash passwords, issue and validate sessions, mint API keys, one-time tokens (password reset, magic links, invites) | **auth** | Rolling your own crypto; sending the email itself |
 | Throttle by key (login attempts, per-user API calls) | **ratelimit** | Durable counters; use kv |
 | Run a cron, or enqueue one job at a future time | **schedule** | Immediate work; enqueue directly |
 | Store runtime settings and evaluate feature flags with rollout | **config** | Secrets that belong in the environment |
 
-Two rules that catch people:
-
-- **pub/sub is at-most-once and only reaches currently-connected subscribers.** If a
-  message must survive a disconnect or a restart, it belongs in a queue (durable) or
-  kv (the value of record). The idiomatic pattern is to write the durable state to
-  kv/queue and use pub/sub only to nudge open clients to refresh.
-- **A queue needs a worker.** Enqueuing does nothing on its own; something has to
-  dequeue, process, and ack. Use the managed worker helper (below) rather than a
-  hand-rolled loop, so heartbeating and acking are correct.
+Two rules that catch people: anything that must survive a disconnect or restart
+belongs in queue/kv, with pub/sub only nudging live clients to refresh (it is
+at-most-once, no replay). And a queue needs a worker — enqueuing does nothing until
+something dequeues, processes, and acks; use the managed worker helper (below).
 
 ## The three bindings at a glance
 
@@ -93,6 +88,9 @@ Full per-language method tables and idioms:
 - **[references/rust.md](references/rust.md)** — accessors, option builders, worker.
 - **[references/node.md](references/node.md)** — raw `ForgeClient` methods + native JSON handles.
 - **[references/python.md](references/python.md)** — raw client methods + native JSON handles.
+- **[references/application-invariants.md](references/application-invariants.md)** —
+  read this whenever you build or review a whole service: multi-key consistency,
+  idempotent workers, auth boundaries, shutdown, scans, and end-to-end validation.
 
 Two idioms to reach for by default (full examples live in the references above):
 
@@ -104,8 +102,10 @@ Two idioms to reach for by default (full examples live in the references above):
   `forge.worker(queue, handler, { signal })` (abort to drain), Python
   `forge.worker(queue, handler, stop=event)`, Rust `forge.worker(queue).run(handler)`.
   It dequeues, heartbeats at a third of the visibility window, acks on success, nacks
-  on a thrown error, and abandons the job if the lease is lost. If you must hand-roll,
-  heartbeat before the lease expires or the job is redelivered mid-flight.
+  on a thrown error, and abandons the job if the lease is lost. Keep and await the
+  returned promise/task/future during shutdown: sending the stop signal begins the
+  drain; it does not mean the drain has finished. If you must hand-roll, heartbeat
+  before the lease expires or the job is redelivered mid-flight.
 
 ## forge.toml conventions
 
@@ -131,9 +131,10 @@ signing_secret = "${FORGE_BLOB_SIGNING_SECRET:-}"   # required for presigned URL
   and booleans stay literal). A `${VAR}` with no value and no default is a hard error,
   so a missing secret stops startup instead of resolving to `""`.
 - **`backends.default` is the memory-vs-postgres switch.** Drive it from the
-  environment (`${FORGE_BACKEND:-postgres}`) so the same file runs on `memory`
-  in tests (in-process, no database) and `postgres` in production. Both pass the same
-  conformance suite, so behavior matches.
+  environment (`${FORGE_BACKEND:-postgres}`) so the same file runs primitives on
+  `memory` in tests and `postgres` in production. Both pass the same conformance
+  suite, so behavior matches. Even all-memory, `init()` still needs a reachable
+  Postgres (or `embedded = true`) for Forge's own system database.
 - **Presigned blob URLs need `[blob].signing_secret`.** CRUD works without it; the
   presign methods fail without it.
 - `[forge].namespace` prefixes every key/queue/topic so several apps can share one
@@ -149,7 +150,7 @@ differs.
 | `NOT_FOUND` | The entity does not exist | No |
 | `INVALID` | Caller bug: bad argument, malformed key, out-of-range option | No |
 | `LIMIT` | A size/length/quota ceiling was exceeded | No |
-| `PRECONDITION` | CAS mismatch, lost lease, duplicate dedup id — re-read state and decide | No |
+| `PRECONDITION` | CAS mismatch, lost lease, unknown receipt — re-read state and decide | No |
 | `UNAVAILABLE` | Transient backend outage (pool timeout, dropped connection) | **Yes** |
 | `CONFIG` | Misconfiguration; only ever raised from `init()` | No |
 | `BACKEND` | A backend error that is none of the above | Sometimes |
@@ -170,32 +171,104 @@ Retrying an `INVALID` or `PRECONDITION` just fails again.
 
 ## Pitfalls (verified, not folklore)
 
+Each of these cost a real agent real time. Ordered by expense.
+
+- **CAS: `old = null`/`None` means "expect absent", and nothing else matches a
+  missing key.** Passing a default (like `[]` from `getOrDefault`) as `old` when the
+  key doesn't exist yet fails forever — a create-or-update loop then spins silently.
+  Seed the key first (`set` with if-not-exists) or branch on `get() === null`.
+- **A duplicate `dedupId` is NOT an error.** Enqueue with a dedup id that was seen in
+  the last 5 minutes (configurable window) silently returns the *existing* job id —
+  SQS semantics, and the dedup outlives the job being acked. Don't wait for a
+  `PRECONDITION` that never comes; compare returned ids if you need to detect it.
+- **Rate limit is a token bucket that starts full**: "20 per 60s" allows 20
+  immediately, then refills continuously at 20/60 per second — a sustained-rate
+  shaper, not a hard per-window cap. `algo: "sliding_window"` (weighted prior
+  window, the standard approximation) tracks a hard cap much more closely but can
+  still admit slightly over it at a window rollover; an exact "never more than N
+  in any window" needs your own kv counter. `remaining` hits 0 on the last
+  *allowed* call. Limiter state lives in Postgres: it persists across restarts
+  and test re-runs.
 - **`kvIncr` returns a JS `number` (f64) in Node**, so a counter past 2^53 loses
-  precision. Real counters never get there; if yours might, read it back losslessly
-  with `forge.kvGetBytes()`. Python's `kv_incr` returns an exact int, Rust's an `i64`.
+  precision (Python/Rust are exact ints). It auto-creates missing keys at 0; the
+  stored value reads back as a decimal string via `kvGet`.
 - **String getters are lossy UTF-8.** `kvGet` / `blobGet` (and Python `kv_get`) decode
-  bytes as UTF-8 with replacement. For binary values use the byte variants:
-  Node `forge.kvGetBytes()` / `forge.kvSetBytes()` / `forge.blobGetBytes()` /
-  `forge.blobPutBytes()`; Python `forge.kv_get_bytes()` / `forge.kv_set_bytes()`, and
-  in Python `forge.blob_put()` / `forge.blob_get()` are already bytes-native (there is
-  no `blob_*_bytes`; use `forge.blob_put_object()` when you also need metadata).
-- **Queue receipts are opaque and process-local in the bindings.** Ack/nack/heartbeat a
-  job with its `receipt` (delivery-unique), never its `id` (stable across
-  redeliveries — that is your idempotency key). A receipt only settles from the same
-  client that leased it.
-- **pub/sub is at-most-once.** No acks, no replay, delivered only to live subscribers.
-  Never use it as the system of record.
+  bytes with replacement. For binary use the byte variants: Node `kvGetBytes` /
+  `kvSetBytes` / `blobGetBytes` / `blobPutBytes`; Python `kv_get_bytes` /
+  `kv_set_bytes`, and Python `blob_put` / `blob_get` are already bytes-native (no
+  `blob_*_bytes`; `blob_put_object` when you also need metadata).
+- **Queue receipts are opaque and process-local in the bindings.** Settle
+  (ack/nack/heartbeat) with the `receipt` (delivery-unique), never the `id` (stable
+  across redeliveries — that is your idempotency key), and only from the client that
+  leased it. Retries back off exponentially with jitter; after `maxAttempts` the job
+  moves to `"<queue>.dlq"` (inspect it with `queueDepth`/`dequeue` on that name).
+  Delivery is at-least-once: a process can finish the side effect and die before ack,
+  so every handler must tolerate the same job again.
+- **pub/sub is at-most-once, live-subscribers-only.** A publish after `subscribe()`
+  resolves is delivered to that subscriber; anything published before it is gone (no
+  replay). Never use it as the system of record. Payloads publish as strings but
+  arrive as bytes (`Buffer`/`bytes`) — decode before parsing.
 - **The scheduler and maintenance sweep only run when you tick them.** Forge starts no
   threads. From Node/Python, call `runSchedulerOnce` / `run_scheduler_once` and
-  `maintain` on an interval (e.g. every 30s). In Rust use the maintenance loop.
+  `maintain` on an interval (e.g. every 30s) — the first fires due crons/one-shots
+  onto their queues, the second is housekeeping. In Rust use the maintenance loop.
   Without a tick, crons never fire and expired rows never get swept.
-- **`memory` backends are per-process.** For pub/sub and rate limit that means no
-  cross-replica delivery, so `memory` is for tests only — Forge logs a warning if you
-  run those two on `memory` outside tests. Use `postgres` in any multi-replica deploy.
+- **There is no client `close()`/shutdown.** The client cleans up at process exit;
+  only pubsub subscriptions have `close()` (Node) / `aclose()` (Python), which also
+  interrupt a pending `next()`. This does not make immediate process exit safe: stop
+  and await workers, subscriptions, scheduler/maintenance loops, and the HTTP server.
+- **Postgres state persists across test runs** (rows, rate-limit buckets, dedup
+  ids). Make fixtures unique per run — suffix emails/IPs/slugs with a run id — or a
+  green first run turns into a red second run.
+
+## Writing good Forge code
+
+Habits that separated the best clean-room implementations from the rest:
+
+- **Design the key/queue/topic layout first and write it down** — a short comment
+  block naming each key pattern and what owns it. Most rework traces to a bad
+  layout, not a bad call.
+- **Cheap guard before expensive work**: rate-limit before hashing or verifying a
+  password. For uniqueness spanning a primary record and an index, choose an
+  explicit write order and compensate every later failure; the two writes are not a
+  transaction. Use app SQL when an unrecoverable partial state is unacceptable.
+- **Model queue handlers as concurrent and repeatable.** Prefer one deterministic
+  record per event/job over read-modify-write of a shared JSON list. Use the stable
+  job id as an idempotency key, and use a transaction/outbox or a downstream
+  idempotency key when the side effect cannot be one atomic Forge write.
+- **Bound and paginate scans.** Partition keys by owner/tenant, give event-like data
+  a retention policy, follow every cursor, and batch reads. A global scan in a request
+  path is not a database query plan.
+- **Wrap Forge errors at your service boundary** into your app's own error codes
+  (`DUPLICATE_EMAIL`, `THROTTLED`). Callers should never parse `"PRECONDITION: …"`
+  strings, and only `UNAVAILABLE`/retryable-`BACKEND` is worth retrying.
+- **Don't mock forgelib.** Run tests against the real thing (`memory` backends, or a
+  scratch Postgres) — the conformance-tested behavior is the point of the library.
+- **Durable live-data pairing**: write the durable record (kv/queue) first, then
+  publish the pub/sub nudge; readers reconcile from the durable side.
+- Comments explain *why* (the invariant, the race being closed), not what the call
+  does. No speculative wrappers around the client until a second caller shares
+  real shape.
 
 ## Before you finish
 
-Every method you call must exist in the binding. If you are unsure of a name, grep the
-contract (`bindings/node/client.d.ts`, `bindings/python/src/lib.rs`, `src/lib.rs`) or
-the per-language reference here. The repo's `tools/skill-check` guard verifies the
-names in this skill against those files, so a name here is real for the committed API.
+Check the application, not just whether it compiles:
+
+- Every method exists in the binding. If unsure, grep `bindings/node/client.d.ts`,
+  `bindings/python/src/lib.rs`, `src/lib.rs`, or the per-language reference. The
+  repo's `tools/skill-check` guard verifies names in this skill against those files.
+- Every enqueued queue has a running worker; every handler is safe under concurrent
+  delivery and redelivery, and shutdown signals then awaits its drain.
+- Every multi-key state transition documents its canonical record, partial-failure
+  recovery, and whether it actually needs an app SQL transaction.
+- Every scan is paginated and bounded by tenant/owner and retention; bulk values use
+  the binding's multi-get instead of serial reads.
+- Security-sensitive rate limits fail closed, run before expensive auth work, and
+  request bodies are type-checked rather than coerced.
+- Durable state is committed before a pub/sub nudge, and subscribers reconcile from
+  that durable state because live messages can be lost.
+- Tests use real forgelib, run twice with unique fixtures, and cover the relevant
+  failure modes against memory plus Postgres when persistence or concurrency matters.
+- For a web app, exercise signup/login, invalid payload types, tenant isolation,
+  session restoration after a hard reload, queue completion/redelivery, graceful
+  shutdown, and browser console/network errors.

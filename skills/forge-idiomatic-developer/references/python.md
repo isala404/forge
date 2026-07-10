@@ -25,15 +25,15 @@ forge = await forgelib.ForgeClient.init_from("svc/forge.toml")
 | `kv_delete()` | Whether the key existed. |
 | `kv_exists()` | Presence (and unexpired). |
 | `kv_expire()` | `kv_expire(key, ttl_seconds)`; `False` if absent. |
-| `kv_compare_and_swap()` | `kv_compare_and_swap(key, old, new)`; `old=None` means "expected absent". |
+| `kv_compare_and_swap()` | `kv_compare_and_swap(key, old, new)`; `old=None` means "expected absent" — a default value never matches a missing key. |
 | `kv_scan()` | First page: `kv_scan(prefix, limit)` → `list[str]`. |
-| `kv_scan_page()` | `kv_scan_page(prefix, cursor, limit)` → `ScanPage(keys, cursor)`. |
+| `kv_scan_page()` | `kv_scan_page(prefix, cursor, limit)` → `ScanPage(keys, cursor)`; `cursor` is `None` when done. |
 
 ## Queue
 
 | Method | Notes |
 | --- | --- |
-| `queue_enqueue()` | `queue_enqueue(queue, payload, max_attempts=None, dedup_id=None, delay_seconds=None)` → id. |
+| `queue_enqueue()` | `queue_enqueue(queue, payload, max_attempts=None, dedup_id=None, delay_seconds=None)` → id. A `dedup_id` seen in the last 5 min returns the existing job's id (no error). |
 | `queue_dequeue()` | `queue_dequeue(queue, visibility_seconds, wait_seconds)` → `Job \| None` (long-polls). |
 | `queue_ack()` | Ack by `receipt` (idempotent). |
 | `queue_nack()` | `queue_nack(receipt, retry_seconds=None)`. Raises `PreconditionError` if the receipt is unknown. |
@@ -47,9 +47,13 @@ key — stable across redeliveries).
 
 | Method | Notes |
 | --- | --- |
-| `pubsub_publish()` | `pubsub_publish(topic, payload)`, fire-and-forget, at-most-once. |
-| `pubsub_subscribe()` | Returns a subscription; `async for payload in sub:` (payloads are `bytes`). |
+| `pubsub_publish()` | `pubsub_publish(topic, payload)`, fire-and-forget, at-most-once. `payload` is a `str`; subscribers receive `bytes`. |
+| `pubsub_subscribe()` | Returns a subscription; `async for payload in sub:` (payloads are `bytes` — decode before parsing). |
 | `pubsub_channel()` | The Postgres `LISTEN`/`NOTIFY` channel a topic maps to. |
+
+The subscription's `aclose()` unsubscribes now and stops a pending `__anext__`
+immediately. Publishes after `pubsub_subscribe()` returns are delivered; earlier
+ones are gone (no replay).
 
 ## Blob
 
@@ -69,6 +73,11 @@ Blob is bytes-native in Python: `blob_put`/`blob_get` already take and return
 | `blob_presign_upload()` | `blob_presign_upload(key, expires_seconds, max_bytes)` — needs the secret. |
 | `blob_verify_presign()` | `blob_verify_presign(method, key, expires_epoch, max_bytes, sig)` → validity. |
 
+Presigned URLs are relative paths (`/api/files?key=…&expires=…&max_bytes=…&sig=…`),
+not absolute URLs: mount your own route and pass the query params to
+`blob_verify_presign` verbatim (a download URL carries `max_bytes=0` — echo it). A
+method mismatch verifies to `False` rather than raising.
+
 ## Auth
 
 | Method | Notes |
@@ -85,6 +94,8 @@ Blob is bytes-native in Python: `blob_put`/`blob_get` already take and return
 | `verify_api_key()` | Key → `owner_id`, or `None`. |
 | `verify_api_key_info()` | Key → `ApiKeyInfo`, or `None`. |
 | `revoke_api_key()` | Revoke by non-secret id. |
+| `create_token()` | `create_token(user_id, purpose, ttl_seconds)` → single-use token (shown once). `purpose` is any string you choose (`"password-reset"`); create/consume must match exactly. `user_id` is any opaque string handed back on consume — for pre-account flows (invites) pass your own reference id. |
+| `consume_token()` | `consume_token(token, purpose)` → `user_id`, or `None` (used/expired/wrong purpose). First consume wins. |
 
 ## Rate limit
 
@@ -93,13 +104,16 @@ Blob is bytes-native in Python: `blob_put`/`blob_get` already take and return
 | `rate_limit_check()` | `rate_limit_check(bucket, key, max, per_seconds, fail_open=None, algo=None)` → `Decision`. `algo` is `"token_bucket"` (default) or `"sliding_window"`. `per_seconds` must be ≥ 1 (a sub-second window raises `InvalidError`). |
 
 `Decision`: `allowed`, `limit`, `remaining`, `reset_after_seconds`, `retry_after_seconds`.
+Pass `False` for `fail_open` on credential, password-reset, invite, and API-key
+verification paths. A limiter outage should deny those security-sensitive requests;
+reserve fail-open behavior for explicitly low-risk, availability-first traffic.
 
 ## Schedule
 
 | Method | Notes |
 | --- | --- |
 | `schedule_cron()` | `schedule_cron(name, expr, queue, payload, max_attempts=None)`; upsert by name. |
-| `schedule_at()` | `schedule_at(when_epoch_ms, queue, payload, max_attempts=None)` → future id. |
+| `schedule_at()` | `schedule_at(when_epoch_ms, queue, payload, max_attempts=None)` → future id. `payload` is a raw string, passed through — `json.dumps` it yourself if a JSON-handle worker consumes the queue. |
 | `schedule_cancel()` | Cancel a cron by name. |
 | `schedule_cancel_at()` | Cancel a one-shot by the id `schedule_at` returned. |
 | `schedule_list()` | `schedule_list(cursor=None, limit=None)` → `SchedulePage(items, cursor)`. |
@@ -113,7 +127,7 @@ Blob is bytes-native in Python: `blob_put`/`blob_get` already take and return
 | `config_set()` | `config_set(key, value)`. |
 | `config_delete()` | Delete a stored value; env `FORGE_CFG_<KEY>` still shadows reads. |
 | `flag()` | `flag(key, default, targeting_key=None)`. Never raises; falls back to the default. |
-| `set_flag_percent()` | Percentage rollout, `0..=100`. |
+| `set_flag_percent()` | Percentage rollout, `0..=100`. Bucketing is a stable hash of `(flag, targeting_key)` — deterministic across processes; without a `targeting_key`, a percent rule returns the caller default. |
 | `set_flag_on()` / `set_flag_off()` | Always-on / always-off. |
 | `set_flag_allow_list()` | `set_flag_allow_list(key, entries)`. |
 | `delete_flag()` | Delete a flag rule; later `flag()` calls use the caller default. |
@@ -143,10 +157,10 @@ profile = forge.kv(f"user:{user_id}")
 await profile.set(value, ttl_seconds=3600)
 ```
 
-- `Queue` from `forge.queue(name)`: `enqueue()`, `dequeue()`, `ack()`, `nack()`, `heartbeat()`, `depth()`, `worker()`.
+- `Queue` from `forge.queue(name)`: `enqueue()`, `dequeue()`, `ack()`, `nack()`, `heartbeat()`, `depth()`, `worker()`. A handle/worker `job.payload` is ALREADY codec-decoded (a dict) — `json.loads`-ing it again raises.
 - `KvKey` from `forge.kv(key)`: `get()`, `get_or_default(default)`, `set()`, `delete()`, `exists()`, `expire()`, `compare_and_swap()`.
 - `ConfigKey` from `forge.config(key, default)`: `get()`, `get_or_default()`, `set()`.
 - `Topic` from `forge.topic(name)`: `publish()`, `subscribe()` (`async for event in topic.subscribe():`).
-- `forge.worker(queue, handler, *, stop=..., visibility_seconds=30.0, wait_seconds=20.0)` / `run_worker(...)` — managed loop; set the `stop` event to drain.
+- `forge.worker(queue, handler, *, stop=..., visibility_seconds=30.0, wait_seconds=20.0)` / `run_worker(...)` — managed loop. Keep its task; set the `stop` event to begin draining, then await the task before process exit.
 - `forge_error_code(exc)` / `forge_error_retryable(exc)` — exceptions are named code +
   `Error` (`LimitError` → code `"Limit"`) and every instance carries a `retryable` attribute.

@@ -6,11 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-07-10
+
 Complete rewrite from the earlier application framework into a library: one Rust
 crate (`forgelib`) exposing eight infrastructure primitives behind stable traits.
 
+**Distribution note:** crates.io already contains an unrelated, yanked, immutable
+`forgelib 1.0.0`. This release publishes 1.0.0 to npm and PyPI and tags the matching
+GitHub source, but does not publish or unyank a Rust crate. Rust users can depend on
+the `v1.0.0` Git tag; version 1.0.1 will restore synchronized crates.io,
+npm, and PyPI publication.
+
 ### Added
 
+- One-time tokens on the auth primitive: `create_token(user_id, purpose, ttl)` /
+  `consume_token(token, purpose)` (`createToken`/`consumeToken` in Node). Tokens
+  are single-use, purpose-scoped, and stored hashed with a hard expiry, covering
+  password reset, email verification, and magic links without an email service —
+  your app sends the message, Forge mints and checks the token. Expired tokens
+  are reclaimed by `maintain()`.
 - Embedded Postgres: `[postgres] embedded = true` provisions a real PG 17 server
   on demand (binaries download once per machine, data persists in
   `.forge/pg`), behind the `embedded` cargo feature. The Node and Python
@@ -42,6 +56,8 @@ crate (`forgelib`) exposing eight infrastructure primitives behind stable traits
 
 ### Changed
 
+- The Python binding now uses PyO3 and `pyo3-async-runtimes` 0.29, removing the
+  vulnerable 0.23 dependency line and adopting PyO3's current interpreter-attachment API.
 - Python exceptions are named canonical code + `Error` (`NotFoundError`,
   `InvalidError`, `LimitError`, `PreconditionError`, `UnavailableError`,
   `ConfigError`, `BackendError`); the old bare names (`Limit`, `Config`,
@@ -68,3 +84,5 @@ crate (`forgelib`) exposing eight infrastructure primitives behind stable traits
 - Node `forgeErrorCode()` / `forgeErrorRetryable()` now parse the `CODE: message`
   prefix as documented. They previously read `error.code`/`error.retryable`,
   which napi never sets, so every error reported `GenericFailure`/not-retryable.
+
+[1.0.0]: https://github.com/isala404/forge/compare/v0.0.1...v1.0.0

@@ -99,6 +99,78 @@ async fn absolute_timeout_expires_the_session() {
 }
 
 #[tokio::test]
+async fn one_time_tokens_consume_once_purpose_scoped() {
+    let db = TestDatabase::new().await.unwrap();
+    let forge = db.forge().await.unwrap();
+    let a = forge.auth();
+
+    let token = a
+        .create_token("user-7", "password-reset", Duration::from_secs(900))
+        .await
+        .unwrap();
+    assert!(!format!("{token:?}").contains(token.as_str()));
+
+    // Wrong purpose leaves the token intact.
+    assert!(
+        a.consume_token(token.as_str(), "email-verify")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        a.consume_token(token.as_str(), "password-reset")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("user-7")
+    );
+    assert!(
+        a.consume_token(token.as_str(), "password-reset")
+            .await
+            .unwrap()
+            .is_none(),
+        "single use"
+    );
+    assert!(
+        a.consume_token("unknown-token", "password-reset")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    assert!(matches!(
+        a.create_token("u", "p", Duration::ZERO).await,
+        Err(ForgeError::Invalid(_))
+    ));
+    assert!(matches!(
+        a.create_token("u", "", Duration::from_secs(60)).await,
+        Err(ForgeError::Invalid(_))
+    ));
+}
+
+#[tokio::test]
+async fn expired_tokens_are_absent_and_swept() {
+    let db = TestDatabase::new().await.unwrap();
+    let forge = db.forge().await.unwrap();
+    let a = forge.auth();
+
+    let token = a
+        .create_token("u", "magic-link", Duration::from_millis(100))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        a.consume_token(token.as_str(), "magic-link")
+            .await
+            .unwrap()
+            .is_none(),
+        "past the expiry"
+    );
+    // The expired row lingers until maintenance reclaims it.
+    forge.maintain().await.unwrap();
+}
+
+#[tokio::test]
 async fn api_keys_create_verify_revoke() {
     let db = TestDatabase::new().await.unwrap();
     let forge = db.forge().await.unwrap();

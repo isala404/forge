@@ -277,6 +277,10 @@ async function dispatch(client, op, args, subscriptions, captureAs) {
     }
     case 'auth.verify_api_key':
       return await client.verifyApiKey(args.key)
+    case 'auth.create_token':
+      return await client.createToken(args.user_id, args.purpose, args.ttl_seconds)
+    case 'auth.consume_token':
+      return await client.consumeToken(args.token, args.purpose)
     case 'blob.put':
       return client.blobPutObject(args.key, asBuffer(args.value), args.content_type ?? null, args.metadata ?? null)
     case 'blob.get':
