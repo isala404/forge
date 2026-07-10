@@ -138,8 +138,8 @@ jobs:
           set -euo pipefail
           VERSION="${{ inputs.version }}"
           TAG="${{ inputs.release_tag }}"
-          if [[ "$TAG" != "forgelib-v$VERSION" ]]; then
-            echo "Release tag must be forgelib-v$VERSION; got $TAG" >&2
+          if [[ "$TAG" != "v$VERSION" ]]; then
+            echo "Release tag must be v$VERSION; got $TAG" >&2
             exit 1
           fi
           grep -q '^version = "'$VERSION'"$' Cargo.toml
