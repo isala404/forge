@@ -1,5 +1,12 @@
 # Forge - the standard library for agent-built SaaS
 
+[![CI](https://img.shields.io/github/actions/workflow/status/isala404/forge/ci.yml?branch=main&style=flat-square&logo=github&label=CI)](https://github.com/isala404/forge/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/forgelib?style=flat-square&logo=rust&logoColor=white)](https://crates.io/crates/forgelib)
+[![npm](https://img.shields.io/npm/v/forgelib?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/forgelib)
+[![PyPI](https://img.shields.io/pypi/v/forgelib?style=flat-square&logo=pypi&logoColor=white)](https://pypi.org/project/forgelib/)
+[![PostgreSQL 17+](https://img.shields.io/badge/PostgreSQL-17%2B-4169E1?style=flat-square&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![MIT License](https://img.shields.io/github/license/isala404/forge?style=flat-square&color=blue)](./LICENSE)
+
 Every app needs the same plumbing, and the usual answer is a separate service for each piece:
 
 - Redis for caching and sessions
