@@ -1,31 +1,22 @@
 ---
 name: forge-idiomatic-developer
-description: >-
-  Load this whenever you are about to write, edit, or review code that uses the
-  forgelib library in any language — the Rust crate `forgelib`, the Node package
-  `forgelib`, or the Python package `forgelib`. Forge's API is not in your training
-  data, so guessing method names produces code that does not compile or run. This
-  skill maps each task to the right primitive and gives the verified, idiomatic API
-  for every binding. Triggers: a `forge.toml` in the tree; imports of `forgelib`,
-  `ForgeClient`, or `Forge`; any request to add caching, a queue, pub/sub, blob
-  storage, auth, rate limiting, scheduling, or feature flags to a Forge app.
+description: Load this whenever you are about to write, edit, or review code that uses the forgelib library in any language.
 ---
 
 # Building on Forge
 
 Forge is one library that gives an app eight backend primitives on a single Postgres
-connection, with the same behavior in Rust, Node, and Python. You call `init()` once,
-which reads a `forge.toml`, and every primitive hangs off the returned client.
+connection, with the same behavior in Rust, Node, and Python. Call `init()` once — it
+reads `forge.toml` — and every primitive hangs off the returned client.
 
-The API is small and consistent, but the exact names differ per language and are not
-in any model's training data. **Do not invent method names.** Use the tables in this
-skill, or read `bindings/node/client.d.ts` and `bindings/python/src/lib.rs` in the
-repo — those files are the contract.
+The API is small and consistent, but the exact names are not in any model's training
+data. **Do not invent method names.** Use the tables in this skill, or read
+`bindings/node/client.d.ts` and `bindings/python/src/lib.rs` in the repo — those
+files are the contract.
 
 ## Pick the primitive first
 
-Match the job to the primitive before writing anything. Reaching for the wrong one
-(pub/sub for durable work, a queue for a cache) is the most common mistake.
+Match the job to the primitive before writing anything.
 
 | You need to… | Use | Never use it for |
 | --- | --- | --- |
@@ -39,18 +30,39 @@ Match the job to the primitive before writing anything. Reaching for the wrong o
 | Store runtime settings and evaluate feature flags with rollout | **config** | Secrets that belong in the environment |
 
 Two rules that catch people: anything that must survive a disconnect or restart
-belongs in queue/kv, with pub/sub only nudging live clients to refresh (it is
-at-most-once, no replay). And a queue needs a worker — enqueuing does nothing until
-something dequeues, processes, and acks; use the managed worker helper (below).
+belongs in queue/kv, with pub/sub only nudging live clients to reconcile from the
+durable side (write the durable record first, publish the nudge second). And a queue
+needs a worker — enqueuing does nothing until something dequeues, processes, and acks.
+
+## Shape the data before writing handlers
+
+Design the key/queue/topic layout first and write it down (a `STATE.md` naming every
+key pattern and its owner). Derive it from **access paths, not entities**: every
+endpoint/screen must map to one tenant-bounded prefix scan or a multi-get. A read
+path with no owning prefix is a schema bug — add a secondary index at write time, or
+it becomes a global scan in production.
+
+Then pick each record's shape from how it is *written*, not how it is displayed:
+
+| Write pattern | Shape |
+| --- | --- |
+| Many users each own a piece (votes, reactions, RSVPs) | One key per user, e.g. `vote:{tenant}:{item}:{user}` — the race disappears by design |
+| Append-only shared list (comments, activity, audit) | One key per entry, never a JSON array |
+| One shared value, several writers | Compare-and-swap with a bounded retry loop |
+| One conceptual writer (a user's own profile) | Plain set |
+
+Read-modify-write of a shared JSON record is the default *bug*, not the default
+pattern — under concurrency it silently loses writes. Restructure keys so writes
+cannot conflict; reach for CAS only when writers genuinely share one value. This
+applies to request handlers exactly as much as to queue workers.
 
 ## The three bindings at a glance
 
 Same primitives, three surface styles. The raw contract methods carry strings/bytes
 1:1 across languages; Node and Python also expose native JSON handles on the main
-client so app payloads are real objects without a second import path.
+client so app payloads are real objects.
 
-**Rust** — namespaced accessors plus option-struct builders. Fallible calls return
-`Result`, so `?` them.
+**Rust** — namespaced accessors plus option-struct builders; `?` the `Result`s.
 
 ```rust
 use std::time::Duration;
@@ -61,8 +73,8 @@ forge.kv().set("k", "v".into(), SetOpts::new().with_ttl(Duration::from_secs(60))
 let n = forge.kv().incr("hits", 1).await?;
 ```
 
-**Node** — flat camelCase methods on the client, plain positional arguments, optional
-trailing args passed as `null` to skip. Everything is `async`.
+**Node** — flat camelCase methods, positional arguments, `null` to skip optional
+trailing args. Everything is `async`.
 
 ```ts
 import { ForgeClient } from "forgelib";
@@ -72,8 +84,7 @@ await forge.kvSet("k", "v", 60);                  // ttlSeconds
 const n = await forge.kvIncr("hits", 1);
 ```
 
-**Python** — flat snake_case methods, every one awaitable, optional args default to
-`None`.
+**Python** — flat snake_case methods, every one awaitable, optional args `None`.
 
 ```python
 import forgelib
@@ -89,29 +100,28 @@ Full per-language method tables and idioms:
 - **[references/node.md](references/node.md)** — raw `ForgeClient` methods + native JSON handles.
 - **[references/python.md](references/python.md)** — raw client methods + native JSON handles.
 - **[references/application-invariants.md](references/application-invariants.md)** —
-  read this whenever you build or review a whole service: multi-key consistency,
-  idempotent workers, auth boundaries, shutdown, scans, and end-to-end validation.
+  read whenever you build or review a whole service: multi-key consistency, idempotent
+  workers, auth boundaries, scans and caps, shutdown, and validation.
 
-Two idioms to reach for by default (full examples live in the references above):
+Two idioms to reach for by default (full examples in the references):
 
-- **Native JSON handles for app payloads.** Bind a codec once instead of
-  stringifying at every call site: `forge.queue(name)` / `forge.kv(key)` /
-  `forge.config(key, default)` / `forge.topic(name)` return typed handles in Node and
-  Python; Rust re-exports typed handles from the crate root.
+- **Native JSON handles for app payloads.** Bind a codec once instead of stringifying
+  at every call site: `forge.queue(name)` / `forge.kv(key)` / `forge.config(key, default)`
+  / `forge.topic(name)` return typed handles in Node and Python; Rust re-exports typed
+  handles from the crate root.
 - **The managed worker instead of a hand-rolled dequeue loop.** Node
   `forge.worker(queue, handler, { signal })` (abort to drain), Python
   `forge.worker(queue, handler, stop=event)`, Rust `forge.worker(queue).run(handler)`.
   It dequeues, heartbeats at a third of the visibility window, acks on success, nacks
-  on a thrown error, and abandons the job if the lease is lost. Keep and await the
-  returned promise/task/future during shutdown: sending the stop signal begins the
-  drain; it does not mean the drain has finished. If you must hand-roll, heartbeat
-  before the lease expires or the job is redelivered mid-flight.
+  on error, abandons on a lost lease. Keep and await the returned promise/task/future
+  during shutdown — the stop signal begins the drain, not finishes it. If you must
+  hand-roll, heartbeat before the lease expires or the job is redelivered mid-flight.
 
 ## forge.toml conventions
 
 One file at the project root configures the whole runtime. `init()` reads it, applies
-production-safe defaults for anything omitted, and migrates its own tables. An unknown
-key is a startup error, not a silent typo.
+production-safe defaults, and migrates its own tables. An unknown key is a startup
+error, not a silent typo.
 
 ```toml
 [postgres]
@@ -127,23 +137,18 @@ default = "${FORGE_BACKEND:-postgres}"   # set FORGE_BACKEND=memory in tests
 signing_secret = "${FORGE_BLOB_SIGNING_SECRET:-}"   # required for presigned URLs
 ```
 
-- **`${VAR}` / `${VAR:-default}` interpolation** runs on string values only (numbers
-  and booleans stay literal). A `${VAR}` with no value and no default is a hard error,
-  so a missing secret stops startup instead of resolving to `""`.
-- **`backends.default` is the memory-vs-postgres switch.** Drive it from the
-  environment (`${FORGE_BACKEND:-postgres}`) so the same file runs primitives on
-  `memory` in tests and `postgres` in production. Both pass the same conformance
-  suite, so behavior matches. Even all-memory, `init()` still needs a reachable
-  Postgres (or `embedded = true`) for Forge's own system database.
-- **Presigned blob URLs need `[blob].signing_secret`.** CRUD works without it; the
-  presign methods fail without it.
-- `[forge].namespace` prefixes every key/queue/topic so several apps can share one
-  database. It must not contain a colon.
+- `${VAR}` / `${VAR:-default}` interpolation runs on string values only. A `${VAR}`
+  with no value and no default is a hard error, so a missing secret stops startup.
+- `backends.default` is the memory-vs-postgres switch; both pass the same conformance
+  suite. Even all-memory, `init()` still needs a reachable Postgres (or
+  `embedded = true`) for Forge's own system database.
+- Presigned blob URLs need `[blob].signing_secret`; CRUD works without it.
+- `[forge].namespace` prefixes every key/queue/topic so apps can share one database.
+  It must not contain a colon.
 
 ## Error taxonomy
 
-Every failure maps to one canonical code. Same set across languages; the surface
-differs.
+Every failure maps to one canonical code, same set across languages.
 
 | Code | Meaning | Retryable |
 | --- | --- | --- |
@@ -155,120 +160,103 @@ differs.
 | `CONFIG` | Misconfiguration; only ever raised from `init()` | No |
 | `BACKEND` | A backend error that is none of the above | Sometimes |
 
-- **Node** prefixes the code onto the thrown `Error`'s message, e.g.
-  `"PRECONDITION: ..."` (a retryable backend error reads `"BACKEND(retryable): ..."`).
-  Parse it with `forgeErrorCode(err)` / test retryability with
-  `forgeErrorRetryable(err)` from `forgelib`.
-- **Python** raises a typed exception hierarchy named code + `Error`
-  (`InvalidError`, `UnavailableError`, …, all subclassing `ForgeError`), each
-  carrying a `retryable` attribute. Use `forge_error_code(exc)` /
-  `forge_error_retryable(exc)` from `forgelib`.
-- **Rust** returns `Err(forgelib::ForgeError)`; match the variant, or call
-  `.is_retryable()`.
+Node prefixes the code onto the thrown `Error`'s message (`"PRECONDITION: ..."`; a
+retryable backend error reads `"BACKEND(retryable): ..."`) — parse with
+`forgeErrorCode(err)` / `forgeErrorRetryable(err)`. Python raises typed exceptions
+(`InvalidError`, `UnavailableError`, …, all subclassing `ForgeError`) carrying a
+`retryable` attribute. Rust returns `Err(forgelib::ForgeError)`; match the variant or
+call `.is_retryable()`.
 
-Only `UNAVAILABLE` (and a `BACKEND` error flagged retryable) is worth retrying.
-Retrying an `INVALID` or `PRECONDITION` just fails again.
+Only `UNAVAILABLE` (and retryable `BACKEND`) is worth retrying. Wrap Forge errors at
+your service boundary into your app's own codes (`DUPLICATE_EMAIL`, `THROTTLED`);
+callers should never parse `"PRECONDITION: …"` strings.
 
 ## Pitfalls (verified, not folklore)
 
 Each of these cost a real agent real time. Ordered by expense.
 
-- **CAS: `old = null`/`None` means "expect absent", and nothing else matches a
-  missing key.** Passing a default (like `[]` from `getOrDefault`) as `old` when the
-  key doesn't exist yet fails forever — a create-or-update loop then spins silently.
-  Seed the key first (`set` with if-not-exists) or branch on `get() === null`.
-- **A duplicate `dedupId` is NOT an error.** Enqueue with a dedup id that was seen in
-  the last 5 minutes (configurable window) silently returns the *existing* job id —
-  SQS semantics, and the dedup outlives the job being acked. Don't wait for a
-  `PRECONDITION` that never comes; compare returned ids if you need to detect it.
+- **CAS: `old = null`/`None` means "expect absent", and nothing else matches a missing
+  key.** Passing a default (like `[]` from `getOrDefault`) as `old` when the key
+  doesn't exist yet fails forever — a create-or-update loop spins silently. Seed the
+  key first (set with if-not-exists) or branch on a null get.
+- **A duplicate `dedupId` is NOT an error.** Enqueue with a dedup id seen in the last
+  5 minutes (configurable) silently returns the *existing* job id — SQS semantics,
+  and the dedup outlives the ack. Compare returned ids if you need to detect it.
 - **Rate limit is a token bucket that starts full**: "20 per 60s" allows 20
-  immediately, then refills continuously at 20/60 per second — a sustained-rate
-  shaper, not a hard per-window cap. `algo: "sliding_window"` (weighted prior
-  window, the standard approximation) tracks a hard cap much more closely but can
-  still admit slightly over it at a window rollover; an exact "never more than N
-  in any window" needs your own kv counter. `remaining` hits 0 on the last
-  *allowed* call. Limiter state lives in Postgres: it persists across restarts
-  and test re-runs.
+  immediately, then refills continuously — a sustained-rate shaper, not a hard
+  per-window cap. `algo: "sliding_window"` tracks a hard cap closely but can still
+  slightly overshoot at a window rollover; an exact cap needs your own kv counter.
+  `remaining` hits 0 on the last *allowed* call. Limiter state lives in Postgres and
+  persists across restarts and test runs.
 - **`kvIncr` returns a JS `number` (f64) in Node**, so a counter past 2^53 loses
   precision (Python/Rust are exact ints). It auto-creates missing keys at 0; the
   stored value reads back as a decimal string via `kvGet`.
-- **String getters are lossy UTF-8.** `kvGet` / `blobGet` (and Python `kv_get`) decode
-  bytes with replacement. For binary use the byte variants: Node `kvGetBytes` /
-  `kvSetBytes` / `blobGetBytes` / `blobPutBytes`; Python `kv_get_bytes` /
-  `kv_set_bytes`, and Python `blob_put` / `blob_get` are already bytes-native (no
-  `blob_*_bytes`; `blob_put_object` when you also need metadata).
-- **Queue receipts are opaque and process-local in the bindings.** Settle
-  (ack/nack/heartbeat) with the `receipt` (delivery-unique), never the `id` (stable
-  across redeliveries — that is your idempotency key), and only from the client that
-  leased it. Retries back off exponentially with jitter; after `maxAttempts` the job
-  moves to `"<queue>.dlq"` (inspect it with `queueDepth`/`dequeue` on that name).
-  Delivery is at-least-once: a process can finish the side effect and die before ack,
-  so every handler must tolerate the same job again.
-- **pub/sub is at-most-once, live-subscribers-only.** A publish after `subscribe()`
-  resolves is delivered to that subscriber; anything published before it is gone (no
-  replay). Never use it as the system of record. Payloads publish as strings but
-  arrive as bytes (`Buffer`/`bytes`) — decode before parsing.
-- **The scheduler and maintenance sweep only run when you tick them.** Forge starts no
-  threads. From Node/Python, call `runSchedulerOnce` / `run_scheduler_once` and
-  `maintain` on an interval (e.g. every 30s) — the first fires due crons/one-shots
-  onto their queues, the second is housekeeping. In Rust use the maintenance loop.
-  Without a tick, crons never fire and expired rows never get swept.
-- **There is no client `close()`/shutdown.** The client cleans up at process exit;
+- **String getters are lossy UTF-8** (bytes decode with replacement). For binary use
+  the byte variants: Node `kvGetBytes` / `kvSetBytes` / `blobGetBytes` /
+  `blobPutBytes`; Python `kv_get_bytes` / `kv_set_bytes` (`blob_put` / `blob_get` are
+  already bytes-native; `blob_put_object` when you also need metadata).
+- **Queue receipts are opaque and process-local.** Settle (ack/nack/heartbeat) with
+  the `receipt` (delivery-unique), never the `id` (stable across redeliveries — that
+  is your idempotency key), and only from the client that leased it. Retries back off
+  exponentially with jitter; after `maxAttempts` the job moves to `"<queue>.dlq"`.
+  Delivery is at-least-once: every handler must tolerate the same job again.
+- **pub/sub is at-most-once, live-subscribers-only.** Nothing published before
+  `subscribe()` resolves is delivered (no replay). Never the system of record.
+  Payloads publish as strings but arrive as bytes — decode before parsing.
+- **The scheduler and maintenance sweep only run when you tick them.** Forge starts
+  no threads: call `runSchedulerOnce` / `run_scheduler_once` and `maintain` on an
+  interval (e.g. 30s); in Rust use the maintenance loop. No tick → crons never fire,
+  expired rows never swept.
+- **There is no client `close()`/shutdown** — the client cleans up at process exit;
   only pubsub subscriptions have `close()` (Node) / `aclose()` (Python), which also
-  interrupt a pending `next()`. This does not make immediate process exit safe: stop
-  and await workers, subscriptions, scheduler/maintenance loops, and the HTTP server.
-- **Postgres state persists across test runs** (rows, rate-limit buckets, dedup
-  ids). Make fixtures unique per run — suffix emails/IPs/slugs with a run id — or a
-  green first run turns into a red second run.
+  interrupt a pending `next()`. Still stop and await workers, subscriptions, tick
+  loops, and the HTTP server before exiting.
+- **Postgres state persists across test runs** (rows, rate-limit buckets, dedup ids).
+  Make fixtures unique per run — suffix emails/IPs/slugs with a run id — or a green
+  first run turns into a red second run.
 
-## Writing good Forge code
+## Write it clean
 
-Habits that separated the best clean-room implementations from the rest:
+Forge apps are small. Keep them small.
 
-- **Design the key/queue/topic layout first and write it down** — a short comment
-  block naming each key pattern and what owns it. Most rework traces to a bad
-  layout, not a bad call.
-- **Cheap guard before expensive work**: rate-limit before hashing or verifying a
-  password. For uniqueness spanning a primary record and an index, choose an
-  explicit write order and compensate every later failure; the two writes are not a
-  transaction. Use app SQL when an unrecoverable partial state is unacceptable.
-- **Model queue handlers as concurrent and repeatable.** Prefer one deterministic
-  record per event/job over read-modify-write of a shared JSON list. Use the stable
-  job id as an idempotency key, and use a transaction/outbox or a downstream
-  idempotency key when the side effect cannot be one atomic Forge write.
-- **Bound and paginate scans.** Partition keys by owner/tenant, give event-like data
-  a retention policy, follow every cursor, and batch reads. A global scan in a request
-  path is not a database query plan.
-- **Wrap Forge errors at your service boundary** into your app's own error codes
-  (`DUPLICATE_EMAIL`, `THROTTLED`). Callers should never parse `"PRECONDITION: …"`
-  strings, and only `UNAVAILABLE`/retryable-`BACKEND` is worth retrying.
-- **Don't mock forgelib.** Run tests against the real thing (`memory` backends, or a
-  scratch Postgres) — the conformance-tested behavior is the point of the library.
-- **Durable live-data pairing**: write the durable record (kv/queue) first, then
-  publish the pub/sub nudge; readers reconcile from the durable side.
-- Comments explain *why* (the invariant, the race being closed), not what the call
-  does. No speculative wrappers around the client until a second caller shares
-  real shape.
+- **Build the minimum that solves the stated problem.** No speculative features,
+  flags, or wrappers around the client until a second caller shares real shape.
+  Wrong abstractions calcify; duplication is fixable.
+- **One way per concern, used everywhere.** When you write a helper — an
+  authorization gate, a validation parser, a scan utility — migrate every call site
+  to it; a helper half the routes bypass is worse than none. Authorization
+  especially: one gate taking a minimum role, called from the resource loader, never
+  hand-rolled comparisons per route.
+- **Loaders fetch what their callers need, nothing more.** A request-context loader
+  that scans a full roster for routes that never read it is a hidden N+1.
+- **No dead code ships**: no commented-out blocks, unused imports (or `void x`
+  suppression hacks), unreachable branches, or always-true predicates.
+- **Comments explain why** — the invariant, the race being closed — never what the
+  call does. A comment that restates the code gets deleted.
+- **Idiomatic beats clever.** Match the host codebase's style; a fluent reader
+  should find the code boring.
 
 ## Before you finish
 
 Check the application, not just whether it compiles:
 
-- Every method exists in the binding. If unsure, grep `bindings/node/client.d.ts`,
-  `bindings/python/src/lib.rs`, `src/lib.rs`, or the per-language reference. The
-  repo's `tools/skill-check` guard verifies names in this skill against those files.
-- Every enqueued queue has a running worker; every handler is safe under concurrent
-  delivery and redelivery, and shutdown signals then awaits its drain.
-- Every multi-key state transition documents its canonical record, partial-failure
-  recovery, and whether it actually needs an app SQL transaction.
-- Every scan is paginated and bounded by tenant/owner and retention; bulk values use
-  the binding's multi-get instead of serial reads.
-- Security-sensitive rate limits fail closed, run before expensive auth work, and
-  request bodies are type-checked rather than coerced.
-- Durable state is committed before a pub/sub nudge, and subscribers reconcile from
-  that durable state because live messages can be lost.
-- Tests use real forgelib, run twice with unique fixtures, and cover the relevant
-  failure modes against memory plus Postgres when persistence or concurrency matters.
-- For a web app, exercise signup/login, invalid payload types, tenant isolation,
-  session restoration after a hard reload, queue completion/redelivery, graceful
-  shutdown, and browser console/network errors.
+- Every method exists in the binding — grep `bindings/node/client.d.ts` or
+  `bindings/python/src/lib.rs` (`tools/skill-check` guards this skill against them).
+- Every enqueued queue has a running worker; handlers survive concurrent
+  redelivery; shutdown signals, then awaits, the drain.
+- Multi-key transitions document canonical record, write order, and compensation;
+  deletes run in reverse creation order.
+- Scans are tenant-bounded and paginated end to end; caps truncate and return a
+  cursor — never throw — and the HTTP layer exposes the cursor.
+- Credential rate limits fail closed, run before expensive work, and key on the
+  socket address unless a trusted proxy is configured; no-op conditions are checked
+  before consuming single-use tokens or limiter budget.
+- Bodies are type-checked without coercion; cross-field invariants hold on every
+  write path, updates included; money is integer minor units, grouped by currency.
+- Durable state commits before any pub/sub nudge; subscribers reconcile from it.
+- The state-model doc matches the store code; any contradiction is a bug in one.
+- Tests use real forgelib (memory, plus Postgres where persistence or concurrency
+  matters), run twice with unique fixtures. Pure computation (splits, balances, date
+  math) gets direct unit tests — e2e won't catch a wrong number that renders fine.
+  Web apps add a browser smoke test: signup/login, invalid payloads, tenant
+  isolation, hard-reload session restore, queue completion, console/network errors.
