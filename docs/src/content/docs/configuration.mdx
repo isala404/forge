@@ -37,7 +37,8 @@ fail_open = true
 
 [blob]
 backend = "postgres"         # "postgres", "fs", or "memory"
-signing_secret = "${FORGE_BLOB_SIGNING_SECRET:-}"
+# Include only when using presigned URLs. Missing/empty secrets fail loudly.
+signing_secret = "${FORGE_BLOB_SIGNING_SECRET}"
 base_url = "/api/files"
 ```
 

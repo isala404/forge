@@ -636,6 +636,15 @@ impl ForgeConfig {
                 "namespace must not contain ':' (it is the reserved namespace separator)",
             ));
         }
+        if self
+            .blob_signing_secret
+            .as_deref()
+            .is_some_and(|secret| secret.trim().is_empty())
+        {
+            return Err(ForgeError::config(
+                "blob.signing_secret must not be empty or whitespace",
+            ));
+        }
         if let BlobBackendConfig::Filesystem { root } = &self.blob_backend
             && root.as_os_str().is_empty()
         {
@@ -709,6 +718,17 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(cfg.validate(), Err(ForgeError::Config(_))));
+    }
+
+    #[test]
+    fn validate_rejects_empty_blob_signing_secret() {
+        for secret in ["", "   "] {
+            let cfg = ForgeConfig::from_toml_str(&format!(
+                "[postgres]\nurl = \"postgres://x/y\"\n[blob]\nsigning_secret = {secret:?}\n"
+            ))
+            .unwrap();
+            assert!(matches!(cfg.validate(), Err(ForgeError::Config(_))));
+        }
     }
 
     #[test]

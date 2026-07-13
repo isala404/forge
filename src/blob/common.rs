@@ -89,11 +89,13 @@ pub(super) fn like_escape(prefix: &str) -> String {
 /// A missing signing secret is `Config`: presigning is unconfigured, a deployment
 /// problem, classified the same way across presign/verify/router.
 fn require_secret(secret: Option<&[u8]>) -> Result<&[u8]> {
-    secret.ok_or_else(|| {
-        ForgeError::config(
-            "blob signing secret is not configured (set blob.signing_secret in forge.toml)",
-        )
-    })
+    secret
+        .filter(|value| !value.is_empty() && value.iter().any(|byte| !byte.is_ascii_whitespace()))
+        .ok_or_else(|| {
+            ForgeError::config(
+                "blob signing secret is not configured or is empty (set a non-empty blob.signing_secret in forge.toml)",
+            )
+        })
 }
 
 /// Build a signed URL (pool-free, so it is unit-testable without a database).
@@ -293,6 +295,19 @@ mod tests {
         // Missing signing secret is a configuration problem, classified `Config`
         // consistently across presign_* and verify_presigned.
         assert!(matches!(err, ForgeError::Config(_)));
+
+        for secret in [b"".as_slice(), b"   ".as_slice()] {
+            let err = presign_url(
+                Some(secret),
+                "/api/files",
+                Method::Get,
+                "k",
+                Duration::from_secs(60),
+                0,
+            )
+            .unwrap_err();
+            assert!(matches!(err, ForgeError::Config(_)));
+        }
     }
 
     #[test]
