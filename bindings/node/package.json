@@ -1,6 +1,6 @@
 {
   "name": "forgelib",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Node.js bindings for Forge: hardened infra primitives on Postgres",
   "license": "MIT",
   "repository": {
@@ -8,6 +8,15 @@
     "url": "git+https://github.com/isala404/forge.git",
     "directory": "bindings/node"
   },
+  "homepage": "https://isala404.github.io/forge/",
+  "bugs": "https://github.com/isala404/forge/issues",
+  "keywords": [
+    "postgres",
+    "queue",
+    "kv",
+    "backend",
+    "napi-rs"
+  ],
   "main": "client.js",
   "types": "client.d.ts",
   "files": [
@@ -25,14 +34,14 @@
     }
   },
   "napi": {
-    "name": "forgelib",
-    "triples": {
-      "additional": [
-        "aarch64-apple-darwin",
-        "aarch64-unknown-linux-gnu",
-        "x86_64-unknown-linux-musl"
-      ]
-    }
+    "binaryName": "forgelib",
+    "targets": [
+      "x86_64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl",
+      "aarch64-unknown-linux-gnu",
+      "aarch64-apple-darwin",
+      "x86_64-pc-windows-msvc"
+    ]
   },
   "scripts": {
     "test": "node --test test/*.test.js",
@@ -40,7 +49,7 @@
     "build:debug": "napi build --platform"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^2.18.4"
+    "@napi-rs/cli": "^3.7.3"
   },
   "engines": {
     "node": ">=18"

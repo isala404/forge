@@ -15,8 +15,8 @@ pub fn install_otlp(endpoint: &str) -> Result<()> {
         .build()
         .map_err(|e| ForgeError::config(format!("OTLP exporter setup failed: {e}")))?;
 
-    let provider = opentelemetry_sdk::trace::TracerProvider::builder()
-        .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
         .build();
 
     let tracer = provider.tracer("forge");

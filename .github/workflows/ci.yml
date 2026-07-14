@@ -139,7 +139,7 @@ jobs:
           shared-key: ci
           save-if: "false"
       - name: Install sqlx-cli
-        run: cargo install sqlx-cli --locked --version 0.8.6 --no-default-features --features rustls,postgres
+        run: cargo install sqlx-cli --locked --version 0.9.0 --no-default-features --features rustls,postgres
       - name: Apply migrations
         run: |
           for f in src/migrations/v*.sql; do

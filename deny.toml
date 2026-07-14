@@ -4,11 +4,6 @@ all-features = true
 [advisories]
 yanked = "warn"
 unmaintained = "workspace"
-ignore = [
-    # See .cargo/audit.toml: rsa advisory, reachable only via the unused sqlx-mysql
-    # driver that sqlx's macro crate compiles. Forge is Postgres-only.
-    "RUSTSEC-2023-0071",
-]
 
 [licenses]
 private = { ignore = true }

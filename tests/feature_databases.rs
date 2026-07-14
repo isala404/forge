@@ -10,7 +10,8 @@ use sqlx::{Connection, PgConnection};
 
 async fn count(url: &str, table: &str) -> i64 {
     let mut conn = PgConnection::connect(url).await.unwrap();
-    let n: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+    // `table` is test-owned; SQL identifiers cannot be bound.
+    let n: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
         .fetch_one(&mut conn)
         .await
         .unwrap();

@@ -6,11 +6,11 @@ on:
       version:
         description: "Version to release, without v prefix"
         required: true
-        default: "1.0.0"
+        default: "1.0.1"
       release_tag:
         description: "Git tag to release from"
         required: true
-        default: "v1.0.0"
+        default: "v1.0.1"
       dry_run:
         description: "Build/package only; do not publish"
         required: true
@@ -98,7 +98,7 @@ on:
       baseline_ref:
         description: "Optional previous release ref for cargo-semver-checks"
         required: false
-        default: "forgelib-v0.0.1"
+        default: "v1.0.0"
 
 permissions:
   contents: read
@@ -112,26 +112,9 @@ jobs:
   preflight:
     name: Preflight
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-deny@0.19.5,cargo-audit@0.22.1
       - name: Confirm release ref and versions
         shell: bash
         run: |
@@ -388,6 +371,26 @@ jobs:
             printf '  - %s\n' "${missing[@]}" >&2
             exit 1
           fi
+  quality:
+    name: Quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: preflight
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-quality
+          workspaces: |
+            . -> target
+            bindings/node -> target
+            bindings/python -> target
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - run: cargo fmt --all --check
       - run: cargo fmt --manifest-path bindings/node/Cargo.toml -- --check
       - run: cargo fmt --manifest-path bindings/python/Cargo.toml -- --check
@@ -399,27 +402,56 @@ jobs:
       - run: cargo run --manifest-path tools/codegen/Cargo.toml -- --check
       - run: python3 tools/api-contract/check.py
       - run: python3 tools/skill-check/check.py
+
+  guardrails:
+    name: Guardrails and package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: preflight
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-guardrails
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.19.5,cargo-audit@0.22.1
       - run: cargo deny check
       - run: cargo audit --deny warnings
       - run: cargo audit --file bindings/node/Cargo.lock --deny warnings
       - run: cargo audit --file bindings/python/Cargo.lock --deny warnings
-      - run: cargo package --no-verify
+      - run: cargo package --locked
+
+  semver:
+    name: Rust patch compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: preflight
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-semver
+      - uses: taiki-e/install-action@v2
+        if: ${{ inputs.baseline_ref != '' }}
+        with:
+          tool: cargo-semver-checks@0.48.0
       - name: Optional Rust public API compatibility check
         if: ${{ inputs.baseline_ref != '' }}
         run: |
-          cargo install cargo-semver-checks --locked --version 0.48.0
-          # The 0.x -> 1.0 version jump is technically a major release, which would
-          # skip compatibility lints. Force a minor-policy comparison so the stable
-          # boundary preserves the already-published Rust API unless reviewed.
           cargo semver-checks check-release \
-            --release-type minor \
+            --release-type patch \
             --baseline-rev "${{ inputs.baseline_ref }}"
 
   postgres-tests:
     name: Postgres Integration
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    needs: preflight
+    needs: [quality, guardrails, semver]
     services:
       postgres:
         image: postgres:18
@@ -441,7 +473,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release
+          shared-key: release-quality
+          workspaces: |
+            . -> target
+            bindings/node -> target
+            bindings/python -> target
           save-if: "false"
       - run: cargo test --features pg-tests -- --test-threads=4
 
@@ -449,7 +485,7 @@ jobs:
     name: Cross-Language Conformance
     runs-on: ubuntu-latest
     timeout-minutes: 40
-    needs: preflight
+    needs: [quality, guardrails, semver]
     services:
       postgres:
         image: postgres:18
@@ -469,6 +505,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-quality
+          workspaces: |
+            . -> target
+            bindings/node -> target
+            bindings/python -> target
+          save-if: "false"
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -531,7 +575,7 @@ jobs:
     name: Node Native (${{ matrix.platform }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 35
-    needs: preflight
+    needs: [quality, guardrails, semver]
     if: ${{ inputs.publish_npm == 'true' }}
     strategy:
       fail-fast: false
@@ -565,17 +609,27 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-node-${{ matrix.platform }}
+          workspaces: bindings/node -> target
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
       - uses: goto-bus-stop/setup-zig@v2
         if: ${{ matrix.zig }}
-      - run: npm install --ignore-scripts --no-audit --no-fund
+        with:
+          version: 0.14.1
+      - uses: taiki-e/install-action@v2
+        if: ${{ matrix.zig }}
+        with:
+          tool: cargo-zigbuild@0.23.0
+      - run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Build native addon
         shell: bash
         run: |
           if [[ "${{ matrix.zig }}" == "true" ]]; then
-            npm run build -- --target ${{ matrix.target }} --zig
+            npm run build -- --target ${{ matrix.target }} --cross-compile
           else
             npm run build -- --target ${{ matrix.target }}
           fi
@@ -603,7 +657,7 @@ jobs:
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
-      - run: npm install --ignore-scripts --no-audit --no-fund
+      - run: npm ci --ignore-scripts --no-audit --no-fund
       - uses: actions/download-artifact@v4
         with:
           pattern: forgelib-*
@@ -646,7 +700,7 @@ jobs:
     name: Python Wheel (${{ matrix.platform }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 35
-    needs: preflight
+    needs: [quality, guardrails, semver]
     if: ${{ inputs.publish_pypi == 'true' }}
     strategy:
       fail-fast: false
@@ -679,6 +733,7 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux || 'auto' }}
           container: ${{ matrix.container || '' }}
+          sccache: true
       - uses: actions/upload-artifact@v4
         with:
           name: wheel-${{ matrix.platform }}
@@ -700,7 +755,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m pip install --upgrade pip twine maturin
+      - run: python -m pip install --upgrade pip twine "maturin>=1.5,<2"
       - name: Build sdist
         run: maturin sdist --manifest-path bindings/python/Cargo.toml --out dist
       - uses: actions/download-artifact@v4
@@ -1226,6 +1281,9 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - preflight
+      - quality
+      - guardrails
+      - semver
       - postgres-tests
       - conformance
       - crates

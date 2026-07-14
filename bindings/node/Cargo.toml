@@ -1,7 +1,7 @@
 [package]
 name = "forgelib-node"
-version = "1.0.0"
-edition = "2021"
+version = "1.0.1"
+edition = "2024"
 publish = false
 description = "Node.js (napi-rs) bindings for Forge — hardened infra primitives on Postgres"
 
@@ -13,8 +13,8 @@ crate-type = ["cdylib"]
 # ships with both wired in ([postgres] embedded = true works out of the box).
 forgelib = { path = "../..", features = ["otel", "embedded"] }
 futures-util = "0.3"
-napi = { version = "2", default-features = false, features = ["napi6", "tokio_rt"] }
-napi-derive = "2"
+napi = { version = "3", default-features = false, features = ["napi6", "tokio_rt"] }
+napi-derive = "3"
 tokio = { version = "1", features = ["sync", "macros"] }
 
 [build-dependencies]

@@ -178,7 +178,7 @@ async fn create_database(name: &str) {
         .await
         .expect("connect to admin postgres db");
     // name is a generated uuid suffix, safe to interpolate; CREATE DATABASE cannot bind.
-    conn.execute(format!("CREATE DATABASE \"{name}\"").as_str())
+    conn.execute(sqlx::AssertSqlSafe(format!("CREATE DATABASE \"{name}\"")))
         .await
         .expect("create test database");
     conn.close().await.ok();
@@ -188,7 +188,9 @@ async fn drop_database(name: &str) {
     let admin = admin_url();
     if let Ok(mut conn) = PgConnection::connect(&admin).await {
         let _ = conn
-            .execute(format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)").as_str())
+            .execute(sqlx::AssertSqlSafe(format!(
+                "DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"
+            )))
             .await;
         conn.close().await.ok();
     }

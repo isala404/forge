@@ -1,16 +1,25 @@
 [package]
 name = "forgelib"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 rust-version = "1.94"
 license = "MIT"
 repository = "https://github.com/isala404/forge"
+homepage = "https://isala404.github.io/forge/"
+documentation = "https://docs.rs/forgelib"
+readme = "README.md"
 description = "The standard library for agent-built SaaS: hardened infra primitives on Postgres"
 keywords = ["postgres", "queue", "kv", "primitives", "backend"]
 categories = ["database", "asynchronous"]
-# Ship only the crate itself; the language packages, examples, runners, and CI
-# config build under their own lockfiles and must not bloat the published package.
-exclude = ["/bindings", "/examples", "/tools", "/.github"]
+include = [
+    "/src/**",
+    "/.sqlx/**",
+    "/Cargo.toml",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/SECURITY.md",
+]
 
 [lib]
 name = "forgelib"
@@ -43,7 +52,7 @@ conformance = []
 tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
 async-trait = "0.1"
 
-sqlx = { version = "0.8", default-features = false, features = [
+sqlx = { version = "0.9", default-features = false, features = [
     "runtime-tokio",
     "postgres",
     "uuid",
@@ -59,16 +68,16 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 # Config files. `${VAR}` env interpolation is a small in-house helper over toml::Value;
 # no figment/config layer, to keep the dependency surface minimal.
-toml = "0.8"
+toml = "1.1"
 uuid = { version = "1.19", features = ["v4", "serde"] }
 chrono = { version = "0.4", default-features = false, features = ["serde", "std", "clock"] }
 
 thiserror = "2.0"
 
-sha2 = "0.10"
+sha2 = "0.11"
 
 # Blob presigned URLs: HMAC-SHA256 signing + percent-encoding the key into the URL.
-hmac = "0.12"
+hmac = "0.13"
 percent-encoding = "2.3"
 
 # Auth: argon2id password hashing (PHC strings) + a CSPRNG for salts and tokens.
@@ -79,15 +88,12 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 tracing = "0.1"
 metrics = "0.24"
 
-# Embedded Postgres provisioning. rustls (not native-tls) to match the otel export
-# stack; its internal sqlx 0.9 duplicates our 0.8 in the build graph, which
-# cargo-deny only warns on — accepted over forking to keep crates.io publishability.
 postgresql_embedded = { version = "0.20.4", optional = true, default-features = false, features = ["theseus", "rustls", "tokio"] }
 
-opentelemetry = { version = "0.27", optional = true, features = ["trace"] }
-opentelemetry_sdk = { version = "0.27", optional = true, features = ["rt-tokio", "trace"] }
-opentelemetry-otlp = { version = "0.27", optional = true, default-features = false, features = ["http-json", "reqwest-rustls", "trace"] }
-tracing-opentelemetry = { version = "0.28", optional = true }
+opentelemetry = { version = "0.32", optional = true, features = ["trace"] }
+opentelemetry_sdk = { version = "0.32", optional = true, features = ["trace"] }
+opentelemetry-otlp = { version = "0.32", optional = true, default-features = false, features = ["http-json", "reqwest-rustls", "trace"] }
+tracing-opentelemetry = { version = "0.33", optional = true }
 tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter", "fmt"] }
 
 [dev-dependencies]

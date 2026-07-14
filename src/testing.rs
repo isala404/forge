@@ -33,7 +33,7 @@ impl TestDatabase {
             ForgeError::config(format!("could not connect to TEST_DATABASE_URL: {e}"))
         })?;
         // db name is generated and safe; CREATE DATABASE cannot be parameterized.
-        sqlx::query(&format!("CREATE DATABASE \"{name}\""))
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE \"{name}\"")))
             .execute(&mut conn)
             .await
             .map_err(|e| ForgeError::config(format!("could not create test database: {e}")))?;
@@ -75,7 +75,7 @@ impl TestDatabase {
         let mut conn = PgConnection::connect(&self.url)
             .await
             .map_err(|e| ForgeError::config(format!("could not connect to test database: {e}")))?;
-        let res = sqlx::query(sql)
+        let res = sqlx::query(sqlx::AssertSqlSafe(sql))
             .execute(&mut conn)
             .await
             .map_err(ForgeError::from_sqlx)
@@ -101,10 +101,11 @@ impl Drop for TestDatabase {
             };
             rt.block_on(async move {
                 if let Ok(mut conn) = PgConnection::connect(&admin_url).await {
-                    let _ =
-                        sqlx::query(&format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"))
-                            .execute(&mut conn)
-                            .await;
+                    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+                        "DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"
+                    )))
+                    .execute(&mut conn)
+                    .await;
                     conn.close().await.ok();
                 }
             });

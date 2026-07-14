@@ -430,8 +430,7 @@ impl ForgeConfig {
     /// no default is a hard error: config fails loud, never resolves to empty). Unknown keys
     /// are rejected with a precise error.
     pub(crate) fn from_toml_str(s: &str) -> Result<Self> {
-        let mut value: toml::Value = s
-            .parse()
+        let mut value: toml::Value = toml::from_str(s)
             .map_err(|e| ForgeError::config(format!("invalid TOML config: {e}")))?;
         interpolate_value(&mut value)?;
         let parsed = TomlConfig::deserialize(value).map_err(|e| {

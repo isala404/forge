@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "forgelib"
-version = "1.0.0"
+version = "1.0.1"
 description = "Python bindings for Forge — hardened infra primitives on Postgres"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -13,7 +13,16 @@ classifiers = [
     "Development Status :: 5 - Production/Stable",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Typing :: Typed",
 ]
+
+[project.urls]
+Homepage = "https://isala404.github.io/forge/"
+Documentation = "https://isala404.github.io/forge/"
+Repository = "https://github.com/isala404/forge"
+Issues = "https://github.com/isala404/forge/issues"
 
 [tool.maturin]
 module-name = "forgelib"

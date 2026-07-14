@@ -6,12 +6,19 @@
       {
         "ordinal": 0,
         "name": "tokens",
-        "type_info": "Float8"
+        "type_info": "Float8",
+        "origin": {
+          "Table": {
+            "table": "forge_ratelimit",
+            "name": "tokens"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "elapsed!",
-        "type_info": "Float8"
+        "type_info": "Float8",
+        "origin": "Expression"
       }
     ],
     "parameters": {

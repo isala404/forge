@@ -6,22 +6,41 @@
       {
         "ordinal": 0,
         "name": "window_start",
-        "type_info": "Float8"
+        "type_info": "Float8",
+        "origin": {
+          "Table": {
+            "table": "forge_ratelimit",
+            "name": "window_start"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "cur_count",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "forge_ratelimit",
+            "name": "cur_count"
+          }
+        }
       },
       {
         "ordinal": 2,
         "name": "prev_count",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "forge_ratelimit",
+            "name": "prev_count"
+          }
+        }
       },
       {
         "ordinal": 3,
         "name": "now_epoch!",
-        "type_info": "Float8"
+        "type_info": "Float8",
+        "origin": "Expression"
       }
     ],
     "parameters": {

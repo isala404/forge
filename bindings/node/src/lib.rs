@@ -395,10 +395,11 @@ impl ForgeClient {
             )));
         };
         self.forge.queue().heartbeat(&job).await.map_err(err)?;
-        if let Some(stored) = self.leased.lock().await.get_mut(&receipt) {
-            if stored.id == job.id && stored.lease_token() == job.lease_token() {
-                stored.leased_until = SystemTime::now();
-            }
+        if let Some(stored) = self.leased.lock().await.get_mut(&receipt)
+            && stored.id == job.id
+            && stored.lease_token() == job.lease_token()
+        {
+            stored.leased_until = SystemTime::now();
         }
         Ok(())
     }

@@ -156,7 +156,10 @@ impl MigrationRunner {
             if is_empty_or_comment_only(&stmt) {
                 continue;
             }
-            sqlx::query(&stmt).execute(&mut *conn).await?;
+            // Migration SQL is embedded and contains no caller input.
+            sqlx::query(sqlx::AssertSqlSafe(stmt))
+                .execute(&mut *conn)
+                .await?;
         }
         Ok(())
     }
@@ -185,13 +188,16 @@ impl MigrationRunner {
                 if is_empty_or_comment_only(&stmt) {
                     continue;
                 }
-                sqlx::query(&stmt).execute(&mut *tx).await.map_err(|e| {
-                    ForgeError::config(format!(
-                        "migration '{}' failed: {}",
-                        migration.version,
-                        sql_cause(&e)
-                    ))
-                })?;
+                sqlx::query(sqlx::AssertSqlSafe(stmt))
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| {
+                        ForgeError::config(format!(
+                            "migration '{}' failed: {}",
+                            migration.version,
+                            sql_cause(&e)
+                        ))
+                    })?;
             }
             sqlx::query!(
                 "INSERT INTO forge_system_migrations (version, checksum) VALUES ($1, $2)",
@@ -219,13 +225,16 @@ impl MigrationRunner {
                     if is_empty_or_comment_only(&stmt) {
                         continue;
                     }
-                    sqlx::query(&stmt).execute(&mut *conn).await.map_err(|e| {
-                        ForgeError::config(format!(
-                            "migration '{}' failed: {}",
-                            migration.version,
-                            sql_cause(&e)
-                        ))
-                    })?;
+                    sqlx::query(sqlx::AssertSqlSafe(stmt))
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(|e| {
+                            ForgeError::config(format!(
+                                "migration '{}' failed: {}",
+                                migration.version,
+                                sql_cause(&e)
+                            ))
+                        })?;
                 }
                 sqlx::query!(
                     "INSERT INTO forge_system_migrations (version, checksum) VALUES ($1, $2)",

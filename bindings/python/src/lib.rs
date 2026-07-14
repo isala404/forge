@@ -872,10 +872,11 @@ impl ForgeClient {
                 )));
             };
             forge.queue().heartbeat(&job).await.map_err(pyerr)?;
-            if let Some(stored) = leased.lock().await.get_mut(&receipt) {
-                if stored.id == job.id && stored.lease_token() == job.lease_token() {
-                    stored.leased_until = SystemTime::now();
-                }
+            if let Some(stored) = leased.lock().await.get_mut(&receipt)
+                && stored.id == job.id
+                && stored.lease_token() == job.lease_token()
+            {
+                stored.leased_until = SystemTime::now();
             }
             Ok(())
         })

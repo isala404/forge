@@ -6,12 +6,24 @@
       {
         "ordinal": 0,
         "name": "version",
-        "type_info": "Varchar"
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "forge_system_migrations",
+            "name": "version"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "checksum",
-        "type_info": "Varchar"
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "forge_system_migrations",
+            "name": "checksum"
+          }
+        }
       }
     ],
     "parameters": {
