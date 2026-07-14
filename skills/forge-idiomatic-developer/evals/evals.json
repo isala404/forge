@@ -1,0 +1,83 @@
+{
+  "skill_name": "forge-idiomatic-developer",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Build a production-minded Next.js App Router application named Away Together for managing group trips. Use TypeScript, npm, and exactly forgelib@1.0.1. The product needs authentication, trips and roles, invitations, availability, itinerary, polls, shared expenses and settlements, tasks and packing, messages, attachments, search, and a convincing demo. For this product, use application-owned Postgres tables with migrations and constraints for relational domain data; use Forge for its infrastructure primitives. Include a worker, safe blob access, graceful shutdown, documentation, unit/integration tests, and a real-browser smoke flow. Work until lint, typecheck, tests, and production build pass.",
+      "expected_output": "A runnable full-stack application that follows the user's explicit relational-storage requirement while using the installed Forge 1.0.1 API correctly.",
+      "expectations": [
+        "The project pins and resolves forgelib 1.0.1 and verifies API use against that installed version",
+        "Relational domain data uses application-owned Postgres migrations rather than Forge internal tables",
+        "Forge initialization, auth, queue, blob, scheduler, and shutdown behavior match the Node binding",
+        "Queue effects are idempotent at the logical side-effect boundary, including fan-out",
+        "Lint, typecheck, automated tests, production build, and a browser smoke flow pass"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Design a small Forge-backed URL shortener. Each slug maps directly to one destination, click counts are atomic, links may expire, and the service will hold at most 5,000 links. There is no search, reporting, joining, or multi-record transaction requirement. Explain the storage choice and sketch the Rust implementation.",
+      "expected_output": "A proportionate design that recognizes Forge KV as a valid fit instead of adding a second application database automatically.",
+      "expectations": [
+        "The storage decision is based on exact-key access, bounded growth, TTL, and atomic-counter requirements",
+        "Forge KV is accepted as a reasonable canonical store for this bounded design",
+        "The answer notes scan consistency/scale limits without inventing relational infrastructure",
+        "Rust method names and async behavior match the selected Forge version"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Architect a multi-tenant booking service using Forge. Reservations must enforce uniqueness across resources and time ranges, update inventory and payment state atomically, support filtering and reporting, and keep a permanent audit history. Decide where every category of state belongs and justify the boundaries.",
+      "expected_output": "A relational design chosen from invariants and query requirements, with Forge primitives used where they fit.",
+      "expectations": [
+        "Reservations and inventory use a query-oriented transactional datastore",
+        "The design does not simulate multi-record transactions or relational indexes with Forge KV",
+        "Rate limiting is not used as an inventory or billing counter",
+        "Cross-system queue/payment effects have an explicit repair and idempotency strategy"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Review a Python Forge queue worker that starts `forge.worker(...)` without scheduling the coroutine, exits immediately when its stop event is set, uses `job.id` to ack, and writes one notification per recipient under a unique key containing only the job id. Identify every correctness problem and show a corrected lifecycle and idempotency design.",
+      "expected_output": "A binding-accurate Python review covering task creation, receipt ownership, fan-out idempotency, and the current long-poll shutdown caveat.",
+      "expectations": [
+        "The worker coroutine is started with asyncio.create_task and retained",
+        "Managed jobs are settled by the helper rather than acked with the stable id",
+        "Fan-out idempotency is scoped per logical recipient effect",
+        "The answer verifies whether the selected Python helper rechecks stop after long-poll dequeue"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Add live typing indicators and durable document-updated notifications to a Node Forge service. Explain how pub/sub should be used for each case, including payload limits and what subscribers do after reconnecting.",
+      "expected_output": "A design that allows direct ephemeral typing publications while ordering durable-change notifications after commit.",
+      "expectations": [
+        "Typing indicators may publish directly without manufacturing durable state",
+        "Document-updated events publish after the durable write and subscribers reconcile",
+        "The answer states at-most-once/live-subscriber-only behavior",
+        "The answer respects the valid UTF-8 and 7,000-byte built-in payload contract"
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "A consumer project is pinned to forgelib@1.0.0, while the local Forge repository checkout is 1.0.1. Review its blob presign configuration and API usage. Explain which source is authoritative, how to handle behavior that changed between the releases, and what safe configuration works across both.",
+      "expected_output": "A version-aware review that follows the installed package while using a non-empty configuration independently of release validation.",
+      "expectations": [
+        "The installed 1.0.0 package is treated as authoritative for the consumer's runtime behavior",
+        "The answer identifies empty signing-secret rejection as a 1.0.1 change",
+        "The recommended configuration has no empty fallback and is safe on both releases",
+        "The response does not silently apply current-repository behavior to the older installed package"
+      ]
+    },
+    {
+      "id": 7,
+      "prompt": "Review a Rust Forge service that writes domain tables through `forge.pool()`, assumes queue depth is exact, hard-codes a five-minute dedup guarantee, and publishes arbitrary binary payloads over pub/sub. Provide precise corrections without redesigning unrelated parts.",
+      "expected_output": "A focused Rust review covering the system-pool boundary and configurable/approximate runtime contracts.",
+      "expectations": [
+        "The answer rejects forge.pool() as the home for domain tables and uses an application-owned pool when needed",
+        "Queue depth is described as approximate and point-in-time",
+        "The dedup window is described as configurable with a 300-second default",
+        "Built-in pub/sub payloads are described as valid UTF-8 with a 7,000-byte limit"
+      ]
+    }
+  ]
+}

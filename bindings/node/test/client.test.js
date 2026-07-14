@@ -92,6 +92,28 @@ test('runWorker acks a handled job', async () => {
   assert.deepEqual(client.calls.nacked, []);
 });
 
+test('runWorker releases a job returned after shutdown during long-poll', async () => {
+  const controller = new AbortController();
+  const raw = rawJob({ n: 1 });
+  const calls = { nacked: [], handled: 0 };
+  const client = {
+    async queueDequeue() {
+      controller.abort();
+      return raw;
+    },
+    async queueNack(receipt, retrySeconds) {
+      calls.nacked.push({ receipt, retrySeconds });
+    },
+  };
+
+  await runWorker(client, 'q', async () => {
+    calls.handled += 1;
+  }, { signal: controller.signal });
+
+  assert.equal(calls.handled, 0);
+  assert.deepEqual(calls.nacked, [{ receipt: 'r1', retrySeconds: 0 }]);
+});
+
 test('runWorker nacks and reports a failing handler', async () => {
   const controller = new AbortController();
   const client = stubClient([rawJob({ n: 1 })], controller);

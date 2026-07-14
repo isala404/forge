@@ -9,8 +9,9 @@ What counts as a "named method":
   * an inline code token written as `name()` (the reference tables use this form), and
   * a `forge.NAME(` / `client.NAME(` call inside a ts/js or python fenced code block.
 
-Rust is compiler-checked (and uses namespaced accessors like `forge.kv()` that don't
-map to a flat method list), so rust.md and rust fences are not machine-checked here.
+Rust uses namespaced accessors that do not map to a flat method list, so method-name
+checking skips Rust. A second set of semantic regression checks covers the
+cross-language mistakes that a spelling-only API check cannot catch.
 
 Sources of truth:
   * Node   -> bindings/node/client.d.ts + client.js + generated index.d.ts
@@ -109,6 +110,78 @@ def scan(md: Path, node: set[str], py: set[str], inline_scope: str) -> list[str]
     return problems
 
 
+def semantic_regressions() -> list[str]:
+    """Guard the high-impact semantics that previously drifted from the code."""
+    problems: list[str] = []
+    files = {
+        path.name: path.read_text(encoding="utf-8")
+        for path in [SKILL_DIR / "SKILL.md", *(SKILL_DIR / "references").glob("*.md")]
+    }
+    combined = "\n".join(files.values())
+
+    forbidden = {
+        "Everything is `async`": "Node has synchronous helpers",
+        "every one awaitable": "Python has synchronous helpers",
+        'signing_secret = "${FORGE_BLOB_SIGNING_SECRET:-}"': "empty signing secrets are unsafe",
+        "method mismatch verifies to `false`": "unsupported presign methods are INVALID",
+        "method mismatch verifies to `False`": "unsupported presign methods are InvalidError",
+        "single Postgres connection": "Forge uses a pool and may hold a pubsub listener",
+        "forge.pool() / forge.postgres_url()": "Forge's Rust system pool is not for domain tables",
+        "A `dedupId` seen in the last 5 min": "the queue dedup window is configurable",
+        "A `dedup_id` seen in the last 5 min": "the queue dedup window is configurable",
+    }
+    for phrase, reason in forbidden.items():
+        if phrase in combined:
+            problems.append(f"forbidden skill claim {phrase!r}: {reason}")
+
+    required = {
+        "SKILL.md": [
+            "Use the Forge version resolved by the project",
+            "references/runtime-contract.md",
+            "references/application-design.md",
+            "references/nextjs.md",
+        ],
+        "runtime-contract.md": [
+            "compare-and-swap mismatch returns `false`",
+            "unsupported HTTP method is `INVALID`",
+            "up to about 30 seconds",
+            'signing_secret = "${FORGE_BLOB_SIGNING_SECRET}"',
+            "default window is 300 seconds; it is configurable",
+            "valid UTF-8 payloads up to 7,000 bytes",
+            "rechecks shutdown after a long-poll dequeue",
+        ],
+        "node.md": [
+            "A dequeued `QueueJob<T>` owns `ack()`, `nack()`, and `heartbeat()`",
+            "for await (const event of await topic.subscribe())",
+            "unsupported method throws `INVALID`",
+        ],
+        "python.md": [
+            "asyncio.create_task",
+            "it has no `if_exists` argument",
+            "unsupported method raises `InvalidError`",
+        ],
+        "rust.md": [
+            "forge.pool() is the Forge system pool",
+            "valid UTF-8 payload bytes of at most 7,000 bytes",
+        ],
+    }
+    for name, phrases in required.items():
+        text = files.get(name, "")
+        normalized = " ".join(text.split())
+        for phrase in phrases:
+            if " ".join(phrase.split()) not in normalized:
+                problems.append(f"{name}: missing semantic guard phrase {phrase!r}")
+
+    rust = files.get("rust.md", "")
+    queue_block = re.search(
+        r"if let Some\(job\).*?\{(?P<body>.*?)\n\}", rust, flags=re.DOTALL
+    )
+    if not queue_block or "heartbeat(&job)" not in queue_block.group("body"):
+        problems.append("rust.md: queue heartbeat example must keep `job` inside its scope")
+
+    return problems
+
+
 def main() -> int:
     node, py = load_known()
     if not node or not py:
@@ -117,7 +190,9 @@ def main() -> int:
 
     targets = [
         (SKILL_DIR / "SKILL.md", "any"),
-        (SKILL_DIR / "references" / "application-invariants.md", "any"),
+        (SKILL_DIR / "references" / "application-design.md", "any"),
+        (SKILL_DIR / "references" / "runtime-contract.md", "any"),
+        (SKILL_DIR / "references" / "nextjs.md", "any"),
         (SKILL_DIR / "references" / "node.md", "node"),
         (SKILL_DIR / "references" / "python.md", "python"),
         (SKILL_DIR / "references" / "rust.md", "skip"),  # inline tokens not checked
@@ -130,6 +205,7 @@ def main() -> int:
             continue
         checked += 1
         problems.extend(scan(md, node, py, scope))
+    problems.extend(semantic_regressions())
 
     if problems:
         print("skill-check: the skill names methods that are not in the bindings:\n", file=sys.stderr)
@@ -142,7 +218,10 @@ def main() -> int:
         )
         return 1
 
-    print(f"skill-check: OK — {checked} skill files verified against the bindings")
+    print(
+        f"skill-check: OK — {checked} skill files verified against the bindings "
+        "and semantic regression rules"
+    )
     return 0
 
 

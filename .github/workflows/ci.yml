@@ -231,3 +231,5 @@ jobs:
       - name: node wrapper unit tests
         run: npm test
         working-directory: bindings/node
+      - name: python wrapper unit tests
+        run: python -m unittest discover -s bindings/python/test

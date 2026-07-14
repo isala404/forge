@@ -286,6 +286,14 @@ async def run_worker(
             continue
         if raw is None:
             continue
+        # The event may have been set while the long-poll was in flight. Release
+        # the new lease instead of beginning fresh work after shutdown.
+        if stop is not None and stop.is_set():
+            try:
+                await client.queue_nack(raw.receipt, 0.0)
+            except Exception as exc:  # noqa: BLE001
+                await report(exc, None)
+            break
 
         lease_lost = asyncio.Event()
         try:

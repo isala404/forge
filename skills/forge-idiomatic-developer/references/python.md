@@ -1,10 +1,12 @@
 # Forge — Python reference
 
 The package is `forgelib`. Raw contract methods live directly on `ForgeClient` in
-flat snake_case and are awaitable (`await` all of them, including `init`). Native
+flat snake_case. Most are awaitable, but methods explicitly marked **synchronous**
+below must not be awaited. Native
 JSON handles also hang off the client (`forge.queue()`, `forge.kv()`,
 `forge.config()`, `forge.topic()`) for app payloads. Optional raw arguments default
-to `None`. Verified against `bindings/python/src/lib.rs`.
+to `None`. Check the installed extension, package helpers, and `.pyi` stubs when exact
+behavior matters.
 
 ```python
 import forgelib
@@ -19,7 +21,7 @@ forge = await forgelib.ForgeClient.init_from("svc/forge.toml")
 | `kv_get()` | Value as a `str`, or `None`. Lossy for binary — use bytes. |
 | `kv_get_bytes()` | Value as `bytes`, or `None`. Lossless. |
 | `kv_set()` | `kv_set(key, value, ttl_seconds=None, if_not_exists=None, if_exists=None)`. Returns whether it wrote. |
-| `kv_set_bytes()` | Same, with a `bytes` value. |
+| `kv_set_bytes()` | `kv_set_bytes(key, value, ttl_seconds=None, if_not_exists=None)`; unlike `kv_set`, it has no `if_exists` argument. |
 | `kv_mget()` | Many keys in one round-trip; per-key `str \| None`. |
 | `kv_incr()` | `kv_incr(key, by)` → exact `int` (unlike Node's f64). |
 | `kv_delete()` | Whether the key existed. |
@@ -33,15 +35,16 @@ forge = await forgelib.ForgeClient.init_from("svc/forge.toml")
 
 | Method | Notes |
 | --- | --- |
-| `queue_enqueue()` | `queue_enqueue(queue, payload, max_attempts=None, dedup_id=None, delay_seconds=None)` → id. A `dedup_id` seen in the last 5 min returns the existing job's id (no error). |
+| `queue_enqueue()` | `queue_enqueue(queue, payload, max_attempts=None, dedup_id=None, delay_seconds=None)` → id. A `dedup_id` inside the configured dedup window returns the existing id (no error); the default is 300 seconds. |
 | `queue_dequeue()` | `queue_dequeue(queue, visibility_seconds, wait_seconds)` → `Job \| None` (long-polls). |
 | `queue_ack()` | Ack by `receipt` (idempotent). |
 | `queue_nack()` | `queue_nack(receipt, retry_seconds=None)`. Raises `PreconditionError` if the receipt is unknown. |
 | `queue_heartbeat()` | Extend the lease; raises `PreconditionError` if the lease was lost. |
-| `queue_depth()` | `QueueDepth(visible, in_flight, delayed)`. Pass `"<queue>.dlq"` for the dead-letter backlog. |
+| `queue_depth()` | Approximate point-in-time `QueueDepth(visible, in_flight, delayed)`. Pass `"<queue>.dlq"` for the dead-letter backlog. |
 
-Settle by the delivery-unique `receipt`, never `id` (the `id` is your idempotency
-key — stable across redeliveries).
+Settle by the delivery-unique `receipt`, never `id`. The stable id is useful for
+redelivery idempotency, but scope the key to the logical effect or use a domain
+operation id when duplicate jobs are possible.
 
 ## Pub/sub
 
@@ -49,11 +52,11 @@ key — stable across redeliveries).
 | --- | --- |
 | `pubsub_publish()` | `pubsub_publish(topic, payload)`, fire-and-forget, at-most-once. `payload` is a `str`; subscribers receive `bytes`. |
 | `pubsub_subscribe()` | Returns a subscription; `async for payload in sub:` (payloads are `bytes` — decode before parsing). |
-| `pubsub_channel()` | The Postgres `LISTEN`/`NOTIFY` channel a topic maps to. |
+| `pubsub_channel()` | Backend channel mapping; with Postgres pub/sub it is the `LISTEN`/`NOTIFY` channel. **Synchronous.** |
 
 The subscription's `aclose()` unsubscribes now and stops a pending `__anext__`
 immediately. Publishes after `pubsub_subscribe()` returns are delivered; earlier
-ones are gone (no replay).
+ones are gone (no replay). Payloads must be valid UTF-8 and at most 7,000 bytes.
 
 ## Blob
 
@@ -73,17 +76,18 @@ Blob is bytes-native in Python: `blob_put`/`blob_get` already take and return
 | `blob_presign_upload()` | `blob_presign_upload(key, expires_seconds, max_bytes)` — needs the secret. |
 | `blob_verify_presign()` | `blob_verify_presign(method, key, expires_epoch, max_bytes, sig)` → validity. |
 
-Presigned URLs are relative paths (`/api/files?key=…&expires=…&max_bytes=…&sig=…`),
-not absolute URLs: mount your own route and pass the query params to
-`blob_verify_presign` verbatim (a download URL carries `max_bytes=0` — echo it). A
-method mismatch verifies to `False` rather than raising.
+Presigned URLs use `/api/files?key=…&expires=…&max_bytes=…&sig=…` by default, but
+`[blob].base_url` can make the configured base relative or absolute. Mount a matching
+route and pass the query params to `blob_verify_presign` verbatim (a download URL
+carries `max_bytes=0` — echo it). Expiry or a bad signature returns `False`; an
+unsupported method raises `InvalidError`.
 
 ## Auth
 
 | Method | Notes |
 | --- | --- |
 | `hash_password()` | argon2id PHC string to store in your users table. |
-| `verify_password()` | `verify_password(plain, hash)`, constant-time. |
+| `verify_password()` | `verify_password(plain, hash)`; a malformed stored hash raises `InvalidError`, not `False`. |
 | `needs_rehash()` | After a successful verify, re-hash if `True`. Synchronous. |
 | `create_session()` | `create_session(user_id, idle_seconds=None, absolute_seconds=None)` → token (shown once). |
 | `validate_session()` | Token → `user_id`, or `None`. |
@@ -104,9 +108,9 @@ method mismatch verifies to `False` rather than raising.
 | `rate_limit_check()` | `rate_limit_check(bucket, key, max, per_seconds, fail_open=None, algo=None)` → `Decision`. `algo` is `"token_bucket"` (default) or `"sliding_window"`. `per_seconds` must be ≥ 1 (a sub-second window raises `InvalidError`). |
 
 `Decision`: `allowed`, `limit`, `remaining`, `reset_after_seconds`, `retry_after_seconds`.
-Pass `False` for `fail_open` on credential, password-reset, invite, and API-key
-verification paths. A limiter outage should deny those security-sensitive requests;
-reserve fail-open behavior for explicitly low-risk, availability-first traffic.
+Run credential limits before password work and choose `fail_open` deliberately. Use
+`False` when bypass creates unacceptable security/financial risk; use `True` with
+monitoring and defense in depth when availability takes precedence.
 
 ## Schedule
 
@@ -136,8 +140,8 @@ reserve fail-open behavior for explicitly low-risk, availability-first traffic.
 
 | Method | Notes |
 | --- | --- |
-| `backend_report()` | Which provider powers each primitive. Synchronous. |
-| `postgres_url()` | The resolved system DSN (embedded servers mint theirs at init) for the app's own pool. Contains credentials. Synchronous. |
+| `backend_report()` | Which provider powers each primitive. **Synchronous.** |
+| `postgres_url()` | Resolved Forge system DSN. Contains credentials. Use server-side to reach embedded Postgres from another process or intentionally seed an application-owned pool; choose production isolation deliberately. **Synchronous.** |
 | `maintain()` | One housekeeping sweep. Call on an interval alongside `run_scheduler_once`. |
 
 ## Native JSON handles
@@ -160,7 +164,10 @@ await profile.set(value, ttl_seconds=3600)
 - `Queue` from `forge.queue(name)`: `enqueue()`, `dequeue()`, `ack()`, `nack()`, `heartbeat()`, `depth()`, `worker()`. A handle/worker `job.payload` is ALREADY codec-decoded (a dict) — `json.loads`-ing it again raises.
 - `KvKey` from `forge.kv(key)`: `get()`, `get_or_default(default)`, `set()`, `delete()`, `exists()`, `expire()`, `compare_and_swap()`.
 - `ConfigKey` from `forge.config(key, default)`: `get()`, `get_or_default()`, `set()`.
-- `Topic` from `forge.topic(name)`: `publish()`, `subscribe()` (`async for event in topic.subscribe():`).
-- `forge.worker(queue, handler, *, stop=..., visibility_seconds=30.0, wait_seconds=20.0)` / `run_worker(...)` — managed loop. Keep its task; set the `stop` event to begin draining, then await the task before process exit.
+- `Topic` from `forge.topic(name)`: asynchronous `publish()`, async-generator `subscribe()` (`async for event in topic.subscribe():`), and synchronous `channel()`.
+- `forge.worker(queue, handler, *, stop=..., visibility_seconds=30.0,
+  wait_seconds=20.0)` / `run_worker(...)` — managed coroutine. Start and retain an
+  actual task: `task = asyncio.create_task(forge.worker(..., stop=stop))`; set the
+  event, then `await task` before exit.
 - `forge_error_code(exc)` / `forge_error_retryable(exc)` — exceptions are named code +
   `Error` (`LimitError` → code `"Limit"`) and every instance carries a `retryable` attribute.

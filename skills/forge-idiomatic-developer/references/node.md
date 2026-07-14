@@ -1,11 +1,12 @@
 # Forge — Node reference
 
 The package is `forgelib`. Raw contract methods live directly on `ForgeClient` in
-flat camelCase and return a `Promise`. Native JSON handles also hang off the client
+flat camelCase. Most are asynchronous, but methods explicitly marked **synchronous**
+below must not be awaited. Native JSON handles also hang off the client
 (`forge.queue<T>()`, `forge.kv<T>()`, `forge.config<T>()`, `forge.topic<T>()`) for
 app payloads. Optional trailing raw arguments are positional — pass `null` (or
-`undefined`) to skip one and set a later one. Verified against
-`bindings/node/client.d.ts`.
+`undefined`) to skip one and set a later one. Check the installed `client.d.ts`,
+`index.d.ts`, and JavaScript helpers when exact behavior matters.
 
 ```ts
 import { ForgeClient } from "forgelib";
@@ -34,15 +35,16 @@ const forge2 = await ForgeClient.initFrom("svc/forge.toml");
 
 | Method | Notes |
 | --- | --- |
-| `queueEnqueue()` | `queueEnqueue(queue, payload, maxAttempts?, dedupId?, delaySeconds?)` → job id. A `dedupId` seen in the last 5 min returns the existing job's id (no error). |
+| `queueEnqueue()` | `queueEnqueue(queue, payload, maxAttempts?, dedupId?, delaySeconds?)` → job id. A `dedupId` seen inside the configured dedup window returns the existing id (no error); the default is 300 seconds. |
 | `queueDequeue()` | `queueDequeue(queue, visibilitySeconds, waitSeconds)` → `JsJob \| null` (long-polls). |
 | `queueAck()` | Ack by `receipt` (idempotent). |
 | `queueNack()` | `queueNack(receipt, retrySeconds?)`. Throws `PRECONDITION` if the receipt is unknown. |
 | `queueHeartbeat()` | Extend the lease by one visibility window; throws `PRECONDITION` if the lease is lost. |
-| `queueDepth()` | `{ visible, inFlight, delayed }`. Pass `"<queue>.dlq"` to gauge the dead-letter backlog. |
+| `queueDepth()` | Approximate point-in-time `{ visible, inFlight, delayed }`. Pass `"<queue>.dlq"` to gauge the dead-letter backlog. |
 
-Settle a job by its delivery-unique `receipt`, never its `id` (the `id` is stable
-across redeliveries — that is your idempotency key).
+Settle a job by its delivery-unique `receipt`, never its `id`. The stable id is useful
+for redelivery idempotency, but scope the final key to the logical effect (for example,
+`jobId:recipientId`) or use a domain operation id when duplicate jobs are possible.
 
 ## Pub/sub
 
@@ -50,13 +52,13 @@ across redeliveries — that is your idempotency key).
 | --- | --- |
 | `pubsubPublish()` | `pubsubPublish(topic, payload)`, fire-and-forget, at-most-once. |
 | `pubsubSubscribe()` | Returns a `JsSubscription`; loop `next()` until it resolves `null`. |
-| `pubsubChannel()` | The Postgres `LISTEN`/`NOTIFY` channel a topic maps to. |
+| `pubsubChannel()` | Backend channel mapping. With the Postgres pub/sub backend, this is its `LISTEN`/`NOTIFY` channel. **Synchronous.** |
 
 `JsSubscription` has `next()` (→ `Buffer \| null`) and `close()` (unsubscribe now —
 call it when a client's socket closes; it also resolves any pending `next()` to
 `null`). `pubsubPublish` takes a string; `next()` yields a `Buffer` — `toString()`
 before parsing. Publishes after `subscribe()` resolves are delivered; earlier ones
-are gone.
+are gone. Payloads must be valid UTF-8 and at most 7,000 bytes.
 
 ## Blob
 
@@ -75,17 +77,18 @@ are gone.
 | `blobPresignUpload()` | `blobPresignUpload(key, expiresSeconds, maxBytes)` — needs the secret. |
 | `blobVerifyPresign()` | `blobVerifyPresign(method, key, expiresEpoch, maxBytes, sig)` → validity. |
 
-Presigned URLs are relative paths (`/api/files?key=…&expires=…&max_bytes=…&sig=…`),
-not absolute URLs: mount your own route and pass the query params to
-`blobVerifyPresign` verbatim (a download URL carries `max_bytes=0` — echo it, don't
-substitute). A method mismatch verifies to `false` rather than throwing.
+Presigned URLs use `/api/files?key=…&expires=…&max_bytes=…&sig=…` by default, but
+`[blob].base_url` can make the configured base relative or absolute. Mount a matching
+route and pass the query params to `blobVerifyPresign` verbatim (a download URL
+carries `max_bytes=0` — echo it, don't substitute). Expiry or a bad signature returns
+`false`; an unsupported method throws `INVALID`.
 
 ## Auth
 
 | Method | Notes |
 | --- | --- |
 | `hashPassword()` | argon2id PHC string to store in your users table. |
-| `verifyPassword()` | `verifyPassword(plain, hash)`, constant-time. |
+| `verifyPassword()` | `verifyPassword(plain, hash)`; a malformed stored hash throws `INVALID`, not `false`. |
 | `needsRehash()` | After a successful verify, re-hash if `true` (params below baseline). Synchronous. |
 | `createSession()` | `createSession(userId, idleSeconds?, absoluteSeconds?)` → opaque token (shown once). |
 | `validateSession()` | Token → `userId`, or `null`. |
@@ -106,9 +109,9 @@ substitute). A method mismatch verifies to `false` rather than throwing.
 | `rateLimitCheck()` | `rateLimitCheck(bucket, key, max, perSeconds, failOpen?, algo?)` → `JsDecision`. `algo` is `"token_bucket"` (default) or `"sliding_window"`. `perSeconds` must be ≥ 1 (a sub-second window is `INVALID`). |
 
 `JsDecision`: `{ allowed, limit, remaining, resetAfterSeconds, retryAfterSeconds? }`.
-Pass `false` for `failOpen` on credential, password-reset, invite, and API-key
-verification paths. A limiter outage should deny those security-sensitive requests;
-reserve fail-open behavior for explicitly low-risk, availability-first traffic.
+Run credential limits before password work and choose `failOpen` deliberately. Pass
+`false` when bypass creates unacceptable security/financial risk; pass `true` with
+monitoring and defense in depth when availability takes precedence.
 
 ## Schedule
 
@@ -138,8 +141,8 @@ reserve fail-open behavior for explicitly low-risk, availability-first traffic.
 
 | Method | Notes |
 | --- | --- |
-| `backendReport()` | Which provider powers each primitive (for a health page). Synchronous. |
-| `postgresUrl()` | The resolved system DSN (embedded servers mint theirs at init) for the app's own pool. Contains credentials. Synchronous. |
+| `backendReport()` | Which provider powers each primitive (for a health page). **Synchronous.** |
+| `postgresUrl()` | Resolved Forge system DSN. Contains credentials. Use server-side to reach embedded Postgres from another process or intentionally seed an application-owned pool; choose production isolation deliberately. **Synchronous.** |
 | `maintain()` | One housekeeping sweep (expired kv, settled/dead jobs, stale buckets, expired sessions). |
 
 ## Native JSON handles
@@ -159,11 +162,16 @@ const profile = forge.kv<Profile>(`user:${id}`);
 await profile.set(value, { ttlSeconds: 3600 });
 ```
 
-- `Queue<T>` from `forge.queue<T>(name)`: `enqueue()`, `dequeue()`, `ack()`, `nack()`, `heartbeat()`, `depth()`, `worker()`. A handle/worker `job.payload` is ALREADY codec-decoded (an object) — `JSON.parse`-ing it again throws.
+- `Queue<T>` from `forge.queue<T>(name)`: `enqueue()`, `dequeue()`, `depth()`, `worker()`. A dequeued `QueueJob<T>` owns `ack()`, `nack()`, and `heartbeat()`. A handle/worker `job.payload` is ALREADY codec-decoded (an object) — `JSON.parse`-ing it again throws.
 - `KvKey<T>` from `forge.kv<T>(key)`: `get()`, `getOrDefault(default)`, `set()`, `delete()`, `exists()`, `expire()`, `compareAndSwap()`.
-- `ConfigKey<T>` from `forge.config<T>(key, defaultValue)`: `get()`, `getOrDefault()`, `set()`.
-- `Topic<T>` from `forge.topic<T>(name)`: `publish()`, `subscribe()` (an `AsyncIterable<T>`; its iterator's `next()` resolves `{ value, done }`, unlike the raw `JsSubscription.next()` which resolves the payload directly).
-- `forge.worker<T>(queue, handler, opts?)` / `runWorker(client, queue, handler, opts?)` — managed loop. Keep its `Promise`; abort `opts.signal` to begin draining, then await the promise before exiting. Calling `process.exit()` immediately after abort defeats the drain.
+- `ConfigKey<T>` from `forge.config<T>(key, defaultValue)`: `get()` returns the bound
+  default when supplied and the key is missing; without a bound default it returns
+  `null`, matching the declared `T | null`. `getOrDefault()` can override the bound
+  default. It also has `set()`, `delete()`, and `flag()`.
+- `Topic<T>` from `forge.topic<T>(name)`: `publish()`, asynchronous `subscribe()`, and synchronous `channel()`. Await the subscription before iterating: `for await (const event of await topic.subscribe())`. Its iterator's `next()` resolves `{ value, done }`, unlike the raw `JsSubscription.next()` which resolves the payload directly.
+- `forge.worker<T>(queue, handler, opts?)` / `runWorker(client, queue, handler, opts?)`
+  — managed loop. Keep its `Promise`; abort `opts.signal`, then await the promise before
+  exiting. Calling `process.exit()` immediately after abort defeats completion.
 - `forgeErrorCode(err)` / `forgeErrorRetryable(err)` — parse the code Forge prefixes onto
   the message; a retryable backend error is prefixed `BACKEND(retryable):` and
   `forgeErrorRetryable` reports it (alongside `UNAVAILABLE`).

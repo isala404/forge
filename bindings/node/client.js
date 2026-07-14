@@ -247,6 +247,16 @@ async function runWorker(client, name, handler, opts = {}) {
       continue;
     }
     if (!raw) continue;
+    // The signal may have fired while the long-poll was in flight. Release the
+    // newly leased job immediately instead of beginning fresh work after shutdown.
+    if (opts.signal?.aborted) {
+      try {
+        await client.queueNack(raw.receipt, 0);
+      } catch (error) {
+        await report(error, undefined);
+      }
+      break;
+    }
 
     let job;
     try {

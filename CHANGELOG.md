@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format is based on 
 
 ## [Unreleased]
 
+### Fixed
+
+- Rechecked Node and Python managed-worker shutdown after long-poll dequeue and
+  released a newly leased job instead of starting fresh work after a stop signal.
+
 ## [1.0.1] - 2026-07-14
 
 ### Changed

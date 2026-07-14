@@ -3,8 +3,8 @@
 The crate is `forgelib`. Primitives hang off namespaced accessors on `Forge`
 (`forge.kv()`, `forge.queue()`, …), and calls take option-struct builders instead of
 long positional argument lists. Fallible calls return `Result`, so `?` them. Bodies
-are `Bytes`; use `.into()` from `&str`/`Vec<u8>`. Verified against `src/lib.rs` and the
-primitive traits under `src/*/mod.rs`.
+are `Bytes`; use `.into()` from `&str`/`Vec<u8>`. Check the crate source resolved by
+`Cargo.lock` when exact behavior matters.
 
 ```rust
 use std::time::Duration;
@@ -14,8 +14,9 @@ use forgelib::{Forge, Bytes, SetOpts, SetMode, EnqueueOpts, DequeueOpts, NackOpt
 let forge = Forge::init().await?;                    // reads ./forge.toml
 // Forge::init_from(path) / Forge::init_from_str(toml) also exist.
 // `[postgres] embedded = true` needs the `embedded` cargo feature in Rust
-// (the Node/Python packages ship with it built in). For the app's own tables on
-// the same database use forge.pool() / forge.postgres_url().
+// (the Node/Python packages ship with it built in). If app-owned tables intentionally
+// share that database, build a separate application pool from forge.postgres_url().
+// forge.pool() is the Forge system pool and is not a home for domain tables.
 ```
 
 ## Key/value — `forge.kv()`
@@ -40,15 +41,17 @@ let id = forge.queue().enqueue("emails", payload.into(),
     EnqueueOpts::new().with_max_attempts(5).with_dedup_id("once")).await?;
 if let Some(job) = forge.queue().dequeue("emails", DequeueOpts::new()).await? {
     // ... settle by the whole `job`, using its delivery-unique lease
+    forge.queue().heartbeat(&job).await?;             // extend the lease mid-flight
     forge.queue().ack(&job).await?;                  // or .nack(&job, NackOpts::retry_in(d))
 }
-forge.queue().heartbeat(&job).await?;                // extend the lease mid-flight
-let depth = forge.queue().depth("emails").await?;    // QueueDepth { visible, in_flight, delayed }
+let depth = forge.queue().depth("emails").await?;    // approximate point-in-time counts
 ```
 
-`Job::id()` is the stable idempotency key; the lease token settles the delivery.
-A repeated `dedup_id` within the window returns the existing job's id (no error).
-Prefer the managed worker below to a hand-rolled loop.
+The lease token settles the delivery. `Job::id()` is stable across redelivery and is
+useful as an idempotency-key base, but scope the final key to the logical effect or use
+a domain operation id when duplicate jobs are possible. A repeated `dedup_id` inside
+the configured window returns the existing id (no error); the default window is 300
+seconds. Prefer the managed worker below to a hand-rolled loop.
 
 ## Managed worker — `forge.worker(name)`
 
@@ -76,6 +79,10 @@ let mut sub = forge.pubsub().subscribe("user.created").await?;
 while let Some(payload) = sub.next().await { let payload = payload?; }
 let channel = forge.pubsub().channel_for("user.created")?;          // raw LISTEN channel
 ```
+
+Built-in pub/sub backends require valid UTF-8 payload bytes of at most 7,000 bytes.
+`channel_for` is the backend mapping; external PostgreSQL `LISTEN` use applies when
+the Postgres pub/sub backend is selected.
 
 ## Blob — `forge.blob()`
 
@@ -110,6 +117,10 @@ let reset = forge.auth().create_token(&user_id, "password-reset", Duration::from
 let owner = forge.auth().consume_token(reset.as_str(), "password-reset").await?; // Option<String>, single use
 ```
 
+A malformed stored password hash is `ForgeError::Invalid`, not `Ok(false)`;
+`needs_rehash` returns true for malformed hashes. Successful session validation slides
+the idle deadline up to the absolute deadline.
+
 ## Rate limit — `forge.ratelimit()`
 
 ```rust
@@ -122,8 +133,10 @@ forge.ratelimit().check_with("login", &email,
     FailMode::Closed).await?;
 ```
 
-Use `FailMode::Closed` for credential, password-reset, invite, and API-key verification
-paths. Reserve fail-open behavior for explicitly low-risk, availability-first traffic.
+Run credential limits before password work and choose the fail mode deliberately.
+Use `FailMode::Closed` when bypass creates unacceptable security/financial risk; use
+`FailMode::Open` with monitoring and defense in depth when availability takes
+precedence.
 
 ## Schedule — `forge.schedule()`
 
