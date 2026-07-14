@@ -6,33 +6,24 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Fixed
 
-- Rechecked Node and Python managed-worker shutdown after long-poll dequeue and
-  released a newly leased job instead of starting fresh work after a stop signal.
+- Rechecked Node and Python managed-worker shutdown after long-poll dequeue and released a newly leased job instead of starting fresh work after a stop signal.
 
 ## [1.0.1] - 2026-07-14
 
 ### Changed
 
-- Modernized the Rust stack to SQLx 0.9, OpenTelemetry 0.32, `toml` 1.1,
-  `hmac` 0.13, and `sha2` 0.11, including the required API migrations.
-- Upgraded the Node native binding to napi-rs 3 and moved both binding crates to
-  Rust 2024 edition.
-- Refreshed the required SQLx offline metadata and example lockfiles for the
-  updated core dependency graph.
-- Added complete package metadata for crates.io, npm, and PyPI and reduced the
-  crates.io source package to its intentional publish surface.
-- Updated release defaults and the API compatibility baseline for the coordinated
-  `v1.0.1` release.
+- Modernized the Rust stack to SQLx 0.9, OpenTelemetry 0.32, `toml` 1.1, `hmac` 0.13, and `sha2` 0.11, including the required API migrations.
+- Upgraded the Node native binding to napi-rs 3 and moved both binding crates to Rust 2024 edition.
+- Refreshed the required SQLx offline metadata and example lockfiles for the updated core dependency graph.
+- Added complete package metadata for crates.io, npm, and PyPI and reduced the crates.io source package to its intentional publish surface.
+- Updated release defaults and the API compatibility baseline for the coordinated `v1.0.1` release.
 
 ### Fixed
 
-- Rejected empty or whitespace-only blob signing secrets during configuration
-  validation and before generating presigned URLs.
-- Preserved safe dynamic migration and test SQL under SQLx 0.9's explicit
-  `AssertSqlSafe` contract.
+- Rejected empty or whitespace-only blob signing secrets during configuration validation and before generating presigned URLs.
+- Preserved safe dynamic migration and test SQL under SQLx 0.9's explicit `AssertSqlSafe` contract.
 - Restored full-document Forge configuration parsing under `toml` 1.x.
-- Hardened release packaging to use locked, reproducible installs and verified
-  package builds instead of skipping Cargo's package verification.
+- Hardened release packaging to use locked, reproducible installs and verified package builds instead of skipping Cargo's package verification.
 
 Full Changelog: [https://github.com/isala404/forge/compare/v1.0.0...v1.0.1](https://github.com/isala404/forge/compare/v1.0.0...v1.0.1)
 
@@ -40,13 +31,13 @@ Full Changelog: [https://github.com/isala404/forge/compare/v1.0.0...v1.0.1](http
 
 Forge 1.0.0 is a complete rewrite of the earlier application framework.
 
-Forge is now a library built around one Rust crate, `forgelib`. It provides eight infrastructure primitives through stable traits, with Node and Python bindings backed by the same Rust implementation.
+Forge is now a library built around one Rust crate, `forgelib`. It provides the backend primitives most applications need through stable traits, with Node and Python bindings backed by the same Rust implementation.
 
 The `1.x` API is now stable. Breaking API changes will be reserved for `2.0`.
 
 ### Added
 
-- Eight infrastructure primitives covering key/value storage, queues, pub/sub, blobs, authentication, rate limiting, scheduling, and configuration with feature flags.
+- Backend primitives for key/value storage, queues, pub/sub, blobs, authentication, rate limiting, scheduling, and configuration with feature flags.
 - PostgreSQL and in-memory backends for every primitive. Blob storage also supports the local filesystem.
 - Embedded PostgreSQL 17 support through `[postgres] embedded = true`. Node and Python packages include this by default, so local development does not require a separate PostgreSQL installation.
 - A shared `forge.toml` configuration file for Rust, Node, and Python.

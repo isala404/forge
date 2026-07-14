@@ -1,11 +1,6 @@
 # Forge - the standard library for agent-built SaaS
 
-[![CI](https://img.shields.io/github/actions/workflow/status/isala404/forge/ci.yml?branch=main&style=flat-square&logo=github&label=CI)](https://github.com/isala404/forge/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/forgelib?style=flat-square&logo=rust&logoColor=white)](https://crates.io/crates/forgelib)
-[![npm](https://img.shields.io/npm/v/forgelib?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/forgelib)
-[![PyPI](https://img.shields.io/pypi/v/forgelib?style=flat-square&logo=pypi&logoColor=white)](https://pypi.org/project/forgelib/)
-[![PostgreSQL 17+](https://img.shields.io/badge/PostgreSQL-17%2B-4169E1?style=flat-square&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
-[![MIT License](https://img.shields.io/github/license/isala404/forge?style=flat-square&color=blue)](./LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/isala404/forge/ci.yml?branch=main&style=flat-square&logo=github&label=CI)](https://github.com/isala404/forge/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/forgelib?style=flat-square&logo=rust&logoColor=white)](https://crates.io/crates/forgelib) [![npm](https://img.shields.io/npm/v/forgelib?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/forgelib) [![PyPI](https://img.shields.io/pypi/v/forgelib?style=flat-square&logo=pypi&logoColor=white)](https://pypi.org/project/forgelib/) [![PostgreSQL 17+](https://img.shields.io/badge/PostgreSQL-17%2B-4169E1?style=flat-square&logo=postgresql&logoColor=white)](https://www.postgresql.org/) [![MIT License](https://img.shields.io/github/license/isala404/forge?style=flat-square&color=blue)](./LICENSE)
 
 Every app needs the same plumbing, and the usual answer is a separate service for each piece:
 
@@ -18,18 +13,15 @@ Every app needs the same plumbing, and the usual answer is a separate service fo
 
 Six things to provision, secure, mock in tests, and learn before you ship a feature. It's worse for an AI agent building the app, where each service is more to wire up and another API to get wrong.
 
-Forge does all of it in one library, with the same API in Rust, Node, and Python.
-The `1.x` line is the stable API: Rust, Node, and Python release in lockstep and
-reserve breaking changes for `2.0`.
+Forge does all of it in one library, with the same API in Rust, Node, and Python. The `1.x` line is the stable API: Rust, Node, and Python release in lockstep and reserve breaking changes for `2.0`.
 
-## One connection, eight primitives
+## One connection, the backend primitives most applications need
 
 ```bash
 npm install forgelib
 ```
 
-Configuration lives in a `forge.toml` at your project root. `init()` reads it and
-instantiates the runtime; string values may reference the environment as `${VAR}`:
+Configuration lives in a `forge.toml` at your project root. `init()` reads it and instantiates the runtime; string values may reference the environment as `${VAR}`:
 
 ```toml
 [postgres]
@@ -37,10 +29,7 @@ url = "${DATABASE_URL:-}"
 embedded = true
 ```
 
-Set `DATABASE_URL` to use a managed or shared Postgres. Leave it unset and Forge
-downloads and runs Postgres for you (data persists in `.forge/pg`) — built into
-the Node and Python packages, behind the `embedded` cargo feature in Rust. Forge
-supports Postgres 17+.
+Set `DATABASE_URL` to use a managed or shared Postgres. Leave it unset and Forge downloads and runs Postgres for you (data persists in `.forge/pg`) — built into the Node and Python packages, behind the `embedded` cargo feature in Rust. Forge supports Postgres 17+.
 
 Omit settings you do not need; Forge applies production-safe defaults for the rest.
 
@@ -234,7 +223,7 @@ MIT. Do whatever you want.
 
 <p align="center">
   <strong>Postgres is enough.</strong><br>
-  <a href="#one-connection-eight-primitives">Quick Start</a> ·
+  <a href="#one-connection-the-backend-primitives-most-applications-need">Quick Start</a> ·
   <a href="#examples">Examples</a> ·
   <a href="https://github.com/isala404/forge/discussions">Discussions</a>
 </p>

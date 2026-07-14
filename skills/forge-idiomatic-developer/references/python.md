@@ -1,12 +1,6 @@
 # Forge — Python reference
 
-The package is `forgelib`. Raw contract methods live directly on `ForgeClient` in
-flat snake_case. Most are awaitable, but methods explicitly marked **synchronous**
-below must not be awaited. Native
-JSON handles also hang off the client (`forge.queue()`, `forge.kv()`,
-`forge.config()`, `forge.topic()`) for app payloads. Optional raw arguments default
-to `None`. Check the installed extension, package helpers, and `.pyi` stubs when exact
-behavior matters.
+The package is `forgelib`. Raw contract methods live directly on `ForgeClient` in flat snake_case. Most are awaitable, but methods explicitly marked **synchronous** below must not be awaited. Native JSON handles also hang off the client (`forge.queue()`, `forge.kv()`, `forge.config()`, `forge.topic()`) for app payloads. Optional raw arguments default to `None`. Check the installed extension, package helpers, and `.pyi` stubs when exact behavior matters.
 
 ```python
 import forgelib
@@ -42,9 +36,7 @@ forge = await forgelib.ForgeClient.init_from("svc/forge.toml")
 | `queue_heartbeat()` | Extend the lease; raises `PreconditionError` if the lease was lost. |
 | `queue_depth()` | Approximate point-in-time `QueueDepth(visible, in_flight, delayed)`. Pass `"<queue>.dlq"` for the dead-letter backlog. |
 
-Settle by the delivery-unique `receipt`, never `id`. The stable id is useful for
-redelivery idempotency, but scope the key to the logical effect or use a domain
-operation id when duplicate jobs are possible.
+Settle by the delivery-unique `receipt`, never `id`. The stable id is useful for redelivery idempotency, but scope the key to the logical effect or use a domain operation id when duplicate jobs are possible.
 
 ## Pub/sub
 
@@ -54,14 +46,11 @@ operation id when duplicate jobs are possible.
 | `pubsub_subscribe()` | Returns a subscription; `async for payload in sub:` (payloads are `bytes` — decode before parsing). |
 | `pubsub_channel()` | Backend channel mapping; with Postgres pub/sub it is the `LISTEN`/`NOTIFY` channel. **Synchronous.** |
 
-The subscription's `aclose()` unsubscribes now and stops a pending `__anext__`
-immediately. Publishes after `pubsub_subscribe()` returns are delivered; earlier
-ones are gone (no replay). Payloads must be valid UTF-8 and at most 7,000 bytes.
+The subscription's `aclose()` unsubscribes now and stops a pending `__anext__` immediately. Publishes after `pubsub_subscribe()` returns are delivered; earlier ones are gone (no replay). Payloads must be valid UTF-8 and at most 7,000 bytes.
 
 ## Blob
 
-Blob is bytes-native in Python: `blob_put`/`blob_get` already take and return
-`bytes`. There is no `blob_*_bytes` variant.
+Blob is bytes-native in Python: `blob_put`/`blob_get` already take and return `bytes`. There is no `blob_*_bytes` variant.
 
 | Method | Notes |
 | --- | --- |
@@ -76,11 +65,7 @@ Blob is bytes-native in Python: `blob_put`/`blob_get` already take and return
 | `blob_presign_upload()` | `blob_presign_upload(key, expires_seconds, max_bytes)` — needs the secret. |
 | `blob_verify_presign()` | `blob_verify_presign(method, key, expires_epoch, max_bytes, sig)` → validity. |
 
-Presigned URLs use `/api/files?key=…&expires=…&max_bytes=…&sig=…` by default, but
-`[blob].base_url` can make the configured base relative or absolute. Mount a matching
-route and pass the query params to `blob_verify_presign` verbatim (a download URL
-carries `max_bytes=0` — echo it). Expiry or a bad signature returns `False`; an
-unsupported method raises `InvalidError`.
+Presigned URLs use `/api/files?key=…&expires=…&max_bytes=…&sig=…` by default, but `[blob].base_url` can make the configured base relative or absolute. Mount a matching route and pass the query params to `blob_verify_presign` verbatim (a download URL carries `max_bytes=0` — echo it). Expiry or a bad signature returns `False`; an unsupported method raises `InvalidError`.
 
 ## Auth
 
@@ -107,10 +92,7 @@ unsupported method raises `InvalidError`.
 | --- | --- |
 | `rate_limit_check()` | `rate_limit_check(bucket, key, max, per_seconds, fail_open=None, algo=None)` → `Decision`. `algo` is `"token_bucket"` (default) or `"sliding_window"`. `per_seconds` must be ≥ 1 (a sub-second window raises `InvalidError`). |
 
-`Decision`: `allowed`, `limit`, `remaining`, `reset_after_seconds`, `retry_after_seconds`.
-Run credential limits before password work and choose `fail_open` deliberately. Use
-`False` when bypass creates unacceptable security/financial risk; use `True` with
-monitoring and defense in depth when availability takes precedence.
+`Decision`: `allowed`, `limit`, `remaining`, `reset_after_seconds`, `retry_after_seconds`. Run credential limits before password work and choose `fail_open` deliberately. Use `False` when bypass creates unacceptable security/financial risk; use `True` with monitoring and defense in depth when availability takes precedence.
 
 ## Schedule
 
@@ -146,8 +128,7 @@ monitoring and defense in depth when availability takes precedence.
 
 ## Native JSON handles
 
-Bind a JSON codec once from the main package (the codec defaults to `json`; pass
-`loads=`/`dumps=` to swap).
+Bind a JSON codec once from the main package (the codec defaults to `json`; pass `loads=`/`dumps=` to swap).
 
 ```python
 import forgelib
@@ -165,9 +146,5 @@ await profile.set(value, ttl_seconds=3600)
 - `KvKey` from `forge.kv(key)`: `get()`, `get_or_default(default)`, `set()`, `delete()`, `exists()`, `expire()`, `compare_and_swap()`.
 - `ConfigKey` from `forge.config(key, default)`: `get()`, `get_or_default()`, `set()`.
 - `Topic` from `forge.topic(name)`: asynchronous `publish()`, async-generator `subscribe()` (`async for event in topic.subscribe():`), and synchronous `channel()`.
-- `forge.worker(queue, handler, *, stop=..., visibility_seconds=30.0,
-  wait_seconds=20.0)` / `run_worker(...)` — managed coroutine. Start and retain an
-  actual task: `task = asyncio.create_task(forge.worker(..., stop=stop))`; set the
-  event, then `await task` before exit.
-- `forge_error_code(exc)` / `forge_error_retryable(exc)` — exceptions are named code +
-  `Error` (`LimitError` → code `"Limit"`) and every instance carries a `retryable` attribute.
+- `forge.worker(queue, handler, *, stop=..., visibility_seconds=30.0, wait_seconds=20.0)` / `run_worker(...)` — managed coroutine. Start and retain an actual task: `task = asyncio.create_task(forge.worker(..., stop=stop))`; set the event, then `await task` before exit.
+- `forge_error_code(exc)` / `forge_error_retryable(exc)` — exceptions are named code + `Error` (`LimitError` → code `"Limit"`) and every instance carries a `retryable` attribute.

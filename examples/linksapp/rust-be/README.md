@@ -4,8 +4,7 @@ URL shortener backend built on [Forge](../../../). Runs on port **9091**.
 
 ## Prerequisites
 
-- Rust toolchain (edition 2024). No database needed: with no configuration the app
-  boots an embedded Postgres (data persists in `.forge/pg`).
+- Rust toolchain (edition 2024). No database needed: with no configuration the app boots an embedded Postgres (data persists in `.forge/pg`).
 
 ## Run
 
@@ -18,10 +17,7 @@ FORGE_POSTGRES_URL=postgres://postgres:forge@127.0.0.1:5432/linksapp_rust \
 
 ## Environment variables
 
-Forge configures itself from `forge.toml` in this directory. The variables below are read
-from the environment: `FORGE_POSTGRES_URL` is referenced by `forge.toml`
-(`${FORGE_POSTGRES_URL:-}`) as an override rather than passed to Forge directly; the rest
-configure the HTTP server.
+Forge configures itself from `forge.toml` in this directory. The variables below are read from the environment: `FORGE_POSTGRES_URL` is referenced by `forge.toml` (`${FORGE_POSTGRES_URL:-}`) as an override rather than passed to Forge directly; the rest configure the HTTP server.
 
 | Variable              | Default                                                       |
 | --------------------- | ------------------------------------------------------------- |

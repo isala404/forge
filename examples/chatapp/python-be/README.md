@@ -1,13 +1,8 @@
 # chatapp: Python backend
 
-A pure GraphQL API for the chatapp example: FastAPI + Strawberry (code-first schema,
-HTTP + `graphql-transport-ws`), asyncpg for the chat tables, and forgelib for every
-infra primitive (auth, blob, pubsub, queue, kv, schedule, ratelimit, config).
+A pure GraphQL API for the chatapp example: FastAPI + Strawberry (code-first schema, HTTP + `graphql-transport-ws`), asyncpg for the chat tables, and forgelib for every infra primitive (auth, blob, pubsub, queue, kv, schedule, ratelimit, config).
 
-It serves exactly the canonical `../schema.graphql`. Strawberry is code-first, so parity is
-guaranteed by a test (`tests/test_sdl_match.py`) that compares the emitted SDL to the
-canonical file under a normalized comparison (sorted types + fields, descriptions ignored,
-an absent default treated as `= null`).
+It serves exactly the canonical `../schema.graphql`. Strawberry is code-first, so parity is guaranteed by a test (`tests/test_sdl_match.py`) that compares the emitted SDL to the canonical file under a normalized comparison (sorted types + fields, descriptions ignored, an absent default treated as `= null`).
 
 ## Layout
 
@@ -29,38 +24,15 @@ tests/               integration suite over real HTTP + WS against a live Postgr
 
 ## Design notes
 
-- **Bearer auth, no cookies.** HTTP sends `Authorization: Bearer <token>`; the
-  graphql-transport-ws socket sends `{"authorization": "Bearer <token>"}` in the
-  `connection_init` payload. A token authenticates as either a Forge session
-  (`validate_session`, which slides the idle deadline) or a Forge API key
-  (`verify_api_key`). `me` returns null when unauthenticated; other auth'd resolvers raise
-  `UNAUTHENTICATED`.
-- **DataLoader on every relational field** (`Chat.members/lastMessage/unread`,
-  `Message.sender/receipts`, `Receipt.user`, `User.online`). Loaders are built fresh per
-  request in the context, so a query selecting N messages issues one batched query per
-  field, not N. The DB-backed loaders use `= ANY($1)`; the kv-backed ones (online, unread)
-  fan out concurrently in a single dispatch.
-- **Realtime** rides Forge pubsub via the binding's `Subscription` async iterator. Topics:
-  `chat:<id>` carries `message`/`typing`/`receipt`; `presence` carries `presence`. Each
-  subscription filters by event type, re-hydrates the domain object, and (for typing)
-  suppresses the caller's own events.
-- **Workers** run in-process as asyncio tasks: a fanout worker (marks receipts delivered +
-  bumps unread kv, idempotent on message id), a reap worker (deletes a disappearing
-  message's row + blob when its scheduled job fires), a fail worker (always nacks to drive
-  the DLQ demo), and a scheduler loop (`run_scheduler_once` fires due `at` jobs).
-- **Presigned blob URLs.** forgelib does not expose `blob_router()`, so `blob_router.py`
-  mounts the equivalent route at the default presign prefix (`/_forge/blob`). It verifies
-  the HMAC signature + expiry with `blob_verify_presign` (the exact check the Rust router
-  performs), then does the get/put. Upload flow: `requestUpload(chatId)` → PUT to the
-  signed URL → `sendMessage(mediaKey)` → `Message.media.downloadUrl`.
+- **Bearer auth, no cookies.** HTTP sends `Authorization: Bearer <token>`; the graphql-transport-ws socket sends `{"authorization": "Bearer <token>"}` in the `connection_init` payload. A token authenticates as either a Forge session (`validate_session`, which slides the idle deadline) or a Forge API key (`verify_api_key`). `me` returns null when unauthenticated; other auth'd resolvers raise `UNAUTHENTICATED`.
+- **DataLoader on every relational field** (`Chat.members/lastMessage/unread`, `Message.sender/receipts`, `Receipt.user`, `User.online`). Loaders are built fresh per request in the context, so a query selecting N messages issues one batched query per field, not N. The DB-backed loaders use `= ANY($1)`; the kv-backed ones (online, unread) fan out concurrently in a single dispatch.
+- **Realtime** rides Forge pubsub via the binding's `Subscription` async iterator. Topics: `chat:<id>` carries `message`/`typing`/`receipt`; `presence` carries `presence`. Each subscription filters by event type, re-hydrates the domain object, and (for typing) suppresses the caller's own events.
+- **Workers** run in-process as asyncio tasks: a fanout worker (marks receipts delivered + bumps unread kv, idempotent on message id), a reap worker (deletes a disappearing message's row + blob when its scheduled job fires), a fail worker (always nacks to drive the DLQ demo), and a scheduler loop (`run_scheduler_once` fires due `at` jobs).
+- **Presigned blob URLs.** forgelib does not expose `blob_router()`, so `blob_router.py` mounts the equivalent route at the default presign prefix (`/_forge/blob`). It verifies the HMAC signature + expiry with `blob_verify_presign` (the exact check the Rust router performs), then does the get/put. Upload flow: `requestUpload(chatId)` → PUT to the signed URL → `sendMessage(mediaKey)` → `Message.media.downloadUrl`.
 
 ## Running
 
-Requires a Rust toolchain (uv builds the editable `forgelib` wheel via maturin on
-first `uv sync`). No database needed: with no configuration the app boots an embedded
-Postgres (data persists in `.forge/pg`); the app's own asyncpg pool follows
-`forge.postgres_url()`. Setting `FORGE_POSTGRES_URL` (interpolated by `forge.toml`)
-wins when you'd rather use your own server.
+Requires a Rust toolchain (uv builds the editable `forgelib` wheel via maturin on first `uv sync`). No database needed: with no configuration the app boots an embedded Postgres (data persists in `.forge/pg`); the app's own asyncpg pool follows `forge.postgres_url()`. Setting `FORGE_POSTGRES_URL` (interpolated by `forge.toml`) wins when you'd rather use your own server.
 
 ```sh
 uv sync
@@ -72,13 +44,11 @@ export FORGE_BLOB_SIGNING_SECRET=dev-secret-change-me
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8083
 ```
 
-GraphQL is at `/graphql` (POST for queries/mutations, WS upgrade for subscriptions).
-`/healthz` returns `ok`.
+GraphQL is at `/graphql` (POST for queries/mutations, WS upgrade for subscriptions). `/healthz` returns `ok`.
 
 ### Environment
 
-`FORGE_POSTGRES_URL` and `FORGE_BLOB_SIGNING_SECRET` are referenced by `forge.toml`
-rather than read by Forge directly; the rest configure the app loops and CORS.
+`FORGE_POSTGRES_URL` and `FORGE_BLOB_SIGNING_SECRET` are referenced by `forge.toml` rather than read by Forge directly; the rest configure the app loops and CORS.
 
 | var | default | meaning |
 | --- | --- | --- |
@@ -91,10 +61,7 @@ rather than read by Forge directly; the rest configure the app loops and CORS.
 
 ## Tests
 
-The suite boots the real ASGI app under uvicorn on a free port and drives the GraphQL API
-over real HTTP (httpx) and WS (websockets) against a live Postgres. It creates its own
-database `chatapp_python_be_test` and shortens TTL/scheduler timers so TTL-driven scenarios
-finish in seconds. No skips.
+The suite boots the real ASGI app under uvicorn on a free port and drives the GraphQL API over real HTTP (httpx) and WS (websockets) against a live Postgres. It creates its own database `chatapp_python_be_test` and shortens TTL/scheduler timers so TTL-driven scenarios finish in seconds. No skips.
 
 ```sh
 uv run pytest          # needs Postgres at postgres://postgres:forge@127.0.0.1:5432
@@ -107,5 +74,4 @@ uv run ruff check .
 docker compose -f docker-compose.yml up --build
 ```
 
-Brings up Postgres, this backend (8083), and the shared React SPA (5173). The build context
-is the repo root because of the `forgelib` path dependency.
+Brings up Postgres, this backend (8083), and the shared React SPA (5173). The build context is the repo root because of the `forgelib` path dependency.

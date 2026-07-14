@@ -1,13 +1,8 @@
 # forgelib
 
-Node.js bindings for [Forge](../..) via [napi-rs](https://napi.rs). A native addon
-exposing the full primitive surface (kv, queue, config, ratelimit, blob, auth,
-schedule, pubsub) plus `backendReport`. Async Rust methods become JS `Promise`s;
-method names are camelCased.
+Node.js bindings for [Forge](../..) via [napi-rs](https://napi.rs). A native addon exposing the full primitive surface (kv, queue, config, ratelimit, blob, auth, schedule, pubsub) plus `backendReport`. Async Rust methods become JS `Promise`s; method names are camelCased.
 
-The `1.x` npm package ships prebuilt addons for Linux x64 (glibc and musl), Linux
-arm64 (glibc), macOS arm64, and Windows x64. Intel macOS is not a supported prebuilt
-target.
+The `1.x` npm package ships prebuilt addons for Linux x64 (glibc and musl), Linux arm64 (glibc), macOS arm64, and Windows x64. Intel macOS is not a supported prebuilt target.
 
 ## Build
 
@@ -18,13 +13,11 @@ npm install          # installs @napi-rs/cli
 npm run build:debug  # or `npm run build` for a release binary
 ```
 
-This produces `forgelib.<platform>.node` next to the committed `index.js` /
-`index.d.ts` (the generated JS entry + TypeScript types).
+This produces `forgelib.<platform>.node` next to the committed `index.js` / `index.d.ts` (the generated JS entry + TypeScript types).
 
 ## Use
 
-Configuration lives in a `forge.toml` at the project root; `init()` reads it and
-instantiates the runtime. A minimal one:
+Configuration lives in a `forge.toml` at the project root; `init()` reads it and instantiates the runtime. A minimal one:
 
 ```toml
 [postgres]
@@ -53,12 +46,7 @@ if (job) {
 }
 ```
 
-Leased jobs are held Rust-side and settled by `receipt`; the stable `id` remains the
-job's idempotency key and the opaque lease fence never crosses into JS. Every
-per-deployment knob (namespace, pool size, blob backend, ...) lives in `forge.toml`;
-`ForgeClient.initFrom(path)` loads a file outside the current directory.
-See `index.d.ts` for the full TypeScript surface, including the raw 1:1 methods
-(`kvSet`, `queueEnqueue`, ...) and the typed handles below.
+Leased jobs are held Rust-side and settled by `receipt`; the stable `id` remains the job's idempotency key and the opaque lease fence never crosses into JS. Every per-deployment knob (namespace, pool size, blob backend, ...) lives in `forge.toml`; `ForgeClient.initFrom(path)` loads a file outside the current directory. See `index.d.ts` for the full TypeScript surface, including the raw 1:1 methods (`kvSet`, `queueEnqueue`, ...) and the typed handles below.
 
 ### Native typed handles
 
@@ -77,6 +65,4 @@ if (job) { handle(job.payload); await emails.ack(job.receipt); }
 // onto the thrown error's message.
 ```
 
-The raw methods are still present for string/byte contracts and exact cross-language
-parity. Use `forge.kv<T>(key)`, `forge.queue<T>(name)`, `forge.config<T>(key, default)`,
-and `forge.topic<T>(name)` when the payload is app JSON.
+The raw methods are still present for string/byte contracts and exact cross-language parity. Use `forge.kv<T>(key)`, `forge.queue<T>(name)`, `forge.config<T>(key, default)`, and `forge.topic<T>(name)` when the payload is app JSON.

@@ -1,12 +1,6 @@
 # Forge — Node reference
 
-The package is `forgelib`. Raw contract methods live directly on `ForgeClient` in
-flat camelCase. Most are asynchronous, but methods explicitly marked **synchronous**
-below must not be awaited. Native JSON handles also hang off the client
-(`forge.queue<T>()`, `forge.kv<T>()`, `forge.config<T>()`, `forge.topic<T>()`) for
-app payloads. Optional trailing raw arguments are positional — pass `null` (or
-`undefined`) to skip one and set a later one. Check the installed `client.d.ts`,
-`index.d.ts`, and JavaScript helpers when exact behavior matters.
+The package is `forgelib`. Raw contract methods live directly on `ForgeClient` in flat camelCase. Most are asynchronous, but methods explicitly marked **synchronous** below must not be awaited. Native JSON handles also hang off the client (`forge.queue<T>()`, `forge.kv<T>()`, `forge.config<T>()`, `forge.topic<T>()`) for app payloads. Optional trailing raw arguments are positional — pass `null` (or `undefined`) to skip one and set a later one. Check the installed `client.d.ts`, `index.d.ts`, and JavaScript helpers when exact behavior matters.
 
 ```ts
 import { ForgeClient } from "forgelib";
@@ -42,9 +36,7 @@ const forge2 = await ForgeClient.initFrom("svc/forge.toml");
 | `queueHeartbeat()` | Extend the lease by one visibility window; throws `PRECONDITION` if the lease is lost. |
 | `queueDepth()` | Approximate point-in-time `{ visible, inFlight, delayed }`. Pass `"<queue>.dlq"` to gauge the dead-letter backlog. |
 
-Settle a job by its delivery-unique `receipt`, never its `id`. The stable id is useful
-for redelivery idempotency, but scope the final key to the logical effect (for example,
-`jobId:recipientId`) or use a domain operation id when duplicate jobs are possible.
+Settle a job by its delivery-unique `receipt`, never its `id`. The stable id is useful for redelivery idempotency, but scope the final key to the logical effect (for example, `jobId:recipientId`) or use a domain operation id when duplicate jobs are possible.
 
 ## Pub/sub
 
@@ -54,11 +46,7 @@ for redelivery idempotency, but scope the final key to the logical effect (for e
 | `pubsubSubscribe()` | Returns a `JsSubscription`; loop `next()` until it resolves `null`. |
 | `pubsubChannel()` | Backend channel mapping. With the Postgres pub/sub backend, this is its `LISTEN`/`NOTIFY` channel. **Synchronous.** |
 
-`JsSubscription` has `next()` (→ `Buffer \| null`) and `close()` (unsubscribe now —
-call it when a client's socket closes; it also resolves any pending `next()` to
-`null`). `pubsubPublish` takes a string; `next()` yields a `Buffer` — `toString()`
-before parsing. Publishes after `subscribe()` resolves are delivered; earlier ones
-are gone. Payloads must be valid UTF-8 and at most 7,000 bytes.
+`JsSubscription` has `next()` (→ `Buffer \| null`) and `close()` (unsubscribe now — call it when a client's socket closes; it also resolves any pending `next()` to `null`). `pubsubPublish` takes a string; `next()` yields a `Buffer` — `toString()` before parsing. Publishes after `subscribe()` resolves are delivered; earlier ones are gone. Payloads must be valid UTF-8 and at most 7,000 bytes.
 
 ## Blob
 
@@ -77,11 +65,7 @@ are gone. Payloads must be valid UTF-8 and at most 7,000 bytes.
 | `blobPresignUpload()` | `blobPresignUpload(key, expiresSeconds, maxBytes)` — needs the secret. |
 | `blobVerifyPresign()` | `blobVerifyPresign(method, key, expiresEpoch, maxBytes, sig)` → validity. |
 
-Presigned URLs use `/api/files?key=…&expires=…&max_bytes=…&sig=…` by default, but
-`[blob].base_url` can make the configured base relative or absolute. Mount a matching
-route and pass the query params to `blobVerifyPresign` verbatim (a download URL
-carries `max_bytes=0` — echo it, don't substitute). Expiry or a bad signature returns
-`false`; an unsupported method throws `INVALID`.
+Presigned URLs use `/api/files?key=…&expires=…&max_bytes=…&sig=…` by default, but `[blob].base_url` can make the configured base relative or absolute. Mount a matching route and pass the query params to `blobVerifyPresign` verbatim (a download URL carries `max_bytes=0` — echo it, don't substitute). Expiry or a bad signature returns `false`; an unsupported method throws `INVALID`.
 
 ## Auth
 
@@ -108,10 +92,7 @@ carries `max_bytes=0` — echo it, don't substitute). Expiry or a bad signature 
 | --- | --- |
 | `rateLimitCheck()` | `rateLimitCheck(bucket, key, max, perSeconds, failOpen?, algo?)` → `JsDecision`. `algo` is `"token_bucket"` (default) or `"sliding_window"`. `perSeconds` must be ≥ 1 (a sub-second window is `INVALID`). |
 
-`JsDecision`: `{ allowed, limit, remaining, resetAfterSeconds, retryAfterSeconds? }`.
-Run credential limits before password work and choose `failOpen` deliberately. Pass
-`false` when bypass creates unacceptable security/financial risk; pass `true` with
-monitoring and defense in depth when availability takes precedence.
+`JsDecision`: `{ allowed, limit, remaining, resetAfterSeconds, retryAfterSeconds? }`. Run credential limits before password work and choose `failOpen` deliberately. Pass `false` when bypass creates unacceptable security/financial risk; pass `true` with monitoring and defense in depth when availability takes precedence.
 
 ## Schedule
 
@@ -147,8 +128,7 @@ monitoring and defense in depth when availability takes precedence.
 
 ## Native JSON handles
 
-Bind a JSON codec once instead of stringifying at every call site. These are exported
-from the main `forgelib` package and installed as methods on `ForgeClient`.
+Bind a JSON codec once instead of stringifying at every call site. These are exported from the main `forgelib` package and installed as methods on `ForgeClient`.
 
 ```ts
 import { ForgeClient, forgeErrorCode, forgeErrorRetryable } from "forgelib";
@@ -164,14 +144,7 @@ await profile.set(value, { ttlSeconds: 3600 });
 
 - `Queue<T>` from `forge.queue<T>(name)`: `enqueue()`, `dequeue()`, `depth()`, `worker()`. A dequeued `QueueJob<T>` owns `ack()`, `nack()`, and `heartbeat()`. A handle/worker `job.payload` is ALREADY codec-decoded (an object) — `JSON.parse`-ing it again throws.
 - `KvKey<T>` from `forge.kv<T>(key)`: `get()`, `getOrDefault(default)`, `set()`, `delete()`, `exists()`, `expire()`, `compareAndSwap()`.
-- `ConfigKey<T>` from `forge.config<T>(key, defaultValue)`: `get()` returns the bound
-  default when supplied and the key is missing; without a bound default it returns
-  `null`, matching the declared `T | null`. `getOrDefault()` can override the bound
-  default. It also has `set()`, `delete()`, and `flag()`.
+- `ConfigKey<T>` from `forge.config<T>(key, defaultValue)`: `get()` returns the bound default when supplied and the key is missing; without a bound default it returns `null`, matching the declared `T | null`. `getOrDefault()` can override the bound default. It also has `set()`, `delete()`, and `flag()`.
 - `Topic<T>` from `forge.topic<T>(name)`: `publish()`, asynchronous `subscribe()`, and synchronous `channel()`. Await the subscription before iterating: `for await (const event of await topic.subscribe())`. Its iterator's `next()` resolves `{ value, done }`, unlike the raw `JsSubscription.next()` which resolves the payload directly.
-- `forge.worker<T>(queue, handler, opts?)` / `runWorker(client, queue, handler, opts?)`
-  — managed loop. Keep its `Promise`; abort `opts.signal`, then await the promise before
-  exiting. Calling `process.exit()` immediately after abort defeats completion.
-- `forgeErrorCode(err)` / `forgeErrorRetryable(err)` — parse the code Forge prefixes onto
-  the message; a retryable backend error is prefixed `BACKEND(retryable):` and
-  `forgeErrorRetryable` reports it (alongside `UNAVAILABLE`).
+- `forge.worker<T>(queue, handler, opts?)` / `runWorker(client, queue, handler, opts?)` — managed loop. Keep its `Promise`; abort `opts.signal`, then await the promise before exiting. Calling `process.exit()` immediately after abort defeats completion.
+- `forgeErrorCode(err)` / `forgeErrorRetryable(err)` — parse the code Forge prefixes onto the message; a retryable backend error is prefixed `BACKEND(retryable):` and `forgeErrorRetryable` reports it (alongside `UNAVAILABLE`).

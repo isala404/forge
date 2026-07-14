@@ -1,10 +1,6 @@
 # Forge — Rust reference
 
-The crate is `forgelib`. Primitives hang off namespaced accessors on `Forge`
-(`forge.kv()`, `forge.queue()`, …), and calls take option-struct builders instead of
-long positional argument lists. Fallible calls return `Result`, so `?` them. Bodies
-are `Bytes`; use `.into()` from `&str`/`Vec<u8>`. Check the crate source resolved by
-`Cargo.lock` when exact behavior matters.
+The crate is `forgelib`. Primitives hang off namespaced accessors on `Forge` (`forge.kv()`, `forge.queue()`, …), and calls take option-struct builders instead of long positional argument lists. Fallible calls return `Result`, so `?` them. Bodies are `Bytes`; use `.into()` from `&str`/`Vec<u8>`. Check the crate source resolved by `Cargo.lock` when exact behavior matters.
 
 ```rust
 use std::time::Duration;
@@ -47,11 +43,7 @@ if let Some(job) = forge.queue().dequeue("emails", DequeueOpts::new()).await? {
 let depth = forge.queue().depth("emails").await?;    // approximate point-in-time counts
 ```
 
-The lease token settles the delivery. `Job::id()` is stable across redelivery and is
-useful as an idempotency-key base, but scope the final key to the logical effect or use
-a domain operation id when duplicate jobs are possible. A repeated `dedup_id` inside
-the configured window returns the existing id (no error); the default window is 300
-seconds. Prefer the managed worker below to a hand-rolled loop.
+The lease token settles the delivery. `Job::id()` is stable across redelivery and is useful as an idempotency-key base, but scope the final key to the logical effect or use a domain operation id when duplicate jobs are possible. A repeated `dedup_id` inside the configured window returns the existing id (no error); the default window is 300 seconds. Prefer the managed worker below to a hand-rolled loop.
 
 ## Managed worker — `forge.worker(name)`
 
@@ -64,10 +56,7 @@ forge.worker("emails")
 // .run_until(shutdown_future, handler) to drain on a shutdown signal.
 ```
 
-The builder dequeues, heartbeats within the visibility window, acks on `Ok`, nacks on
-`Err`, and abandons the job if the lease is lost. `.grace(d)` and `.poll_wait(d)` tune
-shutdown drain and long-poll. Await `.run_until(...)` to completion before process
-exit; resolving the shutdown future begins the drain rather than completing it.
+The builder dequeues, heartbeats within the visibility window, acks on `Ok`, nacks on `Err`, and abandons the job if the lease is lost. `.grace(d)` and `.poll_wait(d)` tune shutdown drain and long-poll. Await `.run_until(...)` to completion before process exit; resolving the shutdown future begins the drain rather than completing it.
 
 ## Pub/sub — `forge.pubsub()`
 
@@ -80,9 +69,7 @@ while let Some(payload) = sub.next().await { let payload = payload?; }
 let channel = forge.pubsub().channel_for("user.created")?;          // raw LISTEN channel
 ```
 
-Built-in pub/sub backends require valid UTF-8 payload bytes of at most 7,000 bytes.
-`channel_for` is the backend mapping; external PostgreSQL `LISTEN` use applies when
-the Postgres pub/sub backend is selected.
+Built-in pub/sub backends require valid UTF-8 payload bytes of at most 7,000 bytes. `channel_for` is the backend mapping; external PostgreSQL `LISTEN` use applies when the Postgres pub/sub backend is selected.
 
 ## Blob — `forge.blob()`
 
@@ -117,9 +104,7 @@ let reset = forge.auth().create_token(&user_id, "password-reset", Duration::from
 let owner = forge.auth().consume_token(reset.as_str(), "password-reset").await?; // Option<String>, single use
 ```
 
-A malformed stored password hash is `ForgeError::Invalid`, not `Ok(false)`;
-`needs_rehash` returns true for malformed hashes. Successful session validation slides
-the idle deadline up to the absolute deadline.
+A malformed stored password hash is `ForgeError::Invalid`, not `Ok(false)`; `needs_rehash` returns true for malformed hashes. Successful session validation slides the idle deadline up to the absolute deadline.
 
 ## Rate limit — `forge.ratelimit()`
 
@@ -133,10 +118,7 @@ forge.ratelimit().check_with("login", &email,
     FailMode::Closed).await?;
 ```
 
-Run credential limits before password work and choose the fail mode deliberately.
-Use `FailMode::Closed` when bypass creates unacceptable security/financial risk; use
-`FailMode::Open` with monitoring and defense in depth when availability takes
-precedence.
+Run credential limits before password work and choose the fail mode deliberately. Use `FailMode::Closed` when bypass creates unacceptable security/financial risk; use `FailMode::Open` with monitoring and defense in depth when availability takes precedence.
 
 ## Schedule — `forge.schedule()`
 
@@ -168,9 +150,7 @@ let on = forge.config().flag("new-ui", false, &EvalCtx::user(user_id)).await; //
 
 ## Typed handles
 
-The crate root also re-exports typed handles (`KvKey`, `QueueName`, `Topic`,
-`ConfigKey`, …) that bind a serde codec to a key/queue/topic so you pass real structs
-instead of `Bytes`. Reach for them when a payload is a `#[derive(Serialize)]` type.
+The crate root also re-exports typed handles (`KvKey`, `QueueName`, `Topic`, `ConfigKey`, …) that bind a serde codec to a key/queue/topic so you pass real structs instead of `Bytes`. Reach for them when a payload is a `#[derive(Serialize)]` type.
 
 ## Custom backends — `Forge::builder()`
 

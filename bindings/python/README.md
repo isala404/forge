@@ -1,18 +1,10 @@
 # forgelib
 
-Python bindings for Forge via [pyo3](https://pyo3.rs). A **natively async**
-`ForgeClient` over the async Rust core: every method returns an awaitable driven on a
-shared Tokio runtime, so an asyncio app `await`s the binding directly: no thread-pool
-wrapper, the event loop is never blocked. The full primitive surface is exposed (kv,
-queue, config, ratelimit, blob, auth, schedule, pubsub), plus `backend_report`.
+Python bindings for Forge via [pyo3](https://pyo3.rs). A **natively async** `ForgeClient` over the async Rust core: every method returns an awaitable driven on a shared Tokio runtime, so an asyncio app `await`s the binding directly: no thread-pool wrapper, the event loop is never blocked. The full primitive surface is exposed (kv, queue, config, ratelimit, blob, auth, schedule, pubsub), plus `backend_report`.
 
-Forge errors surface as a typed exception hierarchy (`forgelib.NotFoundError`,
-`forgelib.InvalidError`, `forgelib.LimitError`, … all subclasses of
-`forgelib.ForgeError`), and every raised instance carries a `retryable` attribute.
+Forge errors surface as a typed exception hierarchy (`forgelib.NotFoundError`, `forgelib.InvalidError`, `forgelib.LimitError`, … all subclasses of `forgelib.ForgeError`), and every raised instance carries a `retryable` attribute.
 
-Built against the stable ABI (`abi3-py39`), so one wheel runs on CPython ≥ 3.9.
-The `1.x` release publishes wheels for Linux x64, Linux arm64, macOS arm64, and
-Windows x64, plus a source distribution. Intel macOS installs from source.
+Built against the stable ABI (`abi3-py39`), so one wheel runs on CPython ≥ 3.9. The `1.x` release publishes wheels for Linux x64, Linux arm64, macOS arm64, and Windows x64, plus a source distribution. Intel macOS installs from source.
 
 ## Build
 
@@ -25,13 +17,11 @@ pip install maturin
 maturin develop                  # compiles + installs `forgelib` into the venv
 ```
 
-(On a CPython newer than this pyo3 release knows about, prefix the build with
-`PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1`.)
+(On a CPython newer than this pyo3 release knows about, prefix the build with `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1`.)
 
 ## Use
 
-Configuration lives in a `forge.toml` at the project root; `init()` reads it and
-instantiates the runtime. A minimal one:
+Configuration lives in a `forge.toml` at the project root; `init()` reads it and instantiates the runtime. A minimal one:
 
 ```toml
 [postgres]
@@ -57,8 +47,7 @@ async for event in forge.topic("chat:1").subscribe():
 
 ### Native typed handles
 
-The main `forgelib` package binds names to JSON value types directly on the client,
-so most app code does not need raw queue strings plus `json.dumps`:
+The main `forgelib` package binds names to JSON value types directly on the client, so most app code does not need raw queue strings plus `json.dumps`:
 
 ```python
 import forgelib
@@ -74,6 +63,4 @@ profile = forge.kv("user:1:profile")
 await profile.set({"name": "Ada"})
 ```
 
-The raw methods (`kv_set`, `queue_enqueue`, ...) remain available for exact
-cross-language parity and string/byte contracts. The packaged stubs include both the
-raw client and the typed handles.
+The raw methods (`kv_set`, `queue_enqueue`, ...) remain available for exact cross-language parity and string/byte contracts. The packaged stubs include both the raw client and the typed handles.
