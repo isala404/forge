@@ -187,14 +187,14 @@ export class AppCtx {
 
   async reactionsEnabled(userId: string): Promise<boolean> {
     try {
-      return await this.forge.flag("reactions_v2", false, userId);
+      return await this.forge.flag("reactions_v1", false, userId);
     } catch {
       return false;
     }
   }
 
   async setReactionsRollout(percent: number): Promise<void> {
-    await this.forge.setFlagPercent("reactions_v2", percent);
+    await this.forge.setFlagPercent("reactions_v1", percent);
   }
 
   // Accurate up to the 1000-key scan cap; not for very large user bases.
@@ -256,12 +256,12 @@ export async function userFromBearer(
   }
   if (userId) return { id: userId, token };
 
-  let ownerId: string | null;
+  let apiKey: Awaited<ReturnType<AppCtx["forge"]["verifyApiKey"]>>;
   try {
-    ownerId = await app.forge.verifyApiKey(token);
+    apiKey = await app.forge.verifyApiKey(token);
   } catch {
-    ownerId = null;
+    apiKey = null;
   }
-  if (ownerId) return { id: ownerId, token: "" };
+  if (apiKey) return { id: apiKey.ownerId, token: "" };
   return null;
 }

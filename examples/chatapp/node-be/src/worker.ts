@@ -42,7 +42,7 @@ export function runFanoutWorker(app: AppCtx, stopped: Stopped): void {
   void app.forge.worker<MessageJob>(
     FANOUT_QUEUE,
     async (job) => handleFanout(app, job.payload),
-    { visibilitySeconds: VISIBILITY, waitSeconds: WAIT, signal: signalFromStopped(stopped) },
+    { visibilitySeconds: VISIBILITY, waitSeconds: WAIT, concurrencyLimitPerKey: 1, signal: signalFromStopped(stopped) },
   );
 }
 
@@ -122,6 +122,10 @@ export function runScheduler(app: AppCtx, stopped: Stopped): void {
     while (!stopped()) {
       try {
         await app.forge.runSchedulerOnce();
+        const diagnostics = await app.forge.schedulerDiagnostics();
+        if (diagnostics.dueCount > 0) {
+          console.warn("scheduler remains behind", { due: diagnostics.dueCount, lagMs: diagnostics.lagMs });
+        }
         await reconcileOnce(app);
         // Sweep expired Forge storage rows.
         await app.forge.maintain();

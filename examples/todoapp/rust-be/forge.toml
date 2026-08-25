@@ -5,16 +5,24 @@ url = "${FORGE_POSTGRES_URL:-}"
 embedded = true
 max_connections = 10
 acquire_timeout_secs = 30
+auto_migrate = true
+migration_lock_timeout_secs = 30
 statement_timeout_ms = 15000
 lock_timeout_ms = 5000
 idle_in_transaction_timeout_ms = 15000
 
 [forge]
 namespace = ""
+mode = "postgres"
+environment = "development"
 
 [queue]
 dedup_window_secs = 300
-retention_secs = 604800
+payload_retention_secs = 86400
+terminal_retention_secs = 604800
+succeeded_retention_secs = 604800
+dead_retention_secs = 2592000
+cancelled_retention_secs = 604800
 
 [ratelimit]
 fail_open = true
@@ -24,14 +32,3 @@ backend = "postgres"
 fs_root = "./.forge/blobs"
 signing_secret = "${FORGE_BLOB_SIGNING_SECRET:-todoapp-rust-local-signing-secret}"
 base_url = "/api/files"
-
-[backends]
-default = "postgres"
-kv = "postgres"
-queue = "postgres"
-blob = "postgres"
-auth = "postgres"
-config = "postgres"
-ratelimit = "postgres"
-schedule = "postgres"
-pubsub = "postgres"

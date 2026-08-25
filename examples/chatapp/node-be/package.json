@@ -9,6 +9,7 @@
     "lint": "eslint .",
     "build": "tsc --noEmit",
     "start": "node src/server.ts",
+    "migrate": "node src/migrate.ts",
     "test": "vitest run"
   },
   "dependencies": {

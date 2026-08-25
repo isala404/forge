@@ -34,7 +34,7 @@ export const Message: MessageResolvers = {
     if (!m.media_key) return null;
     let downloadUrl: string;
     try {
-      downloadUrl = await ctx.app.forge.blobPresignDownload(m.media_key, 3600);
+      downloadUrl = (await ctx.app.forge.blobPresignDownload(m.media_key, 3600)).url;
     } catch (e) {
       throw mapForge(e);
     }

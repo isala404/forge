@@ -1,4 +1,5 @@
 import http from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createYoga } from "graphql-yoga";
 import { useServer } from "graphql-ws/use/ws";
@@ -26,6 +27,20 @@ function send(res: ServerResponse, status: number, body: string): void {
   res.end(body);
 }
 
+function sendJson(res: ServerResponse, status: number, body: unknown): void {
+  res.writeHead(status, { "content-type": "application/json; charset=utf-8", ...corsHeaders() });
+  res.end(JSON.stringify(body));
+}
+
+function hasOpsToken(req: IncomingMessage): boolean {
+  const expected = process.env.OPS_TOKEN;
+  const header = req.headers.authorization;
+  if (!expected || typeof header !== "string" || !header.startsWith("Bearer ")) return false;
+  const actualBytes = Buffer.from(header.slice(7));
+  const expectedBytes = Buffer.from(expected);
+  return actualBytes.length === expectedBytes.length && timingSafeEqual(actualBytes, expectedBytes);
+}
+
 // The forgelib binding has no built-in HTTP router, so /api/files is served
 // here against the same presign contract. Binary goes through put/getBytes intact.
 const BLOB_BODY_LIMIT = 50 * 1024 * 1024;
@@ -42,6 +57,10 @@ function etagMatches(ifNoneMatch: string, etag: string): boolean {
     .split(",")
     .map((c) => c.trim())
     .some((candidate) => candidate === "*" || candidate === etag);
+}
+
+function httpEtag(etag: string): string {
+  return etag.startsWith('"') && etag.endsWith('"') ? etag : `"${etag}"`;
 }
 
 function readBody(req: IncomingMessage, limit: number): Promise<Buffer> {
@@ -110,6 +129,16 @@ export async function startServer(port = parseInt(envOr("PORT", "8082"), 10)): P
         return void res.end();
       }
       if (path === "/healthz") return send(res, 200, "ok");
+      if (path === "/internal/forge/diagnostics") {
+        if (req.method !== "GET") return send(res, 405, "method not allowed");
+        if (!process.env.OPS_TOKEN) return send(res, 404, "not found");
+        if (!hasOpsToken(req)) return send(res, 403, "forbidden");
+        const [runtime, scheduler] = await Promise.all([
+          app.forge.diagnostics(2),
+          app.forge.schedulerDiagnostics(),
+        ]);
+        return sendJson(res, 200, { runtime, scheduler });
+      }
       if (path === "/graphql") return void yoga.handle(req, res);
       if (path.startsWith("/api/files")) {
         const key = url.searchParams.get("key");
@@ -161,7 +190,7 @@ export async function startServer(port = parseInt(envOr("PORT", "8082"), 10)): P
           const info = await app.forge.blobHead(key);
           if (info) {
             if (info.contentType) contentType = info.contentType;
-            etag = `"${info.etag}"`;
+            etag = httpEtag(info.etag);
           }
         } catch {
           /* keep defaults; a head failure just means no conditional request support */
@@ -241,7 +270,10 @@ export async function startServer(port = parseInt(envOr("PORT", "8082"), 10)): P
     stopping = true;
     await new Promise<void>((resolve) => wsServer.close(() => resolve()));
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    // The application pool may point at Forge's embedded PostgreSQL. Release every
+    // dependent application connection before Forge tears that server down.
     await app.pool.end();
+    await app.forge.close(30);
   };
 
   return { server, app, port: boundPort, close };

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use forgelib::{
-    Bytes, EnqueueOpts, FailMode, Forge, Limit, PhcString, SessionOpts, SetMode, SetOpts,
+    Bytes, EnqueueOpts, FailMode, Forge, Limit, PhcString, Priority, SessionOpts, SetMode, SetOpts,
 };
 use rocket::fairing::{Fairing, Info, Kind};
 use rocket::http::{Header, Status};
@@ -312,6 +312,8 @@ async fn create_todo(
             Bytes::from(audit.to_string()),
             EnqueueOpts::new()
                 .with_max_attempts(3)
+                .with_priority(Priority::Low)
+                .with_concurrency_key(session.user_id.to_string())
                 .with_dedup_id(format!("created:{}", todo.id)),
         )
         .await?;
@@ -445,7 +447,7 @@ async fn meta(state: &State<AppState>) -> Result<Json<MetaResponse>, ApiError> {
     let depth = state.forge.queue().depth(AUDIT_QUEUE).await?;
     let forge = state
         .forge
-        .backend_report()
+        .backend_capabilities()
         .backends
         .into_iter()
         .map(|line| ReportLine {

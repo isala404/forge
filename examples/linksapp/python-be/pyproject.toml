@@ -10,6 +10,9 @@ dependencies = [
     "segno>=1.6",
 ]
 
+[project.scripts]
+forge-migrate = "app.migrate:main"
+
 [tool.uv.sources]
 forgelib = { path = "../../../bindings/python", editable = true }
 
