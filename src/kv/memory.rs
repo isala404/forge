@@ -1,11 +1,12 @@
 use super::{Kv, MAX_KEY_BYTES, MAX_VALUE_BYTES, SetMode, SetOpts};
+use crate::clock::Clock;
 use crate::error::{ForgeError, Result};
 use crate::types::Cursor;
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::collections::HashMap;
-use std::sync::{Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 /// Upper bound on a relative TTL (~100 years), matching the Postgres backend. Over => `Limit`.
 const MAX_TTL_SECS: f64 = 100.0 * 365.0 * 24.0 * 60.0 * 60.0;
@@ -14,11 +15,11 @@ const MAX_TTL_SECS: f64 = 100.0 * 365.0 * 24.0 * 60.0 * 60.0;
 struct Entry {
     value: Bytes,
     /// Absolute deadline; `None` means no expiry. An entry is gone once `now >= expires_at`.
-    expires_at: Option<Instant>,
+    expires_at: Option<Duration>,
 }
 
 impl Entry {
-    fn is_expired(&self, now: Instant) -> bool {
+    fn is_expired(&self, now: Duration) -> bool {
         self.expires_at.is_some_and(|e| e <= now)
     }
 }
@@ -27,13 +28,20 @@ pub(crate) struct MemKv {
     state: Mutex<HashMap<String, Entry>>,
     /// Prefix joined to every key as `<namespace>:<key>`. Empty = no prefix.
     namespace: String,
+    clock: Arc<dyn Clock>,
 }
 
 impl MemKv {
+    #[cfg(test)]
     pub(crate) fn new(namespace: String) -> Self {
+        Self::with_clock(namespace, Arc::new(crate::clock::SystemClock::new()))
+    }
+
+    pub(crate) fn with_clock(namespace: String, clock: Arc<dyn Clock>) -> Self {
         Self {
             state: Mutex::new(HashMap::new()),
             namespace,
+            clock,
         }
     }
 
@@ -87,7 +95,7 @@ impl MemKv {
 
     /// Drop every expired entry. Reads already hide them; this reclaims the memory.
     pub(crate) fn purge_expired(&self) {
-        let now = Instant::now();
+        let now = self.clock.elapsed();
         self.lock().retain(|_, e| !e.is_expired(now));
     }
 }
@@ -111,7 +119,7 @@ impl Kv for MemKv {
     async fn get(&self, key: &str) -> Result<Option<Bytes>> {
         Self::check_key(&self.namespace, key)?;
         let pk = self.physical(key);
-        let now = Instant::now();
+        let now = self.clock.elapsed();
         let mut state = self.lock();
         match state.get(&pk) {
             Some(e) if e.is_expired(now) => {
@@ -130,7 +138,7 @@ impl Kv for MemKv {
         for k in keys {
             Self::check_key(&self.namespace, k)?;
         }
-        let now = Instant::now();
+        let now = self.clock.elapsed();
         let state = self.lock();
         let out = keys
             .iter()
@@ -150,7 +158,7 @@ impl Kv for MemKv {
         Self::check_value(&value)?;
         let ttl = opts.ttl.map(ttl_to_duration).transpose()?;
         let pk = self.physical(key);
-        let now = Instant::now();
+        let now = self.clock.elapsed();
         let mut state = self.lock();
         let live = state.get(&pk).is_some_and(|e| !e.is_expired(now));
         let wrote = match opts.mode {
@@ -173,7 +181,7 @@ impl Kv for MemKv {
     async fn delete(&self, key: &str) -> Result<bool> {
         Self::check_key(&self.namespace, key)?;
         let pk = self.physical(key);
-        let now = Instant::now();
+        let now = self.clock.elapsed();
         let mut state = self.lock();
         // An expired entry counts as absent: remove it but report `false`.
         let removed = match state.remove(&pk) {
@@ -186,7 +194,7 @@ impl Kv for MemKv {
     async fn exists(&self, key: &str) -> Result<bool> {
         Self::check_key(&self.namespace, key)?;
         let pk = self.physical(key);
-        let now = Instant::now();
+        let now = self.clock.elapsed();
         let mut state = self.lock();
         if state.get(&pk).is_some_and(|e| e.is_expired(now)) {
             state.remove(&pk);
@@ -198,7 +206,7 @@ impl Kv for MemKv {
     async fn incr(&self, key: &str, by: i64) -> Result<i64> {
         Self::check_key(&self.namespace, key)?;
         let pk = self.physical(key);
-        let now = Instant::now();
+        let now = self.clock.elapsed();
         let mut state = self.lock();
         // A missing or expired key starts from 0 with no TTL; a live key adds `by` and
         // keeps its TTL, matching the Postgres backend's ON CONFLICT branch.
@@ -229,7 +237,7 @@ impl Kv for MemKv {
         Self::check_key(&self.namespace, key)?;
         let dur = ttl_to_duration(ttl)?;
         let pk = self.physical(key);
-        let now = Instant::now();
+        let now = self.clock.elapsed();
         let mut state = self.lock();
         match state.get_mut(&pk) {
             Some(e) if !e.is_expired(now) => {
@@ -244,7 +252,7 @@ impl Kv for MemKv {
         Self::check_key(&self.namespace, key)?;
         Self::check_value(&new)?;
         let pk = self.physical(key);
-        let now = Instant::now();
+        let now = self.clock.elapsed();
         let mut state = self.lock();
         let live = state
             .get(&pk)
@@ -279,7 +287,7 @@ impl Kv for MemKv {
         // Keyset pagination over the physical key, like the Postgres backend: the
         // cursor token is the last physical key returned.
         let after = cursor.map(|c| c.token().to_string());
-        let now = Instant::now();
+        let now = self.clock.elapsed();
         let state = self.lock();
         let mut keys: Vec<String> = state
             .iter()

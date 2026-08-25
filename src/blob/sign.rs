@@ -23,14 +23,26 @@ impl Method {
 
 /// The exact bytes covered by the signature. Order and separators are fixed so the
 /// signer and verifier agree.
-fn canonical(method: Method, key: &str, expires_epoch: i64, max_bytes: u64) -> String {
-    format!("{}\n{key}\n{expires_epoch}\n{max_bytes}", method.as_str())
+const FORMAT_VERSION: &str = "1";
+
+fn canonical(
+    namespace: &str,
+    method: Method,
+    key: &str,
+    expires_epoch: i64,
+    max_bytes: u64,
+) -> String {
+    format!(
+        "{FORMAT_VERSION}\n{namespace}\n{}\n{key}\n{expires_epoch}\n{max_bytes}",
+        method.as_str()
+    )
 }
 
 /// HMAC-SHA256 hex signature over the canonical string. `max_bytes` is `0` for a
 /// download (it is part of the signature either way).
 pub(crate) fn sign(
     secret: &[u8],
+    namespace: &str,
     method: Method,
     key: &str,
     expires_epoch: i64,
@@ -39,7 +51,7 @@ pub(crate) fn sign(
     // HMAC accepts any key length, so this never actually errs.
     let mut mac = HmacSha256::new_from_slice(secret)
         .map_err(|_| ForgeError::backend("hmac key initialization failed"))?;
-    mac.update(canonical(method, key, expires_epoch, max_bytes).as_bytes());
+    mac.update(canonical(namespace, method, key, expires_epoch, max_bytes).as_bytes());
     Ok(crate::util::hex(&mac.finalize().into_bytes()))
 }
 
@@ -48,6 +60,7 @@ pub(crate) fn sign(
 /// Consumed by `Blob::verify_presigned`.
 pub(crate) fn verify(
     secret: &[u8],
+    namespace: &str,
     method: Method,
     key: &str,
     expires_epoch: i64,
@@ -60,7 +73,7 @@ pub(crate) fn verify(
     let Ok(mut mac) = HmacSha256::new_from_slice(secret) else {
         return false;
     };
-    mac.update(canonical(method, key, expires_epoch, max_bytes).as_bytes());
+    mac.update(canonical(namespace, method, key, expires_epoch, max_bytes).as_bytes());
     mac.verify_slice(&provided).is_ok()
 }
 
@@ -88,27 +101,61 @@ mod tests {
     #[test]
     fn sign_then_verify_roundtrips() {
         let secret = b"super-secret";
-        let sig = sign(secret, Method::Get, "exports/a.csv", 1_000, 0).unwrap();
-        assert!(verify(secret, Method::Get, "exports/a.csv", 1_000, 0, &sig));
+        let sig = sign(secret, "app", Method::Get, "exports/a.csv", 1_000, 0).unwrap();
+        assert!(verify(
+            secret,
+            "app",
+            Method::Get,
+            "exports/a.csv",
+            1_000,
+            0,
+            &sig
+        ));
     }
 
     #[test]
     fn verification_rejects_tampering() {
         let secret = b"super-secret";
-        let sig = sign(secret, Method::Put, "k", 1_000, 1024).unwrap();
-        assert!(!verify(secret, Method::Get, "k", 1_000, 1024, &sig));
-        assert!(!verify(secret, Method::Put, "other", 1_000, 1024, &sig));
-        assert!(!verify(secret, Method::Put, "k", 2_000, 1024, &sig));
-        assert!(!verify(secret, Method::Put, "k", 1_000, 2048, &sig));
+        let sig = sign(secret, "app", Method::Put, "k", 1_000, 1024).unwrap();
+        assert!(!verify(secret, "app", Method::Get, "k", 1_000, 1024, &sig));
         assert!(!verify(
-            b"wrong-secret",
+            secret,
+            "other",
             Method::Put,
             "k",
             1_000,
             1024,
             &sig
         ));
-        assert!(!verify(secret, Method::Put, "k", 1_000, 1024, "not-hex!!"));
+        assert!(!verify(
+            secret,
+            "app",
+            Method::Put,
+            "other",
+            1_000,
+            1024,
+            &sig
+        ));
+        assert!(!verify(secret, "app", Method::Put, "k", 2_000, 1024, &sig));
+        assert!(!verify(secret, "app", Method::Put, "k", 1_000, 2048, &sig));
+        assert!(!verify(
+            b"wrong-secret",
+            "app",
+            Method::Put,
+            "k",
+            1_000,
+            1024,
+            &sig
+        ));
+        assert!(!verify(
+            secret,
+            "app",
+            Method::Put,
+            "k",
+            1_000,
+            1024,
+            "not-hex!!"
+        ));
     }
 
     #[test]

@@ -71,11 +71,11 @@ impl TestDatabase {
 
     /// Run a raw SQL statement against this database. Test setup only (e.g. seeding
     /// rows or auxiliary tables a test needs before `Forge::init`).
-    pub async fn execute_raw(&self, sql: &str) -> Result<()> {
+    pub async fn execute_raw(&self, sql: &'static str) -> Result<()> {
         let mut conn = PgConnection::connect(&self.url)
             .await
             .map_err(|e| ForgeError::config(format!("could not connect to test database: {e}")))?;
-        let res = sqlx::query(sqlx::AssertSqlSafe(sql))
+        let res = sqlx::raw_sql(sql)
             .execute(&mut conn)
             .await
             .map_err(ForgeError::from_sqlx)

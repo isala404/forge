@@ -1,5 +1,6 @@
 use super::{
-    ConfigStore, EvalCtx, FlagRule, MAX_ALLOWLIST_ENTRIES, MAX_KEY_BYTES, MAX_VALUE_BYTES,
+    ConfigStore, EvalCtx, FlagEvaluation, FlagRule, MAX_ALLOWLIST_ENTRIES, MAX_KEY_BYTES,
+    MAX_VALUE_BYTES, capture_environment_overrides, environment_override,
 };
 use crate::backend::{BackendLifecycle, Primitive};
 use crate::error::{ForgeError, Result};
@@ -14,6 +15,7 @@ pub(crate) struct MemConfig {
     /// Prefix joined to every stored key as `<namespace>:<key>`. Empty = no prefix.
     /// The `FORGE_CFG_<KEY>` env override uses the caller (logical) key, matching Postgres.
     namespace: String,
+    environment: HashMap<String, String>,
     values: Mutex<HashMap<String, String>>,
     flags: Mutex<HashMap<String, FlagRule>>,
 }
@@ -22,6 +24,7 @@ impl MemConfig {
     pub(crate) fn new(namespace: String) -> Self {
         Self {
             namespace,
+            environment: capture_environment_overrides(),
             values: Mutex::new(HashMap::new()),
             flags: Mutex::new(HashMap::new()),
         }
@@ -69,6 +72,13 @@ fn check_rule(rule: &FlagRule) -> Result<()> {
                 "an AllowList entry exceeds {MAX_ALLOWLIST_ENTRY_BYTES} bytes"
             )))
         }
+        FlagRule::Value { value, variant }
+            if value.to_string().len() > MAX_VALUE_BYTES || variant.len() > 128 =>
+        {
+            Err(ForgeError::limit(
+                "typed flag value exceeds 64 KiB or variant exceeds 128 bytes",
+            ))
+        }
         _ => Ok(()),
     }
 }
@@ -97,10 +107,60 @@ fn evaluate(key: &str, rule: &FlagRule, default: bool, ctx: &EvalCtx) -> bool {
             Some(k) => list.iter().any(|e| e == k),
             None => false,
         },
-        // `FlagRule` is `#[non_exhaustive]`; an unknown rule resolves to the caller's
-        // default (matching the "never errors" flag contract).
-        #[allow(unreachable_patterns)]
-        _ => default,
+        FlagRule::Value { value, .. } => value.as_bool().unwrap_or(default),
+    }
+}
+
+fn evaluate_details(
+    key: &str,
+    rule: &FlagRule,
+    default: &serde_json::Value,
+    ctx: &EvalCtx,
+) -> FlagEvaluation {
+    match rule {
+        FlagRule::Value { value, variant } => {
+            FlagEvaluation::new(value, Some(variant.clone()), "static", None)
+        }
+        FlagRule::On => FlagEvaluation::new(
+            &serde_json::Value::Bool(true),
+            Some("on".into()),
+            "static",
+            None,
+        ),
+        FlagRule::Off => FlagEvaluation::new(
+            &serde_json::Value::Bool(false),
+            Some("off".into()),
+            "static",
+            None,
+        ),
+        FlagRule::Percent(percent) => match &ctx.targeting_key {
+            Some(targeting_key) => {
+                let enabled = stable_bucket(key, targeting_key) < u32::from(*percent);
+                FlagEvaluation::new(
+                    &serde_json::Value::Bool(enabled),
+                    Some(if enabled { "on" } else { "off" }.into()),
+                    if enabled { "percent_in" } else { "percent_out" },
+                    None,
+                )
+            }
+            None => FlagEvaluation::new(default, None, "default_no_key", None),
+        },
+        FlagRule::AllowList(entries) => {
+            let enabled = ctx
+                .targeting_key
+                .as_ref()
+                .is_some_and(|targeting_key| entries.iter().any(|entry| entry == targeting_key));
+            FlagEvaluation::new(
+                &serde_json::Value::Bool(enabled),
+                Some(if enabled { "on" } else { "off" }.into()),
+                if enabled {
+                    "targeting_match"
+                } else {
+                    "targeting_miss"
+                },
+                None,
+            )
+        }
     }
 }
 
@@ -109,17 +169,8 @@ impl ConfigStore for MemConfig {
     async fn get_raw(&self, key: &str) -> Result<Option<String>> {
         check_key(key)?;
         // env `FORGE_CFG_<KEY>` wins over the store, even when set to empty (12-factor).
-        if let Ok(v) = std::env::var(format!("FORGE_CFG_{key}")) {
-            return Ok(Some(v));
-        }
-        // Fall back to the uppercased name (the universal env convention), so an operator
-        // exporting FORGE_CFG_MAX_UPLOAD_MB finds a key "max_upload_mb". The verbatim name
-        // above takes precedence. Only uppercase (an allocation) when the key has a
-        // lowercase letter to fold; an already-uppercase key would re-probe the same var.
-        if key.bytes().any(|b| b.is_ascii_lowercase())
-            && let Ok(v) = std::env::var(format!("FORGE_CFG_{}", key.to_ascii_uppercase()))
-        {
-            return Ok(Some(v));
+        if let Some(value) = environment_override(&self.environment, key) {
+            return Ok(Some(value.to_string()));
         }
         Ok(lock(&self.values).get(&self.physical(key)).cloned())
     }
@@ -142,6 +193,18 @@ impl ConfigStore for MemConfig {
         match lock(&self.flags).get(&self.physical(key)) {
             Some(rule) => evaluate(key, rule, default, ctx),
             None => default,
+        }
+    }
+
+    async fn flag_details(
+        &self,
+        key: &str,
+        default: &serde_json::Value,
+        ctx: &EvalCtx,
+    ) -> FlagEvaluation {
+        match lock(&self.flags).get(&self.physical(key)) {
+            Some(rule) => evaluate_details(key, rule, default, ctx),
+            None => FlagEvaluation::new(default, None, "default_missing", None),
         }
     }
 
@@ -269,6 +332,28 @@ mod tests {
             !cfg.flag("allow", true, &without).await,
             "no targeting key => miss, not default"
         );
+    }
+
+    #[tokio::test]
+    async fn typed_flags_return_value_variant_and_reason() {
+        let cfg = MemConfig::new(String::new());
+        cfg.set_flag(
+            "theme",
+            FlagRule::Value {
+                value: serde_json::json!({"color": "blue"}),
+                variant: "blue-v2".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let result = cfg
+            .flag_details("theme", &serde_json::json!({}), &EvalCtx::new())
+            .await;
+        assert_eq!(result.value_json, r#"{"color":"blue"}"#);
+        assert_eq!(result.value_type, "object");
+        assert_eq!(result.variant.as_deref(), Some("blue-v2"));
+        assert_eq!(result.reason, "static");
+        assert_eq!(result.error_code, None);
     }
 
     #[tokio::test]

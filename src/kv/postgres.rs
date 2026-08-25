@@ -57,8 +57,11 @@ impl PgKv {
 
     /// Delete expired rows to reclaim space (reads already hide them).
     pub(crate) async fn sweep(&self) -> Result<u64> {
+        let prefix = (!self.namespace.is_empty()).then(|| format!("{}:", self.namespace));
         let r = sqlx::query!(
-            "DELETE FROM forge_kv WHERE expires_at IS NOT NULL AND expires_at <= now()"
+            "DELETE FROM forge_kv WHERE expires_at IS NOT NULL AND expires_at <= now() \
+             AND ($1::text IS NULL OR left(key, length($1)) = $1)",
+            prefix,
         )
         .execute(&self.pool)
         .await?;

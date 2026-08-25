@@ -1,5 +1,7 @@
 use crate::error::{ForgeError, Result};
 use async_trait::async_trait;
+use bytes::Bytes;
+use std::collections::HashMap;
 use std::fmt;
 use std::time::{Duration, SystemTime};
 
@@ -13,6 +15,11 @@ pub const MAX_ID_BYTES: usize = 255;
 pub const MAX_LABEL_BYTES: usize = 255;
 /// Max one-time-token `purpose` length.
 pub const MAX_PURPOSE_BYTES: usize = 255;
+/// Max opaque one-time-token payload.
+pub const MAX_TOKEN_PAYLOAD_BYTES: usize = 4096;
+/// Max API-key scopes and metadata serialized size.
+pub const MAX_API_KEY_SCOPES: usize = 32;
+pub const MAX_API_KEY_METADATA_BYTES: usize = 4096;
 
 /// A PHC-format password hash (`$argon2id$v=19$...`). Portable to/from the wider
 /// `password_hash` ecosystem. `Debug` is redacted.
@@ -183,17 +190,31 @@ pub struct ApiKey {
     pub secret: ApiKeySecret,
     /// When the key was created.
     pub created_at: SystemTime,
+    pub expires_at: Option<SystemTime>,
+    pub scopes: Vec<String>,
+    pub metadata: HashMap<String, String>,
 }
 
 impl ApiKey {
     /// Construct a freshly created API key. For backend implementors; app code receives
     /// this from [`Auth::create_api_key`].
-    pub fn new(id: String, label: String, secret: ApiKeySecret, created_at: SystemTime) -> Self {
+    pub fn new(
+        id: String,
+        label: String,
+        secret: ApiKeySecret,
+        created_at: SystemTime,
+        expires_at: Option<SystemTime>,
+        scopes: Vec<String>,
+        metadata: HashMap<String, String>,
+    ) -> Self {
         Self {
             id,
             label,
             secret,
             created_at,
+            expires_at,
+            scopes,
+            metadata,
         }
     }
 }
@@ -208,18 +229,67 @@ pub struct ApiKeyInfo {
     pub owner_id: String,
     /// The key's label.
     pub label: String,
+    pub expires_at: Option<SystemTime>,
+    pub scopes: Vec<String>,
+    pub metadata: HashMap<String, String>,
 }
 
 impl ApiKeyInfo {
     /// Construct API-key metadata. For backend implementors; app code receives this
     /// from [`Auth::verify_api_key`].
-    pub fn new(id: String, owner_id: String, label: String) -> Self {
+    pub fn new(
+        id: String,
+        owner_id: String,
+        label: String,
+        expires_at: Option<SystemTime>,
+        scopes: Vec<String>,
+        metadata: HashMap<String, String>,
+    ) -> Self {
         Self {
             id,
             owner_id,
             label,
+            expires_at,
+            scopes,
+            metadata,
         }
     }
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, Default)]
+pub struct ApiKeyOpts {
+    pub expires_in: Option<Duration>,
+    pub scopes: Vec<String>,
+    pub metadata: HashMap<String, String>,
+}
+
+impl ApiKeyOpts {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_expires_in(mut self, expires_in: Duration) -> Self {
+        self.expires_in = Some(expires_in);
+        self
+    }
+
+    pub fn with_scopes(mut self, scopes: Vec<String>) -> Self {
+        self.scopes = scopes;
+        self
+    }
+
+    pub fn with_metadata(mut self, metadata: HashMap<String, String>) -> Self {
+        self.metadata = metadata;
+        self
+    }
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenConsumption {
+    pub user_id: String,
+    pub payload: Bytes,
 }
 
 /// Auth primitives: argon2id passwords, opaque hashed sessions, `fk_` API keys, and
@@ -256,6 +326,13 @@ pub trait Auth: Send + Sync {
     /// Mint an `fk_`-prefixed API key, storing only its SHA-256. Secret shown once.
     async fn create_api_key(&self, owner_id: &str, label: &str) -> Result<ApiKey>;
 
+    async fn create_api_key_with(
+        &self,
+        owner_id: &str,
+        label: &str,
+        opts: ApiKeyOpts,
+    ) -> Result<ApiKey>;
+
     /// Verify a key by hash. `Some(ApiKeyInfo)` if live, else `Ok(None)`.
     async fn verify_api_key(&self, key: &str) -> Result<Option<ApiKeyInfo>>;
 
@@ -277,6 +354,14 @@ pub trait Auth: Send + Sync {
         ))
     }
 
+    async fn create_token_with_payload(
+        &self,
+        user_id: &str,
+        purpose: &str,
+        ttl: Duration,
+        payload: Bytes,
+    ) -> Result<OneTimeToken>;
+
     /// Atomically consume a token minted for `purpose`: delete it and return its
     /// `user_id`. Unknown/expired/already-consumed => `Ok(None)`, never an error.
     /// A live token presented with the wrong `purpose` is left intact. Custom auth
@@ -287,6 +372,12 @@ pub trait Auth: Send + Sync {
             "one-time tokens are not supported by this auth backend",
         ))
     }
+
+    async fn consume_token_with_payload(
+        &self,
+        token: &str,
+        purpose: &str,
+    ) -> Result<Option<TokenConsumption>>;
 }
 
 mod memory;

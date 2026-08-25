@@ -32,6 +32,12 @@ pub fn install_otlp(endpoint: &str) -> Result<()> {
         .try_init()
         .map_err(|e| ForgeError::config(format!("tracing subscriber init failed: {e}")))?;
 
+    opentelemetry::global::set_text_map_propagator(
+        opentelemetry::propagation::TextMapCompositePropagator::new(vec![
+            Box::new(opentelemetry_sdk::propagation::TraceContextPropagator::new()),
+            Box::new(opentelemetry_sdk::propagation::BaggagePropagator::new()),
+        ]),
+    );
     opentelemetry::global::set_tracer_provider(provider);
     Ok(())
 }

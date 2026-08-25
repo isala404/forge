@@ -9,17 +9,6 @@ pub(crate) fn hashed_channel_for(topic: &str) -> String {
     format!("forge_{}", h.get(..32).unwrap_or(h.as_str()))
 }
 
-/// The legacy unnamespaced Postgres `LISTEN`/`NOTIFY` hash for `topic`.
-///
-/// Prefer [`Pubsub::channel_for`] (via `forge.pubsub().channel_for(topic)`); it includes
-/// the configured Forge namespace and any backend-specific mapping.
-#[deprecated(
-    note = "use forge.pubsub().channel_for(topic) so namespaces and backend mapping are honored"
-)]
-pub fn channel_for(topic: &str) -> String {
-    hashed_channel_for(topic)
-}
-
 /// Largest allowed topic in UTF-8 bytes. Over => [`crate::error::ForgeError::Invalid`].
 pub const MAX_TOPIC_BYTES: usize = 256;
 

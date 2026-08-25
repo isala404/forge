@@ -1,5 +1,8 @@
 use super::common;
-use super::{Blob, BlobInfo, DEFAULT_CONTENT_TYPE, ListPage, PutOpts};
+use super::{
+    Blob, BlobInfo, BlobSummary, ConditionalGet, DEFAULT_CONTENT_TYPE, ListPage, ProxyPresign,
+    PutOpts, PutPrecondition,
+};
 use crate::error::Result;
 use crate::obs;
 use crate::types::Cursor;
@@ -7,6 +10,7 @@ use crate::util::{key_hash, sha256_hex};
 use async_trait::async_trait;
 use bytes::Bytes;
 use sqlx::PgPool;
+use sqlx::Row;
 use sqlx::types::Json;
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -36,6 +40,7 @@ impl PgBlob {
 
 #[async_trait]
 impl Blob for PgBlob {
+    #[allow(clippy::disallowed_methods)]
     async fn put(&self, key: &str, data: Bytes, opts: PutOpts) -> Result<()> {
         let span = tracing::info_span!(
             "forge.blob.put",
@@ -49,6 +54,7 @@ impl Blob for PgBlob {
         obs::instrument("blob", "put", span, async move {
             common::check_key(key)?;
             common::check_put(&data, &opts)?;
+            common::reject_s3_encryption(&opts)?;
             let pk = self.shared.physical(key);
             let etag = sha256_hex(&data);
             let content_type = opts
@@ -56,22 +62,44 @@ impl Blob for PgBlob {
                 .unwrap_or_else(|| DEFAULT_CONTENT_TYPE.to_string());
             let size = i64::try_from(data.len()).unwrap_or(i64::MAX);
             tracing::Span::current().record("blob.etag", etag.as_str());
-            sqlx::query!(
-                "INSERT INTO forge_blobs (key, data, content_type, etag, metadata, size, last_modified) \
-                 VALUES ($1, $2, $3, $4, $5, $6, now()) \
+            let (condition, expected) = match &opts.precondition {
+                None => ("any", None),
+                Some(PutPrecondition::CreateOnly) => ("create", None),
+                Some(PutPrecondition::MatchVersion(etag)) => ("match", Some(etag.as_str())),
+            };
+            let checksum_sha256 = etag.clone();
+            let written = sqlx::query_scalar::<_, String>(
+                "INSERT INTO forge_blobs (key, data, content_type, etag, metadata, size, last_modified, \
+                   cache_control, content_disposition, checksum_sha256) \
+                 VALUES ($1, $2, $3, $4, $5, $6, now(), $7, $8, $9) \
                  ON CONFLICT (key) DO UPDATE SET \
                    data = EXCLUDED.data, content_type = EXCLUDED.content_type, \
                    etag = EXCLUDED.etag, metadata = EXCLUDED.metadata, \
-                   size = EXCLUDED.size, last_modified = EXCLUDED.last_modified",
-                pk,
-                data.as_ref(),
-                content_type,
-                etag,
-                Json(&opts.metadata) as _,
-                size,
+                   size = EXCLUDED.size, last_modified = EXCLUDED.last_modified, \
+                   cache_control = EXCLUDED.cache_control, \
+                   content_disposition = EXCLUDED.content_disposition, \
+                   checksum_sha256 = EXCLUDED.checksum_sha256 \
+                 WHERE $10 = 'any' OR ($10 = 'match' AND forge_blobs.etag = $11) \
+                 RETURNING key",
             )
-            .execute(&self.pool)
+            .bind(pk)
+            .bind(data.as_ref())
+            .bind(content_type)
+            .bind(etag)
+            .bind(Json(&opts.metadata))
+            .bind(size)
+            .bind(opts.cache_control)
+            .bind(opts.content_disposition)
+            .bind(checksum_sha256)
+            .bind(condition)
+            .bind(expected)
+            .fetch_optional(&self.pool)
             .await?;
+            if written.is_none() {
+                return Err(crate::error::ForgeError::precondition(
+                    "blob write precondition failed",
+                ));
+            }
             Ok(())
         })
         .await
@@ -103,6 +131,38 @@ impl Blob for PgBlob {
         .await
     }
 
+    #[allow(clippy::disallowed_methods)]
+    async fn get_if(
+        &self,
+        key: &str,
+        if_match: Option<&str>,
+        if_none_match: Option<&str>,
+    ) -> Result<ConditionalGet> {
+        common::check_key(key)?;
+        common::check_get_conditions(if_match, if_none_match)?;
+        let row = sqlx::query("SELECT data, etag FROM forge_blobs WHERE key = $1")
+            .bind(self.shared.physical(key))
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some(row) = row else {
+            return Ok(ConditionalGet::Missing);
+        };
+        let etag: String = row.try_get("etag")?;
+        if if_match.is_some_and(|expected| expected != etag) {
+            return Err(crate::ForgeError::precondition(
+                "blob read version does not match",
+            ));
+        }
+        if if_none_match.is_some_and(|version| version == etag) {
+            return Ok(ConditionalGet::NotModified { etag });
+        }
+        Ok(ConditionalGet::Found {
+            body: Bytes::from(row.try_get::<Vec<u8>, _>("data")?),
+            etag,
+        })
+    }
+
+    #[allow(clippy::disallowed_methods)]
     async fn head(&self, key: &str) -> Result<Option<BlobInfo>> {
         let span = tracing::info_span!(
             "forge.blob.head",
@@ -114,30 +174,39 @@ impl Blob for PgBlob {
         obs::instrument("blob", "head", span, async move {
             common::check_key(key)?;
             let pk = self.shared.physical(key);
-            let row = sqlx::query!(
-                r#"SELECT content_type, etag, size,
-                          metadata AS "metadata: Json<Meta>", last_modified
-                   FROM forge_blobs WHERE key = $1"#,
-                pk
+            let row = sqlx::query(
+                "SELECT content_type, etag, size, metadata, last_modified, \
+                        cache_control, content_disposition, checksum_sha256 \
+                 FROM forge_blobs WHERE key = $1",
             )
+            .bind(pk)
             .fetch_optional(&self.pool)
             .await?;
             tracing::Span::current().record("blob.hit", row.is_some());
-            Ok(row.map(|r| {
-                BlobInfo::new(
+            row.map(|r| -> Result<BlobInfo> {
+                let metadata: Json<Meta> = r.try_get("metadata")?;
+                let last_modified: chrono::DateTime<chrono::Utc> = r.try_get("last_modified")?;
+                Ok(BlobInfo::new(
                     key.to_string(),
-                    u64::try_from(r.size).unwrap_or(0),
-                    r.content_type,
-                    r.etag,
-                    r.last_modified.into(),
-                    r.metadata.0,
+                    u64::try_from(r.try_get::<i64, _>("size")?).unwrap_or(0),
+                    r.try_get("content_type")?,
+                    r.try_get("etag")?,
+                    last_modified.into(),
+                    metadata.0,
                 )
-            }))
+                .with_storage_metadata(
+                    r.try_get("cache_control")?,
+                    r.try_get("content_disposition")?,
+                    r.try_get("checksum_sha256")?,
+                    None,
+                ))
+            })
+            .transpose()
         })
         .await
     }
 
-    async fn delete(&self, key: &str) -> Result<bool> {
+    async fn delete(&self, key: &str) -> Result<()> {
         let span = tracing::info_span!(
             "forge.blob.delete",
             blob.key_hash = %key_hash(key),
@@ -148,13 +217,10 @@ impl Blob for PgBlob {
         obs::instrument("blob", "delete", span, async move {
             common::check_key(key)?;
             let pk = self.shared.physical(key);
-            let removed =
-                sqlx::query_scalar!("DELETE FROM forge_blobs WHERE key = $1 RETURNING key", pk)
-                    .fetch_optional(&self.pool)
-                    .await?
-                    .is_some();
-            tracing::Span::current().record("blob.hit", removed);
-            Ok(removed)
+            sqlx::query!("DELETE FROM forge_blobs WHERE key = $1", pk)
+                .execute(&self.pool)
+                .await?;
+            Ok(())
         })
         .await
     }
@@ -176,7 +242,7 @@ impl Blob for PgBlob {
                           metadata AS "metadata: Json<Meta>", last_modified
                    FROM forge_blobs
                    WHERE key LIKE $1 ESCAPE '\' AND ($2::text IS NULL OR key > $2)
-                   ORDER BY key LIMIT $3"#,
+                   ORDER BY key LIMIT ($3::bigint + 1)"#,
                 pattern,
                 after,
                 limit_i,
@@ -184,21 +250,21 @@ impl Blob for PgBlob {
             .fetch_all(&self.pool)
             .await?;
 
-            let next = if (rows.len() as i64) < limit_i {
-                None
+            let next = if (rows.len() as i64) > limit_i {
+                rows.get(usize::try_from(limit_i - 1).unwrap_or(0))
+                    .map(|r| Cursor::from_token(r.key.clone()))
             } else {
-                rows.last().map(|r| Cursor::from_token(r.key.clone()))
+                None
             };
             let items = rows
                 .into_iter()
+                .take(usize::try_from(limit_i).unwrap_or(1000))
                 .map(|r| {
-                    BlobInfo::new(
+                    BlobSummary::new(
                         self.shared.logical(&r.key).to_string(),
                         u64::try_from(r.size).unwrap_or(0),
-                        r.content_type,
                         r.etag,
                         r.last_modified.into(),
-                        r.metadata.0,
                     )
                 })
                 .collect::<Vec<_>>();
@@ -208,11 +274,16 @@ impl Blob for PgBlob {
         .await
     }
 
-    async fn presign_upload(&self, key: &str, expires: Duration, max_bytes: u64) -> Result<String> {
+    async fn presign_upload(
+        &self,
+        key: &str,
+        expires: Duration,
+        max_bytes: u64,
+    ) -> Result<ProxyPresign> {
         self.shared.presign_upload(key, expires, max_bytes).await
     }
 
-    async fn presign_download(&self, key: &str, expires: Duration) -> Result<String> {
+    async fn presign_download(&self, key: &str, expires: Duration) -> Result<ProxyPresign> {
         self.shared.presign_download(key, expires).await
     }
 

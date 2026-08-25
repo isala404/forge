@@ -6,8 +6,6 @@ node_modules
 .env
 !examples/**/.env
 **/test-results/**
-
-# conformance runner artifacts
-tools/conformance/python/.venv/
-tools/conformance/python/__pycache__/
-bindings/python/dist/
+.venv/
+__pycache__/
+dist/

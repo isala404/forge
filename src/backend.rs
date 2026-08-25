@@ -30,6 +30,23 @@ impl Primitive {
             Primitive::Pubsub => "pubsub",
         }
     }
+
+    /// Parse a contract primitive name.
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "kv" => Ok(Self::Kv),
+            "queue" => Ok(Self::Queue),
+            "blob" => Ok(Self::Blob),
+            "auth" => Ok(Self::Auth),
+            "config" => Ok(Self::Config),
+            "ratelimit" => Ok(Self::RateLimit),
+            "schedule" => Ok(Self::Schedule),
+            "pubsub" => Ok(Self::Pubsub),
+            _ => Err(crate::ForgeError::invalid(
+                "backend must be kv, queue, blob, auth, config, ratelimit, schedule, or pubsub",
+            )),
+        }
+    }
 }
 
 /// Per-primitive provider lifecycle, beside the operation traits.
@@ -59,6 +76,11 @@ pub trait BackendLifecycle: Send + Sync {
     /// Idempotent maintenance (expiry sweeps, lease reclaim, orphan cleanup). Defaults
     /// to a no-op for backends with nothing to sweep.
     async fn maintain(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Release provider-owned background tasks and dedicated connections. Idempotent.
+    async fn close(&self) -> Result<()> {
         Ok(())
     }
 }
@@ -105,7 +127,7 @@ impl<T: crate::schedule::Schedule + BackendLifecycle> ScheduleBackend for T {}
 pub trait PubsubBackend: crate::pubsub::Pubsub + BackendLifecycle {}
 impl<T: crate::pubsub::Pubsub + BackendLifecycle> PubsubBackend for T {}
 
-/// One line of [`BackendReport`]: which provider powers a primitive and its properties.
+/// One line of [`BackendCapabilities`]: which provider powers a primitive and its properties.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct BackendInfo {
@@ -132,25 +154,25 @@ impl BackendInfo {
     }
 }
 
-/// A snapshot of which backend powers each primitive, for logs, health pages, and
-/// debugging. Not needed for request handling; the provider must not leak into app logic.
-/// See `forgelib::Forge::backend_report`.
+/// Static configuration describing which backend powers each primitive. This is
+/// capability information, not health; use [`Forge::probe`](crate::Forge::probe) for
+/// a bounded live dependency check.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
-pub struct BackendReport {
+pub struct BackendCapabilities {
     pub backends: Vec<BackendInfo>,
 }
 
-impl BackendReport {
+impl BackendCapabilities {
     /// Assemble a report from its per-primitive lines.
     pub fn new(backends: Vec<BackendInfo>) -> Self {
         Self { backends }
     }
 }
 
-impl fmt::Display for BackendReport {
+impl fmt::Display for BackendCapabilities {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "forge backend report:")?;
+        writeln!(f, "forge backend capabilities:")?;
         for b in &self.backends {
             writeln!(
                 f,
@@ -272,6 +294,9 @@ impl BackendLifecycle for crate::pubsub::PgPubsub {
     }
     fn caveats(&self) -> &'static str {
         "at-most-once, non-durable"
+    }
+    async fn close(&self) -> Result<()> {
+        self.shutdown().await
     }
 }
 

@@ -25,7 +25,12 @@ enum Cmd {
         ack: oneshot::Sender<Result<broadcast::Receiver<Bytes>>>,
     },
     /// A subscription was dropped; release the channel if it now has no receivers.
-    Unregister { channel: String },
+    Unregister {
+        channel: String,
+    },
+    Shutdown {
+        ack: oneshot::Sender<()>,
+    },
 }
 
 /// Handle to the shared-listener broker task.
@@ -108,6 +113,18 @@ impl PgPubsub {
             })
             .await
     }
+
+    pub(crate) async fn shutdown(&self) -> Result<()> {
+        let Some(broker) = self.broker.get() else {
+            return Ok(());
+        };
+        let (ack_tx, ack_rx) = oneshot::channel();
+        if broker.cmd_tx.send(Cmd::Shutdown { ack: ack_tx }).is_err() {
+            return Ok(());
+        }
+        let _ = ack_rx.await;
+        Ok(())
+    }
 }
 
 /// The shared-listener loop: own one `PgListener`, register channels on demand, and
@@ -157,6 +174,10 @@ async fn broker_task(
                             let _ = listener.unlisten(&channel).await;
                             channels.remove(&channel);
                         }
+                    }
+                    Some(Cmd::Shutdown { ack }) => {
+                        let _ = ack.send(());
+                        break;
                     }
                 }
             }
@@ -266,16 +287,6 @@ impl Pubsub for PgPubsub {
             channel,
             cmd_tx: broker.cmd_tx.clone(),
         };
-
-        // subscribe has no completing Result to instrument like the other ops; emit a
-        // counter so live subscription counts are still observable.
-        metrics::counter!(
-            "forge_ops_total",
-            "primitive" => "pubsub",
-            "op" => "subscribe",
-            "outcome" => "ok",
-        )
-        .increment(1);
 
         // A lagging subscriber skips dropped messages rather than erroring the stream;
         // the stream ends when the broadcast sender is gone (broker shutdown). The guard

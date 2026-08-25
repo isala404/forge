@@ -314,7 +314,7 @@ impl<K> BlobKey<K> {
         blob.head(&self.key).await
     }
 
-    pub async fn delete(&self, blob: &dyn Blob) -> Result<bool> {
+    pub async fn delete(&self, blob: &dyn Blob) -> Result<()> {
         blob.delete(&self.key).await
     }
 }

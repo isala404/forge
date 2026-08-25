@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO forge_schedules (name, kind, cron_expr, target_queue, payload, job_id, next_run, app, max_attempts, misfire_policy, max_catch_up) VALUES ($1, 'cron', $2, $3, $4, NULL, $5, $6, $7, $8, $9) ON CONFLICT (name, app) DO UPDATE SET kind = 'cron', cron_expr = EXCLUDED.cron_expr, target_queue = EXCLUDED.target_queue, payload = EXCLUDED.payload, job_id = NULL, next_run = EXCLUDED.next_run, last_run = NULL, max_attempts = EXCLUDED.max_attempts, misfire_policy = EXCLUDED.misfire_policy, max_catch_up = EXCLUDED.max_catch_up",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Bytea",
+        "Timestamptz",
+        "Text",
+        "Int4",
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "661c2152c104dce9e9d4c1602823b5c86359c11d83f4ae52e72ae811e383e1dd"
+}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM forge_sessions WHERE idle_deadline <= now() AND app = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b902a7c2043f3ee6dca4f8693a2b113ca69639b6d9b33dbfe25ef94d3e608396"
+}

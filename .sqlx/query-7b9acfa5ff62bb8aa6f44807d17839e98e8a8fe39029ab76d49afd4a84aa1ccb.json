@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM forge_job_dedup WHERE expires_at <= now() AND ($1::text IS NULL OR left(queue, length($1)) = $1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7b9acfa5ff62bb8aa6f44807d17839e98e8a8fe39029ab76d49afd4a84aa1ccb"
+}

@@ -1,16 +1,19 @@
 use super::{
-    CACHE_TTL_SECS, ConfigStore, EvalCtx, FlagRule, MAX_ALLOWLIST_ENTRIES, MAX_KEY_BYTES,
-    MAX_VALUE_BYTES,
+    CACHE_TTL_SECS, ConfigEntry, ConfigStore, EvalCtx, FlagEvaluation, FlagEvaluationEntry,
+    FlagEvaluationRequest, FlagRule, MAX_ALLOWLIST_ENTRIES, MAX_KEY_BYTES, MAX_VALUE_BYTES,
+    capture_environment_overrides, check_bulk_len, environment_override,
 };
 use crate::error::{ForgeError, Result};
 use crate::obs;
 use crate::util::key_hash;
 use async_trait::async_trait;
 use sqlx::PgPool;
+use sqlx::postgres::PgListener;
 use sqlx::types::Json;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::sync::watch;
 use tracing::Instrument;
 use tracing::field::Empty;
 
@@ -40,10 +43,14 @@ fn cap_cache<T>(cache: &mut HashMap<String, Cached<T>>) {
 
 /// Read a fresh cached value (within the TTL), cloned out. A poisoned lock, or a stale or
 /// absent entry, reads as a miss (the caller falls through to the DB), never a panic.
-fn cache_get<T: Clone>(cache: &Mutex<HashMap<String, Cached<T>>>, key: &str) -> Option<T> {
+fn cache_get<T: Clone>(
+    cache: &Mutex<HashMap<String, Cached<T>>>,
+    key: &str,
+) -> Option<(T, Duration)> {
     let cache = cache.lock().ok()?;
     let entry = cache.get(key)?;
-    (entry.fetched.elapsed() < CACHE_TTL).then(|| entry.value.clone())
+    let age = entry.fetched.elapsed();
+    (age < CACHE_TTL).then(|| (entry.value.clone(), age))
 }
 
 /// Insert into a bounded cache (purging first if at the cap). A poisoned lock skips the
@@ -67,17 +74,31 @@ pub(crate) struct PgConfig {
     /// database don't collide. Empty = no prefix. The per-instance cache and the
     /// `FORGE_CFG_<KEY>` env override use the caller (logical) key.
     namespace: String,
-    values: Mutex<HashMap<String, Cached<Option<String>>>>,
-    flags: Mutex<HashMap<String, Cached<Option<FlagRule>>>>,
+    environment: HashMap<String, String>,
+    values: Arc<Mutex<HashMap<String, Cached<Option<String>>>>>,
+    flags: Arc<Mutex<HashMap<String, Cached<Option<FlagRule>>>>>,
+    stop_invalidation: watch::Sender<bool>,
 }
 
 impl PgConfig {
     pub(crate) fn new(pool: PgPool, namespace: String) -> Self {
+        let values = Arc::new(Mutex::new(HashMap::new()));
+        let flags = Arc::new(Mutex::new(HashMap::new()));
+        let (stop_invalidation, stop) = watch::channel(false);
+        tokio::spawn(run_invalidation_listener(
+            pool.clone(),
+            key_hash(&namespace),
+            values.clone(),
+            flags.clone(),
+            stop,
+        ));
         Self {
             pool,
             namespace,
-            values: Mutex::new(HashMap::new()),
-            flags: Mutex::new(HashMap::new()),
+            environment: capture_environment_overrides(),
+            values,
+            flags,
+            stop_invalidation,
         }
     }
 
@@ -88,7 +109,7 @@ impl PgConfig {
 
     /// Fetch the stored raw value, using the cache. Errors only on a real backend fault.
     async fn fetch_value(&self, key: &str) -> Result<Option<String>> {
-        if let Some(hit) = cache_get(&self.values, key) {
+        if let Some((hit, _)) = cache_get(&self.values, key) {
             return Ok(hit);
         }
         let value = sqlx::query_scalar!(
@@ -102,7 +123,7 @@ impl PgConfig {
     }
 
     async fn fetch_flag(&self, key: &str) -> Result<Option<FlagRule>> {
-        if let Some(hit) = cache_get(&self.flags, key) {
+        if let Some((hit, _)) = cache_get(&self.flags, key) {
             return Ok(hit);
         }
         let rule = sqlx::query_scalar!(
@@ -115,6 +136,81 @@ impl PgConfig {
         cache_put(&self.flags, key, rule.clone());
         Ok(rule)
     }
+}
+
+impl Drop for PgConfig {
+    fn drop(&mut self) {
+        let _ = self.stop_invalidation.send(true);
+    }
+}
+
+const INVALIDATION_CHANNEL: &str = "forge_config_invalidate";
+
+fn invalidate_matching<T>(cache: &Mutex<HashMap<String, Cached<T>>>, hash: &str) {
+    if let Ok(mut cache) = cache.lock() {
+        cache.retain(|key, _| key_hash(key) != hash);
+    }
+}
+
+async fn run_invalidation_listener(
+    pool: PgPool,
+    namespace_hash: String,
+    values: Arc<Mutex<HashMap<String, Cached<Option<String>>>>>,
+    flags: Arc<Mutex<HashMap<String, Cached<Option<FlagRule>>>>>,
+    mut stop: watch::Receiver<bool>,
+) {
+    let mut retry = Duration::from_millis(100);
+    loop {
+        if *stop.borrow() {
+            return;
+        }
+        let connected = tokio::select! {
+            result = PgListener::connect_with(&pool) => result,
+            _ = stop.changed() => return,
+        };
+        let mut listener = match connected {
+            Ok(listener) => listener,
+            Err(_) => {
+                tokio::select! {
+                    _ = tokio::time::sleep(retry) => {},
+                    _ = stop.changed() => return,
+                }
+                retry = (retry * 2).min(Duration::from_secs(5));
+                continue;
+            }
+        };
+        if listener.listen(INVALIDATION_CHANNEL).await.is_err() {
+            continue;
+        }
+        retry = Duration::from_millis(100);
+        loop {
+            let notification = tokio::select! {
+                result = listener.recv() => result,
+                _ = stop.changed() => return,
+            };
+            let Ok(notification) = notification else {
+                break;
+            };
+            let mut parts = notification.payload().split(':');
+            let Some(incoming_namespace) = parts.next() else {
+                continue;
+            };
+            let Some(kind) = parts.next() else { continue };
+            let Some(hash) = parts.next() else { continue };
+            if parts.next().is_some() || incoming_namespace != namespace_hash {
+                continue;
+            }
+            match kind {
+                "value" => invalidate_matching(&values, hash),
+                "flag" => invalidate_matching(&flags, hash),
+                _ => continue,
+            }
+        }
+    }
+}
+
+fn invalidation_payload(namespace: &str, kind: &str, key: &str) -> String {
+    format!("{}:{kind}:{}", key_hash(namespace), key_hash(key))
 }
 
 fn check_key(key: &str) -> Result<()> {
@@ -145,6 +241,13 @@ fn check_rule(rule: &FlagRule) -> Result<()> {
             Err(ForgeError::limit(format!(
                 "an AllowList entry exceeds {MAX_ALLOWLIST_ENTRY_BYTES} bytes"
             )))
+        }
+        FlagRule::Value { value, variant }
+            if value.to_string().len() > MAX_VALUE_BYTES || variant.len() > 128 =>
+        {
+            Err(ForgeError::limit(
+                "typed flag value exceeds 64 KiB or variant exceeds 128 bytes",
+            ))
         }
         _ => Ok(()),
     }
@@ -179,10 +282,69 @@ fn evaluate(key: &str, rule: &FlagRule, default: bool, ctx: &EvalCtx) -> (bool, 
             Some(k) if list.iter().any(|e| e == k) => (true, "targeting_match"),
             _ => (false, "targeting_miss"),
         },
-        // `FlagRule` is `#[non_exhaustive]`; an unknown rule resolves to
-        // the caller's default (matching the "never errors" flag contract).
-        #[allow(unreachable_patterns)]
-        _ => (default, "default_unknown_rule"),
+        FlagRule::Value { value, .. } => value
+            .as_bool()
+            .map_or((default, "default_type_mismatch"), |value| {
+                (value, "static")
+            }),
+    }
+}
+
+fn evaluate_details(
+    key: &str,
+    rule: &FlagRule,
+    default: &serde_json::Value,
+    ctx: &EvalCtx,
+) -> FlagEvaluation {
+    match rule {
+        FlagRule::Value { value, variant } => {
+            FlagEvaluation::new(value, Some(variant.clone()), "static", None)
+        }
+        FlagRule::On => FlagEvaluation::new(
+            &serde_json::Value::Bool(true),
+            Some("on".into()),
+            "static",
+            None,
+        ),
+        FlagRule::Off => FlagEvaluation::new(
+            &serde_json::Value::Bool(false),
+            Some("off".into()),
+            "static",
+            None,
+        ),
+        FlagRule::Percent(percent) => match &ctx.targeting_key {
+            Some(targeting_key) => {
+                let enabled = stable_bucket(key, targeting_key) < u32::from(*percent);
+                FlagEvaluation::new(
+                    &serde_json::Value::Bool(enabled),
+                    Some(if enabled { "on" } else { "off" }.into()),
+                    if enabled { "percent_in" } else { "percent_out" },
+                    None,
+                )
+            }
+            None => FlagEvaluation::new(default, None, "default_no_key", None),
+        },
+        FlagRule::AllowList(entries) => match &ctx.targeting_key {
+            Some(targeting_key) => {
+                let enabled = entries.iter().any(|entry| entry == targeting_key);
+                FlagEvaluation::new(
+                    &serde_json::Value::Bool(enabled),
+                    Some(if enabled { "on" } else { "off" }.into()),
+                    if enabled {
+                        "targeting_match"
+                    } else {
+                        "targeting_miss"
+                    },
+                    None,
+                )
+            }
+            None => FlagEvaluation::new(
+                &serde_json::Value::Bool(false),
+                Some("off".into()),
+                "targeting_miss",
+                None,
+            ),
+        },
     }
 }
 
@@ -199,20 +361,9 @@ impl ConfigStore for PgConfig {
         obs::instrument("config", "get_raw", span, async move {
             check_key(key)?;
             // env `FORGE_CFG_<KEY>` wins over the store, even when set to empty (12-factor).
-            if let Ok(v) = std::env::var(format!("FORGE_CFG_{key}")) {
+            if let Some(value) = environment_override(&self.environment, key) {
                 tracing::Span::current().record("config.source", "env");
-                return Ok(Some(v));
-            }
-            // Fall back to the uppercased name (the universal env convention), so an
-            // operator exporting FORGE_CFG_MAX_UPLOAD_MB finds a key "max_upload_mb".
-            // The verbatim name above takes precedence. Only uppercase (an allocation)
-            // when the key has a lowercase letter to fold; an already-uppercase key
-            // would just re-probe the same var.
-            if key.bytes().any(|b| b.is_ascii_lowercase())
-                && let Ok(v) = std::env::var(format!("FORGE_CFG_{}", key.to_ascii_uppercase()))
-            {
-                tracing::Span::current().record("config.source", "env");
-                return Ok(Some(v));
+                return Ok(Some(value.to_string()));
             }
             let value = self.fetch_value(key).await?;
             tracing::Span::current().record(
@@ -222,6 +373,43 @@ impl ConfigStore for PgConfig {
             Ok(value)
         })
         .await
+    }
+
+    async fn get_many_raw(&self, keys: &[String]) -> Result<Vec<ConfigEntry>> {
+        check_bulk_len(keys.len())?;
+        for key in keys {
+            check_key(key)?;
+        }
+        let store_keys: Vec<&String> = keys
+            .iter()
+            .filter(|key| environment_override(&self.environment, key).is_none())
+            .collect();
+        let physical: Vec<String> = store_keys.iter().map(|key| self.physical(key)).collect();
+        let values: HashMap<String, String> = if physical.is_empty() {
+            HashMap::new()
+        } else {
+            sqlx::query!(
+                "SELECT key, value FROM forge_config WHERE key = ANY($1)",
+                &physical
+            )
+            .fetch_all(&self.pool)
+            .await?
+            .into_iter()
+            .map(|row| (row.key, row.value))
+            .collect()
+        };
+        for key in store_keys {
+            cache_put(&self.values, key, values.get(&self.physical(key)).cloned());
+        }
+        Ok(keys
+            .iter()
+            .map(|key| ConfigEntry {
+                key: key.clone(),
+                value: environment_override(&self.environment, key)
+                    .map(str::to_string)
+                    .or_else(|| values.get(&self.physical(key)).cloned()),
+            })
+            .collect())
     }
 
     async fn set_raw(&self, key: &str, value: &str) -> Result<()> {
@@ -245,6 +433,12 @@ impl ConfigStore for PgConfig {
                  ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
                 self.physical(key),
                 value,
+            )
+            .execute(&self.pool)
+            .await?;
+            sqlx::query!(
+                "SELECT pg_notify('forge_config_invalidate', $1)",
+                invalidation_payload(&self.namespace, "value", key),
             )
             .execute(&self.pool)
             .await?;
@@ -274,12 +468,109 @@ impl ConfigStore for PgConfig {
             let s = tracing::Span::current();
             s.record("flag.result", result);
             s.record("flag.reason", reason);
-            metrics::counter!("forge_ops_total", "primitive" => "config", "op" => "flag", "outcome" => "ok")
-                .increment(1);
             result
         }
         .instrument(span)
         .await
+    }
+
+    async fn flag_details(
+        &self,
+        key: &str,
+        default: &serde_json::Value,
+        ctx: &EvalCtx,
+    ) -> FlagEvaluation {
+        match self.fetch_flag(key).await {
+            Ok(Some(rule)) => evaluate_details(key, &rule, default, ctx),
+            Ok(None) => FlagEvaluation::new(default, None, "default_missing", None),
+            Err(error) => FlagEvaluation::new(
+                default,
+                None,
+                "default_error",
+                Some(crate::obs::error_variant(&error).to_ascii_uppercase()),
+            ),
+        }
+    }
+
+    async fn flag_details_many(
+        &self,
+        requests: &[FlagEvaluationRequest],
+    ) -> Result<Vec<FlagEvaluationEntry>> {
+        check_bulk_len(requests.len())?;
+
+        let mut physical = Vec::new();
+        for request in requests {
+            if check_key(&request.key).is_ok() {
+                physical.push(self.physical(&request.key));
+            }
+        }
+        physical.sort();
+        physical.dedup();
+        let fetched: Result<HashMap<String, FlagRule>> = if physical.is_empty() {
+            Ok(HashMap::new())
+        } else {
+            sqlx::query!(
+                r#"SELECT key, rule AS "rule!: Json<FlagRule>" FROM forge_flags WHERE key = ANY($1)"#,
+                &physical
+            )
+                .fetch_all(&self.pool)
+                .await
+                .map_err(ForgeError::from_sqlx)
+                .map(|rows| {
+                    rows.into_iter()
+                        .map(|row| (row.key, row.rule.0))
+                        .collect()
+                })
+        };
+        let rules = fetched.as_ref().ok();
+        let fetch_error_code = fetched
+            .as_ref()
+            .err()
+            .map(|error| obs::error_variant(error).to_ascii_uppercase());
+        if let Some(rules) = &rules {
+            for request in requests {
+                if check_key(&request.key).is_ok() {
+                    cache_put(
+                        &self.flags,
+                        &request.key,
+                        rules.get(&self.physical(&request.key)).cloned(),
+                    );
+                }
+            }
+        }
+
+        Ok(requests
+            .iter()
+            .map(|request| {
+                let evaluation = if check_key(&request.key).is_err() {
+                    FlagEvaluation::new(
+                        &request.default,
+                        None,
+                        "default_error",
+                        Some("INVALID".into()),
+                    )
+                } else if let Some(rules) = &rules {
+                    rules.get(&self.physical(&request.key)).map_or_else(
+                        || FlagEvaluation::new(&request.default, None, "default_missing", None),
+                        |rule| {
+                            evaluate_details(&request.key, rule, &request.default, &request.context)
+                        },
+                    )
+                } else {
+                    FlagEvaluation::new(
+                        &request.default,
+                        None,
+                        "default_error",
+                        fetch_error_code.clone(),
+                    )
+                };
+                FlagEvaluationEntry {
+                    id: request.id.clone(),
+                    key: request.key.clone(),
+                    evaluation,
+                }
+            })
+            .collect())
     }
 
     async fn set_flag(&self, key: &str, rule: FlagRule) -> Result<()> {
@@ -297,6 +588,12 @@ impl ConfigStore for PgConfig {
                  ON CONFLICT (key) DO UPDATE SET rule = EXCLUDED.rule",
                 self.physical(key),
                 Json(&rule) as _,
+            )
+            .execute(&self.pool)
+            .await?;
+            sqlx::query!(
+                "SELECT pg_notify('forge_config_invalidate', $1)",
+                invalidation_payload(&self.namespace, "flag", key),
             )
             .execute(&self.pool)
             .await?;
@@ -323,6 +620,12 @@ impl ConfigStore for PgConfig {
             .await?
             .rows_affected()
                 > 0;
+            sqlx::query!(
+                "SELECT pg_notify('forge_config_invalidate', $1)",
+                invalidation_payload(&self.namespace, "value", key),
+            )
+            .execute(&self.pool)
+            .await?;
             // Cache the absence locally; other instances converge within the cache TTL.
             cache_put(&self.values, key, None);
             Ok(removed)
@@ -345,6 +648,12 @@ impl ConfigStore for PgConfig {
                     .await?
                     .rows_affected()
                     > 0;
+            sqlx::query!(
+                "SELECT pg_notify('forge_config_invalidate', $1)",
+                invalidation_payload(&self.namespace, "flag", key),
+            )
+            .execute(&self.pool)
+            .await?;
             cache_put(&self.flags, key, None);
             Ok(removed)
         })

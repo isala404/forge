@@ -1,6 +1,8 @@
 use super::{
-    ApiKey, ApiKeyInfo, ApiKeySecret, Auth, MAX_ID_BYTES, MAX_LABEL_BYTES, MAX_PASSWORD_BYTES,
-    MAX_PHC_BYTES, MAX_PURPOSE_BYTES, OneTimeToken, PhcString, Session, SessionOpts, SessionToken,
+    ApiKey, ApiKeyInfo, ApiKeyOpts, ApiKeySecret, Auth, MAX_API_KEY_METADATA_BYTES,
+    MAX_API_KEY_SCOPES, MAX_ID_BYTES, MAX_LABEL_BYTES, MAX_PASSWORD_BYTES, MAX_PHC_BYTES,
+    MAX_PURPOSE_BYTES, MAX_TOKEN_PAYLOAD_BYTES, OneTimeToken, PhcString, Session, SessionOpts,
+    SessionToken, TokenConsumption,
 };
 use crate::error::{ForgeError, Result};
 use crate::obs;
@@ -8,8 +10,11 @@ use crate::util::{hex, key_hash, sha256_hex};
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier};
 use async_trait::async_trait;
+use bytes::Bytes;
 use rand_core::{OsRng, RngCore};
 use sqlx::PgPool;
+use sqlx::types::Json;
+use std::collections::HashMap;
 use std::time::Duration;
 use tracing::field::Empty;
 use uuid::Uuid;
@@ -59,13 +64,25 @@ impl PgAuth {
         // `idle_deadline <= abs_deadline` is an invariant (enforced at create and
         // capped at validate), so the abs_deadline arm is redundant; dropping it lets
         // the delete use the idle_deadline index instead of seq-scanning.
-        let sessions = sqlx::query!("DELETE FROM forge_sessions WHERE idle_deadline <= now()")
-            .execute(&self.pool)
-            .await?;
-        let tokens = sqlx::query!("DELETE FROM forge_auth_tokens WHERE expires_at <= now()")
-            .execute(&self.pool)
-            .await?;
-        Ok(sessions.rows_affected() + tokens.rows_affected())
+        let sessions = sqlx::query!(
+            "DELETE FROM forge_sessions WHERE idle_deadline <= now() AND app = $1",
+            self.app,
+        )
+        .execute(&self.pool)
+        .await?;
+        let tokens = sqlx::query!(
+            "DELETE FROM forge_auth_tokens WHERE expires_at <= now() AND app = $1",
+            self.app,
+        )
+        .execute(&self.pool)
+        .await?;
+        let keys = sqlx::query!(
+            "DELETE FROM forge_api_keys WHERE expires_at <= now() AND app = $1",
+            self.app,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(sessions.rows_affected() + tokens.rows_affected() + keys.rows_affected())
     }
 }
 
@@ -95,6 +112,27 @@ fn check_label(label: &str) -> Result<()> {
             "label is {} bytes; max is {MAX_LABEL_BYTES}",
             label.len()
         )));
+    }
+    Ok(())
+}
+
+fn check_api_key_opts(opts: &ApiKeyOpts) -> Result<()> {
+    if opts.expires_in.is_some_and(|duration| duration.is_zero()) {
+        return Err(ForgeError::invalid("API key expiry must be positive"));
+    }
+    if opts.scopes.len() > MAX_API_KEY_SCOPES
+        || opts
+            .scopes
+            .iter()
+            .any(|scope| scope.is_empty() || scope.len() > 128)
+    {
+        return Err(ForgeError::limit("API key scopes exceed their bounds"));
+    }
+    let metadata_bytes = serde_json::to_vec(&opts.metadata).map_err(|error| {
+        ForgeError::backend_with("API key metadata could not be encoded", false, error)
+    })?;
+    if metadata_bytes.len() > MAX_API_KEY_METADATA_BYTES {
+        return Err(ForgeError::limit("API key metadata exceeds 4096 bytes"));
     }
     Ok(())
 }
@@ -265,7 +303,6 @@ impl Auth for PgAuth {
         let token_hash = sha256_hex(token.as_bytes());
         let span = tracing::info_span!(
             "forge.auth.validate_session",
-            auth.token_hash = %token_hash,
             auth.session_valid = Empty,
             outcome = Empty,
             error.variant = Empty,
@@ -292,7 +329,6 @@ impl Auth for PgAuth {
         let token_hash = sha256_hex(token.as_bytes());
         let span = tracing::info_span!(
             "forge.auth.revoke_session",
-            auth.token_hash = %token_hash,
             outcome = Empty,
             error.variant = Empty,
         );
@@ -332,6 +368,16 @@ impl Auth for PgAuth {
     }
 
     async fn create_api_key(&self, owner_id: &str, label: &str) -> Result<ApiKey> {
+        self.create_api_key_with(owner_id, label, ApiKeyOpts::default())
+            .await
+    }
+
+    async fn create_api_key_with(
+        &self,
+        owner_id: &str,
+        label: &str,
+        opts: ApiKeyOpts,
+    ) -> Result<ApiKey> {
         let id = Uuid::new_v4().to_string();
         let span = tracing::info_span!(
             "forge.auth.create_api_key",
@@ -343,16 +389,22 @@ impl Auth for PgAuth {
         obs::instrument("auth", "create_api_key", span, async move {
             check_id(owner_id)?;
             check_label(label)?;
+            check_api_key_opts(&opts)?;
             let secret = format!("{KEY_PREFIX}{}", random_token());
             let key_hash = sha256_hex(secret.as_bytes());
-            let created_at = sqlx::query_scalar!(
-                "INSERT INTO forge_api_keys (id, key_hash, owner_id, label, app) \
-                 VALUES ($1, $2, $3, $4, $5) RETURNING created_at",
+            let expires_secs = opts.expires_in.map(|duration| duration.as_secs_f64());
+            let row = sqlx::query!(
+                "INSERT INTO forge_api_keys (id, key_hash, owner_id, label, app, expires_at, scopes, metadata) \
+                 VALUES ($1, $2, $3, $4, $5, CASE WHEN $6::float8 IS NULL THEN NULL ELSE now() + make_interval(secs => $6) END, $7, $8) \
+                 RETURNING created_at, expires_at",
                 id,
                 key_hash,
                 owner_id,
                 label,
                 self.app,
+                expires_secs,
+                &opts.scopes,
+                Json(&opts.metadata) as _,
             )
             .fetch_one(&self.pool)
             .await?;
@@ -360,7 +412,10 @@ impl Auth for PgAuth {
                 id,
                 label.to_string(),
                 ApiKeySecret::new(secret),
-                created_at.into(),
+                row.created_at.into(),
+                row.expires_at.map(Into::into),
+                opts.scopes,
+                opts.metadata,
             ))
         })
         .await
@@ -370,7 +425,6 @@ impl Auth for PgAuth {
         let key_hash = sha256_hex(key.as_bytes());
         let span = tracing::info_span!(
             "forge.auth.verify_api_key",
-            auth.token_hash = %key_hash,
             auth.key_valid = Empty,
             auth.key_id = Empty,
             outcome = Empty,
@@ -378,7 +432,9 @@ impl Auth for PgAuth {
         );
         obs::instrument("auth", "verify_api_key", span, async move {
             let row = sqlx::query!(
-                "SELECT id, owner_id, label FROM forge_api_keys WHERE key_hash = $1 AND app = $2",
+                r#"SELECT id, owner_id, label, expires_at, scopes, metadata AS "metadata!: Json<HashMap<String, String>>"
+                   FROM forge_api_keys WHERE key_hash = $1 AND app = $2
+                   AND (expires_at IS NULL OR expires_at > now())"#,
                 key_hash,
                 self.app,
             )
@@ -389,7 +445,14 @@ impl Auth for PgAuth {
             if let Some(r) = &row {
                 s.record("auth.key_id", r.id.as_str());
             }
-            Ok(row.map(|r| ApiKeyInfo::new(r.id, r.owner_id, r.label)))
+            Ok(row.map(|r| ApiKeyInfo::new(
+                r.id,
+                r.owner_id,
+                r.label,
+                r.expires_at.map(Into::into),
+                r.scopes,
+                r.metadata.0,
+            )))
         })
         .await
     }
@@ -421,6 +484,17 @@ impl Auth for PgAuth {
         purpose: &str,
         ttl: Duration,
     ) -> Result<OneTimeToken> {
+        self.create_token_with_payload(user_id, purpose, ttl, Bytes::new())
+            .await
+    }
+
+    async fn create_token_with_payload(
+        &self,
+        user_id: &str,
+        purpose: &str,
+        ttl: Duration,
+        payload: Bytes,
+    ) -> Result<OneTimeToken> {
         let span = tracing::info_span!(
             "forge.auth.create_token",
             auth.user_hash = %key_hash(user_id),
@@ -433,17 +507,21 @@ impl Auth for PgAuth {
             check_id(user_id)?;
             check_purpose(purpose)?;
             check_token_ttl(ttl)?;
+            if payload.len() > MAX_TOKEN_PAYLOAD_BYTES {
+                return Err(ForgeError::limit("one-time token payload exceeds 4096 bytes"));
+            }
             let token = random_token();
             let token_hash = sha256_hex(token.as_bytes());
             let ttl_secs = ttl.as_secs_f64();
             sqlx::query!(
-                "INSERT INTO forge_auth_tokens (token_hash, user_id, purpose, expires_at, app) \
-                 VALUES ($1, $2, $3, now() + make_interval(secs => $4), $5)",
+                "INSERT INTO forge_auth_tokens (token_hash, user_id, purpose, expires_at, app, payload) \
+                 VALUES ($1, $2, $3, now() + make_interval(secs => $4), $5, $6)",
                 token_hash,
                 user_id,
                 purpose,
                 ttl_secs,
                 self.app,
+                payload.as_ref(),
             )
             .execute(&self.pool)
             .await?;
@@ -453,10 +531,20 @@ impl Auth for PgAuth {
     }
 
     async fn consume_token(&self, token: &str, purpose: &str) -> Result<Option<String>> {
+        Ok(self
+            .consume_token_with_payload(token, purpose)
+            .await?
+            .map(|consumption| consumption.user_id))
+    }
+
+    async fn consume_token_with_payload(
+        &self,
+        token: &str,
+        purpose: &str,
+    ) -> Result<Option<TokenConsumption>> {
         let token_hash = sha256_hex(token.as_bytes());
         let span = tracing::info_span!(
             "forge.auth.consume_token",
-            auth.token_hash = %token_hash,
             auth.purpose = %purpose,
             auth.token_valid = Empty,
             outcome = Empty,
@@ -466,18 +554,21 @@ impl Auth for PgAuth {
             check_purpose(purpose)?;
             // Single use: delete iff live and minted for this purpose, atomically. A
             // purpose mismatch matches no row and leaves the token intact.
-            let user_id = sqlx::query_scalar!(
+            let consumption = sqlx::query!(
                 "DELETE FROM forge_auth_tokens \
                  WHERE token_hash = $1 AND app = $2 AND purpose = $3 AND expires_at > now() \
-                 RETURNING user_id",
+                 RETURNING user_id, payload",
                 token_hash,
                 self.app,
                 purpose,
             )
             .fetch_optional(&self.pool)
             .await?;
-            tracing::Span::current().record("auth.token_valid", user_id.is_some());
-            Ok(user_id)
+            tracing::Span::current().record("auth.token_valid", consumption.is_some());
+            Ok(consumption.map(|record| TokenConsumption {
+                user_id: record.user_id,
+                payload: Bytes::from(record.payload),
+            }))
         })
         .await
     }

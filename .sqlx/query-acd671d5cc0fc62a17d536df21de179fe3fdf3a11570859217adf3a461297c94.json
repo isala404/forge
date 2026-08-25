@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO forge_schedules (name, kind, cron_expr, target_queue, payload, job_id, next_run, app, max_attempts, misfire_policy, max_catch_up) VALUES ($1, 'at', NULL, $2, $3, $4, $5, $6, $7, $8, $9)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Bytea",
+        "Uuid",
+        "Timestamptz",
+        "Text",
+        "Int4",
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "acd671d5cc0fc62a17d536df21de179fe3fdf3a11570859217adf3a461297c94"
+}
