@@ -1,0 +1,33 @@
+name: Release Node OpenFeature provider
+
+on:
+  push:
+    tags: ["openfeature-node-v*"]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+      - name: Verify independent package tag
+        working-directory: packages/openfeature-node
+        run: test "openfeature-node-v$(node -p \"require('./package.json').version\")" = "$GITHUB_REF_NAME"
+      - name: Install and test
+        working-directory: packages/openfeature-node
+        run: |
+          npm install --ignore-scripts --no-package-lock --legacy-peer-deps
+          npm test
+      - name: Inspect published contents
+        working-directory: packages/openfeature-node
+        run: npm pack --dry-run
+      - name: Publish with npm trusted publishing
+        working-directory: packages/openfeature-node
+        run: npm publish --provenance --access public

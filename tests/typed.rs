@@ -155,7 +155,7 @@ async fn blob_typed_key_roundtrips() {
         forgelib::Bytes::from_static(b"png-bytes")
     );
     assert!(key.head(forge.blob()).await.unwrap().is_some());
-    assert!(key.delete(forge.blob()).await.unwrap());
+    key.delete(forge.blob()).await.unwrap();
 }
 
 #[tokio::test]

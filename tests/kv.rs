@@ -10,6 +10,13 @@ fn b(s: &str) -> Bytes {
     Bytes::from(s.as_bytes().to_vec())
 }
 
+fn assert_code<T>(result: Result<T, ForgeError>, expected: &str) {
+    match result {
+        Err(error) => assert_eq!(error.code(), expected),
+        Ok(_) => panic!("expected {expected} error"),
+    }
+}
+
 #[tokio::test]
 async fn set_then_get_roundtrips() {
     let db = TestDatabase::new().await.unwrap();
@@ -127,7 +134,7 @@ async fn incr_on_non_numeric_value_is_invalid() {
     kv.set("s", b("not-a-number"), SetOpts::new())
         .await
         .unwrap();
-    assert!(matches!(kv.incr("s", 1).await, Err(ForgeError::Invalid(_))));
+    assert_code(kv.incr("s", 1).await, "INVALID");
 }
 
 #[tokio::test]
@@ -140,7 +147,7 @@ async fn incr_on_non_utf8_value_is_invalid() {
     kv.set("c", Bytes::from(vec![0xFF, 0xFE]), SetOpts::new())
         .await
         .unwrap();
-    assert!(matches!(kv.incr("c", 1).await, Err(ForgeError::Invalid(_))));
+    assert_code(kv.incr("c", 1).await, "INVALID");
 }
 
 #[tokio::test]
@@ -224,13 +231,10 @@ async fn size_limits_are_rejected() {
     let kv = forge.kv();
 
     let big_key = "x".repeat(513);
-    assert!(matches!(kv.get(&big_key).await, Err(ForgeError::Limit(_))));
+    assert_code(kv.get(&big_key).await, "LIMIT");
 
     let big_val = Bytes::from(vec![0u8; 1024 * 1024 + 1]);
-    assert!(matches!(
-        kv.set("k", big_val, SetOpts::new()).await,
-        Err(ForgeError::Limit(_))
-    ));
+    assert_code(kv.set("k", big_val, SetOpts::new()).await, "LIMIT");
 }
 
 #[tokio::test]

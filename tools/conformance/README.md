@@ -1,6 +1,6 @@
 # Forge conformance suite
 
-One declarative scenario matrix, run by a native runner in each language (Rust, Node, Python) against the same throwaway-Postgres setup. It exists to make the cross-language contract executable: if Node and Python ever drift on units, shapes, defaults, or error codes, a scenario goes red instead of slipping through review.
+One declarative scenario matrix, run by a native runner in Rust, JavaScript, Python, and Go. Durable runners share the same throwaway-PostgreSQL setup; Rust and Go also run the complete database-free memory profile without a database service.
 
 This is the anti-regression backbone for the cross-language contract. Scenarios encode the target unified contract: Rust's shape is the reference. Where a binding does not yet conform, the gap is registered in `known_gaps.json` so CI stays honest: it asserts that *exactly* the registered gaps fail. Fixing a gap (without removing it from the registry) fails CI ("known gap now passes, remove it"), and a brand-new divergence fails CI as an unexpected red. Both directions are caught.
 
@@ -16,9 +16,11 @@ src/conformance/
 
 tools/conformance/
   README.md            # this file, schema + how to run
-  run-all.sh           # builds both bindings and runs all three runners
+  run-all.sh           # builds packages and runs all four runners
   node/                # Node runner (forgelib binding)
   python/              # Python runner (forgelib binding)
+
+bindings/go/conformance_test.go # native Go scenario interpreter
 
 tests/conformance.rs   # the Rust runner: drives forgelib::conformance against throwaway DBs
 ```
@@ -59,7 +61,7 @@ A scenario is an ordered list of **steps** run against one fresh Forge in one na
   - `value`: expected scalar / `null` / bool / number / string.
   - `bytes`: `{ "$bytes": [ ... ] }` for a binary return.
   - `shape`: object of expected fields for a struct return (dequeue job, queue depth, rate-limit decision, blob info, …). Runners normalize each language's native return (Node object, Python tuple/class) into canonical **snake_case** keys before comparing, so a missing/renamed field fails.
-  - `error`: canonical code string, one of `Config | Unavailable | NotFound | Precondition | Limit | Invalid | Backend`. Runners map each language's surface (Node `"INVALID: ..."` prefix, Python exception class) to the canonical spelling. When P1-5 lands this also asserts the `retryable` flag via `"retryable": true|false` alongside `error`.
+  - `error`: canonical code string, one of `Config | NotConfigured | Unavailable | NotFound | Precondition | Limit | Invalid | Backend`. Runners map each language's surface (Node `"INVALID: ..."` prefix, Python exception class) to the canonical spelling and assert retryability when a scenario specifies it.
 
 ### Matchers (for non-deterministic results)
 
@@ -85,6 +87,9 @@ Each runner needs a Postgres it can create throwaway databases against, via `TES
 # Rust
 TEST_DATABASE_URL=postgres://… cargo test --features pg-tests,conformance --test conformance
 
+# Rust memory (no database service)
+cargo test --features conformance --test memory_conformance
+
 # Node   (after `cd bindings/node && napi build --platform --release`
 #         and `cd tools/conformance/node && npm install`)
 TEST_DATABASE_URL=postgres://… node tools/conformance/node/run.js
@@ -93,11 +98,14 @@ TEST_DATABASE_URL=postgres://… node tools/conformance/node/run.js
 #         and `uv venv tools/conformance/python/.venv && uv pip install --python
 #         tools/conformance/python/.venv bindings/python/dist/*.whl 'psycopg[binary]'`)
 TEST_DATABASE_URL=postgres://… tools/conformance/python/.venv/bin/python tools/conformance/python/run.py
+
+# Go memory and PostgreSQL profiles
+cd bindings/go && TEST_DATABASE_URL=postgres://… go test -run '^TestConformance(Memory|Postgres)$' ./...
 ```
 
-`tools/conformance/run-all.sh` builds both bindings and runs all three runners in sequence; it is what CI invokes.
+`tools/conformance/run-all.sh` builds the packages and runs all four runners in sequence; it is what CI invokes.
 
-CI runs all three and compares the failure set against `known_gaps.json`.
+CI runs all four and refuses a supported release when `known_gaps.json` or the contract development-gap set is non-empty.
 
 ## Adding a fix
 

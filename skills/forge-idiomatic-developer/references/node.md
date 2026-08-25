@@ -54,18 +54,21 @@ Settle a job by its delivery-unique `receipt`, never its `id`. The stable id is 
 | --- | --- |
 | `blobPut()` | `blobPut(key, data, contentType?)` — `data` is a string. |
 | `blobPutBytes()` | `blobPutBytes(key, buf, contentType?)`. |
-| `blobPutObject()` | `blobPutObject(key, buf, contentType?, metadata?)` when you also need user metadata. |
+| `blobPutObject()` | `blobPutObject(key, buf, options?)`; options include content type, metadata, conditions, web headers, SHA-256, and S3 encryption. |
+| `blobPutFile()` | Streams a file path without buffering it in JavaScript. |
 | `blobGet()` | Object as a UTF-8 string, or `null`. |
 | `blobGetBytes()` | Object as a `Buffer`, or `null`. |
+| `blobGetRange()` | Inclusive bounded byte range as a `Buffer`, or `null`. |
 | `blobHead()` | `JsBlobInfo` (size, contentType, etag, lastModifiedMs, metadata), or `null`. |
 | `blobList()` | `blobList(prefix, cursor, limit)` → `{ items, cursor }`. |
 | `blobContentType()` | Stored content type, or `null`. |
-| `blobDelete()` | Returns whether it existed. |
-| `blobPresignDownload()` | `blobPresignDownload(key, expiresSeconds)` — needs `[blob].signing_secret`. |
-| `blobPresignUpload()` | `blobPresignUpload(key, expiresSeconds, maxBytes)` — needs the secret. |
+| `blobDelete()` | Idempotent; resolves with no existence claim. |
+| `blobPresignDownload()` | Returns `JsProxyPresign`; use `.url`. Needs `[blob].signing_secret`. |
+| `blobPresignUpload()` | Returns a size-enforcing `JsProxyPresign`; use `.url`. |
+| `blobPresignNativeGet()` / `blobPresignNativePut()` | S3-only provider presigns with required headers; native PUT has no portable size cap. |
 | `blobVerifyPresign()` | `blobVerifyPresign(method, key, expiresEpoch, maxBytes, sig)` → validity. |
 
-Presigned URLs use `/api/files?key=…&expires=…&max_bytes=…&sig=…` by default, but `[blob].base_url` can make the configured base relative or absolute. Mount a matching route and pass the query params to `blobVerifyPresign` verbatim (a download URL carries `max_bytes=0` — echo it, don't substitute). Expiry or a bad signature returns `false`; an unsupported method throws `INVALID`.
+Proxy presigned URLs include a version, namespace, method, key, expiry, size constraint, and signature under `[blob].base_url`. Mount a matching route and pass the structured ticket fields to `blobVerifyPresign` verbatim. Expiry or a bad signature returns `false`; an unsupported method throws `INVALID`. Proxy and native presigned URLs are bearer credentials, so redact their query strings.
 
 ## Auth
 
@@ -80,8 +83,7 @@ Presigned URLs use `/api/files?key=…&expires=…&max_bytes=…&sig=…` by def
 | `revokeSession()` | Log out one device (idempotent). |
 | `revokeAllSessions()` | Log out everywhere; returns the count. |
 | `createApiKey()` | `createApiKey(ownerId, label)` → `JsApiKey` (`secret` shown once). |
-| `verifyApiKey()` | Key → `ownerId`, or `null`. |
-| `verifyApiKeyInfo()` | Key → `JsApiKeyInfo` (id, owner, label), or `null`. |
+| `verifyApiKey()` | Key → `JsApiKeyInfo` (id, owner, label, expiry, scopes, metadata), or `null`. |
 | `revokeApiKey()` | Revoke by non-secret id. |
 | `createToken()` | `createToken(userId, purpose, ttlSeconds)` → single-use token (shown once). `purpose` is any string you choose (`"password-reset"`); create/consume must match exactly. `userId` is any opaque string handed back on consume — for pre-account flows (invites) pass your own reference id. |
 | `consumeToken()` | `consumeToken(token, purpose)` → `userId`, or `null` (used/expired/wrong purpose). First consume wins. |
@@ -116,13 +118,14 @@ Presigned URLs use `/api/files?key=…&expires=…&max_bytes=…&sig=…` by def
 | `setFlagPercent()` | Percentage rollout, `0..=100`. Bucketing is a stable hash of `(flag, targetingKey)` — deterministic across processes; without a `targetingKey`, a percent rule returns the caller default. |
 | `setFlagOn()` / `setFlagOff()` | Always-on / always-off. |
 | `setFlagAllowList()` | `setFlagAllowList(key, entries)` — on only for those targeting keys. |
+| `setFlagValue()` / `flagDetails()` | Store typed JSON and return its value type, stable variant, reason, and default/error reason. |
 | `deleteFlag()` | Delete a flag rule; later `flag()` calls use the caller default. |
 
 ## Client
 
 | Method | Notes |
 | --- | --- |
-| `backendReport()` | Which provider powers each primitive (for a health page). **Synchronous.** |
+| `backendCapabilities()` | Static provider and durability capabilities for each primitive. **Synchronous.** |
 | `postgresUrl()` | Resolved Forge system DSN. Contains credentials. Use server-side to reach embedded Postgres from another process or intentionally seed an application-owned pool; choose production isolation deliberately. **Synchronous.** |
 | `maintain()` | One housekeeping sweep (expired kv, settled/dead jobs, stale buckets, expired sessions). |
 
@@ -146,5 +149,5 @@ await profile.set(value, { ttlSeconds: 3600 });
 - `KvKey<T>` from `forge.kv<T>(key)`: `get()`, `getOrDefault(default)`, `set()`, `delete()`, `exists()`, `expire()`, `compareAndSwap()`.
 - `ConfigKey<T>` from `forge.config<T>(key, defaultValue)`: `get()` returns the bound default when supplied and the key is missing; without a bound default it returns `null`, matching the declared `T | null`. `getOrDefault()` can override the bound default. It also has `set()`, `delete()`, and `flag()`.
 - `Topic<T>` from `forge.topic<T>(name)`: `publish()`, asynchronous `subscribe()`, and synchronous `channel()`. Await the subscription before iterating: `for await (const event of await topic.subscribe())`. Its iterator's `next()` resolves `{ value, done }`, unlike the raw `JsSubscription.next()` which resolves the payload directly.
-- `forge.worker<T>(queue, handler, opts?)` / `runWorker(client, queue, handler, opts?)` — managed loop. Keep its `Promise`; abort `opts.signal`, then await the promise before exiting. Calling `process.exit()` immediately after abort defeats completion.
+- `forge.worker<T>(queue, handler, opts?)` / `runWorker(client, queue, handler, opts?)` — managed loop. Keep its `Promise`. `forge.close(deadlineSeconds)` stops the loop, aborts `job.signal` for an active handler, releases its lease, and awaits helper cleanup before closing native resources. Await close before process exit.
 - `forgeErrorCode(err)` / `forgeErrorRetryable(err)` — parse the code Forge prefixes onto the message; a retryable backend error is prefixed `BACKEND(retryable):` and `forgeErrorRetryable` reports it (alongside `UNAVAILABLE`).

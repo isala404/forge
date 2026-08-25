@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::panic, clippy::disallowed_methods)]
 
 use forgelib::testing::TestDatabase;
-use forgelib::{Bytes, Forge, ForgeError, PutOpts};
+use forgelib::{Bytes, Forge, PutOpts};
 use sqlx::{Connection, PgConnection};
 use std::time::Duration;
 
@@ -43,7 +43,7 @@ async fn fs_put_get_head_delete_roundtrip() {
 
     assert_eq!(b.get("missing").await.unwrap(), None);
     assert!(b.head("missing").await.unwrap().is_none());
-    assert!(!b.delete("missing").await.unwrap());
+    b.delete("missing").await.unwrap();
 
     b.put(
         "docs/a.txt",
@@ -78,7 +78,8 @@ async fn fs_put_get_head_delete_roundtrip() {
         Bytes::from_static(b"goodbye")
     );
 
-    assert!(b.delete("docs/a.txt").await.unwrap());
+    b.delete("docs/a.txt").await.unwrap();
+    b.delete("docs/a.txt").await.unwrap();
     assert!(b.get("docs/a.txt").await.unwrap().is_none());
 }
 
@@ -182,27 +183,21 @@ async fn fs_presign_and_verify() {
     let forge = fs_forge(&db, &root).await;
     let b = forge.blob();
 
-    let url = b
+    let ticket = b
         .presign_upload("media/x.bin", Duration::from_secs(600), 4096)
         .await
         .unwrap();
-    assert!(url.contains("max_bytes=4096"));
-    let q = url.split_once('?').unwrap().1;
-    let (mut expires, mut max_bytes) = (0i64, 0u64);
-    let mut sig = String::new();
-    for kv in q.split('&') {
-        let (k, v) = kv.split_once('=').unwrap();
-        match k {
-            "expires" => expires = v.parse().unwrap(),
-            "max_bytes" => max_bytes = v.parse().unwrap(),
-            "sig" => sig = v.to_string(),
-            _ => {}
-        }
-    }
+    assert!(ticket.url.contains("max_bytes=4096"));
     assert!(
-        b.verify_presigned("PUT", "media/x.bin", expires, max_bytes, &sig)
-            .await
-            .unwrap()
+        b.verify_presigned(
+            "PUT",
+            "media/x.bin",
+            ticket.expires_epoch,
+            ticket.max_bytes,
+            &ticket.signature,
+        )
+        .await
+        .unwrap()
     );
 
     // No secret on a filesystem backend => Config, same as the Postgres backend.
@@ -212,23 +207,25 @@ async fn fs_presign_and_verify() {
     )))
     .await
     .unwrap();
-    assert!(matches!(
+    assert_eq!(
         plain
             .blob()
             .presign_download("k", Duration::from_secs(60))
-            .await,
-        Err(ForgeError::Config(_))
-    ));
+            .await
+            .unwrap_err()
+            .code(),
+        "CONFIG"
+    );
 }
 
 #[tokio::test]
-async fn fs_backend_report_and_maintain() {
+async fn fs_backend_capabilities_and_maintain() {
     let db = TestDatabase::new().await.unwrap();
     let root = temp_root(&db);
     let forge = fs_forge(&db, &root).await;
 
     // The report shows the filesystem provider for blob, Postgres for the rest.
-    let report = forge.backend_report();
+    let report = forge.backend_capabilities();
     let blob = report
         .backends
         .iter()

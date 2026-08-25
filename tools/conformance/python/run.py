@@ -2,9 +2,7 @@ import asyncio
 import json
 import os
 import pathlib
-import shutil
 import sys
-import tempfile
 import time
 import uuid
 
@@ -23,6 +21,7 @@ SIGNING_SECRET = "conformance-signing-secret"
 # Forge reads this forge.toml; its ${FORGE_*} references resolve from the env vars the
 # runner sets before each init, so one file drives every per-namespace/per-backend client.
 CONFIG_PATH = str(HERE / "forge.toml")
+MIGRATED_URLS: set[str] = set()
 
 
 async def connect_ns(url: str, ns: str):
@@ -33,6 +32,15 @@ async def connect_ns(url: str, ns: str):
     os.environ["FORGE_BLOB_SIGNING_SECRET"] = SIGNING_SECRET
     for key in ("FORGE_QUEUE_BACKEND", "FORGE_BLOB_BACKEND", "FORGE_BLOB_FS_ROOT"):
         os.environ.pop(key, None)
+    if url not in MIGRATED_URLS:
+        status = await forgelib.ForgeClient.migration_status_from(CONFIG_PATH)
+        if len(status) != 1 or status[0].state not in {"pending", "applied"}:
+            raise RuntimeError(f"unexpected migration status: {status!r}")
+        migrated = await forgelib.ForgeClient.migrate_from(CONFIG_PATH)
+        validated = await forgelib.ForgeClient.validate_schema_from(CONFIG_PATH)
+        if any(item.state != "applied" for item in [*migrated, *validated]):
+            raise RuntimeError("migration API did not produce an applied schema")
+        MIGRATED_URLS.add(url)
     return await forgelib.ForgeClient.init_from(CONFIG_PATH)
 
 ADMIN_URL = os.environ.get("TEST_DATABASE_URL")
@@ -54,7 +62,16 @@ def admin_exec(sql: str) -> None:
 
 
 # error mapping: exception classes are named canonical code + "Error"
-CODES = {"Config", "Unavailable", "NotFound", "Precondition", "Limit", "Invalid", "Backend"}
+CODES = {
+    "Config",
+    "NotConfigured",
+    "Unavailable",
+    "NotFound",
+    "Precondition",
+    "Limit",
+    "Invalid",
+    "Backend",
+}
 
 
 def canonical_error_code(exc: BaseException) -> str:
@@ -90,82 +107,37 @@ def value_to_bytes(v):
     raise ValueError(f"cannot coerce value to bytes: {v!r}")
 
 
-def provider(report, primitive: str):
-    for row in report:
-        if row.primitive == primitive:
-            return row.provider
-    return None
-
-
-def restore_env(saved):
-    for key, value in saved.items():
-        if value is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = value
-
-
-async def run_backend_selection_smoke():
-    name = "forge_conf_" + uuid.uuid4().hex[:12]
-    admin_exec(f'CREATE DATABASE "{name}"')
-    url = swap_db(ADMIN_URL, name)
-    root = tempfile.mkdtemp(prefix="forgelib-blob-")
-    keys = [
-        "FORGE_POSTGRES_URL",
-        "FORGE_NAMESPACE",
-        "FORGE_BLOB_SIGNING_SECRET",
-        "FORGE_QUEUE_BACKEND",
-        "FORGE_BLOB_BACKEND",
-        "FORGE_BLOB_FS_ROOT",
-    ]
-    saved = {key: os.environ.get(key) for key in keys}
+async def run_runtime_profile_smoke():
+    config = f'''[forge]\nmode = "memory"\nenvironment = "test"\n[blob]\nsigning_secret = "{SIGNING_SECRET}"\n'''
+    client = await forgelib.ForgeClient.init_from_string(config)
+    report = client.backend_capabilities()
+    if not all(row.provider == "memory" for row in report):
+        raise AssertionError("memory profile did not resolve every primitive to memory")
+    await client.queue_enqueue("profile", b"hello")
+    job = await client.queue_dequeue("profile", 30, 0)
+    if job is None or bytes(job.payload) != b"hello":
+        raise AssertionError("memory queue smoke failed")
+    await client.queue_ack(job.receipt)
+    await client.close(1)
+    await client.close(1)
     try:
-        os.environ["FORGE_POSTGRES_URL"] = url
-        os.environ["FORGE_NAMESPACE"] = ""
-        os.environ["FORGE_BLOB_SIGNING_SECRET"] = SIGNING_SECRET
-        os.environ["FORGE_QUEUE_BACKEND"] = "memory"
-        os.environ["FORGE_BLOB_BACKEND"] = "filesystem"
-        os.environ["FORGE_BLOB_FS_ROOT"] = root
-
-        client = await forgelib.ForgeClient.init_from(CONFIG_PATH)
-        report = client.backend_report()
-        if provider(report, "queue") != "memory":
-            raise AssertionError("queue backend was not memory")
-        if provider(report, "blob") != "filesystem":
-            raise AssertionError("blob backend was not filesystem")
-
-        await client.queue_enqueue("swapq", "hello")
-        job = await client.queue_dequeue("swapq", 30, 0)
-        if job is None or job.payload != "hello":
-            raise AssertionError("memory queue smoke failed")
-        await client.queue_ack(job.receipt)
-
-        await client.blob_put("swap/blob.txt", b"blob", "text/plain")
-        if await client.blob_get("swap/blob.txt") != b"blob":
-            raise AssertionError("filesystem blob smoke failed")
-    finally:
-        restore_env(saved)
-        shutil.rmtree(root, ignore_errors=True)
-        admin_exec(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
-    print("PASS  backend/env_backend_selection")
+        await client.kv_get("closed")
+    except forgelib.PreconditionError:
+        pass
+    else:
+        raise AssertionError("work was accepted after close")
+    print("PASS  runtime/memory_profile_and_lifecycle")
 
 
-def parse_presign(url, key, method):
-    """Decompose a presigned URL into the signed params verify_presigned needs, so a
-    scenario can $ref them straight into a verify step. Mirrors the Rust runner."""
-    query = url.split("?", 1)[1] if "?" in url else ""
-    expires_epoch, max_bytes, sig = 0, 0, ""
-    for pair in query.split("&"):
-        if "=" not in pair:
-            continue
-        k, val = pair.split("=", 1)
-        if k == "expires":
-            expires_epoch = int(val)
-        elif k == "max_bytes":
-            max_bytes = int(val)
-        elif k == "sig":
-            sig = val
-    return {"url": url, "key": key, "method": method, "expires_epoch": expires_epoch, "max_bytes": max_bytes, "sig": sig}
+def parse_presign(ticket):
+    return {
+        "url": ticket.url,
+        "key": ticket.key,
+        "method": ticket.method,
+        "expires_epoch": ticket.expires_epoch,
+        "max_bytes": ticket.max_bytes,
+        "signature": ticket.signature,
+    }
 
 
 async def dispatch(client, op, args, subscriptions, capture_as):
@@ -193,7 +165,7 @@ async def dispatch(client, op, args, subscriptions, capture_as):
         page = await client.kv_scan_page(args["prefix"], args.get("cursor"), args.get("limit", 100))
         return {"keys": list(page.keys), "cursor": page.cursor}
     if op == "ratelimit.check":
-        d = await client.rate_limit_check(args["bucket"], args["key"], args["max"], args["per_seconds"], args.get("fail_open"), args.get("algo"))
+        d = await client.rate_limit_check(args["bucket"], args["key"], args["max"], args["per_seconds"], args.get("fail_open"), args.get("algo"), args.get("cost", 1))
         return {
             "allowed": d.allowed,
             "limit": d.limit,
@@ -201,14 +173,33 @@ async def dispatch(client, op, args, subscriptions, capture_as):
             "reset_after_seconds": d.reset_after_seconds,
             "retry_after_seconds": d.retry_after_seconds,
         }
+    if op == "ratelimit.reserve":
+        value = await client.rate_limit_reserve(args["bucket"], args["key"], args["max"], args["per_seconds"], args["units"], args["ttl_seconds"], args.get("algo"))
+        return None if value is None else json.loads(value)
+    if op == "ratelimit.commit":
+        return json.loads(await client.rate_limit_commit(args["reservation_id"], args["actual_units"]))
+    if op == "ratelimit.release":
+        return json.loads(await client.rate_limit_release(args["reservation_id"]))
     if op == "schedule.at":
-        return await client.schedule_at(args["when_epoch_ms"], args["queue"], value_to_str(args["payload"]), args.get("max_attempts"))
+        return await client.schedule_at(args["when_epoch_ms"], args["queue"], value_to_str(args["payload"]), args.get("max_attempts"), args.get("misfire_policy"), args.get("max_catch_up"))
     if op == "schedule.cron":
-        return await client.schedule_cron(args["name"], args["expr"], args["queue"], value_to_str(args["payload"]), args.get("max_attempts"))
+        return await client.schedule_cron(args["name"], args["expr"], args["queue"], value_to_str(args["payload"]), args.get("max_attempts"), args.get("misfire_policy"), args.get("max_catch_up"))
     if op == "schedule.cancel":
         return await client.schedule_cancel(args["name"])
     if op == "schedule.cancel_at":
         return await client.schedule_cancel_at(args["job_id"])
+    if op == "schedule.inspect":
+        value = await client.schedule_inspect(args["name"])
+        if value is None:
+            return None
+        return {"name": value.name, "kind": value.kind, "queue": value.queue, "next_run_ms": value.next_run_ms, "last_run_ms": value.last_run_ms, "cron_expr": value.cron_expr, "paused": value.paused, "misfire_policy": value.misfire_policy, "max_catch_up": value.max_catch_up}
+    if op == "schedule.pause":
+        return await client.schedule_pause(args["name"])
+    if op == "schedule.resume":
+        return await client.schedule_resume(args["name"])
+    if op == "schedule.diagnostics":
+        value = await client.scheduler_diagnostics()
+        return {"lag_ms": value.lag_ms, "last_successful_tick_ms": value.last_successful_tick_ms, "due_count": value.due_count, "enqueue_failures": value.enqueue_failures}
     if op == "schedule.list":
         page = await client.schedule_list(args.get("cursor"), args.get("limit", 100))
         return {
@@ -220,6 +211,9 @@ async def dispatch(client, op, args, subscriptions, capture_as):
                     "next_run_ms": s.next_run_ms,
                     "last_run_ms": s.last_run_ms,
                     "cron_expr": s.cron_expr,
+                    "paused": s.paused,
+                    "misfire_policy": s.misfire_policy,
+                    "max_catch_up": s.max_catch_up,
                 }
                 for s in page.items
             ],
@@ -228,19 +222,38 @@ async def dispatch(client, op, args, subscriptions, capture_as):
     if op == "schedule.tick":
         return await client.run_scheduler_once()
     if op == "queue.enqueue":
-        return await client.queue_enqueue(args["queue"], value_to_str(args["payload"]), args.get("max_attempts"), args.get("dedup_id"), args.get("delay_seconds"))
+        return await client.queue_enqueue(args["queue"], value_to_str(args["payload"]).encode(), args.get("max_attempts"), args.get("dedup_id"), args.get("delay_seconds"), args.get("id"), None, None, None, None, args.get("priority"), args.get("concurrency_key"))
     if op == "queue.dequeue":
-        job = await client.queue_dequeue(args["queue"], args["visibility_seconds"], args["wait_seconds"])
+        job = await client.queue_dequeue(args["queue"], args["visibility_seconds"], args["wait_seconds"], args.get("concurrency_limit_per_key"))
         if job is None:
             return None
         return {"id": job.id, "receipt": job.receipt, "payload": job.payload, "attempt": job.attempt, "max_attempts": job.max_attempts}
     if op == "queue.ack":
         return await client.queue_ack(args["receipt"])
     if op == "queue.nack":
-        return await client.queue_nack(args["receipt"], args.get("retry_seconds"))
+        return await client.queue_nack(args["receipt"], args.get("retry_seconds"), args.get("failure_summary"))
+    if op == "queue.cancellation_requested":
+        return await client.queue_cancellation_requested(args["receipt"])
+    if op == "queue.finish_cancellation":
+        return await client.queue_finish_cancellation(args["receipt"])
+    if op == "queue.cancel":
+        value = await client.queue_cancel(args["job_id"])
+        return None if value is None else json.loads(value)
+    if op == "queue.status":
+        value = await client.queue_status(args["job_id"])
+        return None if value is None else json.loads(value)
     if op == "queue.depth":
         d = await client.queue_depth(args["queue"])
-        return {"visible": d.visible, "in_flight": d.in_flight, "delayed": d.delayed}
+        return {"visible": d.visible, "in_flight": d.in_flight, "delayed": d.delayed, "oldest_visible_age_ms": d.oldest_visible_age_ms}
+    if op == "queue.dead_letters":
+        page = await client.queue_dead_letters(args["queue"], args.get("cursor"), args.get("limit", 50))
+        return {"items": [{"job_id": item.job_id, "queue": item.queue, "attempt_count": item.attempt_count, "failure_summary": item.failure_summary} for item in page.items], "cursor": page.cursor}
+    if op == "queue.redrive":
+        return await client.queue_redrive(args["job_id"], args["destination"], args["dedup_policy"])
+    if op == "queue.purge_dead_letters_dry_run":
+        return await client.queue_purge_dead_letters_dry_run(args["queue"])
+    if op == "queue.purge_dead_letters":
+        return await client.queue_purge_dead_letters(args["queue"], args["confirmation"])
     if op == "config.set":
         return await client.config_set(args["key"], args["value"])
     if op == "config.get":
@@ -257,8 +270,19 @@ async def dispatch(client, op, args, subscriptions, capture_as):
         return await client.set_flag_percent(args["key"], args["percent"])
     if op == "config.set_flag_allow_list":
         return await client.set_flag_allow_list(args["key"], args["entries"])
+    if op == "config.set_flag_value":
+        return await client.set_flag_value(args["key"], json.dumps(args.get("value"), separators=(",", ":")), args["variant"])
+    if op == "config.flag_details":
+        value = await client.flag_details(args["key"], json.dumps(args.get("default"), separators=(",", ":")), args.get("targeting_key"))
+        return {"value_json": value.value_json, "value_type": value.value_type, "variant": value.variant, "reason": value.reason, "error_code": value.error_code}
     if op == "config.delete_flag":
         return await client.delete_flag(args["key"])
+    if op == "auth.hash_password":
+        return await client.hash_password(args["plain"])
+    if op == "auth.verify_password":
+        return await client.verify_password(args["plain"], args["hash"])
+    if op == "auth.needs_rehash":
+        return client.needs_rehash(args["hash"])
     if op == "auth.create_session":
         return await client.create_session(args["user_id"], args.get("idle_seconds"), args.get("absolute_seconds"))
     if op == "auth.validate_session":
@@ -266,36 +290,65 @@ async def dispatch(client, op, args, subscriptions, capture_as):
     if op == "auth.revoke_session":
         return await client.revoke_session(args["token"])
     if op == "auth.create_api_key":
-        k = await client.create_api_key(args["owner_id"], args["label"])
-        return {"id": k.id, "secret": k.secret, "label": k.label, "created_at_ms": k.created_at_ms}
+        k = await client.create_api_key_with(args["owner_id"], args["label"], args.get("expires_in_seconds"), args.get("scopes"), args.get("metadata"))
+        return {"id": k.id, "secret": k.secret, "label": k.label, "created_at_ms": k.created_at_ms, "expires_at_ms": k.expires_at_ms, "scopes": k.scopes, "metadata": k.metadata}
     if op == "auth.verify_api_key":
-        return await client.verify_api_key(args["key"])
+        value = await client.verify_api_key(args["key"])
+        return None if value is None else {"id": value.id, "owner_id": value.owner_id, "label": value.label, "expires_at_ms": value.expires_at_ms, "scopes": value.scopes, "metadata": value.metadata}
     if op == "auth.create_token":
-        return await client.create_token(args["user_id"], args["purpose"], args["ttl_seconds"])
+        return await client.create_token(args["user_id"], args["purpose"], args["ttl_seconds"], args.get("payload", "").encode())
     if op == "auth.consume_token":
-        return await client.consume_token(args["token"], args["purpose"])
+        value = await client.consume_token(args["token"], args["purpose"])
+        return None if value is None else {"user_id": value.user_id, "payload": bytes(value.payload).decode()}
+    if op == "scope.kv_key":
+        return forgelib.scope_kv_key(args["application"], args["tenant"], args["user"], args["resource"])
+    if op == "scope.blob_key":
+        return forgelib.scope_blob_key(args["application"], args["tenant"], args["user"], args["resource"])
+    if op == "scope.rate_limit_subject":
+        return forgelib.scope_rate_limit_subject(args["application"], args["tenant"], args["user"], args["resource"])
+    if op == "scope.topic":
+        return forgelib.scope_topic(args["application"], args["tenant"], args["user"], args["resource"])
     if op == "blob.put":
-        return await client.blob_put_object(args["key"], value_to_bytes(args["value"]), args.get("content_type"), args.get("metadata"))
+        return await client.blob_put_object(
+            args["key"], value_to_bytes(args["value"]), args.get("content_type"), args.get("metadata"),
+            bool(args.get("create_only", False)), args.get("match_version"), args.get("cache_control"),
+            args.get("content_disposition"), args.get("checksum_sha256")
+        )
     if op == "blob.get":
         return await client.blob_get(args["key"])  # bytes | None
+    if op == "blob.get_range":
+        return await client.blob_get_range(args["key"], args["start"], args["end"])
     if op == "blob.head":
         i = await client.blob_head(args["key"])
         if i is None:
             return None
-        return {"key": i.key, "size": i.size, "content_type": i.content_type, "etag": i.etag, "metadata": dict(i.metadata), "last_modified_ms": i.last_modified_ms}
+        return {"key": i.key, "size": i.size, "content_type": i.content_type, "etag": i.etag, "metadata": dict(i.metadata), "cache_control": i.cache_control, "content_disposition": i.content_disposition, "checksum_sha256": i.checksum_sha256, "server_side_encryption": i.server_side_encryption, "last_modified_ms": i.last_modified_ms}
+    if op == "blob.get_if":
+        value = await client.blob_get_if(args["key"], args.get("if_match"), args.get("if_none_match"))
+        return {"state": value.state, "body": None if value.body is None else bytes(value.body).decode(), "etag": value.etag}
+    if op == "blob.copy":
+        i = await client.blob_copy(
+            args["source"], args["destination"], args.get("content_type"), args.get("metadata"),
+            bool(args.get("create_only", False)), args.get("match_version"), args.get("cache_control"),
+            args.get("content_disposition"), args.get("checksum_sha256")
+        )
+        return {"key": i.key, "size": i.size, "content_type": i.content_type, "etag": i.etag, "metadata": dict(i.metadata), "cache_control": i.cache_control, "content_disposition": i.content_disposition, "checksum_sha256": i.checksum_sha256, "server_side_encryption": i.server_side_encryption, "last_modified_ms": i.last_modified_ms}
+    if op == "blob.verify_checksum_sha256":
+        return await client.blob_verify_checksum_sha256(args["key"], args["expected_hex"])
     if op == "blob.delete":
-        return await client.blob_delete(args["key"])
+        await client.blob_delete(args["key"])
+        return None
     if op == "blob.list":
         page = await client.blob_list(args["prefix"], args.get("cursor"), args.get("limit", 100))
         return {
             "keys": [i.key for i in page.items],
-            "items": [{"key": i.key, "size": i.size, "content_type": i.content_type, "etag": i.etag} for i in page.items],
+            "items": [{"key": i.key, "size": i.size, "etag": i.etag, "last_modified_ms": i.last_modified_ms} for i in page.items],
             "cursor": page.cursor,
         }
     if op == "blob.presign_download":
-        return parse_presign(await client.blob_presign_download(args["key"], args["expires_seconds"]), args["key"], "GET")
+        return parse_presign(await client.blob_presign_download(args["key"], args["expires_seconds"]))
     if op == "blob.presign_upload":
-        return parse_presign(await client.blob_presign_upload(args["key"], args["expires_seconds"], args["max_bytes"]), args["key"], "PUT")
+        return parse_presign(await client.blob_presign_upload(args["key"], args["expires_seconds"], args["max_bytes"]))
     if op == "blob.verify_presigned":
         return await client.blob_verify_presign(args["method"], args["key"], args["expires_epoch"], args["max_bytes"], args["sig"])
     if op == "pubsub.publish":
@@ -414,12 +467,12 @@ async def run_scenario(scenario):
     admin_exec(f'CREATE DATABASE "{name}"')
     url = swap_db(ADMIN_URL, name)
     # init_from migrates the throwaway DB's schema (idempotent across namespaces).
+    clients = {}
+    subscriptions = {}
     try:
-        clients = {}
         captures = {}
         # Live pubsub subscriptions held across steps, keyed by a subscribe step's `as`
         # name; a later pubsub.receive reads the next message off the named handle.
-        subscriptions = {}
         for i, step in enumerate(scenario["steps"]):
             ns = step.get("namespace", "")
             if ns not in clients:
@@ -441,6 +494,13 @@ async def run_scenario(scenario):
             elif not ok:
                 raise AssertionError(f"step {i} ({step['op']}): unexpected error {code}")
     finally:
+        await asyncio.gather(
+            *(subscription.aclose() for subscription in subscriptions.values()),
+            return_exceptions=True,
+        )
+        await asyncio.gather(
+            *(client.close(5) for client in clients.values()), return_exceptions=True
+        )
         admin_exec(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
 
 
@@ -479,10 +539,10 @@ async def main():
             else:
                 problems.append(f"{key}: {err}")
     try:
-        await run_backend_selection_smoke()
+        await run_runtime_profile_smoke()
         passed += 1
     except Exception as e:  # noqa: BLE001
-        problems.append(f"backend/env_backend_selection: {e}")
+        problems.append(f"runtime/memory_profile_and_lifecycle: {e}")
     print(f"\nconformance(python): {passed} ok, {len(problems)} unexpected")
     if problems:
         print("unexpected conformance results:\n  " + "\n  ".join(problems), file=sys.stderr)

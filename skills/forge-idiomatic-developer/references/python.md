@@ -55,17 +55,20 @@ Blob is bytes-native in Python: `blob_put`/`blob_get` already take and return `b
 | Method | Notes |
 | --- | --- |
 | `blob_put()` | `blob_put(key, data, content_type=None)` — `data` is `bytes`. |
-| `blob_put_object()` | `blob_put_object(key, data, content_type=None, metadata=None)` for user metadata. |
+| `blob_put_object()` | Supports metadata plus `create_only` or `match_version` preconditions. |
+| `blob_put_file()` | Streams a file path without buffering it in Python. |
 | `blob_get()` | Object `bytes`, or `None`. |
+| `blob_get_range()` | Inclusive bounded byte range, or `None`. |
 | `blob_head()` | `BlobInfo` (size, content_type, etag, last_modified_ms, metadata), or `None`. |
 | `blob_list()` | `blob_list(prefix, cursor, limit)` → `BlobListPage(items, cursor)`. |
 | `blob_content_type()` | Stored content type, or `None`. |
-| `blob_delete()` | Whether it existed. |
-| `blob_presign_download()` | `blob_presign_download(key, expires_seconds)` — needs `[blob].signing_secret`. |
-| `blob_presign_upload()` | `blob_presign_upload(key, expires_seconds, max_bytes)` — needs the secret. |
+| `blob_delete()` | Idempotent; returns `None` without an existence claim. |
+| `blob_presign_download()` | Returns `ProxyPresign`; use `.url`. Needs `[blob].signing_secret`. |
+| `blob_presign_upload()` | Returns a size-enforcing `ProxyPresign`; use `.url`. |
+| `blob_presign_native_get()` / `blob_presign_native_put()` | S3-only provider presigns with required headers; native PUT has no portable size cap. |
 | `blob_verify_presign()` | `blob_verify_presign(method, key, expires_epoch, max_bytes, sig)` → validity. |
 
-Presigned URLs use `/api/files?key=…&expires=…&max_bytes=…&sig=…` by default, but `[blob].base_url` can make the configured base relative or absolute. Mount a matching route and pass the query params to `blob_verify_presign` verbatim (a download URL carries `max_bytes=0` — echo it). Expiry or a bad signature returns `False`; an unsupported method raises `InvalidError`.
+Proxy presigned URLs include a version, namespace, method, key, expiry, size constraint, and signature under `[blob].base_url`. Pass the structured ticket fields to `blob_verify_presign` verbatim. Expiry or a bad signature returns `False`; an unsupported method raises `InvalidError`. Proxy and native presigned URLs are bearer credentials, so redact their query strings.
 
 ## Auth
 
@@ -80,8 +83,7 @@ Presigned URLs use `/api/files?key=…&expires=…&max_bytes=…&sig=…` by def
 | `revoke_session()` | Log out one device (idempotent). |
 | `revoke_all_sessions()` | Log out everywhere; returns the count. |
 | `create_api_key()` | `create_api_key(owner_id, label)` → `ApiKey` (`secret` shown once). |
-| `verify_api_key()` | Key → `owner_id`, or `None`. |
-| `verify_api_key_info()` | Key → `ApiKeyInfo`, or `None`. |
+| `verify_api_key()` | Key → `ApiKeyInfo` (id, owner, label, expiry, scopes, metadata), or `None`. |
 | `revoke_api_key()` | Revoke by non-secret id. |
 | `create_token()` | `create_token(user_id, purpose, ttl_seconds)` → single-use token (shown once). `purpose` is any string you choose (`"password-reset"`); create/consume must match exactly. `user_id` is any opaque string handed back on consume — for pre-account flows (invites) pass your own reference id. |
 | `consume_token()` | `consume_token(token, purpose)` → `user_id`, or `None` (used/expired/wrong purpose). First consume wins. |
@@ -116,13 +118,14 @@ Presigned URLs use `/api/files?key=…&expires=…&max_bytes=…&sig=…` by def
 | `set_flag_percent()` | Percentage rollout, `0..=100`. Bucketing is a stable hash of `(flag, targeting_key)` — deterministic across processes; without a `targeting_key`, a percent rule returns the caller default. |
 | `set_flag_on()` / `set_flag_off()` | Always-on / always-off. |
 | `set_flag_allow_list()` | `set_flag_allow_list(key, entries)`. |
+| `set_flag_value()` / `flag_details()` | Store typed JSON and return its value type, stable variant, reason, and default/error reason. |
 | `delete_flag()` | Delete a flag rule; later `flag()` calls use the caller default. |
 
 ## Client
 
 | Method | Notes |
 | --- | --- |
-| `backend_report()` | Which provider powers each primitive. **Synchronous.** |
+| `backend_capabilities()` | Static provider and durability capabilities for each primitive. **Synchronous.** |
 | `postgres_url()` | Resolved Forge system DSN. Contains credentials. Use server-side to reach embedded Postgres from another process or intentionally seed an application-owned pool; choose production isolation deliberately. **Synchronous.** |
 | `maintain()` | One housekeeping sweep. Call on an interval alongside `run_scheduler_once`. |
 
@@ -146,5 +149,5 @@ await profile.set(value, ttl_seconds=3600)
 - `KvKey` from `forge.kv(key)`: `get()`, `get_or_default(default)`, `set()`, `delete()`, `exists()`, `expire()`, `compare_and_swap()`.
 - `ConfigKey` from `forge.config(key, default)`: `get()`, `get_or_default()`, `set()`.
 - `Topic` from `forge.topic(name)`: asynchronous `publish()`, async-generator `subscribe()` (`async for event in topic.subscribe():`), and synchronous `channel()`.
-- `forge.worker(queue, handler, *, stop=..., visibility_seconds=30.0, wait_seconds=20.0)` / `run_worker(...)` — managed coroutine. Start and retain an actual task: `task = asyncio.create_task(forge.worker(..., stop=stop))`; set the event, then `await task` before exit.
+- `forge.worker(queue, handler, *, stop=..., visibility_seconds=30.0, wait_seconds=20.0)` / `run_worker(...)` — managed coroutine. Start and retain an actual task with `asyncio.create_task`. `await forge.close(deadline_seconds)` cancels an active handler task, sets `job.cancelled`, releases its lease, awaits helper cleanup, and then closes native resources.
 - `forge_error_code(exc)` / `forge_error_retryable(exc)` — exceptions are named code + `Error` (`LimitError` → code `"Limit"`) and every instance carries a `retryable` attribute.

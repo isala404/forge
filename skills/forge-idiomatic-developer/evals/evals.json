@@ -3,14 +3,14 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "Build a production-minded Next.js App Router application named Away Together for managing group trips. Use TypeScript, npm, and exactly forgelib@1.0.1. The product needs authentication, trips and roles, invitations, availability, itinerary, polls, shared expenses and settlements, tasks and packing, messages, attachments, search, and a convincing demo. For this product, use application-owned Postgres tables with migrations and constraints for relational domain data; use Forge for its infrastructure primitives. Include a worker, safe blob access, graceful shutdown, documentation, unit/integration tests, and a real-browser smoke flow. Work until lint, typecheck, tests, and production build pass.",
-      "expected_output": "A runnable full-stack application that follows the user's explicit relational-storage requirement while using the installed Forge 1.0.1 API correctly.",
+      "prompt": "Build a production-minded Node.js HTTP service named Away Together for managing group trips. Use TypeScript, npm, and exactly forgelib@1.0.1. The product needs authentication, trips and roles, invitations, availability, itinerary, polls, shared expenses and settlements, tasks and packing, messages, attachments, and search. Use application-owned Postgres tables with migrations and constraints for relational domain data; use Forge for its infrastructure primitives. Include a worker, safe blob access, graceful shutdown, documentation, and unit and integration tests. Work until lint, typecheck, tests, and the production build pass.",
+      "expected_output": "A runnable backend service that follows the user's explicit relational-storage requirement while using the installed Forge 1.0.1 API correctly.",
       "expectations": [
         "The project pins and resolves forgelib 1.0.1 and verifies API use against that installed version",
         "Relational domain data uses application-owned Postgres migrations rather than Forge internal tables",
         "Forge initialization, auth, queue, blob, scheduler, and shutdown behavior match the Node binding",
         "Queue effects are idempotent at the logical side-effect boundary, including fan-out",
-        "Lint, typecheck, automated tests, production build, and a browser smoke flow pass"
+        "Lint, typecheck, automated tests, and the production build pass"
       ]
     },
     {

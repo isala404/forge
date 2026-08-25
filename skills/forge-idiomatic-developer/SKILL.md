@@ -19,9 +19,7 @@ Read these only when they apply:
 
 - [references/runtime-contract.md](references/runtime-contract.md) for configuration, errors, deployment, queues, scheduling, rate limits, pub/sub, presigning, flags, or maintenance.
 - [references/application-design.md](references/application-design.md) for a nontrivial service, storage decision, authentication workflow, cross-system side effects, lifecycle, or test strategy.
-- [references/nextjs.md](references/nextjs.md) for Next.js integration.
-
-Do not preload unrelated language or framework references.
+Do not preload unrelated language references.
 
 ## Pick the primitive deliberately
 

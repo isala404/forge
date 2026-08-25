@@ -2,7 +2,8 @@
 #![allow(clippy::unwrap_used, clippy::panic)]
 
 use forgelib::testing::TestDatabase;
-use forgelib::{ForgeError, PhcString, SessionOpts};
+use forgelib::{ApiKeyOpts, Bytes, PhcString, SessionOpts};
+use std::collections::HashMap;
 use std::time::Duration;
 
 #[tokio::test]
@@ -26,16 +27,13 @@ async fn password_hash_verify_and_rehash() {
 
     // A malformed PHC string: Invalid on verify, true on needs_rehash (rehash it).
     let bad = PhcString::new("not-a-phc-string");
-    assert!(matches!(
-        a.verify_password("x", &bad).await,
-        Err(ForgeError::Invalid(_))
-    ));
+    assert_eq!(
+        a.verify_password("x", &bad).await.unwrap_err().code(),
+        "INVALID"
+    );
     assert!(a.needs_rehash(&bad));
 
-    assert!(matches!(
-        a.hash_password("").await,
-        Err(ForgeError::Invalid(_))
-    ));
+    assert_eq!(a.hash_password("").await.unwrap_err().code(), "INVALID");
 }
 
 #[tokio::test]
@@ -138,14 +136,61 @@ async fn one_time_tokens_consume_once_purpose_scoped() {
             .is_none()
     );
 
-    assert!(matches!(
-        a.create_token("u", "p", Duration::ZERO).await,
-        Err(ForgeError::Invalid(_))
-    ));
-    assert!(matches!(
-        a.create_token("u", "", Duration::from_secs(60)).await,
-        Err(ForgeError::Invalid(_))
-    ));
+    assert_eq!(
+        a.create_token("u", "p", Duration::ZERO)
+            .await
+            .unwrap_err()
+            .code(),
+        "INVALID"
+    );
+    assert_eq!(
+        a.create_token("u", "", Duration::from_secs(60))
+            .await
+            .unwrap_err()
+            .code(),
+        "INVALID"
+    );
+}
+
+#[tokio::test]
+async fn one_time_token_payload_is_bounded_and_consumed_atomically() {
+    let db = TestDatabase::new().await.unwrap();
+    let forge = db.forge().await.unwrap();
+    let auth = forge.auth();
+    let token = auth
+        .create_token_with_payload(
+            "user-7",
+            "password-reset",
+            Duration::from_secs(900),
+            Bytes::from_static(b"return-to=/settings"),
+        )
+        .await
+        .unwrap();
+    let consumed = auth
+        .consume_token_with_payload(token.as_str(), "password-reset")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(consumed.user_id, "user-7");
+    assert_eq!(consumed.payload, Bytes::from_static(b"return-to=/settings"));
+    assert!(
+        auth.consume_token_with_payload(token.as_str(), "password-reset")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        auth.create_token_with_payload(
+            "user-7",
+            "password-reset",
+            Duration::from_secs(900),
+            Bytes::from(vec![0; 4097]),
+        )
+        .await
+        .unwrap_err()
+        .code(),
+        "LIMIT"
+    );
 }
 
 #[tokio::test]
@@ -199,4 +244,34 @@ async fn api_keys_create_verify_revoke() {
             .is_none()
     );
     assert!(!a.revoke_api_key("no-such-id").await.unwrap());
+}
+
+#[tokio::test]
+async fn api_key_verification_returns_expiry_scopes_and_metadata() {
+    let db = TestDatabase::new().await.unwrap();
+    let forge = db.forge().await.unwrap();
+    let auth = forge.auth();
+    let opts = ApiKeyOpts::new()
+        .with_expires_in(Duration::from_secs(60))
+        .with_scopes(vec!["deploy".to_string(), "artifacts:read".to_string()])
+        .with_metadata(HashMap::from([(
+            "environment".to_string(),
+            "test".to_string(),
+        )]));
+    let key = auth
+        .create_api_key_with("owner-1", "ci-token", opts)
+        .await
+        .unwrap();
+    assert!(key.expires_at.is_some());
+    let info = auth
+        .verify_api_key(key.secret.as_str())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(info.scopes, vec!["deploy", "artifacts:read"]);
+    assert_eq!(
+        info.metadata.get("environment").map(String::as_str),
+        Some("test")
+    );
+    assert_eq!(info.expires_at, key.expires_at);
 }
