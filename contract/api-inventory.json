@@ -1,0 +1,1501 @@
+{
+  "contract_version": "1.1.0",
+  "languages": {
+    "go": {
+      "auth.consume_token": [
+        "ConsumeToken"
+      ],
+      "auth.create_api_key": [
+        "CreateAPIKey"
+      ],
+      "auth.create_session": [
+        "CreateSession"
+      ],
+      "auth.create_token": [
+        "CreateToken"
+      ],
+      "auth.hash_password": [
+        "HashPassword"
+      ],
+      "auth.needs_rehash": [
+        "NeedsRehash"
+      ],
+      "auth.revoke_all_sessions": [
+        "RevokeAllSessions"
+      ],
+      "auth.revoke_api_key": [
+        "RevokeAPIKey"
+      ],
+      "auth.revoke_session": [
+        "RevokeSession"
+      ],
+      "auth.validate_session": [
+        "ValidateSession"
+      ],
+      "auth.verify_api_key": [
+        "VerifyAPIKey"
+      ],
+      "auth.verify_password": [
+        "VerifyPassword"
+      ],
+      "blob.abort_multipart": [
+        "BlobAbortMultipart"
+      ],
+      "blob.complete_multipart": [
+        "BlobCompleteMultipart"
+      ],
+      "blob.copy": [
+        "BlobCopy"
+      ],
+      "blob.create_multipart": [
+        "BlobCreateMultipart"
+      ],
+      "blob.delete": [
+        "BlobDelete"
+      ],
+      "blob.get": [
+        "BlobGet",
+        "BlobOpen"
+      ],
+      "blob.get_if": [
+        "BlobGetIf"
+      ],
+      "blob.get_range": [
+        "BlobGetRange"
+      ],
+      "blob.head": [
+        "BlobHead"
+      ],
+      "blob.list": [
+        "BlobList"
+      ],
+      "blob.presign_download": [
+        "BlobPresignDownload"
+      ],
+      "blob.presign_native_get": [
+        "BlobPresignNativeGet"
+      ],
+      "blob.presign_native_put": [
+        "BlobPresignNativePut"
+      ],
+      "blob.presign_upload": [
+        "BlobPresignUpload"
+      ],
+      "blob.put": [
+        "BlobPut"
+      ],
+      "blob.put_stream": [
+        "BlobPutStream"
+      ],
+      "blob.upload_part": [
+        "BlobUploadPart"
+      ],
+      "blob.verify_checksum_sha256": [
+        "BlobVerifyChecksumSHA256"
+      ],
+      "blob.verify_presigned": [
+        "BlobVerifyPresigned"
+      ],
+      "client.advance_test_clock": [
+        "AdvanceTestClock"
+      ],
+      "client.backend_capabilities": [
+        "BackendCapabilities"
+      ],
+      "client.close": [
+        "Close"
+      ],
+      "client.diagnostics": [
+        "Diagnostics"
+      ],
+      "client.init": [
+        "InitDefault"
+      ],
+      "client.init_from": [
+        "InitFrom"
+      ],
+      "client.init_from_string": [
+        "InitFromString"
+      ],
+      "client.init_memory_for_testing": [
+        "NewMemoryForTesting"
+      ],
+      "client.liveness": [
+        "IsLive"
+      ],
+      "client.maintain": [
+        "Maintain"
+      ],
+      "client.metrics_snapshot": [
+        "MetricsSnapshot"
+      ],
+      "client.migrate": [
+        "Migrate"
+      ],
+      "client.migrate_from": [
+        "MigrateFrom"
+      ],
+      "client.migrate_from_string": [
+        "MigrateFromString"
+      ],
+      "client.migration_status": [
+        "MigrationStatus"
+      ],
+      "client.migration_status_from": [
+        "MigrationStatusFrom"
+      ],
+      "client.migration_status_from_string": [
+        "MigrationStatusFromString"
+      ],
+      "client.postgres_url": [
+        "PostgresURL"
+      ],
+      "client.probe": [
+        "Probe"
+      ],
+      "client.render_prometheus": [
+        "RenderPrometheus"
+      ],
+      "client.validate_schema": [
+        "ValidateSchema"
+      ],
+      "client.validate_schema_from": [
+        "ValidateSchemaFrom"
+      ],
+      "client.validate_schema_from_string": [
+        "ValidateSchemaFromString"
+      ],
+      "config.delete_flag": [
+        "DeleteFlag"
+      ],
+      "config.delete_raw": [
+        "ConfigDelete"
+      ],
+      "config.flag": [
+        "Flag"
+      ],
+      "config.flag_details": [
+        "FlagDetails"
+      ],
+      "config.flag_details_many": [
+        "FlagDetailsMany"
+      ],
+      "config.get_many_raw": [
+        "ConfigGetMany"
+      ],
+      "config.get_raw": [
+        "ConfigGet"
+      ],
+      "config.set_flag": [
+        "SetFlag"
+      ],
+      "config.set_raw": [
+        "ConfigSet"
+      ],
+      "config.snapshot": [
+        "ConfigSnapshot"
+      ],
+      "config.snapshot_decode": [
+        "DecodeConfigSnapshot"
+      ],
+      "config.snapshot_encode": [
+        "EncodeConfigSnapshot"
+      ],
+      "kv.compare_and_swap": [
+        "KVCompareAndSwap"
+      ],
+      "kv.delete": [
+        "KVDelete"
+      ],
+      "kv.exists": [
+        "KVExists"
+      ],
+      "kv.expire": [
+        "KVExpire"
+      ],
+      "kv.get": [
+        "KVGet"
+      ],
+      "kv.incr": [
+        "KVIncr"
+      ],
+      "kv.mget": [
+        "KVMGet"
+      ],
+      "kv.scan": [
+        "KVScan"
+      ],
+      "kv.set": [
+        "KVSet"
+      ],
+      "pubsub.channel_for": [
+        "PubsubChannel"
+      ],
+      "pubsub.publish": [
+        "Publish"
+      ],
+      "pubsub.subscribe": [
+        "Subscribe"
+      ],
+      "queue.ack": [
+        "Ack"
+      ],
+      "queue.cancel": [
+        "CancelJob"
+      ],
+      "queue.cancellation_requested": [
+        "CancellationRequested"
+      ],
+      "queue.dead_letters": [
+        "DeadLetters"
+      ],
+      "queue.depth": [
+        "Depth"
+      ],
+      "queue.dequeue": [
+        "Dequeue"
+      ],
+      "queue.dequeue_batch": [
+        "DequeueBatch"
+      ],
+      "queue.enqueue": [
+        "Enqueue"
+      ],
+      "queue.enqueue_batch": [
+        "EnqueueBatch"
+      ],
+      "queue.finish_cancellation": [
+        "FinishCancellation"
+      ],
+      "queue.heartbeat": [
+        "Heartbeat"
+      ],
+      "queue.is_paused": [
+        "QueuePaused"
+      ],
+      "queue.list_status": [
+        "ListJobStatus"
+      ],
+      "queue.nack": [
+        "Nack"
+      ],
+      "queue.outbox_once": [
+        "RunOutboxOnce"
+      ],
+      "queue.outbox_relay": [
+        "RunOutboxRelay"
+      ],
+      "queue.pause": [
+        "PauseQueue"
+      ],
+      "queue.purge_dead_letters": [
+        "PurgeDeadLetters"
+      ],
+      "queue.purge_dead_letters_dry_run": [
+        "PurgeDeadLettersDryRun"
+      ],
+      "queue.redrive": [
+        "Redrive"
+      ],
+      "queue.redrive_batch": [
+        "RedriveBatch"
+      ],
+      "queue.resume": [
+        "ResumeQueue"
+      ],
+      "queue.stats": [
+        "QueueStats"
+      ],
+      "queue.status": [
+        "JobStatus"
+      ],
+      "ratelimit.check": [
+        "RateLimitCheck"
+      ],
+      "ratelimit.check_weighted": [
+        "RateLimitCheck"
+      ],
+      "ratelimit.commit": [
+        "RateLimitCommit"
+      ],
+      "ratelimit.release": [
+        "RateLimitRelease"
+      ],
+      "ratelimit.reserve": [
+        "RateLimitReserve"
+      ],
+      "schedule.at": [
+        "ScheduleAt"
+      ],
+      "schedule.cancel": [
+        "ScheduleCancel"
+      ],
+      "schedule.cancel_at": [
+        "ScheduleCancelAt"
+      ],
+      "schedule.cron": [
+        "ScheduleCron"
+      ],
+      "schedule.diagnostics": [
+        "SchedulerDiagnostics"
+      ],
+      "schedule.inspect": [
+        "ScheduleInspect"
+      ],
+      "schedule.list": [
+        "ScheduleList"
+      ],
+      "schedule.pause": [
+        "SchedulePause"
+      ],
+      "schedule.process_due": [
+        "RunSchedulerOnce"
+      ],
+      "schedule.resume": [
+        "ScheduleResume"
+      ],
+      "scope.blob_key": [
+        "ScopeBlobKey"
+      ],
+      "scope.kv_key": [
+        "ScopeKVKey"
+      ],
+      "scope.rate_limit_subject": [
+        "ScopeRateLimitSubject"
+      ],
+      "scope.topic": [
+        "ScopeTopic"
+      ]
+    },
+    "javascript": {
+      "auth.consume_token": [
+        "consumeToken",
+        "consumeTokenWithPayload"
+      ],
+      "auth.create_api_key": [
+        "createApiKey",
+        "createApiKeyWith"
+      ],
+      "auth.create_session": [
+        "createSession"
+      ],
+      "auth.create_token": [
+        "createToken",
+        "createTokenWithPayload"
+      ],
+      "auth.hash_password": [
+        "hashPassword"
+      ],
+      "auth.needs_rehash": [
+        "needsRehash"
+      ],
+      "auth.revoke_all_sessions": [
+        "revokeAllSessions"
+      ],
+      "auth.revoke_api_key": [
+        "revokeApiKey"
+      ],
+      "auth.revoke_session": [
+        "revokeSession"
+      ],
+      "auth.validate_session": [
+        "validateSession",
+        "validateSessionInfo"
+      ],
+      "auth.verify_api_key": [
+        "verifyApiKey"
+      ],
+      "auth.verify_password": [
+        "verifyPassword"
+      ],
+      "blob.abort_multipart": [
+        "blobAbortMultipart"
+      ],
+      "blob.complete_multipart": [
+        "blobCompleteMultipart"
+      ],
+      "blob.copy": [
+        "blobCopy"
+      ],
+      "blob.create_multipart": [
+        "blobCreateMultipart"
+      ],
+      "blob.delete": [
+        "blobDelete"
+      ],
+      "blob.get": [
+        "blobGet",
+        "blobGetBytes"
+      ],
+      "blob.get_if": [
+        "blobGetIf"
+      ],
+      "blob.get_range": [
+        "blobGetRange"
+      ],
+      "blob.head": [
+        "blobHead",
+        "blobContentType"
+      ],
+      "blob.list": [
+        "blobList"
+      ],
+      "blob.presign_download": [
+        "blobPresignDownload"
+      ],
+      "blob.presign_native_get": [
+        "blobPresignNativeGet"
+      ],
+      "blob.presign_native_put": [
+        "blobPresignNativePut"
+      ],
+      "blob.presign_upload": [
+        "blobPresignUpload"
+      ],
+      "blob.put": [
+        "blobPut",
+        "blobPutBytes",
+        "blobPutObject"
+      ],
+      "blob.put_stream": [
+        "blobPutFile"
+      ],
+      "blob.upload_part": [
+        "blobUploadPart"
+      ],
+      "blob.verify_checksum_sha256": [
+        "blobVerifyChecksumSha256"
+      ],
+      "blob.verify_presigned": [
+        "blobVerifyPresign"
+      ],
+      "client.advance_test_clock": [
+        "advanceTestClock"
+      ],
+      "client.backend_capabilities": [
+        "backendCapabilities"
+      ],
+      "client.close": [
+        "close"
+      ],
+      "client.diagnostics": [
+        "diagnostics"
+      ],
+      "client.init": [
+        "init"
+      ],
+      "client.init_from": [
+        "initFrom"
+      ],
+      "client.init_from_string": [
+        "initFromString"
+      ],
+      "client.init_memory_for_testing": [
+        "initMemoryForTesting"
+      ],
+      "client.liveness": [
+        "isLive"
+      ],
+      "client.maintain": [
+        "maintain"
+      ],
+      "client.metrics_snapshot": [
+        "metricsSnapshot"
+      ],
+      "client.migrate": [
+        "migrate"
+      ],
+      "client.migrate_from": [
+        "migrateFrom"
+      ],
+      "client.migrate_from_string": [
+        "migrateFromString"
+      ],
+      "client.migration_status": [
+        "migrationStatus"
+      ],
+      "client.migration_status_from": [
+        "migrationStatusFrom"
+      ],
+      "client.migration_status_from_string": [
+        "migrationStatusFromString"
+      ],
+      "client.postgres_url": [
+        "postgresUrl"
+      ],
+      "client.probe": [
+        "probe"
+      ],
+      "client.render_prometheus": [
+        "renderPrometheus"
+      ],
+      "client.validate_schema": [
+        "validateSchema"
+      ],
+      "client.validate_schema_from": [
+        "validateSchemaFrom"
+      ],
+      "client.validate_schema_from_string": [
+        "validateSchemaFromString"
+      ],
+      "config.delete_flag": [
+        "deleteFlag"
+      ],
+      "config.delete_raw": [
+        "configDelete"
+      ],
+      "config.flag": [
+        "flag"
+      ],
+      "config.flag_details": [
+        "flagDetails"
+      ],
+      "config.flag_details_many": [
+        "flagDetailsMany"
+      ],
+      "config.get_many_raw": [
+        "configGetMany"
+      ],
+      "config.get_raw": [
+        "configGet"
+      ],
+      "config.set_flag": [
+        "setFlagPercent",
+        "setFlagOn",
+        "setFlagOff",
+        "setFlagAllowList",
+        "setFlagValue"
+      ],
+      "config.set_raw": [
+        "configSet"
+      ],
+      "config.snapshot": [
+        "configSnapshot"
+      ],
+      "config.snapshot_decode": [
+        "decodeConfigSnapshot"
+      ],
+      "config.snapshot_encode": [
+        "encodeConfigSnapshot"
+      ],
+      "kv.compare_and_swap": [
+        "kvCompareAndSwap"
+      ],
+      "kv.delete": [
+        "kvDelete"
+      ],
+      "kv.exists": [
+        "kvExists"
+      ],
+      "kv.expire": [
+        "kvExpire"
+      ],
+      "kv.get": [
+        "kvGet",
+        "kvGetBytes"
+      ],
+      "kv.incr": [
+        "kvIncr"
+      ],
+      "kv.mget": [
+        "kvMget"
+      ],
+      "kv.scan": [
+        "kvScan",
+        "kvScanPage"
+      ],
+      "kv.set": [
+        "kvSet",
+        "kvSetBytes"
+      ],
+      "pubsub.channel_for": [
+        "pubsubChannel"
+      ],
+      "pubsub.publish": [
+        "pubsubPublish"
+      ],
+      "pubsub.subscribe": [
+        "pubsubSubscribe"
+      ],
+      "queue.ack": [
+        "queueAck"
+      ],
+      "queue.cancel": [
+        "queueCancel"
+      ],
+      "queue.cancellation_requested": [
+        "queueCancellationRequested"
+      ],
+      "queue.dead_letters": [
+        "queueDeadLetters"
+      ],
+      "queue.depth": [
+        "queueDepth"
+      ],
+      "queue.dequeue": [
+        "queueDequeue"
+      ],
+      "queue.dequeue_batch": [
+        "queueDequeueBatch"
+      ],
+      "queue.enqueue": [
+        "queueEnqueue"
+      ],
+      "queue.enqueue_batch": [
+        "queueEnqueueBatch"
+      ],
+      "queue.finish_cancellation": [
+        "queueFinishCancellation"
+      ],
+      "queue.heartbeat": [
+        "queueHeartbeat"
+      ],
+      "queue.is_paused": [
+        "queueIsPaused"
+      ],
+      "queue.list_status": [
+        "queueListStatus"
+      ],
+      "queue.nack": [
+        "queueNack"
+      ],
+      "queue.outbox_once": [
+        "runOutboxOnce"
+      ],
+      "queue.outbox_relay": [
+        "runOutboxRelay"
+      ],
+      "queue.pause": [
+        "queuePause"
+      ],
+      "queue.purge_dead_letters": [
+        "queuePurgeDeadLetters"
+      ],
+      "queue.purge_dead_letters_dry_run": [
+        "queuePurgeDeadLettersDryRun"
+      ],
+      "queue.redrive": [
+        "queueRedrive"
+      ],
+      "queue.redrive_batch": [
+        "queueRedriveBatch"
+      ],
+      "queue.resume": [
+        "queueResume"
+      ],
+      "queue.stats": [
+        "queueStats"
+      ],
+      "queue.status": [
+        "queueStatus"
+      ],
+      "ratelimit.check": [
+        "rateLimitCheck"
+      ],
+      "ratelimit.check_weighted": [
+        "rateLimitCheck"
+      ],
+      "ratelimit.commit": [
+        "rateLimitCommit"
+      ],
+      "ratelimit.release": [
+        "rateLimitRelease"
+      ],
+      "ratelimit.reserve": [
+        "rateLimitReserve"
+      ],
+      "schedule.at": [
+        "scheduleAt"
+      ],
+      "schedule.cancel": [
+        "scheduleCancel"
+      ],
+      "schedule.cancel_at": [
+        "scheduleCancelAt"
+      ],
+      "schedule.cron": [
+        "scheduleCron"
+      ],
+      "schedule.diagnostics": [
+        "schedulerDiagnostics"
+      ],
+      "schedule.inspect": [
+        "scheduleInspect"
+      ],
+      "schedule.list": [
+        "scheduleList"
+      ],
+      "schedule.pause": [
+        "schedulePause"
+      ],
+      "schedule.process_due": [
+        "runSchedulerOnce"
+      ],
+      "schedule.resume": [
+        "scheduleResume"
+      ],
+      "scope.blob_key": [
+        "scopeBlobKey"
+      ],
+      "scope.kv_key": [
+        "scopeKvKey"
+      ],
+      "scope.rate_limit_subject": [
+        "scopeRateLimitSubject"
+      ],
+      "scope.topic": [
+        "scopeTopic"
+      ]
+    },
+    "python": {
+      "auth.consume_token": [
+        "consume_token",
+        "consume_token_with_payload"
+      ],
+      "auth.create_api_key": [
+        "create_api_key",
+        "create_api_key_with"
+      ],
+      "auth.create_session": [
+        "create_session"
+      ],
+      "auth.create_token": [
+        "create_token",
+        "create_token_with_payload"
+      ],
+      "auth.hash_password": [
+        "hash_password"
+      ],
+      "auth.needs_rehash": [
+        "needs_rehash"
+      ],
+      "auth.revoke_all_sessions": [
+        "revoke_all_sessions"
+      ],
+      "auth.revoke_api_key": [
+        "revoke_api_key"
+      ],
+      "auth.revoke_session": [
+        "revoke_session"
+      ],
+      "auth.validate_session": [
+        "validate_session",
+        "validate_session_info"
+      ],
+      "auth.verify_api_key": [
+        "verify_api_key"
+      ],
+      "auth.verify_password": [
+        "verify_password"
+      ],
+      "blob.abort_multipart": [
+        "blob_abort_multipart"
+      ],
+      "blob.complete_multipart": [
+        "blob_complete_multipart"
+      ],
+      "blob.copy": [
+        "blob_copy"
+      ],
+      "blob.create_multipart": [
+        "blob_create_multipart"
+      ],
+      "blob.delete": [
+        "blob_delete"
+      ],
+      "blob.get": [
+        "blob_get"
+      ],
+      "blob.get_if": [
+        "blob_get_if"
+      ],
+      "blob.get_range": [
+        "blob_get_range"
+      ],
+      "blob.head": [
+        "blob_head",
+        "blob_content_type"
+      ],
+      "blob.list": [
+        "blob_list"
+      ],
+      "blob.presign_download": [
+        "blob_presign_download"
+      ],
+      "blob.presign_native_get": [
+        "blob_presign_native_get"
+      ],
+      "blob.presign_native_put": [
+        "blob_presign_native_put"
+      ],
+      "blob.presign_upload": [
+        "blob_presign_upload"
+      ],
+      "blob.put": [
+        "blob_put",
+        "blob_put_object"
+      ],
+      "blob.put_stream": [
+        "blob_put_file"
+      ],
+      "blob.upload_part": [
+        "blob_upload_part"
+      ],
+      "blob.verify_checksum_sha256": [
+        "blob_verify_checksum_sha256"
+      ],
+      "blob.verify_presigned": [
+        "blob_verify_presign"
+      ],
+      "client.advance_test_clock": [
+        "advance_test_clock"
+      ],
+      "client.backend_capabilities": [
+        "backend_capabilities"
+      ],
+      "client.close": [
+        "close"
+      ],
+      "client.diagnostics": [
+        "diagnostics"
+      ],
+      "client.init": [
+        "init"
+      ],
+      "client.init_from": [
+        "init_from"
+      ],
+      "client.init_from_string": [
+        "init_from_string"
+      ],
+      "client.init_memory_for_testing": [
+        "init_memory_for_testing"
+      ],
+      "client.liveness": [
+        "is_live"
+      ],
+      "client.maintain": [
+        "maintain"
+      ],
+      "client.metrics_snapshot": [
+        "metrics_snapshot"
+      ],
+      "client.migrate": [
+        "migrate"
+      ],
+      "client.migrate_from": [
+        "migrate_from"
+      ],
+      "client.migrate_from_string": [
+        "migrate_from_string"
+      ],
+      "client.migration_status": [
+        "migration_status"
+      ],
+      "client.migration_status_from": [
+        "migration_status_from"
+      ],
+      "client.migration_status_from_string": [
+        "migration_status_from_string"
+      ],
+      "client.postgres_url": [
+        "postgres_url"
+      ],
+      "client.probe": [
+        "probe"
+      ],
+      "client.render_prometheus": [
+        "render_prometheus"
+      ],
+      "client.validate_schema": [
+        "validate_schema"
+      ],
+      "client.validate_schema_from": [
+        "validate_schema_from"
+      ],
+      "client.validate_schema_from_string": [
+        "validate_schema_from_string"
+      ],
+      "config.delete_flag": [
+        "delete_flag"
+      ],
+      "config.delete_raw": [
+        "config_delete"
+      ],
+      "config.flag": [
+        "flag"
+      ],
+      "config.flag_details": [
+        "flag_details"
+      ],
+      "config.flag_details_many": [
+        "flag_details_many"
+      ],
+      "config.get_many_raw": [
+        "config_get_many"
+      ],
+      "config.get_raw": [
+        "config_get"
+      ],
+      "config.set_flag": [
+        "set_flag_percent",
+        "set_flag_on",
+        "set_flag_off",
+        "set_flag_allow_list",
+        "set_flag_value"
+      ],
+      "config.set_raw": [
+        "config_set"
+      ],
+      "config.snapshot": [
+        "config_snapshot"
+      ],
+      "config.snapshot_decode": [
+        "decode_config_snapshot"
+      ],
+      "config.snapshot_encode": [
+        "encode_config_snapshot"
+      ],
+      "kv.compare_and_swap": [
+        "kv_compare_and_swap"
+      ],
+      "kv.delete": [
+        "kv_delete"
+      ],
+      "kv.exists": [
+        "kv_exists"
+      ],
+      "kv.expire": [
+        "kv_expire"
+      ],
+      "kv.get": [
+        "kv_get",
+        "kv_get_bytes"
+      ],
+      "kv.incr": [
+        "kv_incr"
+      ],
+      "kv.mget": [
+        "kv_mget"
+      ],
+      "kv.scan": [
+        "kv_scan",
+        "kv_scan_page"
+      ],
+      "kv.set": [
+        "kv_set",
+        "kv_set_bytes"
+      ],
+      "pubsub.channel_for": [
+        "pubsub_channel"
+      ],
+      "pubsub.publish": [
+        "pubsub_publish"
+      ],
+      "pubsub.subscribe": [
+        "pubsub_subscribe"
+      ],
+      "queue.ack": [
+        "queue_ack"
+      ],
+      "queue.cancel": [
+        "queue_cancel"
+      ],
+      "queue.cancellation_requested": [
+        "queue_cancellation_requested"
+      ],
+      "queue.dead_letters": [
+        "queue_dead_letters"
+      ],
+      "queue.depth": [
+        "queue_depth"
+      ],
+      "queue.dequeue": [
+        "queue_dequeue"
+      ],
+      "queue.dequeue_batch": [
+        "queue_dequeue_batch"
+      ],
+      "queue.enqueue": [
+        "queue_enqueue"
+      ],
+      "queue.enqueue_batch": [
+        "queue_enqueue_batch"
+      ],
+      "queue.finish_cancellation": [
+        "queue_finish_cancellation"
+      ],
+      "queue.heartbeat": [
+        "queue_heartbeat"
+      ],
+      "queue.is_paused": [
+        "queue_is_paused"
+      ],
+      "queue.list_status": [
+        "queue_list_status"
+      ],
+      "queue.nack": [
+        "queue_nack"
+      ],
+      "queue.outbox_once": [
+        "run_outbox_once"
+      ],
+      "queue.outbox_relay": [
+        "run_outbox_relay"
+      ],
+      "queue.pause": [
+        "queue_pause"
+      ],
+      "queue.purge_dead_letters": [
+        "queue_purge_dead_letters"
+      ],
+      "queue.purge_dead_letters_dry_run": [
+        "queue_purge_dead_letters_dry_run"
+      ],
+      "queue.redrive": [
+        "queue_redrive"
+      ],
+      "queue.redrive_batch": [
+        "queue_redrive_batch"
+      ],
+      "queue.resume": [
+        "queue_resume"
+      ],
+      "queue.stats": [
+        "queue_stats"
+      ],
+      "queue.status": [
+        "queue_status"
+      ],
+      "ratelimit.check": [
+        "rate_limit_check"
+      ],
+      "ratelimit.check_weighted": [
+        "rate_limit_check"
+      ],
+      "ratelimit.commit": [
+        "rate_limit_commit"
+      ],
+      "ratelimit.release": [
+        "rate_limit_release"
+      ],
+      "ratelimit.reserve": [
+        "rate_limit_reserve"
+      ],
+      "schedule.at": [
+        "schedule_at"
+      ],
+      "schedule.cancel": [
+        "schedule_cancel"
+      ],
+      "schedule.cancel_at": [
+        "schedule_cancel_at"
+      ],
+      "schedule.cron": [
+        "schedule_cron"
+      ],
+      "schedule.diagnostics": [
+        "scheduler_diagnostics"
+      ],
+      "schedule.inspect": [
+        "schedule_inspect"
+      ],
+      "schedule.list": [
+        "schedule_list"
+      ],
+      "schedule.pause": [
+        "schedule_pause"
+      ],
+      "schedule.process_due": [
+        "run_scheduler_once"
+      ],
+      "schedule.resume": [
+        "schedule_resume"
+      ],
+      "scope.blob_key": [
+        "scope_blob_key"
+      ],
+      "scope.kv_key": [
+        "scope_kv_key"
+      ],
+      "scope.rate_limit_subject": [
+        "scope_rate_limit_subject"
+      ],
+      "scope.topic": [
+        "scope_topic"
+      ]
+    },
+    "rust": {
+      "auth.consume_token": [
+        "consume_token",
+        "consume_token_with_payload"
+      ],
+      "auth.create_api_key": [
+        "create_api_key",
+        "create_api_key_with"
+      ],
+      "auth.create_session": [
+        "create_session"
+      ],
+      "auth.create_token": [
+        "create_token",
+        "create_token_with_payload"
+      ],
+      "auth.hash_password": [
+        "hash_password"
+      ],
+      "auth.needs_rehash": [
+        "needs_rehash"
+      ],
+      "auth.revoke_all_sessions": [
+        "revoke_all_sessions"
+      ],
+      "auth.revoke_api_key": [
+        "revoke_api_key"
+      ],
+      "auth.revoke_session": [
+        "revoke_session"
+      ],
+      "auth.validate_session": [
+        "validate_session"
+      ],
+      "auth.verify_api_key": [
+        "verify_api_key"
+      ],
+      "auth.verify_password": [
+        "verify_password"
+      ],
+      "blob.abort_multipart": [
+        "abort_multipart"
+      ],
+      "blob.complete_multipart": [
+        "complete_multipart"
+      ],
+      "blob.copy": [
+        "copy"
+      ],
+      "blob.create_multipart": [
+        "create_multipart"
+      ],
+      "blob.delete": [
+        "delete"
+      ],
+      "blob.get": [
+        "get",
+        "open"
+      ],
+      "blob.get_if": [
+        "get_if"
+      ],
+      "blob.get_range": [
+        "get_range"
+      ],
+      "blob.head": [
+        "head"
+      ],
+      "blob.list": [
+        "list"
+      ],
+      "blob.presign_download": [
+        "presign_download"
+      ],
+      "blob.presign_native_get": [
+        "presign_native_get"
+      ],
+      "blob.presign_native_put": [
+        "presign_native_put"
+      ],
+      "blob.presign_upload": [
+        "presign_upload"
+      ],
+      "blob.put": [
+        "put"
+      ],
+      "blob.put_stream": [
+        "put_stream"
+      ],
+      "blob.upload_part": [
+        "upload_part"
+      ],
+      "blob.verify_checksum_sha256": [
+        "verify_checksum_sha256"
+      ],
+      "blob.verify_presigned": [
+        "verify_presigned"
+      ],
+      "client.advance_test_clock": [
+        "advance_test_clock"
+      ],
+      "client.backend_capabilities": [
+        "backend_capabilities"
+      ],
+      "client.close": [
+        "close"
+      ],
+      "client.diagnostics": [
+        "diagnostics"
+      ],
+      "client.init": [
+        "init"
+      ],
+      "client.init_from": [
+        "init_from"
+      ],
+      "client.init_from_string": [
+        "init_from_str"
+      ],
+      "client.init_memory_for_testing": [
+        "init_memory_for_testing"
+      ],
+      "client.liveness": [
+        "is_live"
+      ],
+      "client.maintain": [
+        "maintain"
+      ],
+      "client.metrics_snapshot": [
+        "metrics_snapshot"
+      ],
+      "client.migrate": [
+        "migrate"
+      ],
+      "client.migrate_from": [
+        "migrate_from"
+      ],
+      "client.migrate_from_string": [
+        "migrate_from_str"
+      ],
+      "client.migration_status": [
+        "migration_status"
+      ],
+      "client.migration_status_from": [
+        "migration_status_from"
+      ],
+      "client.migration_status_from_string": [
+        "migration_status_from_str"
+      ],
+      "client.postgres_url": [
+        "postgres_url"
+      ],
+      "client.probe": [
+        "probe"
+      ],
+      "client.render_prometheus": [
+        "render_prometheus"
+      ],
+      "client.validate_schema": [
+        "validate_schema"
+      ],
+      "client.validate_schema_from": [
+        "validate_schema_from"
+      ],
+      "client.validate_schema_from_string": [
+        "validate_schema_from_str"
+      ],
+      "config.delete_flag": [
+        "delete_flag"
+      ],
+      "config.delete_raw": [
+        "delete_raw"
+      ],
+      "config.flag": [
+        "flag"
+      ],
+      "config.flag_details": [
+        "flag_details"
+      ],
+      "config.flag_details_many": [
+        "flag_details_many"
+      ],
+      "config.get_many_raw": [
+        "get_many_raw"
+      ],
+      "config.get_raw": [
+        "get_raw"
+      ],
+      "config.set_flag": [
+        "set_flag"
+      ],
+      "config.set_raw": [
+        "set_raw"
+      ],
+      "config.snapshot": [
+        "snapshot"
+      ],
+      "config.snapshot_decode": [
+        "decode_snapshot"
+      ],
+      "config.snapshot_encode": [
+        "encode_snapshot"
+      ],
+      "kv.compare_and_swap": [
+        "compare_and_swap"
+      ],
+      "kv.delete": [
+        "delete"
+      ],
+      "kv.exists": [
+        "exists"
+      ],
+      "kv.expire": [
+        "expire"
+      ],
+      "kv.get": [
+        "get"
+      ],
+      "kv.incr": [
+        "incr"
+      ],
+      "kv.mget": [
+        "mget"
+      ],
+      "kv.scan": [
+        "scan"
+      ],
+      "kv.set": [
+        "set"
+      ],
+      "pubsub.channel_for": [
+        "channel_for"
+      ],
+      "pubsub.publish": [
+        "publish"
+      ],
+      "pubsub.subscribe": [
+        "subscribe"
+      ],
+      "queue.ack": [
+        "ack"
+      ],
+      "queue.cancel": [
+        "cancel"
+      ],
+      "queue.cancellation_requested": [
+        "cancellation_requested"
+      ],
+      "queue.dead_letters": [
+        "dead_letters"
+      ],
+      "queue.depth": [
+        "depth"
+      ],
+      "queue.dequeue": [
+        "dequeue"
+      ],
+      "queue.dequeue_batch": [
+        "dequeue_batch"
+      ],
+      "queue.enqueue": [
+        "enqueue"
+      ],
+      "queue.enqueue_batch": [
+        "enqueue_batch"
+      ],
+      "queue.finish_cancellation": [
+        "finish_cancellation"
+      ],
+      "queue.heartbeat": [
+        "heartbeat"
+      ],
+      "queue.is_paused": [
+        "is_paused"
+      ],
+      "queue.list_status": [
+        "list_status"
+      ],
+      "queue.nack": [
+        "nack"
+      ],
+      "queue.outbox_once": [
+        "run_outbox_once"
+      ],
+      "queue.outbox_relay": [
+        "run_outbox_relay",
+        "run_outbox_relay_until"
+      ],
+      "queue.pause": [
+        "pause"
+      ],
+      "queue.purge_dead_letters": [
+        "purge_dead_letters"
+      ],
+      "queue.purge_dead_letters_dry_run": [
+        "purge_dead_letters_dry_run"
+      ],
+      "queue.redrive": [
+        "redrive"
+      ],
+      "queue.redrive_batch": [
+        "redrive_batch"
+      ],
+      "queue.resume": [
+        "resume"
+      ],
+      "queue.stats": [
+        "stats"
+      ],
+      "queue.status": [
+        "status"
+      ],
+      "ratelimit.check": [
+        "check",
+        "check_with"
+      ],
+      "ratelimit.check_weighted": [
+        "check_cost",
+        "check_cost_with"
+      ],
+      "ratelimit.commit": [
+        "commit"
+      ],
+      "ratelimit.release": [
+        "release"
+      ],
+      "ratelimit.reserve": [
+        "reserve"
+      ],
+      "schedule.at": [
+        "at"
+      ],
+      "schedule.cancel": [
+        "cancel"
+      ],
+      "schedule.cancel_at": [
+        "cancel_at"
+      ],
+      "schedule.cron": [
+        "cron"
+      ],
+      "schedule.diagnostics": [
+        "diagnostics"
+      ],
+      "schedule.inspect": [
+        "inspect"
+      ],
+      "schedule.list": [
+        "list"
+      ],
+      "schedule.pause": [
+        "pause"
+      ],
+      "schedule.process_due": [
+        "process_due"
+      ],
+      "schedule.resume": [
+        "resume"
+      ],
+      "scope.blob_key": [
+        "scope_blob_key"
+      ],
+      "scope.kv_key": [
+        "scope_kv_key"
+      ],
+      "scope.rate_limit_subject": [
+        "scope_rate_limit_subject"
+      ],
+      "scope.topic": [
+        "scope_topic"
+      ]
+    }
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "cloud_event": {
+    "input": {
+      "specversion": "1.0",
+      "id": "render-42",
+      "source": "/mcp/tools/render",
+      "type": "com.example.artifact.rendered",
+      "subject": "artifact/report.pdf",
+      "time": "2026-08-25T08:30:00Z",
+      "datacontenttype": "application/octet-stream",
+      "traceid": "00f067aa0ba902b7",
+      "attempt": 2,
+      "data_base64": "AAEC/w=="
+    },
+    "data_hex": "000102ff",
+    "extensions": {
+      "attempt": 2,
+      "traceid": "00f067aa0ba902b7"
+    }
+  },
+  "environment": {
+    "mappings": [
+      {
+        "key": "database.url",
+        "names": ["DATABASE_URL", "POSTGRES_URL"]
+      },
+      {
+        "key": "blob.bucket",
+        "names": ["S3_BUCKET", "AWS_S3_BUCKET"]
+      }
+    ],
+    "source": {
+      "POSTGRES_URL": "postgres://db/app",
+      "S3_BUCKET": "artifacts"
+    },
+    "imported": {
+      "blob.bucket": "artifacts",
+      "database.url": "postgres://db/app"
+    },
+    "exported": {
+      "DATABASE_URL": "postgres://db/app",
+      "S3_BUCKET": "artifacts"
+    }
+  }
+}

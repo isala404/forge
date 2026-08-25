@@ -85,6 +85,16 @@
         { "op": "kv.get", "args": { "key": "shared" }, "namespace": "app-b", "expect": { "value": null } },
         { "op": "kv.get", "args": { "key": "shared" }, "namespace": "app-a", "expect": { "value": "ns-a" } }
       ]
+    },
+    {
+      "name": "namespace_cross_write_and_delete_isolation",
+      "steps": [
+        { "op": "kv.set", "args": { "key": "same", "value": "a" }, "namespace": "app-a" },
+        { "op": "kv.set", "args": { "key": "same", "value": "b" }, "namespace": "app-b" },
+        { "op": "kv.delete", "args": { "key": "same" }, "namespace": "app-b", "expect": { "value": true } },
+        { "op": "kv.get", "args": { "key": "same" }, "namespace": "app-a", "expect": { "value": "a" } },
+        { "op": "kv.get", "args": { "key": "same" }, "namespace": "app-b", "expect": { "value": null } }
+      ]
     }
   ]
 }

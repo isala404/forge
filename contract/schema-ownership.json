@@ -1,0 +1,53 @@
+{
+  "manifest_version": 1,
+  "schema": "configured PostgreSQL search_path",
+  "objects": {
+    "tables": [
+      "forge_api_keys",
+      "forge_blobs",
+      "forge_config",
+      "forge_fs_blobs",
+      "forge_flags",
+      "forge_jobs",
+      "forge_kv",
+      "forge_auth_tokens",
+      "forge_job_dedup",
+      "forge_queue_controls",
+      "forge_queue_counters",
+      "forge_ratelimit",
+      "forge_ratelimit_reservations",
+      "forge_scheduler_state",
+      "forge_schedules",
+      "forge_sessions",
+      "forge_system_migrations"
+    ],
+    "indexes": [
+      "forge_api_keys_expiry_idx",
+      "forge_api_keys_owner_idx",
+      "forge_auth_tokens_expiry_idx",
+      "forge_job_dedup_expires_idx",
+      "forge_jobs_claim_idx",
+      "forge_jobs_depth_idx",
+      "forge_jobs_done_idx",
+      "forge_jobs_dead_letter_idx",
+      "forge_jobs_leased_idx",
+      "forge_jobs_concurrency_idx",
+      "forge_jobs_status_list_idx",
+      "forge_jobs_visible_age_idx",
+      "forge_kv_expires_at_idx",
+      "forge_ratelimit_updated_idx",
+      "forge_ratelimit_reservations_expiry_idx",
+      "forge_schedules_active_due_idx",
+      "forge_schedules_due_idx",
+      "forge_sessions_expiry_idx",
+      "forge_sessions_user_idx"
+    ],
+    "functions": [],
+    "triggers": [],
+    "channels": ["forge_<namespace_hash>_<topic_hash>"]
+  },
+  "rules": [
+    "Applications must not write Forge-owned objects directly.",
+    "The checked-in schema is a reset baseline; unknown or checksum-mismatched migration history is rejected."
+  ]
+}

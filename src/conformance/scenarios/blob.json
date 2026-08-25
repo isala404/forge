@@ -22,6 +22,33 @@
       ]
     },
     {
+      "name": "conditional_writes_and_ranges",
+      "note": "Create-only is provider-neutral and ranges use inclusive byte offsets.",
+      "steps": [
+        { "op": "blob.put", "args": { "key": "guarded", "value": "hello world", "create_only": true } },
+        { "op": "blob.put", "args": { "key": "guarded", "value": "duplicate", "create_only": true }, "expect": { "error": "Precondition" } },
+        { "op": "blob.get_range", "args": { "key": "guarded", "start": 6, "end": 10 }, "expect": { "value": "world" } },
+        { "op": "blob.get_range", "args": { "key": "missing", "start": 0, "end": 1 }, "expect": { "value": null } }
+      ]
+    },
+    {
+      "name": "conditional_reads_copy_headers_and_checksums",
+      "note": "ETags remain opaque conditions while SHA-256, web headers, and copy metadata compose portably.",
+      "steps": [
+        { "op": "blob.put", "args": { "key": "source", "value": "hello", "content_type": "text/plain", "metadata": { "owner": "alice" }, "cache_control": "public, max-age=60", "content_disposition": "attachment; filename=hello.txt", "checksum_sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824" } },
+        { "op": "blob.head", "args": { "key": "source" }, "as": "source",
+          "expect": { "shape": { "cache_control": "public, max-age=60", "content_disposition": "attachment; filename=hello.txt", "checksum_sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824" } } },
+        { "op": "blob.get_if", "args": { "key": "source", "if_match": { "$ref": "source.etag" } }, "expect": { "shape": { "state": "found", "body": "hello" } } },
+        { "op": "blob.get_if", "args": { "key": "source", "if_none_match": { "$ref": "source.etag" } }, "expect": { "shape": { "state": "not_modified", "body": null } } },
+        { "op": "blob.get_if", "args": { "key": "source", "if_match": "wrong" }, "expect": { "error": "Precondition" } },
+        { "op": "blob.get_if", "args": { "key": "missing" }, "expect": { "shape": { "state": "missing", "body": null } } },
+        { "op": "blob.copy", "args": { "source": "source", "destination": "copy" },
+          "expect": { "shape": { "key": "copy", "cache_control": "public, max-age=60", "content_disposition": "attachment; filename=hello.txt", "checksum_sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824" } } },
+        { "op": "blob.verify_checksum_sha256", "args": { "key": "copy", "expected_hex": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824" }, "expect": { "value": true } },
+        { "op": "blob.verify_checksum_sha256", "args": { "key": "copy", "expected_hex": "0000000000000000000000000000000000000000000000000000000000000000" }, "expect": { "value": false } }
+      ]
+    },
+    {
       "name": "list_paginates_by_prefix_with_cursor",
       "note": "A small page limit + cursor follow must cover every key under the prefix exactly once, in lexicographic order, and never spill keys outside it.",
       "steps": [
@@ -40,9 +67,9 @@
       "steps": [
         { "op": "blob.put", "args": { "key": "doomed", "value": "bye" } },
         { "op": "blob.head", "args": { "key": "doomed" }, "expect": { "shape": { "size": 3 } } },
-        { "op": "blob.delete", "args": { "key": "doomed" }, "expect": { "value": true } },
+        { "op": "blob.delete", "args": { "key": "doomed" }, "expect": { "value": null } },
         { "op": "blob.head", "args": { "key": "doomed" }, "expect": { "value": null } },
-        { "op": "blob.delete", "args": { "key": "doomed" }, "expect": { "value": false } }
+        { "op": "blob.delete", "args": { "key": "doomed" }, "expect": { "value": null } }
       ]
     },
     {
@@ -62,13 +89,13 @@
       "steps": [
         { "op": "blob.presign_download", "args": { "key": "docs/report.pdf", "expires_seconds": 300 }, "as": "dl" },
         { "op": "blob.verify_presigned",
-          "args": { "method": "GET", "key": { "$ref": "dl.key" }, "expires_epoch": { "$ref": "dl.expires_epoch" }, "max_bytes": { "$ref": "dl.max_bytes" }, "sig": { "$ref": "dl.sig" } },
+          "args": { "method": "GET", "key": { "$ref": "dl.key" }, "expires_epoch": { "$ref": "dl.expires_epoch" }, "max_bytes": { "$ref": "dl.max_bytes" }, "sig": { "$ref": "dl.signature" } },
           "expect": { "value": true } },
         { "op": "blob.verify_presigned",
           "args": { "method": "GET", "key": { "$ref": "dl.key" }, "expires_epoch": { "$ref": "dl.expires_epoch" }, "max_bytes": { "$ref": "dl.max_bytes" }, "sig": "0000000000000000000000000000000000000000000000000000000000000000" },
           "expect": { "value": false } },
         { "op": "blob.verify_presigned",
-          "args": { "method": "GET", "key": { "$ref": "dl.key" }, "expires_epoch": 1000, "max_bytes": { "$ref": "dl.max_bytes" }, "sig": { "$ref": "dl.sig" } },
+          "args": { "method": "GET", "key": { "$ref": "dl.key" }, "expires_epoch": 1000, "max_bytes": { "$ref": "dl.max_bytes" }, "sig": { "$ref": "dl.signature" } },
           "expect": { "value": false } }
       ]
     },
@@ -78,11 +105,19 @@
       "steps": [
         { "op": "blob.presign_upload", "args": { "key": "uploads/x.bin", "expires_seconds": 300, "max_bytes": 4096 }, "as": "ul" },
         { "op": "blob.verify_presigned",
-          "args": { "method": "PUT", "key": { "$ref": "ul.key" }, "expires_epoch": { "$ref": "ul.expires_epoch" }, "max_bytes": { "$ref": "ul.max_bytes" }, "sig": { "$ref": "ul.sig" } },
+          "args": { "method": "PUT", "key": { "$ref": "ul.key" }, "expires_epoch": { "$ref": "ul.expires_epoch" }, "max_bytes": { "$ref": "ul.max_bytes" }, "sig": { "$ref": "ul.signature" } },
           "expect": { "value": true } },
         { "op": "blob.verify_presigned",
-          "args": { "method": "PUT", "key": { "$ref": "ul.key" }, "expires_epoch": { "$ref": "ul.expires_epoch" }, "max_bytes": 8192, "sig": { "$ref": "ul.sig" } },
+          "args": { "method": "PUT", "key": { "$ref": "ul.key" }, "expires_epoch": { "$ref": "ul.expires_epoch" }, "max_bytes": 8192, "sig": { "$ref": "ul.signature" } },
           "expect": { "value": false } }
+      ]
+    },
+    {
+      "name": "presign_namespace_replay_is_rejected",
+      "steps": [
+        { "op": "blob.presign_download", "args": { "key": "docs/report.pdf", "expires_seconds": 300 }, "namespace": "app-a", "as": "dl" },
+        { "op": "blob.verify_presigned", "args": { "method": "GET", "key": { "$ref": "dl.key" }, "expires_epoch": { "$ref": "dl.expires_epoch" }, "max_bytes": { "$ref": "dl.max_bytes" }, "sig": { "$ref": "dl.signature" } }, "namespace": "app-b", "expect": { "value": false } },
+        { "op": "blob.verify_presigned", "args": { "method": "GET", "key": { "$ref": "dl.key" }, "expires_epoch": { "$ref": "dl.expires_epoch" }, "max_bytes": { "$ref": "dl.max_bytes" }, "sig": { "$ref": "dl.signature" } }, "namespace": "app-a", "expect": { "value": true } }
       ]
     }
   ]

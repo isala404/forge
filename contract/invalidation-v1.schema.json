@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tryforge.dev/contracts/invalidation-v1.schema.json",
+  "title": "Forge invalidation hint v1",
+  "description": "A bounded, transport-neutral hint. Receivers refetch authoritative state; delivery is never required for convergence.",
+  "type": "object",
+  "required": ["schema_version"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "tags": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 128 }
+    },
+    "query_keys": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 8,
+        "items": { "$ref": "#/$defs/queryKeyPart1" }
+      }
+    },
+    "revision": { "type": "string", "minLength": 1, "maxLength": 256 }
+  },
+  "anyOf": [
+    { "required": ["tags"], "properties": { "tags": { "minItems": 1 } } },
+    { "required": ["query_keys"], "properties": { "query_keys": { "minItems": 1 } } }
+  ],
+  "additionalProperties": true,
+  "$defs": {
+    "scalar": { "type": ["string", "number", "boolean", "null"] },
+    "queryKeyPart1": {
+      "oneOf": [
+        { "$ref": "#/$defs/scalar" },
+        { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/queryKeyPart2" } },
+        { "type": "object", "maxProperties": 16, "propertyNames": { "maxLength": 64 }, "additionalProperties": { "$ref": "#/$defs/queryKeyPart2" } }
+      ]
+    },
+    "queryKeyPart2": {
+      "oneOf": [
+        { "$ref": "#/$defs/scalar" },
+        { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/scalar" } },
+        { "type": "object", "maxProperties": 16, "propertyNames": { "maxLength": 64 }, "additionalProperties": { "$ref": "#/$defs/scalar" } }
+      ]
+    }
+  }
+}

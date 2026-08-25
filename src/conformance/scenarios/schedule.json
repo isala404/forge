@@ -58,6 +58,17 @@
         { "op": "queue.dequeue", "args": { "queue": "oneshot", "visibility_seconds": 30, "wait_seconds": 0 },
           "expect": { "shape": { "max_attempts": 1 } } }
       ]
+    },
+    {
+      "name": "named_schedule_control_and_diagnostics",
+      "note": "Pause keeps a schedule inspectable but removes it from the due backlog; all canonical timestamps are UTC epoch milliseconds.",
+      "steps": [
+        { "op": "schedule.cron", "args": { "name": "controlled", "expr": "0 0 * * *", "queue": "q", "payload": "{}" } },
+        { "op": "schedule.pause", "args": { "name": "controlled" }, "expect": { "value": true } },
+        { "op": "schedule.inspect", "args": { "name": "controlled" }, "expect": { "shape": { "name": "controlled", "paused": true, "misfire_policy": "run_once", "max_catch_up": 0 } } },
+        { "op": "schedule.diagnostics", "args": {}, "expect": { "shape": { "due_count": 0, "enqueue_failures": 0 } } },
+        { "op": "schedule.resume", "args": { "name": "controlled" }, "expect": { "value": true } }
+      ]
     }
   ]
 }
