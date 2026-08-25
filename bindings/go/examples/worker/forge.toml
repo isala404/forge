@@ -1,0 +1,17 @@
+[postgres]
+url = "${DATABASE_URL}"
+max_connections = 10
+auto_migrate = true
+migration_lock_timeout_secs = 30
+
+[forge]
+namespace = "go_worker_example"
+mode = "postgres"
+environment = "development"
+
+[queue]
+payload_retention_secs = 86400
+terminal_retention_secs = 604800
+succeeded_retention_secs = 604800
+dead_retention_secs = 2592000
+cancelled_retention_secs = 604800
