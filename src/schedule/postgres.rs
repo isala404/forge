@@ -1,6 +1,7 @@
 use super::cron::Cron;
 use super::{
-    MAX_AT_HORIZON_DAYS, MAX_NAME_BYTES, Schedule, ScheduleInfo, ScheduleKind, ScheduleOpts,
+    MAX_AT_HORIZON_DAYS, MAX_NAME_BYTES, MisfirePolicy, Schedule, ScheduleInfo, ScheduleKind,
+    ScheduleOpts, SchedulerDiagnostics, plan_cron_occurrences,
 };
 use crate::error::{ForgeError, Result};
 use crate::obs;
@@ -12,14 +13,10 @@ use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use tracing::field::Empty;
 use uuid::Uuid;
 
-/// A tick more than this far late (e.g. all replicas were down) fires once on
-/// recovery only if within the window, else is skipped + logged (k8s
-/// `startingDeadlineSeconds`).
-const MISSED_TICK_GRACE_SECS: f64 = 60.0 * 60.0;
 /// Most schedules a single tick fires at once.
 const TICK_BATCH: i64 = 1000;
 
@@ -91,6 +88,20 @@ impl PgSchedule {
         }
     }
 
+    // This best-effort write runs only after the scheduler transaction has been
+    // rolled back, so it cannot use that transaction's statically checked query.
+    #[allow(clippy::disallowed_methods)]
+    async fn record_enqueue_failure(&self) {
+        let _ = sqlx::query(
+            "INSERT INTO forge_scheduler_state (app, enqueue_failures) VALUES ($1, 1) \
+             ON CONFLICT (app) DO UPDATE SET enqueue_failures = \
+             forge_scheduler_state.enqueue_failures + 1",
+        )
+        .bind(&self.app)
+        .execute(&self.pool)
+        .await;
+    }
+
     /// Fire every due schedule once. Returns how many jobs were enqueued. Idempotent
     /// and safe to run concurrently on many replicas (per-row claim).
     // Up to TICK_BATCH due schedules are processed in one transaction. A single
@@ -109,10 +120,9 @@ impl PgSchedule {
             let mut tx = self.pool.begin().await?;
             let due = sqlx::query(
                 r#"SELECT name, app, kind, cron_expr, target_queue, payload, job_id,
-                          next_run, max_attempts,
-                          EXTRACT(EPOCH FROM (now() - next_run))::float8 AS lateness
+                          next_run, max_attempts, misfire_policy, max_catch_up
                    FROM forge_schedules
-                   WHERE next_run <= now() AND app = $2
+                   WHERE next_run <= now() AND app = $2 AND paused = FALSE
                    ORDER BY next_run
                    FOR UPDATE SKIP LOCKED
                    LIMIT $1"#,
@@ -134,66 +144,56 @@ impl PgSchedule {
                 let job_id: Option<Uuid> = row.try_get("job_id")?;
                 let next_run: DateTime<Utc> = row.try_get("next_run")?;
                 let max_attempts: Option<i32> = row.try_get("max_attempts")?;
-                let row_lateness: f64 = row.try_get("lateness")?;
-                // For a cron, the grace decision is measured from the MOST-RECENT missed
-                // tick, not the oldest stored next_run. Otherwise a fast cron (e.g.
-                // `* * * * *`) that fell behind during a long outage is wrongly skipped
-                // wholesale, even though its latest tick is only seconds late and the
-                // contract promises that one fires. One-shot/`at` rows keep next_run.
-                let lateness = if kind == "cron" {
-                    cron_expr
-                        .as_deref()
-                        .and_then(|e| Cron::parse(e).ok())
-                        .and_then(|c| c.prev_or_at(now))
-                        .map_or(row_lateness, |prev| (now - prev).num_seconds() as f64)
+                let policy_name: String = row.try_get("misfire_policy")?;
+                let max_catch_up: i32 = row.try_get("max_catch_up")?;
+                let policy = policy_from_columns(&policy_name, max_catch_up)?;
+                let (occurrences, next) = if kind == "cron" {
+                    cron_expr.as_deref().and_then(|expr| Cron::parse(expr).ok()).map_or_else(
+                        || (Vec::new(), None),
+                        |cron| plan_cron_occurrences(&cron, next_run, now, policy),
+                    )
                 } else {
-                    row_lateness
+                    let occurrences = if policy == MisfirePolicy::Skip {
+                        Vec::new()
+                    } else {
+                        vec![next_run]
+                    };
+                    (occurrences, None)
                 };
-                if lateness <= MISSED_TICK_GRACE_SECS {
-                    let job_id = job_id
+                for occurrence in &occurrences {
+                    let occurrence_job_id = job_id
                         .map(JobId)
-                        .unwrap_or_else(|| self.tick_job_id(&name, next_run));
-                    // Unset opts inherit the queue's own enqueue defaults. Retry timing is the
-                    // queue's default backoff policy, resolved at delivery time, not persisted.
-                    let mut opts = EnqueueOpts::new().with_job_id(job_id);
+                        .unwrap_or_else(|| self.tick_job_id(&name, *occurrence));
+                    let mut opts = EnqueueOpts::new().with_job_id(occurrence_job_id);
                     if let Some(m) = max_attempts {
                         opts = opts.with_max_attempts(u32::try_from(m).unwrap_or(0));
                     }
-                    self.queue
+                    if let Err(error) = self
+                        .queue
                         .enqueue(
                             &self.logical_queue(&target_queue),
-                            Bytes::from(payload),
+                            Bytes::from(payload.clone()),
                             opts,
                         )
-                        .await?;
+                        .await
+                    {
+                        let _ = tx.rollback().await;
+                        self.record_enqueue_failure().await;
+                        return Err(error);
+                    }
                     fired += 1;
-                } else {
-                    tracing::warn!(
-                        schedule.name = %name,
-                        lateness_secs = lateness,
-                        "skipping missed schedule tick (past the grace window)"
-                    );
                 }
 
-                // A cron whose expression no longer parses or never fires again is
-                // silently dropped here rather than erroring, same path as a one-shot.
-                let next = if kind == "cron" {
-                    cron_expr
-                        .as_deref()
-                        .and_then(|e| Cron::parse(e).ok())
-                        .and_then(|c| c.next_after(Utc::now()))
-                } else {
-                    None
-                };
                 match next {
                     Some(n) => {
-                        sqlx::query!(
-                            "UPDATE forge_schedules SET last_run = now(), next_run = $2 \
-                             WHERE name = $1 AND app = $3",
-                            name,
-                            n,
-                            app,
+                        sqlx::query(
+                            "UPDATE forge_schedules SET last_run = COALESCE($4, last_run), \
+                             next_run = $2 WHERE name = $1 AND app = $3",
                         )
+                        .bind(&name)
+                        .bind(n)
+                        .bind(&app)
+                        .bind(occurrences.last().copied())
                         .execute(&mut *tx)
                         .await?;
                     }
@@ -208,6 +208,14 @@ impl PgSchedule {
                     }
                 }
             }
+            sqlx::query(
+                "INSERT INTO forge_scheduler_state (app, last_successful_tick) VALUES ($1, $2) \
+                 ON CONFLICT (app) DO UPDATE SET last_successful_tick = EXCLUDED.last_successful_tick",
+            )
+            .bind(&self.app)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
             tx.commit().await?;
             tracing::Span::current().record("schedule.fired", fired);
             Ok(fired)
@@ -258,6 +266,27 @@ fn opt_columns(opts: &ScheduleOpts) -> Option<i32> {
         .map(|m| i32::try_from(m).unwrap_or(i32::MAX))
 }
 
+fn policy_columns(opts: &ScheduleOpts) -> Result<(&'static str, i32)> {
+    let policy = opts.misfire_policy.validate()?;
+    Ok((
+        policy.name(),
+        i32::try_from(policy.max_catch_up()).unwrap_or(i32::MAX),
+    ))
+}
+
+fn policy_from_columns(name: &str, max_catch_up: i32) -> Result<MisfirePolicy> {
+    match name {
+        "skip" => Ok(MisfirePolicy::Skip),
+        "run_once" => Ok(MisfirePolicy::RunOnce),
+        "catch_up" => {
+            MisfirePolicy::CatchUp(u32::try_from(max_catch_up).unwrap_or(u32::MAX)).validate()
+        }
+        _ => Err(ForgeError::backend(
+            "invalid persisted scheduler misfire policy",
+        )),
+    }
+}
+
 fn check_payload(payload: &[u8]) -> Result<()> {
     if payload.len() > MAX_PAYLOAD_BYTES {
         return Err(ForgeError::limit(format!(
@@ -293,16 +322,19 @@ impl Schedule for PgSchedule {
                 .next_after(Utc::now())
                 .ok_or_else(|| ForgeError::invalid("cron expression never fires"))?;
             let max_attempts = opt_columns(&opts);
+            let (misfire_policy, max_catch_up) = policy_columns(&opts)?;
             sqlx::query!(
                 "INSERT INTO forge_schedules \
                    (name, kind, cron_expr, target_queue, payload, job_id, next_run, app, \
-                    max_attempts) \
-                 VALUES ($1, 'cron', $2, $3, $4, NULL, $5, $6, $7) \
+                    max_attempts, misfire_policy, max_catch_up) \
+                 VALUES ($1, 'cron', $2, $3, $4, NULL, $5, $6, $7, $8, $9) \
                  ON CONFLICT (name, app) DO UPDATE SET \
                    kind = 'cron', cron_expr = EXCLUDED.cron_expr, \
                    target_queue = EXCLUDED.target_queue, payload = EXCLUDED.payload, \
                    job_id = NULL, next_run = EXCLUDED.next_run, last_run = NULL, \
-                   max_attempts = EXCLUDED.max_attempts",
+                   max_attempts = EXCLUDED.max_attempts, \
+                   misfire_policy = EXCLUDED.misfire_policy, \
+                   max_catch_up = EXCLUDED.max_catch_up",
                 name,
                 expr,
                 self.physical_queue(queue),
@@ -310,6 +342,8 @@ impl Schedule for PgSchedule {
                 next,
                 self.app,
                 max_attempts,
+                misfire_policy,
+                max_catch_up,
             )
             .execute(&self.pool)
             .await?;
@@ -338,18 +372,19 @@ impl Schedule for PgSchedule {
             check_queue(queue)?;
             check_payload(&payload)?;
             let when_dt: DateTime<Utc> = when.into();
-            // A past/now `when` is allowed (it fires on the next tick within grace);
+            // A past/now `when` is allowed and its misfire policy handles the next tick;
             // only an absurdly-far-future `when` is rejected, matching the contract's
             // ~100-year ceiling so every backend agrees on the horizon.
             if when_dt > Utc::now() + chrono::Duration::days(MAX_AT_HORIZON_DAYS) {
                 return Err(ForgeError::limit("at `when` exceeds the ~100-year ceiling"));
             }
             let max_attempts = opt_columns(&opts);
+            let (misfire_policy, max_catch_up) = policy_columns(&opts)?;
             sqlx::query!(
                 "INSERT INTO forge_schedules \
                    (name, kind, cron_expr, target_queue, payload, job_id, next_run, app, \
-                    max_attempts) \
-                 VALUES ($1, 'at', NULL, $2, $3, $4, $5, $6, $7)",
+                    max_attempts, misfire_policy, max_catch_up) \
+                 VALUES ($1, 'at', NULL, $2, $3, $4, $5, $6, $7, $8, $9)",
                 name,
                 self.physical_queue(queue),
                 payload.as_ref(),
@@ -357,6 +392,8 @@ impl Schedule for PgSchedule {
                 when_dt,
                 self.app,
                 max_attempts,
+                misfire_policy,
+                max_catch_up,
             )
             .execute(&self.pool)
             .await?;
@@ -386,6 +423,92 @@ impl Schedule for PgSchedule {
         .await
     }
 
+    async fn inspect(&self, name: &str) -> Result<Option<ScheduleInfo>> {
+        let row = sqlx::query!(
+            "SELECT name, kind, cron_expr, target_queue, next_run, last_run, paused, \
+             misfire_policy, max_catch_up FROM forge_schedules WHERE name = $1 AND app = $2",
+            name,
+            self.app,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok(ScheduleInfo::new(
+                row.name,
+                if row.kind == "cron" {
+                    ScheduleKind::Cron(row.cron_expr.unwrap_or_default())
+                } else {
+                    ScheduleKind::At
+                },
+                self.logical_queue(&row.target_queue),
+                row.next_run.into(),
+                row.last_run.map(Into::into),
+                row.paused,
+                policy_from_columns(&row.misfire_policy, row.max_catch_up)?,
+            ))
+        })
+        .transpose()
+    }
+
+    async fn pause(&self, name: &str) -> Result<bool> {
+        Ok(sqlx::query_scalar!(
+            "UPDATE forge_schedules SET paused = TRUE WHERE name = $1 AND app = $2 \
+             RETURNING name",
+            name,
+            self.app,
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .is_some())
+    }
+
+    async fn resume(&self, name: &str) -> Result<bool> {
+        Ok(sqlx::query_scalar!(
+            "UPDATE forge_schedules SET paused = FALSE WHERE name = $1 AND app = $2 \
+             RETURNING name",
+            name,
+            self.app,
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .is_some())
+    }
+
+    #[allow(clippy::disallowed_methods)]
+    async fn diagnostics(&self) -> Result<SchedulerDiagnostics> {
+        let due = sqlx::query(
+            "SELECT COUNT(*)::bigint AS due_count, \
+             EXTRACT(EPOCH FROM (now() - MIN(next_run)))::float8 AS lag_seconds \
+             FROM forge_schedules WHERE app = $1 AND paused = FALSE AND next_run <= now()",
+        )
+        .bind(&self.app)
+        .fetch_one(&self.pool)
+        .await?;
+        let due_count: i64 = due.try_get("due_count")?;
+        let lag_seconds: Option<f64> = due.try_get("lag_seconds")?;
+        let state = sqlx::query(
+            "SELECT last_successful_tick, enqueue_failures FROM forge_scheduler_state \
+             WHERE app = $1",
+        )
+        .bind(&self.app)
+        .fetch_optional(&self.pool)
+        .await?;
+        let last_successful_tick = state
+            .as_ref()
+            .map(|row| row.try_get::<Option<DateTime<Utc>>, _>("last_successful_tick"))
+            .transpose()?
+            .flatten();
+        let enqueue_failures = state
+            .as_ref()
+            .map_or(Ok(0_i64), |row| row.try_get("enqueue_failures"))?;
+        Ok(SchedulerDiagnostics {
+            lag: lag_seconds.map(|seconds| Duration::from_secs_f64(seconds.max(0.0))),
+            last_successful_tick: last_successful_tick.map(Into::into),
+            due_count: u64::try_from(due_count).unwrap_or(0),
+            enqueue_failures: u64::try_from(enqueue_failures).unwrap_or(0),
+        })
+    }
+
     async fn list(
         &self,
         cursor: Option<Cursor>,
@@ -403,7 +526,8 @@ impl Schedule for PgSchedule {
             // so the cursor token is simply the last name returned.
             let after = cursor.as_ref().map(|c| c.token());
             let rows = sqlx::query!(
-                "SELECT name, kind, cron_expr, target_queue, next_run, last_run \
+                "SELECT name, kind, cron_expr, target_queue, next_run, last_run, paused, \
+                 misfire_policy, max_catch_up \
                  FROM forge_schedules \
                  WHERE app = $1 AND ($2::text IS NULL OR name > $2) \
                  ORDER BY name LIMIT $3",
@@ -418,7 +542,7 @@ impl Schedule for PgSchedule {
             } else {
                 rows.last().map(|r| Cursor::from_token(r.name.clone()))
             };
-            let items: Vec<ScheduleInfo> = rows
+            let items: Result<Vec<ScheduleInfo>> = rows
                 .into_iter()
                 .map(|r| {
                     let kind = if r.kind == "cron" {
@@ -426,15 +550,18 @@ impl Schedule for PgSchedule {
                     } else {
                         ScheduleKind::At
                     };
-                    ScheduleInfo::new(
+                    Ok(ScheduleInfo::new(
                         r.name,
                         kind,
                         self.logical_queue(&r.target_queue),
                         r.next_run.into(),
                         r.last_run.map(Into::into),
-                    )
+                        r.paused,
+                        policy_from_columns(&r.misfire_policy, r.max_catch_up)?,
+                    ))
                 })
                 .collect();
+            let items = items?;
             tracing::Span::current().record("schedule.count", items.len());
             Ok((items, next))
         })

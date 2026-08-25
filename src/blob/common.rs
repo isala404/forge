@@ -1,7 +1,7 @@
 use super::sign::{self, Method};
 use super::{
-    MAX_CONTENT_TYPE_BYTES, MAX_KEY_BYTES, MAX_METADATA_BYTES, MAX_OBJECT_BYTES,
-    MAX_PRESIGN_EXPIRES, PutOpts,
+    MAX_CONTENT_TYPE_BYTES, MAX_HTTP_METADATA_BYTES, MAX_KEY_BYTES, MAX_METADATA_BYTES,
+    MAX_OBJECT_BYTES, MAX_PRESIGN_EXPIRES, ProxyPresign, PutOpts,
 };
 use crate::error::{ForgeError, Result};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
@@ -29,7 +29,7 @@ pub(super) fn logical<'a>(namespace: &str, stored: &'a str) -> &'a str {
 }
 
 /// Validate a blob key: non-empty and within the byte cap.
-pub(super) fn check_key(key: &str) -> Result<()> {
+pub(crate) fn check_key(key: &str) -> Result<()> {
     if key.is_empty() {
         return Err(ForgeError::invalid("blob key must not be empty"));
     }
@@ -63,6 +63,81 @@ pub(super) fn check_put(data: &[u8], opts: &PutOpts) -> Result<()> {
         return Err(ForgeError::limit(format!(
             "metadata is {meta_bytes} bytes; max is {MAX_METADATA_BYTES}"
         )));
+    }
+    for (name, value) in [
+        ("cache_control", opts.cache_control.as_deref()),
+        ("content_disposition", opts.content_disposition.as_deref()),
+    ] {
+        if value.is_some_and(|value| value.len() > MAX_HTTP_METADATA_BYTES) {
+            return Err(ForgeError::limit(format!(
+                "{name} exceeds {MAX_HTTP_METADATA_BYTES} bytes"
+            )));
+        }
+    }
+    if let Some(expected) = &opts.checksum_sha256 {
+        check_sha256(expected)?;
+        if !data.is_empty() && crate::util::sha256_hex(data) != *expected {
+            return Err(ForgeError::precondition(
+                "blob SHA-256 checksum does not match",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn check_sha256(value: &str) -> Result<()> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ForgeError::invalid(
+            "SHA-256 checksum must be 64 hexadecimal characters",
+        ));
+    }
+    if value.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        return Err(ForgeError::invalid(
+            "SHA-256 checksum must use lowercase hexadecimal",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn sha256_base64(value: &str) -> Result<String> {
+    check_sha256(value)?;
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(32);
+    for pair in bytes.chunks_exact(2) {
+        let [high, low] = pair else {
+            return Err(ForgeError::invalid("invalid SHA-256 checksum"));
+        };
+        let high = (*high as char)
+            .to_digit(16)
+            .ok_or_else(|| ForgeError::invalid("invalid SHA-256 checksum"))?;
+        let low = (*low as char)
+            .to_digit(16)
+            .ok_or_else(|| ForgeError::invalid("invalid SHA-256 checksum"))?;
+        decoded.push((high * 16 + low) as u8);
+    }
+    Ok(aws_smithy_types::base64::encode(decoded))
+}
+
+pub(super) fn check_get_conditions(
+    if_match: Option<&str>,
+    if_none_match: Option<&str>,
+) -> Result<()> {
+    if if_match.is_some() && if_none_match.is_some() {
+        return Err(ForgeError::invalid(
+            "if_match and if_none_match are mutually exclusive",
+        ));
+    }
+    if if_match.is_some_and(str::is_empty) || if_none_match.is_some_and(str::is_empty) {
+        return Err(ForgeError::invalid("blob ETag condition must not be empty"));
+    }
+    Ok(())
+}
+
+pub(super) fn reject_s3_encryption(opts: &PutOpts) -> Result<()> {
+    if opts.s3_encryption.is_some() {
+        return Err(ForgeError::not_configured(
+            "S3 server-side encryption requires the S3 blob backend",
+        ));
     }
     Ok(())
 }
@@ -102,11 +177,12 @@ fn require_secret(secret: Option<&[u8]>) -> Result<&[u8]> {
 pub(super) fn presign_url(
     secret: Option<&[u8]>,
     base_url: &str,
+    namespace: &str,
     method: Method,
     key: &str,
     expires: Duration,
     max_bytes: u64,
-) -> Result<String> {
+) -> Result<ProxyPresign> {
     let secret = require_secret(secret)?;
     if expires.is_zero() {
         return Err(ForgeError::invalid("presign expires must be positive"));
@@ -123,17 +199,29 @@ pub(super) fn presign_url(
         ));
     }
     let expires_epoch = unix_secs(SystemTime::now() + expires);
-    let sig = sign::sign(secret, method, key, expires_epoch, max_bytes)?;
+    let sig = sign::sign(secret, namespace, method, key, expires_epoch, max_bytes)?;
     let enc_key = utf8_percent_encode(key, NON_ALPHANUMERIC);
-    Ok(format!(
-        "{base_url}?key={enc_key}&expires={expires_epoch}&max_bytes={max_bytes}&sig={sig}"
-    ))
+    let url = format!(
+        "{base_url}?v=1&ns={}&method={}&key={enc_key}&expires={expires_epoch}&max_bytes={max_bytes}&sig={sig}",
+        utf8_percent_encode(namespace, NON_ALPHANUMERIC),
+        method.as_str(),
+    );
+    Ok(ProxyPresign {
+        url,
+        method: method.as_str().to_string(),
+        key: key.to_string(),
+        expires_epoch,
+        max_bytes,
+        signature: sig,
+        required_headers: std::collections::BTreeMap::new(),
+    })
 }
 
 /// Verify a presigned URL's parameters against `secret`. `Config` with no secret,
 /// `Invalid` for a non-GET/PUT method, `Ok(false)` for an expired URL or bad signature.
 pub(super) fn verify_presigned(
     secret: Option<&[u8]>,
+    namespace: &str,
     method: &str,
     key: &str,
     expires_epoch: i64,
@@ -157,6 +245,7 @@ pub(super) fn verify_presigned(
     }
     Ok(sign::verify(
         secret,
+        namespace,
         method,
         key,
         expires_epoch,
@@ -200,7 +289,7 @@ impl Shared {
         key: &str,
         expires: Duration,
         max_bytes: u64,
-    ) -> Result<String> {
+    ) -> Result<ProxyPresign> {
         let span = tracing::info_span!(
             "forge.blob.presign_upload",
             blob.key_hash = %crate::util::key_hash(key),
@@ -219,6 +308,7 @@ impl Shared {
             presign_url(
                 self.secret.as_deref(),
                 &self.base_url,
+                &self.namespace,
                 Method::Put,
                 key,
                 expires,
@@ -229,7 +319,11 @@ impl Shared {
     }
 
     /// Mint a presigned download URL. Identical across backends.
-    pub(super) async fn presign_download(&self, key: &str, expires: Duration) -> Result<String> {
+    pub(super) async fn presign_download(
+        &self,
+        key: &str,
+        expires: Duration,
+    ) -> Result<ProxyPresign> {
         let span = tracing::info_span!(
             "forge.blob.presign_download",
             blob.key_hash = %crate::util::key_hash(key),
@@ -242,6 +336,7 @@ impl Shared {
             presign_url(
                 self.secret.as_deref(),
                 &self.base_url,
+                &self.namespace,
                 Method::Get,
                 key,
                 expires,
@@ -262,6 +357,7 @@ impl Shared {
     ) -> Result<bool> {
         verify_presigned(
             self.secret.as_deref(),
+            &self.namespace,
             method,
             key,
             expires_epoch,
@@ -286,6 +382,7 @@ mod tests {
         let err = presign_url(
             None,
             "/api/files",
+            "",
             Method::Get,
             "k",
             Duration::from_secs(60),
@@ -300,6 +397,7 @@ mod tests {
             let err = presign_url(
                 Some(secret),
                 "/api/files",
+                "",
                 Method::Get,
                 "k",
                 Duration::from_secs(60),
@@ -312,19 +410,24 @@ mod tests {
 
     #[test]
     fn presigned_url_carries_signed_params() {
-        let url = presign_url(
+        let ticket = presign_url(
             Some(b"secret"),
             "/api/files",
+            "app",
             Method::Put,
             "exports/a b.csv",
             Duration::from_secs(60),
             1024,
         )
         .unwrap();
-        assert!(url.starts_with("/api/files?key="));
-        assert!(url.contains("max_bytes=1024"));
-        assert!(url.contains("sig="));
+        assert!(
+            ticket
+                .url
+                .starts_with("/api/files?v=1&ns=app&method=PUT&key=")
+        );
+        assert!(ticket.url.contains("max_bytes=1024"));
+        assert!(ticket.url.contains("sig="));
         // The space in the key is percent-encoded (NON_ALPHANUMERIC also encodes `.`/`/`).
-        assert!(url.contains("a%20b"));
+        assert!(ticket.url.contains("a%20b"));
     }
 }

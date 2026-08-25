@@ -78,9 +78,8 @@ impl Cron {
     }
 
     /// The most recent matching minute at or before `at` (UTC), or `None` if none falls
-    /// within ~4 years back. Finds the latest *missed* tick on recovery: for a fast cron
-    /// many ticks behind, this is essentially `at` truncated to the minute, so the grace
-    /// check sees a tick only seconds late rather than the oldest one.
+    /// within ~4 years back. Finds the latest missed tick for `run_once` recovery and
+    /// provides the starting point for bounded `catch_up` recovery.
     pub(crate) fn prev_or_at(&self, at: DateTime<Utc>) -> Option<DateTime<Utc>> {
         let mut t = at.with_second(0)?.with_nanosecond(0)?;
         for _ in 0..(4 * 366 * 24 * 60) {

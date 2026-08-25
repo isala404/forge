@@ -1,5 +1,8 @@
 use super::common;
-use super::{Blob, BlobInfo, DEFAULT_CONTENT_TYPE, ListPage, PutOpts};
+use super::{
+    Blob, BlobInfo, BlobSummary, ConditionalGet, DEFAULT_CONTENT_TYPE, ListPage, ProxyPresign,
+    PutOpts, PutPrecondition,
+};
 use crate::error::{ForgeError, Result};
 use crate::obs;
 use crate::types::Cursor;
@@ -153,6 +156,7 @@ fn fs_err(e: std::io::Error) -> ForgeError {
 
 #[async_trait]
 impl Blob for FsBlob {
+    #[allow(clippy::disallowed_methods)]
     async fn put(&self, key: &str, data: Bytes, opts: PutOpts) -> Result<()> {
         let span = tracing::info_span!(
             "forge.blob.put",
@@ -166,6 +170,7 @@ impl Blob for FsBlob {
         obs::instrument("blob", "put", span, async move {
             common::check_key(key)?;
             common::check_put(&data, &opts)?;
+            common::reject_s3_encryption(&opts)?;
             let pk = self.shared.physical(key);
             let etag = sha256_hex(&data);
             let content_type = opts
@@ -193,32 +198,54 @@ impl Blob for FsBlob {
             // sweep's grace window then starts now, so concurrent readers that saw the
             // old row never observe a normal overwrite as missing.
             let mut tx = self.pool.begin().await?;
-            let old_ref = sqlx::query_scalar!(
-                "SELECT data_ref FROM forge_fs_blobs WHERE key = $1 FOR UPDATE",
+            let old = sqlx::query!(
+                "SELECT data_ref, etag FROM forge_fs_blobs WHERE key = $1 FOR UPDATE",
                 pk
             )
             .fetch_optional(&mut *tx)
             .await?;
-            if let Some(old) = old_ref.as_deref()
+            match (&opts.precondition, &old) {
+                (Some(PutPrecondition::CreateOnly), Some(_)) => {
+                    return Err(ForgeError::precondition("blob already exists"));
+                }
+                (Some(PutPrecondition::MatchVersion(expected)), Some(current))
+                    if &current.etag != expected =>
+                {
+                    return Err(ForgeError::precondition("blob version does not match"));
+                }
+                (Some(PutPrecondition::MatchVersion(_)), None) => {
+                    return Err(ForgeError::precondition("blob version does not match"));
+                }
+                _ => {}
+            }
+            if let Some(old) = old.as_ref().map(|row| row.data_ref.as_str())
                 && old != data_ref
             {
                 self.refresh_orphan_grace(old).await?;
             }
-            sqlx::query!(
+            let checksum_sha256 = etag.clone();
+            sqlx::query(
                 "INSERT INTO forge_fs_blobs \
-                   (key, data_ref, content_type, etag, metadata, size, last_modified) \
-                 VALUES ($1, $2, $3, $4, $5, $6, now()) \
+                   (key, data_ref, content_type, etag, metadata, size, last_modified, \
+                    cache_control, content_disposition, checksum_sha256) \
+                 VALUES ($1, $2, $3, $4, $5, $6, now(), $7, $8, $9) \
                  ON CONFLICT (key) DO UPDATE SET \
                    data_ref = EXCLUDED.data_ref, content_type = EXCLUDED.content_type, \
                    etag = EXCLUDED.etag, metadata = EXCLUDED.metadata, \
-                   size = EXCLUDED.size, last_modified = EXCLUDED.last_modified",
-                pk,
-                data_ref,
-                content_type,
-                etag,
-                Json(&opts.metadata) as _,
-                size,
+                   size = EXCLUDED.size, last_modified = EXCLUDED.last_modified, \
+                   cache_control = EXCLUDED.cache_control, \
+                   content_disposition = EXCLUDED.content_disposition, \
+                   checksum_sha256 = EXCLUDED.checksum_sha256",
             )
+            .bind(pk)
+            .bind(data_ref)
+            .bind(content_type)
+            .bind(etag)
+            .bind(Json(&opts.metadata))
+            .bind(size)
+            .bind(opts.cache_control)
+            .bind(opts.content_disposition)
+            .bind(checksum_sha256)
             .execute(&mut *tx)
             .await?;
             tx.commit().await?;
@@ -272,6 +299,42 @@ impl Blob for FsBlob {
         .await
     }
 
+    #[allow(clippy::disallowed_methods)]
+    async fn get_if(
+        &self,
+        key: &str,
+        if_match: Option<&str>,
+        if_none_match: Option<&str>,
+    ) -> Result<ConditionalGet> {
+        common::check_key(key)?;
+        common::check_get_conditions(if_match, if_none_match)?;
+        let row = sqlx::query("SELECT data_ref, etag FROM forge_fs_blobs WHERE key = $1")
+            .bind(self.shared.physical(key))
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some(row) = row else {
+            return Ok(ConditionalGet::Missing);
+        };
+        let etag: String = row.try_get("etag")?;
+        if if_match.is_some_and(|expected| expected != etag) {
+            return Err(ForgeError::precondition("blob read version does not match"));
+        }
+        if if_none_match.is_some_and(|version| version == etag) {
+            return Ok(ConditionalGet::NotModified { etag });
+        }
+        let data_ref: String = row.try_get("data_ref")?;
+        match tokio::fs::read(self.root.join(data_ref)).await {
+            Ok(body) => Ok(ConditionalGet::Found {
+                body: Bytes::from(body),
+                etag,
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(
+                ForgeError::precondition("blob changed during conditional read"),
+            ),
+            Err(error) => Err(fs_err(error)),
+        }
+    }
+
     // Runtime SQL until the offline sqlx metadata is regenerated for the data_ref column.
     #[allow(clippy::disallowed_methods)]
     async fn head(&self, key: &str) -> Result<Option<BlobInfo>> {
@@ -286,7 +349,8 @@ impl Blob for FsBlob {
             common::check_key(key)?;
             let pk = self.shared.physical(key);
             let row = sqlx::query(
-                r#"SELECT data_ref, content_type, etag, size, metadata, last_modified
+                r#"SELECT data_ref, content_type, etag, size, metadata, last_modified,
+                          cache_control, content_disposition, checksum_sha256
                    FROM forge_fs_blobs WHERE key = $1"#,
             )
             .bind(pk)
@@ -305,19 +369,27 @@ impl Blob for FsBlob {
             let metadata: Json<Meta> = row.try_get("metadata")?;
             let last_modified: DateTime<Utc> = row.try_get("last_modified")?;
             tracing::Span::current().record("blob.hit", true);
-            Ok(Some(BlobInfo::new(
-                key.to_string(),
-                u64::try_from(size).unwrap_or(0),
-                row.try_get("content_type")?,
-                row.try_get("etag")?,
-                last_modified.into(),
-                metadata.0,
-            )))
+            Ok(Some(
+                BlobInfo::new(
+                    key.to_string(),
+                    u64::try_from(size).unwrap_or(0),
+                    row.try_get("content_type")?,
+                    row.try_get("etag")?,
+                    last_modified.into(),
+                    metadata.0,
+                )
+                .with_storage_metadata(
+                    row.try_get("cache_control")?,
+                    row.try_get("content_disposition")?,
+                    row.try_get("checksum_sha256")?,
+                    None,
+                ),
+            ))
         })
         .await
     }
 
-    async fn delete(&self, key: &str) -> Result<bool> {
+    async fn delete(&self, key: &str) -> Result<()> {
         let span = tracing::info_span!(
             "forge.blob.delete",
             blob.key_hash = %key_hash(key),
@@ -334,13 +406,11 @@ impl Blob for FsBlob {
             )
             .fetch_optional(&self.pool)
             .await?;
-            let hit = removed.is_some();
-            tracing::Span::current().record("blob.hit", hit);
             if let Some(data_ref) = removed {
                 // Best-effort file removal; an orphaned file is swept later.
                 let _ = tokio::fs::remove_file(self.root.join(&data_ref)).await;
             }
-            Ok(hit)
+            Ok(())
         })
         .await
     }
@@ -363,7 +433,7 @@ impl Blob for FsBlob {
                 r#"SELECT key, data_ref, content_type, etag, size, metadata, last_modified
                    FROM forge_fs_blobs
                    WHERE key LIKE $1 ESCAPE '\' AND ($2::text IS NULL OR key > $2)
-                   ORDER BY key LIMIT $3"#,
+                   ORDER BY key LIMIT $3 + 1"#,
             )
             .bind(pattern)
             .bind(after)
@@ -371,30 +441,30 @@ impl Blob for FsBlob {
             .fetch_all(&self.pool)
             .await?;
 
-            let next = if (rows.len() as i64) < limit_i {
-                None
-            } else {
-                rows.last()
+            let next = if (rows.len() as i64) > limit_i {
+                rows.get(usize::try_from(limit_i - 1).unwrap_or(0))
                     .and_then(|r| r.try_get::<String, _>("key").ok())
                     .map(Cursor::from_token)
+            } else {
+                None
             };
             let mut items = Vec::new();
-            for r in rows {
+            for r in rows
+                .into_iter()
+                .take(usize::try_from(limit_i).unwrap_or(1000))
+            {
                 let data_ref: String = r.try_get("data_ref")?;
                 if !self.data_file_exists(&data_ref).await? {
                     continue;
                 }
                 let key: String = r.try_get("key")?;
                 let size: i64 = r.try_get("size")?;
-                let metadata: Json<Meta> = r.try_get("metadata")?;
                 let last_modified: DateTime<Utc> = r.try_get("last_modified")?;
-                items.push(BlobInfo::new(
+                items.push(BlobSummary::new(
                     self.shared.logical(&key).to_string(),
                     u64::try_from(size).unwrap_or(0),
-                    r.try_get("content_type")?,
                     r.try_get("etag")?,
                     last_modified.into(),
-                    metadata.0,
                 ));
             }
             tracing::Span::current().record("blob.list_returned", items.len());
@@ -403,11 +473,16 @@ impl Blob for FsBlob {
         .await
     }
 
-    async fn presign_upload(&self, key: &str, expires: Duration, max_bytes: u64) -> Result<String> {
+    async fn presign_upload(
+        &self,
+        key: &str,
+        expires: Duration,
+        max_bytes: u64,
+    ) -> Result<ProxyPresign> {
         self.shared.presign_upload(key, expires, max_bytes).await
     }
 
-    async fn presign_download(&self, key: &str, expires: Duration) -> Result<String> {
+    async fn presign_download(&self, key: &str, expires: Duration) -> Result<ProxyPresign> {
         self.shared.presign_download(key, expires).await
     }
 

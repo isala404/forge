@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT data_ref, etag FROM forge_fs_blobs WHERE key = $1 FOR UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "data_ref",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "forge_fs_blobs",
+            "name": "data_ref"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "etag",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "forge_fs_blobs",
+            "name": "etag"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "5ae72b5448f27f8a82ad51b01c789c1088d53ec2dc4067dcf4722552fba142f3"
+}

@@ -2,6 +2,7 @@
 pub(crate) mod embedded;
 mod migrations;
 pub(crate) use migrations::MigrationRunner;
+pub use migrations::{MigrationReport, MigrationState};
 
 use crate::config::DatabaseConfig;
 use crate::error::{ForgeError, Result};
@@ -11,7 +12,7 @@ use std::str::FromStr;
 /// Lowest supported `server_version_num` (PG 17): the supported floor. The SQL itself
 /// only needs PG 14 features (`SKIP LOCKED`, advisory locks, partial indexes,
 /// `gen_random_uuid`), but 17 is the oldest version we test and ship embedded.
-const MIN_SERVER_VERSION_NUM: i32 = 170_000;
+pub(crate) const MIN_SERVER_VERSION_NUM: i32 = 170_000;
 
 /// Returns a probed, ready pool, or a `ForgeError::Config` on any connection or version failure.
 pub(crate) async fn connect(db: &DatabaseConfig) -> Result<sqlx::PgPool> {

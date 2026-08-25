@@ -5,10 +5,24 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum ForgeError {
+    /// Structured operation context added at the public Forge facade. The nested
+    /// error retains its stable category and local source chain.
+    #[error("{source}")]
+    Context {
+        operation: String,
+        backend: Option<String>,
+        #[source]
+        source: Box<ForgeError>,
+    },
+
     /// Misconfiguration: bad connection string, missing migration, malformed option. By
     /// principle 3 this can only occur during `forgelib::Forge::init`. Not retryable.
     #[error("configuration error: {0}")]
     Config(String),
+
+    /// The requested backend-specific capability is absent in the resolved runtime.
+    #[error("not configured: {0}")]
+    NotConfigured(String),
 
     /// Transient backend outage (pool checkout timeout, dropped connection,
     /// Postgres `08xxx`/`57014`/`57P03`). Retryable.
@@ -46,12 +60,63 @@ pub enum ForgeError {
 }
 
 impl ForgeError {
+    /// Add stable low-cardinality operation/backend metadata without changing the category.
+    pub fn with_context(self, operation: impl Into<String>, backend: Option<String>) -> Self {
+        Self::Context {
+            operation: operation.into(),
+            backend,
+            source: Box::new(self),
+        }
+    }
+
+    /// Stable cross-language code.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Context { source, .. } => source.code(),
+            Self::Config(_) => "CONFIG",
+            Self::NotConfigured(_) => "NOT_CONFIGURED",
+            Self::Unavailable(_) => "UNAVAILABLE",
+            Self::NotFound => "NOT_FOUND",
+            Self::Precondition(_) => "PRECONDITION",
+            Self::Limit(_) => "LIMIT",
+            Self::Invalid(_) => "INVALID",
+            Self::Backend { .. } => "BACKEND",
+        }
+    }
+
+    /// Public operation identifier when the error crossed a Forge facade.
+    pub fn operation(&self) -> Option<&str> {
+        match self {
+            Self::Context { operation, .. } => Some(operation),
+            _ => None,
+        }
+    }
+
+    /// Optional resolved backend identifier.
+    pub fn backend_id(&self) -> Option<&str> {
+        match self {
+            Self::Context {
+                backend, source, ..
+            } => backend.as_deref().or_else(|| source.backend_id()),
+            _ => None,
+        }
+    }
+
+    /// Secret-safe display message, independent of structured metadata.
+    pub fn safe_message(&self) -> String {
+        self.to_string()
+    }
+
     pub fn config(msg: impl Into<String>) -> Self {
         Self::Config(msg.into())
     }
 
     pub fn unavailable(msg: impl Into<String>) -> Self {
         Self::Unavailable(msg.into())
+    }
+
+    pub fn not_configured(msg: impl Into<String>) -> Self {
+        Self::NotConfigured(msg.into())
     }
 
     pub fn precondition(msg: impl Into<String>) -> Self {
@@ -92,6 +157,7 @@ impl ForgeError {
     /// Whether retrying the operation might succeed. Part of the contract.
     pub fn is_retryable(&self) -> bool {
         match self {
+            Self::Context { source, .. } => source.is_retryable(),
             Self::Unavailable(_) => true,
             Self::Backend { retryable, .. } => *retryable,
             _ => false,
@@ -152,6 +218,10 @@ mod tests {
             ForgeError::config("bad dsn").to_string(),
             "configuration error: bad dsn"
         );
+        assert_eq!(
+            ForgeError::not_configured("PostgreSQL is unavailable in memory mode").to_string(),
+            "not configured: PostgreSQL is unavailable in memory mode"
+        );
         assert_eq!(ForgeError::NotFound.to_string(), "not found");
         assert_eq!(
             ForgeError::precondition("lease lost").to_string(),
@@ -185,6 +255,7 @@ mod tests {
     fn retryability_matches_contract() {
         assert!(ForgeError::unavailable("x").is_retryable());
         assert!(!ForgeError::NotFound.is_retryable());
+        assert!(!ForgeError::not_configured("x").is_retryable());
         assert!(!ForgeError::invalid("x").is_retryable());
         assert!(!ForgeError::limit("x").is_retryable());
         assert!(!ForgeError::precondition("x").is_retryable());

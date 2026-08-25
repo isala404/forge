@@ -1,11 +1,21 @@
 use crate::error::Result;
 use async_trait::async_trait;
 use std::time::Duration;
+use std::time::SystemTime;
+use uuid::Uuid;
 
 /// Largest allowed bucket name, in bytes. Over => [`crate::error::ForgeError::Limit`].
 pub const MAX_BUCKET_BYTES: usize = 128;
 /// Largest allowed subject key, in bytes. Over => [`crate::error::ForgeError::Limit`].
 pub const MAX_KEY_BYTES: usize = 512;
+/// Largest portable bucket capacity. PostgreSQL stores exact sliding-window
+/// counters as signed 32-bit integers.
+pub const MAX_UNITS: u32 = i32::MAX as u32;
+pub const MAX_RESERVATION_TTL: Duration = Duration::from_secs(60 * 60);
+
+pub fn parse_reservation_id(value: &str) -> Result<Uuid> {
+    Uuid::parse_str(value).map_err(|_| crate::ForgeError::invalid("reservation id must be a UUID"))
+}
 
 /// Rate-limit algorithm.
 #[non_exhaustive]
@@ -84,6 +94,24 @@ pub struct Decision {
     pub retry_after: Option<Duration>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReservationState {
+    Pending,
+    Committed,
+    Released,
+    Expired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reservation {
+    pub id: Uuid,
+    pub reserved_units: u32,
+    pub expires_at: SystemTime,
+    pub state: ReservationState,
+    pub committed_units: Option<u32>,
+}
+
 impl Decision {
     /// Construct a decision. For backend implementors; app code receives this from
     /// [`RateLimit::check`].
@@ -128,7 +156,46 @@ pub trait RateLimit: Send + Sync {
         key: &str,
         limit: Limit,
         fail: FailMode,
+    ) -> Result<Decision> {
+        self.check_cost_with(bucket, key, limit, 1, fail).await
+    }
+
+    /// Weighted atomic check. `cost` must be positive and no greater than capacity.
+    async fn check_cost(
+        &self,
+        bucket: &str,
+        key: &str,
+        limit: Limit,
+        cost: u32,
+    ) -> Result<Decision> {
+        self.check_cost_with(bucket, key, limit, cost, FailMode::Default)
+            .await
+    }
+
+    async fn check_cost_with(
+        &self,
+        bucket: &str,
+        key: &str,
+        limit: Limit,
+        cost: u32,
+        fail: FailMode,
     ) -> Result<Decision>;
+
+    /// Reserve an upper bound of abstract integer units. Expiry automatically releases it.
+    async fn reserve(
+        &self,
+        bucket: &str,
+        key: &str,
+        limit: Limit,
+        units: u32,
+        ttl: Duration,
+    ) -> Result<Option<Reservation>>;
+
+    /// Commit actual usage (`0..=reserved_units`). Repeating the same commit is idempotent.
+    async fn commit(&self, reservation_id: Uuid, actual_units: u32) -> Result<Reservation>;
+
+    /// Release a pending reservation. Repeating release is idempotent.
+    async fn release(&self, reservation_id: Uuid) -> Result<Reservation>;
 }
 
 mod algo;

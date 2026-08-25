@@ -65,24 +65,29 @@ impl std::fmt::Debug for DatabaseConfig {
     }
 }
 
-/// Which backend powers one of the seven non-blob primitives. Blob has its own
-/// richer selector ([`BlobBackendConfig`], since it carries a filesystem root).
+/// The complete Forge runtime profile. A profile selects every core primitive at once;
+/// Forge does not expose a configuration-driven per-primitive backend matrix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum Backend {
-    /// Postgres: the durable default. Survives restarts; shared across processes and
-    /// replicas through the database.
+pub enum RuntimeMode {
+    /// The normal durable, cross-process production profile.
     #[default]
     Postgres,
-    /// An in-process accelerator. Fast and dependency-free, but not durable and not
-    /// shared across processes or replicas: state lives only in this process's memory
-    /// and is lost on restart.
+    /// Explicit database-free state for tests and local development. Process-local and
+    /// discarded when the last handle is dropped.
     Memory,
 }
 
-/// Which backend stores blob bytes. Metadata always lives in Postgres; this only
-/// chooses where the object body goes. An `enum` so a later S3/R2/GCS backend is a
-/// non-breaking variant add. Filesystem keeps large objects out of the WAL but makes
-/// `put` non-atomic with app SQL and needs a shared mount for multi-replica deploys.
+/// The declared deployment environment used to guard unsafe profile choices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Environment {
+    #[default]
+    Development,
+    Test,
+    Production,
+}
+
+/// Which backend stores blob objects. Filesystem keeps large bodies out of the WAL but
+/// makes `put` non-atomic with app SQL and needs a shared mount for multi-replica deploys.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) enum BlobBackendConfig {
     /// Object bytes in the `forge_blobs.data` `BYTEA` column.
@@ -95,6 +100,50 @@ pub(crate) enum BlobBackendConfig {
     },
     /// Object bytes in process memory. Not durable, not shared across replicas.
     Memory,
+    /// Object bytes and metadata in an S3-compatible bucket.
+    S3(S3BlobConfig),
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct S3BlobConfig {
+    pub bucket: String,
+    pub region: String,
+    pub endpoint: Option<String>,
+    pub prefix: String,
+    pub access_key: Option<String>,
+    pub secret_key: Option<String>,
+    pub session_token: Option<String>,
+    pub path_style: bool,
+    pub connect_timeout: Duration,
+    pub request_timeout: Duration,
+    pub max_retries: u32,
+}
+
+impl std::fmt::Debug for S3BlobConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3BlobConfig")
+            .field("bucket", &self.bucket)
+            .field("region", &self.region)
+            .field("endpoint", &self.endpoint)
+            .field("prefix", &self.prefix)
+            .field(
+                "access_key",
+                &self.access_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "secret_key",
+                &self.secret_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "session_token",
+                &self.session_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("path_style", &self.path_style)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("request_timeout", &self.request_timeout)
+            .field("max_retries", &self.max_retries)
+            .finish()
+    }
 }
 
 /// The parsed `forge.toml`, holding every resolved customizable point. Constructed only by
@@ -104,6 +153,17 @@ pub(crate) enum BlobBackendConfig {
 ///
 /// `Debug` is hand-written to redact the password-bearing connection string; never derive it.
 pub(crate) struct ForgeConfig {
+    /// The complete runtime profile. PostgreSQL is the default; memory must be explicit.
+    pub mode: RuntimeMode,
+    /// Deployment environment used to reject accidental memory state in production.
+    pub environment: Environment,
+    /// Explicit escape hatch for intentionally process-local production experiments.
+    pub allow_memory_in_production: bool,
+    /// Whether initialization applies pending migrations. Defaults to true outside
+    /// production and false in production; `[postgres].auto_migrate` overrides it.
+    pub auto_migrate: bool,
+    /// Maximum time an explicit or startup migration waits for the advisory lock.
+    pub migration_lock_timeout: Duration,
     /// Connection string for Forge's system database: a Postgres database Forge fully
     /// owns, separate from your application's own. Forge creates and migrates its `forge_*`
     /// tables here at [`Forge::init`](crate::Forge::init); nothing else should write to it.
@@ -143,9 +203,17 @@ pub(crate) struct ForgeConfig {
     /// Window within which a repeated `enqueue` `dedup_id` is de-duplicated.
     /// Default 5 minutes (SQS FIFO precedent).
     pub queue_dedup_window: Duration,
-    /// How long completed (`done`) jobs are retained before the maintenance
-    /// sweep purges them. Default 7 days.
+    /// How long terminal status rows remain queryable. Default 7 days.
     pub queue_retention: Duration,
+    /// How long succeeded job status remains queryable. Defaults to terminal retention.
+    pub queue_succeeded_retention: Duration,
+    /// How long dead job status remains queryable. Defaults to terminal retention.
+    pub queue_dead_retention: Duration,
+    /// How long cancelled job status remains queryable. Defaults to terminal retention.
+    pub queue_cancelled_retention: Duration,
+    /// How long terminal payload bytes remain before maintenance clears them while
+    /// preserving status metadata. Default 24 hours.
+    pub queue_payload_retention: Duration,
     /// Whether `ratelimit().check` fails open (allow + warn) on a backend error.
     /// Default true; set false for abuse- or payment-sensitive buckets.
     pub ratelimit_fail_open: bool,
@@ -158,13 +226,6 @@ pub(crate) struct ForgeConfig {
     pub blob_base_url: String,
     /// Which backend stores blob bytes. Default [`BlobBackendConfig::Postgres`].
     pub blob_backend: BlobBackendConfig,
-    /// The backend used by any non-blob primitive without an explicit `[backends]` entry.
-    /// Default [`Backend::Postgres`]. (Blob is selected via `blob_backend`, not this.)
-    pub default_backend: Backend,
-    /// Per-primitive backend overrides for the seven non-blob primitives. A primitive
-    /// absent here falls back to `default_backend`. Blob is excluded: it carries its own
-    /// `blob_backend` so there is a single source of truth for where blob bytes live.
-    pub backends: HashMap<Primitive, Backend>,
     /// Per-feature database overrides. A primitive listed here gets its own dedicated
     /// connection pool to the configured Postgres database, isolated from the system pool
     /// and every other feature, so one feature exhausting its connections can't starve the
@@ -178,6 +239,11 @@ pub(crate) struct ForgeConfig {
 impl Default for ForgeConfig {
     fn default() -> Self {
         Self {
+            mode: RuntimeMode::Postgres,
+            environment: Environment::Development,
+            allow_memory_in_production: false,
+            auto_migrate: true,
+            migration_lock_timeout: Duration::from_secs(30),
             postgres: String::new(),
             embedded: false,
             embedded_dir: PathBuf::from(".forge/pg"),
@@ -189,12 +255,14 @@ impl Default for ForgeConfig {
             kv_namespace: String::new(),
             queue_dedup_window: Duration::from_secs(5 * 60),
             queue_retention: Duration::from_secs(7 * 24 * 60 * 60),
+            queue_succeeded_retention: Duration::from_secs(7 * 24 * 60 * 60),
+            queue_dead_retention: Duration::from_secs(7 * 24 * 60 * 60),
+            queue_cancelled_retention: Duration::from_secs(7 * 24 * 60 * 60),
+            queue_payload_retention: Duration::from_secs(24 * 60 * 60),
             ratelimit_fail_open: true,
             blob_signing_secret: None,
             blob_base_url: "/api/files".to_string(),
             blob_backend: BlobBackendConfig::Postgres,
-            default_backend: Backend::Postgres,
-            backends: HashMap::new(),
             feature_databases: HashMap::new(),
         }
     }
@@ -255,14 +323,23 @@ fn parse_primitive(name: &str) -> Result<Primitive> {
         })
 }
 
-/// Parse a backend selector (`postgres`/`memory`, case-insensitive) for the TOML loader.
-/// `name` is the source key for a precise error.
-fn parse_backend(name: &str, val: &str) -> Result<Backend> {
+fn parse_mode(name: &str, val: &str) -> Result<RuntimeMode> {
     match val.trim().to_ascii_lowercase().as_str() {
-        "postgres" => Ok(Backend::Postgres),
-        "memory" => Ok(Backend::Memory),
+        "postgres" => Ok(RuntimeMode::Postgres),
+        "memory" => Ok(RuntimeMode::Memory),
         other => Err(ForgeError::config(format!(
             "{name} must be 'postgres' or 'memory', got {other:?}"
+        ))),
+    }
+}
+
+fn parse_environment(val: &str) -> Result<Environment> {
+    match val.trim().to_ascii_lowercase().as_str() {
+        "development" => Ok(Environment::Development),
+        "test" => Ok(Environment::Test),
+        "production" => Ok(Environment::Production),
+        other => Err(ForgeError::config(format!(
+            "forge.environment must be 'development', 'test', or 'production', got {other:?}"
         ))),
     }
 }
@@ -337,26 +414,7 @@ struct TomlConfig {
     #[serde(default)]
     blob: TomlBlob,
     #[serde(default)]
-    backends: TomlBackends,
-    #[serde(default)]
     databases: HashMap<String, TomlDatabase>,
-}
-
-/// The `[backends]` table: a `default` plus one optional key per primitive, each
-/// `postgres` or `memory`. `blob` here maps onto `blob_backend` (the single source of
-/// truth for blob); a filesystem blob still goes through `[blob] backend = "fs"`.
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TomlBackends {
-    default: Option<String>,
-    kv: Option<String>,
-    queue: Option<String>,
-    blob: Option<String>,
-    auth: Option<String>,
-    config: Option<String>,
-    ratelimit: Option<String>,
-    schedule: Option<String>,
-    pubsub: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -370,19 +428,28 @@ struct TomlPostgres {
     statement_timeout_ms: Option<u64>,
     lock_timeout_ms: Option<u64>,
     idle_in_transaction_timeout_ms: Option<u64>,
+    auto_migrate: Option<bool>,
+    migration_lock_timeout_secs: Option<f64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TomlForge {
     namespace: Option<String>,
+    mode: Option<String>,
+    environment: Option<String>,
+    allow_memory_in_production: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TomlQueue {
     dedup_window_secs: Option<f64>,
-    retention_secs: Option<f64>,
+    terminal_retention_secs: Option<f64>,
+    succeeded_retention_secs: Option<f64>,
+    dead_retention_secs: Option<f64>,
+    cancelled_retention_secs: Option<f64>,
+    payload_retention_secs: Option<f64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -398,6 +465,17 @@ struct TomlBlob {
     fs_root: Option<String>,
     signing_secret: Option<String>,
     base_url: Option<String>,
+    bucket: Option<String>,
+    region: Option<String>,
+    endpoint: Option<String>,
+    prefix: Option<String>,
+    access_key: Option<String>,
+    secret_key: Option<String>,
+    session_token: Option<String>,
+    path_style: Option<bool>,
+    connect_timeout_secs: Option<f64>,
+    request_timeout_secs: Option<f64>,
+    max_retries: Option<u32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -444,7 +522,24 @@ impl ForgeConfig {
     /// Map a parsed TOML document onto the config. Only keys present in the file are
     /// touched; everything else keeps its default.
     fn apply_toml(&mut self, t: TomlConfig) -> Result<()> {
+        let forge = t.forge;
+        if let Some(mode) = forge.mode {
+            self.mode = parse_mode("forge.mode", &mode)?;
+        }
+        if let Some(environment) = forge.environment {
+            self.environment = parse_environment(&environment)?;
+        }
+        if let Some(allow) = forge.allow_memory_in_production {
+            self.allow_memory_in_production = allow;
+        }
+        if let Some(ns) = forge.namespace {
+            self.kv_namespace = ns;
+        }
+
         let p = t.postgres;
+        self.auto_migrate = p
+            .auto_migrate
+            .unwrap_or(self.environment != Environment::Production);
         if let Some(url) = p.url {
             self.postgres = url;
         }
@@ -469,15 +564,30 @@ impl ForgeConfig {
         if let Some(ms) = p.idle_in_transaction_timeout_ms {
             self.idle_in_transaction_timeout = Duration::from_millis(ms);
         }
-
-        if let Some(ns) = t.forge.namespace {
-            self.kv_namespace = ns;
+        if let Some(secs) = p.migration_lock_timeout_secs {
+            self.migration_lock_timeout = dur_secs("postgres.migration_lock_timeout_secs", secs)?;
         }
+
         if let Some(secs) = t.queue.dedup_window_secs {
             self.queue_dedup_window = dur_secs("queue.dedup_window_secs", secs)?;
         }
-        if let Some(secs) = t.queue.retention_secs {
-            self.queue_retention = dur_secs("queue.retention_secs", secs)?;
+        if let Some(secs) = t.queue.terminal_retention_secs {
+            self.queue_retention = dur_secs("queue.terminal_retention_secs", secs)?;
+            self.queue_succeeded_retention = self.queue_retention;
+            self.queue_dead_retention = self.queue_retention;
+            self.queue_cancelled_retention = self.queue_retention;
+        }
+        if let Some(secs) = t.queue.succeeded_retention_secs {
+            self.queue_succeeded_retention = dur_secs("queue.succeeded_retention_secs", secs)?;
+        }
+        if let Some(secs) = t.queue.dead_retention_secs {
+            self.queue_dead_retention = dur_secs("queue.dead_retention_secs", secs)?;
+        }
+        if let Some(secs) = t.queue.cancelled_retention_secs {
+            self.queue_cancelled_retention = dur_secs("queue.cancelled_retention_secs", secs)?;
+        }
+        if let Some(secs) = t.queue.payload_retention_secs {
+            self.queue_payload_retention = dur_secs("queue.payload_retention_secs", secs)?;
         }
         if let Some(b) = t.ratelimit.fail_open {
             self.ratelimit_fail_open = b;
@@ -502,34 +612,49 @@ impl ForgeConfig {
                     })?;
                     self.blob_backend = BlobBackendConfig::Filesystem { root: root.into() };
                 }
+                "s3" => {
+                    let bucket = blob.bucket.ok_or_else(|| {
+                        ForgeError::config("blob.backend = \"s3\" requires blob.bucket")
+                    })?;
+                    let access_key = blob.access_key;
+                    let secret_key = blob.secret_key;
+                    if access_key.is_some() != secret_key.is_some() {
+                        return Err(ForgeError::config(
+                            "blob.access_key and blob.secret_key must be configured together",
+                        ));
+                    }
+                    self.blob_backend = BlobBackendConfig::S3(S3BlobConfig {
+                        bucket,
+                        region: blob.region.unwrap_or_else(|| "us-east-1".to_string()),
+                        endpoint: blob.endpoint,
+                        prefix: blob
+                            .prefix
+                            .unwrap_or_default()
+                            .trim_matches('/')
+                            .to_string(),
+                        access_key,
+                        secret_key,
+                        session_token: blob.session_token,
+                        path_style: blob.path_style.unwrap_or(false),
+                        connect_timeout: dur_secs(
+                            "blob.connect_timeout_secs",
+                            blob.connect_timeout_secs.unwrap_or(3.0),
+                        )?,
+                        request_timeout: dur_secs(
+                            "blob.request_timeout_secs",
+                            blob.request_timeout_secs.unwrap_or(30.0),
+                        )?,
+                        max_retries: blob.max_retries.unwrap_or(3).min(10),
+                    });
+                }
                 other => {
                     return Err(ForgeError::config(format!(
-                        "blob.backend must be 'postgres', 'memory', or 'fs', got {other:?}"
+                        "blob.backend must be 'postgres', 'memory', 'fs', or 's3', got {other:?}"
                     )));
                 }
             }
-        }
-
-        // [backends]: a default plus per-primitive overrides. `blob` here folds into
-        // blob_backend (memory/postgres only; a filesystem blob comes from [blob]).
-        let tb = t.backends;
-        if let Some(d) = &tb.default {
-            self.default_backend = parse_backend("backends.default", d)?;
-        }
-        for (p, val) in [
-            (Primitive::Kv, &tb.kv),
-            (Primitive::Queue, &tb.queue),
-            (Primitive::Blob, &tb.blob),
-            (Primitive::Auth, &tb.auth),
-            (Primitive::Config, &tb.config),
-            (Primitive::RateLimit, &tb.ratelimit),
-            (Primitive::Schedule, &tb.schedule),
-            (Primitive::Pubsub, &tb.pubsub),
-        ] {
-            if let Some(v) = val {
-                let b = parse_backend(&format!("backends.{}", p.as_str()), v)?;
-                self.set_backend(p, b);
-            }
+        } else if self.mode == RuntimeMode::Memory {
+            self.blob_backend = BlobBackendConfig::Memory;
         }
 
         // [databases.<primitive>] gives one feature its own pool/server. Pool sizing and
@@ -562,19 +687,6 @@ impl ForgeConfig {
         Ok(())
     }
 
-    /// The single translation point for a per-primitive backend choice: blob folds into
-    /// `blob_backend`, every other primitive lands in the `backends` map.
-    fn set_backend(&mut self, p: Primitive, b: Backend) {
-        if p == Primitive::Blob {
-            self.blob_backend = match b {
-                Backend::Memory => BlobBackendConfig::Memory,
-                Backend::Postgres => BlobBackendConfig::Postgres,
-            };
-        } else {
-            self.backends.insert(p, b);
-        }
-    }
-
     /// The system database: the one Forge owns and every non-overridden feature uses, built
     /// from the top-level `postgres` / `max_connections` / `acquire_timeout` fields.
     pub(crate) fn system_database(&self) -> DatabaseConfig {
@@ -596,15 +708,6 @@ impl ForgeConfig {
             .unwrap_or_else(|| self.system_database())
     }
 
-    /// The resolved backend for a non-blob primitive: its override if present, else
-    /// `default_backend`. Blob is resolved through `blob_backend`, not this.
-    pub(crate) fn backend_for(&self, p: Primitive) -> Backend {
-        self.backends
-            .get(&p)
-            .copied()
-            .unwrap_or(self.default_backend)
-    }
-
     /// Whether init should boot an embedded server: the flag is set and no explicit
     /// connection string outranks it.
     pub(crate) fn use_embedded(&self) -> bool {
@@ -614,27 +717,52 @@ impl ForgeConfig {
     /// Validate the statically-checkable fields with a precise message;
     /// connection/migration failures surface later in `Forge::init`.
     pub(crate) fn validate(&self) -> Result<()> {
-        // The system database is always migrated at init, so it always needs >= 2.
-        // With an embedded server the DSN is minted at init, so only the pool shape
-        // is statically checkable.
-        if self.use_embedded() {
-            validate_pool_shape(&self.system_database(), true, "postgres")?;
+        if self.mode == RuntimeMode::Memory {
+            if self.environment == Environment::Production && !self.allow_memory_in_production {
+                return Err(ForgeError::config(
+                    "forge.mode = \"memory\" is disabled in production; use PostgreSQL or set forge.allow_memory_in_production = true explicitly",
+                ));
+            }
+            if !self.postgres.trim().is_empty() || self.embedded {
+                return Err(ForgeError::config(
+                    "memory mode cannot configure postgres.url or postgres.embedded",
+                ));
+            }
+            if !self.feature_databases.is_empty() {
+                return Err(ForgeError::config(
+                    "memory mode cannot configure per-primitive PostgreSQL databases",
+                ));
+            }
+            if !matches!(self.blob_backend, BlobBackendConfig::Memory) {
+                return Err(ForgeError::config(
+                    "memory mode requires blob.backend = \"memory\" (or omit blob.backend)",
+                ));
+            }
         } else {
-            validate_database(&self.system_database(), true, "postgres")?;
+            if matches!(self.blob_backend, BlobBackendConfig::Memory) {
+                return Err(ForgeError::config(
+                    "PostgreSQL mode cannot select an independently memory-backed blob store; use forge.mode = \"memory\" for the complete process-local profile",
+                ));
+            }
+            // Automatic migration holds one pool connection for the advisory lock while
+            // another applies SQL. Explicit migration uses its own two-connection pool.
+            // With an embedded server the DSN is minted at init, so only the pool shape
+            // is statically checkable.
+            if self.use_embedded() {
+                validate_pool_shape(&self.system_database(), self.auto_migrate, "postgres")?;
+            } else {
+                validate_database(&self.system_database(), self.auto_migrate, "postgres")?;
+            }
+            for (feature, db) in &self.feature_databases {
+                // A feature override on the same target as the system database is
+                // deduplicated in `init` (the system pool migrates it), so it never holds the
+                // migration lock and a size-1 bulkhead pool is legitimate. An override on a
+                // distinct target is migrated through its own pool and needs >= 2.
+                let migrates = self.auto_migrate && db.postgres != self.postgres;
+                validate_database(db, migrates, feature.as_str())?;
+            }
         }
-        for (feature, db) in &self.feature_databases {
-            // A feature override on the same target as the system database is
-            // deduplicated in `init` (the system pool migrates it), so it never holds the
-            // migration lock and a size-1 bulkhead pool is legitimate. An override on a
-            // distinct target is migrated through its own pool and needs >= 2.
-            let migrates = db.postgres != self.postgres;
-            validate_database(db, migrates, feature.as_str())?;
-        }
-        if self.kv_namespace.contains(':') {
-            return Err(ForgeError::config(
-                "namespace must not contain ':' (it is the reserved namespace separator)",
-            ));
-        }
+        crate::util::validate_namespace(&self.kv_namespace)?;
         if self
             .blob_signing_secret
             .as_deref()
@@ -651,6 +779,17 @@ impl ForgeConfig {
                 "filesystem blob backend requires a non-empty root directory",
             ));
         }
+        if let BlobBackendConfig::S3(config) = &self.blob_backend {
+            if config.bucket.trim().is_empty() {
+                return Err(ForgeError::config("S3 blob bucket must not be empty"));
+            }
+            if config.region.trim().is_empty() {
+                return Err(ForgeError::config("S3 blob region must not be empty"));
+            }
+            if config.connect_timeout.is_zero() || config.request_timeout.is_zero() {
+                return Err(ForgeError::config("S3 blob timeouts must be positive"));
+            }
+        }
         Ok(())
     }
 }
@@ -658,6 +797,14 @@ impl ForgeConfig {
 impl std::fmt::Debug for ForgeConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ForgeConfig")
+            .field("mode", &self.mode)
+            .field("environment", &self.environment)
+            .field(
+                "allow_memory_in_production",
+                &self.allow_memory_in_production,
+            )
+            .field("auto_migrate", &self.auto_migrate)
+            .field("migration_lock_timeout", &self.migration_lock_timeout)
             .field("postgres", &"<redacted>")
             .field("embedded", &self.embedded)
             .field("embedded_dir", &self.embedded_dir)
@@ -672,6 +819,10 @@ impl std::fmt::Debug for ForgeConfig {
             .field("kv_namespace", &self.kv_namespace)
             .field("queue_dedup_window", &self.queue_dedup_window)
             .field("queue_retention", &self.queue_retention)
+            .field("queue_payload_retention", &self.queue_payload_retention)
+            .field("queue_succeeded_retention", &self.queue_succeeded_retention)
+            .field("queue_dead_retention", &self.queue_dead_retention)
+            .field("queue_cancelled_retention", &self.queue_cancelled_retention)
             .field("ratelimit_fail_open", &self.ratelimit_fail_open)
             .field(
                 "blob_signing_secret",
@@ -679,8 +830,6 @@ impl std::fmt::Debug for ForgeConfig {
             )
             .field("blob_base_url", &self.blob_base_url)
             .field("blob_backend", &self.blob_backend)
-            .field("default_backend", &self.default_backend)
-            .field("backends", &self.backends)
             .field("feature_databases", &self.feature_databases)
             .finish()
     }
@@ -833,6 +982,10 @@ mod tests {
 
             [queue]
             dedup_window_secs = 120
+            payload_retention_secs = 3600
+            terminal_retention_secs = 7200
+            dead_retention_secs = 14400
+            cancelled_retention_secs = 21600
 
             [ratelimit]
             fail_open = false
@@ -854,6 +1007,11 @@ mod tests {
         assert_eq!(cfg.statement_timeout, Duration::from_millis(9000));
         assert_eq!(cfg.kv_namespace, "myapp");
         assert_eq!(cfg.queue_dedup_window, Duration::from_secs(120));
+        assert_eq!(cfg.queue_payload_retention, Duration::from_secs(3600));
+        assert_eq!(cfg.queue_retention, Duration::from_secs(7200));
+        assert_eq!(cfg.queue_succeeded_retention, Duration::from_secs(7200));
+        assert_eq!(cfg.queue_dead_retention, Duration::from_secs(14400));
+        assert_eq!(cfg.queue_cancelled_retention, Duration::from_secs(21600));
         assert!(!cfg.ratelimit_fail_open);
         assert_eq!(
             cfg.blob_backend,
@@ -900,15 +1058,28 @@ mod tests {
     }
 
     #[test]
-    fn backends_table_selects_per_primitive() {
-        let cfg = ForgeConfig::from_toml_str(
-            "[postgres]\nurl = \"postgres://x/y\"\n\
-             [backends]\ndefault = \"memory\"\nqueue = \"postgres\"\nblob = \"memory\"\n",
+    fn memory_mode_is_one_explicit_profile() {
+        let cfg =
+            ForgeConfig::from_toml_str("[forge]\nmode = \"memory\"\nenvironment = \"test\"\n")
+                .unwrap();
+        assert_eq!(cfg.mode, RuntimeMode::Memory);
+        assert_eq!(cfg.blob_backend, BlobBackendConfig::Memory);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn memory_mode_rejects_production_and_database_combinations() {
+        let production = ForgeConfig::from_toml_str(
+            "[forge]\nmode = \"memory\"\nenvironment = \"production\"\n",
         )
         .unwrap();
-        assert_eq!(cfg.backend_for(Primitive::Kv), Backend::Memory);
-        assert_eq!(cfg.backend_for(Primitive::Queue), Backend::Postgres);
-        assert_eq!(cfg.blob_backend, BlobBackendConfig::Memory);
+        assert!(matches!(production.validate(), Err(ForgeError::Config(_))));
+
+        let mixed = ForgeConfig::from_toml_str(
+            "[forge]\nmode = \"memory\"\n[postgres]\nurl = \"postgres://x/y\"\n",
+        )
+        .unwrap();
+        assert!(matches!(mixed.validate(), Err(ForgeError::Config(_))));
     }
 
     #[test]

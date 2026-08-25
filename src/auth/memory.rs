@@ -1,16 +1,19 @@
 use super::{
-    ApiKey, ApiKeyInfo, ApiKeySecret, Auth, MAX_ID_BYTES, MAX_LABEL_BYTES, MAX_PASSWORD_BYTES,
-    MAX_PHC_BYTES, MAX_PURPOSE_BYTES, OneTimeToken, PhcString, Session, SessionOpts, SessionToken,
+    ApiKey, ApiKeyInfo, ApiKeyOpts, ApiKeySecret, Auth, MAX_API_KEY_METADATA_BYTES,
+    MAX_API_KEY_SCOPES, MAX_ID_BYTES, MAX_LABEL_BYTES, MAX_PASSWORD_BYTES, MAX_PHC_BYTES,
+    MAX_PURPOSE_BYTES, MAX_TOKEN_PAYLOAD_BYTES, OneTimeToken, PhcString, Session, SessionOpts,
+    SessionToken, TokenConsumption,
 };
 use crate::backend::{BackendLifecycle, Primitive};
+use crate::clock::{Clock, RandomSource};
 use crate::error::{ForgeError, Result};
 use crate::util::{hex, namespaced, sha256_hex};
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier};
 use async_trait::async_trait;
-use rand_core::{OsRng, RngCore};
+use bytes::Bytes;
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime};
 use uuid::Uuid;
 
@@ -41,10 +44,17 @@ const MAX_ABSOLUTE_SECS: f64 = 10.0 * 365.0 * 24.0 * 60.0 * 60.0;
 const KEY_PREFIX: &str = "fk_";
 
 /// A fresh 256-bit random token rendered as hex.
-fn random_token() -> String {
+fn random_token(random: &dyn RandomSource) -> String {
     let mut buf = [0u8; TOKEN_BYTES];
-    OsRng.fill_bytes(&mut buf);
+    random.fill(&mut buf);
     hex(&buf)
+}
+
+fn random_salt(random: &dyn RandomSource) -> Result<SaltString> {
+    let mut bytes = [0u8; 16];
+    random.fill(&mut bytes);
+    SaltString::encode_b64(&bytes)
+        .map_err(|error| ForgeError::backend(format!("salt generation failed: {error}")))
 }
 
 fn check_id(id: &str) -> Result<()> {
@@ -153,6 +163,9 @@ struct ApiKeyRecord {
     id: String,
     owner_id: String,
     label: String,
+    expires_at: Option<SystemTime>,
+    scopes: Vec<String>,
+    metadata: HashMap<String, String>,
 }
 
 /// A stored one-time token. The map key is the token's SHA-256; the plaintext is never kept.
@@ -160,6 +173,7 @@ struct TokenRecord {
     user_id: String,
     purpose: String,
     expires_at: SystemTime,
+    payload: Bytes,
 }
 
 /// In-process [`Auth`]. Passwords are stateless; sessions and API keys are held as
@@ -172,15 +186,32 @@ pub(crate) struct MemAuth {
     /// stored digest so an app sharing a process can neither validate nor revoke another
     /// app's sessions or keys. Empty = the unnamespaced app.
     namespace: String,
+    clock: Arc<dyn Clock>,
+    random: Arc<dyn RandomSource>,
 }
 
 impl MemAuth {
+    #[cfg(test)]
     pub(crate) fn new(namespace: String) -> Self {
+        Self::with_dependencies(
+            namespace,
+            Arc::new(crate::clock::SystemClock::new()),
+            Arc::new(crate::clock::SystemRandom),
+        )
+    }
+
+    pub(crate) fn with_dependencies(
+        namespace: String,
+        clock: Arc<dyn Clock>,
+        random: Arc<dyn RandomSource>,
+    ) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
             api_keys: Mutex::new(HashMap::new()),
             tokens: Mutex::new(HashMap::new()),
             namespace,
+            clock,
+            random,
         }
     }
 
@@ -192,15 +223,19 @@ impl MemAuth {
 
     /// Drop expired sessions and one-time tokens, mirroring `PgAuth::sweep`. Reads
     /// already treat them as absent; this reclaims the memory. Returns how many were
-    /// purged. API keys never expire, so they are untouched.
+    /// purged.
     pub(crate) fn purge_expired(&self) -> u64 {
-        let now = SystemTime::now();
+        let now = self.clock.now();
         let mut purged = {
             let mut sessions = lock(&self.sessions);
             let before = sessions.len();
             sessions.retain(|_, rec| rec.is_live(now));
             (before - sessions.len()) as u64
         };
+        let mut api_keys = lock(&self.api_keys);
+        let before = api_keys.len();
+        api_keys.retain(|_, record| record.expires_at.is_none_or(|expires| expires > now));
+        purged += (before - api_keys.len()) as u64;
         let mut tokens = lock(&self.tokens);
         let before = tokens.len();
         tokens.retain(|_, rec| rec.expires_at > now);
@@ -209,22 +244,44 @@ impl MemAuth {
     }
 }
 
+fn check_api_key_opts(opts: &ApiKeyOpts) -> Result<()> {
+    if opts.expires_in.is_some_and(|duration| duration.is_zero()) {
+        return Err(ForgeError::invalid("API key expiry must be positive"));
+    }
+    if opts.scopes.len() > MAX_API_KEY_SCOPES
+        || opts
+            .scopes
+            .iter()
+            .any(|scope| scope.is_empty() || scope.len() > 128)
+    {
+        return Err(ForgeError::limit("API key scopes exceed their bounds"));
+    }
+    let metadata_bytes = serde_json::to_vec(&opts.metadata).map_err(|error| {
+        ForgeError::backend_with("API key metadata could not be encoded", false, error)
+    })?;
+    if metadata_bytes.len() > MAX_API_KEY_METADATA_BYTES {
+        return Err(ForgeError::limit("API key metadata exceeds 4096 bytes"));
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl Auth for MemAuth {
     async fn hash_password(&self, plain: &str) -> Result<PhcString> {
         check_password(plain)?;
         let owned = plain.to_string();
         let argon = forge_argon2()?;
+        let random = self.random.clone();
         // argon2 is CPU-heavy; keep it off the async runtime threads.
-        let phc = tokio::task::spawn_blocking(move || {
-            let salt = SaltString::generate(&mut OsRng);
+        let phc = tokio::task::spawn_blocking(move || -> Result<String> {
+            let salt = random_salt(random.as_ref())?;
             argon
                 .hash_password(owned.as_bytes(), &salt)
                 .map(|h| h.to_string())
+                .map_err(|error| ForgeError::backend(format!("argon2 hashing failed: {error}")))
         })
         .await
-        .map_err(|e| ForgeError::backend(format!("hash task failed: {e}")))?
-        .map_err(|e| ForgeError::backend(format!("argon2 hashing failed: {e}")))?;
+        .map_err(|e| ForgeError::backend(format!("hash task failed: {e}")))??;
         Ok(PhcString::new(phc))
     }
 
@@ -270,9 +327,9 @@ impl Auth for MemAuth {
     async fn create_session(&self, user_id: &str, opts: SessionOpts) -> Result<SessionToken> {
         check_id(user_id)?;
         check_session_opts(&opts)?;
-        let token = random_token();
+        let token = random_token(self.random.as_ref());
         let token_hash = sha256_hex(token.as_bytes());
-        let now = SystemTime::now();
+        let now = self.clock.now();
         let record = SessionRecord {
             user_id: user_id.to_string(),
             created_at: now,
@@ -286,7 +343,7 @@ impl Auth for MemAuth {
 
     async fn validate_session(&self, token: &str) -> Result<Option<Session>> {
         let pk = self.physical(&sha256_hex(token.as_bytes()));
-        let now = SystemTime::now();
+        let now = self.clock.now();
         let mut sessions = lock(&self.sessions);
         match sessions.get_mut(&pk) {
             Some(rec) if rec.is_live(now) => {
@@ -318,16 +375,31 @@ impl Auth for MemAuth {
     }
 
     async fn create_api_key(&self, owner_id: &str, label: &str) -> Result<ApiKey> {
+        self.create_api_key_with(owner_id, label, ApiKeyOpts::default())
+            .await
+    }
+
+    async fn create_api_key_with(
+        &self,
+        owner_id: &str,
+        label: &str,
+        opts: ApiKeyOpts,
+    ) -> Result<ApiKey> {
         check_id(owner_id)?;
         check_label(label)?;
+        check_api_key_opts(&opts)?;
         let id = Uuid::new_v4().to_string();
-        let secret = format!("{KEY_PREFIX}{}", random_token());
+        let secret = format!("{KEY_PREFIX}{}", random_token(self.random.as_ref()));
         let key_hash = sha256_hex(secret.as_bytes());
-        let created_at = SystemTime::now();
+        let created_at = self.clock.now();
+        let expires_at = opts.expires_in.map(|duration| created_at + duration);
         let record = ApiKeyRecord {
             id: id.clone(),
             owner_id: owner_id.to_string(),
             label: label.to_string(),
+            expires_at,
+            scopes: opts.scopes.clone(),
+            metadata: opts.metadata.clone(),
         };
         lock(&self.api_keys).insert(self.physical(&key_hash), record);
         Ok(ApiKey::new(
@@ -335,6 +407,9 @@ impl Auth for MemAuth {
             label.to_string(),
             ApiKeySecret::new(secret),
             created_at,
+            expires_at,
+            opts.scopes,
+            opts.metadata,
         ))
     }
 
@@ -344,9 +419,22 @@ impl Auth for MemAuth {
         // the same property the SQL backend's indexed-digest lookup has.
         let pk = self.physical(&sha256_hex(key.as_bytes()));
         let api_keys = lock(&self.api_keys);
-        Ok(api_keys
-            .get(&pk)
-            .map(|r| ApiKeyInfo::new(r.id.clone(), r.owner_id.clone(), r.label.clone())))
+        Ok(api_keys.get(&pk).and_then(|record| {
+            if record
+                .expires_at
+                .is_some_and(|expires| expires <= self.clock.now())
+            {
+                return None;
+            }
+            Some(ApiKeyInfo::new(
+                record.id.clone(),
+                record.owner_id.clone(),
+                record.label.clone(),
+                record.expires_at,
+                record.scopes.clone(),
+                record.metadata.clone(),
+            ))
+        }))
     }
 
     async fn revoke_api_key(&self, key_id: &str) -> Result<bool> {
@@ -372,31 +460,62 @@ impl Auth for MemAuth {
         purpose: &str,
         ttl: Duration,
     ) -> Result<OneTimeToken> {
+        self.create_token_with_payload(user_id, purpose, ttl, Bytes::new())
+            .await
+    }
+
+    async fn create_token_with_payload(
+        &self,
+        user_id: &str,
+        purpose: &str,
+        ttl: Duration,
+        payload: Bytes,
+    ) -> Result<OneTimeToken> {
         check_id(user_id)?;
         check_purpose(purpose)?;
         check_token_ttl(ttl)?;
-        let token = random_token();
+        if payload.len() > MAX_TOKEN_PAYLOAD_BYTES {
+            return Err(ForgeError::limit(
+                "one-time token payload exceeds 4096 bytes",
+            ));
+        }
+        let token = random_token(self.random.as_ref());
         let token_hash = sha256_hex(token.as_bytes());
         let record = TokenRecord {
             user_id: user_id.to_string(),
             purpose: purpose.to_string(),
-            expires_at: SystemTime::now() + ttl,
+            expires_at: self.clock.now() + ttl,
+            payload,
         };
         lock(&self.tokens).insert(self.physical(&token_hash), record);
         Ok(OneTimeToken::new(token))
     }
 
     async fn consume_token(&self, token: &str, purpose: &str) -> Result<Option<String>> {
+        Ok(self
+            .consume_token_with_payload(token, purpose)
+            .await?
+            .map(|consumption| consumption.user_id))
+    }
+
+    async fn consume_token_with_payload(
+        &self,
+        token: &str,
+        purpose: &str,
+    ) -> Result<Option<TokenConsumption>> {
         check_purpose(purpose)?;
         let pk = self.physical(&sha256_hex(token.as_bytes()));
-        let now = SystemTime::now();
+        let now = self.clock.now();
         let mut tokens = lock(&self.tokens);
         // Consume only a live token minted for this purpose; a purpose mismatch leaves
         // it intact, matching `PgAuth`'s conditional DELETE. Expired records linger
         // until `purge_expired`, like the unswept SQL rows.
         match tokens.get(&pk) {
             Some(rec) if rec.expires_at > now && rec.purpose == purpose => {
-                Ok(tokens.remove(&pk).map(|r| r.user_id))
+                Ok(tokens.remove(&pk).map(|record| TokenConsumption {
+                    user_id: record.user_id,
+                    payload: record.payload,
+                }))
             }
             _ => Ok(None),
         }
@@ -490,7 +609,7 @@ mod tests {
             argon2::Version::V0x13,
             Params::new(8, ARGON2_T_COST, ARGON2_P_COST, None).unwrap(),
         )
-        .hash_password(b"pw", &SaltString::generate(&mut OsRng))
+        .hash_password(b"pw", &SaltString::generate(&mut rand_core::OsRng))
         .unwrap()
         .to_string();
         assert!(

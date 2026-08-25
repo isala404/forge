@@ -1,5 +1,8 @@
 use super::common;
-use super::{Blob, BlobInfo, DEFAULT_CONTENT_TYPE, ListPage, PutOpts};
+use super::{
+    Blob, BlobInfo, BlobSummary, ConditionalGet, DEFAULT_CONTENT_TYPE, ListPage, ProxyPresign,
+    PutOpts, PutPrecondition,
+};
 use crate::backend::{BackendLifecycle, Primitive};
 use crate::error::Result;
 use crate::types::Cursor;
@@ -18,6 +21,9 @@ struct Object {
     etag: String,
     last_modified: SystemTime,
     metadata: BTreeMap<String, String>,
+    cache_control: Option<String>,
+    content_disposition: Option<String>,
+    checksum_sha256: String,
 }
 
 impl Object {
@@ -31,6 +37,21 @@ impl Object {
             self.etag.clone(),
             self.last_modified,
             self.metadata.clone(),
+        )
+        .with_storage_metadata(
+            self.cache_control.clone(),
+            self.content_disposition.clone(),
+            Some(self.checksum_sha256.clone()),
+            None,
+        )
+    }
+
+    fn summary(&self, key: String) -> BlobSummary {
+        BlobSummary::new(
+            key,
+            u64::try_from(self.data.len()).unwrap_or(u64::MAX),
+            self.etag.clone(),
+            self.last_modified,
         )
     }
 }
@@ -73,14 +94,30 @@ impl Blob for MemBlob {
     async fn put(&self, key: &str, data: Bytes, opts: PutOpts) -> Result<()> {
         common::check_key(key)?;
         common::check_put(&data, &opts)?;
+        common::reject_s3_encryption(&opts)?;
         let pk = self.shared.physical(key);
         let etag = sha256_hex(&data);
+        let checksum_sha256 = etag.clone();
         let content_type = opts
             .content_type
             .unwrap_or_else(|| DEFAULT_CONTENT_TYPE.to_string());
-        // Last-write-wins: a fresh object replaces all prior bytes and metadata, like the
-        // Postgres `ON CONFLICT DO UPDATE SET ...` overwrite.
-        self.lock().insert(
+        let mut state = self.lock();
+        match &opts.precondition {
+            Some(PutPrecondition::CreateOnly) if state.contains_key(&pk) => {
+                return Err(crate::error::ForgeError::precondition(
+                    "blob already exists",
+                ));
+            }
+            Some(PutPrecondition::MatchVersion(expected))
+                if state.get(&pk).map(|object| &object.etag) != Some(expected) =>
+            {
+                return Err(crate::error::ForgeError::precondition(
+                    "blob version does not match",
+                ));
+            }
+            _ => {}
+        }
+        state.insert(
             pk,
             Object {
                 data,
@@ -88,6 +125,9 @@ impl Blob for MemBlob {
                 etag,
                 last_modified: commit_time(),
                 metadata: opts.metadata,
+                cache_control: opts.cache_control,
+                content_disposition: opts.content_disposition,
+                checksum_sha256,
             },
         );
         Ok(())
@@ -99,16 +139,46 @@ impl Blob for MemBlob {
         Ok(self.lock().get(&pk).map(|o| o.data.clone()))
     }
 
+    async fn get_if(
+        &self,
+        key: &str,
+        if_match: Option<&str>,
+        if_none_match: Option<&str>,
+    ) -> Result<ConditionalGet> {
+        common::check_key(key)?;
+        common::check_get_conditions(if_match, if_none_match)?;
+        let pk = self.shared.physical(key);
+        let state = self.lock();
+        let Some(object) = state.get(&pk) else {
+            return Ok(ConditionalGet::Missing);
+        };
+        if if_match.is_some_and(|expected| expected != object.etag) {
+            return Err(crate::ForgeError::precondition(
+                "blob read version does not match",
+            ));
+        }
+        if if_none_match.is_some_and(|version| version == object.etag) {
+            return Ok(ConditionalGet::NotModified {
+                etag: object.etag.clone(),
+            });
+        }
+        Ok(ConditionalGet::Found {
+            body: object.data.clone(),
+            etag: object.etag.clone(),
+        })
+    }
+
     async fn head(&self, key: &str) -> Result<Option<BlobInfo>> {
         common::check_key(key)?;
         let pk = self.shared.physical(key);
         Ok(self.lock().get(&pk).map(|o| o.info(key.to_string())))
     }
 
-    async fn delete(&self, key: &str) -> Result<bool> {
+    async fn delete(&self, key: &str) -> Result<()> {
         common::check_key(key)?;
         let pk = self.shared.physical(key);
-        Ok(self.lock().remove(&pk).is_some())
+        self.lock().remove(&pk);
+        Ok(())
     }
 
     async fn list(&self, prefix: &str, cursor: Option<Cursor>, limit: u32) -> Result<ListPage> {
@@ -118,28 +188,37 @@ impl Blob for MemBlob {
         // token is the last physical key returned; the next page starts after it.
         let after = cursor.map(|c| c.token().to_string());
         let state = self.lock();
-        let mut matched: Vec<(String, BlobInfo)> = state
+        let mut matched: Vec<(String, BlobSummary)> = state
             .iter()
             .filter(|(k, _)| k.starts_with(physical_prefix.as_str()))
             .filter(|(k, _)| after.as_deref().is_none_or(|a| k.as_str() > a))
-            .map(|(k, o)| (k.clone(), o.info(self.shared.logical(k).to_string())))
+            .map(|(k, o)| (k.clone(), o.summary(self.shared.logical(k).to_string())))
             .collect();
         matched.sort_by(|a, b| a.0.cmp(&b.0));
+        matched.truncate(limit.saturating_add(1));
+        let next = (matched.len() > limit).then(|| {
+            Cursor::from_token(
+                matched
+                    .get(limit - 1)
+                    .map(|item| item.0.clone())
+                    .unwrap_or_default(),
+            )
+        });
         matched.truncate(limit);
-        let next = if matched.len() < limit {
-            None
-        } else {
-            matched.last().map(|(k, _)| Cursor::from_token(k.clone()))
-        };
         let items = matched.into_iter().map(|(_, info)| info).collect();
         Ok(ListPage::new(items, next))
     }
 
-    async fn presign_upload(&self, key: &str, expires: Duration, max_bytes: u64) -> Result<String> {
+    async fn presign_upload(
+        &self,
+        key: &str,
+        expires: Duration,
+        max_bytes: u64,
+    ) -> Result<ProxyPresign> {
         self.shared.presign_upload(key, expires, max_bytes).await
     }
 
-    async fn presign_download(&self, key: &str, expires: Duration) -> Result<String> {
+    async fn presign_download(&self, key: &str, expires: Duration) -> Result<ProxyPresign> {
         self.shared.presign_download(key, expires).await
     }
 
@@ -177,21 +256,12 @@ impl BackendLifecycle for MemBlob {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::S3Encryption;
     use crate::blob::MAX_CONTENT_TYPE_BYTES;
     use crate::error::ForgeError;
 
     fn b(s: &str) -> Bytes {
         Bytes::from(s.as_bytes().to_vec())
-    }
-
-    /// Pull a query-param value off a presigned URL. Test-only: the exact key is known,
-    /// so this never has to percent-decode.
-    fn param(url: &str, name: &str) -> String {
-        let needle = format!("{name}=");
-        url.split(&['?', '&'][..])
-            .find_map(|kv| kv.strip_prefix(needle.as_str()))
-            .map(str::to_string)
-            .unwrap()
     }
 
     #[tokio::test]
@@ -265,11 +335,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_reports_presence() {
+    async fn conditional_reads_copy_headers_and_checksum_compose() {
+        let blob = MemBlob::new(String::new(), None, "/files".to_string());
+        let body = b("portable bytes");
+        let checksum = sha256_hex(&body);
+        blob.put(
+            "source",
+            body.clone(),
+            PutOpts::new()
+                .with_cache_control("public, max-age=60")
+                .with_content_disposition("attachment; filename=report.txt")
+                .with_checksum_sha256(checksum.clone()),
+        )
+        .await
+        .unwrap();
+        let info = blob.head("source").await.unwrap().unwrap();
+        assert_eq!(info.cache_control.as_deref(), Some("public, max-age=60"));
+        assert_eq!(info.checksum_sha256.as_deref(), Some(checksum.as_str()));
+        assert!(
+            blob.verify_checksum_sha256("source", &checksum)
+                .await
+                .unwrap()
+        );
+
+        assert!(matches!(
+            blob.get_if("source", None, Some(&info.etag)).await.unwrap(),
+            ConditionalGet::NotModified { .. }
+        ));
+        assert!(matches!(
+            blob.get_if("source", Some("wrong"), None).await,
+            Err(ForgeError::Precondition(_))
+        ));
+        let copied = blob
+            .copy("source", "copy", PutOpts::new().create_only())
+            .await
+            .unwrap();
+        assert_eq!(blob.get("copy").await.unwrap(), Some(body));
+        assert_eq!(copied.cache_control, info.cache_control);
+        assert!(matches!(
+            blob.create_multipart("large", PutOpts::new()).await,
+            Err(ForgeError::NotConfigured(_))
+        ));
+        assert!(matches!(
+            blob.put(
+                "encrypted",
+                b("x"),
+                PutOpts::new().with_s3_encryption(S3Encryption::S3Managed),
+            )
+            .await,
+            Err(ForgeError::NotConfigured(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn delete_is_idempotent() {
         let blob = MemBlob::new(String::new(), None, "/files".to_string());
         blob.put("k", b("v"), PutOpts::new()).await.unwrap();
-        assert!(blob.delete("k").await.unwrap(), "present => removed");
-        assert!(!blob.delete("k").await.unwrap(), "already absent => false");
+        blob.delete("k").await.unwrap();
+        blob.delete("k").await.unwrap();
         assert_eq!(blob.get("k").await.unwrap(), None);
     }
 
@@ -377,8 +500,8 @@ mod tests {
             .presign_download("docs/report.pdf", Duration::from_secs(300))
             .await
             .unwrap();
-        let expires: i64 = param(&url, "expires").parse().unwrap();
-        let sig = param(&url, "sig");
+        let expires = url.expires_epoch;
+        let sig = url.signature;
 
         assert!(
             blob.verify_presigned("GET", "docs/report.pdf", expires, 0, &sig)
@@ -400,6 +523,19 @@ mod tests {
                 .unwrap(),
             "a GET URL cannot be replayed as a PUT"
         );
+
+        let other_namespace = MemBlob::new(
+            "other-app".to_string(),
+            Some(b"sign-key".to_vec()),
+            "/files".to_string(),
+        );
+        assert!(
+            !other_namespace
+                .verify_presigned("GET", "docs/report.pdf", expires, 0, &sig)
+                .await
+                .unwrap(),
+            "a URL cannot be replayed into another application namespace"
+        );
     }
 
     #[tokio::test]
@@ -413,9 +549,9 @@ mod tests {
             .presign_upload("uploads/x.bin", Duration::from_secs(120), 4096)
             .await
             .unwrap();
-        assert!(url.contains("max_bytes=4096"));
-        let expires: i64 = param(&url, "expires").parse().unwrap();
-        let sig = param(&url, "sig");
+        assert!(url.url.contains("max_bytes=4096"));
+        let expires = url.expires_epoch;
+        let sig = url.signature;
 
         assert!(
             blob.verify_presigned("PUT", "uploads/x.bin", expires, 4096, &sig)

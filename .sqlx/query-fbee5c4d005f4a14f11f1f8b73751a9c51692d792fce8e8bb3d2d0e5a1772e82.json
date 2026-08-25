@@ -1,0 +1,125 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT name, kind, cron_expr, target_queue, next_run, last_run, paused, misfire_policy, max_catch_up FROM forge_schedules WHERE name = $1 AND app = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "forge_schedules",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "forge_schedules",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "cron_expr",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "forge_schedules",
+            "name": "cron_expr"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "target_queue",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "forge_schedules",
+            "name": "target_queue"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "next_run",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "forge_schedules",
+            "name": "next_run"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "last_run",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "forge_schedules",
+            "name": "last_run"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "paused",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "forge_schedules",
+            "name": "paused"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "misfire_policy",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "forge_schedules",
+            "name": "misfire_policy"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "max_catch_up",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "forge_schedules",
+            "name": "max_catch_up"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "fbee5c4d005f4a14f11f1f8b73751a9c51692d792fce8e8bb3d2d0e5a1772e82"
+}

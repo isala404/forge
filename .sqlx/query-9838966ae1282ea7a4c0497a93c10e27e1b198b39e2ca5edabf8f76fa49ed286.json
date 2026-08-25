@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO forge_auth_tokens (token_hash, user_id, purpose, expires_at, app, payload) VALUES ($1, $2, $3, now() + make_interval(secs => $4), $5, $6)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Float8",
+        "Text",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9838966ae1282ea7a4c0497a93c10e27e1b198b39e2ca5edabf8f76fa49ed286"
+}

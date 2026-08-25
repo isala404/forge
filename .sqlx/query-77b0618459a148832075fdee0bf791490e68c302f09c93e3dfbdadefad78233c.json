@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM forge_ratelimit WHERE updated_at <= now() - make_interval(secs => $1) AND ($2::text IS NULL OR left(bucket, length($2)) = $2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Float8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "77b0618459a148832075fdee0bf791490e68c302f09c93e3dfbdadefad78233c"
+}

@@ -1,5 +1,24 @@
 use sha2::{Digest, Sha256};
 
+pub const MAX_NAMESPACE_BYTES: usize = 128;
+
+pub fn validate_namespace(namespace: &str) -> crate::Result<()> {
+    if namespace.len() > MAX_NAMESPACE_BYTES {
+        return Err(crate::ForgeError::config(
+            "namespace must contain at most 128 bytes",
+        ));
+    }
+    if !namespace
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(crate::ForgeError::config(
+            "namespace may contain only ASCII letters, digits, '-', '_', and '.'",
+        ));
+    }
+    Ok(())
+}
+
 /// SHA-256 of `bytes` as a lowercase hex string. Stable across binaries/deploys (unlike `DefaultHasher`), so safe for migration checksums.
 pub fn sha256_hex(bytes: &[u8]) -> String {
     hex(Sha256::digest(bytes).as_slice())
@@ -67,5 +86,13 @@ mod tests {
         assert_eq!(namespaced("", "k"), "k");
         assert_eq!(namespaced("app", "k"), "app:k");
         assert_eq!(namespaced("app", "a:b"), "app:a:b");
+    }
+
+    #[test]
+    fn namespace_validation_is_exact_and_bounded() {
+        assert!(validate_namespace("").is_ok());
+        assert!(validate_namespace("App_1.prod").is_ok());
+        assert!(validate_namespace("space here").is_err());
+        assert!(validate_namespace(&"a".repeat(129)).is_err());
     }
 }

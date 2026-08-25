@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COALESCE(has_table_privilege(current_user, 'forge_jobs', 'SELECT,INSERT,UPDATE,DELETE'), FALSE) AS \"permitted!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "permitted!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "a0353f2b7684404556311c8677bf148e6ff84209161c02dab9d3304d94b55895"
+}

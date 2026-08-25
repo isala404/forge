@@ -3,7 +3,7 @@
 //! this module, so a given `(state, elapsed, limit)` yields the same decision
 //! everywhere and the backends cannot drift apart.
 
-use super::{Decision, FailMode, Limit, MAX_BUCKET_BYTES, MAX_KEY_BYTES};
+use super::{Decision, FailMode, Limit, MAX_BUCKET_BYTES, MAX_KEY_BYTES, MAX_UNITS};
 use crate::error::{ForgeError, Result};
 use std::time::Duration;
 
@@ -17,10 +17,6 @@ pub(super) fn resolve_fail_open(fail: FailMode, instance_default: bool) -> bool 
         FailMode::Default => instance_default,
         FailMode::Open => true,
         FailMode::Closed => false,
-        // `FailMode` is `#[non_exhaustive]`; an unknown mode falls back to the
-        // instance default.
-        #[allow(unreachable_patterns)]
-        _ => instance_default,
     }
 }
 
@@ -64,6 +60,9 @@ pub(super) fn check_limit(limit: &Limit) -> Result<()> {
     if limit.max == 0 {
         return Err(ForgeError::invalid("Limit.max must be > 0"));
     }
+    if limit.max > MAX_UNITS {
+        return Err(ForgeError::limit("Limit.max exceeds the portable maximum"));
+    }
     if limit.per.is_zero() {
         return Err(ForgeError::invalid("Limit.per must be > 0"));
     }
@@ -80,12 +79,23 @@ pub(super) fn check_limit(limit: &Limit) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn check_cost(limit: &Limit, cost: u32) -> Result<()> {
+    if cost == 0 {
+        return Err(ForgeError::invalid("rate-limit cost must be positive"));
+    }
+    if cost > limit.max {
+        return Err(ForgeError::limit("rate-limit cost exceeds bucket capacity"));
+    }
+    Ok(())
+}
+
 /// One token-bucket step. `stored` is the current token count (`None` = fresh full
 /// bucket). Returns the tokens to persist and the resulting `Decision`.
 pub(super) fn token_bucket_step(
     stored: Option<f64>,
     elapsed_secs: f64,
     limit: Limit,
+    cost: u32,
 ) -> (f64, Decision) {
     let max = f64::from(limit.max);
     // `check_limit` guarantees `per >= 1s`; the clamp only guards direct callers.
@@ -93,12 +103,13 @@ pub(super) fn token_bucket_step(
     let rate = max / per;
     let tokens = stored.unwrap_or(max);
     let refilled = (tokens + elapsed_secs.max(0.0) * rate).min(max);
-    let allowed = refilled >= 1.0;
-    let new_tokens = if allowed { refilled - 1.0 } else { refilled };
+    let cost = f64::from(cost);
+    let allowed = refilled >= cost;
+    let new_tokens = if allowed { refilled - cost } else { refilled };
     let remaining = new_tokens.max(0.0).floor() as u32;
     let reset_after = Duration::from_secs_f64(((max - new_tokens) / rate).max(0.0));
     let retry_after =
-        (!allowed).then(|| Duration::from_secs_f64(((1.0 - refilled) / rate).max(0.0)));
+        (!allowed).then(|| Duration::from_secs_f64(((cost - refilled) / rate).max(0.0)));
     (
         new_tokens,
         Decision::new(allowed, limit.max, remaining, reset_after, retry_after),
@@ -119,6 +130,7 @@ pub(super) fn sliding_step(
     stored: Option<SlidingState>,
     now_epoch: f64,
     limit: Limit,
+    cost: u32,
 ) -> (SlidingState, Decision) {
     let max = f64::from(limit.max);
     let per = limit.per.as_secs_f64().max(1.0);
@@ -142,11 +154,12 @@ pub(super) fn sliding_step(
     let elapsed_in_win = (now_epoch - window_start).clamp(0.0, per);
     let weight = ((per - elapsed_in_win) / per).clamp(0.0, 1.0);
     let weighted = prev as f64 * weight + cur as f64;
-    let allowed = weighted < max;
+    let cost_i64 = i64::from(cost);
+    let allowed = weighted + f64::from(cost) <= max;
     if allowed {
-        cur += 1;
+        cur = cur.saturating_add(cost_i64);
     }
-    let used = weighted + if allowed { 1.0 } else { 0.0 };
+    let used = weighted + if allowed { f64::from(cost) } else { 0.0 };
     let remaining = (max - used).max(0.0).floor() as u32;
     let reset_after = Duration::from_secs_f64((per - elapsed_in_win).max(0.0));
     let retry_after = (!allowed).then_some(reset_after);
@@ -173,13 +186,13 @@ mod tests {
     #[test]
     fn token_bucket_consumes_then_denies_when_empty() {
         let limit = tb(3, 60);
-        let (t1, d1) = token_bucket_step(None, 0.0, limit);
+        let (t1, d1) = token_bucket_step(None, 0.0, limit, 1);
         assert!(d1.allowed && d1.remaining == 2);
-        let (t2, d2) = token_bucket_step(Some(t1), 0.0, limit);
+        let (t2, d2) = token_bucket_step(Some(t1), 0.0, limit, 1);
         assert!(d2.allowed && d2.remaining == 1);
-        let (t3, d3) = token_bucket_step(Some(t2), 0.0, limit);
+        let (t3, d3) = token_bucket_step(Some(t2), 0.0, limit, 1);
         assert!(d3.allowed && d3.remaining == 0);
-        let (_t4, d4) = token_bucket_step(Some(t3), 0.0, limit);
+        let (_t4, d4) = token_bucket_step(Some(t3), 0.0, limit, 1);
         assert!(!d4.allowed && d4.remaining == 0);
         assert!(d4.retry_after.is_some());
     }
@@ -189,7 +202,7 @@ mod tests {
         // 60 tokens / 60s = 1 token/sec; from empty, 5s of refill yields 5 tokens,
         // one of which this call consumes.
         let limit = tb(60, 60);
-        let (_t, d) = token_bucket_step(Some(0.0), 5.0, limit);
+        let (_t, d) = token_bucket_step(Some(0.0), 5.0, limit, 1);
         assert!(d.allowed);
         assert_eq!(d.remaining, 4);
     }
@@ -198,11 +211,11 @@ mod tests {
     fn sliding_window_caps_per_window() {
         let limit = tb(2, 100).with_algo(Algo::SlidingWindow);
         let t = 1_000_000.0;
-        let (s1, d1) = sliding_step(None, t, limit);
+        let (s1, d1) = sliding_step(None, t, limit, 1);
         assert!(d1.allowed);
-        let (s2, d2) = sliding_step(Some(s1), t, limit);
+        let (s2, d2) = sliding_step(Some(s1), t, limit, 1);
         assert!(d2.allowed);
-        let (_s3, d3) = sliding_step(Some(s2), t, limit);
+        let (_s3, d3) = sliding_step(Some(s2), t, limit, 1);
         assert!(!d3.allowed, "third call in the window is denied");
         assert!(d3.retry_after.is_some());
     }
@@ -211,12 +224,12 @@ mod tests {
     fn sliding_window_resets_next_window() {
         let limit = tb(1, 100).with_algo(Algo::SlidingWindow);
         let t = 1_000_000.0;
-        let (s1, d1) = sliding_step(None, t, limit);
+        let (s1, d1) = sliding_step(None, t, limit, 1);
         assert!(d1.allowed);
-        let (_s2, d2) = sliding_step(Some(s1.clone()), t, limit);
+        let (_s2, d2) = sliding_step(Some(s1.clone()), t, limit, 1);
         assert!(!d2.allowed);
         // Far in the future (gap > 1 window): treated as fresh, allowed again.
-        let (_s3, d3) = sliding_step(Some(s1), t + 10_000.0, limit);
+        let (_s3, d3) = sliding_step(Some(s1), t + 10_000.0, limit, 1);
         assert!(d3.allowed);
     }
 

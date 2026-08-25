@@ -1,8 +1,10 @@
 use super::cron::Cron;
 use super::{
-    MAX_AT_HORIZON_DAYS, MAX_NAME_BYTES, Schedule, ScheduleInfo, ScheduleKind, ScheduleOpts,
+    MAX_AT_HORIZON_DAYS, MAX_NAME_BYTES, MisfirePolicy, Schedule, ScheduleInfo, ScheduleKind,
+    ScheduleOpts, SchedulerDiagnostics, plan_cron_occurrences,
 };
 use crate::backend::{BackendLifecycle, Primitive};
+use crate::clock::Clock;
 use crate::error::{ForgeError, Result};
 use crate::queue::{EnqueueOpts, JobId, MAX_PAYLOAD_BYTES, Queue};
 use crate::types::Cursor;
@@ -15,10 +17,6 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
 use uuid::Uuid;
 
-/// A tick more than this far late (e.g. every replica was down) fires once on recovery
-/// only if within the window, else is skipped and logged. Matches the Postgres backend's
-/// `MISSED_TICK_GRACE_SECS` (k8s `startingDeadlineSeconds`).
-const MISSED_TICK_GRACE_SECS: f64 = 60.0 * 60.0;
 /// In-process claim timeout for a due schedule. If a `process_due` future is cancelled
 /// after claiming but before settling, a later pass may retry after this window.
 const CLAIM_TIMEOUT_SECS: i64 = 30;
@@ -37,25 +35,45 @@ struct ScheduleEntry {
     opts: ScheduleOpts,
     next_run: DateTime<Utc>,
     last_run: Option<DateTime<Utc>>,
+    paused: bool,
     claim: Option<(Uuid, DateTime<Utc>)>,
+}
+
+#[derive(Default)]
+struct ScheduleMetrics {
+    last_successful_tick: Option<DateTime<Utc>>,
+    enqueue_failures: u64,
 }
 
 pub(crate) struct MemSchedule {
     state: Mutex<HashMap<String, ScheduleEntry>>,
+    metrics: Mutex<ScheduleMetrics>,
     /// App namespace mixed into the stored target-queue name so a scheduled enqueue
     /// names this app's queue. Empty = the unnamespaced app.
     app: String,
     /// Resolved queue backend; a due tick enqueues through it.
     queue: Arc<dyn Queue>,
+    clock: Arc<dyn Clock>,
 }
 
 impl MemSchedule {
+    #[cfg(test)]
     pub(crate) fn new(app: String, queue: Arc<dyn Queue>) -> Self {
+        Self::with_clock(app, queue, Arc::new(crate::clock::SystemClock::new()))
+    }
+
+    pub(crate) fn with_clock(app: String, queue: Arc<dyn Queue>, clock: Arc<dyn Clock>) -> Self {
         Self {
             state: Mutex::new(HashMap::new()),
+            metrics: Mutex::new(ScheduleMetrics::default()),
             app,
             queue,
+            clock,
         }
+    }
+
+    fn now(&self) -> DateTime<Utc> {
+        self.clock.now().into()
     }
 
     /// Take the map lock, recovering the guard if a previous holder panicked. The
@@ -63,6 +81,22 @@ impl MemSchedule {
     /// poisoned lock never reflects a half-updated invariant worth aborting for.
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, ScheduleEntry>> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn lock_metrics(&self) -> std::sync::MutexGuard<'_, ScheduleMetrics> {
+        self.metrics.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn info(&self, name: &str, entry: &ScheduleEntry) -> ScheduleInfo {
+        ScheduleInfo::new(
+            name.to_string(),
+            entry.kind.clone(),
+            self.logical_queue(&entry.target_queue).to_string(),
+            entry.next_run.into(),
+            entry.last_run.map(Into::into),
+            entry.paused,
+            entry.opts.misfire_policy,
+        )
     }
 
     /// The stored (namespaced) target-queue name, matching `PgSchedule`'s prefixing.
@@ -171,8 +205,9 @@ impl Schedule for MemSchedule {
         check_name(name)?;
         check_queue(queue)?;
         check_payload(&payload)?;
+        opts.misfire_policy.validate()?;
         let next = Cron::parse(expr)?
-            .next_after(Utc::now())
+            .next_after(self.now())
             .ok_or_else(|| ForgeError::invalid("cron expression never fires"))?;
         // Insert replaces any existing schedule of the same name, resetting last_run; the
         // in-process analogue of the Postgres `ON CONFLICT (name, app) DO UPDATE`.
@@ -186,6 +221,7 @@ impl Schedule for MemSchedule {
                 opts,
                 next_run: next,
                 last_run: None,
+                paused: false,
                 claim: None,
             },
         );
@@ -201,11 +237,12 @@ impl Schedule for MemSchedule {
     ) -> Result<JobId> {
         check_queue(queue)?;
         check_payload(&payload)?;
+        opts.misfire_policy.validate()?;
         let when_dt: DateTime<Utc> = when.into();
-        // A past/now `when` is allowed (it fires on the next tick within grace); only an
-        // absurdly-far-future `when` is rejected, matching the contract's ~100-year
-        // ceiling so every backend agrees on the horizon.
-        if when_dt > Utc::now() + chrono::Duration::days(MAX_AT_HORIZON_DAYS) {
+        // A past/now `when` is allowed and its misfire policy handles the next tick;
+        // only an absurdly-far-future `when` is rejected, matching the contract's
+        // ~100-year ceiling so every backend agrees on the horizon.
+        if when_dt > self.now() + chrono::Duration::days(MAX_AT_HORIZON_DAYS) {
             return Err(ForgeError::limit("at `when` exceeds the ~100-year ceiling"));
         }
         let job_id = JobId::new();
@@ -221,6 +258,7 @@ impl Schedule for MemSchedule {
                 opts,
                 next_run: when_dt,
                 last_run: None,
+                paused: false,
                 claim: None,
             },
         );
@@ -229,6 +267,49 @@ impl Schedule for MemSchedule {
 
     async fn cancel(&self, name: &str) -> Result<bool> {
         Ok(self.lock().remove(name).is_some())
+    }
+
+    async fn inspect(&self, name: &str) -> Result<Option<ScheduleInfo>> {
+        let state = self.lock();
+        Ok(state.get(name).map(|entry| self.info(name, entry)))
+    }
+
+    async fn pause(&self, name: &str) -> Result<bool> {
+        let mut state = self.lock();
+        let Some(entry) = state.get_mut(name) else {
+            return Ok(false);
+        };
+        entry.paused = true;
+        entry.claim = None;
+        Ok(true)
+    }
+
+    async fn resume(&self, name: &str) -> Result<bool> {
+        let mut state = self.lock();
+        let Some(entry) = state.get_mut(name) else {
+            return Ok(false);
+        };
+        entry.paused = false;
+        Ok(true)
+    }
+
+    async fn diagnostics(&self) -> Result<SchedulerDiagnostics> {
+        let now = self.now();
+        let state = self.lock();
+        let due: Vec<_> = state
+            .values()
+            .filter(|entry| !entry.paused && entry.next_run <= now)
+            .collect();
+        let oldest = due.iter().map(|entry| entry.next_run).min();
+        let due_count = due.len() as u64;
+        drop(state);
+        let metrics = self.lock_metrics();
+        Ok(SchedulerDiagnostics {
+            lag: oldest.map(|at| (now - at).to_std().unwrap_or_default()),
+            last_successful_tick: metrics.last_successful_tick.map(Into::into),
+            due_count,
+            enqueue_failures: metrics.enqueue_failures,
+        })
     }
 
     async fn list(
@@ -254,29 +335,20 @@ impl Schedule for MemSchedule {
         };
         let items = names
             .iter()
-            .filter_map(|n| {
-                state.get(*n).map(|e| {
-                    ScheduleInfo::new(
-                        (*n).clone(),
-                        e.kind.clone(),
-                        self.logical_queue(&e.target_queue).to_string(),
-                        e.next_run.into(),
-                        e.last_run.map(Into::into),
-                    )
-                })
-            })
+            .filter_map(|n| state.get(*n).map(|e| self.info(n, e)))
             .collect();
         Ok((items, next))
     }
 
     async fn process_due(&self) -> Result<u64> {
-        let now = Utc::now();
+        let now = self.now();
         struct DuePlan {
             name: String,
             claim: Uuid,
             next_run: DateTime<Utc>,
-            enqueue: Option<(String, Bytes, EnqueueOpts)>,
+            enqueues: Vec<(String, Bytes, EnqueueOpts)>,
             next: Option<DateTime<Utc>>,
+            last_run: Option<DateTime<Utc>>,
         }
 
         let claim_matches = |entry: &ScheduleEntry, next_run: DateTime<Utc>, claim: Uuid| {
@@ -295,7 +367,8 @@ impl Schedule for MemSchedule {
             let mut due: Vec<(DateTime<Utc>, String)> = state
                 .iter()
                 .filter(|(_, e)| {
-                    e.next_run <= now
+                    !e.paused
+                        && e.next_run <= now
                         && e.claim
                             .as_ref()
                             .is_none_or(|(_, claimed_at)| *claimed_at <= stale_before)
@@ -312,53 +385,44 @@ impl Schedule for MemSchedule {
                 let claim = Uuid::new_v4();
                 entry.claim = Some((claim, now));
                 let next_run = entry.next_run;
-                let cron = match &entry.kind {
-                    ScheduleKind::Cron(expr) => Cron::parse(expr).ok(),
-                    ScheduleKind::At => None,
-                };
-
-                // For a cron the grace is measured from the most-recent missed tick, so a fast
-                // cron that fell behind during an outage still fires its latest tick instead of
-                // being skipped wholesale. A one-shot (no cron) keeps its next_run.
-                let base_lateness = (now - next_run).num_seconds() as f64;
-                let lateness = cron
-                    .as_ref()
-                    .and_then(|c| c.prev_or_at(now))
-                    .map_or(base_lateness, |prev| (now - prev).num_seconds() as f64);
-                let enqueue = if lateness <= MISSED_TICK_GRACE_SECS {
-                    // Unset `max_attempts` inherits the queue's own enqueue default, matching
-                    // the Postgres tick's `unwrap_or` path.
-                    let mut eo = EnqueueOpts::new();
-                    if let Some(m) = entry.opts.max_attempts {
-                        eo.max_attempts = m;
+                let (occurrences, next) = match &entry.kind {
+                    ScheduleKind::Cron(expr) => Cron::parse(expr).ok().map_or_else(
+                        || (Vec::new(), None),
+                        |cron| {
+                            plan_cron_occurrences(&cron, next_run, now, entry.opts.misfire_policy)
+                        },
+                    ),
+                    ScheduleKind::At => {
+                        let occurrences = if entry.opts.misfire_policy == MisfirePolicy::Skip {
+                            Vec::new()
+                        } else {
+                            vec![next_run]
+                        };
+                        (occurrences, None)
                     }
-                    let job_id = entry
-                        .job_id
-                        .unwrap_or_else(|| self.tick_job_id(&name, next_run));
-                    eo = eo.with_job_id(job_id);
-                    Some((
-                        self.logical_queue(&entry.target_queue).to_string(),
-                        entry.payload.clone(),
-                        eo,
-                    ))
-                } else {
-                    tracing::warn!(
-                        schedule.name = %name,
-                        lateness_secs = lateness,
-                        "skipping missed schedule tick (past the grace window)"
-                    );
-                    None
                 };
-
-                // After a successful enqueue/skip, advance a cron to its next tick or drop a
-                // one-shot (or a cron that will never fire again), matching Postgres.
-                let next = cron.and_then(|c| c.next_after(now));
+                let queue = self.logical_queue(&entry.target_queue).to_string();
+                let enqueues = occurrences
+                    .iter()
+                    .map(|occurrence| {
+                        let mut eo = EnqueueOpts::new();
+                        if let Some(m) = entry.opts.max_attempts {
+                            eo.max_attempts = m;
+                        }
+                        let job_id = entry
+                            .job_id
+                            .unwrap_or_else(|| self.tick_job_id(&name, *occurrence));
+                        eo = eo.with_job_id(job_id);
+                        (queue.clone(), entry.payload.clone(), eo)
+                    })
+                    .collect();
                 plans.push(DuePlan {
                     name,
                     claim,
                     next_run,
-                    enqueue,
+                    enqueues,
                     next,
+                    last_run: occurrences.last().copied(),
                 });
             }
             plans
@@ -369,7 +433,7 @@ impl Schedule for MemSchedule {
         // enqueue succeeds, so transient queue errors leave the schedule retryable.
         let mut enqueued = 0u64;
         for plan in plans {
-            if let Some((queue, payload, opts)) = plan.enqueue {
+            for (queue, payload, opts) in plan.enqueues {
                 if let Err(e) = self.queue.enqueue(&queue, payload, opts).await {
                     let mut state = self.lock();
                     if let Some(entry) = state.get_mut(&plan.name)
@@ -377,6 +441,8 @@ impl Schedule for MemSchedule {
                     {
                         entry.claim = None;
                     }
+                    let mut metrics = self.lock_metrics();
+                    metrics.enqueue_failures = metrics.enqueue_failures.saturating_add(1);
                     return Err(e);
                 }
                 enqueued += 1;
@@ -392,7 +458,9 @@ impl Schedule for MemSchedule {
             match plan.next {
                 Some(next) => {
                     if let Some(entry) = state.get_mut(&plan.name) {
-                        entry.last_run = Some(now);
+                        if plan.last_run.is_some() {
+                            entry.last_run = plan.last_run;
+                        }
                         entry.next_run = next;
                         entry.claim = None;
                     }
@@ -402,6 +470,7 @@ impl Schedule for MemSchedule {
                 }
             }
         }
+        self.lock_metrics().last_successful_tick = Some(now);
         Ok(enqueued)
     }
 }
@@ -565,20 +634,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_due_skips_a_one_shot_past_grace_but_still_cleans_it() {
+    async fn process_due_honors_skip_for_a_late_one_shot() {
         let s = sched("");
         s.at(
             SystemTime::now() - Duration::from_secs(2 * 3600),
             "jobs",
             b("x"),
-            ScheduleOpts::new(),
+            ScheduleOpts::new().with_misfire_policy(MisfirePolicy::Skip),
         )
         .await
         .unwrap();
         assert_eq!(
             s.process_due().await.unwrap(),
             0,
-            "past the 1h grace window"
+            "skip policy drops the occurrence"
         );
         let (items, _) = s.list(None, 100).await.unwrap();
         assert!(items.is_empty(), "a skipped one-shot is still cleaned up");
@@ -587,8 +656,8 @@ mod tests {
     #[tokio::test]
     async fn process_due_fires_a_behind_cron_via_its_most_recent_tick() {
         let s = sched("");
-        // A fast cron two hours behind: its latest missed tick is only seconds late, so
-        // the grace check passes and it fires (not skipped wholesale).
+        // Run-once recovery selects the most recent occurrence from a cron that is two
+        // hours behind instead of skipping the schedule wholesale.
         {
             let mut st = s.lock();
             st.insert(
@@ -601,6 +670,7 @@ mod tests {
                     opts: ScheduleOpts::new(),
                     next_run: Utc::now() - chrono::Duration::hours(2),
                     last_run: None,
+                    paused: false,
                     claim: None,
                 },
             );
@@ -619,6 +689,42 @@ mod tests {
             st.get("behind").and_then(|e| e.last_run).is_some(),
             "last_run recorded"
         );
+    }
+
+    #[tokio::test]
+    async fn pause_inspect_diagnostics_and_bounded_catch_up_compose() {
+        let s = sched("");
+        let now = Utc::now();
+        {
+            let mut state = s.lock();
+            state.insert(
+                "minute".to_string(),
+                ScheduleEntry {
+                    kind: ScheduleKind::Cron("* * * * *".to_string()),
+                    target_queue: "jobs".to_string(),
+                    payload: b("x"),
+                    job_id: None,
+                    opts: ScheduleOpts::new().with_misfire_policy(MisfirePolicy::CatchUp(3)),
+                    next_run: now - chrono::Duration::minutes(20),
+                    last_run: None,
+                    paused: false,
+                    claim: None,
+                },
+            );
+        }
+        assert!(s.pause("minute").await.unwrap());
+        assert!(s.inspect("minute").await.unwrap().unwrap().paused);
+        assert_eq!(s.diagnostics().await.unwrap().due_count, 0);
+        assert_eq!(s.process_due().await.unwrap(), 0);
+        assert!(s.resume("minute").await.unwrap());
+        assert_eq!(s.diagnostics().await.unwrap().due_count, 1);
+        assert_eq!(s.process_due().await.unwrap(), 3);
+        let diagnostics = s.diagnostics().await.unwrap();
+        assert_eq!(diagnostics.due_count, 0);
+        assert!(diagnostics.last_successful_tick.is_some());
+        let info = s.inspect("minute").await.unwrap().unwrap();
+        assert_eq!(info.misfire_policy, MisfirePolicy::CatchUp(3));
+        assert!(info.last_run.is_some());
     }
 
     #[tokio::test]
@@ -753,7 +859,7 @@ mod tests {
         use crate::queue::DequeueOpts;
         let q = mem_queue();
         let s = MemSchedule::new(String::new(), q.clone());
-        // A one-shot 2s in the past fires on the next tick (within the grace window).
+        // The default run-once policy fires a one-shot that is already due.
         let when = SystemTime::now() - Duration::from_secs(2);
         let id = s
             .at(
