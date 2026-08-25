@@ -1,0 +1,4006 @@
+{
+  "schema_version": 1,
+  "contract_version": "1.1.0",
+  "release_status": "supported",
+  "compatibility": {
+    "reset_from": "1.0",
+    "stable_from": "1.1.0",
+    "breaking_changes_after_reset": "next-major"
+  },
+  "languages": {
+    "rust": {
+      "runtime_floor": "1.94",
+      "package": "crates.io/forgelib"
+    },
+    "javascript": {
+      "runtime_floor": "Node.js 20 or Bun 1.2",
+      "package": "npm/forgelib"
+    },
+    "python": {
+      "runtime_floor": "3.9",
+      "package": "PyPI/forgelib"
+    },
+    "go": {
+      "runtime_floor": "1.26",
+      "package": "github.com/isala404/forge/bindings/go"
+    }
+  },
+  "units": {
+    "durations": "seconds unless a field ends in _ms",
+    "timestamps": "Unix epoch milliseconds",
+    "sizes": "bytes",
+    "counts": "non-negative integers"
+  },
+  "defaults": {
+    "queue_max_attempts": 5,
+    "queue_visibility_seconds": 30,
+    "queue_wait_seconds": 0,
+    "scan_limit": 100,
+    "blob_list_limit": 100,
+    "queue_status_list_limit": 50,
+    "queue_priority": "normal",
+    "shutdown_grace_seconds": 30
+  },
+  "limits": {
+    "key_bytes": 512,
+    "kv_value_bytes": 1048576,
+    "queue_payload_bytes": 262144,
+    "queue_envelope_metadata_bytes": 8192,
+    "queue_concurrency_key_bytes": 256,
+    "ratelimit_units": 2147483647,
+    "ratelimit_reservation_seconds": 3600,
+    "blob_buffered_bytes": 52428800,
+    "blob_key_bytes": 1024,
+    "pubsub_payload_bytes": 7168,
+    "invalidation_event_bytes": 4096,
+    "invalidation_targets": 64,
+    "scope_component_bytes": 255,
+    "scoped_name_key_bytes": 383,
+    "scoped_name_blob_bytes": 895,
+    "config_value_bytes": 65536,
+    "password_bytes": 4096,
+    "token_purpose_bytes": 255
+  },
+  "errors": [
+    {
+      "code": "CONFIG",
+      "retryable": false,
+      "safe_message": "invalid Forge configuration"
+    },
+    {
+      "code": "NOT_CONFIGURED",
+      "retryable": false,
+      "safe_message": "the requested capability is not configured"
+    },
+    {
+      "code": "UNAVAILABLE",
+      "retryable": true,
+      "safe_message": "a backend is temporarily unavailable"
+    },
+    {
+      "code": "NOT_FOUND",
+      "retryable": false,
+      "safe_message": "the requested value was not found"
+    },
+    {
+      "code": "PRECONDITION",
+      "retryable": false,
+      "safe_message": "an operation precondition failed"
+    },
+    {
+      "code": "LIMIT",
+      "retryable": false,
+      "safe_message": "a configured or contract limit was exceeded"
+    },
+    {
+      "code": "INVALID",
+      "retryable": false,
+      "safe_message": "an argument is invalid"
+    },
+    {
+      "code": "BACKEND",
+      "retryable": false,
+      "safe_message": "a backend operation failed"
+    }
+  ],
+  "backend_capabilities": [
+    "durable",
+    "shared_across_processes",
+    "presign_proxy",
+    "presign_native",
+    "streaming",
+    "multipart",
+    "notifications"
+  ],
+  "lifecycle": {
+    "states": [
+      "running",
+      "closing",
+      "closed"
+    ],
+    "reject_work_after": "closing",
+    "signal_handlers": "application-owned",
+    "shutdown": "idempotent and bounded by caller context or deadline"
+  },
+  "dtos": [
+    {
+      "name": "Job",
+      "node_name": "JsJob",
+      "python_name": "Job",
+      "clone": false,
+      "doc": "A leased queue job.",
+      "fields": [
+        {
+      "name": "id",
+      "type": "string",
+          "doc": ""
+        },
+        {
+          "name": "receipt",
+          "type": "string",
+          "doc": ""
+        },
+        {
+      "name": "payload",
+      "type": "bytes",
+          "doc": ""
+        },
+        {
+          "name": "attempt",
+          "type": "uint32",
+          "doc": ""
+        },
+        {
+          "name": "max_attempts",
+          "type": "uint32",
+          "doc": ""
+        },
+        {
+          "name": "leased_until_ms",
+          "type": "float64",
+          "doc": ""
+        },
+        {
+          "name": "queue",
+          "type": "string",
+          "doc": ""
+        },
+        {
+          "name": "traceparent",
+          "type": "string?",
+          "doc": "Validated W3C traceparent stored outside the payload."
+        },
+        {
+          "name": "tracestate",
+          "type": "string?",
+          "doc": "Validated W3C tracestate."
+        },
+        {
+          "name": "baggage",
+          "type": "string?",
+          "doc": "Allow-listed W3C baggage only."
+        }
+      ]
+    },
+    {
+      "name": "Decision",
+      "node_name": "JsDecision",
+      "python_name": "Decision",
+      "clone": false,
+      "doc": "A rate-limit decision.",
+      "fields": [
+        {
+          "name": "allowed",
+          "type": "boolean",
+          "doc": ""
+        },
+        {
+          "name": "limit",
+          "type": "uint32",
+          "doc": ""
+        },
+        {
+          "name": "remaining",
+          "type": "uint32",
+          "doc": ""
+        },
+        {
+          "name": "reset_after_seconds",
+          "type": "float64",
+          "doc": ""
+        },
+        {
+          "name": "retry_after_seconds",
+          "type": "float64?",
+          "doc": ""
+        }
+      ]
+    },
+    {
+      "name": "ApiKey",
+      "node_name": "JsApiKey",
+      "python_name": "ApiKey",
+      "clone": false,
+      "doc": "A freshly minted API key whose secret is shown once.",
+      "fields": [
+        {
+          "name": "id",
+          "type": "string",
+          "doc": ""
+        },
+        {
+          "name": "secret",
+          "type": "string",
+          "doc": ""
+        },
+        {
+          "name": "label",
+          "type": "string",
+          "doc": ""
+        },
+        {
+          "name": "created_at_ms",
+          "type": "float64",
+          "doc": ""
+        },
+        {
+          "name": "expires_at_ms",
+          "type": "float64?",
+          "doc": ""
+        },
+        {
+          "name": "scopes",
+          "type": "string[]",
+          "doc": "Application-owned authorization labels; Forge stores but does not interpret them."
+        },
+        {
+          "name": "metadata",
+          "type": "string_map",
+          "doc": "Bounded application metadata."
+        }
+      ]
+    },
+    {
+      "name": "QueueDepth",
+      "node_name": "JsQueueDepth",
+      "python_name": "QueueDepth",
+      "clone": false,
+      "doc": "Approximate queue depth.",
+      "fields": [
+        {
+          "name": "visible",
+          "type": "count",
+          "doc": ""
+        },
+        {
+          "name": "in_flight",
+          "type": "count",
+          "doc": ""
+        },
+        {
+          "name": "delayed",
+          "type": "count",
+          "doc": ""
+        },
+        {
+          "name": "oldest_visible_age_ms",
+          "type": "float64?",
+          "doc": "Age of the oldest visible job, or null when none is visible."
+        }
+      ]
+    },
+    {
+      "name": "DeadLetterInfo",
+      "node_name": "JsDeadLetterInfo",
+      "python_name": "DeadLetterInfo",
+      "clone": true,
+      "doc": "Payload-free operator metadata for one dead letter.",
+      "fields": [
+        { "name": "job_id", "type": "string", "doc": "" },
+        { "name": "queue", "type": "string", "doc": "" },
+        { "name": "attempt_count", "type": "uint32", "doc": "" },
+        { "name": "enqueued_at_ms", "type": "float64", "doc": "" },
+        { "name": "dead_lettered_at_ms", "type": "float64", "doc": "" },
+        { "name": "failure_summary", "type": "string?", "doc": "Bounded and redacted." }
+      ]
+    },
+    {
+      "name": "BatchEnqueueResult",
+      "node_name": "JsBatchEnqueueResult",
+      "python_name": "BatchEnqueueResult",
+      "clone": false,
+      "doc": "Ordered result for one item in a non-atomic batch enqueue.",
+      "fields": [
+        { "name": "job_id", "type": "string?", "doc": "Effective deterministic job ID on success." },
+        { "name": "error_code", "type": "string?", "doc": "Stable Forge error code on failure." },
+        { "name": "retryable", "type": "boolean", "doc": "Whether retrying the failed item may succeed unchanged." },
+        { "name": "message", "type": "string?", "doc": "Safe bounded failure message." }
+      ]
+    },
+    {
+      "name": "QueueStats",
+      "node_name": "JsQueueStats",
+      "python_name": "QueueStats",
+      "clone": false,
+      "doc": "Counter-based queue activity and indexed age estimate.",
+      "fields": [
+        { "name": "enqueued_total", "type": "count", "doc": "Monotonic enqueue counter." },
+        { "name": "settled_total", "type": "count", "doc": "Monotonic terminal settlement counter." },
+        { "name": "dead_total", "type": "count", "doc": "Monotonic dead-letter transition counter." },
+        { "name": "cancelled_total", "type": "count", "doc": "Monotonic cancellation counter." },
+        { "name": "enqueue_rate_per_minute", "type": "float64", "doc": "Lifetime-average enqueue estimate." },
+        { "name": "settle_rate_per_minute", "type": "float64", "doc": "Lifetime-average settlement estimate." },
+        { "name": "oldest_visible_age_ms", "type": "float64?", "doc": "Indexed age of the oldest visible job." },
+        { "name": "paused", "type": "boolean", "doc": "Whether new leases are paused." }
+      ]
+    },
+    {
+      "name": "DeadLetterPage",
+      "node_name": "JsDeadLetterPage",
+      "python_name": "DeadLetterPage",
+      "clone": false,
+      "doc": "A bounded page of dead letters.",
+      "fields": [
+        { "name": "items", "type": "DeadLetterInfo[]", "doc": "" },
+        { "name": "cursor", "type": "string?", "doc": "" }
+      ]
+    },
+    {
+      "name": "RedriveBatchResult",
+      "node_name": "JsRedriveBatchResult",
+      "python_name": "RedriveBatchResult",
+      "clone": false,
+      "doc": "Result of one bounded batch redrive.",
+      "fields": [
+        { "name": "redriven", "type": "uint32", "doc": "" },
+        { "name": "cursor", "type": "string?", "doc": "" }
+      ]
+    },
+    {
+      "name": "OutboxRelayReport",
+      "node_name": "JsOutboxRelayReport",
+      "python_name": "OutboxRelayReport",
+      "clone": false,
+      "doc": "Result and backlog snapshot from one outbox relay pass.",
+      "fields": [
+        { "name": "claimed", "type": "uint32", "doc": "" },
+        { "name": "dispatched", "type": "uint32", "doc": "" },
+        { "name": "failed", "type": "uint32", "doc": "" },
+        { "name": "pending", "type": "count", "doc": "" },
+        { "name": "oldest_pending_age_ms", "type": "float64?", "doc": "" }
+      ]
+    },
+    {
+      "name": "ScanPage",
+      "node_name": "JsScanPage",
+      "python_name": "ScanPage",
+      "clone": false,
+      "doc": "A page of keys and an opaque continuation cursor.",
+      "fields": [
+        {
+          "name": "keys",
+          "type": "string[]",
+          "doc": ""
+        },
+        {
+          "name": "cursor",
+          "type": "string?",
+          "doc": ""
+        }
+      ]
+    },
+    {
+      "name": "BlobInfo",
+      "node_name": "JsBlobInfo",
+      "python_name": "BlobInfo",
+      "clone": true,
+      "doc": "Complete object metadata returned by head.",
+      "fields": [
+        {
+          "name": "key",
+          "type": "string",
+          "doc": ""
+        },
+        {
+          "name": "size",
+          "type": "size",
+          "doc": ""
+        },
+        {
+          "name": "content_type",
+          "type": "string",
+          "doc": ""
+        },
+        {
+          "name": "etag",
+          "type": "string",
+          "doc": ""
+        },
+        {
+          "name": "last_modified_ms",
+          "type": "float64",
+          "doc": ""
+        },
+        {
+          "name": "metadata",
+          "type": "string_map",
+          "doc": ""
+        },
+        {
+          "name": "cache_control",
+          "type": "string?",
+          "doc": "HTTP cache policy stored with the object."
+        },
+        {
+          "name": "content_disposition",
+          "type": "string?",
+          "doc": "HTTP download disposition stored with the object."
+        },
+        {
+          "name": "checksum_sha256",
+          "type": "string?",
+          "doc": "Lowercase SHA-256 hex digest, independent of the provider ETag."
+        },
+        {
+          "name": "server_side_encryption",
+          "type": "string?",
+          "doc": "Provider-managed encryption label when reported by S3."
+        }
+      ]
+    },
+    {
+      "name": "BlobSummary",
+      "node_name": "JsBlobSummary",
+      "python_name": "BlobSummary",
+      "clone": true,
+      "doc": "Lightweight object metadata returned by list; content type and user metadata require head.",
+      "fields": [
+        {
+          "name": "key",
+          "type": "string",
+          "doc": ""
+        },
+        {
+          "name": "size",
+          "type": "size",
+          "doc": ""
+        },
+        {
+          "name": "etag",
+          "type": "string",
+          "doc": "Opaque provider version token; not necessarily an MD5 digest."
+        },
+        {
+          "name": "last_modified_ms",
+          "type": "float64",
+          "doc": ""
+        }
+      ]
+    },
+    {
+      "name": "BlobPage",
+      "node_name": "JsBlobPage",
+      "python_name": "BlobListPage",
+      "clone": false,
+      "doc": "A page of blob summaries and an opaque continuation cursor.",
+      "fields": [
+        {
+          "name": "items",
+          "type": "BlobSummary[]",
+          "doc": ""
+        },
+        {
+          "name": "cursor",
+          "type": "string?",
+          "doc": ""
+        }
+      ]
+    },
+    {
+      "name": "ConditionalBlobGet",
+      "node_name": "JsConditionalBlobGet",
+      "python_name": "ConditionalBlobGet",
+      "clone": false,
+      "doc": "Atomic conditional-read result that distinguishes missing and not-modified.",
+      "fields": [
+        { "name": "state", "type": "string", "doc": "found, not_modified, or missing." },
+        { "name": "body", "type": "bytes?", "doc": "Present only for found." },
+        { "name": "etag", "type": "string?", "doc": "Opaque version returned for found or not_modified." }
+      ]
+    },
+    {
+      "name": "MultipartUpload",
+      "node_name": "JsMultipartUpload",
+      "python_name": "MultipartUpload",
+      "clone": true,
+      "doc": "Opaque provider-native server-mediated multipart upload handle.",
+      "fields": [
+        { "name": "key", "type": "string", "doc": "Exact logical destination key." },
+        { "name": "upload_id", "type": "string", "doc": "Opaque provider upload identifier." },
+        { "name": "create_only", "type": "boolean", "doc": "Whether completion must create a new key." },
+        { "name": "match_version", "type": "string?", "doc": "Destination ETag required at completion." }
+      ]
+    },
+    {
+      "name": "MultipartPart",
+      "node_name": "JsMultipartPart",
+      "python_name": "MultipartPart",
+      "clone": true,
+      "doc": "One uploaded multipart part receipt.",
+      "fields": [
+        { "name": "part_number", "type": "uint32", "doc": "Provider part number in 1..=10000." },
+        { "name": "etag", "type": "string", "doc": "Opaque part receipt passed back unchanged." },
+        { "name": "size", "type": "size", "doc": "Uploaded part size in bytes." }
+      ]
+    },
+    {
+      "name": "ProxyPresign",
+      "node_name": "JsProxyPresign",
+      "python_name": "ProxyPresign",
+      "clone": true,
+      "doc": "Forge proxy-signed request whose server-side proxy can enforce an upload-size ceiling.",
+      "fields": [
+        { "name": "url", "type": "string", "doc": "Bearer credential; redact its query string from logs and traces." },
+        { "name": "method", "type": "string", "doc": "GET or PUT." },
+        { "name": "key", "type": "string", "doc": "Logical object key." },
+        { "name": "expires_epoch", "type": "int64", "doc": "Unix expiry in seconds." },
+        { "name": "max_bytes", "type": "size", "doc": "Upload ceiling enforced by the Forge proxy; zero for GET." },
+        { "name": "signature", "type": "string", "doc": "Signature value for proxy verification." },
+        { "name": "required_headers", "type": "string_map", "doc": "Headers the caller must send." }
+      ]
+    },
+    {
+      "name": "NativePresign",
+      "node_name": "JsNativePresign",
+      "python_name": "NativePresign",
+      "clone": true,
+      "doc": "Provider-native presigned request. Native PUT does not portably enforce a maximum body size.",
+      "fields": [
+        { "name": "url", "type": "string", "doc": "Bearer credential; redact its query string from logs and traces." },
+        { "name": "method", "type": "string", "doc": "GET or PUT." },
+        { "name": "expires_epoch", "type": "int64", "doc": "Unix expiry in seconds." },
+        { "name": "required_headers", "type": "string_map", "doc": "Signed headers the caller must send exactly." },
+        { "name": "constraints", "type": "string_map", "doc": "Structured provider/security constraints." }
+      ]
+    },
+    {
+      "name": "ScheduleInfo",
+      "node_name": "JsScheduleInfo",
+      "python_name": "ScheduleInfo",
+      "clone": true,
+      "doc": "A registered schedule.",
+      "fields": [
+        {
+          "name": "name",
+          "type": "string",
+          "doc": ""
+        },
+        {
+          "name": "kind",
+          "type": "string",
+          "doc": ""
+        },
+        {
+          "name": "cron_expr",
+          "type": "string?",
+          "doc": ""
+        },
+        {
+          "name": "queue",
+          "type": "string",
+          "doc": ""
+        },
+        {
+          "name": "next_run_ms",
+          "type": "float64",
+          "doc": ""
+        },
+        {
+          "name": "last_run_ms",
+          "type": "float64?",
+          "doc": ""
+        },
+        {
+          "name": "paused",
+          "type": "boolean",
+          "doc": "Whether this named schedule is paused."
+        },
+        {
+          "name": "misfire_policy",
+          "type": "string",
+          "doc": "skip, run_once, or catch_up."
+        },
+        {
+          "name": "max_catch_up",
+          "type": "uint32",
+          "doc": "Maximum missed occurrences dispatched by catch_up; zero otherwise."
+        }
+      ]
+    },
+    {
+      "name": "SchedulePage",
+      "node_name": "JsSchedulePage",
+      "python_name": "SchedulePage",
+      "clone": false,
+      "doc": "A page of schedules and an opaque continuation cursor.",
+      "fields": [
+        {
+          "name": "items",
+          "type": "ScheduleInfo[]",
+          "doc": ""
+        },
+        {
+          "name": "cursor",
+          "type": "string?",
+          "doc": ""
+        }
+      ]
+    },
+    {
+      "name": "SchedulerDiagnostics",
+      "node_name": "JsSchedulerDiagnostics",
+      "python_name": "SchedulerDiagnostics",
+      "clone": true,
+      "doc": "Bounded operational state for one scheduler namespace.",
+      "fields": [
+        { "name": "lag_ms", "type": "float64?", "doc": "Age of the oldest unpaused due occurrence." },
+        { "name": "last_successful_tick_ms", "type": "float64?", "doc": "UTC Unix timestamp of the latest successful pass." },
+        { "name": "due_count", "type": "count", "doc": "Unpaused schedules currently due." },
+        { "name": "enqueue_failures", "type": "count", "doc": "Cumulative scheduler enqueue failures." }
+      ]
+    },
+    {
+      "name": "Session",
+      "node_name": "JsSession",
+      "python_name": "SessionInfo",
+      "clone": false,
+      "doc": "Validated session metadata.",
+      "fields": [
+        {
+          "name": "user_id",
+          "type": "string",
+          "doc": ""
+        },
+        {
+          "name": "created_at_ms",
+          "type": "float64",
+          "doc": ""
+        },
+        {
+          "name": "expires_at_ms",
+          "type": "float64",
+          "doc": ""
+        }
+      ]
+    },
+    {
+      "name": "ApiKeyInfo",
+      "node_name": "JsApiKeyInfo",
+      "python_name": "ApiKeyInfo",
+      "clone": false,
+      "doc": "Non-secret API-key metadata.",
+      "fields": [
+        {
+          "name": "id",
+          "type": "string",
+          "doc": ""
+        },
+        {
+          "name": "owner_id",
+          "type": "string",
+          "doc": ""
+        },
+        {
+          "name": "label",
+          "type": "string",
+          "doc": ""
+        },
+        {
+          "name": "expires_at_ms",
+          "type": "float64?",
+          "doc": ""
+        },
+        {
+          "name": "scopes",
+          "type": "string[]",
+          "doc": "Application-owned authorization labels; Forge stores but does not interpret them."
+        },
+        {
+          "name": "metadata",
+          "type": "string_map",
+          "doc": "Bounded application metadata."
+        }
+      ]
+    },
+    {
+      "name": "TokenConsumption",
+      "node_name": "JsTokenConsumption",
+      "python_name": "TokenConsumption",
+      "clone": false,
+      "doc": "The user and bounded opaque payload returned by atomic one-time-token consumption.",
+      "fields": [
+        { "name": "user_id", "type": "string", "doc": "Application-owned user identifier." },
+        { "name": "payload", "type": "bytes", "doc": "Opaque bytes stored with the token." }
+      ]
+    },
+    {
+      "name": "FlagEvaluation",
+      "node_name": "JsFlagEvaluation",
+      "python_name": "FlagEvaluation",
+      "clone": true,
+      "doc": "Typed OpenFeature-style flag result with stable evaluation details.",
+      "fields": [
+        { "name": "value_json", "type": "string", "doc": "Canonical JSON value." },
+        { "name": "value_type", "type": "string", "doc": "boolean, string, integer, float, object, array, or null." },
+        { "name": "variant", "type": "string?", "doc": "Stable application-defined variant." },
+        { "name": "reason", "type": "string", "doc": "Stable evaluation reason." },
+        { "name": "error_code", "type": "string?", "doc": "Error category when the default was used." }
+      ]
+    },
+    {
+      "name": "ConfigEntry",
+      "node_name": "JsConfigEntry",
+      "python_name": "ConfigEntry",
+      "clone": true,
+      "doc": "One config value returned in the same order as its requested key.",
+      "fields": [
+        { "name": "key", "type": "string", "doc": "Exact requested key." },
+        { "name": "value", "type": "string?", "doc": "Resolved value, or null when unset." }
+      ]
+    },
+    {
+      "name": "FlagEvaluationRequest",
+      "node_name": "JsFlagEvaluationRequest",
+      "python_name": "FlagEvaluationRequest",
+      "clone": true,
+      "doc": "One typed bulk flag evaluation with a caller-owned correlation id.",
+      "fields": [
+        { "name": "id", "type": "string", "doc": "Caller-owned id returned unchanged." },
+        { "name": "key", "type": "string", "doc": "Flag key." },
+        { "name": "default_json", "type": "string", "doc": "Valid JSON default value." },
+        { "name": "targeting_key", "type": "string?", "doc": "Stable evaluation subject." },
+        { "name": "context_json", "type": "string?", "doc": "Optional JSON object of invocation-local OpenFeature context fields." }
+      ]
+    },
+    {
+      "name": "FlagEvaluationEntry",
+      "node_name": "JsFlagEvaluationEntry",
+      "python_name": "FlagEvaluationEntry",
+      "clone": true,
+      "doc": "One typed bulk flag result in request order.",
+      "fields": [
+        { "name": "id", "type": "string", "doc": "Caller-owned request id." },
+        { "name": "key", "type": "string", "doc": "Flag key." },
+        { "name": "evaluation", "type": "FlagEvaluation", "doc": "Stable OpenFeature-style details." }
+      ]
+    },
+    {
+      "name": "ConfigSnapshot",
+      "node_name": "JsConfigSnapshot",
+      "python_name": "ConfigSnapshot",
+      "clone": true,
+      "doc": "Read-only caller-scoped config view with an explicit expiry and secret-handling declaration.",
+      "fields": [
+        { "name": "schema_version", "type": "uint32", "doc": "Portable snapshot schema version; currently 1." },
+        { "name": "created_at_ms", "type": "float64", "doc": "Unix epoch milliseconds when captured." },
+        { "name": "expires_at_ms", "type": "float64", "doc": "Hard Unix epoch millisecond staleness boundary." },
+        { "name": "secret_handling", "type": "string", "doc": "no_secrets or application_protected." },
+        { "name": "config", "type": "ConfigEntry[]", "doc": "Only the exact requested config keys." },
+        { "name": "flags", "type": "FlagEvaluationEntry[]", "doc": "Pre-evaluated flag requests; no offline re-evaluation." }
+      ]
+    },
+    {
+      "name": "BackendInfo",
+      "node_name": "JsBackendInfo",
+      "python_name": "BackendInfo",
+      "clone": false,
+      "doc": "Resolved backend capability information.",
+      "fields": [
+        {
+          "name": "primitive",
+          "type": "string",
+          "doc": ""
+        },
+        {
+          "name": "provider",
+          "type": "string",
+          "doc": ""
+        },
+        {
+          "name": "durable",
+          "type": "boolean",
+          "doc": ""
+        },
+        {
+          "name": "caveats",
+          "type": "string",
+          "doc": ""
+        }
+      ]
+    },
+    {
+      "name": "BackendHealth",
+      "node_name": "JsBackendHealth",
+      "python_name": "BackendHealth",
+      "clone": true,
+      "doc": "One redacted live backend probe result.",
+      "fields": [
+        { "name": "primitive", "type": "string", "doc": "" },
+        { "name": "provider", "type": "string", "doc": "" },
+        { "name": "status", "type": "string", "doc": "healthy or unhealthy" },
+        { "name": "latency_ms", "type": "float64", "doc": "" },
+        { "name": "error_category", "type": "string?", "doc": "Stable category, never a raw provider error." },
+        { "name": "last_success_ms", "type": "float64?", "doc": "" },
+        { "name": "message", "type": "string", "doc": "Bounded redacted diagnostic." }
+      ]
+    },
+    {
+      "name": "HealthReport",
+      "node_name": "JsHealthReport",
+      "python_name": "HealthReport",
+      "clone": false,
+      "doc": "Separate process liveness and dependency readiness.",
+      "fields": [
+        { "name": "live", "type": "boolean", "doc": "" },
+        { "name": "ready", "type": "boolean", "doc": "" },
+        { "name": "checked_at_ms", "type": "float64", "doc": "" },
+        { "name": "duration_ms", "type": "float64", "doc": "" },
+        { "name": "backends", "type": "BackendHealth[]", "doc": "" }
+      ]
+    },
+    {
+      "name": "MetricSample",
+      "node_name": "JsMetricSample",
+      "python_name": "MetricSample",
+      "clone": false,
+      "doc": "One bounded-cardinality per-instance metric sample.",
+      "fields": [
+        { "name": "name", "type": "string", "doc": "" },
+        { "name": "kind", "type": "string", "doc": "counter, gauge, or histogram" },
+        { "name": "labels", "type": "string_map", "doc": "Fixed low-cardinality dimensions only." },
+        { "name": "value", "type": "float64", "doc": "Counter or gauge value." },
+        { "name": "count", "type": "count?", "doc": "Histogram observation count." },
+        { "name": "sum", "type": "float64?", "doc": "Histogram observation sum." }
+      ]
+    },
+    {
+      "name": "DiagnosticCheck",
+      "node_name": "JsDiagnosticCheck",
+      "python_name": "DiagnosticCheck",
+      "clone": true,
+      "doc": "One secret-safe deployment or operator diagnostic.",
+      "fields": [
+        { "name": "name", "type": "string", "doc": "Stable check identifier." },
+        { "name": "status", "type": "string", "doc": "pass, warn, or fail." },
+        { "name": "message", "type": "string", "doc": "Bounded redacted explanation." }
+      ]
+    },
+    {
+      "name": "DiagnosticsReport",
+      "node_name": "JsDiagnosticsReport",
+      "python_name": "DiagnosticsReport",
+      "clone": false,
+      "doc": "Bounded configuration, schema, permission, reachability, skew, and safety checks.",
+      "fields": [
+        { "name": "ready", "type": "boolean", "doc": "False when any required check fails." },
+        { "name": "checked_at_ms", "type": "float64", "doc": "Unix epoch milliseconds." },
+        { "name": "checks", "type": "DiagnosticCheck[]", "doc": "Stable ordered checks." }
+      ]
+    },
+    {
+      "name": "MigrationReport",
+      "node_name": "JsMigrationReport",
+      "python_name": "MigrationReport",
+      "clone": false,
+      "doc": "Structured migration outcome for one distinct PostgreSQL target.",
+      "fields": [
+        {
+          "name": "target",
+          "type": "string",
+          "doc": "Safe logical target name, never a connection string."
+        },
+        {
+          "name": "state",
+          "type": "string",
+          "doc": "pending, applied, locked, incompatible, or failed"
+        },
+        {
+          "name": "current_version",
+          "type": "string?",
+          "doc": "Highest recorded schema version."
+        },
+        {
+          "name": "target_version",
+          "type": "string",
+          "doc": "Newest migration embedded in this library."
+        },
+        {
+          "name": "applied",
+          "type": "string[]",
+          "doc": "Recorded migration versions."
+        },
+        {
+          "name": "pending",
+          "type": "string[]",
+          "doc": "Known migrations not yet applied."
+        },
+        {
+          "name": "lock_holder",
+          "type": "string?",
+          "doc": "Safe PostgreSQL session identity when another migrator owns the lock."
+        },
+        {
+          "name": "message",
+          "type": "string",
+          "doc": "Safe actionable summary."
+        }
+      ]
+    }
+  ],
+  "operations": [
+    {
+      "id": "client.init",
+      "primitive": "client",
+      "arguments": [],
+      "result": "Forge",
+      "methods": {
+        "rust": [
+          "init"
+        ],
+        "javascript": [
+          "init"
+        ],
+        "python": [
+          "init"
+        ],
+        "go": [
+          "InitDefault"
+        ]
+      },
+      "errors": [
+        "CONFIG",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Initialization may be retried only for retryable dependency errors."
+    },
+    {
+      "id": "client.init_from",
+      "primitive": "client",
+      "arguments": [
+        {
+          "name": "path",
+          "type": "string"
+        }
+      ],
+      "result": "Forge",
+      "methods": {
+        "rust": [
+          "init_from"
+        ],
+        "javascript": [
+          "initFrom"
+        ],
+        "python": [
+          "init_from"
+        ],
+        "go": [
+          "InitFrom"
+        ]
+      },
+      "errors": [
+        "CONFIG",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Initialization may be retried only for retryable dependency errors."
+    },
+    {
+      "id": "client.init_from_string",
+      "primitive": "client",
+      "arguments": [
+        {
+          "name": "toml",
+          "type": "string"
+        }
+      ],
+      "result": "Forge",
+      "methods": {
+        "rust": [
+          "init_from_str"
+        ],
+        "javascript": [
+          "initFromString"
+        ],
+        "python": [
+          "init_from_string"
+        ],
+        "go": [
+          "InitFromString"
+        ]
+      },
+      "errors": [
+        "CONFIG",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Initialization may be retried only for retryable dependency errors."
+    },
+    {
+      "id": "client.init_memory_for_testing",
+      "primitive": "client",
+      "arguments": [
+        {"name": "toml", "type": "string"},
+        {"name": "start_ms", "type": "float64"},
+        {"name": "seed", "type": "uint64"}
+      ],
+      "result": "Forge",
+      "methods": {
+        "rust": ["init_memory_for_testing"],
+        "javascript": ["initMemoryForTesting"],
+        "python": ["init_memory_for_testing"],
+        "go": ["NewMemoryForTesting"]
+      },
+      "errors": ["CONFIG", "INVALID"],
+      "retry": "Test-only deterministic factory; do not use its seeded entropy for production secrets."
+    },
+    {
+      "id": "client.advance_test_clock",
+      "primitive": "client",
+      "arguments": [{"name": "duration", "type": "duration"}],
+      "result": "void",
+      "methods": {
+        "rust": ["advance_test_clock"],
+        "javascript": ["advanceTestClock"],
+        "python": ["advance_test_clock"],
+        "go": ["AdvanceTestClock"]
+      },
+      "errors": ["INVALID", "PRECONDITION"],
+      "retry": "Test-only local state mutation."
+    },
+    {
+      "id": "client.migrate",
+      "primitive": "client",
+      "arguments": [],
+      "result": "MigrationReport[]",
+      "methods": {
+        "rust": ["migrate"],
+        "javascript": ["migrate"],
+        "python": ["migrate"],
+        "go": ["Migrate"]
+      },
+      "errors": ["CONFIG", "NOT_CONFIGURED", "UNAVAILABLE", "BACKEND"],
+      "retry": "Idempotent; locked and retryable dependency outcomes may be retried."
+    },
+    {
+      "id": "client.migrate_from",
+      "primitive": "client",
+      "arguments": [{"name": "path", "type": "string"}],
+      "result": "MigrationReport[]",
+      "methods": {
+        "rust": ["migrate_from"],
+        "javascript": ["migrateFrom"],
+        "python": ["migrate_from"],
+        "go": ["MigrateFrom"]
+      },
+      "errors": ["CONFIG", "NOT_CONFIGURED", "UNAVAILABLE", "BACKEND"],
+      "retry": "Idempotent; locked and retryable dependency outcomes may be retried."
+    },
+    {
+      "id": "client.migrate_from_string",
+      "primitive": "client",
+      "arguments": [{"name": "toml", "type": "string"}],
+      "result": "MigrationReport[]",
+      "methods": {
+        "rust": ["migrate_from_str"],
+        "javascript": ["migrateFromString"],
+        "python": ["migrate_from_string"],
+        "go": ["MigrateFromString"]
+      },
+      "errors": ["CONFIG", "NOT_CONFIGURED", "UNAVAILABLE", "BACKEND"],
+      "retry": "Idempotent; locked and retryable dependency outcomes may be retried."
+    },
+    {
+      "id": "client.migration_status",
+      "primitive": "client",
+      "arguments": [],
+      "result": "MigrationReport[]",
+      "methods": {
+        "rust": ["migration_status"],
+        "javascript": ["migrationStatus"],
+        "python": ["migration_status"],
+        "go": ["MigrationStatus"]
+      },
+      "errors": ["CONFIG", "NOT_CONFIGURED", "UNAVAILABLE", "BACKEND"],
+      "retry": "Read-only; retryable dependency failures may be retried."
+    },
+    {
+      "id": "client.migration_status_from",
+      "primitive": "client",
+      "arguments": [{"name": "path", "type": "string"}],
+      "result": "MigrationReport[]",
+      "methods": {
+        "rust": ["migration_status_from"],
+        "javascript": ["migrationStatusFrom"],
+        "python": ["migration_status_from"],
+        "go": ["MigrationStatusFrom"]
+      },
+      "errors": ["CONFIG", "NOT_CONFIGURED", "UNAVAILABLE", "BACKEND"],
+      "retry": "Read-only; retryable dependency failures may be retried."
+    },
+    {
+      "id": "client.migration_status_from_string",
+      "primitive": "client",
+      "arguments": [{"name": "toml", "type": "string"}],
+      "result": "MigrationReport[]",
+      "methods": {
+        "rust": ["migration_status_from_str"],
+        "javascript": ["migrationStatusFromString"],
+        "python": ["migration_status_from_string"],
+        "go": ["MigrationStatusFromString"]
+      },
+      "errors": ["CONFIG", "NOT_CONFIGURED", "UNAVAILABLE", "BACKEND"],
+      "retry": "Read-only; retryable dependency failures may be retried."
+    },
+    {
+      "id": "client.validate_schema",
+      "primitive": "client",
+      "arguments": [],
+      "result": "MigrationReport[]",
+      "methods": {
+        "rust": ["validate_schema"],
+        "javascript": ["validateSchema"],
+        "python": ["validate_schema"],
+        "go": ["ValidateSchema"]
+      },
+      "errors": ["CONFIG", "NOT_CONFIGURED", "UNAVAILABLE", "BACKEND"],
+      "retry": "Read-only; retryable dependency failures may be retried."
+    },
+    {
+      "id": "client.validate_schema_from",
+      "primitive": "client",
+      "arguments": [{"name": "path", "type": "string"}],
+      "result": "MigrationReport[]",
+      "methods": {
+        "rust": ["validate_schema_from"],
+        "javascript": ["validateSchemaFrom"],
+        "python": ["validate_schema_from"],
+        "go": ["ValidateSchemaFrom"]
+      },
+      "errors": ["CONFIG", "NOT_CONFIGURED", "UNAVAILABLE", "BACKEND"],
+      "retry": "Read-only; retryable dependency failures may be retried."
+    },
+    {
+      "id": "client.validate_schema_from_string",
+      "primitive": "client",
+      "arguments": [{"name": "toml", "type": "string"}],
+      "result": "MigrationReport[]",
+      "methods": {
+        "rust": ["validate_schema_from_str"],
+        "javascript": ["validateSchemaFromString"],
+        "python": ["validate_schema_from_string"],
+        "go": ["ValidateSchemaFromString"]
+      },
+      "errors": ["CONFIG", "NOT_CONFIGURED", "UNAVAILABLE", "BACKEND"],
+      "retry": "Read-only; retryable dependency failures may be retried."
+    },
+    {
+      "id": "client.close",
+      "primitive": "client",
+      "arguments": [
+        {
+          "name": "deadline_seconds",
+          "type": "float64?",
+          "default": 30
+        }
+      ],
+      "result": "void",
+      "methods": {
+        "rust": [
+          "close"
+        ],
+        "javascript": [
+          "close"
+        ],
+        "python": [
+          "close"
+        ],
+        "go": [
+          "Close"
+        ]
+      },
+      "errors": [
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Idempotent; callers may retry after a deadline error with a new deadline."
+    },
+    {
+      "id": "client.backend_capabilities",
+      "primitive": "client",
+      "arguments": [],
+      "result": "BackendInfo[]",
+      "methods": {
+        "rust": [
+          "backend_capabilities"
+        ],
+        "javascript": [
+          "backendCapabilities"
+        ],
+        "python": [
+          "backend_capabilities"
+        ],
+        "go": [
+          "BackendCapabilities"
+        ]
+      },
+      "errors": [],
+      "retry": "Pure configuration and capability inspection."
+    },
+    {
+      "id": "client.liveness",
+      "primitive": "client",
+      "arguments": [],
+      "result": "boolean",
+      "methods": {
+        "rust": ["is_live"],
+        "javascript": ["isLive"],
+        "python": ["is_live"],
+        "go": ["IsLive"]
+      },
+      "errors": [],
+      "retry": "Pure process state inspection; dependency failures do not affect liveness."
+    },
+    {
+      "id": "client.probe",
+      "primitive": "client",
+      "arguments": [
+        { "name": "deadline_seconds", "type": "float64" },
+        { "name": "readiness_backends", "type": "string[]" }
+      ],
+      "result": "HealthReport",
+      "methods": {
+        "rust": ["probe"],
+        "javascript": ["probe"],
+        "python": ["probe"],
+        "go": ["Probe"]
+      },
+      "errors": ["INVALID"],
+      "retry": "Bounded live operations use Forge-reserved probe keys; callers choose which enabled backends decide readiness."
+    },
+    {
+      "id": "client.metrics_snapshot",
+      "primitive": "client",
+      "arguments": [],
+      "result": "MetricSample[]",
+      "methods": {
+        "rust": ["metrics_snapshot"],
+        "javascript": ["metricsSnapshot"],
+        "python": ["metrics_snapshot"],
+        "go": ["MetricsSnapshot"]
+      },
+      "errors": [],
+      "retry": "Pure point-in-time instance snapshot."
+    },
+    {
+      "id": "client.diagnostics",
+      "primitive": "client",
+      "arguments": [{ "name": "deadline_seconds", "type": "float64" }],
+      "result": "DiagnosticsReport",
+      "methods": {
+        "rust": ["diagnostics"],
+        "javascript": ["diagnostics"],
+        "python": ["diagnostics"],
+        "go": ["Diagnostics"]
+      },
+      "errors": ["INVALID", "UNAVAILABLE", "BACKEND"],
+      "retry": "Bounded checks may use Forge-reserved probe keys; applications choose how to expose the report."
+    },
+    {
+      "id": "client.render_prometheus",
+      "primitive": "client",
+      "arguments": [],
+      "result": "string",
+      "methods": {
+        "rust": ["render_prometheus"],
+        "javascript": ["renderPrometheus"],
+        "python": ["render_prometheus"],
+        "go": ["RenderPrometheus"]
+      },
+      "errors": [],
+      "retry": "Pure Prometheus 0.0.4 rendering with no mandatory collector."
+    },
+    {
+      "id": "client.maintain",
+      "primitive": "client",
+      "arguments": [],
+      "result": "void",
+      "methods": {
+        "rust": [
+          "maintain"
+        ],
+        "javascript": [
+          "maintain"
+        ],
+        "python": [
+          "maintain"
+        ],
+        "go": [
+          "Maintain"
+        ]
+      },
+      "errors": [
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Maintenance is idempotent and may retry retryable errors."
+    },
+    {
+      "id": "client.postgres_url",
+      "primitive": "client",
+      "arguments": [],
+      "result": "string",
+      "methods": {
+        "rust": [
+          "postgres_url"
+        ],
+        "javascript": [
+          "postgresUrl"
+        ],
+        "python": [
+          "postgres_url"
+        ],
+        "go": [
+          "PostgresURL"
+        ]
+      },
+      "errors": [
+        "NOT_CONFIGURED"
+      ],
+      "retry": "Pure accessor."
+    },
+
+    {
+      "id": "kv.get",
+      "primitive": "kv",
+      "arguments": [
+        {
+          "name": "key",
+          "type": "string"
+        }
+      ],
+      "result": "bytes?",
+      "methods": {
+        "rust": [
+          "get"
+        ],
+        "javascript": [
+          "kvGet",
+          "kvGetBytes"
+        ],
+        "python": [
+          "kv_get",
+          "kv_get_bytes"
+        ],
+        "go": [
+          "KVGet"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "kv.mget",
+      "primitive": "kv",
+      "arguments": [
+        {
+          "name": "keys",
+          "type": "string[]"
+        }
+      ],
+      "result": "bytes?[]",
+      "methods": {
+        "rust": [
+          "mget"
+        ],
+        "javascript": [
+          "kvMget"
+        ],
+        "python": [
+          "kv_mget"
+        ],
+        "go": [
+          "KVMGet"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "kv.set",
+      "primitive": "kv",
+      "arguments": [
+        {
+          "name": "key",
+          "type": "string"
+        },
+        {
+          "name": "value",
+          "type": "bytes"
+        },
+        {
+          "name": "ttl_seconds",
+          "type": "float?"
+        },
+        {
+          "name": "mode",
+          "type": "SetMode"
+        }
+      ],
+      "result": "boolean",
+      "methods": {
+        "rust": [
+          "set"
+        ],
+        "javascript": [
+          "kvSet",
+          "kvSetBytes"
+        ],
+        "python": [
+          "kv_set",
+          "kv_set_bytes"
+        ],
+        "go": [
+          "KVSet"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "kv.delete",
+      "primitive": "kv",
+      "arguments": [
+        {
+          "name": "key",
+          "type": "string"
+        }
+      ],
+      "result": "boolean",
+      "methods": {
+        "rust": [
+          "delete"
+        ],
+        "javascript": [
+          "kvDelete"
+        ],
+        "python": [
+          "kv_delete"
+        ],
+        "go": [
+          "KVDelete"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "kv.exists",
+      "primitive": "kv",
+      "arguments": [
+        {
+          "name": "key",
+          "type": "string"
+        }
+      ],
+      "result": "boolean",
+      "methods": {
+        "rust": [
+          "exists"
+        ],
+        "javascript": [
+          "kvExists"
+        ],
+        "python": [
+          "kv_exists"
+        ],
+        "go": [
+          "KVExists"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "kv.incr",
+      "primitive": "kv",
+      "arguments": [
+        {
+          "name": "key",
+          "type": "string"
+        },
+        {
+          "name": "by",
+          "type": "int64"
+        }
+      ],
+      "result": "int64",
+      "methods": {
+        "rust": [
+          "incr"
+        ],
+        "javascript": [
+          "kvIncr"
+        ],
+        "python": [
+          "kv_incr"
+        ],
+        "go": [
+          "KVIncr"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "kv.expire",
+      "primitive": "kv",
+      "arguments": [
+        {
+          "name": "key",
+          "type": "string"
+        },
+        {
+          "name": "ttl_seconds",
+          "type": "float"
+        }
+      ],
+      "result": "boolean",
+      "methods": {
+        "rust": [
+          "expire"
+        ],
+        "javascript": [
+          "kvExpire"
+        ],
+        "python": [
+          "kv_expire"
+        ],
+        "go": [
+          "KVExpire"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "kv.compare_and_swap",
+      "primitive": "kv",
+      "arguments": [
+        {
+          "name": "key",
+          "type": "string"
+        },
+        {
+          "name": "expected",
+          "type": "bytes?"
+        },
+        {
+          "name": "replacement",
+          "type": "bytes"
+        }
+      ],
+      "result": "boolean",
+      "methods": {
+        "rust": [
+          "compare_and_swap"
+        ],
+        "javascript": [
+          "kvCompareAndSwap"
+        ],
+        "python": [
+          "kv_compare_and_swap"
+        ],
+        "go": [
+          "KVCompareAndSwap"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "kv.scan",
+      "primitive": "kv",
+      "arguments": [
+        {
+          "name": "prefix",
+          "type": "string"
+        },
+        {
+          "name": "cursor",
+          "type": "cursor?"
+        },
+        {
+          "name": "limit",
+          "type": "uint32"
+        }
+      ],
+      "result": "ScanPage",
+      "methods": {
+        "rust": [
+          "scan"
+        ],
+        "javascript": [
+          "kvScan",
+          "kvScanPage"
+        ],
+        "python": [
+          "kv_scan",
+          "kv_scan_page"
+        ],
+        "go": [
+          "KVScan"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "queue.enqueue",
+      "primitive": "queue",
+      "arguments": [
+        {
+          "name": "queue",
+          "type": "string"
+        },
+        {
+          "name": "payload",
+          "type": "bytes"
+        },
+        {
+          "name": "options",
+          "type": "EnqueueOptions"
+        }
+      ],
+      "result": "JobId",
+      "methods": {
+        "rust": [
+          "enqueue"
+        ],
+        "javascript": [
+          "queueEnqueue"
+        ],
+        "python": [
+          "queue_enqueue"
+        ],
+        "go": [
+          "Enqueue"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "queue.dequeue",
+      "primitive": "queue",
+      "arguments": [
+        {
+          "name": "queue",
+          "type": "string"
+        },
+        {
+          "name": "options",
+          "type": "DequeueOptions"
+        }
+      ],
+      "result": "Job?",
+      "methods": {
+        "rust": [
+          "dequeue"
+        ],
+        "javascript": [
+          "queueDequeue"
+        ],
+        "python": [
+          "queue_dequeue"
+        ],
+        "go": [
+          "Dequeue"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "queue.enqueue_batch",
+      "primitive": "queue",
+      "arguments": [
+        { "name": "queue", "type": "string" },
+        { "name": "items", "type": "BatchEnqueueItem[]" }
+      ],
+      "result": "BatchEnqueueResult[]",
+      "methods": {
+        "rust": ["enqueue_batch"],
+        "javascript": ["queueEnqueueBatch"],
+        "python": ["queue_enqueue_batch"],
+        "go": ["EnqueueBatch"]
+      },
+      "errors": ["INVALID", "LIMIT", "UNAVAILABLE", "BACKEND"],
+      "retry": "The call is non-atomic; retry only failed items using deterministic IDs."
+    },
+    {
+      "id": "queue.dequeue_batch",
+      "primitive": "queue",
+      "arguments": [
+        { "name": "queue", "type": "string" },
+        { "name": "max_items", "type": "uint32" },
+        { "name": "options", "type": "DequeueOptions" }
+      ],
+      "result": "Job[]",
+      "methods": {
+        "rust": ["dequeue_batch"],
+        "javascript": ["queueDequeueBatch"],
+        "python": ["queue_dequeue_batch"],
+        "go": ["DequeueBatch"]
+      },
+      "errors": ["INVALID", "LIMIT", "UNAVAILABLE", "BACKEND"],
+      "retry": "Only the first claim long-polls; every returned job has an independent fenced lease."
+    },
+    {
+      "id": "queue.ack",
+      "primitive": "queue",
+      "arguments": [
+        {
+          "name": "receipt",
+          "type": "string"
+        }
+      ],
+      "result": "void",
+      "methods": {
+        "rust": [
+          "ack"
+        ],
+        "javascript": [
+          "queueAck"
+        ],
+        "python": [
+          "queue_ack"
+        ],
+        "go": [
+          "Ack"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "queue.nack",
+      "primitive": "queue",
+      "arguments": [
+        {
+          "name": "receipt",
+          "type": "string"
+        },
+        {
+          "name": "options",
+          "type": "NackOptions"
+        }
+      ],
+      "result": "void",
+      "methods": {
+        "rust": [
+          "nack"
+        ],
+        "javascript": [
+          "queueNack"
+        ],
+        "python": [
+          "queue_nack"
+        ],
+        "go": [
+          "Nack"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "queue.heartbeat",
+      "primitive": "queue",
+      "arguments": [
+        {
+          "name": "receipt",
+          "type": "string"
+        }
+      ],
+      "result": "void",
+      "methods": {
+        "rust": [
+          "heartbeat"
+        ],
+        "javascript": [
+          "queueHeartbeat"
+        ],
+        "python": [
+          "queue_heartbeat"
+        ],
+        "go": [
+          "Heartbeat"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "queue.cancellation_requested",
+      "primitive": "queue",
+      "arguments": [{ "name": "job", "type": "Job" }],
+      "result": "boolean",
+      "methods": {
+        "rust": ["cancellation_requested"],
+        "javascript": ["queueCancellationRequested"],
+        "python": ["queue_cancellation_requested"],
+        "go": ["CancellationRequested"]
+      },
+      "errors": ["INVALID", "PRECONDITION", "UNAVAILABLE", "BACKEND"],
+      "retry": "A low-cost cooperative check. A stale receipt returns PRECONDITION."
+    },
+    {
+      "id": "queue.finish_cancellation",
+      "primitive": "queue",
+      "arguments": [{ "name": "job", "type": "Job" }],
+      "result": "void",
+      "methods": {
+        "rust": ["finish_cancellation"],
+        "javascript": ["queueFinishCancellation"],
+        "python": ["queue_finish_cancellation"],
+        "go": ["FinishCancellation"]
+      },
+      "errors": ["INVALID", "PRECONDITION", "UNAVAILABLE", "BACKEND"],
+      "retry": "Idempotent only for the active fenced lease."
+    },
+    {
+      "id": "queue.cancel",
+      "primitive": "queue",
+      "arguments": [{ "name": "job_id", "type": "string" }],
+      "result": "JobStatus?",
+      "methods": {
+        "rust": ["cancel"],
+        "javascript": ["queueCancel"],
+        "python": ["queue_cancel"],
+        "go": ["CancelJob"]
+      },
+      "errors": ["INVALID", "UNAVAILABLE", "BACKEND"],
+      "retry": "Queued work is removed atomically; leased work moves to cancel-requested."
+    },
+    {
+      "id": "queue.status",
+      "primitive": "queue",
+      "arguments": [{ "name": "job_id", "type": "string" }],
+      "result": "JobStatus?",
+      "methods": {
+        "rust": ["status"],
+        "javascript": ["queueStatus"],
+        "python": ["queue_status"],
+        "go": ["JobStatus"]
+      },
+      "errors": ["INVALID", "UNAVAILABLE", "BACKEND"],
+      "retry": "Read-only lookup subject to terminal retention."
+    },
+    {
+      "id": "queue.list_status",
+      "primitive": "queue",
+      "arguments": [{ "name": "filter", "type": "JobStatusFilter" }],
+      "result": "JobStatusPage",
+      "methods": {
+        "rust": ["list_status"],
+        "javascript": ["queueListStatus"],
+        "python": ["queue_list_status"],
+        "go": ["ListJobStatus"]
+      },
+      "errors": ["INVALID", "LIMIT", "UNAVAILABLE", "BACKEND"],
+      "retry": "Bounded stable oldest-first operator listing."
+    },
+    {
+      "id": "queue.depth",
+      "primitive": "queue",
+      "arguments": [
+        {
+          "name": "queue",
+          "type": "string"
+        }
+      ],
+      "result": "QueueDepth",
+      "methods": {
+        "rust": [
+          "depth"
+        ],
+        "javascript": [
+          "queueDepth"
+        ],
+        "python": [
+          "queue_depth"
+        ],
+        "go": [
+          "Depth"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "queue.dead_letters",
+      "primitive": "queue",
+      "arguments": [
+        { "name": "queue", "type": "string" },
+        { "name": "cursor", "type": "cursor?" },
+        { "name": "limit", "type": "uint32" }
+      ],
+      "result": "DeadLetterPage",
+      "methods": {
+        "rust": ["dead_letters"],
+        "javascript": ["queueDeadLetters"],
+        "python": ["queue_dead_letters"],
+        "go": ["DeadLetters"]
+      },
+      "errors": ["INVALID", "LIMIT", "UNAVAILABLE", "BACKEND"],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "queue.pause",
+      "primitive": "queue",
+      "arguments": [{ "name": "queue", "type": "string" }],
+      "result": "void",
+      "methods": { "rust": ["pause"], "javascript": ["queuePause"], "python": ["queue_pause"], "go": ["PauseQueue"] },
+      "errors": ["INVALID", "UNAVAILABLE", "BACKEND"],
+      "retry": "Idempotently prevents new leases without modifying queued or leased jobs."
+    },
+    {
+      "id": "queue.resume",
+      "primitive": "queue",
+      "arguments": [{ "name": "queue", "type": "string" }],
+      "result": "void",
+      "methods": { "rust": ["resume"], "javascript": ["queueResume"], "python": ["queue_resume"], "go": ["ResumeQueue"] },
+      "errors": ["INVALID", "UNAVAILABLE", "BACKEND"],
+      "retry": "Idempotently permits new leases."
+    },
+    {
+      "id": "queue.is_paused",
+      "primitive": "queue",
+      "arguments": [{ "name": "queue", "type": "string" }],
+      "result": "boolean",
+      "methods": { "rust": ["is_paused"], "javascript": ["queueIsPaused"], "python": ["queue_is_paused"], "go": ["QueuePaused"] },
+      "errors": ["INVALID", "UNAVAILABLE", "BACKEND"],
+      "retry": "Read-only operator inspection."
+    },
+    {
+      "id": "queue.stats",
+      "primitive": "queue",
+      "arguments": [{ "name": "queue", "type": "string" }],
+      "result": "QueueStats",
+      "methods": { "rust": ["stats"], "javascript": ["queueStats"], "python": ["queue_stats"], "go": ["QueueStats"] },
+      "errors": ["INVALID", "UNAVAILABLE", "BACKEND"],
+      "retry": "Read-only counter and indexed-age estimate without payload scans."
+    },
+    {
+      "id": "queue.redrive",
+      "primitive": "queue",
+      "arguments": [
+        { "name": "job_id", "type": "string" },
+        { "name": "destination", "type": "string" },
+        { "name": "dedup_policy", "type": "string" }
+      ],
+      "result": "boolean",
+      "methods": {
+        "rust": ["redrive"],
+        "javascript": ["queueRedrive"],
+        "python": ["queue_redrive"],
+        "go": ["Redrive"]
+      },
+      "errors": ["INVALID", "PRECONDITION", "UNAVAILABLE", "BACKEND"],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "queue.redrive_batch",
+      "primitive": "queue",
+      "arguments": [
+        { "name": "queue", "type": "string" },
+        { "name": "cursor", "type": "cursor?" },
+        { "name": "limit", "type": "uint32" },
+        { "name": "destination", "type": "string" },
+        { "name": "dedup_policy", "type": "string" }
+      ],
+      "result": "RedriveBatchResult",
+      "methods": {
+        "rust": ["redrive_batch"],
+        "javascript": ["queueRedriveBatch"],
+        "python": ["queue_redrive_batch"],
+        "go": ["RedriveBatch"]
+      },
+      "errors": ["INVALID", "PRECONDITION", "UNAVAILABLE", "BACKEND"],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "queue.purge_dead_letters_dry_run",
+      "primitive": "queue",
+      "arguments": [{ "name": "queue", "type": "string" }],
+      "result": "count",
+      "methods": {
+        "rust": ["purge_dead_letters_dry_run"],
+        "javascript": ["queuePurgeDeadLettersDryRun"],
+        "python": ["queue_purge_dead_letters_dry_run"],
+        "go": ["PurgeDeadLettersDryRun"]
+      },
+      "errors": ["INVALID", "UNAVAILABLE", "BACKEND"],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "queue.purge_dead_letters",
+      "primitive": "queue",
+      "arguments": [
+        { "name": "queue", "type": "string" },
+        { "name": "confirmation", "type": "string" }
+      ],
+      "result": "count",
+      "methods": {
+        "rust": ["purge_dead_letters"],
+        "javascript": ["queuePurgeDeadLetters"],
+        "python": ["queue_purge_dead_letters"],
+        "go": ["PurgeDeadLetters"]
+      },
+      "errors": ["INVALID", "PRECONDITION", "UNAVAILABLE", "BACKEND"],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "queue.outbox_once",
+      "primitive": "outbox",
+      "arguments": [{ "name": "options", "type": "OutboxRelayOptions" }],
+      "result": "OutboxRelayReport",
+      "methods": {
+        "rust": ["run_outbox_once"],
+        "javascript": ["runOutboxOnce"],
+        "python": ["run_outbox_once"],
+        "go": ["RunOutboxOnce"]
+      },
+      "errors": ["INVALID", "NOT_CONFIGURED", "UNAVAILABLE", "BACKEND"],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "queue.outbox_relay",
+      "primitive": "outbox",
+      "arguments": [{ "name": "options", "type": "OutboxRelayOptions" }],
+      "result": "unit",
+      "methods": {
+        "rust": ["run_outbox_relay", "run_outbox_relay_until"],
+        "javascript": ["runOutboxRelay"],
+        "python": ["run_outbox_relay"],
+        "go": ["RunOutboxRelay"]
+      },
+      "errors": ["INVALID", "NOT_CONFIGURED", "UNAVAILABLE", "BACKEND"],
+      "retry": "The relay retries only errors whose contract error code is marked retryable until cancellation."
+    },
+    {
+      "id": "config.get_raw",
+      "primitive": "config",
+      "arguments": [
+        {
+          "name": "key",
+          "type": "string"
+        }
+      ],
+      "result": "bytes?",
+      "methods": {
+        "rust": [
+          "get_raw"
+        ],
+        "javascript": [
+          "configGet"
+        ],
+        "python": [
+          "config_get"
+        ],
+        "go": [
+          "ConfigGet"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "config.set_raw",
+      "primitive": "config",
+      "arguments": [
+        {
+          "name": "key",
+          "type": "string"
+        },
+        {
+          "name": "value",
+          "type": "bytes"
+        }
+      ],
+      "result": "void",
+      "methods": {
+        "rust": [
+          "set_raw"
+        ],
+        "javascript": [
+          "configSet"
+        ],
+        "python": [
+          "config_set"
+        ],
+        "go": [
+          "ConfigSet"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "config.get_many_raw",
+      "primitive": "config",
+      "arguments": [{ "name": "keys", "type": "string[]" }],
+      "result": "ConfigEntry[]",
+      "methods": {
+        "rust": ["get_many_raw"],
+        "javascript": ["configGetMany"],
+        "python": ["config_get_many"],
+        "go": ["ConfigGetMany"]
+      },
+      "errors": ["INVALID", "LIMIT", "UNAVAILABLE", "BACKEND"],
+      "retry": "At most 256 exact keys are resolved in input order with one durable-backend round trip."
+    },
+    {
+      "id": "config.delete_raw",
+      "primitive": "config",
+      "arguments": [
+        {
+          "name": "key",
+          "type": "string"
+        }
+      ],
+      "result": "boolean",
+      "methods": {
+        "rust": [
+          "delete_raw"
+        ],
+        "javascript": [
+          "configDelete"
+        ],
+        "python": [
+          "config_delete"
+        ],
+        "go": [
+          "ConfigDelete"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "config.flag",
+      "primitive": "config",
+      "arguments": [
+        {
+          "name": "key",
+          "type": "string"
+        },
+        {
+          "name": "default",
+          "type": "boolean"
+        },
+        {
+          "name": "targeting_key",
+          "type": "string?"
+        }
+      ],
+      "result": "boolean",
+      "methods": {
+        "rust": [
+          "flag"
+        ],
+        "javascript": [
+          "flag"
+        ],
+        "python": [
+          "flag"
+        ],
+        "go": [
+          "Flag"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "config.set_flag",
+      "primitive": "config",
+      "arguments": [
+        {
+          "name": "key",
+          "type": "string"
+        },
+        {
+          "name": "rule",
+          "type": "FlagRule"
+        }
+      ],
+      "result": "void",
+      "methods": {
+        "rust": [
+          "set_flag"
+        ],
+        "javascript": [
+          "setFlagPercent",
+          "setFlagOn",
+          "setFlagOff",
+          "setFlagAllowList",
+          "setFlagValue"
+        ],
+        "python": [
+          "set_flag_percent",
+          "set_flag_on",
+          "set_flag_off",
+          "set_flag_allow_list",
+          "set_flag_value"
+        ],
+        "go": [
+          "SetFlag"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "config.flag_details",
+      "primitive": "config",
+      "arguments": [
+        { "name": "key", "type": "string" },
+        { "name": "default_json", "type": "string" },
+        { "name": "targeting_key", "type": "string?" }
+      ],
+      "result": "FlagEvaluation",
+      "methods": {
+        "rust": ["flag_details"],
+        "javascript": ["flagDetails"],
+        "python": ["flag_details"],
+        "go": ["FlagDetails"]
+      },
+      "errors": ["INVALID", "LIMIT", "UNAVAILABLE", "BACKEND"],
+      "retry": "Evaluation returns the caller default with an error reason instead of raising backend failures."
+    },
+    {
+      "id": "config.delete_flag",
+      "primitive": "config",
+      "arguments": [
+        {
+          "name": "key",
+          "type": "string"
+        }
+      ],
+      "result": "boolean",
+      "methods": {
+        "rust": [
+          "delete_flag"
+        ],
+        "javascript": [
+          "deleteFlag"
+        ],
+        "python": [
+          "delete_flag"
+        ],
+        "go": [
+          "DeleteFlag"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "config.flag_details_many",
+      "primitive": "config",
+      "arguments": [{ "name": "requests", "type": "FlagEvaluationRequest[]" }],
+      "result": "FlagEvaluationEntry[]",
+      "methods": {
+        "rust": ["flag_details_many"],
+        "javascript": ["flagDetailsMany"],
+        "python": ["flag_details_many"],
+        "go": ["FlagDetailsMany"]
+      },
+      "errors": ["INVALID", "LIMIT", "UNAVAILABLE", "BACKEND"],
+      "retry": "The request envelope may fail; each valid flag evaluation otherwise returns its caller default and stable error details on evaluation failure."
+    },
+    {
+      "id": "config.snapshot",
+      "primitive": "config",
+      "arguments": [
+        { "name": "config_keys", "type": "string[]" },
+        { "name": "flag_requests", "type": "FlagEvaluationRequest[]" },
+        { "name": "max_stale_seconds", "type": "float64" },
+        { "name": "secret_handling", "type": "string" }
+      ],
+      "result": "ConfigSnapshot",
+      "methods": {
+        "rust": ["snapshot"],
+        "javascript": ["configSnapshot"],
+        "python": ["config_snapshot"],
+        "go": ["ConfigSnapshot"]
+      },
+      "errors": ["INVALID", "LIMIT", "UNAVAILABLE", "BACKEND"],
+      "retry": "Snapshots expire after 1 to 86400 seconds, contain only exact requested values, and must not be used after expires_at_ms."
+    },
+    {
+      "id": "config.snapshot_encode",
+      "primitive": "config",
+      "arguments": [{ "name": "snapshot", "type": "ConfigSnapshot" }],
+      "result": "bytes",
+      "methods": {
+        "rust": ["encode_snapshot"],
+        "javascript": ["encodeConfigSnapshot"],
+        "python": ["encode_config_snapshot"],
+        "go": ["EncodeConfigSnapshot"]
+      },
+      "errors": ["INVALID", "LIMIT", "PRECONDITION"],
+      "retry": "Encoding validates the schema, expiry bound, secret declaration, unique identifiers, and 1 MiB limit."
+    },
+    {
+      "id": "config.snapshot_decode",
+      "primitive": "config",
+      "arguments": [{ "name": "encoded", "type": "bytes" }],
+      "result": "ConfigSnapshot",
+      "methods": {
+        "rust": ["decode_snapshot"],
+        "javascript": ["decodeConfigSnapshot"],
+        "python": ["decode_config_snapshot"],
+        "go": ["DecodeConfigSnapshot"]
+      },
+      "errors": ["INVALID", "LIMIT", "PRECONDITION"],
+      "retry": "Decoding is local and validates the portable snapshot before returning a read-only view."
+    },
+    {
+      "id": "ratelimit.check",
+      "primitive": "ratelimit",
+      "arguments": [
+        {
+          "name": "bucket",
+          "type": "string"
+        },
+        {
+          "name": "subject",
+          "type": "string"
+        },
+        {
+          "name": "limit",
+          "type": "Limit"
+        }
+      ],
+      "result": "Decision",
+      "methods": {
+        "rust": [
+          "check",
+          "check_with"
+        ],
+        "javascript": [
+          "rateLimitCheck"
+        ],
+        "python": [
+          "rate_limit_check"
+        ],
+        "go": [
+          "RateLimitCheck"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "ratelimit.check_weighted",
+      "primitive": "ratelimit",
+      "arguments": [
+        { "name": "bucket", "type": "string" },
+        { "name": "subject", "type": "string" },
+        { "name": "limit", "type": "Limit" },
+        { "name": "cost", "type": "uint32" }
+      ],
+      "result": "Decision",
+      "methods": {
+        "rust": ["check_cost", "check_cost_with"],
+        "javascript": ["rateLimitCheck"],
+        "python": ["rate_limit_check"],
+        "go": ["RateLimitCheck"]
+      },
+      "errors": ["INVALID", "LIMIT", "UNAVAILABLE", "BACKEND"],
+      "retry": "Consumes a positive number of abstract units atomically."
+    },
+    {
+      "id": "ratelimit.reserve",
+      "primitive": "ratelimit",
+      "arguments": [
+        { "name": "bucket", "type": "string" },
+        { "name": "subject", "type": "string" },
+        { "name": "limit", "type": "Limit" },
+        { "name": "units", "type": "uint32" },
+        { "name": "ttl_seconds", "type": "float64" }
+      ],
+      "result": "Reservation?",
+      "methods": {
+        "rust": ["reserve"],
+        "javascript": ["rateLimitReserve"],
+        "python": ["rate_limit_reserve"],
+        "go": ["RateLimitReserve"]
+      },
+      "errors": ["INVALID", "LIMIT", "UNAVAILABLE", "BACKEND"],
+      "retry": "A denied reservation returns no reservation; pending reservations expire and refund automatically."
+    },
+    {
+      "id": "ratelimit.commit",
+      "primitive": "ratelimit",
+      "arguments": [
+        { "name": "reservation_id", "type": "string" },
+        { "name": "actual_units", "type": "uint32" }
+      ],
+      "result": "Reservation",
+      "methods": {
+        "rust": ["commit"],
+        "javascript": ["rateLimitCommit"],
+        "python": ["rate_limit_commit"],
+        "go": ["RateLimitCommit"]
+      },
+      "errors": ["INVALID", "LIMIT", "NOT_FOUND", "PRECONDITION", "UNAVAILABLE", "BACKEND"],
+      "retry": "Repeating the same commit is idempotent; a different settlement fails PRECONDITION."
+    },
+    {
+      "id": "ratelimit.release",
+      "primitive": "ratelimit",
+      "arguments": [{ "name": "reservation_id", "type": "string" }],
+      "result": "Reservation",
+      "methods": {
+        "rust": ["release"],
+        "javascript": ["rateLimitRelease"],
+        "python": ["rate_limit_release"],
+        "go": ["RateLimitRelease"]
+      },
+      "errors": ["INVALID", "NOT_FOUND", "PRECONDITION", "UNAVAILABLE", "BACKEND"],
+      "retry": "Repeating release is idempotent; committing after release fails PRECONDITION."
+    },
+    {
+      "id": "blob.put",
+      "primitive": "blob",
+      "arguments": [
+        {
+          "name": "key",
+          "type": "string"
+        },
+        {
+          "name": "body",
+          "type": "bytes"
+        },
+        {
+          "name": "options",
+          "type": "PutOptions"
+        }
+      ],
+      "result": "void",
+      "methods": {
+        "rust": [
+          "put"
+        ],
+        "javascript": [
+          "blobPut",
+          "blobPutBytes",
+          "blobPutObject"
+        ],
+        "python": [
+          "blob_put",
+          "blob_put_object"
+        ],
+        "go": [
+          "BlobPut"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "PRECONDITION",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "blob.put_stream",
+      "primitive": "blob",
+      "arguments": [
+        {
+          "name": "key",
+          "type": "string"
+        },
+        {
+          "name": "source",
+          "type": "stream"
+        },
+        {
+          "name": "options",
+          "type": "PutOptions"
+        }
+      ],
+      "result": "void",
+      "methods": {
+        "rust": [
+          "put_stream"
+        ],
+        "javascript": [
+          "blobPutFile"
+        ],
+        "python": [
+          "blob_put_file"
+        ],
+        "go": [
+          "BlobPutStream"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "PRECONDITION",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "A failed stream is not retried automatically because callers must provide a fresh readable source."
+    },
+    {
+      "id": "blob.get",
+      "primitive": "blob",
+      "arguments": [
+        {
+          "name": "key",
+          "type": "string"
+        }
+      ],
+      "result": "bytes?",
+      "methods": {
+        "rust": [
+          "get",
+          "open"
+        ],
+        "javascript": [
+          "blobGet",
+          "blobGetBytes"
+        ],
+        "python": [
+          "blob_get"
+        ],
+        "go": [
+          "BlobGet",
+          "BlobOpen"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "blob.get_range",
+      "primitive": "blob",
+      "arguments": [
+        {
+          "name": "key",
+          "type": "string"
+        },
+        {
+          "name": "start",
+          "type": "uint64"
+        },
+        {
+          "name": "end",
+          "type": "uint64"
+        }
+      ],
+      "result": "bytes?",
+      "methods": {
+        "rust": [
+          "get_range"
+        ],
+        "javascript": [
+          "blobGetRange"
+        ],
+        "python": [
+          "blob_get_range"
+        ],
+        "go": [
+          "BlobGetRange"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Read-only; retryable dependency failures may be retried."
+    },
+    {
+      "id": "blob.get_if",
+      "primitive": "blob",
+      "arguments": [
+        { "name": "key", "type": "string" },
+        { "name": "if_match", "type": "string?" },
+        { "name": "if_none_match", "type": "string?" }
+      ],
+      "result": "ConditionalBlobGet",
+      "methods": { "rust": ["get_if"], "javascript": ["blobGetIf"], "python": ["blob_get_if"], "go": ["BlobGetIf"] },
+      "errors": ["INVALID", "LIMIT", "PRECONDITION", "UNAVAILABLE", "BACKEND"],
+      "retry": "The read and its ETag condition use one backend snapshot or provider request."
+    },
+    {
+      "id": "blob.head",
+      "primitive": "blob",
+      "arguments": [
+        {
+          "name": "key",
+          "type": "string"
+        }
+      ],
+      "result": "BlobInfo?",
+      "methods": {
+        "rust": [
+          "head"
+        ],
+        "javascript": [
+          "blobHead",
+          "blobContentType"
+        ],
+        "python": [
+          "blob_head",
+          "blob_content_type"
+        ],
+        "go": [
+          "BlobHead"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "blob.delete",
+      "primitive": "blob",
+      "arguments": [
+        {
+          "name": "key",
+          "type": "string"
+        }
+      ],
+      "result": "void",
+      "methods": {
+        "rust": [
+          "delete"
+        ],
+        "javascript": [
+          "blobDelete"
+        ],
+        "python": [
+          "blob_delete"
+        ],
+        "go": [
+          "BlobDelete"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "blob.list",
+      "primitive": "blob",
+      "arguments": [
+        {
+          "name": "prefix",
+          "type": "string"
+        },
+        {
+          "name": "cursor",
+          "type": "cursor?"
+        },
+        {
+          "name": "limit",
+          "type": "uint32"
+        }
+      ],
+      "result": "BlobPage",
+      "methods": {
+        "rust": [
+          "list"
+        ],
+        "javascript": [
+          "blobList"
+        ],
+        "python": [
+          "blob_list"
+        ],
+        "go": [
+          "BlobList"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "blob.copy",
+      "primitive": "blob",
+      "arguments": [
+        { "name": "source", "type": "string" },
+        { "name": "destination", "type": "string" },
+        { "name": "options", "type": "PutOptions" }
+      ],
+      "result": "BlobInfo",
+      "methods": { "rust": ["copy"], "javascript": ["blobCopy"], "python": ["blob_copy"], "go": ["BlobCopy"] },
+      "errors": ["INVALID", "LIMIT", "NOT_FOUND", "PRECONDITION", "UNAVAILABLE", "BACKEND"],
+      "retry": "Portable copy is non-atomic across keys; deterministic destination preconditions prevent unintended overwrite. Move is intentionally absent."
+    },
+    {
+      "id": "blob.create_multipart",
+      "primitive": "blob",
+      "arguments": [{ "name": "key", "type": "string" }, { "name": "options", "type": "PutOptions" }],
+      "result": "MultipartUpload",
+      "methods": { "rust": ["create_multipart"], "javascript": ["blobCreateMultipart"], "python": ["blob_create_multipart"], "go": ["BlobCreateMultipart"] },
+      "errors": ["INVALID", "LIMIT", "NOT_CONFIGURED", "UNAVAILABLE", "BACKEND"],
+      "retry": "S3-only provider handle; retain the returned upload ID and explicitly abort abandoned uploads."
+    },
+    {
+      "id": "blob.upload_part",
+      "primitive": "blob",
+      "arguments": [{ "name": "upload", "type": "MultipartUpload" }, { "name": "part_number", "type": "uint32" }, { "name": "body", "type": "bytes" }],
+      "result": "MultipartPart",
+      "methods": { "rust": ["upload_part"], "javascript": ["blobUploadPart"], "python": ["blob_upload_part"], "go": ["BlobUploadPart"] },
+      "errors": ["INVALID", "LIMIT", "NOT_CONFIGURED", "UNAVAILABLE", "BACKEND"],
+      "retry": "Uploading the same part number replaces that part; retain only the latest receipt."
+    },
+    {
+      "id": "blob.complete_multipart",
+      "primitive": "blob",
+      "arguments": [{ "name": "upload", "type": "MultipartUpload" }, { "name": "parts", "type": "MultipartPart[]" }],
+      "result": "BlobInfo",
+      "methods": { "rust": ["complete_multipart"], "javascript": ["blobCompleteMultipart"], "python": ["blob_complete_multipart"], "go": ["BlobCompleteMultipart"] },
+      "errors": ["INVALID", "PRECONDITION", "NOT_CONFIGURED", "UNAVAILABLE", "BACKEND"],
+      "retry": "Parts must be strictly ordered and passed back exactly as returned by upload_part."
+    },
+    {
+      "id": "blob.abort_multipart",
+      "primitive": "blob",
+      "arguments": [{ "name": "upload", "type": "MultipartUpload" }],
+      "result": "void",
+      "methods": { "rust": ["abort_multipart"], "javascript": ["blobAbortMultipart"], "python": ["blob_abort_multipart"], "go": ["BlobAbortMultipart"] },
+      "errors": ["INVALID", "NOT_CONFIGURED", "UNAVAILABLE", "BACKEND"],
+      "retry": "Idempotent for an active provider upload; callers may treat an already-absent upload as settled."
+    },
+    {
+      "id": "blob.verify_checksum_sha256",
+      "primitive": "blob",
+      "arguments": [{ "name": "key", "type": "string" }, { "name": "expected_hex", "type": "string" }],
+      "result": "boolean",
+      "methods": { "rust": ["verify_checksum_sha256"], "javascript": ["blobVerifyChecksumSha256"], "python": ["blob_verify_checksum_sha256"], "go": ["BlobVerifyChecksumSHA256"] },
+      "errors": ["INVALID", "NOT_FOUND", "UNAVAILABLE", "BACKEND"],
+      "retry": "Streams the authoritative object and compares SHA-256 independently of ETag."
+    },
+    {
+      "id": "blob.presign_upload",
+      "primitive": "blob",
+      "arguments": [
+        {
+          "name": "key",
+          "type": "string"
+        },
+        {
+          "name": "expires_seconds",
+          "type": "float"
+        },
+        {
+          "name": "max_bytes",
+          "type": "uint64"
+        }
+      ],
+      "result": "ProxyPresign",
+      "methods": {
+        "rust": [
+          "presign_upload"
+        ],
+        "javascript": [
+          "blobPresignUpload"
+        ],
+        "python": [
+          "blob_presign_upload"
+        ],
+        "go": [
+          "BlobPresignUpload"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "blob.presign_download",
+      "primitive": "blob",
+      "arguments": [
+        {
+          "name": "key",
+          "type": "string"
+        },
+        {
+          "name": "expires_seconds",
+          "type": "float"
+        }
+      ],
+      "result": "ProxyPresign",
+      "methods": {
+        "rust": [
+          "presign_download"
+        ],
+        "javascript": [
+          "blobPresignDownload"
+        ],
+        "python": [
+          "blob_presign_download"
+        ],
+        "go": [
+          "BlobPresignDownload"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "blob.presign_native_get",
+      "primitive": "blob",
+      "arguments": [
+        {
+          "name": "key",
+          "type": "string"
+        },
+        {
+          "name": "expires_seconds",
+          "type": "float"
+        }
+      ],
+      "result": "NativePresign",
+      "methods": {
+        "rust": [
+          "presign_native_get"
+        ],
+        "javascript": [
+          "blobPresignNativeGet"
+        ],
+        "python": [
+          "blob_presign_native_get"
+        ],
+        "go": [
+          "BlobPresignNativeGet"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "NOT_CONFIGURED",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Presigning is local once provider credentials have been resolved."
+    },
+    {
+      "id": "blob.presign_native_put",
+      "primitive": "blob",
+      "arguments": [
+        {
+          "name": "key",
+          "type": "string"
+        },
+        {
+          "name": "expires_seconds",
+          "type": "float"
+        },
+        {
+          "name": "options",
+          "type": "PutOptions"
+        }
+      ],
+      "result": "NativePresign",
+      "methods": {
+        "rust": [
+          "presign_native_put"
+        ],
+        "javascript": [
+          "blobPresignNativePut"
+        ],
+        "python": [
+          "blob_presign_native_put"
+        ],
+        "go": [
+          "BlobPresignNativePut"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "NOT_CONFIGURED",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Presigning is local once provider credentials have been resolved."
+    },
+    {
+      "id": "blob.verify_presigned",
+      "primitive": "blob",
+      "arguments": [
+        {
+          "name": "method",
+          "type": "string"
+        },
+        {
+          "name": "key",
+          "type": "string"
+        },
+        {
+          "name": "expires_epoch",
+          "type": "int64"
+        },
+        {
+          "name": "max_bytes",
+          "type": "uint64"
+        },
+        {
+          "name": "signature",
+          "type": "string"
+        }
+      ],
+      "result": "boolean",
+      "methods": {
+        "rust": [
+          "verify_presigned"
+        ],
+        "javascript": [
+          "blobVerifyPresign"
+        ],
+        "python": [
+          "blob_verify_presign"
+        ],
+        "go": [
+          "BlobVerifyPresigned"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "auth.hash_password",
+      "primitive": "auth",
+      "arguments": [
+        {
+          "name": "plain",
+          "type": "string"
+        }
+      ],
+      "result": "string",
+      "methods": {
+        "rust": [
+          "hash_password"
+        ],
+        "javascript": [
+          "hashPassword"
+        ],
+        "python": [
+          "hash_password"
+        ],
+        "go": [
+          "HashPassword"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "auth.verify_password",
+      "primitive": "auth",
+      "arguments": [
+        {
+          "name": "plain",
+          "type": "string"
+        },
+        {
+          "name": "hash",
+          "type": "string"
+        }
+      ],
+      "result": "boolean",
+      "methods": {
+        "rust": [
+          "verify_password"
+        ],
+        "javascript": [
+          "verifyPassword"
+        ],
+        "python": [
+          "verify_password"
+        ],
+        "go": [
+          "VerifyPassword"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "auth.needs_rehash",
+      "primitive": "auth",
+      "arguments": [
+        {
+          "name": "hash",
+          "type": "string"
+        }
+      ],
+      "result": "boolean",
+      "methods": {
+        "rust": [
+          "needs_rehash"
+        ],
+        "javascript": [
+          "needsRehash"
+        ],
+        "python": [
+          "needs_rehash"
+        ],
+        "go": [
+          "NeedsRehash"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "auth.create_session",
+      "primitive": "auth",
+      "arguments": [
+        {
+          "name": "user_id",
+          "type": "string"
+        },
+        {
+          "name": "options",
+          "type": "SessionOptions"
+        }
+      ],
+      "result": "string",
+      "methods": {
+        "rust": [
+          "create_session"
+        ],
+        "javascript": [
+          "createSession"
+        ],
+        "python": [
+          "create_session"
+        ],
+        "go": [
+          "CreateSession"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "auth.validate_session",
+      "primitive": "auth",
+      "arguments": [
+        {
+          "name": "token",
+          "type": "string"
+        }
+      ],
+      "result": "Session?",
+      "methods": {
+        "rust": [
+          "validate_session"
+        ],
+        "javascript": [
+          "validateSession",
+          "validateSessionInfo"
+        ],
+        "python": [
+          "validate_session",
+          "validate_session_info"
+        ],
+        "go": [
+          "ValidateSession"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "auth.revoke_session",
+      "primitive": "auth",
+      "arguments": [
+        {
+          "name": "token",
+          "type": "string"
+        }
+      ],
+      "result": "void",
+      "methods": {
+        "rust": [
+          "revoke_session"
+        ],
+        "javascript": [
+          "revokeSession"
+        ],
+        "python": [
+          "revoke_session"
+        ],
+        "go": [
+          "RevokeSession"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "auth.revoke_all_sessions",
+      "primitive": "auth",
+      "arguments": [
+        {
+          "name": "user_id",
+          "type": "string"
+        }
+      ],
+      "result": "uint64",
+      "methods": {
+        "rust": [
+          "revoke_all_sessions"
+        ],
+        "javascript": [
+          "revokeAllSessions"
+        ],
+        "python": [
+          "revoke_all_sessions"
+        ],
+        "go": [
+          "RevokeAllSessions"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "auth.create_api_key",
+      "primitive": "auth",
+      "arguments": [
+        {
+          "name": "owner_id",
+          "type": "string"
+        },
+        {
+          "name": "label",
+          "type": "string"
+        },
+        {
+          "name": "expires_in_seconds",
+          "type": "float64?"
+        },
+        {
+          "name": "scopes",
+          "type": "string[]"
+        },
+        {
+          "name": "metadata",
+          "type": "string_map"
+        }
+      ],
+      "result": "ApiKey",
+      "methods": {
+        "rust": [
+          "create_api_key",
+          "create_api_key_with"
+        ],
+        "javascript": [
+          "createApiKey",
+          "createApiKeyWith"
+        ],
+        "python": [
+          "create_api_key",
+          "create_api_key_with"
+        ],
+        "go": [
+          "CreateAPIKey"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "auth.verify_api_key",
+      "primitive": "auth",
+      "arguments": [
+        {
+          "name": "key",
+          "type": "string"
+        }
+      ],
+      "result": "ApiKeyInfo?",
+      "methods": {
+        "rust": [
+          "verify_api_key"
+        ],
+        "javascript": [
+          "verifyApiKey"
+        ],
+        "python": [
+          "verify_api_key"
+        ],
+        "go": [
+          "VerifyAPIKey"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "auth.revoke_api_key",
+      "primitive": "auth",
+      "arguments": [
+        {
+          "name": "id",
+          "type": "string"
+        }
+      ],
+      "result": "void",
+      "methods": {
+        "rust": [
+          "revoke_api_key"
+        ],
+        "javascript": [
+          "revokeApiKey"
+        ],
+        "python": [
+          "revoke_api_key"
+        ],
+        "go": [
+          "RevokeAPIKey"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "auth.create_token",
+      "primitive": "auth",
+      "arguments": [
+        {
+          "name": "user_id",
+          "type": "string"
+        },
+        {
+          "name": "purpose",
+          "type": "string"
+        },
+        {
+          "name": "ttl_seconds",
+          "type": "float"
+        },
+        {
+          "name": "payload",
+          "type": "bytes"
+        }
+      ],
+      "result": "string",
+      "methods": {
+        "rust": [
+          "create_token",
+          "create_token_with_payload"
+        ],
+        "javascript": [
+          "createToken",
+          "createTokenWithPayload"
+        ],
+        "python": [
+          "create_token",
+          "create_token_with_payload"
+        ],
+        "go": [
+          "CreateToken"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "auth.consume_token",
+      "primitive": "auth",
+      "arguments": [
+        {
+          "name": "token",
+          "type": "string"
+        },
+        {
+          "name": "purpose",
+          "type": "string"
+        }
+      ],
+      "result": "TokenConsumption?",
+      "methods": {
+        "rust": [
+          "consume_token",
+          "consume_token_with_payload"
+        ],
+        "javascript": [
+          "consumeToken",
+          "consumeTokenWithPayload"
+        ],
+        "python": [
+          "consume_token",
+          "consume_token_with_payload"
+        ],
+        "go": [
+          "ConsumeToken"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "scope.kv_key",
+      "primitive": "scope",
+      "arguments": [
+        { "name": "application", "type": "string" },
+        { "name": "tenant", "type": "string" },
+        { "name": "user", "type": "string" },
+        { "name": "resource", "type": "string" }
+      ],
+      "result": "string",
+      "methods": {
+        "rust": ["scope_kv_key"],
+        "javascript": ["scopeKvKey"],
+        "python": ["scope_kv_key"],
+        "go": ["ScopeKVKey"]
+      },
+      "errors": ["INVALID", "LIMIT"],
+      "retry": "Never retry malformed or oversized names."
+    },
+    {
+      "id": "scope.blob_key",
+      "primitive": "scope",
+      "arguments": [
+        { "name": "application", "type": "string" },
+        { "name": "tenant", "type": "string" },
+        { "name": "user", "type": "string" },
+        { "name": "resource", "type": "string" }
+      ],
+      "result": "string",
+      "methods": {
+        "rust": ["scope_blob_key"],
+        "javascript": ["scopeBlobKey"],
+        "python": ["scope_blob_key"],
+        "go": ["ScopeBlobKey"]
+      },
+      "errors": ["INVALID", "LIMIT"],
+      "retry": "Never retry malformed or oversized names."
+    },
+    {
+      "id": "scope.rate_limit_subject",
+      "primitive": "scope",
+      "arguments": [
+        { "name": "application", "type": "string" },
+        { "name": "tenant", "type": "string" },
+        { "name": "user", "type": "string" },
+        { "name": "resource", "type": "string" }
+      ],
+      "result": "string",
+      "methods": {
+        "rust": ["scope_rate_limit_subject"],
+        "javascript": ["scopeRateLimitSubject"],
+        "python": ["scope_rate_limit_subject"],
+        "go": ["ScopeRateLimitSubject"]
+      },
+      "errors": ["INVALID", "LIMIT"],
+      "retry": "Never retry malformed or oversized names."
+    },
+    {
+      "id": "scope.topic",
+      "primitive": "scope",
+      "arguments": [
+        { "name": "application", "type": "string" },
+        { "name": "tenant", "type": "string" },
+        { "name": "user", "type": "string" },
+        { "name": "resource", "type": "string" }
+      ],
+      "result": "string",
+      "methods": {
+        "rust": ["scope_topic"],
+        "javascript": ["scopeTopic"],
+        "python": ["scope_topic"],
+        "go": ["ScopeTopic"]
+      },
+      "errors": ["INVALID", "LIMIT"],
+      "retry": "Never retry malformed or oversized names."
+    },
+    {
+      "id": "schedule.cron",
+      "primitive": "schedule",
+      "arguments": [
+        {
+          "name": "name",
+          "type": "string"
+        },
+        {
+          "name": "expression",
+          "type": "string"
+        },
+        {
+          "name": "queue",
+          "type": "string"
+        },
+        {
+          "name": "payload",
+          "type": "bytes"
+        },
+        {
+          "name": "options",
+          "type": "ScheduleOptions"
+        }
+      ],
+      "result": "void",
+      "methods": {
+        "rust": [
+          "cron"
+        ],
+        "javascript": [
+          "scheduleCron"
+        ],
+        "python": [
+          "schedule_cron"
+        ],
+        "go": [
+          "ScheduleCron"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "schedule.at",
+      "primitive": "schedule",
+      "arguments": [
+        {
+          "name": "when_epoch_ms",
+          "type": "float"
+        },
+        {
+          "name": "queue",
+          "type": "string"
+        },
+        {
+          "name": "payload",
+          "type": "bytes"
+        },
+        {
+          "name": "options",
+          "type": "ScheduleOptions"
+        }
+      ],
+      "result": "JobId",
+      "methods": {
+        "rust": [
+          "at"
+        ],
+        "javascript": [
+          "scheduleAt"
+        ],
+        "python": [
+          "schedule_at"
+        ],
+        "go": [
+          "ScheduleAt"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "schedule.cancel",
+      "primitive": "schedule",
+      "arguments": [
+        {
+          "name": "name",
+          "type": "string"
+        }
+      ],
+      "result": "boolean",
+      "methods": {
+        "rust": [
+          "cancel"
+        ],
+        "javascript": [
+          "scheduleCancel"
+        ],
+        "python": [
+          "schedule_cancel"
+        ],
+        "go": [
+          "ScheduleCancel"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "schedule.cancel_at",
+      "primitive": "schedule",
+      "arguments": [
+        {
+          "name": "job_id",
+          "type": "string"
+        }
+      ],
+      "result": "boolean",
+      "methods": {
+        "rust": [
+          "cancel_at"
+        ],
+        "javascript": [
+          "scheduleCancelAt"
+        ],
+        "python": [
+          "schedule_cancel_at"
+        ],
+        "go": [
+          "ScheduleCancelAt"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "schedule.inspect",
+      "primitive": "schedule",
+      "arguments": [{ "name": "name", "type": "string" }],
+      "result": "ScheduleInfo?",
+      "methods": {
+        "rust": ["inspect"],
+        "javascript": ["scheduleInspect"],
+        "python": ["schedule_inspect"],
+        "go": ["ScheduleInspect"]
+      },
+      "errors": ["INVALID", "LIMIT", "UNAVAILABLE", "BACKEND"],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "schedule.pause",
+      "primitive": "schedule",
+      "arguments": [{ "name": "name", "type": "string" }],
+      "result": "boolean",
+      "methods": {
+        "rust": ["pause"],
+        "javascript": ["schedulePause"],
+        "python": ["schedule_pause"],
+        "go": ["SchedulePause"]
+      },
+      "errors": ["INVALID", "LIMIT", "UNAVAILABLE", "BACKEND"],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "schedule.resume",
+      "primitive": "schedule",
+      "arguments": [{ "name": "name", "type": "string" }],
+      "result": "boolean",
+      "methods": {
+        "rust": ["resume"],
+        "javascript": ["scheduleResume"],
+        "python": ["schedule_resume"],
+        "go": ["ScheduleResume"]
+      },
+      "errors": ["INVALID", "LIMIT", "UNAVAILABLE", "BACKEND"],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "schedule.diagnostics",
+      "primitive": "schedule",
+      "arguments": [],
+      "result": "SchedulerDiagnostics",
+      "methods": {
+        "rust": ["diagnostics"],
+        "javascript": ["schedulerDiagnostics"],
+        "python": ["scheduler_diagnostics"],
+        "go": ["SchedulerDiagnostics"]
+      },
+      "errors": ["UNAVAILABLE", "BACKEND"],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "schedule.list",
+      "primitive": "schedule",
+      "arguments": [
+        {
+          "name": "cursor",
+          "type": "cursor?"
+        },
+        {
+          "name": "limit",
+          "type": "uint32"
+        }
+      ],
+      "result": "SchedulePage",
+      "methods": {
+        "rust": [
+          "list"
+        ],
+        "javascript": [
+          "scheduleList"
+        ],
+        "python": [
+          "schedule_list"
+        ],
+        "go": [
+          "ScheduleList"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "schedule.process_due",
+      "primitive": "schedule",
+      "arguments": [
+        {
+          "name": "limit",
+          "type": "uint32"
+        }
+      ],
+      "result": "uint64",
+      "methods": {
+        "rust": [
+          "process_due"
+        ],
+        "javascript": [
+          "runSchedulerOnce"
+        ],
+        "python": [
+          "run_scheduler_once"
+        ],
+        "go": [
+          "RunSchedulerOnce"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "pubsub.channel_for",
+      "primitive": "pubsub",
+      "arguments": [
+        {
+          "name": "topic",
+          "type": "string"
+        }
+      ],
+      "result": "string",
+      "methods": {
+        "rust": [
+          "channel_for"
+        ],
+        "javascript": [
+          "pubsubChannel"
+        ],
+        "python": [
+          "pubsub_channel"
+        ],
+        "go": [
+          "PubsubChannel"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "pubsub.publish",
+      "primitive": "pubsub",
+      "arguments": [
+        {
+          "name": "topic",
+          "type": "string"
+        },
+        {
+          "name": "payload",
+          "type": "bytes"
+        }
+      ],
+      "result": "void",
+      "methods": {
+        "rust": [
+          "publish"
+        ],
+        "javascript": [
+          "pubsubPublish"
+        ],
+        "python": [
+          "pubsub_publish"
+        ],
+        "go": [
+          "Publish"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    },
+    {
+      "id": "pubsub.subscribe",
+      "primitive": "pubsub",
+      "arguments": [
+        {
+          "name": "topic",
+          "type": "string"
+        }
+      ],
+      "result": "Subscription",
+      "methods": {
+        "rust": [
+          "subscribe"
+        ],
+        "javascript": [
+          "pubsubSubscribe"
+        ],
+        "python": [
+          "pubsub_subscribe"
+        ],
+        "go": [
+          "Subscribe"
+        ]
+      },
+      "errors": [
+        "INVALID",
+        "LIMIT",
+        "UNAVAILABLE",
+        "BACKEND"
+      ],
+      "retry": "Only errors whose contract error code is marked retryable may be retried."
+    }
+  ],
+  "development_gaps": []
+}

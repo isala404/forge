@@ -21,6 +21,21 @@
       ]
     },
     {
+      "name": "priority_key_fairness_and_cooperative_cancellation",
+      "steps": [
+        { "op": "queue.enqueue", "args": { "queue": "long", "payload": "first", "priority": "high", "concurrency_key": "tenant-a" }, "as": "first" },
+        { "op": "queue.enqueue", "args": { "queue": "long", "payload": "blocked", "priority": "high", "concurrency_key": "tenant-a" } },
+        { "op": "queue.enqueue", "args": { "queue": "long", "payload": "other", "priority": "normal", "concurrency_key": "tenant-b" }, "as": "other" },
+        { "op": "queue.dequeue", "args": { "queue": "long", "visibility_seconds": 30, "wait_seconds": 0, "concurrency_limit_per_key": 1 }, "as": "leased", "expect": { "shape": { "id": { "$type": "string" }, "payload": "first" } } },
+        { "op": "queue.dequeue", "args": { "queue": "long", "visibility_seconds": 30, "wait_seconds": 0, "concurrency_limit_per_key": 1 }, "expect": { "shape": { "id": { "$type": "string" }, "payload": "other" } } },
+        { "op": "queue.cancel", "args": { "job_id": { "$ref": "first" } }, "expect": { "shape": { "state": "cancel_requested" } } },
+        { "op": "queue.cancellation_requested", "args": { "receipt": { "$ref": "leased.receipt" } }, "expect": { "value": true } },
+        { "op": "queue.finish_cancellation", "args": { "receipt": { "$ref": "leased.receipt" } } },
+        { "op": "queue.ack", "args": { "receipt": { "$ref": "leased.receipt" } }, "expect": { "error": "Precondition" } },
+        { "op": "queue.status", "args": { "job_id": { "$ref": "first" } }, "expect": { "shape": { "state": "cancelled" } } }
+      ]
+    },
+    {
       "name": "namespace_isolation",
       "note": "Queue names are scoped by Forge namespace. A dequeue under another namespace must not see the job.",
       "steps": [
@@ -41,6 +56,54 @@
       "steps": [
         { "op": "queue.enqueue", "args": { "queue": "q", "payload": "x" } },
         { "op": "queue.dequeue", "args": { "queue": "q", "visibility_seconds": 0, "wait_seconds": 0 }, "expect": { "error": "Invalid" } }
+      ]
+    },
+    {
+      "name": "deterministic_id_is_idempotent",
+      "note": "A caller-selected UUID is the primary idempotency key and every enqueue returns the effective ID.",
+      "steps": [
+        { "op": "queue.enqueue", "args": { "queue": "stable", "payload": "first", "id": "11111111-1111-4111-8111-111111111111" }, "expect": { "value": "11111111-1111-4111-8111-111111111111" } },
+        { "op": "queue.enqueue", "args": { "queue": "stable", "payload": "ignored", "id": "11111111-1111-4111-8111-111111111111" }, "expect": { "value": "11111111-1111-4111-8111-111111111111" } },
+        { "op": "queue.depth", "args": { "queue": "stable" }, "expect": { "shape": { "visible": 1, "in_flight": 0, "delayed": 0 } } }
+      ]
+    },
+    {
+      "name": "deterministic_id_conflicting_with_dedup_is_precondition",
+      "steps": [
+        { "op": "queue.enqueue", "args": { "queue": "stable", "payload": "first", "id": "22222222-2222-4222-8222-222222222222", "dedup_id": "content" } },
+        { "op": "queue.enqueue", "args": { "queue": "stable", "payload": "second", "id": "33333333-3333-4333-8333-333333333333", "dedup_id": "content" }, "expect": { "error": "Precondition" } }
+      ]
+    },
+    {
+      "name": "terminal_failure_releases_dedup_and_can_redrive",
+      "steps": [
+        { "op": "queue.enqueue", "args": { "queue": "operator", "payload": "first", "id": "44444444-4444-4444-8444-444444444444", "dedup_id": "content", "max_attempts": 1 } },
+        { "op": "queue.dequeue", "args": { "queue": "operator", "visibility_seconds": 30, "wait_seconds": 0 }, "as": "job" },
+        { "op": "queue.nack", "args": { "receipt": { "$ref": "job.receipt" }, "retry_seconds": 0, "failure_summary": "safe failure" } },
+        { "op": "queue.enqueue", "args": { "queue": "operator", "payload": "replacement", "dedup_id": "content" }, "expect": { "value": { "$type": "string" } } },
+        { "op": "queue.dead_letters", "args": { "queue": "operator", "limit": 10 }, "expect": { "shape": { "items": [ { "job_id": "44444444-4444-4444-8444-444444444444", "queue": "operator", "attempt_count": 1, "failure_summary": "safe failure" } ], "cursor": null } } },
+        { "op": "queue.redrive", "args": { "job_id": "44444444-4444-4444-8444-444444444444", "destination": "recovered", "dedup_policy": "clear" }, "expect": { "value": true } },
+        { "op": "queue.depth", "args": { "queue": "recovered" }, "expect": { "shape": { "visible": 1 } } }
+      ]
+    },
+    {
+      "name": "dead_letter_purge_requires_confirmation",
+      "steps": [
+        { "op": "queue.enqueue", "args": { "queue": "purge", "payload": "x", "max_attempts": 1 } },
+        { "op": "queue.dequeue", "args": { "queue": "purge", "visibility_seconds": 30, "wait_seconds": 0 }, "as": "job" },
+        { "op": "queue.nack", "args": { "receipt": { "$ref": "job.receipt" }, "retry_seconds": 0 } },
+        { "op": "queue.purge_dead_letters_dry_run", "args": { "queue": "purge" }, "expect": { "value": 1 } },
+        { "op": "queue.purge_dead_letters", "args": { "queue": "purge", "confirmation": "wrong" }, "expect": { "error": "Precondition" } },
+        { "op": "queue.purge_dead_letters", "args": { "queue": "purge", "confirmation": "purge" }, "expect": { "value": 1 } }
+      ]
+    },
+    {
+      "name": "namespace_cross_ack_is_rejected",
+      "steps": [
+        { "op": "queue.enqueue", "args": { "queue": "q", "payload": "x" }, "namespace": "app-a" },
+        { "op": "queue.dequeue", "args": { "queue": "q", "visibility_seconds": 30, "wait_seconds": 0 }, "namespace": "app-a", "as": "j" },
+        { "op": "queue.ack", "args": { "receipt": { "$ref": "j.receipt" } }, "namespace": "app-b", "expect": { "error": "Precondition" } },
+        { "op": "queue.ack", "args": { "receipt": { "$ref": "j.receipt" } }, "namespace": "app-a" }
       ]
     }
   ]

@@ -1,0 +1,21 @@
+{
+  "primitive": "scope",
+  "scenarios": [
+    {
+      "name": "primitive_specific_unambiguous_paths",
+      "steps": [
+        { "op": "scope.kv_key", "args": { "application": "billing", "tenant": "a:b", "user": "u/1", "resource": "invoice:7" }, "expect": { "value": "v1|kv|7:billing3:a:b3:u/19:invoice:7" } },
+        { "op": "scope.blob_key", "args": { "application": "billing", "tenant": "a:b", "user": "u/1", "resource": "invoice:7" }, "expect": { "value": "v1|blob|7:billing3:a:b3:u/19:invoice:7" } },
+        { "op": "scope.rate_limit_subject", "args": { "application": "billing", "tenant": "a:b", "user": "u/1", "resource": "invoice:7" }, "expect": { "value": "v1|rate|7:billing3:a:b3:u/19:invoice:7" } },
+        { "op": "scope.topic", "args": { "application": "billing", "tenant": "a:b", "user": "u/1", "resource": "invoice:7" }, "expect": { "value": "v1|topic|7:billing3:a:b3:u/19:invoice:7" } }
+      ]
+    },
+    {
+      "name": "invalid_components_fail_before_io",
+      "steps": [
+        { "op": "scope.kv_key", "args": { "application": "", "tenant": "t", "user": "u", "resource": "r" }, "expect": { "error": "Invalid" } },
+        { "op": "scope.topic", "args": { "application": "app", "tenant": "t", "user": "u", "resource": "line\nbreak" }, "expect": { "error": "Invalid" } }
+      ]
+    }
+  ]
+}

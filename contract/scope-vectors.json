@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "valid": {
+    "application": "billing",
+    "tenant": "a:b",
+    "user": "u/1",
+    "resource": "invoice:7",
+    "kv": "v1|kv|7:billing3:a:b3:u/19:invoice:7",
+    "blob": "v1|blob|7:billing3:a:b3:u/19:invoice:7",
+    "rate": "v1|rate|7:billing3:a:b3:u/19:invoice:7",
+    "topic": "v1|topic|7:billing3:a:b3:u/19:invoice:7"
+  }
+}

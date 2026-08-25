@@ -31,6 +31,7 @@ const SCENARIOS: &[(&str, &str)] = &[
     ("auth", include_str!("scenarios/auth.json")),
     ("blob", include_str!("scenarios/blob.json")),
     ("pubsub", include_str!("scenarios/pubsub.json")),
+    ("scope", include_str!("scenarios/scope.json")),
 ];
 
 /// Abstracts how a namespaced [`crate::Forge`] is built for a scenario run.
@@ -137,7 +138,7 @@ async fn run_scenario(factory: &dyn ForgeFactory, scenario: &Value) -> Result<()
 
     // Leased jobs held for ack/nack, keyed by the receipt the runner returns from
     // dequeue.
-    let mut leased: HashMap<String, crate::Job> = HashMap::new();
+    let mut leased: HashMap<String, (String, crate::Job)> = HashMap::new();
 
     // Live pubsub subscriptions held across steps, keyed by the `as` capture name a
     // `pubsub.subscribe` step gives them; a later `pubsub.receive` reads the next message
@@ -164,6 +165,7 @@ async fn run_scenario(factory: &dyn ForgeFactory, scenario: &Value) -> Result<()
         );
         let outcome = dispatch(
             forge,
+            ns,
             &mut leased,
             &mut subscriptions,
             capture_as,
@@ -194,7 +196,8 @@ async fn run_scenario(factory: &dyn ForgeFactory, scenario: &Value) -> Result<()
 /// Map a canonical op + args onto the Forge API; normalize the result to a `Value`.
 async fn dispatch(
     forge: &Forge,
-    leased: &mut HashMap<String, crate::Job>,
+    namespace: &str,
+    leased: &mut HashMap<String, (String, crate::Job)>,
     subscriptions: &mut HashMap<String, Subscription>,
     capture_as: Option<&str>,
     op: &str,
@@ -275,7 +278,12 @@ async fn dispatch(
             .with_algo(algo);
             let d = forge
                 .ratelimit()
-                .check(arg_str(args, "bucket"), arg_str(args, "key"), limit)
+                .check_cost(
+                    arg_str(args, "bucket"),
+                    arg_str(args, "key"),
+                    limit,
+                    args.get("cost").and_then(Value::as_u64).unwrap_or(1) as u32,
+                )
                 .await?;
             Ok(json!({
                 "allowed": d.allowed,
@@ -285,6 +293,39 @@ async fn dispatch(
                 "retry_after_seconds": d.retry_after.map(|x| x.as_secs_f64()),
             }))
         }
+        "ratelimit.reserve" => {
+            let limit = Limit::per_duration(
+                args["max"].as_u64().unwrap() as u32,
+                Duration::from_secs_f64(args["per_seconds"].as_f64().unwrap()),
+            );
+            Ok(forge
+                .ratelimit()
+                .reserve(
+                    arg_str(args, "bucket"),
+                    arg_str(args, "key"),
+                    limit,
+                    args["units"].as_u64().unwrap() as u32,
+                    Duration::from_secs_f64(args["ttl_seconds"].as_f64().unwrap()),
+                )
+                .await?
+                .map_or(Value::Null, reservation_value))
+        }
+        "ratelimit.commit" => forge
+            .ratelimit()
+            .commit(
+                crate::parse_reservation_id(arg_str(args, "reservation_id"))?,
+                args["actual_units"].as_u64().unwrap() as u32,
+            )
+            .await
+            .map(reservation_value),
+        "ratelimit.release" => forge
+            .ratelimit()
+            .release(crate::parse_reservation_id(arg_str(
+                args,
+                "reservation_id",
+            ))?)
+            .await
+            .map(reservation_value),
         "schedule.at" => {
             let ms = args["when_epoch_ms"].as_u64().unwrap();
             let when = UNIX_EPOCH + Duration::from_millis(ms);
@@ -320,6 +361,29 @@ async fn dispatch(
             .cancel(&format!("at:{}", arg_str(args, "job_id")))
             .await
             .map(Value::Bool),
+        "schedule.inspect" => forge
+            .schedule()
+            .inspect(arg_str(args, "name"))
+            .await
+            .map(|info| info.map_or(Value::Null, |schedule| schedule_value(&schedule))),
+        "schedule.pause" => forge
+            .schedule()
+            .pause(arg_str(args, "name"))
+            .await
+            .map(Value::Bool),
+        "schedule.resume" => forge
+            .schedule()
+            .resume(arg_str(args, "name"))
+            .await
+            .map(Value::Bool),
+        "schedule.diagnostics" => forge.schedule().diagnostics().await.map(|value| {
+            json!({
+                "lag_ms": value.lag.map(|lag| lag.as_secs_f64() * 1000.0),
+                "last_successful_tick_ms": value.last_successful_tick.map(epoch_ms),
+                "due_count": value.due_count,
+                "enqueue_failures": value.enqueue_failures,
+            })
+        }),
         "schedule.list" => {
             let cursor = args
                 .get("cursor")
@@ -327,24 +391,7 @@ async fn dispatch(
                 .map(Cursor::from_token);
             let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(100) as u32;
             let (infos, next) = forge.schedule().list(cursor, limit).await?;
-            let arr: Vec<Value> = infos
-                .iter()
-                .map(|s| {
-                    let (kind, cron_expr) = match &s.kind {
-                        ScheduleKind::Cron(e) => ("cron", Some(e.clone())),
-                        ScheduleKind::At => ("at", None),
-                        _ => ("unknown", None),
-                    };
-                    json!({
-                        "name": s.name,
-                        "kind": kind,
-                        "queue": s.queue,
-                        "next_run_ms": epoch_ms(s.next_run),
-                        "last_run_ms": s.last_run.map(epoch_ms),
-                        "cron_expr": cron_expr,
-                    })
-                })
-                .collect();
+            let arr: Vec<Value> = infos.iter().map(schedule_value).collect();
             Ok(json!({ "items": arr, "cursor": next.map(|c| c.token().to_string()) }))
         }
         "schedule.tick" => forge.run_scheduler_once().await.map(|n| json!(n)),
@@ -358,6 +405,20 @@ async fn dispatch(
             }
             if let Some(s) = args.get("delay_seconds").and_then(Value::as_f64) {
                 opts = opts.with_delay(Duration::from_secs_f64(s));
+            }
+            if let Some(id) = args.get("id").and_then(Value::as_str) {
+                opts = opts.with_job_id(crate::JobId::parse(id)?);
+            }
+            if let Some(priority) = args.get("priority").and_then(Value::as_str) {
+                opts = opts.with_priority(match priority {
+                    "low" => crate::Priority::Low,
+                    "normal" => crate::Priority::Normal,
+                    "high" => crate::Priority::High,
+                    _ => return Err(ForgeError::invalid("unknown queue priority")),
+                });
+            }
+            if let Some(key) = args.get("concurrency_key").and_then(Value::as_str) {
+                opts = opts.with_concurrency_key(key);
             }
             forge
                 .queue()
@@ -373,6 +434,12 @@ async fn dispatch(
             if let Some(v) = args.get("visibility_seconds").and_then(Value::as_f64) {
                 opts = opts.with_visibility_timeout(Duration::from_secs_f64(v));
             }
+            if let Some(limit) = args
+                .get("concurrency_limit_per_key")
+                .and_then(Value::as_u64)
+            {
+                opts = opts.with_concurrency_limit_per_key(limit as u32);
+            }
             match forge.queue().dequeue(arg_str(args, "queue"), opts).await? {
                 None => Ok(Value::Null),
                 Some(job) => {
@@ -383,34 +450,141 @@ async fn dispatch(
                     let payload = bytes_opt_to_value(Some(job.payload.clone()));
                     let attempt = job.attempt;
                     let max_attempts = job.max_attempts;
-                    leased.insert(receipt.clone(), job);
+                    leased.insert(receipt.clone(), (namespace.to_string(), job));
                     Ok(
                         json!({ "id": id, "receipt": receipt, "payload": payload, "attempt": attempt, "max_attempts": max_attempts }),
                     )
                 }
             }
         }
-        "queue.ack" => match leased.remove(arg_str(args, "receipt")) {
-            Some(job) => forge.queue().ack(&job).await.map(|()| Value::Null),
-            None => Ok(Value::Null),
-        },
+        "queue.ack" => {
+            let receipt = arg_str(args, "receipt");
+            match leased.get(receipt) {
+                Some((owner, _)) if owner != namespace => Err(ForgeError::precondition(
+                    "unknown receipt: the lease was lost",
+                )),
+                Some(_) => {
+                    let (_, job) = leased.remove(receipt).expect("checked above");
+                    forge.queue().ack(&job).await.map(|()| Value::Null)
+                }
+                None => Err(ForgeError::precondition(
+                    "unknown receipt: the lease was lost",
+                )),
+            }
+        }
         "queue.nack" => {
-            let opts = match args.get("retry_seconds").and_then(Value::as_f64) {
+            let mut opts = match args.get("retry_seconds").and_then(Value::as_f64) {
                 Some(s) => crate::NackOpts::retry_in(Duration::from_secs_f64(s)),
                 None => crate::NackOpts::default(),
             };
-            match leased.remove(arg_str(args, "receipt")) {
-                Some(job) => forge.queue().nack(&job, opts).await.map(|()| Value::Null),
+            if let Some(summary) = args.get("failure_summary").and_then(Value::as_str) {
+                opts = opts.with_failure_summary(summary);
+            }
+            let receipt = arg_str(args, "receipt");
+            match leased.get(receipt) {
+                Some((owner, _)) if owner != namespace => Err(ForgeError::precondition(
+                    "unknown receipt: the lease was lost",
+                )),
+                Some(_) => {
+                    let (_, job) = leased.remove(receipt).expect("checked above");
+                    forge.queue().nack(&job, opts).await.map(|()| Value::Null)
+                }
                 // Mirror the bindings: an unknown receipt means the lease was lost.
                 None => Err(ForgeError::precondition(
                     "unknown receipt: the lease was lost",
                 )),
             }
         }
+        "queue.cancellation_requested" => {
+            let receipt = arg_str(args, "receipt");
+            let (_, job) = leased
+                .get(receipt)
+                .ok_or_else(|| ForgeError::precondition("unknown receipt: the lease was lost"))?;
+            forge
+                .queue()
+                .cancellation_requested(job)
+                .await
+                .map(Value::Bool)
+        }
+        "queue.finish_cancellation" => {
+            let receipt = arg_str(args, "receipt");
+            let (_, job) = leased
+                .remove(receipt)
+                .ok_or_else(|| ForgeError::precondition("unknown receipt: the lease was lost"))?;
+            forge
+                .queue()
+                .finish_cancellation(&job)
+                .await
+                .map(|()| Value::Null)
+        }
+        "queue.cancel" => forge
+            .queue()
+            .cancel(crate::JobId::parse(arg_str(args, "job_id"))?)
+            .await
+            .map(|status| status.map_or(Value::Null, job_status_value)),
+        "queue.status" => forge
+            .queue()
+            .status(crate::JobId::parse(arg_str(args, "job_id"))?)
+            .await
+            .map(|status| status.map_or(Value::Null, job_status_value)),
         "queue.depth" => {
             let d = forge.queue().depth(arg_str(args, "queue")).await?;
-            Ok(json!({ "visible": d.visible, "in_flight": d.in_flight, "delayed": d.delayed }))
+            Ok(
+                json!({ "visible": d.visible, "in_flight": d.in_flight, "delayed": d.delayed, "oldest_visible_age_ms": d.oldest_visible_age_ms }),
+            )
         }
+        "queue.dead_letters" => {
+            let page = forge
+                .queue()
+                .dead_letters(
+                    arg_str(args, "queue"),
+                    args.get("cursor")
+                        .and_then(Value::as_str)
+                        .map(crate::Cursor::from_token),
+                    args.get("limit").and_then(Value::as_u64).unwrap_or(50) as u32,
+                )
+                .await?;
+            let items = page
+                .items
+                .into_iter()
+                .map(|item| {
+                    json!({
+                        "job_id": item.job_id.to_string(),
+                        "queue": item.queue,
+                        "attempt_count": item.attempt_count,
+                        "failure_summary": item.failure_summary,
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok(
+                json!({ "items": items, "cursor": page.next_cursor.map(|value| value.token().to_string()) }),
+            )
+        }
+        "queue.redrive" => {
+            let policy = match arg_str(args, "dedup_policy") {
+                "clear" => crate::RedriveDedupPolicy::Clear,
+                "preserve" => crate::RedriveDedupPolicy::Preserve,
+                _ => return Err(ForgeError::invalid("invalid redrive dedup policy")),
+            };
+            forge
+                .queue()
+                .redrive(
+                    crate::JobId::parse(arg_str(args, "job_id"))?,
+                    crate::RedriveOpts::new(arg_str(args, "destination"), policy),
+                )
+                .await
+                .map(Value::Bool)
+        }
+        "queue.purge_dead_letters_dry_run" => forge
+            .queue()
+            .purge_dead_letters_dry_run(arg_str(args, "queue"))
+            .await
+            .map(|count| json!(count)),
+        "queue.purge_dead_letters" => forge
+            .queue()
+            .purge_dead_letters(arg_str(args, "queue"), arg_str(args, "confirmation"))
+            .await
+            .map(|count| json!(count)),
         "config.set" => forge
             .config()
             .set_raw(arg_str(args, "key"), arg_str(args, "value"))
@@ -474,11 +648,58 @@ async fn dispatch(
                 .await
                 .map(|()| Value::Null)
         }
+        "config.set_flag_value" => forge
+            .config()
+            .set_flag(
+                arg_str(args, "key"),
+                crate::FlagRule::Value {
+                    value: args.get("value").cloned().unwrap_or(Value::Null),
+                    variant: arg_str(args, "variant").to_string(),
+                },
+            )
+            .await
+            .map(|()| Value::Null),
+        "config.flag_details" => {
+            let ctx = match args.get("targeting_key").and_then(Value::as_str) {
+                Some(key) => crate::EvalCtx::user(key),
+                None => crate::EvalCtx::new(),
+            };
+            let default = args.get("default").cloned().unwrap_or(Value::Null);
+            let value = forge
+                .config()
+                .flag_details(arg_str(args, "key"), &default, &ctx)
+                .await;
+            Ok(json!({
+                "value_json": value.value_json,
+                "value_type": value.value_type,
+                "variant": value.variant,
+                "reason": value.reason,
+                "error_code": value.error_code,
+            }))
+        }
         "config.delete_flag" => forge
             .config()
             .delete_flag(arg_str(args, "key"))
             .await
             .map(Value::Bool),
+        "auth.hash_password" => forge
+            .auth()
+            .hash_password(arg_str(args, "plain"))
+            .await
+            .map(|hash| json!(hash.as_str())),
+        "auth.verify_password" => {
+            let hash = crate::PhcString::new(arg_str(args, "hash"));
+            forge
+                .auth()
+                .verify_password(arg_str(args, "plain"), &hash)
+                .await
+                .map(Value::Bool)
+        }
+        "auth.needs_rehash" => {
+            Ok(Value::Bool(forge.auth().needs_rehash(
+                &crate::PhcString::new(arg_str(args, "hash")),
+            )))
+        }
         "auth.create_session" => {
             let token = forge
                 .auth()
@@ -502,20 +723,53 @@ async fn dispatch(
             .await
             .map(|()| Value::Null),
         "auth.create_api_key" => {
+            let mut opts = crate::ApiKeyOpts::new()
+                .with_scopes(
+                    args.get("scopes")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect(),
+                )
+                .with_metadata(
+                    args.get("metadata")
+                        .and_then(Value::as_object)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|(key, value)| {
+                            value.as_str().map(|value| (key.clone(), value.to_string()))
+                        })
+                        .collect(),
+                );
+            if let Some(seconds) = args.get("expires_in_seconds").and_then(Value::as_f64) {
+                opts = opts.with_expires_in(Duration::from_secs_f64(seconds));
+            }
             let k = forge
                 .auth()
-                .create_api_key(arg_str(args, "owner_id"), arg_str(args, "label"))
+                .create_api_key_with(arg_str(args, "owner_id"), arg_str(args, "label"), opts)
                 .await?;
             Ok(json!({
                 "id": k.id,
                 "secret": k.secret.as_str(),
                 "label": k.label,
                 "created_at_ms": epoch_ms(k.created_at),
+                "expires_at_ms": k.expires_at.map(epoch_ms),
+                "scopes": k.scopes,
+                "metadata": k.metadata,
             }))
         }
         "auth.verify_api_key" => Ok(
             match forge.auth().verify_api_key(arg_str(args, "key")).await? {
-                Some(info) => json!(info.owner_id),
+                Some(info) => json!({
+                    "id": info.id,
+                    "owner_id": info.owner_id,
+                    "label": info.label,
+                    "expires_at_ms": info.expires_at.map(epoch_ms),
+                    "scopes": info.scopes,
+                    "metadata": info.metadata,
+                }),
                 None => Value::Null,
             },
         ),
@@ -525,10 +779,16 @@ async fn dispatch(
                 .unwrap_or_else(|| panic!("arg \"ttl_seconds\" must be a number"));
             let token = forge
                 .auth()
-                .create_token(
+                .create_token_with_payload(
                     arg_str(args, "user_id"),
                     arg_str(args, "purpose"),
                     Duration::from_secs_f64(ttl),
+                    Bytes::copy_from_slice(
+                        args.get("payload")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .as_bytes(),
+                    ),
                 )
                 .await?;
             Ok(json!(token.as_str()))
@@ -536,33 +796,65 @@ async fn dispatch(
         "auth.consume_token" => Ok(
             match forge
                 .auth()
-                .consume_token(arg_str(args, "token"), arg_str(args, "purpose"))
+                .consume_token_with_payload(arg_str(args, "token"), arg_str(args, "purpose"))
                 .await?
             {
-                Some(user_id) => json!(user_id),
+                Some(value) => json!({
+                    "user_id": value.user_id,
+                    "payload": String::from_utf8_lossy(&value.payload),
+                }),
                 None => Value::Null,
             },
         ),
-        "blob.put" => {
-            let mut opts = PutOpts::new();
-            if let Some(ct) = args.get("content_type").and_then(Value::as_str) {
-                opts = opts.with_content_type(ct);
-            }
-            if let Some(meta) = args.get("metadata").and_then(Value::as_object) {
-                for (k, v) in meta {
-                    if let Some(vs) = v.as_str() {
-                        opts = opts.with_metadata(k, vs);
-                    }
-                }
-            }
-            forge
-                .blob()
-                .put(arg_str(args, "key"), arg_bytes(args, "value"), opts)
-                .await
-                .map(|()| Value::Null)
-        }
+        "scope.kv_key" => crate::scope_kv_key(
+            arg_str(args, "application"),
+            arg_str(args, "tenant"),
+            arg_str(args, "user"),
+            arg_str(args, "resource"),
+        )
+        .map(Value::String),
+        "scope.blob_key" => crate::scope_blob_key(
+            arg_str(args, "application"),
+            arg_str(args, "tenant"),
+            arg_str(args, "user"),
+            arg_str(args, "resource"),
+        )
+        .map(Value::String),
+        "scope.rate_limit_subject" => crate::scope_rate_limit_subject(
+            arg_str(args, "application"),
+            arg_str(args, "tenant"),
+            arg_str(args, "user"),
+            arg_str(args, "resource"),
+        )
+        .map(Value::String),
+        "scope.topic" => crate::scope_topic(
+            arg_str(args, "application"),
+            arg_str(args, "tenant"),
+            arg_str(args, "user"),
+            arg_str(args, "resource"),
+        )
+        .map(Value::String),
+        "blob.put" => forge
+            .blob()
+            .put(
+                arg_str(args, "key"),
+                arg_bytes(args, "value"),
+                blob_put_opts(args),
+            )
+            .await
+            .map(|()| Value::Null),
         "blob.get" => Ok(bytes_opt_to_value(
             forge.blob().get(arg_str(args, "key")).await?,
+        )),
+        "blob.get_range" => Ok(bytes_opt_to_value(
+            forge
+                .blob()
+                .get_range(
+                    arg_str(args, "key"),
+                    args["start"].as_u64().unwrap(),
+                    args["end"].as_u64().unwrap(),
+                )
+                .await?,
         )),
         "blob.head" => Ok(match forge.blob().head(arg_str(args, "key")).await? {
             None => Value::Null,
@@ -572,14 +864,65 @@ async fn dispatch(
                 "content_type": info.content_type,
                 "etag": info.etag,
                 "metadata": info.metadata,
+                "cache_control": info.cache_control,
+                "content_disposition": info.content_disposition,
+                "checksum_sha256": info.checksum_sha256,
+                "server_side_encryption": info.server_side_encryption,
                 "last_modified_ms": epoch_ms(info.last_modified),
             }),
         }),
+        "blob.get_if" => Ok(
+            match forge
+                .blob()
+                .get_if(
+                    arg_str(args, "key"),
+                    args.get("if_match").and_then(Value::as_str),
+                    args.get("if_none_match").and_then(Value::as_str),
+                )
+                .await?
+            {
+                crate::ConditionalGet::Missing => json!({"state": "missing", "body": null}),
+                crate::ConditionalGet::NotModified { etag } => {
+                    json!({"state": "not_modified", "body": null, "etag": etag})
+                }
+                crate::ConditionalGet::Found { body, etag } => {
+                    json!({"state": "found", "body": String::from_utf8_lossy(&body), "etag": etag})
+                }
+                _ => unreachable!("non-exhaustive conditional-get variant"),
+            },
+        ),
+        "blob.copy" => {
+            let info = forge
+                .blob()
+                .copy(
+                    arg_str(args, "source"),
+                    arg_str(args, "destination"),
+                    blob_put_opts(args),
+                )
+                .await?;
+            Ok(json!({
+                "key": info.key,
+                "size": info.size,
+                "content_type": info.content_type,
+                "etag": info.etag,
+                "metadata": info.metadata,
+                "cache_control": info.cache_control,
+                "content_disposition": info.content_disposition,
+                "checksum_sha256": info.checksum_sha256,
+                "server_side_encryption": info.server_side_encryption,
+                "last_modified_ms": epoch_ms(info.last_modified),
+            }))
+        }
+        "blob.verify_checksum_sha256" => forge
+            .blob()
+            .verify_checksum_sha256(arg_str(args, "key"), arg_str(args, "expected_hex"))
+            .await
+            .map(Value::Bool),
         "blob.delete" => forge
             .blob()
             .delete(arg_str(args, "key"))
             .await
-            .map(Value::Bool),
+            .map(|()| Value::Null),
         "blob.list" => {
             let cursor = args
                 .get("cursor")
@@ -598,8 +941,8 @@ async fn dispatch(
                     json!({
                         "key": i.key,
                         "size": i.size,
-                        "content_type": i.content_type,
                         "etag": i.etag,
+                        "last_modified_ms": epoch_ms(i.last_modified),
                     })
                 })
                 .collect();
@@ -612,15 +955,15 @@ async fn dispatch(
         "blob.presign_download" => {
             let key = arg_str(args, "key");
             let expires = Duration::from_secs_f64(args["expires_seconds"].as_f64().unwrap());
-            let url = forge.blob().presign_download(key, expires).await?;
-            Ok(presign_to_value(&url, key, "GET"))
+            let ticket = forge.blob().presign_download(key, expires).await?;
+            Ok(presign_to_value(&ticket))
         }
         "blob.presign_upload" => {
             let key = arg_str(args, "key");
             let expires = Duration::from_secs_f64(args["expires_seconds"].as_f64().unwrap());
             let max_bytes = args["max_bytes"].as_u64().unwrap();
-            let url = forge.blob().presign_upload(key, expires, max_bytes).await?;
-            Ok(presign_to_value(&url, key, "PUT"))
+            let ticket = forge.blob().presign_upload(key, expires, max_bytes).await?;
+            Ok(presign_to_value(&ticket))
         }
         "blob.verify_presigned" => forge
             .blob()
@@ -675,29 +1018,15 @@ fn epoch_ms(t: SystemTime) -> f64 {
 /// Decompose a presigned URL into the signed params `verify_presigned` needs, so a
 /// scenario can `$ref` them straight into a verify step. The original `key`/`method` are
 /// passed through rather than re-parsed (the key is percent-encoded in the URL).
-fn presign_to_value(url: &str, key: &str, method: &str) -> Value {
-    let mut expires_epoch: i64 = 0;
-    let mut max_bytes: u64 = 0;
-    let mut sig = String::new();
-    if let Some((_, query)) = url.split_once('?') {
-        for pair in query.split('&') {
-            if let Some((k, v)) = pair.split_once('=') {
-                match k {
-                    "expires" => expires_epoch = v.parse().unwrap_or(0),
-                    "max_bytes" => max_bytes = v.parse().unwrap_or(0),
-                    "sig" => sig = v.to_string(),
-                    _ => {}
-                }
-            }
-        }
-    }
+fn presign_to_value(ticket: &crate::blob::ProxyPresign) -> Value {
     json!({
-        "url": url,
-        "key": key,
-        "method": method,
-        "expires_epoch": expires_epoch,
-        "max_bytes": max_bytes,
-        "sig": sig,
+        "url": ticket.url,
+        "key": ticket.key,
+        "method": ticket.method,
+        "expires_epoch": ticket.expires_epoch,
+        "max_bytes": ticket.max_bytes,
+        "signature": ticket.signature,
+        "headers": ticket.required_headers,
     })
 }
 
@@ -722,7 +1051,40 @@ fn schedule_opts(args: &Value) -> crate::ScheduleOpts {
     if let Some(m) = args.get("max_attempts").and_then(Value::as_u64) {
         opts = opts.with_max_attempts(m as u32);
     }
+    let policy = match args
+        .get("misfire_policy")
+        .and_then(Value::as_str)
+        .unwrap_or("run_once")
+    {
+        "skip" => crate::MisfirePolicy::Skip,
+        "catch_up" => crate::MisfirePolicy::CatchUp(
+            args.get("max_catch_up")
+                .and_then(Value::as_u64)
+                .unwrap_or(10) as u32,
+        ),
+        _ => crate::MisfirePolicy::RunOnce,
+    };
+    opts = opts.with_misfire_policy(policy);
     opts
+}
+
+fn schedule_value(schedule: &crate::ScheduleInfo) -> Value {
+    let (kind, cron_expr) = match &schedule.kind {
+        ScheduleKind::Cron(expression) => ("cron", Some(expression.clone())),
+        ScheduleKind::At => ("at", None),
+        _ => ("unknown", None),
+    };
+    json!({
+        "name": schedule.name,
+        "kind": kind,
+        "queue": schedule.queue,
+        "next_run_ms": epoch_ms(schedule.next_run),
+        "last_run_ms": schedule.last_run.map(epoch_ms),
+        "cron_expr": cron_expr,
+        "paused": schedule.paused,
+        "misfire_policy": schedule.misfire_policy.name(),
+        "max_catch_up": schedule.misfire_policy.max_catch_up(),
+    })
 }
 
 /// A byte-valued argument is either a UTF-8 string or `{"$bytes": [..]}`.
@@ -735,6 +1097,35 @@ fn value_to_bytes(v: &Value) -> Bytes {
         return Bytes::from(bytes);
     }
     panic!("cannot read bytes from {v}")
+}
+
+fn blob_put_opts(args: &Value) -> PutOpts {
+    let mut opts = PutOpts::new();
+    if let Some(value) = args.get("content_type").and_then(Value::as_str) {
+        opts = opts.with_content_type(value);
+    }
+    if let Some(metadata) = args.get("metadata").and_then(Value::as_object) {
+        for (name, value) in metadata {
+            if let Some(value) = value.as_str() {
+                opts = opts.with_metadata(name, value);
+            }
+        }
+    }
+    if let Some(value) = args.get("cache_control").and_then(Value::as_str) {
+        opts = opts.with_cache_control(value);
+    }
+    if let Some(value) = args.get("content_disposition").and_then(Value::as_str) {
+        opts = opts.with_content_disposition(value);
+    }
+    if let Some(value) = args.get("checksum_sha256").and_then(Value::as_str) {
+        opts = opts.with_checksum_sha256(value);
+    }
+    if args.get("create_only").and_then(Value::as_bool) == Some(true) {
+        opts = opts.create_only();
+    } else if let Some(value) = args.get("match_version").and_then(Value::as_str) {
+        opts = opts.match_version(value);
+    }
+    opts
 }
 
 fn bytes_opt_to_value(b: Option<Bytes>) -> Value {
@@ -901,15 +1292,49 @@ fn type_matches(t: &str, actual: &Value) -> bool {
     }
 }
 
+fn job_status_value(status: crate::JobStatus) -> Value {
+    let state = match status.state {
+        crate::JobState::Queued => "queued",
+        crate::JobState::Delayed => "delayed",
+        crate::JobState::Leased => "leased",
+        crate::JobState::Retrying => "retrying",
+        crate::JobState::Succeeded => "succeeded",
+        crate::JobState::Dead => "dead",
+        crate::JobState::CancelRequested => "cancel_requested",
+        crate::JobState::Cancelled => "cancelled",
+    };
+    json!({
+        "id": status.id.to_string(),
+        "queue": status.queue,
+        "state": state,
+        "attempt_count": status.attempt_count,
+    })
+}
+
+fn reservation_value(reservation: crate::Reservation) -> Value {
+    let state = match reservation.state {
+        crate::ReservationState::Pending => "pending",
+        crate::ReservationState::Committed => "committed",
+        crate::ReservationState::Released => "released",
+        crate::ReservationState::Expired => "expired",
+    };
+    json!({
+        "id": reservation.id.to_string(),
+        "reserved_units": reservation.reserved_units,
+        "state": state,
+        "committed_units": reservation.committed_units,
+    })
+}
+
 fn error_code(e: &ForgeError) -> &'static str {
-    match e {
-        ForgeError::Config(_) => "Config",
-        ForgeError::Unavailable(_) => "Unavailable",
-        ForgeError::NotFound => "NotFound",
-        ForgeError::Precondition(_) => "Precondition",
-        ForgeError::Limit(_) => "Limit",
-        ForgeError::Invalid(_) => "Invalid",
-        ForgeError::Backend { .. } => "Backend",
+    match e.code() {
+        "CONFIG" => "Config",
+        "NOT_CONFIGURED" => "NotConfigured",
+        "UNAVAILABLE" => "Unavailable",
+        "NOT_FOUND" => "NotFound",
+        "PRECONDITION" => "Precondition",
+        "LIMIT" => "Limit",
+        "INVALID" => "Invalid",
         _ => "Backend",
     }
 }

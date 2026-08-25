@@ -48,6 +48,24 @@
         { "op": "config.get", "args": { "key": "shared" }, "namespace": "app-b", "expect": { "value": null } },
         { "op": "config.get", "args": { "key": "shared" }, "namespace": "app-a", "expect": { "value": "from-a" } }
       ]
+    },
+    {
+      "name": "typed_flag_values_and_details",
+      "steps": [
+        { "op": "config.set_flag_value", "args": { "key": "bool", "value": true, "variant": "bool-v1" } },
+        { "op": "config.flag_details", "args": { "key": "bool", "default": false }, "expect": { "shape": { "value_json": "true", "value_type": "boolean", "variant": "bool-v1", "reason": "static", "error_code": null } } },
+        { "op": "config.set_flag_value", "args": { "key": "string", "value": "blue", "variant": "string-v1" } },
+        { "op": "config.flag_details", "args": { "key": "string", "default": "red" }, "expect": { "shape": { "value_json": "\"blue\"", "value_type": "string", "variant": "string-v1" } } },
+        { "op": "config.set_flag_value", "args": { "key": "integer", "value": 7, "variant": "integer-v1" } },
+        { "op": "config.flag_details", "args": { "key": "integer", "default": 0 }, "expect": { "shape": { "value_json": "7", "value_type": "integer", "variant": "integer-v1" } } },
+        { "op": "config.set_flag_value", "args": { "key": "float", "value": 1.5, "variant": "float-v1" } },
+        { "op": "config.flag_details", "args": { "key": "float", "default": 0.0 }, "expect": { "shape": { "value_json": "1.5", "value_type": "float", "variant": "float-v1" } } },
+        { "op": "config.set_flag_value", "args": { "key": "object", "value": { "palette": "dark" }, "variant": "object-v1" } },
+        { "op": "config.flag_details", "args": { "key": "object", "default": {} }, "expect": { "shape": { "value_json": "{\"palette\":\"dark\"}", "value_type": "object", "variant": "object-v1" } } },
+        { "op": "config.set_flag_percent", "args": { "key": "rollout", "percent": 44 } },
+        { "op": "config.flag_details", "args": { "key": "rollout", "default": false, "targeting_key": "user-42" }, "expect": { "shape": { "value_json": "true", "value_type": "boolean", "variant": "on", "reason": "percent_in" } } },
+        { "op": "config.flag_details", "args": { "key": "missing", "default": ["fallback"] }, "expect": { "shape": { "value_json": "[\"fallback\"]", "value_type": "array", "variant": null, "reason": "default_missing", "error_code": null } } }
+      ]
     }
   ]
 }

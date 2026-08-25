@@ -23,6 +23,17 @@
       ]
     },
     {
+      "name": "weighted_reservation_refunds_unused_units_once",
+      "steps": [
+        { "op": "ratelimit.check", "args": { "bucket": "budget", "key": "tenant", "max": 10, "per_seconds": 3600, "cost": 4 }, "expect": { "shape": { "allowed": true, "remaining": 6 } } },
+        { "op": "ratelimit.reserve", "args": { "bucket": "budget", "key": "tenant", "max": 10, "per_seconds": 3600, "units": 5, "ttl_seconds": 60 }, "as": "reservation", "expect": { "shape": { "state": "pending", "reserved_units": 5 } } },
+        { "op": "ratelimit.commit", "args": { "reservation_id": { "$ref": "reservation.id" }, "actual_units": 2 }, "expect": { "shape": { "state": "committed", "committed_units": 2 } } },
+        { "op": "ratelimit.commit", "args": { "reservation_id": { "$ref": "reservation.id" }, "actual_units": 2 }, "expect": { "shape": { "state": "committed", "committed_units": 2 } } },
+        { "op": "ratelimit.check", "args": { "bucket": "budget", "key": "tenant", "max": 10, "per_seconds": 3600, "cost": 4 }, "expect": { "shape": { "allowed": true, "remaining": 0 } } },
+        { "op": "ratelimit.release", "args": { "reservation_id": { "$ref": "reservation.id" } }, "expect": { "error": "Precondition" } }
+      ]
+    },
+    {
       "name": "sliding_window_algo_selectable",
       "note": "The algo param ('token_bucket' default | 'sliding_window') must be selectable in every language and still admit then deny within one window.",
       "steps": [

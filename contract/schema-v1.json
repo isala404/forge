@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://isala404.github.io/forge/contract/schema-v1.json",
+  "title": "Forge cross-language contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "contract_version",
+    "release_status",
+    "compatibility",
+    "languages",
+    "units",
+    "defaults",
+    "limits",
+    "errors",
+    "backend_capabilities",
+    "lifecycle",
+    "dtos",
+    "operations",
+    "development_gaps"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "contract_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "release_status": {
+      "enum": [
+        "development",
+        "supported"
+      ]
+    },
+    "compatibility": {
+      "type": "object"
+    },
+    "languages": {
+      "type": "object",
+      "required": [
+        "rust",
+        "javascript",
+        "python",
+        "go"
+      ]
+    },
+    "units": {
+      "type": "object"
+    },
+    "defaults": {
+      "type": "object"
+    },
+    "limits": {
+      "type": "object"
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "code",
+          "retryable",
+          "safe_message"
+        ]
+      }
+    },
+    "backend_capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "lifecycle": {
+      "type": "object"
+    },
+    "dtos": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "node_name",
+          "python_name",
+          "clone",
+          "doc",
+          "fields"
+        ]
+      }
+    },
+    "operations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "primitive",
+          "arguments",
+          "result",
+          "methods",
+          "errors",
+          "retry"
+        ]
+      }
+    },
+    "development_gaps": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}
