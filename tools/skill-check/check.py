@@ -139,7 +139,6 @@ def semantic_regressions() -> list[str]:
             "Use the Forge version resolved by the project",
             "references/runtime-contract.md",
             "references/application-design.md",
-            "references/nextjs.md",
         ],
         "runtime-contract.md": [
             "compare-and-swap mismatch returns `false`",
@@ -192,7 +191,6 @@ def main() -> int:
         (SKILL_DIR / "SKILL.md", "any"),
         (SKILL_DIR / "references" / "application-design.md", "any"),
         (SKILL_DIR / "references" / "runtime-contract.md", "any"),
-        (SKILL_DIR / "references" / "nextjs.md", "any"),
         (SKILL_DIR / "references" / "node.md", "node"),
         (SKILL_DIR / "references" / "python.md", "python"),
         (SKILL_DIR / "references" / "rust.md", "skip"),  # inline tokens not checked

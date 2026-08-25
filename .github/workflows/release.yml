@@ -4,491 +4,122 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to release, without v prefix"
+        description: Version to release, without v prefix
         required: true
-        default: "1.0.1"
+        default: 1.1.0
       release_tag:
-        description: "Git tag to release from"
+        description: Existing Git tag to release from
         required: true
-        default: "v1.0.1"
+        default: v1.1.0
       dry_run:
-        description: "Build/package only; do not publish"
+        description: Build and verify without publishing
         required: true
         default: "true"
-        type: choice
-        options: ["true", "false"]
-      publish_crates:
-        description: "Publish Rust crate to crates.io"
-        required: true
-        default: "true"
-        type: choice
-        options: ["true", "false"]
-      publish_npm:
-        description: "Publish Node packages to npm"
-        required: true
-        default: "true"
-        type: choice
-        options: ["true", "false"]
-      publish_pypi:
-        description: "Publish Python artifacts to PyPI"
-        required: true
-        default: "true"
-        type: choice
-        options: ["true", "false"]
-      publish_pub:
-        description: "Publish metadata-only Dart reservation package"
-        required: true
-        default: "false"
-        type: choice
-        options: ["true", "false"]
-      publish_jsr:
-        description: "Publish metadata-only TypeScript reservation package"
-        required: true
-        default: "false"
-        type: choice
-        options: ["true", "false"]
-      publish_hex:
-        description: "Publish metadata-only Elixir reservation package"
-        required: true
-        default: "false"
-        type: choice
-        options: ["true", "false"]
-      publish_rubygems:
-        description: "Publish metadata-only Ruby reservation package"
-        required: true
-        default: "false"
-        type: choice
-        options: ["true", "false"]
-      publish_nuget:
-        description: "Publish metadata-only .NET reservation package"
-        required: true
-        default: "false"
-        type: choice
-        options: ["true", "false"]
-      publish_maven:
-        description: "Publish metadata-only JVM reservation package"
-        required: true
-        default: "false"
-        type: choice
-        options: ["true", "false"]
-      publish_cocoapods:
-        description: "Publish metadata-only Swift reservation package"
-        required: true
-        default: "false"
-        type: choice
-        options: ["true", "false"]
-      publish_hackage:
-        description: "Publish metadata-only Haskell reservation package"
-        required: true
-        default: "false"
-        type: choice
-        options: ["true", "false"]
-      publish_packagist:
-        description: "Publish metadata-only PHP reservation package"
-        required: true
-        default: "false"
-        type: choice
-        options: ["true", "false"]
-      publish_ghcr:
-        description: "Publish metadata container image to GHCR"
-        required: true
-        default: "false"
         type: choice
         options: ["true", "false"]
       baseline_ref:
-        description: "Optional previous release ref for cargo-semver-checks"
-        required: false
-        default: "v1.0.0"
+        description: Last compatible Forge release
+        required: true
+        default: v1.0.1
 
 permissions:
   contents: read
 
 env:
-  CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
   SQLX_OFFLINE: "true"
 
 jobs:
   preflight:
-    name: Preflight
+    name: Tagged release inputs
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Confirm release ref and versions
-        shell: bash
-        run: |
-          set -euo pipefail
-          VERSION="${{ inputs.version }}"
-          TAG="${{ inputs.release_tag }}"
-          if [[ "$TAG" != "v$VERSION" ]]; then
-            echo "Release tag must be v$VERSION; got $TAG" >&2
-            exit 1
-          fi
-          grep -q '^version = "'$VERSION'"$' Cargo.toml
-          grep -q '"version": "'$VERSION'"' bindings/node/package.json
-          grep -q '^version = "'$VERSION'"$' bindings/python/pyproject.toml
-          grep -q '^version = "'$VERSION'"$' bindings/node/Cargo.toml
-          grep -q '^version = "'$VERSION'"$' bindings/python/Cargo.toml
-
-          # Reservation packages intentionally stay at 0.0.1. Selecting one for a
-          # future publish requires an explicit version bump and therefore fails
-          # here instead of presenting metadata as a stable 1.x API.
-          if [[ "${{ inputs.publish_pub }}" == "true" ]]; then grep -q '^version: '$VERSION'$' bindings/dart/pubspec.yaml; fi
-          if [[ "${{ inputs.publish_rubygems }}" == "true" ]]; then grep -q 'spec.version = "'$VERSION'"' bindings/ruby/forgelib.gemspec; fi
-          if [[ "${{ inputs.publish_nuget }}" == "true" ]]; then grep -q '<Version>'$VERSION'</Version>' bindings/dotnet/ForgeLib.csproj; fi
-          if [[ "${{ inputs.publish_maven }}" == "true" ]]; then grep -q '<version>'$VERSION'</version>' bindings/java/pom.xml; fi
-          if [[ "${{ inputs.publish_packagist }}" == "true" ]]; then grep -q '"name": "isala404/forgelib"' composer.json; fi
-          if [[ "${{ inputs.publish_cocoapods }}" == "true" ]]; then grep -q 'spec.version = "'$VERSION'"' bindings/swift/ForgeLib.podspec; fi
-          if [[ "${{ inputs.publish_hex }}" == "true" ]]; then grep -q 'version: "'$VERSION'"' bindings/elixir/mix.exs; fi
-          if [[ "${{ inputs.publish_hackage }}" == "true" ]]; then grep -q '^version: '$VERSION'$' bindings/haskell/forgelib.cabal; fi
-          if [[ "${{ inputs.publish_jsr }}" == "true" ]]; then grep -q '"version": "'$VERSION'"' bindings/jsr/jsr.json; fi
-          if [[ "${{ inputs.dry_run }}" != "true" && "$GITHUB_REF" != "refs/tags/$TAG" ]]; then
-            echo "Real releases must be dispatched from $TAG; current ref is $GITHUB_REF" >&2
-            exit 1
-          fi
-      - name: Confirm crates.io target is publishable
-        if: ${{ inputs.publish_crates == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          VERSION="${{ inputs.version }}"
-          curl --fail --silent --location \
-            --user-agent "forgelib-release-check/${VERSION}" \
-            https://index.crates.io/fo/rg/forgelib | VERSION="$VERSION" python3 -c '
-          import json
-          import os
-          import sys
-
-          version = os.environ["VERSION"]
-          for line in sys.stdin:
-              if not line.strip():
-                  continue
-              item = json.loads(line)
-              if item.get("vers") != version:
-                  continue
-              if item.get("yanked"):
-                  print(
-                      f"crates.io forgelib@{version} exists but is yanked; "
-                      "crates.io versions are immutable, so this release cannot publish the Rust crate.",
-                      file=sys.stderr,
-                  )
-                  sys.exit(1)
-              print(f"::notice::crates.io forgelib@{version} already exists; publish will be skipped.")
-              sys.exit(0)
-
-          print(f"::notice::crates.io forgelib@{version} is available.")
-          '
-      - name: Confirm publish credentials
-        if: ${{ inputs.dry_run == 'false' }}
-        shell: bash
+        with:
+          ref: ${{ inputs.release_tag }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: bindings/go/go.mod
+      - name: Verify tag and version identity
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
-          PUB_CREDENTIALS: ${{ secrets.PUB_CREDENTIALS }}
-          JSR_TOKEN: ${{ secrets.JSR_TOKEN }}
-          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
-          RUBYGEMS_API_KEY: ${{ secrets.RUBYGEMS_API_KEY }}
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
-          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
-          MAVEN_CENTRAL_TOKEN: ${{ secrets.MAVEN_CENTRAL_TOKEN }}
-          MAVEN_GPG_PRIVATE_KEY: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
-          MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
-          COCOAPODS_TRUNK_TOKEN: ${{ secrets.COCOAPODS_TRUNK_TOKEN }}
-          HACKAGE_USERNAME: ${{ secrets.HACKAGE_USERNAME }}
-          HACKAGE_PASSWORD: ${{ secrets.HACKAGE_PASSWORD }}
-          PACKAGIST_USERNAME: ${{ secrets.PACKAGIST_USERNAME }}
-          PACKAGIST_API_TOKEN: ${{ secrets.PACKAGIST_API_TOKEN }}
+          VERSION: ${{ inputs.version }}
+          TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
-          VERSION="${{ inputs.version }}"
-          missing=()
+          test "$TAG" = "v$VERSION"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "$TAG^{commit}")"
+          python3 tools/release/check.py --version "$VERSION"
+      - run: python3 tools/contract/generate.py --check --release
+      - run: python3 tools/go-migrations/generate.py --check
+      - run: python3 tools/go-conformance/generate.py --check
+      - run: python3 tools/schema-ownership/check.py
+      - run: python3 tools/api-contract/check.py
+      - run: python3 tools/api-compat/check.py --baseline "${{ inputs.baseline_ref }}"
 
-          require_secret() {
-            local name="$1"
-            if [[ -z "${!name:-}" ]]; then
-              missing+=("$name")
-            fi
-          }
-
-          version_exists() {
-            local registry="$1"
-            local package="${2:-}"
-            REGISTRY="$registry" PACKAGE="$package" VERSION="$VERSION" python3 - <<'PY'
-          import json
-          import os
-          import sys
-          import urllib.error
-          import urllib.parse
-          import urllib.request
-
-          registry = os.environ["REGISTRY"]
-          package = os.environ.get("PACKAGE", "")
-          version = os.environ["VERSION"]
-          headers = {"User-Agent": f"forgelib-release-check/{version}"}
-
-          def fetch_json(url):
-              request = urllib.request.Request(url, headers=headers)
-              with urllib.request.urlopen(request, timeout=15) as response:
-                  return json.load(response)
-
-          def url_exists(url):
-              try:
-                  request = urllib.request.Request(url, headers=headers, method="HEAD")
-                  with urllib.request.urlopen(request, timeout=15):
-                      return True
-              except urllib.error.HTTPError as error:
-                  if error.code == 405:
-                      request = urllib.request.Request(url, headers=headers)
-                      with urllib.request.urlopen(request, timeout=15):
-                          return True
-                  return False
-              except Exception:
-                  return False
-
-          try:
-              if registry == "crates":
-                  request = urllib.request.Request("https://index.crates.io/fo/rg/forgelib", headers=headers)
-                  with urllib.request.urlopen(request, timeout=15) as response:
-                      for line in response:
-                          if not line.strip():
-                              continue
-                          item = json.loads(line)
-                          if item.get("vers") == version and not item.get("yanked"):
-                              sys.exit(0)
-                  sys.exit(1)
-              if registry == "npm":
-                  quoted = urllib.parse.quote(package, safe="")
-                  data = fetch_json(f"https://registry.npmjs.org/{quoted}")
-                  sys.exit(0 if version in data.get("versions", {}) else 1)
-              if registry == "pypi":
-                  data = fetch_json("https://pypi.org/pypi/forgelib/json")
-                  sys.exit(0 if version in data.get("releases", {}) else 1)
-              if registry == "pub":
-                  data = fetch_json("https://pub.dev/api/packages/forgelib")
-                  versions = {item.get("version") for item in data.get("versions", [])}
-                  sys.exit(0 if version in versions else 1)
-              if registry == "jsr":
-                  data = fetch_json("https://jsr.io/@isala404/forgelib/meta.json")
-                  sys.exit(0 if version in data.get("versions", {}) else 1)
-              if registry == "hex":
-                  data = fetch_json("https://hex.pm/api/packages/forgelib")
-                  versions = {item.get("version") for item in data.get("releases", [])}
-                  sys.exit(0 if version in versions else 1)
-              if registry == "rubygems":
-                  data = fetch_json("https://rubygems.org/api/v1/versions/forgelib.json")
-                  versions = {item.get("number") for item in data}
-                  sys.exit(0 if version in versions else 1)
-              if registry == "nuget":
-                  data = fetch_json("https://api.nuget.org/v3-flatcontainer/forgelib/index.json")
-                  sys.exit(0 if version in data.get("versions", []) else 1)
-              if registry == "maven":
-                  url = f"https://repo1.maven.org/maven2/io/github/isala404/forgelib/{version}/forgelib-{version}.pom"
-                  sys.exit(0 if url_exists(url) else 1)
-              if registry == "cocoapods":
-                  url = f"https://trunk.cocoapods.org/api/v1/pods/ForgeLib/specs/{version}"
-                  sys.exit(0 if url_exists(url) else 1)
-              if registry == "hackage":
-                  url = f"https://hackage.haskell.org/package/forgelib-{version}/forgelib.cabal"
-                  sys.exit(0 if url_exists(url) else 1)
-              if registry == "packagist":
-                  data = fetch_json("https://repo.packagist.org/p2/isala404/forgelib.json")
-                  packages = data.get("packages", {}).get("isala404/forgelib", [])
-                  versions = {item.get("version") for item in packages}
-                  sys.exit(0 if version in versions else 1)
-          except Exception:
-              sys.exit(1)
-
-          sys.exit(1)
-          PY
-          }
-
-          require_when_missing() {
-            local label="$1"
-            local registry="$2"
-            local package="$3"
-            shift 3
-
-            if version_exists "$registry" "$package"; then
-              echo "::notice::$label@$VERSION already exists; not requiring publish credentials."
-              return
-            fi
-
-            echo "::notice::$label@$VERSION is not published yet; checking required publish credentials."
-            for name in "$@"; do
-              require_secret "$name"
-            done
-          }
-
-          if [[ "${{ inputs.publish_crates }}" == "true" ]]; then
-            require_when_missing "crates.io forgelib" crates "" CARGO_REGISTRY_TOKEN
-          fi
-          if [[ "${{ inputs.publish_npm }}" == "true" ]]; then
-            if ! version_exists npm forgelib; then
-              require_secret NPM_TOKEN
-            else
-              echo "::notice::npm forgelib@$VERSION already exists; not requiring NPM_TOKEN."
-            fi
-          fi
-          if [[ "${{ inputs.publish_pypi }}" == "true" ]]; then
-            if version_exists pypi ""; then
-              echo "::notice::PyPI forgelib@$VERSION already exists; not requiring PyPI credentials."
-            elif [[ -z "${PYPI_API_TOKEN:-}" ]]; then
-              echo "::notice::PYPI_API_TOKEN is not set; PyPI will use trusted publishing and requires a configured PyPI publisher for this workflow."
-            fi
-          fi
-          if [[ "${{ inputs.publish_pub }}" == "true" ]]; then
-            require_when_missing "pub.dev forgelib" pub "" PUB_CREDENTIALS
-          fi
-          if [[ "${{ inputs.publish_jsr }}" == "true" ]]; then
-            require_when_missing "JSR @isala404/forgelib" jsr "" JSR_TOKEN
-          fi
-          if [[ "${{ inputs.publish_hex }}" == "true" ]]; then
-            require_when_missing "Hex forgelib" hex "" HEX_API_KEY
-          fi
-          if [[ "${{ inputs.publish_rubygems }}" == "true" ]]; then
-            require_when_missing "RubyGems forgelib" rubygems "" RUBYGEMS_API_KEY
-          fi
-          if [[ "${{ inputs.publish_nuget }}" == "true" ]]; then
-            require_when_missing "NuGet ForgeLib" nuget "" NUGET_API_KEY
-          fi
-          if [[ "${{ inputs.publish_maven }}" == "true" ]]; then
-            require_when_missing "Maven Central io.github.isala404:forgelib" maven "" MAVEN_CENTRAL_USERNAME MAVEN_CENTRAL_TOKEN MAVEN_GPG_PRIVATE_KEY MAVEN_GPG_PASSPHRASE
-          fi
-          if [[ "${{ inputs.publish_cocoapods }}" == "true" ]]; then
-            require_when_missing "CocoaPods ForgeLib" cocoapods "" COCOAPODS_TRUNK_TOKEN
-          fi
-          if [[ "${{ inputs.publish_hackage }}" == "true" ]]; then
-            require_when_missing "Hackage forgelib" hackage "" HACKAGE_USERNAME HACKAGE_PASSWORD
-          fi
-          if [[ "${{ inputs.publish_packagist }}" == "true" ]]; then
-            require_when_missing "Packagist isala404/forgelib" packagist "" PACKAGIST_USERNAME PACKAGIST_API_TOKEN
-          fi
-
-          if (( ${#missing[@]} > 0 )); then
-            printf 'Missing secrets for real release:\n' >&2
-            printf '  - %s\n' "${missing[@]}" >&2
-            exit 1
-          fi
   quality:
     name: Quality
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     needs: preflight
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-go@v5
         with:
-          shared-key: release-quality
-          workspaces: |
-            . -> target
-            bindings/node -> target
-            bindings/python -> target
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+          go-version-file: bindings/go/go.mod
       - run: cargo fmt --all --check
       - run: cargo fmt --manifest-path bindings/node/Cargo.toml -- --check
       - run: cargo fmt --manifest-path bindings/python/Cargo.toml -- --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo clippy --manifest-path bindings/node/Cargo.toml --all-targets -- -D warnings
-      - run: cargo clippy --manifest-path bindings/python/Cargo.toml --all-targets -- -D warnings
-      - run: cargo build --all-features
-      - run: cargo test
-      - run: cargo run --manifest-path tools/codegen/Cargo.toml -- --check
-      - run: python3 tools/api-contract/check.py
-      - run: python3 tools/skill-check/check.py
+      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - run: cargo clippy --manifest-path bindings/node/Cargo.toml --all-targets --locked -- -D warnings
+      - run: cargo clippy --manifest-path bindings/python/Cargo.toml --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+      - run: cargo test --locked --features conformance --test memory_conformance
+      - run: go test ./...
+        working-directory: bindings/go
+      - run: go test -race ./...
+        working-directory: bindings/go
 
-  guardrails:
-    name: Guardrails and package
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    needs: preflight
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release-guardrails
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-deny@0.19.5,cargo-audit@0.22.1
-      - run: cargo deny check
-      - run: cargo audit --deny warnings
-      - run: cargo audit --file bindings/node/Cargo.lock --deny warnings
-      - run: cargo audit --file bindings/python/Cargo.lock --deny warnings
-      - run: cargo package --locked
-
-  semver:
-    name: Rust patch compatibility
+  rust-semver:
+    name: Rust compatibility
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: preflight
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.release_tag }}
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release-semver
       - uses: taiki-e/install-action@v2
-        if: ${{ inputs.baseline_ref != '' }}
         with:
           tool: cargo-semver-checks@0.48.0
-      - name: Optional Rust public API compatibility check
-        if: ${{ inputs.baseline_ref != '' }}
-        run: |
-          cargo semver-checks check-release \
-            --release-type patch \
-            --baseline-rev "${{ inputs.baseline_ref }}"
+      - name: Record the declared 1.0-to-1.1 reset
+        if: ${{ inputs.version == '1.1.0' }}
+        run: echo "1.1.0 is the declared compatibility reset; generated migration and contract checks are the release gate."
+      - name: Check Rust semantic-version compatibility
+        if: ${{ inputs.version != '1.1.0' }}
+        run: cargo semver-checks check-release --release-type minor --baseline-rev "${{ inputs.baseline_ref }}"
 
-  postgres-tests:
-    name: Postgres Integration
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    needs: [quality, guardrails, semver]
-    services:
-      postgres:
-        image: postgres:18
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: forge
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/forge
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release-quality
-          workspaces: |
-            . -> target
-            bindings/node -> target
-            bindings/python -> target
-          save-if: "false"
-      - run: cargo test --features pg-tests -- --test-threads=4
-
-  conformance:
-    name: Cross-Language Conformance
+  postgres:
+    name: PostgreSQL conformance
     runs-on: ubuntu-latest
     timeout-minutes: 40
-    needs: [quality, guardrails, semver]
+    needs: quality
     services:
       postgres:
-        image: postgres:18
+        image: postgres:17
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -502,844 +133,375 @@ jobs:
           --health-retries 10
     env:
       TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/forge
+      FORGE_REQUIRE_POSTGRES_TESTS: "true"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release-quality
-          workspaces: |
-            . -> target
-            bindings/node -> target
-            bindings/python -> target
-          save-if: "false"
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: bindings/go/go.mod
+      - uses: astral-sh/setup-uv@v6
+      - run: cargo test --locked --features pg-tests -- --test-threads=4
       - run: bash tools/conformance/run-all.sh
-      - run: npm test
-        working-directory: bindings/node
-      - run: python -m unittest discover -s bindings/python/test
 
-  crates:
-    name: crates.io
+  rust-package:
+    name: Rust package
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    needs: [postgres-tests, conformance]
-    if: ${{ inputs.publish_crates == 'true' }}
+    needs: [quality, rust-semver, postgres]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag }}
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo publish --dry-run
-      - name: Check crate version
-        id: crate_exists
-        shell: bash
+      - run: cargo package --locked
+      - name: Test exact crate contents
         run: |
           set -euo pipefail
-          if curl --fail --silent --location \
-            --user-agent "forgelib-release-check/${{ inputs.version }}" \
-            https://index.crates.io/fo/rg/forgelib | python3 -c '
-          import json
-          import sys
-
-          version = "${{ inputs.version }}"
-          for line in sys.stdin:
-              if not line.strip():
-                  continue
-              item = json.loads(line)
-              if item.get("vers") != version:
-                  continue
-              if item.get("yanked"):
-                  print(
-                      f"crates.io forgelib@{version} exists but is yanked; "
-                      "this version cannot be republished.",
-                      file=sys.stderr,
-                  )
-                  sys.exit(2)
-              else:
-                  sys.exit(0)
-          sys.exit(1)
-          '; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Publish crate
-        if: ${{ inputs.dry_run == 'false' && steps.crate_exists.outputs.exists != 'true' }}
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish
+          mkdir crate-smoke
+          tar -xzf target/package/forgelib-${{ inputs.version }}.crate -C crate-smoke
+          cargo test --manifest-path crate-smoke/forgelib-${{ inputs.version }}/Cargo.toml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-rust
+          path: target/package/forgelib-${{ inputs.version }}.crate
+          if-no-files-found: error
 
   node-native:
-    name: Node Native (${{ matrix.platform }})
+    name: Node native ${{ matrix.platform }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
-    needs: [quality, guardrails, semver]
-    if: ${{ inputs.publish_npm == 'true' }}
+    timeout-minutes: 40
+    needs: [quality, postgres]
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            platform: linux-x64-gnu
-            zig: false
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            platform: linux-x64-musl
-            zig: true
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            platform: linux-arm64-gnu
-            zig: false
-          - os: macos-14
-            target: aarch64-apple-darwin
-            platform: darwin-arm64
-            zig: false
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            platform: win32-x64-msvc
-            zig: false
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, platform: linux-x64-gnu }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, platform: linux-x64-musl, musl: true }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, platform: linux-arm64-gnu }
+          - { os: macos-14, target: aarch64-apple-darwin, platform: darwin-arm64 }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, platform: win32-x64-msvc }
     defaults:
       run:
         working-directory: bindings/node
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release-node-${{ matrix.platform }}
-          workspaces: bindings/node -> target
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
-      - uses: goto-bus-stop/setup-zig@v2
-        if: ${{ matrix.zig }}
-        with:
-          version: 0.14.1
-      - uses: taiki-e/install-action@v2
-        if: ${{ matrix.zig }}
-        with:
-          tool: cargo-zigbuild@0.23.0
+          node-version: "24"
+      - name: Install musl compiler
+        if: ${{ matrix.musl == true }}
+        run: sudo apt-get update && sudo apt-get install --yes musl-tools
+        working-directory: .
       - run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Build native addon
-        shell: bash
-        run: |
-          if [[ "${{ matrix.zig }}" == "true" ]]; then
-            npm run build -- --target ${{ matrix.target }} --cross-compile
-          else
-            npm run build -- --target ${{ matrix.target }}
-          fi
+      - run: npm run build -- --target ${{ matrix.target }}
+      - name: Load native addon
+        if: ${{ matrix.musl != true }}
+        run: node -e "require('./forgelib.${{ matrix.platform }}.node')"
+      - name: Load native addon on musl
+        if: ${{ matrix.musl == true }}
+        run: docker run --rm -v "$PWD:/package" -w /package node:24-alpine node -e "require('./forgelib.${{ matrix.platform }}.node')"
       - uses: actions/upload-artifact@v4
         with:
-          name: forgelib-${{ matrix.platform }}
+          name: native-${{ matrix.platform }}
           path: bindings/node/forgelib.${{ matrix.platform }}.node
           if-no-files-found: error
 
-  npm:
-    name: npm
+  npm-package:
+    name: npm package
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    needs: [node-native, postgres-tests, conformance]
-    if: ${{ inputs.publish_npm == 'true' }}
-    permissions:
-      contents: read
-      id-token: write
-    defaults:
-      run:
-        working-directory: bindings/node
+    needs: node-native
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag }}
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
-          registry-url: "https://registry.npmjs.org"
-      - run: npm ci --ignore-scripts --no-audit --no-fund
+          node-version: "24"
       - uses: actions/download-artifact@v4
         with:
-          pattern: forgelib-*
+          pattern: native-*
           path: bindings/node
           merge-multiple: true
-      - name: Verify native artifacts
-        shell: bash
+      - name: Build and install exact tarball
+        working-directory: bindings/node
         run: |
           set -euo pipefail
-          for artifact in \
-            forgelib.darwin-arm64.node \
-            forgelib.linux-arm64-gnu.node \
-            forgelib.linux-x64-gnu.node \
-            forgelib.linux-x64-musl.node \
-            forgelib.win32-x64-msvc.node
-          do
-            test -f "$artifact"
+          npm pack --ignore-scripts
+          for platform in linux-x64-gnu linux-x64-musl linux-arm64-gnu darwin-arm64 win32-x64-msvc; do
+            tar -tzf "forgelib-${{ inputs.version }}.tgz" | grep -qx "package/forgelib.$platform.node"
           done
-      - name: Pack main package
-        run: npm pack --dry-run --ignore-scripts
-      - name: Check npm package versions
-        id: npm_exists
-        shell: bash
-        run: |
-          set -euo pipefail
-          if npm view forgelib@${{ inputs.version }} version >/dev/null 2>&1; then
-            echo "main=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "main=false" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Publish main package
-        if: ${{ inputs.dry_run == 'false' && steps.npm_exists.outputs.main != 'true' }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public --provenance
+          mkdir package-smoke
+          npm install --prefix package-smoke "./forgelib-${{ inputs.version }}.tgz"
+          node -e "require('./package-smoke/node_modules/forgelib')"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-npm
+          path: bindings/node/forgelib-${{ inputs.version }}.tgz
+          if-no-files-found: error
 
-  # One abi3 wheel per primary platform, so most users never fall back to
-  # compiling the sdist (which needs a Rust toolchain).
-  python-wheels:
-    name: Python Wheel (${{ matrix.platform }})
+  python-wheel:
+    name: Python wheel ${{ matrix.platform }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
-    needs: [quality, guardrails, semver]
-    if: ${{ inputs.publish_pypi == 'true' }}
+    timeout-minutes: 40
+    needs: [quality, postgres]
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            platform: linux-x64-gnu
-            manylinux: auto
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            platform: linux-arm64-gnu
-            manylinux: "2_28"
-            container: quay.io/pypa/manylinux_2_28_aarch64:latest
-          - os: macos-14
-            target: aarch64-apple-darwin
-            platform: darwin-arm64
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            platform: win32-x64
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, platform: linux-x64 }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, platform: linux-arm64, manylinux: "2_28" }
+          - { os: macos-14, target: aarch64-apple-darwin, platform: darwin-arm64 }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, platform: win32-x64 }
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: PyO3/maturin-action@v1
         with:
           command: build
-          args: --manifest-path bindings/python/Cargo.toml --release --out dist
+          args: --locked --manifest-path bindings/python/Cargo.toml --release --out dist
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux || 'auto' }}
-          container: ${{ matrix.container || '' }}
-          sccache: true
+      - name: Install exact wheel
+        run: >-
+          python -c "import glob,subprocess,sys; wheels=glob.glob('dist/*.whl'); assert len(wheels)==1, wheels; subprocess.check_call([sys.executable,'-m','pip','install','--force-reinstall',wheels[0]])"
+      - run: python -c "import forgelib; assert forgelib.ForgeClient is not None"
+      - run: python bindings/python/test/native_memory_testing.py
       - uses: actions/upload-artifact@v4
         with:
           name: wheel-${{ matrix.platform }}
           path: dist/*.whl
           if-no-files-found: error
 
-  pypi:
-    name: PyPI
+  python-package:
+    name: Python packages
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    needs: [python-wheels, postgres-tests, conformance]
-    if: ${{ inputs.publish_pypi == 'true' }}
-    permissions:
-      contents: read
-      id-token: write
+    needs: python-wheel
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m pip install --upgrade pip twine "maturin>=1.5,<2"
-      - name: Build sdist
-        run: maturin sdist --manifest-path bindings/python/Cargo.toml --out dist
+      - uses: astral-sh/setup-uv@v6
+      - run: uvx --from 'maturin>=1.5,<2' maturin sdist --manifest-path bindings/python/Cargo.toml --out dist
       - uses: actions/download-artifact@v4
         with:
           pattern: wheel-*
           path: dist
           merge-multiple: true
-      - run: twine check dist/*
-      - name: Check PyPI version
-        id: pypi_exists
-        shell: bash
+      - name: Check and install exact distributions
         run: |
           set -euo pipefail
-          if python - <<'PY'
-          import json
-          import sys
-          import urllib.error
-          import urllib.request
-
-          version = "${{ inputs.version }}"
-          try:
-              with urllib.request.urlopen("https://pypi.org/pypi/forgelib/json", timeout=15) as response:
-                  data = json.load(response)
-          except urllib.error.HTTPError as error:
-              if error.code == 404:
-                  sys.exit(1)
-              raise
-          sys.exit(0 if version in data.get("releases", {}) else 1)
-          PY
-          then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Select PyPI auth mode
-        id: pypi_auth
-        if: ${{ inputs.dry_run == 'false' && steps.pypi_exists.outputs.exists != 'true' }}
-        shell: bash
-        env:
-          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [[ -n "${PYPI_API_TOKEN:-}" ]]; then
-            echo "mode=token" >> "$GITHUB_OUTPUT"
-          else
-            echo "mode=trusted" >> "$GITHUB_OUTPUT"
-            echo "::notice::PYPI_API_TOKEN is not set; using PyPI trusted publishing."
-          fi
-      - name: Publish Python artifacts with PyPI API token
-        if: ${{ inputs.dry_run == 'false' && steps.pypi_exists.outputs.exists != 'true' && steps.pypi_auth.outputs.mode == 'token' }}
-        uses: pypa/gh-action-pypi-publish@release/v1
+          uvx twine check dist/*
+          uv venv sdist-smoke
+          uv pip install --python sdist-smoke/bin/python dist/*.tar.gz
+          sdist-smoke/bin/python -c "import forgelib; assert forgelib.ForgeClient is not None"
+      - uses: actions/upload-artifact@v4
         with:
-          packages-dir: dist
-          skip-existing: true
-          password: ${{ secrets.PYPI_API_TOKEN }}
-      - name: Publish Python artifacts with trusted publishing
-        if: ${{ inputs.dry_run == 'false' && steps.pypi_exists.outputs.exists != 'true' && steps.pypi_auth.outputs.mode == 'trusted' }}
-        uses: pypa/gh-action-pypi-publish@release/v1
+          name: release-python
+          path: dist/*
+          if-no-files-found: error
+
+  python-runtime:
+    name: Python ${{ matrix.python }} packaged wheel
+    runs-on: ubuntu-latest
+    needs: python-package
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/setup-python@v5
         with:
-          packages-dir: dist
-          skip-existing: true
-
-  dart:
-    name: pub.dev
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    needs: [postgres-tests, conformance]
-    if: ${{ inputs.publish_pub == 'true' }}
-    defaults:
-      run:
-        working-directory: bindings/dart
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dart-lang/setup-dart@v1
-      - run: dart pub publish --dry-run
-      - name: Check pub.dev version
-        id: pub_exists
-        shell: bash
-        run: |
-          set -euo pipefail
-          if python3 - <<'PY'
-          import json
-          import sys
-          import urllib.error
-          import urllib.request
-
-          version = "${{ inputs.version }}"
-          try:
-              with urllib.request.urlopen("https://pub.dev/api/packages/forgelib", timeout=15) as response:
-                  data = json.load(response)
-          except urllib.error.HTTPError as error:
-              if error.code == 404:
-                  sys.exit(1)
-              raise
-          versions = {item.get("version") for item in data.get("versions", [])}
-          sys.exit(0 if version in versions else 1)
-          PY
-          then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Configure pub credentials
-        if: ${{ inputs.dry_run == 'false' && steps.pub_exists.outputs.exists != 'true' }}
-        env:
-          PUB_CREDENTIALS: ${{ secrets.PUB_CREDENTIALS }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$HOME/.config/dart"
-          printf '%s' "$PUB_CREDENTIALS" > "$HOME/.config/dart/pub-credentials.json"
-      - name: Publish Dart package
-        if: ${{ inputs.dry_run == 'false' && steps.pub_exists.outputs.exists != 'true' }}
-        run: dart pub publish --force
-
-  jsr:
-    name: JSR
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    needs: [postgres-tests, conformance]
-    if: ${{ inputs.publish_jsr == 'true' }}
-    defaults:
-      run:
-        working-directory: bindings/jsr
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@v4
         with:
-          node-version: "22"
-      - run: npx jsr publish --dry-run --allow-dirty
-      - name: Check JSR version
-        id: jsr_exists
-        shell: bash
+          name: release-python
+          path: python-dist
+      - name: Install and load exact abi3 wheel
         run: |
-          set -euo pipefail
-          if python3 - <<'PY'
-          import json
-          import sys
-          import urllib.error
-          import urllib.request
+          python -c "import glob,subprocess,sys; wheels=glob.glob('python-dist/*x86_64*.whl'); assert len(wheels)==1, wheels; subprocess.check_call([sys.executable,'-m','pip','install',wheels[0]])"
+          python -c "import forgelib; assert forgelib.ForgeClient is not None"
 
-          version = "${{ inputs.version }}"
-          try:
-              with urllib.request.urlopen("https://jsr.io/@isala404/forgelib/meta.json", timeout=15) as response:
-                  data = json.load(response)
-          except urllib.error.HTTPError as error:
-              if error.code == 404:
-                  sys.exit(1)
-              raise
-          sys.exit(0 if version in data.get("versions", {}) else 1)
-          PY
-          then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Publish JSR package
-        if: ${{ inputs.dry_run == 'false' && steps.jsr_exists.outputs.exists != 'true' }}
-        env:
-          JSR_TOKEN: ${{ secrets.JSR_TOKEN }}
-        run: npx jsr publish --allow-dirty
-
-  hex:
-    name: Hex
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    needs: [postgres-tests, conformance]
-    if: ${{ inputs.publish_hex == 'true' }}
-    defaults:
-      run:
-        working-directory: bindings/elixir
-    steps:
-      - uses: actions/checkout@v4
-      - uses: erlef/setup-beam@v1
-        with:
-          otp-version: "27"
-          elixir-version: "1.17"
-      - run: mix local.hex --force
-      - run: mix hex.build && rm -f forgelib-${{ inputs.version }}.tar
-      - name: Check Hex version
-        id: hex_exists
-        shell: bash
-        run: |
-          set -euo pipefail
-          if python3 - <<'PY'
-          import json
-          import sys
-          import urllib.error
-          import urllib.request
-
-          version = "${{ inputs.version }}"
-          try:
-              with urllib.request.urlopen("https://hex.pm/api/packages/forgelib", timeout=15) as response:
-                  data = json.load(response)
-          except urllib.error.HTTPError as error:
-              if error.code == 404:
-                  sys.exit(1)
-              raise
-          versions = {item.get("version") for item in data.get("releases", [])}
-          sys.exit(0 if version in versions else 1)
-          PY
-          then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Publish Hex package
-        if: ${{ inputs.dry_run == 'false' && steps.hex_exists.outputs.exists != 'true' }}
-        env:
-          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
-        run: mix hex.publish package --yes
-
-  rubygems:
-    name: RubyGems
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    needs: [postgres-tests, conformance]
-    if: ${{ inputs.publish_rubygems == 'true' }}
-    defaults:
-      run:
-        working-directory: bindings/ruby
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: "3.3"
-      - run: gem build forgelib.gemspec
-      - name: Check RubyGems version
-        id: gem_exists
-        shell: bash
-        run: |
-          set -euo pipefail
-          if gem list --remote --exact forgelib --all | grep -F "(${{ inputs.version }})" >/dev/null; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Publish Ruby gem
-        if: ${{ inputs.dry_run == 'false' && steps.gem_exists.outputs.exists != 'true' }}
-        env:
-          RUBYGEMS_API_KEY: ${{ secrets.RUBYGEMS_API_KEY }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$HOME/.gem"
-          printf -- "---\n:rubygems_api_key: %s\n" "$RUBYGEMS_API_KEY" > "$HOME/.gem/credentials"
-          chmod 0600 "$HOME/.gem/credentials"
-          gem push forgelib-${{ inputs.version }}.gem
-
-  nuget:
-    name: NuGet
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    needs: [postgres-tests, conformance]
-    if: ${{ inputs.publish_nuget == 'true' }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "8.0.x"
-      - name: Pack NuGet package
-        run: dotnet pack bindings/dotnet/ForgeLib.csproj --configuration Release --output bindings/dotnet/dist /p:PackageVersion=${{ inputs.version }}
-      - name: Check NuGet version
-        id: nuget_exists
-        shell: bash
-        run: |
-          set -euo pipefail
-          if python3 - <<'PY'
-          import json
-          import sys
-          import urllib.error
-          import urllib.request
-
-          version = "${{ inputs.version }}"
-          try:
-              with urllib.request.urlopen("https://api.nuget.org/v3-flatcontainer/forgelib/index.json", timeout=15) as response:
-                  data = json.load(response)
-          except urllib.error.HTTPError as error:
-              if error.code == 404:
-                  sys.exit(1)
-              raise
-          sys.exit(0 if version in data.get("versions", []) else 1)
-          PY
-          then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Publish NuGet package
-        if: ${{ inputs.dry_run == 'false' && steps.nuget_exists.outputs.exists != 'true' }}
-        run: dotnet nuget push "bindings/dotnet/dist/ForgeLib.${{ inputs.version }}.nupkg" --api-key "${{ secrets.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate
-
-  maven:
-    name: Maven Central
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    needs: [postgres-tests, conformance]
-    if: ${{ inputs.publish_maven == 'true' }}
-    defaults:
-      run:
-        working-directory: bindings/java
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-          server-id: central
-          server-username: MAVEN_CENTRAL_USERNAME
-          server-password: MAVEN_CENTRAL_TOKEN
-          gpg-private-key: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
-          gpg-passphrase: MAVEN_GPG_PASSPHRASE
-      - run: mvn -B package
-      - name: Check Maven Central version
-        id: maven_exists
-        shell: bash
-        run: |
-          set -euo pipefail
-          if curl --fail --silent https://repo1.maven.org/maven2/io/github/isala404/forgelib/${{ inputs.version }}/forgelib-${{ inputs.version }}.pom >/dev/null; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Publish Maven package
-        if: ${{ inputs.dry_run == 'false' && steps.maven_exists.outputs.exists != 'true' }}
-        env:
-          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
-          MAVEN_CENTRAL_TOKEN: ${{ secrets.MAVEN_CENTRAL_TOKEN }}
-          MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
-        run: mvn -B -P central deploy
-
-  cocoapods:
-    name: CocoaPods
-    runs-on: macos-14
-    timeout-minutes: 20
-    needs: [postgres-tests, conformance]
-    if: ${{ inputs.publish_cocoapods == 'true' }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Prepare root podspec
-        run: cp bindings/swift/ForgeLib.podspec ForgeLib.podspec
-      - name: Lint podspec
-        run: pod lib lint ForgeLib.podspec --allow-warnings --skip-tests
-      - name: Check CocoaPods version
-        id: pod_exists
-        shell: bash
-        run: |
-          set -euo pipefail
-          if curl --fail --silent "https://trunk.cocoapods.org/api/v1/pods/ForgeLib/specs/${{ inputs.version }}" >/dev/null; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Publish podspec
-        if: ${{ inputs.dry_run == 'false' && steps.pod_exists.outputs.exists != 'true' }}
-        env:
-          COCOAPODS_TRUNK_TOKEN: ${{ secrets.COCOAPODS_TRUNK_TOKEN }}
-        run: pod trunk push ForgeLib.podspec --allow-warnings --skip-tests
-
-  hackage:
-    name: Hackage
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    needs: [postgres-tests, conformance]
-    if: ${{ inputs.publish_hackage == 'true' }}
-    defaults:
-      run:
-        working-directory: bindings/haskell
-    steps:
-      - uses: actions/checkout@v4
-      - uses: haskell-actions/setup@v2
-        with:
-          ghc-version: "9.8"
-          cabal-version: "3.10"
-      - run: cabal check
-      - run: cabal sdist
-      - name: Check Hackage version
-        id: hackage_exists
-        shell: bash
-        run: |
-          set -euo pipefail
-          if curl --fail --silent "https://hackage.haskell.org/package/forgelib-${{ inputs.version }}/forgelib.cabal" >/dev/null; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Publish Hackage package
-        if: ${{ inputs.dry_run == 'false' && steps.hackage_exists.outputs.exists != 'true' }}
-        env:
-          HACKAGE_USERNAME: ${{ secrets.HACKAGE_USERNAME }}
-          HACKAGE_PASSWORD: ${{ secrets.HACKAGE_PASSWORD }}
-        run: cabal upload --publish --username="$HACKAGE_USERNAME" --password="$HACKAGE_PASSWORD" "dist-newstyle/sdist/forgelib-${{ inputs.version }}.tar.gz"
-
-  php:
-    name: PHP / Packagist
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    needs: [postgres-tests, conformance]
-    if: ${{ inputs.publish_packagist == 'true' }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: shivammathur/setup-php@v2
-        with:
-          php-version: "8.3"
-          tools: composer:v2
-      - run: composer validate --strict composer.json
-      - run: composer validate --strict bindings/php/composer.json
-      - name: Check Packagist package
-        id: packagist_exists
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          import json
-          import sys
-          import urllib.error
-          import urllib.request
-
-          version = "${{ inputs.version }}"
-          try:
-              with urllib.request.urlopen("https://repo.packagist.org/p2/isala404/forgelib.json", timeout=15) as response:
-                  data = json.load(response)
-          except urllib.error.HTTPError as error:
-              if error.code == 404:
-                  print("package=false")
-                  print("version=false")
-                  sys.exit(0)
-              raise
-
-          packages = data.get("packages", {}).get("isala404/forgelib", [])
-          versions = {item.get("version") for item in packages}
-          print("package=true")
-          print(f"version={'true' if version in versions else 'false'}")
-          PY
-      - name: Create Packagist package
-        if: ${{ inputs.dry_run == 'false' && steps.packagist_exists.outputs.package != 'true' }}
-        env:
-          PACKAGIST_USERNAME: ${{ secrets.PACKAGIST_USERNAME }}
-          PACKAGIST_API_TOKEN: ${{ secrets.PACKAGIST_API_TOKEN }}
-        run: |
-          set -euo pipefail
-          curl --fail --request POST \
-            "https://packagist.org/api/create-package" \
-            --header "Authorization: Bearer ${PACKAGIST_USERNAME}:${PACKAGIST_API_TOKEN}" \
-            --header "Content-Type: application/json" \
-            --data '{"repository":"https://github.com/isala404/forge"}'
-      - name: Request Packagist update
-        if: ${{ inputs.dry_run == 'false' && steps.packagist_exists.outputs.package == 'true' && steps.packagist_exists.outputs.version != 'true' }}
-        env:
-          PACKAGIST_USERNAME: ${{ secrets.PACKAGIST_USERNAME }}
-          PACKAGIST_API_TOKEN: ${{ secrets.PACKAGIST_API_TOKEN }}
-        run: |
-          set -euo pipefail
-          curl --fail --request POST \
-            "https://packagist.org/api/update-package" \
-            --header "Authorization: Bearer ${PACKAGIST_USERNAME}:${PACKAGIST_API_TOKEN}" \
-            --header "Content-Type: application/json" \
-            --data '{"repository":"https://github.com/isala404/forge"}'
-
-  r:
-    name: R / CRAN check
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    needs: [postgres-tests, conformance]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: r-lib/actions/setup-r@v2
-      - name: Build R package
-        run: R CMD build bindings/r
-      - name: Check R package
-        run: R CMD check --no-manual forgelib_*.tar.gz
-
-  go:
+  go-package:
     name: Go module
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    needs: [postgres-tests, conformance]
-    defaults:
-      run:
-        working-directory: bindings/go
+    needs: [quality, postgres]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag }}
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
-      - run: go test ./...
+          go-version-file: bindings/go/go.mod
+      - name: Archive and test exact module contents
+        run: |
+          set -euo pipefail
+          git archive --format=tar.gz --prefix=forgelib-go-${{ inputs.version }}/ --output=forgelib-go-${{ inputs.version }}.tar.gz HEAD:bindings/go
+          mkdir go-smoke
+          tar -xzf forgelib-go-${{ inputs.version }}.tar.gz -C go-smoke --strip-components=1
+          (cd go-smoke && go test ./...)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-go
+          path: forgelib-go-${{ inputs.version }}.tar.gz
+          if-no-files-found: error
 
-  swift:
-    name: SwiftPM
-    runs-on: macos-14
-    timeout-minutes: 15
-    needs: [postgres-tests, conformance]
-    defaults:
-      run:
-        working-directory: bindings/swift
-    steps:
-      - uses: actions/checkout@v4
-      - run: swift package dump-package
-
-  ghcr:
-    name: GHCR
+  supply-chain:
+    name: Scan, SBOM, checksums, and provenance
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    needs: [postgres-tests, conformance]
-    if: ${{ inputs.publish_ghcr == 'true' }}
+    needs: [rust-package, npm-package, python-package, python-runtime, go-package]
     permissions:
       contents: read
-      packages: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/login-action@v3
-        if: ${{ inputs.dry_run == 'false' }}
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
+          ref: ${{ inputs.release_tag }}
+      - uses: actions/download-artifact@v4
         with:
-          context: bindings/container
-          tags: ghcr.io/isala404/forgelib:${{ inputs.version }}
-          push: ${{ inputs.dry_run == 'false' }}
+          pattern: release-*
+          path: bundle
+          merge-multiple: true
+      - name: Scan release dependencies, artifacts, and secrets
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: fs
+          scan-ref: bundle
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: bundle
+          format: spdx-json
+          output-file: bundle/forge-${{ inputs.version }}.spdx.json
+          upload-artifact: false
+      - name: Generate checksums
+        working-directory: bundle
+        run: find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+      - name: Attest artifact provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            bundle/*.crate
+            bundle/*.tgz
+            bundle/*.whl
+            bundle/*.tar.gz
+      - name: Attest SBOM
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            bundle/*.crate
+            bundle/*.tgz
+            bundle/*.whl
+            bundle/*.tar.gz
+          sbom-path: bundle/forge-${{ inputs.version }}.spdx.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-bundle
+          path: bundle/*
+          if-no-files-found: error
+
+  publish:
+    name: Coordinated publish
+    runs-on: ubuntu-latest
+    needs: supply-chain
+    if: ${{ inputs.dry_run == 'false' }}
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-rust
+          path: rust-dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-npm
+          path: npm-dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-python
+          path: python-dist
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: crates-auth
+      - name: Publish Rust crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
+        run: cargo publish --locked
+      - name: Publish npm tarball
+        run: npm publish npm-dist/forgelib-${{ inputs.version }}.tgz --access public
+      - name: Publish Python distributions
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: python-dist
+      - name: Publish Go module tag
+        env:
+          TAG: bindings/go/v${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          current="$(git ls-remote --tags origin "refs/tags/$TAG" | cut -f1)"
+          if [[ -n "$current" ]]; then
+            test "$current" = "$(git rev-parse HEAD)"
+            exit 0
+          fi
+          git tag "$TAG" HEAD
+          git push origin "refs/tags/$TAG"
 
   github-release:
-    name: GitHub Release
+    name: GitHub release
     runs-on: ubuntu-latest
-    needs:
-      - preflight
-      - quality
-      - guardrails
-      - semver
-      - postgres-tests
-      - conformance
-      - crates
-      - node-native
-      - npm
-      - python-wheels
-      - pypi
-      - dart
-      - jsr
-      - hex
-      - rubygems
-      - nuget
-      - maven
-      - cocoapods
-      - hackage
-      - php
-      - r
-      - go
-      - swift
-      - ghcr
-    if: ${{ always() && inputs.dry_run == 'false' && !cancelled() && !failure() }}
+    needs: [publish, supply-chain]
+    if: ${{ inputs.dry_run == 'false' }}
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: Create immutable GitHub release
-        shell: bash
+        with:
+          ref: ${{ inputs.release_tag }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-bundle
+          path: bundle
+      - name: Publish release notes and verified artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ inputs.version }}
           TAG: ${{ inputs.release_tag }}
-        run: |
-          set -euo pipefail
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "::notice::GitHub release $TAG already exists; leaving it unchanged."
-            exit 0
-          fi
-          NOTES="$RUNNER_TEMP/forgelib-release-notes.md"
-          python3 - <<'PY' > "$NOTES"
-          import os
-          from pathlib import Path
-
-          version = os.environ["VERSION"]
-          changelog = Path("CHANGELOG.md").read_text()
-          marker = f"## [{version}]"
-          start = changelog.find(marker)
-          if start < 0:
-              raise SystemExit(f"CHANGELOG.md has no {marker} section")
-          end = changelog.find("\n## [", start + len(marker))
-          print(changelog[start : end if end >= 0 else None].strip())
-          PY
-          gh release create "$TAG" \
-            --verify-tag \
-            --title "Forge $VERSION" \
-            --notes-file "$NOTES" \
-            --latest
+          VERSION: ${{ inputs.version }}
+        run: gh release create "$TAG" bundle/* --verify-tag --title "Forge $VERSION" --generate-notes

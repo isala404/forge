@@ -1,15 +1,10 @@
-name: examples
+name: Canonical examples
 
-# src/** and Cargo.* are included because the example backends build the
-# bindings from the local path, which compile the core crate.
 on:
   pull_request:
     paths:
-      - "examples/chatapp/**"
-      - "examples/todoapp/**"
-      - "examples/linksapp/**"
-      - "bindings/node/**"
-      - "bindings/python/**"
+      - "examples/**"
+      - "bindings/**"
       - "src/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -17,11 +12,8 @@ on:
   push:
     branches: [main, rewrite]
     paths:
-      - "examples/chatapp/**"
-      - "examples/todoapp/**"
-      - "examples/linksapp/**"
-      - "bindings/node/**"
-      - "bindings/python/**"
+      - "examples/**"
+      - "bindings/**"
       - "src/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -34,29 +26,25 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  rust-be:
-    name: chatapp · rust-be (fmt · clippy · build · test)
+  rust-todo:
+    name: Rust · todo app
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     services:
       postgres:
-        image: postgres:18
+        image: postgres:17
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: forge
-          POSTGRES_DB: postgres
+          POSTGRES_DB: todoapp
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres"
+          --health-cmd "pg_isready -U postgres -d todoapp"
           --health-interval 5s --health-timeout 5s --health-retries 20
-    defaults:
-      run:
-        working-directory: examples/chatapp/rust-be
+    env:
+      FORGE_POSTGRES_URL: postgres://postgres:forge@127.0.0.1:5432/todoapp
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -64,21 +52,34 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: examples/chatapp/rust-be
+          workspaces: examples/todoapp/rust-be
       - run: cargo fmt --check
+        working-directory: examples/todoapp/rust-be
       - run: cargo clippy --all-targets -- -D warnings
+        working-directory: examples/todoapp/rust-be
       - run: cargo build
-      # The integration suite boots the real binary against the postgres service
-      # (it creates/drops its own uniquely-named database).
+        working-directory: examples/todoapp/rust-be
       - run: cargo test
+        working-directory: examples/todoapp/rust-be
+      - name: Start canonical backend
+        run: |
+          (cd examples/todoapp/rust-be && PORT=9081 cargo run > /tmp/todo-rust.log 2>&1) &
+          for attempt in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:9081/healthz >/dev/null && exit 0
+            sleep 2
+          done
+          exit 1
+      - name: Dump logs
+        if: failure()
+        run: tail -n 300 /tmp/todo-rust.log
 
-  node-be:
-    name: chatapp · node-be (codegen · tsc · lint · vitest)
+  node-chat:
+    name: JavaScript · chat app
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     services:
       postgres:
-        image: postgres:18
+        image: postgres:17
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: forge
@@ -95,316 +96,61 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: bindings/node
-      - name: Build forgelib Node package
+      - run: npm ci --ignore-scripts --no-audit --no-fund && npm run build
         working-directory: bindings/node
-        run: npm ci --ignore-scripts --no-audit --no-fund && npm run build
-      - name: Install
+      - run: bun install --frozen-lockfile
         working-directory: examples/chatapp/node-be
-        run: bun install --frozen-lockfile
-      - name: Codegen
+      - run: bun run codegen && bun run typecheck && bun run lint && bun run test
         working-directory: examples/chatapp/node-be
-        run: bun run codegen
-      - name: Type-check
-        working-directory: examples/chatapp/node-be
-        run: bun run typecheck
-      - name: Lint
-        working-directory: examples/chatapp/node-be
-        run: bun run lint
-      - name: Test
-        working-directory: examples/chatapp/node-be
-        run: bun run test
-
-  python-be:
-    name: chatapp · python-be (ruff · sdl · pytest)
+  python-links:
+    name: Python · links app
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     services:
       postgres:
-        image: postgres:18
+        image: postgres:17
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: forge
-          POSTGRES_DB: postgres
+          POSTGRES_DB: linksapp
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s --health-timeout 5s --health-retries 20
-    defaults:
-      run:
-        working-directory: examples/chatapp/python-be
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: bindings/python
-      - uses: astral-sh/setup-uv@v6
-      - name: Sync (builds the forgelib wheel)
-        run: uv sync --frozen
-      - run: uv run ruff check
-      - run: uv run pytest -q
-
-  react-fe:
-    name: chatapp · react-fe (codegen · tsc · build)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    defaults:
-      run:
-        working-directory: examples/chatapp/react-fe
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-      - run: bun install --frozen-lockfile
-      - run: bun run codegen
-      - run: bun run build
-
-  browser-e2e:
-    name: chatapp · browser e2e (all stacks)
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    needs: [rust-be, node-be, python-be, react-fe]
-    defaults:
-      run:
-        working-directory: examples/chatapp
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-      - name: Boot all stacks
-        run: docker compose up --build -d
-      - name: Install frontend test deps
-        working-directory: examples/chatapp/react-fe
-        run: bun install --frozen-lockfile
-      - name: Install Playwright browsers
-        working-directory: examples/chatapp/react-fe
-        run: bunx playwright install --with-deps chromium
-      - name: Run Playwright
-        working-directory: examples/chatapp/react-fe
-        run: bun run test:e2e
-      - name: Dump compose logs
-        if: failure()
-        run: docker compose logs --no-color
-      - name: Stop stacks
-        if: always()
-        run: docker compose down -v
-
-  # todoapp and linksapp share one shape (per-app rust/node/python/react-fe plus a
-  # browser e2e), so they run as a matrix instead of two copy-pasted sets of jobs.
-  # They are simpler than chatapp: no GraphQL codegen, no backend unit tests, so the
-  # steps here stop at fmt/clippy/build (Rust), tsc (Node), ruff (Python), and build
-  # (frontend).
-  example-rust-be:
-    name: ${{ matrix.app }} · rust-be (fmt · clippy · build)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        app: [todoapp, linksapp]
-    defaults:
-      run:
-        working-directory: examples/${{ matrix.app }}/rust-be
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: examples/${{ matrix.app }}/rust-be
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo build
-
-  example-node-be:
-    name: ${{ matrix.app }} · node-be (tsc)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        app: [todoapp, linksapp]
-    defaults:
-      run:
-        working-directory: examples/${{ matrix.app }}/node-be
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-      # The committed forgelib type stubs are enough to type-check against; the native
-      # addon is only needed at runtime (built in the e2e job).
-      - run: bun install --frozen-lockfile
-      - run: bun run typecheck
-
-  example-python-be:
-    name: ${{ matrix.app }} · python-be (ruff)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        app: [todoapp, linksapp]
-    defaults:
-      run:
-        working-directory: examples/${{ matrix.app }}/python-be
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: bindings/python
-      - uses: astral-sh/setup-uv@v6
-      - name: Sync (builds the forgelib wheel)
-        run: uv sync --frozen
-      - run: uv run ruff check
-
-  example-react-fe:
-    name: ${{ matrix.app }} · react-fe (tsc · build)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        app: [todoapp, linksapp]
-    defaults:
-      run:
-        working-directory: examples/${{ matrix.app }}/react-fe
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-      - run: bun install --frozen-lockfile
-      - run: bun run build
-
-  example-e2e:
-    name: ${{ matrix.app }} · browser e2e (all stacks)
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    needs: [example-rust-be, example-node-be, example-python-be, example-react-fe]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # One app runs the out-of-the-box path (embedded Postgres, no
-          # FORGE_POSTGRES_URL), the other a dedicated server, so a regression on
-          # either side of the `url`-wins-over-`embedded` split fails CI.
-          - app: todoapp
-            database: embedded
-            fe_port: 5174
-            rust_port: 9081
-            node_port: 9082
-            python_port: 9083
-          - app: linksapp
-            database: dedicated
-            fe_port: 5175
-            rust_port: 9091
-            node_port: 9092
-            python_port: 9093
-    services:
-      postgres:
-        image: postgres:18
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: forge
-          POSTGRES_DB: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
+          --health-cmd "pg_isready -U postgres -d linksapp"
           --health-interval 5s --health-timeout 5s --health-retries 20
     env:
-      PGPASSWORD: forge
+      FORGE_POSTGRES_URL: postgres://postgres:forge@127.0.0.1:5432/linksapp
     steps:
       - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-      # Node 24 runs the backend's `node src/index.ts` (TypeScript stripped natively);
-      # the runner's default Node is older and would choke on the type annotations.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: examples/${{ matrix.app }}/rust-be
+          workspaces: bindings/python
       - uses: astral-sh/setup-uv@v6
-      # These apps have no docker-compose; boot each stack the way the app READMEs
-      # document (one database per backend, all three plus the SPA on fixed ports),
-      # then drive the existing Playwright spec against them.
-      - name: Create per-backend databases
-        if: matrix.database == 'dedicated'
+      - run: uv sync --frozen && uv run ruff check
+        working-directory: examples/linksapp/python-be
+      - run: uv run python -m unittest discover -s test -v
+        working-directory: examples/linksapp/python-be
+      - name: Start canonical backend
         run: |
-          for db in rust node python; do
-            createdb -h 127.0.0.1 -U postgres "${{ matrix.app }}_${db}"
-          done
-      - name: Build forgelib Node package
-        working-directory: bindings/node
-        run: npm ci --ignore-scripts --no-audit --no-fund && npm run build
-      - name: Start Rust backend
-        working-directory: examples/${{ matrix.app }}/rust-be
-        run: |
-          cargo build
-          if [ "${{ matrix.database }}" = "dedicated" ]; then
-            export FORGE_POSTGRES_URL=postgres://postgres:forge@127.0.0.1:5432/${{ matrix.app }}_rust
-          fi
-          PORT=${{ matrix.rust_port }} \
-            cargo run > /tmp/rust-be.log 2>&1 &
-      - name: Wait for the Rust backend before starting the rest
-        # Embedded servers share the ~/.theseus binary cache; letting the first
-        # backend finish its download/extract avoids three concurrent installs.
-        if: matrix.database == 'embedded'
-        run: |
-          for _ in $(seq 1 90); do
-            curl -fsS "http://127.0.0.1:${{ matrix.rust_port }}/healthz" >/dev/null 2>&1 && exit 0
+          (cd examples/linksapp/python-be && uv run uvicorn app.main:app --host 127.0.0.1 --port 9093 > /tmp/links-python.log 2>&1) &
+          for attempt in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:9093/healthz >/dev/null && exit 0
             sleep 2
           done
-          echo "::error::rust backend (embedded) never became healthy" >&2
           exit 1
-      - name: Start Node backend
-        working-directory: examples/${{ matrix.app }}/node-be
-        run: |
-          bun install --frozen-lockfile
-          if [ "${{ matrix.database }}" = "dedicated" ]; then
-            export FORGE_POSTGRES_URL=postgres://postgres:forge@127.0.0.1:5432/${{ matrix.app }}_node
-          fi
-          PORT=${{ matrix.node_port }} \
-            bun run start > /tmp/node-be.log 2>&1 &
-      - name: Start Python backend
-        working-directory: examples/${{ matrix.app }}/python-be
-        run: |
-          uv sync --frozen
-          if [ "${{ matrix.database }}" = "dedicated" ]; then
-            export FORGE_POSTGRES_URL=postgres://postgres:forge@127.0.0.1:5432/${{ matrix.app }}_python
-          fi
-          uv run uvicorn app.main:app --host 127.0.0.1 --port ${{ matrix.python_port }} \
-            > /tmp/python-be.log 2>&1 &
-      - name: Start frontend
-        working-directory: examples/${{ matrix.app }}/react-fe
-        run: |
-          bun install --frozen-lockfile
-          bun run dev --host 127.0.0.1 --port ${{ matrix.fe_port }} > /tmp/fe.log 2>&1 &
-      - name: Wait for the stack
-        run: |
-          wait_for() {
-            local url="$1" label="$2"
-            for _ in $(seq 1 60); do
-              curl -fsS "$url" >/dev/null 2>&1 && return 0
-              sleep 2
-            done
-            echo "::error::${label} never became healthy at ${url}" >&2
-            return 1
-          }
-          wait_for "http://127.0.0.1:${{ matrix.rust_port }}/healthz" "rust backend"
-          wait_for "http://127.0.0.1:${{ matrix.node_port }}/healthz" "node backend"
-          wait_for "http://127.0.0.1:${{ matrix.python_port }}/healthz" "python backend"
-          wait_for "http://127.0.0.1:${{ matrix.fe_port }}" "frontend"
-      - name: Install Playwright browsers
-        working-directory: examples/${{ matrix.app }}/react-fe
-        run: bunx playwright install --with-deps chromium
-      - name: Run Playwright
-        working-directory: examples/${{ matrix.app }}/react-fe
-        run: bun run test:e2e
-      - name: Dump backend logs
+      - name: Dump logs
         if: failure()
-        run: |
-          for name in rust node python fe; do
-            echo "--- ${name} ---"
-            cat "/tmp/${name}-be.log" 2>/dev/null || cat "/tmp/${name}.log" 2>/dev/null || true
-          done
+        run: tail -n 300 /tmp/links-python.log
+
+  go-worker:
+    name: Go · worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: bindings/go/go.mod
+      - run: go test ./... && go build ./examples/worker
+        working-directory: bindings/go

@@ -10,9 +10,8 @@
 const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
-const os = require('os')
 const { Client } = require('pg')
-const { ForgeClient } = require('../../../bindings/node')
+const { ForgeClient, forgeErrorCode, scopeBlobKey, scopeKvKey, scopeRateLimitSubject, scopeTopic } = require('../../../bindings/node')
 
 const SCENARIO_DIR = path.join(__dirname, '..', '..', '..', 'src', 'conformance', 'scenarios')
 const GAPS_FILE = path.join(__dirname, '..', '..', '..', 'src', 'conformance', 'known_gaps.json')
@@ -24,6 +23,7 @@ const SIGNING_SECRET = 'conformance-signing-secret'
 // Forge reads this forge.toml; its ${FORGE_*} references resolve from the env vars the
 // runner sets before each init, so one file drives every per-namespace/per-backend client.
 const CONFIG_PATH = path.join(__dirname, 'forge.toml')
+const migratedUrls = new Set()
 
 // A client whose system database is `url` and whose namespace is `ns`, on the default
 // Postgres backends. Sets the env the toml interpolates, then loads it fresh.
@@ -34,6 +34,18 @@ async function connectNs(url, ns) {
   delete process.env.FORGE_QUEUE_BACKEND
   delete process.env.FORGE_BLOB_BACKEND
   delete process.env.FORGE_BLOB_FS_ROOT
+  if (!migratedUrls.has(url)) {
+    const status = await ForgeClient.migrationStatusFrom(CONFIG_PATH)
+    if (status.length !== 1 || !['pending', 'applied'].includes(status[0].state)) {
+      throw new Error(`unexpected migration status: ${JSON.stringify(status)}`)
+    }
+    const migrated = await ForgeClient.migrateFrom(CONFIG_PATH)
+    const validated = await ForgeClient.validateSchemaFrom(CONFIG_PATH)
+    if (migrated.some((item) => item.state !== 'applied') || validated.some((item) => item.state !== 'applied')) {
+      throw new Error(`migration API failed: ${JSON.stringify({ migrated, validated })}`)
+    }
+    migratedUrls.add(url)
+  }
   return ForgeClient.initFrom(CONFIG_PATH)
 }
 // Sentinel a pubsub.receive race resolves to when the 2s bound elapses with no message.
@@ -48,6 +60,7 @@ if (!ADMIN_URL) {
 // error code mapping: binding uses UPPER_SNAKE; canonical is Pascal
 const CODE_MAP = {
   CONFIG: 'Config',
+  NOT_CONFIGURED: 'NotConfigured',
   UNAVAILABLE: 'Unavailable',
   NOT_FOUND: 'NotFound',
   PRECONDITION: 'Precondition',
@@ -56,9 +69,7 @@ const CODE_MAP = {
   BACKEND: 'Backend',
 }
 function canonicalErrorCode(err) {
-  const msg = err && err.message ? String(err.message) : ''
-  const m = /^([A-Z_]+):/.exec(msg)
-  return (m && CODE_MAP[m[1]]) || 'Backend'
+  return CODE_MAP[forgeErrorCode(err)] || 'Backend'
 }
 
 function swapDb(url, name) {
@@ -102,73 +113,41 @@ function asBuffer(v) {
   throw new Error('cannot coerce value to bytes: ' + JSON.stringify(v))
 }
 
-function provider(report, primitive) {
-  const row = report.find((r) => r.primitive === primitive)
-  return row && row.provider
+async function runRuntimeProfileSmoke() {
+  const config = `[forge]\nmode = "memory"\nenvironment = "test"\n[blob]\nsigning_secret = "${SIGNING_SECRET}"\n`
+  const client = await ForgeClient.initFromString(config)
+  const report = client.backendCapabilities()
+  if (!report.every((row) => row.provider === 'memory')) {
+    throw new Error('memory profile did not resolve every primitive to memory')
+  }
+  await client.queueEnqueue('profile', Buffer.from('hello'))
+  const job = await client.queueDequeue('profile', 30, 0)
+  if (!job || !Buffer.from(job.payload).equals(Buffer.from('hello'))) throw new Error('memory queue smoke failed')
+  await client.queueAck(job.receipt)
+  await client.close(1)
+  await client.close(1)
+  await client.kvGet('closed').then(
+    () => { throw new Error('work was accepted after close') },
+    (error) => {
+      if (canonicalErrorCode(error) !== 'Precondition') throw error
+    },
+  )
+  console.log('PASS  runtime/memory_profile_and_lifecycle')
 }
-
-function restoreEnv(saved) {
-  for (const [key, value] of Object.entries(saved)) {
-    if (value == null) delete process.env[key]
-    else process.env[key] = value
+function parsePresign(ticket) {
+  return {
+    url: ticket.url,
+    key: ticket.key,
+    method: ticket.method,
+    expires_epoch: ticket.expiresEpoch,
+    max_bytes: ticket.maxBytes,
+    signature: ticket.signature,
   }
 }
 
-async function runBackendSelectionSmoke() {
-  await withTestDb(async (url) => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forgelib-blob-'))
-    const keys = [
-      'FORGE_POSTGRES_URL',
-      'FORGE_NAMESPACE',
-      'FORGE_BLOB_SIGNING_SECRET',
-      'FORGE_QUEUE_BACKEND',
-      'FORGE_BLOB_BACKEND',
-      'FORGE_BLOB_FS_ROOT',
-    ]
-    const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]))
-    try {
-      process.env.FORGE_POSTGRES_URL = url
-      process.env.FORGE_NAMESPACE = ''
-      process.env.FORGE_BLOB_SIGNING_SECRET = SIGNING_SECRET
-      process.env.FORGE_QUEUE_BACKEND = 'memory'
-      process.env.FORGE_BLOB_BACKEND = 'filesystem'
-      process.env.FORGE_BLOB_FS_ROOT = root
-
-      const client = await ForgeClient.initFrom(CONFIG_PATH)
-      const report = client.backendReport()
-      if (provider(report, 'queue') !== 'memory') throw new Error('queue backend was not memory')
-      if (provider(report, 'blob') !== 'filesystem') throw new Error('blob backend was not filesystem')
-
-      await client.queueEnqueue('swapq', 'hello')
-      const job = await client.queueDequeue('swapq', 30, 0)
-      if (!job || job.payload !== 'hello') throw new Error('memory queue smoke failed')
-      await client.queueAck(job.receipt)
-
-      await client.blobPut('swap/blob.txt', 'blob', 'text/plain')
-      if ((await client.blobGet('swap/blob.txt')) !== 'blob') {
-        throw new Error('filesystem blob smoke failed')
-      }
-    } finally {
-      restoreEnv(saved)
-      fs.rmSync(root, { recursive: true, force: true })
-    }
-  })
-  console.log('PASS  backend/env_backend_selection')
-}
-// Decompose a presigned URL into the signed params verify_presigned needs, so a scenario
-// can $ref them straight into a verify step. Mirrors the Rust runner's presign_to_value.
-function parsePresign(url, key, method) {
-  const q = url.includes('?') ? url.slice(url.indexOf('?') + 1) : ''
-  let expires_epoch = 0
-  let max_bytes = 0
-  let sig = ''
-  for (const pair of q.split('&')) {
-    const [k, val] = pair.split('=')
-    if (k === 'expires') expires_epoch = Number(val)
-    else if (k === 'max_bytes') max_bytes = Number(val)
-    else if (k === 'sig') sig = val ?? ''
-  }
-  return { url, key, method, expires_epoch, max_bytes, sig }
+function parseReservation(value) {
+  const item = JSON.parse(value)
+  return { id: item.id, reserved_units: item.reservedUnits, expires_at_ms: item.expiresAtMs, state: item.state, committed_units: item.committedUnits ?? null }
 }
 
 async function dispatch(client, op, args, subscriptions, captureAs) {
@@ -200,7 +179,7 @@ async function dispatch(client, op, args, subscriptions, captureAs) {
       return { keys: page.keys, cursor: page.cursor ?? null }
     }
     case 'ratelimit.check': {
-      const d = await client.rateLimitCheck(args.bucket, args.key, args.max, args.per_seconds, args.fail_open ?? null, args.algo ?? null)
+      const d = await client.rateLimitCheck(args.bucket, args.key, args.max, args.per_seconds, args.fail_open ?? null, args.algo ?? null, args.cost ?? 1)
       return {
         allowed: d.allowed,
         limit: d.limit ?? null,
@@ -209,14 +188,34 @@ async function dispatch(client, op, args, subscriptions, captureAs) {
         retry_after_seconds: d.retryAfterSeconds ?? null,
       }
     }
+    case 'ratelimit.reserve': {
+      const value = await client.rateLimitReserve(args.bucket, args.key, args.max, args.per_seconds, args.units, args.ttl_seconds, args.algo ?? null)
+      return value == null ? null : parseReservation(value)
+    }
+    case 'ratelimit.commit':
+      return parseReservation(await client.rateLimitCommit(args.reservation_id, args.actual_units))
+    case 'ratelimit.release':
+      return parseReservation(await client.rateLimitRelease(args.reservation_id))
     case 'schedule.at':
-      return await client.scheduleAt(args.when_epoch_ms, args.queue, valueToString(args.payload), args.max_attempts ?? null)
+      return await client.scheduleAt(args.when_epoch_ms, args.queue, valueToString(args.payload), args.max_attempts ?? null, args.misfire_policy ?? null, args.max_catch_up ?? null)
     case 'schedule.cron':
-      return await client.scheduleCron(args.name, args.expr, args.queue, valueToString(args.payload), args.max_attempts ?? null)
+      return await client.scheduleCron(args.name, args.expr, args.queue, valueToString(args.payload), args.max_attempts ?? null, args.misfire_policy ?? null, args.max_catch_up ?? null)
     case 'schedule.cancel':
       return client.scheduleCancel(args.name)
     case 'schedule.cancel_at':
       return client.scheduleCancelAt(args.job_id)
+    case 'schedule.inspect': {
+      const s = await client.scheduleInspect(args.name)
+      return s == null ? null : { name: s.name, kind: s.kind, queue: s.queue, next_run_ms: s.nextRunMs, last_run_ms: s.lastRunMs ?? null, cron_expr: s.cronExpr ?? null, paused: s.paused, misfire_policy: s.misfirePolicy, max_catch_up: s.maxCatchUp }
+    }
+    case 'schedule.pause':
+      return client.schedulePause(args.name)
+    case 'schedule.resume':
+      return client.scheduleResume(args.name)
+    case 'schedule.diagnostics': {
+      const value = await client.schedulerDiagnostics()
+      return { lag_ms: value.lagMs ?? null, last_successful_tick_ms: value.lastSuccessfulTickMs ?? null, due_count: value.dueCount, enqueue_failures: value.enqueueFailures }
+    }
     case 'schedule.list': {
       const page = await client.scheduleList(args.cursor ?? null, args.limit ?? null)
       return {
@@ -227,6 +226,9 @@ async function dispatch(client, op, args, subscriptions, captureAs) {
           next_run_ms: s.nextRunMs,
           last_run_ms: s.lastRunMs ?? null,
           cron_expr: s.cronExpr ?? null,
+          paused: s.paused,
+          misfire_policy: s.misfirePolicy,
+          max_catch_up: s.maxCatchUp,
         })),
         cursor: page.cursor ?? null,
       }
@@ -234,19 +236,41 @@ async function dispatch(client, op, args, subscriptions, captureAs) {
     case 'schedule.tick':
       return await client.runSchedulerOnce()
     case 'queue.enqueue':
-      return await client.queueEnqueue(args.queue, valueToString(args.payload), args.max_attempts ?? null, args.dedup_id ?? null, args.delay_seconds ?? null)
+      return await client.queueEnqueue(args.queue, Buffer.from(valueToString(args.payload)), args.max_attempts ?? null, args.dedup_id ?? null, args.delay_seconds ?? null, args.id ?? null, null, null, null, null, args.priority ?? null, args.concurrency_key ?? null)
     case 'queue.dequeue': {
-      const job = await client.queueDequeue(args.queue, args.visibility_seconds, args.wait_seconds)
+      const job = await client.queueDequeue(args.queue, args.visibility_seconds, args.wait_seconds, args.concurrency_limit_per_key ?? null)
       return job == null ? null : { id: job.id, receipt: job.receipt, payload: job.payload, attempt: job.attempt, max_attempts: job.maxAttempts }
     }
     case 'queue.ack':
       return client.queueAck(args.receipt)
     case 'queue.nack':
-      return client.queueNack(args.receipt, args.retry_seconds ?? null)
+      return client.queueNack(args.receipt, args.retry_seconds ?? null, args.failure_summary ?? null)
+    case 'queue.cancellation_requested':
+      return client.queueCancellationRequested(args.receipt)
+    case 'queue.finish_cancellation':
+      return client.queueFinishCancellation(args.receipt)
+    case 'queue.cancel': {
+      const value = await client.queueCancel(args.job_id)
+      return value == null ? null : JSON.parse(value)
+    }
+    case 'queue.status': {
+      const value = await client.queueStatus(args.job_id)
+      return value == null ? null : JSON.parse(value)
+    }
     case 'queue.depth': {
       const d = await client.queueDepth(args.queue)
-      return { visible: d.visible, in_flight: d.inFlight, delayed: d.delayed }
+      return { visible: d.visible, in_flight: d.inFlight, delayed: d.delayed, oldest_visible_age_ms: d.oldestVisibleAgeMs ?? null }
     }
+    case 'queue.dead_letters': {
+      const page = await client.queueDeadLetters(args.queue, args.cursor ?? null, args.limit ?? 50)
+      return { items: page.items.map((item) => ({ job_id: item.jobId, queue: item.queue, attempt_count: item.attemptCount, failure_summary: item.failureSummary ?? null })), cursor: page.cursor ?? null }
+    }
+    case 'queue.redrive':
+      return client.queueRedrive(args.job_id, args.destination, args.dedup_policy)
+    case 'queue.purge_dead_letters_dry_run':
+      return client.queuePurgeDeadLettersDryRun(args.queue)
+    case 'queue.purge_dead_letters':
+      return client.queuePurgeDeadLetters(args.queue, args.confirmation)
     case 'config.set':
       return await client.configSet(args.key, args.value)
     case 'config.get':
@@ -263,8 +287,20 @@ async function dispatch(client, op, args, subscriptions, captureAs) {
       return await client.setFlagPercent(args.key, args.percent)
     case 'config.set_flag_allow_list':
       return await client.setFlagAllowList(args.key, args.entries)
+    case 'config.set_flag_value':
+      return await client.setFlagValue(args.key, JSON.stringify(args.value), args.variant)
+    case 'config.flag_details': {
+      const value = await client.flagDetails(args.key, JSON.stringify(args.default ?? null), args.targeting_key ?? null)
+      return { value_json: value.valueJson, value_type: value.valueType, variant: value.variant ?? null, reason: value.reason, error_code: value.errorCode ?? null }
+    }
     case 'config.delete_flag':
       return await client.deleteFlag(args.key)
+    case 'auth.hash_password':
+      return client.hashPassword(args.plain)
+    case 'auth.verify_password':
+      return client.verifyPassword(args.plain, args.hash)
+    case 'auth.needs_rehash':
+      return client.needsRehash(args.hash)
     case 'auth.create_session':
       return await client.createSession(args.user_id, args.idle_seconds ?? null, args.absolute_seconds ?? null)
     case 'auth.validate_session':
@@ -272,39 +308,80 @@ async function dispatch(client, op, args, subscriptions, captureAs) {
     case 'auth.revoke_session':
       return client.revokeSession(args.token)
     case 'auth.create_api_key': {
-      const k = await client.createApiKey(args.owner_id, args.label)
-      return { id: k.id, secret: k.secret, label: k.label ?? null, created_at_ms: k.createdAtMs ?? null }
+      const k = await client.createApiKeyWith(args.owner_id, args.label, args.expires_in_seconds, args.scopes, args.metadata)
+      return { id: k.id, secret: k.secret, label: k.label ?? null, created_at_ms: k.createdAtMs ?? null, expires_at_ms: k.expiresAtMs ?? null, scopes: k.scopes, metadata: k.metadata }
     }
-    case 'auth.verify_api_key':
-      return await client.verifyApiKey(args.key)
+    case 'auth.verify_api_key': {
+      const value = await client.verifyApiKey(args.key)
+      return value == null ? null : { id: value.id, owner_id: value.ownerId, label: value.label, expires_at_ms: value.expiresAtMs ?? null, scopes: value.scopes, metadata: value.metadata }
+    }
     case 'auth.create_token':
-      return await client.createToken(args.user_id, args.purpose, args.ttl_seconds)
-    case 'auth.consume_token':
-      return await client.consumeToken(args.token, args.purpose)
+      return await client.createToken(args.user_id, args.purpose, args.ttl_seconds, Buffer.from(args.payload ?? ''))
+    case 'auth.consume_token': {
+      const value = await client.consumeToken(args.token, args.purpose)
+      return value == null ? null : { user_id: value.userId, payload: Buffer.from(value.payload).toString() }
+    }
+    case 'scope.kv_key':
+      return scopeKvKey(args.application, args.tenant, args.user, args.resource)
+    case 'scope.blob_key':
+      return scopeBlobKey(args.application, args.tenant, args.user, args.resource)
+    case 'scope.rate_limit_subject':
+      return scopeRateLimitSubject(args.application, args.tenant, args.user, args.resource)
+    case 'scope.topic':
+      return scopeTopic(args.application, args.tenant, args.user, args.resource)
     case 'blob.put':
-      return client.blobPutObject(args.key, asBuffer(args.value), args.content_type ?? null, args.metadata ?? null)
+      return client.blobPutObject(args.key, asBuffer(args.value), {
+        contentType: args.content_type ?? undefined,
+        metadata: args.metadata ?? undefined,
+        createOnly: args.create_only ?? undefined,
+        matchVersion: args.match_version ?? undefined,
+        cacheControl: args.cache_control ?? undefined,
+        contentDisposition: args.content_disposition ?? undefined,
+        checksumSha256: args.checksum_sha256 ?? undefined,
+      })
     case 'blob.get':
       return await client.blobGetBytes(args.key) // Buffer | null
+    case 'blob.get_range':
+      return await client.blobGetRange(args.key, args.start, args.end)
     case 'blob.head': {
       const i = await client.blobHead(args.key)
       return i == null
         ? null
-        : { key: i.key, size: i.size, content_type: i.contentType, etag: i.etag, metadata: i.metadata, last_modified_ms: i.lastModifiedMs }
+        : { key: i.key, size: i.size, content_type: i.contentType, etag: i.etag, metadata: i.metadata, cache_control: i.cacheControl ?? null, content_disposition: i.contentDisposition ?? null, checksum_sha256: i.checksumSha256 ?? null, server_side_encryption: i.serverSideEncryption ?? null, last_modified_ms: i.lastModifiedMs }
     }
+    case 'blob.get_if': {
+      const value = await client.blobGetIf(args.key, args.if_match ?? null, args.if_none_match ?? null)
+      return { state: value.state, body: value.body == null ? null : Buffer.from(value.body).toString('utf8'), etag: value.etag ?? null }
+    }
+    case 'blob.copy': {
+      const i = await client.blobCopy(args.source, args.destination, {
+        contentType: args.content_type ?? undefined,
+        metadata: args.metadata ?? undefined,
+        createOnly: args.create_only ?? undefined,
+        matchVersion: args.match_version ?? undefined,
+        cacheControl: args.cache_control ?? undefined,
+        contentDisposition: args.content_disposition ?? undefined,
+        checksumSha256: args.checksum_sha256 ?? undefined,
+      })
+      return { key: i.key, size: i.size, content_type: i.contentType, etag: i.etag, metadata: i.metadata, cache_control: i.cacheControl ?? null, content_disposition: i.contentDisposition ?? null, checksum_sha256: i.checksumSha256 ?? null, server_side_encryption: i.serverSideEncryption ?? null, last_modified_ms: i.lastModifiedMs }
+    }
+    case 'blob.verify_checksum_sha256':
+      return client.blobVerifyChecksumSha256(args.key, args.expected_hex)
     case 'blob.delete':
-      return client.blobDelete(args.key)
+      await client.blobDelete(args.key)
+      return null
     case 'blob.list': {
       const page = await client.blobList(args.prefix, args.cursor ?? null, args.limit ?? 100)
       return {
         keys: page.items.map((i) => i.key),
-        items: page.items.map((i) => ({ key: i.key, size: i.size, content_type: i.contentType, etag: i.etag })),
+        items: page.items.map((i) => ({ key: i.key, size: i.size, etag: i.etag, last_modified_ms: i.lastModifiedMs })),
         cursor: page.cursor ?? null,
       }
     }
     case 'blob.presign_download':
-      return parsePresign(await client.blobPresignDownload(args.key, args.expires_seconds), args.key, 'GET')
+      return parsePresign(await client.blobPresignDownload(args.key, args.expires_seconds))
     case 'blob.presign_upload':
-      return parsePresign(await client.blobPresignUpload(args.key, args.expires_seconds, args.max_bytes), args.key, 'PUT')
+      return parsePresign(await client.blobPresignUpload(args.key, args.expires_seconds, args.max_bytes))
     case 'blob.verify_presigned':
       return await client.blobVerifyPresign(args.method, args.key, args.expires_epoch, args.max_bytes, args.sig)
     case 'pubsub.publish':
@@ -425,30 +502,35 @@ async function runScenario(scenario) {
     // Live pubsub subscriptions held across steps, keyed by a subscribe step's `as` name;
     // a later pubsub.receive reads the next message off the named handle.
     const subscriptions = new Map()
-    for (let i = 0; i < scenario.steps.length; i++) {
-      const step = scenario.steps[i]
-      const ns = step.namespace ?? ''
-      if (!clients.has(ns)) {
-        clients.set(ns, await connectNs(url, ns))
-      }
-      const client = clients.get(ns)
-      const args = resolve(step.args ?? {}, captures)
-      let outcome
-      try {
-        outcome = { ok: true, value: await dispatch(client, step.op, args, subscriptions, step.as ?? null) }
-      } catch (e) {
-        outcome = { ok: false, code: canonicalErrorCode(e), err: e }
-      }
-      if (step.as && outcome.ok) captures[step.as] = outcome.value
-      if (step.expect) {
-        try {
-          await check(step.expect, outcome)
-        } catch (e) {
-          throw new Error(`step ${i} (${step.op}): ${e.message}`)
+    try {
+      for (let i = 0; i < scenario.steps.length; i++) {
+        const step = scenario.steps[i]
+        const ns = step.namespace ?? ''
+        if (!clients.has(ns)) {
+          clients.set(ns, await connectNs(url, ns))
         }
-      } else if (!outcome.ok) {
-        throw new Error(`step ${i} (${step.op}): unexpected error ${outcome.code}`)
+        const client = clients.get(ns)
+        const args = resolve(step.args ?? {}, captures)
+        let outcome
+        try {
+          outcome = { ok: true, value: await dispatch(client, step.op, args, subscriptions, step.as ?? null) }
+        } catch (e) {
+          outcome = { ok: false, code: canonicalErrorCode(e), err: e }
+        }
+        if (step.as && outcome.ok) captures[step.as] = outcome.value
+        if (step.expect) {
+          try {
+            await check(step.expect, outcome)
+          } catch (e) {
+            throw new Error(`step ${i} (${step.op}): ${e.message}`)
+          }
+        } else if (!outcome.ok) {
+          throw new Error(`step ${i} (${step.op}): unexpected error ${outcome.code}`)
+        }
       }
+    } finally {
+      await Promise.allSettled([...subscriptions.values()].map((subscription) => subscription.close()))
+      await Promise.allSettled([...clients.values()].map((client) => client.close(5)))
     }
   })
 }
@@ -488,10 +570,10 @@ async function main() {
     }
   }
   try {
-    await runBackendSelectionSmoke()
+    await runRuntimeProfileSmoke()
     passed++
   } catch (e) {
-    problems.push('backend/env_backend_selection: ' + e.message)
+    problems.push('runtime/memory_profile_and_lifecycle: ' + e.message)
   }
   console.log(`\nconformance(node): ${passed} ok, ${problems.length} unexpected`)
   if (problems.length) {

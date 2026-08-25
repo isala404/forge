@@ -9,12 +9,27 @@ on:
       - "skills/**"
       - "tools/skill-check/**"
       - "tools/api-contract/**"
+      - "tools/api-compat/**"
+      - "tools/contract/**"
+      - "tools/go-migrations/**"
+      - "tools/go-conformance/**"
+      - "tools/lifecycle/**"
+      - "contract/**"
+      - "src/migrations/**"
+      - "src/conformance/scenarios/**"
   push:
     branches: [main]
     paths:
       - "skills/**"
       - "tools/skill-check/**"
       - "tools/api-contract/**"
+      - "tools/api-compat/**"
+      - "tools/contract/**"
+      - "tools/go-migrations/**"
+      - "tools/go-conformance/**"
+      - "contract/**"
+      - "src/migrations/**"
+      - "src/conformance/scenarios/**"
 
 permissions:
   contents: read
@@ -26,7 +41,20 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
       - name: client libraries match the core API contract
         run: python3 tools/api-contract/check.py
+      - name: generated contract files are current
+        run: python3 tools/contract/generate.py --check
+      - name: Go migrations match canonical SQL
+        run: python3 tools/go-migrations/generate.py --check
+      - name: Go conformance fixtures match canonical scenarios
+        run: python3 tools/go-conformance/generate.py --check
+      - name: Schema ownership manifest matches canonical SQL
+        run: python3 tools/schema-ownership/check.py
+      - name: lifecycle ownership guard
+        run: python3 tools/lifecycle/check.py
       - name: skill names match the bindings (skill drift guard)
         run: python3 tools/skill-check/check.py

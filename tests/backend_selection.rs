@@ -115,54 +115,6 @@ impl BackendLifecycle for InjectedKv {
     }
 }
 
-#[tokio::test]
-async fn memory_kv_ignores_its_bogus_postgres_feature_database() {
-    let db = TestDatabase::new().await.unwrap();
-
-    // Default Postgres everywhere, except kv on the in-process backend. kv also carries a
-    // feature-database override aimed at a host that does not resolve: if memory selection
-    // wrongly connected it, init would fail. Init succeeding proves the override is ignored
-    // because kv is memory-backed (no connect, no migrate to that target). The system
-    // database is still connected and migrated as always.
-    let forge = db
-        .forge_with(
-            "[backends]\nkv = \"memory\"\n\
-             [databases.kv]\nurl = \"postgres://doesnotexist:1/x\"\n",
-        )
-        .await
-        .expect("init must succeed: the bogus kv feature-db is ignored for a memory kv");
-
-    // kv works fully, in-process.
-    assert!(forge.kv().set("k", b("v"), SetOpts::new()).await.unwrap());
-    assert_eq!(forge.kv().get("k").await.unwrap(), Some(b("v")));
-
-    // The report reflects the live choice: kv is memory + non-durable; the rest stay Postgres.
-    let report = forge.backend_report();
-    let kv = report
-        .backends
-        .iter()
-        .find(|x| x.primitive == Primitive::Kv)
-        .expect("kv line present in the report");
-    assert_eq!(kv.provider, "memory");
-    assert!(!kv.durable, "memory kv is not durable");
-
-    for x in &report.backends {
-        if x.primitive != Primitive::Kv {
-            assert_eq!(
-                x.provider, "postgres",
-                "{:?} should remain postgres",
-                x.primitive
-            );
-            assert_eq!(
-                x.durable,
-                x.primitive != Primitive::Pubsub,
-                "{:?}: only pubsub (LISTEN/NOTIFY stores nothing) is non-durable on Postgres",
-                x.primitive
-            );
-        }
-    }
-}
-
 /// Builder injects a kv backend while the other seven primitives stay on Postgres.
 #[tokio::test]
 async fn builder_injects_kv_while_the_rest_stay_postgres() {
@@ -186,7 +138,7 @@ async fn builder_injects_kv_while_the_rest_stay_postgres() {
     assert_eq!(probe.store.lock().unwrap().get("k").cloned(), Some(b("v")));
 
     // The report names the injected backend for kv; everything else is Postgres + durable.
-    let report = forge.backend_report();
+    let report = forge.backend_capabilities();
     let kv = report
         .backends
         .iter()
@@ -229,7 +181,7 @@ async fn init_default_config_is_all_postgres() {
 
     let forge = db.forge().await.expect("default init must succeed");
 
-    let report = forge.backend_report();
+    let report = forge.backend_capabilities();
     for x in &report.backends {
         assert_eq!(
             x.provider, "postgres",
@@ -249,16 +201,12 @@ async fn init_default_config_is_all_postgres() {
     assert_eq!(forge.kv().get("k").await.unwrap(), Some(b("v")));
 }
 
-/// Every primitive on its in-process backend at once (`[backends] default = "memory"` plus
-/// `blob = "memory"`) on the mandatory system database.
+/// Every primitive runs in the explicit, database-free memory profile.
 #[tokio::test]
 async fn all_memory_backends_init_and_operate_in_process() {
-    let db = TestDatabase::new().await.unwrap();
-
-    let forge = db
-        .forge_with("[backends]\ndefault = \"memory\"\nblob = \"memory\"\n")
+    let forge = Forge::init_from_str("[forge]\nmode = \"memory\"\nenvironment = \"test\"\n")
         .await
-        .expect("init must succeed with every primitive in-process on the system database");
+        .expect("memory init must not need a database");
 
     assert!(forge.kv().set("k", b("v"), SetOpts::new()).await.unwrap());
     assert_eq!(forge.kv().get("k").await.unwrap(), Some(b("v")));
@@ -349,7 +297,7 @@ async fn all_memory_backends_init_and_operate_in_process() {
     );
 
     // The report names every one of the eight providers `memory` and non-durable.
-    let report = forge.backend_report();
+    let report = forge.backend_capabilities();
     assert_eq!(report.backends.len(), 8, "one report line per primitive");
     for x in &report.backends {
         assert_eq!(
@@ -363,35 +311,4 @@ async fn all_memory_backends_init_and_operate_in_process() {
             x.primitive
         );
     }
-}
-
-#[tokio::test]
-async fn postgres_schedule_enqueues_through_memory_queue() {
-    let db = TestDatabase::new().await.unwrap();
-
-    let forge = db
-        .forge_with("[backends]\nqueue = \"memory\"\n")
-        .await
-        .expect("init must succeed with Postgres schedule and memory queue");
-
-    let id = forge
-        .schedule()
-        .at(
-            SystemTime::now() - Duration::from_secs(2),
-            "jobs",
-            b("scheduled"),
-            ScheduleOpts::new(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(forge.run_scheduler_once().await.unwrap(), 1);
-    let job = forge
-        .queue()
-        .dequeue("jobs", DequeueOpts::new().with_wait(Duration::ZERO))
-        .await
-        .unwrap()
-        .expect("scheduled work lands in the configured memory queue");
-    assert_eq!(job.id, id);
-    assert_eq!(job.payload, b("scheduled"));
 }

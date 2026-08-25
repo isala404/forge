@@ -2,7 +2,18 @@
 #![allow(clippy::unwrap_used, clippy::panic)]
 
 use forgelib::testing::TestDatabase;
-use forgelib::{ConfigExt, EvalCtx, FlagRule, ForgeError};
+use forgelib::{
+    ConfigExt, ConfigSnapshot, EvalCtx, FlagEvaluationRequest, FlagRule, ForgeError,
+    SnapshotSecretHandling,
+};
+use std::time::Duration;
+
+fn assert_code<T>(result: Result<T, ForgeError>, expected: &str) {
+    match result {
+        Err(error) => assert_eq!(error.code(), expected),
+        Ok(_) => panic!("expected {expected} error"),
+    }
+}
 
 #[tokio::test]
 async fn get_set_raw_roundtrip_is_last_write_wins() {
@@ -60,10 +71,7 @@ async fn typed_get_parses_json_and_flags_bad_values() {
     assert_eq!(c.get::<i32>("absent").await.unwrap(), None);
 
     c.set_raw("not_a_number", "abc").await.unwrap();
-    assert!(matches!(
-        c.get::<i32>("not_a_number").await,
-        Err(ForgeError::Invalid(_))
-    ));
+    assert_code(c.get::<i32>("not_a_number").await, "INVALID");
 }
 
 #[tokio::test]
@@ -129,17 +137,78 @@ async fn set_flag_and_set_raw_enforce_limits() {
     let forge = db.forge().await.unwrap();
     let c = forge.config();
 
-    assert!(matches!(
-        c.set_flag("x", FlagRule::Percent(150)).await,
-        Err(ForgeError::Invalid(_))
-    ));
+    assert_code(c.set_flag("x", FlagRule::Percent(150)).await, "INVALID");
     let big = "x".repeat(64 * 1024 + 1);
-    assert!(matches!(
-        c.set_raw("k", &big).await,
-        Err(ForgeError::Limit(_))
-    ));
-    assert!(matches!(
-        c.set_raw("", "v").await,
-        Err(ForgeError::Invalid(_))
-    ));
+    assert_code(c.set_raw("k", &big).await, "LIMIT");
+    assert_code(c.set_raw("", "v").await, "INVALID");
+}
+
+#[tokio::test]
+async fn bulk_reads_and_bounded_snapshot_preserve_order_and_details() {
+    let db = TestDatabase::new().await.unwrap();
+    let forge = db.forge().await.unwrap();
+    let config = forge.config();
+    config.set_raw("region", "eu-west").await.unwrap();
+    config.set_raw("retries", "3").await.unwrap();
+    config
+        .set_flag(
+            "theme",
+            FlagRule::Value {
+                value: serde_json::json!("blue"),
+                variant: "blue-v2".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let keys = vec!["retries".into(), "missing".into(), "region".into()];
+    let values = config.get_many_raw(&keys).await.unwrap();
+    assert_eq!(
+        values
+            .iter()
+            .map(|entry| entry.value.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("3"), None, Some("eu-west")]
+    );
+
+    let requests = vec![FlagEvaluationRequest {
+        id: "header-theme".into(),
+        key: "theme".into(),
+        default: serde_json::json!("gray"),
+        context: EvalCtx::user("user-1").with_field("region", serde_json::json!("eu")),
+    }];
+    let evaluations = config.flag_details_many(&requests).await.unwrap();
+    let evaluation = evaluations.first().unwrap();
+    assert_eq!(evaluation.evaluation.value_json, r#""blue""#);
+    assert_eq!(evaluation.evaluation.variant.as_deref(), Some("blue-v2"));
+
+    let snapshot = config
+        .snapshot(
+            &keys,
+            &requests,
+            Duration::from_secs(60),
+            SnapshotSecretHandling::NoSecrets,
+        )
+        .await
+        .unwrap();
+    let decoded = ConfigSnapshot::decode(&snapshot.encode().unwrap()).unwrap();
+    assert_eq!(
+        decoded
+            .get_raw("region", decoded.created_at_ms)
+            .unwrap()
+            .as_deref(),
+        Some("eu-west")
+    );
+    assert_eq!(
+        decoded
+            .flag_details("header-theme", decoded.created_at_ms)
+            .unwrap()
+            .variant
+            .as_deref(),
+        Some("blue-v2")
+    );
+    assert_code(
+        decoded.ensure_fresh(decoded.expires_at_ms + 1),
+        "PRECONDITION",
+    );
 }

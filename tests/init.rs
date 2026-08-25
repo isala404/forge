@@ -51,10 +51,10 @@ async fn maintain_runs_cleanly() {
 }
 
 #[tokio::test]
-async fn default_backend_report_is_all_postgres() {
+async fn default_backend_capabilities_are_all_postgres() {
     let db = TestDatabase::new().await.unwrap();
     let forge = db.forge().await.unwrap();
-    let report = forge.backend_report();
+    let report = forge.backend_capabilities();
     assert_eq!(report.backends.len(), 8, "one entry per primitive");
     assert!(
         report.backends.iter().all(|b| b.provider == "postgres"),
@@ -69,6 +69,28 @@ async fn default_backend_report_is_all_postgres() {
     );
     // Display renders one line per primitive plus a header.
     let rendered = report.to_string();
-    assert!(rendered.contains("forge backend report:"));
+    assert!(rendered.contains("forge backend capabilities:"));
     assert!(rendered.contains("blob"));
+}
+
+#[tokio::test]
+async fn diagnostics_verify_postgres_schema_permissions_and_clock() {
+    let db = TestDatabase::new().await.unwrap();
+    let forge = db.forge().await.unwrap();
+    let report = forge
+        .diagnostics(std::time::Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert!(report.ready, "diagnostics failed: {:?}", report.checks);
+    for name in [
+        "configuration",
+        "database_version",
+        "schema_state",
+        "permissions",
+        "clock_skew",
+        "backend_reachability",
+        "unsafe_production_settings",
+    ] {
+        assert!(report.checks.iter().any(|check| check.name == name));
+    }
 }

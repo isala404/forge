@@ -33,8 +33,7 @@ const SIGNING_SECRET: &str = "conformance-signing-secret";
 enum Variant {
     /// Every primitive on Postgres (the reference, durable backend).
     Postgres,
-    /// Every primitive on its in-process memory backend; the system Postgres is still
-    /// connected (init migrates it), but no primitive state touches it.
+    /// Every primitive in the explicit database-free, process-local memory profile.
     Memory,
     /// Blob bytes on a per-scenario filesystem directory, metadata in Postgres. Only the
     /// blob scenarios exercise this; the other primitives keep their Postgres default.
@@ -130,32 +129,34 @@ impl Drop for VariantFactory {
 #[async_trait]
 impl ForgeFactory for VariantFactory {
     async fn forge(&self, namespace: &str) -> Result<Forge, String> {
-        let mut guard = self.db.lock().await;
-        if guard.is_none() {
-            *guard = Some(
-                TestDatabase::new()
-                    .await
-                    .map_err(|e| format!("db setup: {e}"))?,
-            );
-        }
-        let url = guard.as_ref().unwrap().url().to_string();
-        // init migrates the throwaway DB's schema (idempotent across the per-namespace
-        // inits against the same DB). One `[blob]` table per variant so signing_secret and
-        // the filesystem backend don't collide as duplicate tables.
-        let base = format!("[postgres]\nurl = \"{url}\"\n[forge]\nnamespace = \"{namespace}\"\n");
-        let toml = match self.variant {
-            Variant::Postgres => {
-                format!("{base}[blob]\nsigning_secret = \"{SIGNING_SECRET}\"\n")
+        let toml = if self.variant == Variant::Memory {
+            format!(
+                "[forge]\nmode = \"memory\"\nenvironment = \"test\"\nnamespace = \"{namespace}\"\n\
+                 [blob]\nsigning_secret = \"{SIGNING_SECRET}\"\n"
+            )
+        } else {
+            let mut guard = self.db.lock().await;
+            if guard.is_none() {
+                *guard = Some(
+                    TestDatabase::new()
+                        .await
+                        .map_err(|e| format!("db setup: {e}"))?,
+                );
             }
-            Variant::Memory => format!(
-                "{base}[blob]\nsigning_secret = \"{SIGNING_SECRET}\"\n\
-                 [backends]\ndefault = \"memory\"\nblob = \"memory\"\n"
-            ),
-            Variant::Filesystem => format!(
-                "{base}[blob]\nsigning_secret = \"{SIGNING_SECRET}\"\n\
-                 backend = \"fs\"\nfs_root = \"{}\"\n",
-                self.fs_root()?.display(),
-            ),
+            let url = guard.as_ref().unwrap().url().to_string();
+            let base =
+                format!("[postgres]\nurl = \"{url}\"\n[forge]\nnamespace = \"{namespace}\"\n");
+            match self.variant {
+                Variant::Postgres => {
+                    format!("{base}[blob]\nsigning_secret = \"{SIGNING_SECRET}\"\n")
+                }
+                Variant::Filesystem => format!(
+                    "{base}[blob]\nsigning_secret = \"{SIGNING_SECRET}\"\n\
+                     backend = \"fs\"\nfs_root = \"{}\"\n",
+                    self.fs_root()?.display(),
+                ),
+                Variant::Memory => unreachable!(),
+            }
         };
         Forge::init_from_str(&toml)
             .await

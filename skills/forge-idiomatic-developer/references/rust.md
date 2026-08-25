@@ -11,8 +11,8 @@ let forge = Forge::init().await?;                    // reads ./forge.toml
 // Forge::init_from(path) / Forge::init_from_str(toml) also exist.
 // `[postgres] embedded = true` needs the `embedded` cargo feature in Rust
 // (the Node/Python packages ship with it built in). If app-owned tables intentionally
-// share that database, build a separate application pool from forge.postgres_url().
-// forge.pool() is the Forge system pool and is not a home for domain tables.
+// share that database, build a separate application pool from forge.postgres_url()?;
+// forge.pool() is the Forge system pool and is not a home for domain tables; it returns Result.
 ```
 
 ## Key/value — `forge.kv()`
@@ -53,10 +53,10 @@ forge.worker("emails")
     .visibility_timeout(Duration::from_secs(30))
     .run(|job| async move { handle(job).await })     // Ok => ack, Err => nack
     .await;
-// .run_until(shutdown_future, handler) to drain on a shutdown signal.
+// .run_until(app_shutdown_future, handler) also accepts an application-owned trigger.
 ```
 
-The builder dequeues, heartbeats within the visibility window, acks on `Ok`, nacks on `Err`, and abandons the job if the lease is lost. `.grace(d)` and `.poll_wait(d)` tune shutdown drain and long-poll. Await `.run_until(...)` to completion before process exit; resolving the shutdown future begins the drain rather than completing it.
+The builder dequeues, heartbeats within the visibility window, acks on `Ok`, nacks on `Err`, and abandons the job if the lease is lost. `.grace(d)` and `.poll_wait(d)` tune shutdown drain and long-poll. `run()` stops when the owning `Forge` closes; `run_until(...)` additionally accepts an application-owned trigger. Await the worker and `forge.close(...)` before process exit.
 
 ## Pub/sub — `forge.pubsub()`
 
@@ -80,10 +80,12 @@ let bytes: Option<Bytes> = forge.blob().get("exports/x.csv").await?;
 let info = forge.blob().head("exports/x.csv").await?;               // Option<BlobInfo>
 let page = forge.blob().list("exports/", None, 100).await?;
 let url = forge.blob().presign_download("exports/x.csv",
-    Duration::from_secs(3600)).await?;                             // needs signing_secret
+    Duration::from_secs(3600)).await?.url;                         // needs signing_secret
 forge.blob().presign_upload("in/y", Duration::from_secs(600), 5_000_000).await?;
 forge.blob().delete("exports/x.csv").await?;
 ```
+
+Buffered reads and ranges are capped at 50 MiB; use `open`/`put_stream` for large objects. `list` yields lightweight summaries, `head` yields full metadata, ETags are opaque versions, and delete is idempotent. Native S3 presigns are separate from Forge proxy presigns and expose required headers; all presigned URLs are bearer credentials.
 
 ## Auth — `forge.auth()`
 

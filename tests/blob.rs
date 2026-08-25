@@ -2,8 +2,15 @@
 #![allow(clippy::unwrap_used, clippy::panic)]
 
 use forgelib::testing::TestDatabase;
-use forgelib::{Bytes, ForgeError, PutOpts};
+use forgelib::{Bytes, ConditionalGet, ForgeError, PutOpts};
 use std::time::Duration;
+
+fn assert_code<T>(result: Result<T, ForgeError>, expected: &str) {
+    match result {
+        Err(error) => assert_eq!(error.code(), expected),
+        Ok(_) => panic!("expected {expected} error"),
+    }
+}
 
 #[tokio::test]
 async fn put_get_head_delete_roundtrip() {
@@ -13,7 +20,7 @@ async fn put_get_head_delete_roundtrip() {
 
     assert_eq!(b.get("missing").await.unwrap(), None);
     assert!(b.head("missing").await.unwrap().is_none());
-    assert!(!b.delete("missing").await.unwrap());
+    b.delete("missing").await.unwrap();
 
     b.put(
         "docs/a.txt",
@@ -44,7 +51,8 @@ async fn put_get_head_delete_roundtrip() {
     assert_ne!(info2.etag, etag1, "etag changes when bytes change");
     assert_eq!(info2.content_type, "application/octet-stream");
 
-    assert!(b.delete("docs/a.txt").await.unwrap());
+    b.delete("docs/a.txt").await.unwrap();
+    b.delete("docs/a.txt").await.unwrap();
     assert!(b.get("docs/a.txt").await.unwrap().is_none());
 }
 
@@ -78,6 +86,50 @@ async fn list_is_prefixed_ordered_and_paginated() {
 }
 
 #[tokio::test]
+async fn conditional_copy_http_metadata_and_checksum_are_durable() {
+    let db = TestDatabase::new().await.unwrap();
+    let forge = db.forge().await.unwrap();
+    let blob = forge.blob();
+    let checksum = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+    blob.put(
+        "source",
+        Bytes::from_static(b"hello"),
+        PutOpts::new()
+            .with_cache_control("public, max-age=60")
+            .with_content_disposition("attachment; filename=hello.txt")
+            .with_checksum_sha256(checksum),
+    )
+    .await
+    .unwrap();
+    let source = blob.head("source").await.unwrap().unwrap();
+    assert_eq!(source.checksum_sha256.as_deref(), Some(checksum));
+    assert!(
+        blob.verify_checksum_sha256("source", checksum)
+            .await
+            .unwrap()
+    );
+    assert!(matches!(
+        blob.get_if("source", None, Some(&source.etag))
+            .await
+            .unwrap(),
+        ConditionalGet::NotModified { .. }
+    ));
+    assert_code(
+        blob.get_if("source", Some("wrong"), None).await,
+        "PRECONDITION",
+    );
+    let copied = blob
+        .copy("source", "copy", PutOpts::new().create_only())
+        .await
+        .unwrap();
+    assert_eq!(copied.cache_control, source.cache_control);
+    assert_eq!(
+        blob.get("copy").await.unwrap(),
+        Some(Bytes::from_static(b"hello"))
+    );
+}
+
+#[tokio::test]
 async fn presign_requires_secret_and_signs() {
     let db = TestDatabase::new().await.unwrap();
 
@@ -85,13 +137,13 @@ async fn presign_requires_secret_and_signs() {
     // signing secret is a configuration problem, classified the same way that
     // verify_presigned and blob_router classify it.
     let plain = db.forge().await.unwrap();
-    assert!(matches!(
+    assert_code(
         plain
             .blob()
             .presign_download("k", Duration::from_secs(60))
             .await,
-        Err(ForgeError::Config(_))
-    ));
+        "CONFIG",
+    );
 
     // With a secret: presign produces signed URLs against the same database.
     let signed = db
@@ -103,29 +155,29 @@ async fn presign_requires_secret_and_signs() {
         .presign_download("exports/a.csv", Duration::from_secs(60))
         .await
         .unwrap();
-    assert!(dl.starts_with("/api/files?key="));
-    assert!(dl.contains("sig="));
+    assert!(dl.url.starts_with("/api/files?v=1&"));
+    assert!(dl.url.contains("sig="));
 
     let up = signed
         .blob()
         .presign_upload("k", Duration::from_secs(60), 1024)
         .await
         .unwrap();
-    assert!(up.contains("max_bytes=1024"));
+    assert!(up.url.contains("max_bytes=1024"));
 
-    assert!(matches!(
+    assert_code(
         signed.blob().presign_download("k", Duration::ZERO).await,
-        Err(ForgeError::Invalid(_))
-    ));
+        "INVALID",
+    );
 
     // A 0-byte upload cap admits only empty bodies, so it is rejected.
-    assert!(matches!(
+    assert_code(
         signed
             .blob()
             .presign_upload("k", Duration::from_secs(60), 0)
             .await,
-        Err(ForgeError::Invalid(_))
-    ));
+        "INVALID",
+    );
 }
 
 #[tokio::test]
@@ -137,28 +189,14 @@ async fn verify_presigned_matches_what_presign_mints() {
         .unwrap();
     let b = forge.blob();
 
-    // Mint an upload URL, then pull the signed params back off it.
-    let url = b
+    let ticket = b
         .presign_upload("media/x.bin", Duration::from_secs(600), 4096)
         .await
         .unwrap();
-    let q = url.split_once('?').unwrap().1;
-    let mut key = String::new();
-    let (mut expires, mut max_bytes) = (0i64, 0u64);
-    let mut sig = String::new();
-    for kv in q.split('&') {
-        let (k, v) = kv.split_once('=').unwrap();
-        match k {
-            // value is percent-encoded; the only escape here is for the path, which
-            // verify reconstructs from the same key we pass, so decode minimally.
-            "key" => key = v.replace("%2F", "/").replace("%2E", "."),
-            "expires" => expires = v.parse().unwrap(),
-            "max_bytes" => max_bytes = v.parse().unwrap(),
-            "sig" => sig = v.to_string(),
-            _ => {}
-        }
-    }
-    assert_eq!(key, "media/x.bin");
+    let key = ticket.key;
+    let expires = ticket.expires_epoch;
+    let max_bytes = ticket.max_bytes;
+    let sig = ticket.signature;
 
     // A faithful PUT verification passes; the matching GET (different method) fails.
     assert!(
@@ -182,21 +220,21 @@ async fn verify_presigned_matches_what_presign_mints() {
             .await
             .unwrap()
     );
-    assert!(matches!(
+    assert_code(
         b.verify_presigned("PATCH", &key, expires, max_bytes, &sig)
             .await,
-        Err(ForgeError::Invalid(_))
-    ));
+        "INVALID",
+    );
 
     // No signing secret => Config error.
     let plain = db.forge().await.unwrap();
-    assert!(matches!(
+    assert_code(
         plain
             .blob()
             .verify_presigned("PUT", "k", expires, 0, "deadbeef")
             .await,
-        Err(ForgeError::Config(_))
-    ));
+        "CONFIG",
+    );
 }
 
 #[tokio::test]
@@ -206,13 +244,13 @@ async fn limits_are_enforced() {
     let b = forge.blob();
 
     let big_key = "x".repeat(1025);
-    assert!(matches!(
+    assert_code(
         b.put(&big_key, Bytes::from_static(b"x"), PutOpts::new())
             .await,
-        Err(ForgeError::Limit(_))
-    ));
-    assert!(matches!(
+        "LIMIT",
+    );
+    assert_code(
         b.put("", Bytes::from_static(b"x"), PutOpts::new()).await,
-        Err(ForgeError::Invalid(_))
-    ));
+        "INVALID",
+    );
 }

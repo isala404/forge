@@ -2,8 +2,15 @@
 #![allow(clippy::unwrap_used, clippy::panic)]
 
 use forgelib::testing::TestDatabase;
-use forgelib::{Bytes, DequeueOpts, ForgeError, ScheduleKind, ScheduleOpts};
+use forgelib::{Bytes, DequeueOpts, ForgeError, MisfirePolicy, ScheduleKind, ScheduleOpts};
 use std::time::{Duration, SystemTime};
+
+fn assert_code<T>(result: Result<T, ForgeError>, expected: &str) {
+    match result {
+        Err(error) => assert_eq!(error.code(), expected),
+        Ok(_) => panic!("expected {expected} error"),
+    }
+}
 
 #[tokio::test]
 async fn at_fires_a_due_one_shot_into_the_queue() {
@@ -53,10 +60,9 @@ async fn fast_cron_far_behind_still_fires_its_most_recent_tick() {
         .await
         .unwrap();
 
-    // Simulate a long outage: the stored tick is ~90 minutes stale (well past the 1h
-    // grace). The most-recent missed tick is still within grace, so recovery must fire
-    // exactly one job, not skip the schedule wholesale. (pg-relative time, so the
-    // Docker VM clock skew can't flake this.)
+    // Simulate a long outage. The default run-once policy must select exactly the most
+    // recent missed occurrence instead of skipping the schedule wholesale. This uses
+    // database-relative time so Docker VM clock skew cannot make the test flaky.
     db.execute_raw(
         "UPDATE forge_schedules SET next_run = now() - interval '90 minutes' \
          WHERE name = 'heartbeat'",
@@ -74,6 +80,54 @@ async fn fast_cron_far_behind_still_fires_its_most_recent_tick() {
         .unwrap();
     assert_eq!(job.payload, Bytes::from_static(b"b"));
     forge.queue().ack(&job).await.unwrap();
+}
+
+#[tokio::test]
+async fn postgres_pause_diagnostics_and_bounded_catch_up_compose() {
+    let db = TestDatabase::new().await.unwrap();
+    let forge = db.forge().await.unwrap();
+    forge
+        .schedule()
+        .cron(
+            "minute",
+            "* * * * *",
+            "catch-up",
+            Bytes::from_static(b"x"),
+            ScheduleOpts::new().with_misfire_policy(MisfirePolicy::CatchUp(3)),
+        )
+        .await
+        .unwrap();
+    db.execute_raw(
+        "UPDATE forge_schedules SET next_run = now() - interval '20 minutes' \
+         WHERE name = 'minute'",
+    )
+    .await
+    .unwrap();
+
+    assert!(forge.schedule().pause("minute").await.unwrap());
+    let info = forge.schedule().inspect("minute").await.unwrap().unwrap();
+    assert!(info.paused);
+    assert_eq!(info.misfire_policy, MisfirePolicy::CatchUp(3));
+    assert_eq!(forge.schedule().diagnostics().await.unwrap().due_count, 0);
+    assert!(forge.schedule().resume("minute").await.unwrap());
+    assert_eq!(forge.schedule().diagnostics().await.unwrap().due_count, 1);
+    assert_eq!(forge.run_scheduler_once().await.unwrap(), 3);
+
+    let mut ids = std::collections::HashSet::new();
+    for _ in 0..3 {
+        let job = forge
+            .queue()
+            .dequeue("catch-up", DequeueOpts::new().with_wait(Duration::ZERO))
+            .await
+            .unwrap()
+            .unwrap();
+        ids.insert(job.id);
+        forge.queue().ack(&job).await.unwrap();
+    }
+    assert_eq!(ids.len(), 3, "each UTC occurrence has one deterministic id");
+    let diagnostics = forge.schedule().diagnostics().await.unwrap();
+    assert_eq!(diagnostics.due_count, 0);
+    assert!(diagnostics.last_successful_tick.is_some());
 }
 
 #[tokio::test]
@@ -210,7 +264,7 @@ async fn at_past_is_allowed_but_far_future_is_limited() {
     let db = TestDatabase::new().await.unwrap();
     let forge = db.forge().await.unwrap();
 
-    // A `when` in the past is accepted and fires on the next tick (within grace).
+    // The default run-once policy accepts a past `when` and fires it on the next tick.
     let id = forge
         .schedule()
         .at(
@@ -233,13 +287,13 @@ async fn at_past_is_allowed_but_far_future_is_limited() {
 
     // A `when` past the ~100-year ceiling is `Limit`.
     let far = SystemTime::now() + Duration::from_secs(200 * 365 * 24 * 60 * 60);
-    assert!(matches!(
+    assert_code(
         forge
             .schedule()
             .at(far, "later", Bytes::from_static(b"x"), ScheduleOpts::new())
             .await,
-        Err(ForgeError::Limit(_))
-    ));
+        "LIMIT",
+    );
 }
 
 #[tokio::test]
@@ -249,21 +303,21 @@ async fn invalid_cron_and_names_error() {
     let s = forge.schedule();
     let p = Bytes::from_static(b"x");
 
-    assert!(matches!(
+    assert_code(
         s.cron("bad", "not a cron", "q", p.clone(), ScheduleOpts::new())
             .await,
-        Err(ForgeError::Invalid(_))
-    ));
-    assert!(matches!(
+        "INVALID",
+    );
+    assert_code(
         s.cron("", "* * * * *", "q", p.clone(), ScheduleOpts::new())
             .await,
-        Err(ForgeError::Invalid(_))
-    ));
-    assert!(matches!(
+        "INVALID",
+    );
+    assert_code(
         s.cron("ok", "* * * * *", "bad queue", p, ScheduleOpts::new())
             .await,
-        Err(ForgeError::Invalid(_))
-    ));
+        "INVALID",
+    );
 }
 
 #[tokio::test]

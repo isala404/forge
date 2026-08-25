@@ -3,18 +3,89 @@
 
 use bytes::Bytes;
 use forgelib::testing::TestDatabase;
-use forgelib::{DequeueOpts, EnqueueOpts, ForgeError, JobId, NackOpts};
+use forgelib::{
+    BatchEnqueueItem, DequeueOpts, EnqueueOpts, Forge, ForgeError, JobId, JobState, NackOpts,
+    OUTBOX_SCHEMA_SQL, OutboxRelayOpts, Priority, RedriveDedupPolicy, RedriveOpts,
+};
+use sqlx::{Connection, PgConnection};
 use std::collections::HashSet;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 fn payload(s: &str) -> Bytes {
     Bytes::from(s.as_bytes().to_vec())
 }
 
+fn assert_code<T>(result: Result<T, ForgeError>, expected: &str) {
+    match result {
+        Err(error) => assert_eq!(error.code(), expected),
+        Ok(_) => panic!("expected {expected} error"),
+    }
+}
+
 fn vis(secs: u64) -> DequeueOpts {
     DequeueOpts::new()
         .with_wait(Duration::ZERO)
         .with_visibility_timeout(Duration::from_secs(secs))
+}
+
+#[tokio::test]
+async fn cancellation_priority_status_and_key_fairness_are_durable() {
+    let db = TestDatabase::new().await.unwrap();
+    let forge = db.forge().await.unwrap();
+    let q = forge.queue();
+    let cancelled = q
+        .enqueue("long", payload("cancel"), EnqueueOpts::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        q.cancel(cancelled).await.unwrap().unwrap().state,
+        JobState::Cancelled
+    );
+    let first = q
+        .enqueue(
+            "long",
+            payload("a"),
+            EnqueueOpts::new()
+                .with_priority(Priority::High)
+                .with_concurrency_key("tenant-a"),
+        )
+        .await
+        .unwrap();
+    q.enqueue(
+        "long",
+        payload("a2"),
+        EnqueueOpts::new()
+            .with_priority(Priority::High)
+            .with_concurrency_key("tenant-a"),
+    )
+    .await
+    .unwrap();
+    let other = q
+        .enqueue(
+            "long",
+            payload("b"),
+            EnqueueOpts::new().with_concurrency_key("tenant-b"),
+        )
+        .await
+        .unwrap();
+    let opts = vis(30).with_concurrency_limit_per_key(1);
+    let leased = q.dequeue("long", opts.clone()).await.unwrap().unwrap();
+    assert_eq!(leased.id, first);
+    assert_eq!(q.dequeue("long", opts).await.unwrap().unwrap().id, other);
+    assert_eq!(
+        q.cancel(first).await.unwrap().unwrap().state,
+        JobState::CancelRequested
+    );
+    assert!(q.cancellation_requested(&leased).await.unwrap());
+    assert_code(q.ack(&leased).await, "PRECONDITION");
+    q.finish_cancellation(&leased).await.unwrap();
+    assert_eq!(
+        q.status(first).await.unwrap().unwrap().state,
+        JobState::Cancelled
+    );
 }
 
 #[tokio::test]
@@ -78,12 +149,8 @@ async fn lease_expiry_redelivers_and_increments_attempt() {
     assert_eq!(second.attempt, 2, "redelivery increments the attempt");
 
     // Stale handle from the crashed worker can no longer mutate the job.
-    assert!(matches!(
-        q.heartbeat(&first).await,
-        Err(ForgeError::Precondition(_))
-    ));
-    // Acking the stale handle is an idempotent no-op.
-    q.ack(&first).await.unwrap();
+    assert_code(q.heartbeat(&first).await, "PRECONDITION");
+    assert_code(q.ack(&first).await, "PRECONDITION");
     q.ack(&second).await.unwrap();
     assert!(q.dequeue("q", vis(30)).await.unwrap().is_none());
 }
@@ -193,7 +260,7 @@ async fn requested_job_id_is_idempotent_even_with_new_dedup_slot() {
         "same requested id on same queue is success even while claiming a new dedup slot"
     );
 
-    assert!(matches!(
+    assert_code(
         q.enqueue(
             "other",
             payload("bad"),
@@ -202,8 +269,205 @@ async fn requested_job_id_is_idempotent_even_with_new_dedup_slot() {
                 .with_dedup_id("other-slot"),
         )
         .await,
-        Err(ForgeError::Precondition(_))
-    ));
+        "PRECONDITION",
+    );
+}
+
+#[tokio::test]
+async fn many_processes_simultaneously_enqueue_one_deterministic_id() {
+    let db = TestDatabase::new().await.unwrap();
+    let migrated = db.forge().await.unwrap();
+    drop(migrated);
+    let requested = JobId::new();
+    let executable = std::env::current_exe().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let barrier = listener.local_addr().unwrap().to_string();
+    let mut children = Vec::new();
+    let mut ready = Vec::new();
+    for _ in 0..12 {
+        let database_url = db.url().to_string();
+        children.push(
+            Command::new(&executable)
+                .args(["--exact", "deterministic_enqueue_process_helper"])
+                .env("FORGE_QUEUE_PROCESS_TEST_URL", database_url)
+                .env("FORGE_QUEUE_PROCESS_TEST_ID", requested.to_string())
+                .env("FORGE_QUEUE_PROCESS_TEST_BARRIER", &barrier)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        ready.push(listener.accept().unwrap().0);
+    }
+    for stream in &mut ready {
+        stream.write_all(&[1]).unwrap();
+    }
+    for child in children {
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "producer process failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let verify = db.forge_with("auto_migrate = false\n").await.unwrap();
+    assert_eq!(verify.queue().depth("same-id").await.unwrap().visible, 1);
+}
+
+#[tokio::test]
+async fn deterministic_enqueue_process_helper() {
+    let (Ok(database_url), Ok(requested)) = (
+        std::env::var("FORGE_QUEUE_PROCESS_TEST_URL"),
+        std::env::var("FORGE_QUEUE_PROCESS_TEST_ID"),
+    ) else {
+        return;
+    };
+    let barrier = std::env::var("FORGE_QUEUE_PROCESS_TEST_BARRIER").unwrap();
+    let forge = Forge::init_from_str(&format!(
+        "[forge]\nmode = \"postgres\"\nenvironment = \"test\"\n[postgres]\nurl = {database_url:?}\nauto_migrate = false\nmax_connections = 2\nlock_timeout_ms = 0\n"
+    ))
+    .await
+    .unwrap();
+    let mut ready = TcpStream::connect(barrier).unwrap();
+    let mut release = [0];
+    ready.read_exact(&mut release).unwrap();
+    let requested = JobId::parse(&requested).unwrap();
+    assert_eq!(
+        forge
+            .queue()
+            .enqueue(
+                "same-id",
+                payload("same"),
+                EnqueueOpts::new().with_job_id(requested),
+            )
+            .await
+            .unwrap(),
+        requested
+    );
+    forge.close(Duration::from_secs(2)).await.unwrap();
+}
+
+#[tokio::test]
+async fn dead_letter_inspection_redrive_purge_and_dedup_release() {
+    let db = TestDatabase::new().await.unwrap();
+    let forge = db.forge().await.unwrap();
+    let q = forge.queue();
+    let first = q
+        .enqueue(
+            "ops",
+            payload("one"),
+            EnqueueOpts::new()
+                .with_max_attempts(1)
+                .with_dedup_id("content"),
+        )
+        .await
+        .unwrap();
+    let job = q.dequeue("ops", vis(30)).await.unwrap().unwrap();
+    q.nack(
+        &job,
+        NackOpts::default().with_failure_summary("redacted failure"),
+    )
+    .await
+    .unwrap();
+    let second = q
+        .enqueue(
+            "ops",
+            payload("two"),
+            EnqueueOpts::new()
+                .with_dedup_id("content")
+                .with_max_attempts(1),
+        )
+        .await
+        .unwrap();
+    assert_ne!(first, second);
+
+    let page = q.dead_letters("ops", None, 1).await.unwrap();
+    assert_eq!(page.items.len(), 1);
+    let item = page.items.first().unwrap();
+    assert_eq!(item.attempt_count, 1);
+    assert_eq!(item.failure_summary.as_deref(), Some("redacted failure"));
+    assert!(
+        q.redrive(
+            first,
+            RedriveOpts::new("recovered", RedriveDedupPolicy::Clear),
+        )
+        .await
+        .unwrap()
+    );
+    assert_eq!(
+        q.dequeue("recovered", vis(30)).await.unwrap().unwrap().id,
+        first
+    );
+
+    let pending = q.dequeue("ops", vis(30)).await.unwrap().unwrap();
+    q.nack(
+        &pending,
+        NackOpts::default().with_failure_summary("terminal"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(q.purge_dead_letters_dry_run("ops").await.unwrap(), 1);
+    assert_code(q.purge_dead_letters("ops", "wrong").await, "PRECONDITION");
+    assert_eq!(q.purge_dead_letters("ops", "ops").await.unwrap(), 1);
+}
+
+#[tokio::test]
+#[allow(clippy::disallowed_methods)]
+async fn outbox_recovers_before_enqueue_after_enqueue_and_before_mark() {
+    let db = TestDatabase::new().await.unwrap();
+    let forge = db.forge().await.unwrap();
+    db.execute_raw(OUTBOX_SCHEMA_SQL).await.unwrap();
+
+    let before = JobId::new();
+    let after = JobId::new();
+    let before_mark = JobId::new();
+    let mut conn = PgConnection::connect(db.url()).await.unwrap();
+    for (id, state, expired_claim) in [
+        (before, "pending", false),
+        (after, "pending", false),
+        (before_mark, "claimed", true),
+    ] {
+        let sql = if expired_claim {
+            "INSERT INTO app_forge_outbox_v1 (event_id, destination, payload, dispatch_state, claimed_until) VALUES ($1, 'events', decode('78', 'hex'), $2, now() - interval '1 second')"
+        } else {
+            "INSERT INTO app_forge_outbox_v1 (event_id, destination, payload, dispatch_state) VALUES ($1, 'events', decode('78', 'hex'), $2)"
+        };
+        sqlx::query(sql)
+            .bind(id.0)
+            .bind(state)
+            .execute(&mut conn)
+            .await
+            .unwrap();
+    }
+    // Simulate a crash after enqueue but before the outbox row was marked.
+    forge
+        .queue()
+        .enqueue(
+            "events",
+            payload("x"),
+            EnqueueOpts::new().with_job_id(after),
+        )
+        .await
+        .unwrap();
+
+    let report = forge
+        .run_outbox_once(OutboxRelayOpts::new().with_batch_size(10))
+        .await
+        .unwrap();
+    assert_eq!(
+        (report.claimed, report.dispatched, report.failed),
+        (3, 3, 0)
+    );
+    assert_eq!(report.pending, 0);
+    assert_eq!(forge.queue().depth("events").await.unwrap().visible, 3);
+    let dispatched: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM app_forge_outbox_v1 WHERE dispatch_state = 'dispatched'",
+    )
+    .fetch_one(&mut conn)
+    .await
+    .unwrap();
+    assert_eq!(dispatched, 3);
 }
 
 #[tokio::test]
@@ -218,10 +482,7 @@ async fn unknown_job_id_is_not_found() {
     let job = q.dequeue("q", vis(30)).await.unwrap().unwrap();
     q.ack(&job).await.unwrap();
     // Row still exists (status=done) but the lease is gone => Precondition, not NotFound.
-    assert!(matches!(
-        q.heartbeat(&job).await,
-        Err(ForgeError::Precondition(_))
-    ));
+    assert_code(q.heartbeat(&job).await, "PRECONDITION");
 }
 
 #[test]
@@ -235,32 +496,26 @@ async fn validates_queue_names_and_limits() {
     let forge = db.forge().await.unwrap();
     let q = forge.queue();
 
-    assert!(matches!(
+    assert_code(
         q.enqueue("bad name", payload("x"), EnqueueOpts::new())
             .await,
-        Err(ForgeError::Invalid(_))
-    ));
-    assert!(
-        matches!(
-            q.enqueue("q.dlq", payload("x"), EnqueueOpts::new()).await,
-            Err(ForgeError::Invalid(_)),
-        ),
-        "enqueue to a .dlq name is reserved"
+        "INVALID",
+    );
+    assert_code(
+        q.enqueue("q.dlq", payload("x"), EnqueueOpts::new()).await,
+        "INVALID",
     );
 
     let too_big = Bytes::from(vec![0u8; 256 * 1024 + 1]);
-    assert!(matches!(
-        q.enqueue("q", too_big, EnqueueOpts::new()).await,
-        Err(ForgeError::Limit(_))
-    ));
+    assert_code(q.enqueue("q", too_big, EnqueueOpts::new()).await, "LIMIT");
 
     // Queue names are length-capped (256 bytes) like schedule names.
     let long_name = "a".repeat(257);
-    assert!(matches!(
+    assert_code(
         q.enqueue(&long_name, payload("x"), EnqueueOpts::new())
             .await,
-        Err(ForgeError::Invalid(_))
-    ));
+        "INVALID",
+    );
 }
 
 #[tokio::test]
@@ -313,7 +568,7 @@ async fn nack_retry_in_is_bounded() {
             NackOpts::retry_in(Duration::from_secs(100 * 365 * 24 * 3600)),
         )
         .await;
-    assert!(matches!(res, Err(ForgeError::Invalid(_))));
+    assert_code(res, "INVALID");
 }
 
 /// N concurrent consumers each get a distinct job, exercising `FOR UPDATE SKIP LOCKED`.
@@ -410,4 +665,50 @@ async fn depth_counts_dead_letter_backlog() {
         1,
         "one job dead-lettered"
     );
+}
+
+#[tokio::test]
+async fn batch_pause_resume_and_counter_stats_are_durable() {
+    let db = TestDatabase::new().await.unwrap();
+    let forge = db.forge().await.unwrap();
+    let q = forge.queue();
+    let deterministic = JobId::parse("11111111-1111-4111-8111-111111111111").unwrap();
+    let results = q
+        .enqueue_batch(
+            "operator-batch",
+            vec![
+                BatchEnqueueItem::new(
+                    payload("one"),
+                    EnqueueOpts::new().with_job_id(deterministic),
+                ),
+                BatchEnqueueItem::new(payload("two"), EnqueueOpts::new()),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        results.first().and_then(|result| result.job_id),
+        Some(deterministic)
+    );
+    q.pause("operator-batch").await.unwrap();
+    assert!(q.is_paused("operator-batch").await.unwrap());
+    assert!(
+        q.dequeue("operator-batch", vis(30))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    q.resume("operator-batch").await.unwrap();
+    let jobs = q
+        .dequeue_batch("operator-batch", 10, vis(30))
+        .await
+        .unwrap();
+    assert_eq!(jobs.len(), 2);
+    for job in &jobs {
+        q.ack(job).await.unwrap();
+    }
+    let stats = q.stats("operator-batch").await.unwrap();
+    assert_eq!(stats.enqueued_total, 2);
+    assert_eq!(stats.settled_total, 2);
+    assert!(!stats.paused);
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build both bindings and run all three conformance runners against TEST_DATABASE_URL.
+# Build the language packages and run all four conformance runners.
 # Each runner exits non-zero iff its observed failure set differs from known_gaps.json.
 set -euo pipefail
 
@@ -13,6 +13,9 @@ cd "$ROOT"
 
 echo "== rust =="
 cargo test --features pg-tests,conformance --test conformance -- --nocapture
+
+echo "== go: memory + PostgreSQL contract =="
+(cd bindings/go && go test -run '^TestConformance(Memory|Postgres)$' ./...)
 
 echo "== node: build binding + run =="
 (cd bindings/node && npm ci --ignore-scripts --no-audit --no-fund --silent && ./node_modules/.bin/napi build --platform --release)
