@@ -81,7 +81,7 @@ export type Mutation = {
   sendMessage: Message;
   /** Turn disappearing messages on/off for a chat (forge schedule). */
   setDisappearing: Chat;
-  /** Set the `reactions_v2` feature-flag rollout percentage (forge config). */
+  /** Set the `reactions_v1` feature-flag rollout percentage (forge config). */
   setReactionsRollout: Scalars['Boolean']['output'];
   setTyping: Scalars['Boolean']['output'];
   signup: SessionPayload;
@@ -175,7 +175,7 @@ export type Query = {
   /** Developer-tools gauges (kv scan + DLQ depth) for the settings page. */
   opsStats: OpsStats;
   presence: Array<User>;
-  /** Whether the `reactions_v2` feature flag is enabled for the current user (forge config). */
+  /** Whether the `reactions_v1` feature flag is enabled for the current user (forge config). */
   reactionsEnabled: Scalars['Boolean']['output'];
 };
 

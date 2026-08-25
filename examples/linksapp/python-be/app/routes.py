@@ -65,7 +65,7 @@ async def meta(request: Request) -> dict[str, Any]:
                 "durable": line.durable,
                 "caveats": line.caveats,
             }
-            for line in forge.backend_report()
+            for line in forge.backend_capabilities()
         ],
         "features": {"customSlugs": custom_slugs},
         "clicksQueueDepth": {
@@ -243,7 +243,13 @@ async def create_link(
     # segno's SVG writer emits bytes, so render into a BytesIO buffer.
     buf = io.BytesIO()
     segno.make(f"/{slug}", error="m").save(buf, kind="svg", scale=4, border=1)
-    await forge.blob_put(qr_key(slug), buf.getvalue(), "image/svg+xml")
+    await forge.blob_put_object(
+        qr_key(slug),
+        buf.getvalue(),
+        content_type="image/svg+xml",
+        cache_control="public, max-age=300",
+        content_disposition="inline",
+    )
 
     if expires_at is not None:
         exp_epoch_ms = (
@@ -288,6 +294,8 @@ async def get_qr(request: Request, slug: str) -> Response:
 @api.get("/api/links/{slug}/live")
 async def live_clicks(request: Request, slug: str) -> StreamingResponse:
     forge = request.app.state.forge
+    if await forge.kv_get(link_slug_key(slug)) is None:
+        raise HTTPException(status_code=404, detail="not found")
     topic = forge.topic(click_topic(slug))
 
     async def gen():
@@ -295,6 +303,15 @@ async def live_clicks(request: Request, slug: str) -> StreamingResponse:
             yield f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@api.get("/api/links/{slug}/state")
+async def link_state(request: Request, slug: str) -> dict[str, int]:
+    forge = request.app.state.forge
+    if await forge.kv_get(link_slug_key(slug)) is None:
+        raise HTTPException(status_code=404, detail="not found")
+    raw = await forge.kv_get(clicks_key(slug))
+    return {"clicks": int(raw) if raw is not None else 0}
 
 
 # Registered last so it never shadows /api/... or /healthz.
@@ -321,6 +338,8 @@ async def redirect_slug(request: Request, slug: str) -> Response:
         raise HTTPException(status_code=429, detail="too many requests")
 
     await forge.kv_incr(clicks_key(slug), 1)
-    await forge.queue(CLICKS_QUEUE).enqueue({"slug": slug}, max_attempts=3)
+    await forge.queue(CLICKS_QUEUE).enqueue(
+        {"slug": slug}, max_attempts=3, concurrency_key=slug
+    )
 
     return RedirectResponse(url=link["url"], status_code=302)

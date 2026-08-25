@@ -43,7 +43,7 @@ export const mutation: Required<Pick<MutationResolvers, "requestUpload" | "sendM
     const key = `media/${id}/${randomUUID()}`;
     let uploadUrl: string;
     try {
-      uploadUrl = await app.forge.blobPresignUpload(key, 600, maxBytes);
+      uploadUrl = (await app.forge.blobPresignUpload(key, 600, maxBytes)).url;
     } catch (e) {
       throw mapForge(e);
     }
@@ -147,7 +147,7 @@ export const mutation: Required<Pick<MutationResolvers, "requestUpload" | "sendM
     try {
       // Dedup on the message id so a retried sendMessage resolver can't double-enqueue.
       await app.forge.queue<{ message_id: string }>(FANOUT_QUEUE)
-        .enqueue({ message_id: msgId }, { dedupId: msgId });
+        .enqueue({ message_id: msgId }, { dedupId: msgId, priority: "high", concurrencyKey: id });
     } catch (e) {
       throw mapForge(e);
     }

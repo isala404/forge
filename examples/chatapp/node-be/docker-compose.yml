@@ -1,6 +1,6 @@
-# Self-contained node-be stack: Postgres + the GraphQL backend + the shared React SPA.
+# Self-contained node-be stack: Postgres and the GraphQL backend.
 #   docker compose -f examples/chatapp/node-be/docker-compose.yml up --build
-# Backend on http://127.0.0.1:8082/graphql ; SPA on http://127.0.0.1:8092
+# Backend on http://127.0.0.1:8082/graphql
 # Service/network/volume names are prefixed so this file composes cleanly alongside
 # the other backends' stacks (run several at once without name clashes).
 name: chatapp-node-be
@@ -43,27 +43,6 @@ services:
     depends_on:
       node-db:
         condition: service_healthy
-    networks: [node-net]
-
-  react-fe:
-    build:
-      # Multi-stage: vite build -> nginx serving the static bundle.
-      context: ../react-fe
-    environment:
-      # The SPA runs in the host browser, so it must reach the backend at its
-      # published URL. docker-entrypoint.sh bakes these into env.js at start.
-      # Override via the environment (e.g. `--env-file .env.orb`) when 127.0.0.1 ports
-      # aren't host-reachable, as on OrbStack; the defaults suit Docker Desktop.
-      VITE_GRAPHQL_HTTP: ${NODE_GRAPHQL_HTTP:-http://127.0.0.1:8082/graphql}
-      VITE_GRAPHQL_WS: ${NODE_GRAPHQL_WS:-ws://127.0.0.1:8082/graphql}
-      # Presigned blob URLs are relative (`/api/files`), so nginx proxies them to
-      # the backend on the internal network — reachable regardless of host port
-      # forwarding, so uploads work on both Docker Desktop and OrbStack unchanged.
-      BACKEND_ORIGIN: http://node-app:8082
-    ports:
-      - "127.0.0.1:8092:80"
-    depends_on:
-      - node-app
     networks: [node-net]
 
 networks:

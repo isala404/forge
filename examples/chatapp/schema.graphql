@@ -90,7 +90,7 @@ type Query {
   chat(id: ID!): Chat
   messages(chatId: ID!, before: DateTime, limit: Int! = 50): [Message!]!
   presence(userIds: [ID!]!): [User!]!
-  "Whether the `reactions_v2` feature flag is enabled for the current user (forge config)."
+  "Whether the `reactions_v1` feature flag is enabled for the current user (forge config)."
   reactionsEnabled: Boolean!
   "Developer-tools gauges (kv scan + DLQ depth) for the settings page."
   opsStats: OpsStats!
@@ -113,7 +113,7 @@ type Mutation {
   heartbeat: Boolean!
   "Mint a personal API key (forge auth). The secret is returned exactly once."
   createApiKey(label: String!): ApiKeyPayload!
-  "Set the `reactions_v2` feature-flag rollout percentage (forge config)."
+  "Set the `reactions_v1` feature-flag rollout percentage (forge config)."
   setReactionsRollout(percent: Int!): Boolean!
   "Enqueue a job destined to dead-letter (forge queue DLQ demo)."
   triggerFailingJob: Boolean!

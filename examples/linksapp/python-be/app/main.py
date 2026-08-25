@@ -34,6 +34,7 @@ def build_app() -> FastAPI:
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            await forge.close(30.0)
 
     app = FastAPI(lifespan=lifespan)
     app.add_middleware(

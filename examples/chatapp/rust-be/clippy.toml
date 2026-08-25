@@ -1,3 +1,0 @@
-# This example intentionally uses runtime sqlx queries against Forge's shared pool.
-# Empty the repo-root ban on those methods so clippy does not fire here.
-disallowed-methods = []

@@ -15,3 +15,7 @@ FORGE_POSTGRES_URL=postgres://postgres:forge@127.0.0.1:5432/todoapp_rust cargo r
 Default port: `9081`.
 
 Read `src/routes.rs` first for the Rocket handlers, then `src/main.rs` for startup. Forge calls stay inline in the route handlers; `src/types.rs` is only data shapes, and `src/util.rs` is only small validation/key helpers.
+
+The maintenance loop ticks UTC schedules and reports due count/lag when work remains. Named schedules can be inspected, paused, or resumed without introducing workflow state.
+
+For an OpenFeature-managed deployment, enable Forge's `openfeature` Cargo feature, register `forgelib::openfeature::ForgeProvider`, and add `OpenTelemetryHook` at the application-owned SDK scope. Bulk startup reads and expiring snapshots live on `forge.config()`; snapshots never enumerate configuration or re-evaluate flags offline.

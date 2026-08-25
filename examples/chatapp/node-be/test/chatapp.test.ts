@@ -32,6 +32,7 @@ const APP_ENV = {
   // "*" = any authenticated user is an admin, so the ops tests below can exercise the
   // gated mutations without knowing a user id at boot. A real deploy lists actual ids.
   ADMIN_USER_IDS: "*",
+  OPS_TOKEN: "test-ops-token",
 };
 
 let running: ServerHandle;
@@ -80,6 +81,18 @@ describe("SDL parity", () => {
         .replace(/\s+/g, " ")
         .trim();
     expect(norm(served)).toBe(norm(canonical));
+  });
+});
+
+describe("operator diagnostics", () => {
+  test("requires its own token and returns structured Forge state", async () => {
+    const endpoint = `http://127.0.0.1:${running.port}/internal/forge/diagnostics`;
+    expect((await fetch(endpoint)).status).toBe(403);
+    const response = await fetch(endpoint, { headers: { authorization: "Bearer test-ops-token" } });
+    expect(response.status).toBe(200);
+    const body = await response.json() as { runtime: { ready: boolean }; scheduler: { dueCount: number } };
+    expect(typeof body.runtime.ready).toBe("boolean");
+    expect(typeof body.scheduler.dueCount).toBe("number");
   });
 });
 
@@ -431,7 +444,7 @@ describe("feature flags + ops", () => {
     // cache masks the new rollout value.
     const flagFor = async (uid: string): Promise<boolean> => {
       const c = await ForgeClient.init();
-      return c.flag("reactions_v2", false, uid);
+      return c.flag("reactions_v1", false, uid);
     };
     await aHttp.ok(`mutation { setReactionsRollout(percent: 100) }`);
     expect(await flagFor(alice.id)).toBe(true);
