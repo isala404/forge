@@ -1,6 +1,6 @@
 {
   "name": "forgelib",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Node.js bindings for Forge: hardened infra primitives on Postgres",
   "license": "MIT",
   "repository": {
@@ -23,6 +23,7 @@
     "README.md",
     "client.js",
     "client.d.ts",
+    "contract.generated.d.ts",
     "index.js",
     "index.d.ts",
     "*.node"
@@ -52,6 +53,6 @@
     "@napi-rs/cli": "^3.7.3"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   }
 }

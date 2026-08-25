@@ -17,6 +17,19 @@ export declare class ForgeClient {
    * directory.
    */
   static initFrom(path: string): Promise<ForgeClient>
+  /** Parse the canonical configuration from a TOML string. */
+  static initFromString(toml: string): Promise<ForgeClient>
+  /** Create a memory client with a manual clock and seeded token entropy for tests. */
+  static initMemoryForTesting(toml: string, startMs: number, seed: number): Promise<ForgeClient>
+  static migrate(): Promise<Array<JsMigrationReport>>
+  static migrateFrom(path: string): Promise<Array<JsMigrationReport>>
+  static migrateFromString(toml: string): Promise<Array<JsMigrationReport>>
+  static migrationStatus(): Promise<Array<JsMigrationReport>>
+  static migrationStatusFrom(path: string): Promise<Array<JsMigrationReport>>
+  static migrationStatusFromString(toml: string): Promise<Array<JsMigrationReport>>
+  static validateSchema(): Promise<Array<JsMigrationReport>>
+  static validateSchemaFrom(path: string): Promise<Array<JsMigrationReport>>
+  static validateSchemaFromString(toml: string): Promise<Array<JsMigrationReport>>
   /**
    * The resolved connection string of Forge's system database — the configured
    * `[postgres] url`, or the DSN an embedded server minted at init. Contains
@@ -24,8 +37,17 @@ export declare class ForgeClient {
    * (the only way to reach an embedded server from outside Forge).
    */
   postgresUrl(): string
-  /** A backend report: which provider powers each primitive (for health pages/logs). */
-  backendReport(): Array<JsBackendInfo>
+  /** Idempotently stop accepting work and close owned resources within the deadline. */
+  close(timeoutSeconds?: number | undefined | null): Promise<void>
+  /** Move a test-factory client's manual clock forward without sleeping. */
+  advanceTestClock(seconds: number): void
+  /** Static provider capabilities. This performs no I/O. */
+  backendCapabilities(): Array<JsBackendInfo>
+  isLive(): boolean
+  probe(deadlineSeconds?: number | undefined | null, readinessBackends?: Array<string> | undefined | null): Promise<JsHealthReport>
+  diagnostics(deadlineSeconds?: number | undefined | null): Promise<JsDiagnosticsReport>
+  metricsSnapshot(): Array<JsMetricSample>
+  renderPrometheus(): string
   /**
    * `GET key` → the value as a UTF-8 string, or `null`. The string surface is
    * UTF-8-only; use `kvGetBytes` for values that may hold arbitrary bytes.
@@ -62,20 +84,25 @@ export declare class ForgeClient {
   /** `EXISTS key`. Returns whether the key is present (and unexpired). */
   kvExists(key: string): Promise<boolean>
   /** Enqueue a job (string payload). Returns the job id. */
-  queueEnqueue(queue: string, payload: string, maxAttempts?: number | undefined | null, dedupId?: string | undefined | null, delaySeconds?: number | undefined | null): Promise<string>
+  queueEnqueue(queue: string, payload: Buffer, maxAttempts?: number | undefined | null, dedupId?: string | undefined | null, delaySeconds?: number | undefined | null, jobId?: string | undefined | null, traceparent?: string | undefined | null, tracestate?: string | undefined | null, baggage?: string | undefined | null, baggageAllowlist?: Array<string> | undefined | null, priority?: string | undefined | null, concurrencyKey?: string | undefined | null): Promise<string>
+  queueEnqueueBatch(queue: string, items: Array<JsBatchEnqueueItem>): Promise<Array<JsBatchEnqueueResult>>
   /**
    * Lease one job for `visibilitySeconds`, long-polling up to `waitSeconds`.
    * `null` if none arrived. `ack`/`nack`/`heartbeat` it by the returned `receipt`.
    */
-  queueDequeue(queue: string, visibilitySeconds: number, waitSeconds: number): Promise<JsJob | null>
-  /** Ack a leased job by its `receipt` (idempotent: a no-op if already settled). */
+  queueDequeue(queue: string, visibilitySeconds: number, waitSeconds: number, concurrencyLimitPerKey?: number | undefined | null): Promise<JsJob | null>
+  queueDequeueBatch(queue: string, maxItems: number, visibilitySeconds: number, waitSeconds: number, concurrencyLimitPerKey?: number | undefined | null): Promise<Array<JsJob>>
+  /**
+   * Ack a leased job by its `receipt`. Raises `PRECONDITION` if the receipt is
+   * unknown or belongs to another client/namespace.
+   */
   queueAck(receipt: string): Promise<void>
   /**
    * Nack a leased job by its `receipt`; optional `retrySeconds` delays the
    * redelivery. Raises `PRECONDITION` if the receipt is unknown (the lease was
    * lost, stop working on this job).
    */
-  queueNack(receipt: string, retrySeconds?: number | undefined | null): Promise<void>
+  queueNack(receipt: string, retrySeconds?: number | undefined | null, failureSummary?: string | undefined | null): Promise<void>
   /**
    * Extend the lease on a job leased by this client (SQS ChangeMessageVisibility /
    * beanstalkd touch) by one visibility timeout. Call before `leasedUntilMs` for a
@@ -84,15 +111,32 @@ export declare class ForgeClient {
    * lost, stop working on this job).
    */
   queueHeartbeat(receipt: string): Promise<void>
+  queueCancellationRequested(receipt: string): Promise<boolean>
+  queueFinishCancellation(receipt: string): Promise<void>
+  queueCancel(jobId: string): Promise<string | null>
+  queueStatus(jobId: string): Promise<string | null>
+  queueListStatus(queue?: string | undefined | null, states?: Array<string> | undefined | null, cursor?: string | undefined | null, limit?: number | undefined | null): Promise<string>
   /**
    * Approximate `{visible, inFlight, delayed}` counts for a queue (SQS
    * `GetQueueAttributes`). Pass `"<queue>.dlq"` to gauge a dead-letter backlog
    * without leasing its jobs (no side effects, unlike dequeue-to-count).
    */
   queueDepth(queue: string): Promise<JsQueueDepth>
+  queuePause(queue: string): Promise<void>
+  queueResume(queue: string): Promise<void>
+  queueIsPaused(queue: string): Promise<boolean>
+  queueStats(queue: string): Promise<JsQueueStats>
+  queueDeadLetters(queue: string, cursor: string | undefined | null, limit: number): Promise<JsDeadLetterPage>
+  queueRedrive(jobId: string, destination: string, dedupPolicy: string): Promise<boolean>
+  queueRedriveBatch(queue: string, cursor: string | undefined | null, limit: number, destination: string, dedupPolicy: string): Promise<JsRedriveBatchResult>
+  queuePurgeDeadLettersDryRun(queue: string): Promise<number>
+  queuePurgeDeadLetters(queue: string, confirmation: string): Promise<number>
+  runOutboxOnce(batchSize?: number | undefined | null, claimSeconds?: number | undefined | null, failureBackoffSeconds?: number | undefined | null, baggageAllowlist?: Array<string> | undefined | null): Promise<JsOutboxRelayReport>
   configSet(key: string, value: string): Promise<void>
   /** Resolve a config value (env `FORGE_CFG_<KEY>` > store > `null`). */
   configGet(key: string): Promise<string | null>
+  /** Resolve up to 256 exact config keys in input order. */
+  configGetMany(keys: Array<string>): Promise<Array<JsConfigEntry>>
   /** Delete a stored config value. Env `FORGE_CFG_<KEY>` still shadows reads. */
   configDelete(key: string): Promise<boolean>
   /** Set a percentage-rollout flag (`0..=100`). */
@@ -102,23 +146,40 @@ export declare class ForgeClient {
    * `defaultValue` on any failure.
    */
   flag(key: string, defaultValue: boolean, targetingKey?: string | undefined | null): Promise<boolean>
+  flagDetails(key: string, defaultJson: string, targetingKey?: string | undefined | null): Promise<JsFlagEvaluation>
+  /** Evaluate up to 256 typed flags in request order with one durable-backend read. */
+  flagDetailsMany(requests: Array<JsFlagEvaluationRequest>): Promise<Array<JsFlagEvaluationEntry>>
+  /** Capture an expiring, read-only view of only the requested config and flags. */
+  configSnapshot(configKeys: Array<string>, flagRequests: Array<JsFlagEvaluationRequest>, maxStaleSeconds: number, secretHandling: string): Promise<JsConfigSnapshot>
+  /** Validate and encode a portable config snapshot without backend I/O. */
+  encodeConfigSnapshot(snapshot: JsConfigSnapshot): Buffer
+  /** Decode and validate a portable config snapshot without backend I/O. */
+  decodeConfigSnapshot(encoded: Buffer): JsConfigSnapshot
   /**
    * Atomic check-and-consume: `max` per `perSeconds`.
    * `failOpen` overrides what happens on a backend error: omit for the instance
    * default, `true` to allow, `false` to deny. `algo` selects the algorithm:
    * `"token_bucket"` (default) or `"sliding_window"`.
    */
-  rateLimitCheck(bucket: string, key: string, max: number, perSeconds: number, failOpen?: boolean | undefined | null, algo?: string | undefined | null): Promise<JsDecision>
+  rateLimitCheck(bucket: string, key: string, max: number, perSeconds: number, failOpen?: boolean | undefined | null, algo?: string | undefined | null, cost?: number | undefined | null): Promise<JsDecision>
+  rateLimitReserve(bucket: string, key: string, max: number, perSeconds: number, cost: number, ttlSeconds: number, algo?: string | undefined | null): Promise<string | null>
+  rateLimitCommit(reservationId: string, actualUnits: number): Promise<string>
+  rateLimitRelease(reservationId: string): Promise<string>
   blobPut(key: string, data: string, contentType?: string | undefined | null): Promise<void>
   blobPutBytes(key: string, data: Buffer, contentType?: string | undefined | null): Promise<void>
   /** Fetch an object as a UTF-8 string, or `null`. */
   blobGet(key: string): Promise<string | null>
   /** Fetch an object as raw bytes, or `null`. */
   blobGetBytes(key: string): Promise<Buffer | null>
+  blobGetIf(key: string, ifMatch?: string | undefined | null, ifNoneMatch?: string | undefined | null): Promise<JsConditionalBlobGet>
   /** A presigned download URL (needs a `signingSecret` at connect). */
-  blobPresignDownload(key: string, expiresSeconds: number): Promise<string>
+  blobPresignDownload(key: string, expiresSeconds: number): Promise<JsProxyPresign>
   /** A presigned upload (PUT) URL, capped at `maxBytes` (needs a `signingSecret`). */
-  blobPresignUpload(key: string, expiresSeconds: number, maxBytes: number): Promise<string>
+  blobPresignUpload(key: string, expiresSeconds: number, maxBytes: number): Promise<JsProxyPresign>
+  /** Native S3 presigned GET. Its URL is a bearer credential; do not log its query. */
+  blobPresignNativeGet(key: string, expiresSeconds: number): Promise<JsNativePresign>
+  /** Native S3 presigned PUT. No portable maximum-body-size guarantee is provided. */
+  blobPresignNativePut(key: string, expiresSeconds: number, options?: BlobPutOptions | undefined | null): Promise<JsNativePresign>
   /**
    * Verify a presigned URL's query params (needs a `signingSecret`). Returns
    * `true` iff the signature is valid and the URL has not expired; `false` for a
@@ -127,8 +188,8 @@ export declare class ForgeClient {
   blobVerifyPresign(method: string, key: string, expiresEpoch: number, maxBytes: number, sig: string): Promise<boolean>
   /** The stored content type for an object, or `null` if it does not exist. */
   blobContentType(key: string): Promise<string | null>
-  /** Delete an object; returns whether it existed. */
-  blobDelete(key: string): Promise<boolean>
+  /** Idempotently delete an object. */
+  blobDelete(key: string): Promise<void>
   /** argon2id hash of `plain` (a PHC string), to store in your users table. */
   hashPassword(plain: string): Promise<string>
   /** Constant-time verify of `plain` against a stored PHC `hash`. */
@@ -152,27 +213,31 @@ export declare class ForgeClient {
   revokeAllSessions(userId: string): Promise<number>
   /** Mint an `fk_` API key for `ownerId`; the `secret` is shown once. */
   createApiKey(ownerId: string, label: string): Promise<JsApiKey>
-  /** Verify an API key; returns the `ownerId`, or `null`. */
-  verifyApiKey(key: string): Promise<string | null>
+  /** Mint a bounded, optionally expiring API key with application-owned scopes and metadata. */
+  createApiKeyWith(ownerId: string, label: string, expiresInSeconds?: number | undefined | null, scopes?: Array<string> | undefined | null, metadata?: Record<string, string> | undefined | null): Promise<JsApiKey>
+  /** Verify an API key; returns its full non-secret metadata, or `null`. */
+  verifyApiKey(key: string): Promise<JsApiKeyInfo | null>
   /**
    * Mint a single-use token scoped to `purpose` (e.g. `"password-reset"`), expiring
    * after `ttlSeconds`; returns the opaque token (shown once). Deliver it out of
    * band (email link, SMS); Forge does not send anything.
    */
-  createToken(userId: string, purpose: string, ttlSeconds: number): Promise<string>
+  createToken(userId: string, purpose: string, ttlSeconds: number, payload?: Buffer | undefined | null): Promise<string>
+  createTokenWithPayload(userId: string, purpose: string, ttlSeconds: number, payload: Buffer): Promise<string>
   /**
    * Atomically consume a token minted for `purpose`; returns its `userId`, or `null`
    * when unknown/expired/already consumed. A live token presented with the wrong
    * `purpose` is left intact.
    */
-  consumeToken(token: string, purpose: string): Promise<string | null>
+  consumeToken(token: string, purpose: string): Promise<JsTokenConsumption | null>
+  consumeTokenWithPayload(token: string, purpose: string): Promise<JsTokenConsumption | null>
   /** Schedule a one-shot enqueue at `whenEpochMs`; returns the future JobId. */
-  scheduleAt(whenEpochMs: number, queue: string, payload: string, maxAttempts?: number | undefined | null): Promise<string>
+  scheduleAt(whenEpochMs: number, queue: string, payload: string, maxAttempts?: number | undefined | null, misfirePolicy?: string | undefined | null, maxCatchUp?: number | undefined | null): Promise<string>
   /**
    * Upsert a recurring cron schedule by name. `maxAttempts` overrides the delivery
    * attempts of the job each tick enqueues (omit for the queue default of 5).
    */
-  scheduleCron(name: string, expr: string, queue: string, payload: string, maxAttempts?: number | undefined | null): Promise<void>
+  scheduleCron(name: string, expr: string, queue: string, payload: string, maxAttempts?: number | undefined | null, misfirePolicy?: string | undefined | null, maxCatchUp?: number | undefined | null): Promise<void>
   /**
    * Fire all due schedules once; returns how many jobs were enqueued. Run on an
    * interval (e.g. every 30s) to drive the scheduler from Node.
@@ -215,15 +280,29 @@ export declare class ForgeClient {
    * metadata), or `null` if the object does not exist.
    */
   blobHead(key: string): Promise<JsBlobInfo | null>
+  blobCopy(source: string, destination: string, options?: BlobPutOptions | undefined | null): Promise<JsBlobInfo>
+  blobCreateMultipart(key: string, options?: BlobPutOptions | undefined | null): Promise<JsMultipartUpload>
+  blobUploadPart(upload: JsMultipartUpload, partNumber: number, body: Buffer): Promise<JsMultipartPart>
+  blobCompleteMultipart(upload: JsMultipartUpload, parts: Array<JsMultipartPart>): Promise<JsBlobInfo>
+  blobAbortMultipart(upload: JsMultipartUpload): Promise<void>
+  blobVerifyChecksumSha256(key: string, expectedHex: string): Promise<boolean>
   /**
    * `ListObjectsV2`: up to `limit` objects under `prefix`, lexicographic, with cursor
    * pagination. Pass `cursor` from the previous page (omit for the first).
    */
   blobList(prefix: string, cursor: string | undefined | null, limit: number): Promise<JsBlobPage>
   /** Store an object (binary body) with optional content type and user metadata. */
-  blobPutObject(key: string, data: Buffer, contentType?: string | undefined | null, metadata?: Record<string, string> | undefined | null): Promise<void>
+  blobPutObject(key: string, data: Buffer, options?: BlobPutOptions | undefined | null): Promise<void>
+  /** Stream a file into the configured blob backend without loading it into JS memory. */
+  blobPutFile(key: string, path: string, options?: BlobPutOptions | undefined | null): Promise<void>
+  /** Fetch an inclusive byte range. */
+  blobGetRange(key: string, start: number, end: number): Promise<Buffer | null>
   /** Cancel a schedule by name. `true` if one was removed, `false` if none existed. */
   scheduleCancel(name: string): Promise<boolean>
+  scheduleInspect(name: string): Promise<JsScheduleInfo | null>
+  schedulePause(name: string): Promise<boolean>
+  scheduleResume(name: string): Promise<boolean>
+  schedulerDiagnostics(): Promise<JsSchedulerDiagnostics>
   /**
    * Cancel a one-shot scheduled by `scheduleAt`, by the JobId it returned. `true`
    * if it was still pending and removed, `false` if it already fired or never
@@ -242,6 +321,7 @@ export declare class ForgeClient {
   setFlagOff(key: string): Promise<void>
   /** Set a flag to an allow-list of targeting keys. */
   setFlagAllowList(key: string, entries: Array<string>): Promise<void>
+  setFlagValue(key: string, valueJson: string, variant: string): Promise<void>
   /** Delete a flag rule. Later `flag` calls fall back to their caller default. */
   deleteFlag(key: string): Promise<boolean>
   /**
@@ -249,11 +329,6 @@ export declare class ForgeClient {
    * `null`. Use `validateSession` when only the user id is needed.
    */
   validateSessionInfo(token: string): Promise<JsSession | null>
-  /**
-   * Verify an API key; returns full non-secret metadata (id, owner, label), or
-   * `null`. Use `verifyApiKey` when only the owner id is needed.
-   */
-  verifyApiKeyInfo(key: string): Promise<JsApiKeyInfo | null>
   /** Revoke an API key by its (non-secret) id. `true` if one was removed. */
   revokeApiKey(id: string): Promise<boolean>
 }
@@ -275,12 +350,30 @@ export declare class JsSubscription {
   close(): Promise<void>
 }
 
-/** A freshly minted API key. `secret` is shown exactly once. */
+/** Optional metadata, integrity, encryption, and write-precondition controls for blobs. */
+export interface BlobPutOptions {
+  contentType?: string
+  metadata?: Record<string, string>
+  createOnly?: boolean
+  matchVersion?: string
+  cacheControl?: string
+  contentDisposition?: string
+  checksumSha256?: string
+  sseAlgorithm?: string
+  sseKmsKeyId?: string
+}
+
+/** A freshly minted API key whose secret is shown once. */
 export interface JsApiKey {
   id: string
   secret: string
   label: string
   createdAtMs: number
+  expiresAtMs?: number
+  /** Application-owned authorization labels; Forge stores but does not interpret them. */
+  scopes: Array<string>
+  /** Bounded application metadata. */
+  metadata: Record<string, string>
 }
 
 /** Non-secret API-key metadata. */
@@ -288,9 +381,28 @@ export interface JsApiKeyInfo {
   id: string
   ownerId: string
   label: string
+  expiresAtMs?: number
+  /** Application-owned authorization labels; Forge stores but does not interpret them. */
+  scopes: Array<string>
+  /** Bounded application metadata. */
+  metadata: Record<string, string>
 }
 
-/** One line of a backend report: which provider powers a primitive. */
+/** One redacted live backend probe result. */
+export interface JsBackendHealth {
+  primitive: string
+  provider: string
+  /** healthy or unhealthy */
+  status: string
+  latencyMs: number
+  /** Stable category, never a raw provider error. */
+  errorCategory?: string
+  lastSuccessMs?: number
+  /** Bounded redacted diagnostic. */
+  message: string
+}
+
+/** Resolved backend capability information. */
 export interface JsBackendInfo {
   primitive: string
   provider: string
@@ -298,7 +410,29 @@ export interface JsBackendInfo {
   caveats: string
 }
 
-/** Object metadata (S3 HeadObject). `last_modified_ms` is epoch milliseconds. */
+export interface JsBatchEnqueueItem {
+  payload: Buffer
+  maxAttempts?: number
+  dedupId?: string
+  delaySeconds?: number
+  jobId?: string
+  priority?: string
+  concurrencyKey?: string
+}
+
+/** Ordered result for one item in a non-atomic batch enqueue. */
+export interface JsBatchEnqueueResult {
+  /** Effective deterministic job ID on success. */
+  jobId?: string
+  /** Stable Forge error code on failure. */
+  errorCode?: string
+  /** Whether retrying the failed item may succeed unchanged. */
+  retryable: boolean
+  /** Safe bounded failure message. */
+  message?: string
+}
+
+/** Complete object metadata returned by head. */
 export interface JsBlobInfo {
   key: string
   size: number
@@ -306,62 +440,315 @@ export interface JsBlobInfo {
   etag: string
   lastModifiedMs: number
   metadata: Record<string, string>
+  /** HTTP cache policy stored with the object. */
+  cacheControl?: string
+  /** HTTP download disposition stored with the object. */
+  contentDisposition?: string
+  /** Lowercase SHA-256 hex digest, independent of the provider ETag. */
+  checksumSha256?: string
+  /** Provider-managed encryption label when reported by S3. */
+  serverSideEncryption?: string
 }
 
-/**
- * One page of a blob list: the objects plus an opaque next-page `cursor` (absent when
- * iteration is complete).
- */
+/** A page of blob summaries and an opaque continuation cursor. */
 export interface JsBlobPage {
-  items: Array<JsBlobInfo>
+  items: Array<JsBlobSummary>
   cursor?: string
 }
 
-/** A rate-limit decision (maps onto the IETF RateLimit header fields). */
+/** Lightweight object metadata returned by list; content type and user metadata require head. */
+export interface JsBlobSummary {
+  key: string
+  size: number
+  /** Opaque provider version token; not necessarily an MD5 digest. */
+  etag: string
+  lastModifiedMs: number
+}
+
+/** Atomic conditional-read result that distinguishes missing and not-modified. */
+export interface JsConditionalBlobGet {
+  /** found, not_modified, or missing. */
+  state: string
+  /** Present only for found. */
+  body?: Buffer
+  /** Opaque version returned for found or not_modified. */
+  etag?: string
+}
+
+/** One config value returned in the same order as its requested key. */
+export interface JsConfigEntry {
+  /** Exact requested key. */
+  key: string
+  /** Resolved value, or null when unset. */
+  value?: string
+}
+
+/** Read-only caller-scoped config view with an explicit expiry and secret-handling declaration. */
+export interface JsConfigSnapshot {
+  /** Portable snapshot schema version; currently 1. */
+  schemaVersion: number
+  /** Unix epoch milliseconds when captured. */
+  createdAtMs: number
+  /** Hard Unix epoch millisecond staleness boundary. */
+  expiresAtMs: number
+  /** no_secrets or application_protected. */
+  secretHandling: string
+  /** Only the exact requested config keys. */
+  config: Array<JsConfigEntry>
+  /** Pre-evaluated flag requests; no offline re-evaluation. */
+  flags: Array<JsFlagEvaluationEntry>
+}
+
+/** Payload-free operator metadata for one dead letter. */
+export interface JsDeadLetterInfo {
+  jobId: string
+  queue: string
+  attemptCount: number
+  enqueuedAtMs: number
+  deadLetteredAtMs: number
+  /** Bounded and redacted. */
+  failureSummary?: string
+}
+
+/** A bounded page of dead letters. */
+export interface JsDeadLetterPage {
+  items: Array<JsDeadLetterInfo>
+  cursor?: string
+}
+
+/** A rate-limit decision. */
 export interface JsDecision {
   allowed: boolean
   limit: number
   remaining: number
-  /** Seconds until the limit fully resets (the IETF `RateLimit-Reset` value). */
   resetAfterSeconds: number
   retryAfterSeconds?: number
 }
 
-/**
- * A leased job. Settle it with ack/nack/heartbeat using the opaque, delivery-unique `receipt`
- * (not `id`, which is stable across redeliveries and is the natural idempotency key).
- */
+/** One secret-safe deployment or operator diagnostic. */
+export interface JsDiagnosticCheck {
+  /** Stable check identifier. */
+  name: string
+  /** pass, warn, or fail. */
+  status: string
+  /** Bounded redacted explanation. */
+  message: string
+}
+
+/** Bounded configuration, schema, permission, reachability, skew, and safety checks. */
+export interface JsDiagnosticsReport {
+  /** False when any required check fails. */
+  ready: boolean
+  /** Unix epoch milliseconds. */
+  checkedAtMs: number
+  /** Stable ordered checks. */
+  checks: Array<JsDiagnosticCheck>
+}
+
+/** Typed OpenFeature-style flag result with stable evaluation details. */
+export interface JsFlagEvaluation {
+  /** Canonical JSON value. */
+  valueJson: string
+  /** boolean, string, integer, float, object, array, or null. */
+  valueType: string
+  /** Stable application-defined variant. */
+  variant?: string
+  /** Stable evaluation reason. */
+  reason: string
+  /** Error category when the default was used. */
+  errorCode?: string
+}
+
+/** One typed bulk flag result in request order. */
+export interface JsFlagEvaluationEntry {
+  /** Caller-owned request id. */
+  id: string
+  /** Flag key. */
+  key: string
+  /** Stable OpenFeature-style details. */
+  evaluation: JsFlagEvaluation
+}
+
+/** One typed bulk flag evaluation with a caller-owned correlation id. */
+export interface JsFlagEvaluationRequest {
+  /** Caller-owned id returned unchanged. */
+  id: string
+  /** Flag key. */
+  key: string
+  /** Valid JSON default value. */
+  defaultJson: string
+  /** Stable evaluation subject. */
+  targetingKey?: string
+  /** Optional JSON object of invocation-local OpenFeature context fields. */
+  contextJson?: string
+}
+
+/** Separate process liveness and dependency readiness. */
+export interface JsHealthReport {
+  live: boolean
+  ready: boolean
+  checkedAtMs: number
+  durationMs: number
+  backends: Array<JsBackendHealth>
+}
+
+/** A leased queue job. */
 export interface JsJob {
   id: string
-  /** Delivery-unique handle for ack/nack/heartbeat (SQS ReceiptHandle). */
   receipt: string
-  payload: string
+  payload: Buffer
   attempt: number
   maxAttempts: number
   leasedUntilMs: number
   queue: string
+  /** Validated W3C traceparent stored outside the payload. */
+  traceparent?: string
+  /** Validated W3C tracestate. */
+  tracestate?: string
+  /** Allow-listed W3C baggage only. */
+  baggage?: string
 }
 
-/** Approximate queue depth (SQS ApproximateNumberOfMessages{,NotVisible,Delayed}). */
+/** One bounded-cardinality per-instance metric sample. */
+export interface JsMetricSample {
+  name: string
+  /** counter, gauge, or histogram */
+  kind: string
+  /** Fixed low-cardinality dimensions only. */
+  labels: Record<string, string>
+  /** Counter or gauge value. */
+  value: number
+  /** Histogram observation count. */
+  count?: number
+  /** Histogram observation sum. */
+  sum?: number
+}
+
+/** Structured migration outcome for one distinct PostgreSQL target. */
+export interface JsMigrationReport {
+  /** Safe logical target name, never a connection string. */
+  target: string
+  /** pending, applied, locked, incompatible, or failed */
+  state: string
+  /** Highest recorded schema version. */
+  currentVersion?: string
+  /** Newest migration embedded in this library. */
+  targetVersion: string
+  /** Recorded migration versions. */
+  applied: Array<string>
+  /** Known migrations not yet applied. */
+  pending: Array<string>
+  /** Safe PostgreSQL session identity when another migrator owns the lock. */
+  lockHolder?: string
+  /** Safe actionable summary. */
+  message: string
+}
+
+/** One uploaded multipart part receipt. */
+export interface JsMultipartPart {
+  /** Provider part number in 1..=10000. */
+  partNumber: number
+  /** Opaque part receipt passed back unchanged. */
+  etag: string
+  /** Uploaded part size in bytes. */
+  size: number
+}
+
+/** Opaque provider-native server-mediated multipart upload handle. */
+export interface JsMultipartUpload {
+  /** Exact logical destination key. */
+  key: string
+  /** Opaque provider upload identifier. */
+  uploadId: string
+  /** Whether completion must create a new key. */
+  createOnly: boolean
+  /** Destination ETag required at completion. */
+  matchVersion?: string
+}
+
+/** Provider-native presigned request. Native PUT does not portably enforce a maximum body size. */
+export interface JsNativePresign {
+  /** Bearer credential; redact its query string from logs and traces. */
+  url: string
+  /** GET or PUT. */
+  method: string
+  /** Unix expiry in seconds. */
+  expiresEpoch: number
+  /** Signed headers the caller must send exactly. */
+  requiredHeaders: Record<string, string>
+  /** Structured provider/security constraints. */
+  constraints: Record<string, string>
+}
+
+/** Result and backlog snapshot from one outbox relay pass. */
+export interface JsOutboxRelayReport {
+  claimed: number
+  dispatched: number
+  failed: number
+  pending: number
+  oldestPendingAgeMs?: number
+}
+
+/** Forge proxy-signed request whose server-side proxy can enforce an upload-size ceiling. */
+export interface JsProxyPresign {
+  /** Bearer credential; redact its query string from logs and traces. */
+  url: string
+  /** GET or PUT. */
+  method: string
+  /** Logical object key. */
+  key: string
+  /** Unix expiry in seconds. */
+  expiresEpoch: number
+  /** Upload ceiling enforced by the Forge proxy; zero for GET. */
+  maxBytes: number
+  /** Signature value for proxy verification. */
+  signature: string
+  /** Headers the caller must send. */
+  requiredHeaders: Record<string, string>
+}
+
+/** Approximate queue depth. */
 export interface JsQueueDepth {
   visible: number
   inFlight: number
   delayed: number
+  /** Age of the oldest visible job, or null when none is visible. */
+  oldestVisibleAgeMs?: number
 }
 
-/**
- * One page of a kv scan: the keys plus an opaque next-page `cursor` (absent when iteration is
- * complete).
- */
+/** Counter-based queue activity and indexed age estimate. */
+export interface JsQueueStats {
+  /** Monotonic enqueue counter. */
+  enqueuedTotal: number
+  /** Monotonic terminal settlement counter. */
+  settledTotal: number
+  /** Monotonic dead-letter transition counter. */
+  deadTotal: number
+  /** Monotonic cancellation counter. */
+  cancelledTotal: number
+  /** Lifetime-average enqueue estimate. */
+  enqueueRatePerMinute: number
+  /** Lifetime-average settlement estimate. */
+  settleRatePerMinute: number
+  /** Indexed age of the oldest visible job. */
+  oldestVisibleAgeMs?: number
+  /** Whether new leases are paused. */
+  paused: boolean
+}
+
+/** Result of one bounded batch redrive. */
+export interface JsRedriveBatchResult {
+  redriven: number
+  cursor?: string
+}
+
+/** A page of keys and an opaque continuation cursor. */
 export interface JsScanPage {
   keys: Array<string>
   cursor?: string
 }
 
-/**
- * A registered schedule. `kind` is "cron" or "at"; `cron_expr` is set only for crons. Times
- * are epoch milliseconds.
- */
+/** A registered schedule. */
 export interface JsScheduleInfo {
   name: string
   kind: string
@@ -369,20 +756,43 @@ export interface JsScheduleInfo {
   queue: string
   nextRunMs: number
   lastRunMs?: number
+  /** Whether this named schedule is paused. */
+  paused: boolean
+  /** skip, run_once, or catch_up. */
+  misfirePolicy: string
+  /** Maximum missed occurrences dispatched by catch_up; zero otherwise. */
+  maxCatchUp: number
 }
 
-/**
- * One page of a schedule list: the schedules plus an opaque next-page `cursor` (absent when
- * iteration is complete).
- */
+/** A page of schedules and an opaque continuation cursor. */
 export interface JsSchedulePage {
   items: Array<JsScheduleInfo>
   cursor?: string
 }
 
-/** A validated session's metadata. Times are epoch milliseconds. */
+/** Bounded operational state for one scheduler namespace. */
+export interface JsSchedulerDiagnostics {
+  /** Age of the oldest unpaused due occurrence. */
+  lagMs?: number
+  /** UTC Unix timestamp of the latest successful pass. */
+  lastSuccessfulTickMs?: number
+  /** Unpaused schedules currently due. */
+  dueCount: number
+  /** Cumulative scheduler enqueue failures. */
+  enqueueFailures: number
+}
+
+/** Validated session metadata. */
 export interface JsSession {
   userId: string
   createdAtMs: number
   expiresAtMs: number
+}
+
+/** The user and bounded opaque payload returned by atomic one-time-token consumption. */
+export interface JsTokenConsumption {
+  /** Application-owned user identifier. */
+  userId: string
+  /** Opaque bytes stored with the token. */
+  payload: Buffer
 }

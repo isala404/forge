@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "forgelib"
-version = "1.0.1"
+version = "1.1.0"
 description = "Python bindings for Forge — hardened infra primitives on Postgres"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -23,6 +23,12 @@ Homepage = "https://isala404.github.io/forge/"
 Documentation = "https://isala404.github.io/forge/"
 Repository = "https://github.com/isala404/forge"
 Issues = "https://github.com/isala404/forge/issues"
+
+[project.optional-dependencies]
+openfeature = [
+    "openfeature-sdk>=0.10.0,<0.11",
+    "openfeature-hooks-opentelemetry>=0.3.1,<0.4",
+]
 
 [tool.maturin]
 module-name = "forgelib"

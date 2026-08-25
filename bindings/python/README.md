@@ -1,6 +1,10 @@
 # forgelib
 
-Python bindings for Forge via [pyo3](https://pyo3.rs). A **natively async** `ForgeClient` over the async Rust core: every method returns an awaitable driven on a shared Tokio runtime, so an asyncio app `await`s the binding directly: no thread-pool wrapper, the event loop is never blocked. The full primitive surface is exposed (kv, queue, config, ratelimit, blob, auth, schedule, pubsub), plus `backend_report`.
+Python bindings for Forge via [pyo3](https://pyo3.rs). A **natively async** `ForgeClient` over the async Rust core: every method returns an awaitable driven on a shared Tokio runtime, so an asyncio app `await`s the binding directly: no thread-pool wrapper, the event loop is never blocked. The full primitive surface is exposed (kv, queue, config, ratelimit, blob, auth, schedule, pubsub), plus capability inspection, readiness probes, per-instance metrics, and W3C queue trace propagation.
+
+Scheduler methods expose UTC schedule inspection, pause/resume, due lag/count, last successful tick, enqueue failures, and explicit bounded misfire policies. The scheduler enqueues ordinary deterministic queue jobs and does not own workflow state.
+
+The top-level `encode_cloud_event`/`decode_cloud_event` and `import_env_config`/`export_env_config` helpers are state-free. They add no transport, framework, or environment mutation to the native client; see the repository's integration recipes for HTTP frameworks, deployment, and MCP patterns.
 
 Forge errors surface as a typed exception hierarchy (`forgelib.NotFoundError`, `forgelib.InvalidError`, `forgelib.LimitError`, … all subclasses of `forgelib.ForgeError`), and every raised instance carries a `retryable` attribute.
 
@@ -64,3 +68,13 @@ await profile.set({"name": "Ada"})
 ```
 
 The raw methods (`kv_set`, `queue_enqueue`, ...) remain available for exact cross-language parity and string/byte contracts. The packaged stubs include both the raw client and the typed handles.
+
+## Deterministic tests
+
+`await ForgeClient.init_memory_for_testing(toml, start_ms, seed)` creates the normal memory profile with manual time and repeatable test-only entropy. Call `forge.advance_test_clock(seconds)` to drive expiry, delayed work, scheduling, and rate-limit refill without sleeping. The seeded tokens are predictable and must never leave tests.
+
+Application-owned names can use the v1 helper: `forgelib.scope_kv_key("billing", tenant_id, user_id, invoice_id)`. `parse_scoped_name` reverses the length-prefixed encoding. This is a naming aid only; authorize every component before calling Forge.
+
+## OpenFeature, bulk reads, and snapshots
+
+Install `forgelib[openfeature]` and use `forgelib.openfeature.ForgeProvider` with the official OpenFeature async client. The provider preserves stable variants and reasons, installs no global hooks, and exposes the official OpenTelemetry tracing hook for application-scoped registration. Startup code can use `config_get_many` and `flag_details_many` for ordered 256-item reads. `config_snapshot` captures only requested keys and pre-evaluated flags for 1–86,400 seconds; access it through `config_snapshot_get` and `config_snapshot_flag_details`, and protect `application_protected` snapshots before they leave the trusted server boundary.
