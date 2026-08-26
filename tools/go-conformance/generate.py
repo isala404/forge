@@ -12,6 +12,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = ROOT / "bindings" / "go" / "conformance_gen_test.go"
+CONTRACT_VECTORS = {
+    "canonicalInteropVectors": ROOT / "contract" / "interop-vectors.json",
+    "canonicalScopeVectors": ROOT / "contract" / "scope-vectors.json",
+}
 
 
 def render() -> str:
@@ -28,6 +32,11 @@ def render() -> str:
             f"\t{json.dumps(path.name)}: []byte({json.dumps(path.read_text(encoding='utf-8'))}),"
         )
     lines.extend(["}", ""])
+    for name, path in CONTRACT_VECTORS.items():
+        lines.append(
+            f"var {name} = []byte({json.dumps(path.read_text(encoding='utf-8'))})"
+        )
+        lines.append("")
     return "\n".join(lines)
 
 

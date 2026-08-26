@@ -2,19 +2,14 @@ package forge
 
 import (
 	"encoding/json"
-	"os"
 	"testing"
 )
 
 func TestScopedNamesAreReversible(t *testing.T) {
-	encoded, err := os.ReadFile("../../contract/scope-vectors.json")
-	if err != nil {
-		t.Fatal(err)
-	}
 	var vectors struct {
 		Valid map[string]string `json:"valid"`
 	}
-	if err := json.Unmarshal(encoded, &vectors); err != nil {
+	if err := json.Unmarshal(canonicalScopeVectors, &vectors); err != nil {
 		t.Fatal(err)
 	}
 	key, err := ScopeKVKey(vectors.Valid["application"], vectors.Valid["tenant"], vectors.Valid["user"], vectors.Valid["resource"])

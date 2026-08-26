@@ -3,16 +3,11 @@ package forge
 import (
 	"encoding/hex"
 	"encoding/json"
-	"os"
 	"reflect"
 	"testing"
 )
 
 func TestInteropVectors(t *testing.T) {
-	raw, err := os.ReadFile("../../contract/interop-vectors.json")
-	if err != nil {
-		t.Fatal(err)
-	}
 	var vectors struct {
 		CloudEvent struct {
 			Input      json.RawMessage `json:"input"`
@@ -26,7 +21,7 @@ func TestInteropVectors(t *testing.T) {
 			Exported map[string]string  `json:"exported"`
 		} `json:"environment"`
 	}
-	if err := json.Unmarshal(raw, &vectors); err != nil {
+	if err := json.Unmarshal(canonicalInteropVectors, &vectors); err != nil {
 		t.Fatal(err)
 	}
 	event, err := DecodeCloudEvent(vectors.CloudEvent.Input)
