@@ -456,10 +456,11 @@ jobs:
           name: release-python
           path: python-dist
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
           registry-url: https://registry.npmjs.org
+          package-manager-cache: false
       - uses: rust-lang/crates-io-auth-action@v1
         id: crates-auth
       - name: Publish Rust crate
