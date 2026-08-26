@@ -466,15 +466,39 @@ jobs:
           node-version: "24"
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
+      - name: Check published versions
+        id: published
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          check_version() {
+            local output="$1"
+            local url="$2"
+            local status
+            status="$(curl --silent --show-error --header 'User-Agent: forge-release-workflow (https://github.com/isala404/forge)' --output /dev/null --write-out '%{http_code}' "$url")"
+            case "$status" in
+              200) echo "$output=true" >> "$GITHUB_OUTPUT" ;;
+              404) echo "$output=false" >> "$GITHUB_OUTPUT" ;;
+              *) echo "Registry check failed for $url with HTTP $status" >&2; exit 1 ;;
+            esac
+          }
+          check_version rust "https://crates.io/api/v1/crates/forgelib/$VERSION"
+          check_version npm "https://registry.npmjs.org/forgelib/$VERSION"
+          check_version python "https://pypi.org/pypi/forgelib/$VERSION/json"
       - uses: rust-lang/crates-io-auth-action@v1
+        if: ${{ steps.published.outputs.rust != 'true' }}
         id: crates-auth
       - name: Publish Rust crate
+        if: ${{ steps.published.outputs.rust != 'true' }}
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
         run: cargo publish --locked
       - name: Publish npm tarball
-        run: npm publish npm-dist/forgelib-${{ inputs.version }}.tgz --access public
+        if: ${{ steps.published.outputs.npm != 'true' }}
+        run: npm publish ./npm-dist/forgelib-${{ inputs.version }}.tgz --access public
       - name: Publish Python distributions
+        if: ${{ steps.published.outputs.python != 'true' }}
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: python-dist
