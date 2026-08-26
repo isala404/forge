@@ -202,12 +202,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
-      - name: Install musl compiler
+      - name: Install Zig for musl cross-compilation
         if: ${{ matrix.musl == true }}
-        run: sudo apt-get update && sudo apt-get install --yes musl-tools
-        working-directory: .
+        uses: mlugg/setup-zig@v2
       - run: npm ci --ignore-scripts --no-audit --no-fund
-      - run: npm run build -- --target ${{ matrix.target }}
+      - name: Build native addon
+        if: ${{ matrix.musl != true }}
+        run: npm run build -- --target ${{ matrix.target }}
+      - name: Build native addon with musl
+        if: ${{ matrix.musl == true }}
+        run: npm run build -- --target ${{ matrix.target }} --cross-compile
       - name: Load native addon
         if: ${{ matrix.musl != true }}
         run: node -e "require('./forgelib.${{ matrix.platform }}.node')"
