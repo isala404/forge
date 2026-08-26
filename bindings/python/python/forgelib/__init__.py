@@ -10,14 +10,14 @@ import random
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Awaitable, Callable, Generic, Optional, TypeVar
+from typing import Any, AsyncIterator, Awaitable, Callable, Generic, Optional, TypeVar, Union
 
 from .forgelib import *  # noqa: F401,F403
 
 T = TypeVar("T")
 
-Loads = Callable[[str | bytes], Any]
-Dumps = Callable[[Any], str | bytes]
+Loads = Callable[[Union[str, bytes]], Any]
+Dumps = Callable[[Any], Union[str, bytes]]
 OnError = Callable[[BaseException, Optional["QueueJob[Any]"]], Awaitable[None]]
 
 
