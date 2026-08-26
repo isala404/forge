@@ -16,3 +16,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "tim
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.test]
+debug = 0
+incremental = false

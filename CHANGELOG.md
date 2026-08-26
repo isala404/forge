@@ -4,9 +4,26 @@ All notable changes to this project are documented here. The format is based on 
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-25
+
+Forge 1.1 is the one declared compatibility reset from the unused 1.0 API. It freezes one contract across Rust, JavaScript, Python, and the new pure-Go implementation, centers production operation on PostgreSQL, and adds the explicit database-free memory test profile.
+
+### Added
+
+- Native Go, S3-compatible blob storage, reliable managed workers, transactional outbox delivery, live health probes, per-instance metrics, and W3C trace propagation.
+- Deterministic memory test factories with manual time and seeded randomness in every language.
+- Deployment-safe migration APIs, strict schema gates, and stable cross-language errors.
+
+### Changed
+
+- Reset the supported 1.x contract as documented in the 1.0-to-1.1 migration guide. Normal semantic-versioning discipline resumes with this release.
+- Made PostgreSQL 18 the required durable production profile; memory is explicit, process-local, non-durable, and intended for tests and local development.
+
 ### Fixed
 
 - Rechecked Node and Python managed-worker shutdown after long-poll dequeue and released a newly leased job instead of starting fresh work after a stop signal.
+
+Full Changelog: [https://github.com/isala404/forge/compare/v1.0.1...v1.1.0](https://github.com/isala404/forge/compare/v1.0.1...v1.1.0)
 
 ## [1.0.1] - 2026-07-14
 
@@ -53,7 +70,7 @@ The `1.x` API is now stable. Breaking API changes will be reserved for `2.0`.
 - Python now uses PyO3 and `pyo3-async-runtimes` 0.29.
 - Python exception names now include the `Error` suffix, such as `NotFoundError`, `InvalidError`, and `BackendError`. `forge_error_code()` continues to return the original error code.
 - PostgreSQL 17 is now the minimum supported version.
-- The minimum supported Rust version is now 1.94.
+- The minimum supported Rust version is now 1.94.1.
 - Prebuilt macOS packages are published for Apple silicon only.
 - Node's `jsonCodec` now uses strict JSON encoding and decoding. Values written in Node behave the same when read from Python, and the reverse is also true.
 - Rate-limit windows shorter than one second now return `INVALID`.

@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { ErrorCode, StandardResolutionReasons } = require('@openfeature/server-sdk');
-const { ForgeProvider, telemetryHook } = require('../index.js');
+const { ForgeProvider, telemetryHook } = require('../openfeature.js');
 
 test('resolves typed details without mutating context or installing hooks', async () => {
   const calls = [];

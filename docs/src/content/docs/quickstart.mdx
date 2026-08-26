@@ -1,13 +1,11 @@
 ---
 title: Quickstart
-description: Install Forge, point it at a Postgres database, and make your first calls in Rust, Node, or Python.
+description: Add Forge to a backend, configure PostgreSQL, and make the first calls in Rust, JavaScript, Python, or Go.
 ---
 
 import { Tabs, TabItem, Aside, LinkCard, CardGrid } from '@astrojs/starlight/components';
 
-Forge is one dependency. You point it at a Postgres database it can own, call
-`init()`, and you have all eight primitives on a single client. This page gets you
-from nothing to your first calls.
+Add Forge to the backend process, point it at a PostgreSQL database it can own, and call `init()` to get one client for all eight primitives. Forge does not create an HTTP server, install process signal handlers, or add frontend dependencies.
 
 ## Install
 
@@ -33,13 +31,18 @@ from nothing to your first calls.
 		```
 
 	</TabItem>
+	<TabItem label="Go" icon="seti:go">
+
+		```sh
+		go get github.com/isala404/forge/bindings/go
+		```
+
+	</TabItem>
 </Tabs>
 
 ## Give Forge a database
 
-Forge keeps its own state in Postgres. It owns its `forge_*` tables and runs its
-migrations for you when the app starts, so give it a database (or its own schema)
-and keep your product tables separate.
+Forge keeps its own state in Postgres. It owns its `forge_*` tables, so give it a database (or its own schema) and keep your product tables separate. Development startup migrates automatically; production deployments call the migration API before starting the application.
 
 ```sh
 # any Postgres works; create one for Forge to own
@@ -63,8 +66,7 @@ in production.
 url = "${DATABASE_URL:-postgres://localhost/myapp}"
 ```
 
-Everything else has a production-safe default, so this is enough to start. The full
-list of settings is in [Configuration](/configuration/).
+Everything else has a convenient development default, so this is enough to start locally. Set `forge.environment = "production"` in production; automatic migration then defaults off. The full list of settings is in [Configuration](/configuration/).
 
 ## Make your first calls
 
@@ -146,28 +148,49 @@ on this site follow your choice.)
 		```
 
 	</TabItem>
+	<TabItem label="Go" icon="seti:go">
+
+		```go
+		import (
+		    "context"
+		    "time"
+
+		    forge "github.com/isala404/forge/bindings/go"
+		)
+
+		client, err := forge.InitFrom(context.Background(), "forge.toml")
+		if err != nil { return err }
+		defer client.Close(context.Background())
+
+		hash, err := client.HashPassword(context.Background(), password)
+		if err != nil { return err }
+		token, err := client.CreateSession(context.Background(), userID, forge.SessionOptions{})
+		if err != nil { return err }
+
+		views, err := client.KVIncr(context.Background(), "views:"+userID, 1)
+		if err != nil { return err }
+		_, err = client.Enqueue(context.Background(), "emails", payload, forge.EnqueueOptions{})
+		if err != nil { return err }
+
+		limit, err := client.RateLimitCheck(context.Background(), "login", email, forge.RateLimitOptions{Max: 20, Per: time.Minute})
+		if err != nil { return err }
+		if !limit.Allowed { /* return 429 */ }
+		```
+
+	</TabItem>
 </Tabs>
 
-One shape difference is worth noting. Rust reaches each primitive through an accessor
-and uses option structs, like `forge.kv().set(key, value, SetOpts::new())`. Node and
-Python keep the exact raw methods on the client (`forge.kvSet(...)`, `forge.kv_set(...)`)
-for contract parity, and add native JSON handles (`forge.kv<T>(key)`,
-`forge.queue<T>(name)`, `forge.kv(key)`, `forge.queue(name)`) for the app values you
-want typed in day-to-day code.
+One shape difference is worth noting. Rust reaches each primitive through an accessor and uses option structs, like `forge.kv().set(key, value, SetOpts::new())`. JavaScript and Python keep the exact raw methods on the client (`forge.kvSet(...)`, `forge.kv_set(...)`) for contract parity and add native JSON handles for application values. Go uses one concrete client with explicit option structs and `context.Context` on every blocking operation.
 
 ## Run the background work
 
-Forge doesn't start any threads of its own. Enqueued jobs sit in the queue until a
-worker leases them, and schedules only fire when something ticks them. In a typical
-app you run a worker for each queue and one loop that ticks the scheduler and does
-housekeeping. [Operations](/operations/) covers both, and [Recipes](/recipes/) shows
-them inside real handlers.
+Enqueued jobs sit in the queue until an application-owned worker process starts a Forge worker. Schedules fire only when the application runs a scheduler loop. A normal deployment runs workers for the queues it owns, a scheduler loop, and periodic maintenance. [Operations](/operations/) covers those roles, and [Integrations](/integrations/) shows HTTP, deployment, MCP, and observability boundaries.
 
 ## Next steps
 
 <CardGrid>
 	<LinkCard title="Primitives" href="/primitives/" description="What each of the eight does, and the methods you'll actually call." />
-	<LinkCard title="Recipes" href="/recipes/" description="Sign-up and login, background jobs, presigned uploads, live updates." />
+	<LinkCard title="Integrations" href="/integrations/" description="HTTP lifecycle, workers, deployment, MCP, CloudEvents, and observability." />
 	<LinkCard title="Configuration" href="/configuration/" description="Every forge.toml setting and its default." />
 	<LinkCard title="Operations" href="/operations/" description="Workers, the scheduler, health, and going to production." />
 </CardGrid>

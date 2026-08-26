@@ -360,8 +360,8 @@ func (f *Forge) Diagnostics(ctx context.Context, deadline time.Duration) (Diagno
 		var version string
 		if err := pool.QueryRow(ctx, "SHOW server_version_num").Scan(&version); err != nil {
 			checks = append(checks, DiagnosticCheck{Name: "database_version", Status: "fail", Message: "could not read the PostgreSQL server version"})
-		} else if parsed, err := strconv.Atoi(version); err != nil || parsed < 170000 {
-			checks = append(checks, DiagnosticCheck{Name: "database_version", Status: "fail", Message: "PostgreSQL version is below the supported minimum"})
+		} else if parsed, err := strconv.Atoi(version); err != nil || !supportedPostgresVersion(parsed) {
+			checks = append(checks, DiagnosticCheck{Name: "database_version", Status: "fail", Message: "PostgreSQL version is unsupported; Forge requires PostgreSQL 18"})
 		} else {
 			checks = append(checks, DiagnosticCheck{Name: "database_version", Status: "pass", Message: "PostgreSQL server_version_num " + version + " is supported"})
 		}

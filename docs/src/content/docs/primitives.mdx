@@ -1,13 +1,13 @@
 ---
 title: Primitives
-description: The eight Forge primitives, what each one is for, and the methods you'll actually call in Rust, Node, and Python.
+description: The eight Forge primitives, what each one is for, and the methods you'll actually call in Rust, JavaScript, Python, and Go.
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 
 Forge gives you eight primitives on one client. Each one covers the part of a
 familiar service that most apps actually use, with the same behavior across Rust,
-Node, and Python. This page is the tour. Every method, return type, and limit is in
+JavaScript, Python, and Go. This page is the tour. Every method, return type, and limit is in
 the [Reference](/reference/).
 
 A few things hold for all of them. Keys and names are byte-limited and oversized
@@ -89,16 +89,20 @@ with a dead-letter queue, delays, and dedup. Lineage: AWS SQS.
 		const emails = forge.queue<typeof msg>("emails");
 
 		// producer
-		await emails.enqueue(msg, { maxAttempts: 5 });
+		const effectiveId = await emails.enqueue(msg, {
+		  maxAttempts: 5,
+		  jobId: eventId,       // optional UUID: retry-safe producer identity
+		  dedupId: contentHash, // optional short-window content collapse
+		});
 
 		// consumer: lease a job, do the work, settle it by receipt
 		const job = await emails.dequeue({ visibilitySeconds: 30, waitSeconds: 20 });
 		if (job) {
 		  try {
 		    await send(job.payload);
-		    await emails.ack(job.receipt);
+		    await job.ack();
 		  } catch {
-		    await emails.nack(job.receipt);
+		    await job.nack({ failureSummary: "email provider rejected request" });
 		  }
 		}
 		```
@@ -110,7 +114,9 @@ with a dead-letter queue, delays, and dedup. Lineage: AWS SQS.
 		emails = forge.queue("emails")
 
 		# producer
-		await emails.enqueue(msg, max_attempts=5)
+		effective_id = await emails.enqueue(
+		    msg, max_attempts=5, job_id=event_id, dedup_id=content_hash
+		)
 
 		# consumer: lease a job, do the work, settle it by receipt
 		job = await emails.dequeue(visibility_seconds=30, wait_seconds=20)
@@ -142,6 +148,25 @@ with a dead-letter queue, delays, and dedup. Lineage: AWS SQS.
 		```
 
 	</TabItem>
+	<TabItem label="Go" icon="seti:go">
+
+		```go
+		effectiveID, err := forgeClient.Enqueue(ctx, "emails", body, forge.EnqueueOptions{
+			ID: eventID, DedupID: contentHash, MaxAttempts: 5,
+		})
+		job, err := forgeClient.Dequeue(ctx, "emails", forge.DequeueOptions{
+			Visibility: 30 * time.Second, Wait: 20 * time.Second,
+		})
+		if err == nil && job != nil {
+			if err := send(job.Payload); err == nil {
+				err = forgeClient.Ack(ctx, job.Receipt)
+			} else {
+				err = forgeClient.Nack(ctx, job.Receipt, forge.NackOptions{FailureSummary: "email provider rejected request"})
+			}
+		}
+		```
+
+	</TabItem>
 </Tabs>
 
 <Aside type="caution" title="At-least-once, so handlers must be idempotent">
@@ -152,10 +177,21 @@ with a dead-letter queue, delays, and dedup. Lineage: AWS SQS.
 	the `id` is stable across redeliveries and makes a good idempotency key.
 </Aside>
 
-Payloads go up to 256 KiB. A handler that might outlive its lease should
-`heartbeat` to extend it. `dedup_id` collapses repeated enqueues within a window.
-Each binding also ships a managed worker (`forge.worker("emails", handler)` in
-Node/Python, `forge.worker("emails")` in Rust) covered in [Operations](/operations/#workers).
+Payloads are raw bytes up to 256 KiB; JSON codecs are binding conveniences, not a storage requirement. The optional version-1 queue-envelope helpers validate the complete encoded size plus bounded schema, content type, correlation ID, trace context, and artifact-reference metadata before enqueue. Store larger request bodies or generated artifacts in the blob primitive and enqueue a stable blob reference. CloudEvents conversion stays application-owned because Forge does not use CloudEvents as its internal format, and Forge intentionally defines no prompt, completion, tool-call, model-provider, workflow-graph, fan-in, or compensation DTOs.
+
+A handler that might outlive its lease should `heartbeat` to extend it. Cancellation is cooperative: queued or delayed work becomes cancelled atomically, while a leased job becomes cancel-requested and the managed worker propagates that through Rust's cancellation token, JavaScript's `AbortSignal`, Python task cancellation plus an event, or Go's `Context`. Forge cannot terminate application code, so handlers must observe that signal. Cancellation and redelivery fence the old receipt; a late ack or heartbeat fails with `Precondition`.
+
+Status lookup exposes only queued, delayed, leased, retrying, succeeded, dead, cancel-requested, and cancelled. Operator listing is bounded and filterable. `queue.payload_retention_secs` defaults to one day and clears bytes from terminal jobs. `queue.succeeded_retention_secs`, `queue.dead_retention_secs`, and `queue.cancelled_retention_secs` default to seven days and independently remove terminal status. `queue.terminal_retention_secs` sets all three before an individual override.
+
+Batch enqueue returns one ordered result per item and does not roll successful siblings back when another item fails. Retry only failed items with deterministic IDs. Batch dequeue returns at most ten independently fenced leases and long-polls only for the first claim. Pause prevents new leases after the operator write commits; it preserves queued work and does not revoke existing leases. Queue stats combine monotonic counters with an indexed oldest-visible lookup, so throughput estimates do not scan retained payload rows.
+
+Priority is deliberately bounded to low, normal, or high. A backend preserves FIFO within one priority; continuously arriving higher-priority work can starve lower-priority work, so reserve high priority for bounded urgent traffic. An optional concurrency key and per-key dequeue limit prevent one tenant, resource, or provider from occupying every worker slot; a skipped noisy key does not block other eligible keys.
+
+`dedup_id` collapses repeated enqueues within a window. A caller-selected job UUID is the primary idempotency key: repeating it on the same namespace and queue returns that effective ID without another insert; using it on another queue is `Precondition`. If a live dedup reservation points at a different requested job ID, enqueue is also `Precondition`. Permanent failure or cancellation releases the dedup reservation so the content can be intentionally submitted again.
+
+Dead-letter inspection returns payload-free operator metadata: job ID, source queue, failed-attempt count, enqueue/dead-letter timestamps, and a safe error summary capped at 512 bytes. Redrive requires both an explicit destination and an explicit `clear` or `preserve` dedup policy. Purge is split into a dry-run count and a destructive call whose confirmation must exactly equal the source queue. A dead letter can be redriven only while its payload is retained; its payload-free status remains inspectable until terminal retention removes the row.
+
+Each binding also ships a managed worker (`forge.worker("emails", handler)` in Node/Python, `forge.worker("emails")` in Rust, and `RunWorker` in Go) covered in [Operations](/operations/#workers).
 
 ## Pub/sub
 
@@ -210,9 +246,7 @@ message sent while a subscriber is offline is not kept for it.
 
 ## Blob
 
-Object storage for uploads and generated files: put, get, delete, list, and
-presigned upload and download URLs. Lineage: S3. Bytes live in Postgres by default
-or on the local filesystem; the metadata always stays in Postgres.
+Object storage for uploads and generated files: put, get, delete, copy, list, ranged and streaming access, conditional reads and writes, checksums, S3 multipart handles, and proxy or native presigned requests. Lineage: S3. Objects live in PostgreSQL by default, on the local filesystem for local development, or in S3-compatible storage for production-scale bytes.
 
 <Tabs syncKey="lang">
 	<TabItem label="Node" icon="seti:javascript">
@@ -223,7 +257,7 @@ or on the local filesystem; the metadata always stays in Postgres.
 		const data = await forge.blobGet("avatars/42.png");   // string | null
 		// for binary, blobGetBytes returns a Buffer
 
-		const url = await forge.blobPresignDownload("avatars/42.png", 3600);
+		const url = (await forge.blobPresignDownload("avatars/42.png", 3600)).url;
 		```
 
 	</TabItem>
@@ -234,7 +268,7 @@ or on the local filesystem; the metadata always stays in Postgres.
 
 		data = await forge.blob_get("avatars/42.png")   # bytes | None
 
-		url = await forge.blob_presign_download("avatars/42.png", 3600)
+		url = (await forge.blob_presign_download("avatars/42.png", 3600)).url
 		```
 
 	</TabItem>
@@ -251,17 +285,42 @@ or on the local filesystem; the metadata always stays in Postgres.
 
 		// a link the browser can use directly, good for an hour
 		let url = forge.blob()
-		    .presign_download("avatars/42.png", Duration::from_secs(3600)).await?;
+		    .presign_download("avatars/42.png", Duration::from_secs(3600)).await?.url;
+		```
+
+	</TabItem>
+	<TabItem label="Go" icon="seti:go">
+
+		```go
+		checksum := sha256.Sum256(png)
+		expected := hex.EncodeToString(checksum[:])
+		err := forgeClient.BlobPut(ctx, "avatars/42.png", png, forge.PutOptions{
+			ContentType: "image/png", CacheControl: "public, max-age=300",
+			ContentDisposition: "inline", ChecksumSHA256: expected,
+		})
+		if err != nil { return err }
+
+		info, err := forgeClient.BlobHead(ctx, "avatars/42.png")
+		if err != nil { return err }
+		result, err := forgeClient.BlobGetIf(ctx, "avatars/42.png", nil, &info.ETag)
 		```
 
 	</TabItem>
 </Tabs>
 
-Presigned URLs need a `signing_secret` in `forge.toml`. Without one, ordinary CRUD
-still works but the presign calls return a config error. Objects go up to 50 MiB,
-and a presigned upload URL is capped by a `max_bytes` you choose. The filesystem
-backend keeps large files out of the database but needs a shared mount across
-replicas.
+The buffered `put`, `get`, and ranged-read surfaces are capped at 50 MiB. Use `put_stream`/`blobPutFile`/`blob_put_file`/`BlobPutStream` for larger uploads and read large objects in bounded ranges; Rust and Go also expose a streaming reader. `list` returns `BlobSummary` values in lexicographic key order, while `head` returns full `BlobInfo` including content type, `Cache-Control`, `Content-Disposition`, a Forge SHA-256 checksum when recorded, server-side encryption mode when reported, and user metadata. Cursors are opaque provider tokens, listing is not a point-in-time snapshot, and concurrent writes can appear or disappear between pages. ETags are opaque version tokens, not guaranteed MD5 digests.
+
+Conditional `get_if` reads the body and checks `if_match` or `if_none_match` in one backend operation. A match failure is `PRECONDITION`; an unchanged `if_none_match` read returns `not_modified`; an absent key returns `missing`. Put accepts `CreateOnly` or `MatchVersion(etag)` and never emulates a conditional write with a prior read. The portable `copy` helper streams a source into a destination and preserves content type, metadata, cache control, and disposition unless replaced. It is deliberately non-atomic: the source can change while it is copied. Forge has no `move` helper because a portable copy followed by an unconditional delete cannot honestly provide atomic move or protect a newer source version.
+
+Forge uses one portable checksum algorithm: SHA-256 encoded as 64 lowercase hexadecimal characters. Buffered put can require an expected checksum and records the computed checksum independently of ETag. `verify_checksum_sha256` streams the authoritative bytes and returns whether they match, including after an upload whose provider did not retain Forge checksum metadata. Forge does not advertise a checksum selector because every supported backend must verify every advertised algorithm.
+
+Provider-native server-mediated multipart handles are available only with the S3 backend. Create an upload, send numbered parts, retry a failed part by uploading the same number again, complete with 1–10,000 strictly ordered receipts, or abort the handle. Completion applies the destination precondition; abort is idempotent once the provider reports the upload absent. PostgreSQL, filesystem, and memory return `NOT_CONFIGURED` for these handles because their streaming put already accepts an unknown-length reader without a resumable provider session. A multipart expected checksum is not accepted up front; call `verify_checksum_sha256` after completion.
+
+S3 puts, multipart creation, and native PUT presigns can request provider-managed `AES256` encryption or `aws:kms` with a provider key ID. Forge forwards the encryption headers and reports the mode from `head`; it never accepts, stores, rotates, or grants encryption key material. Whether a provider honors a KMS key, and who may decrypt it, remains bucket and IAM policy.
+
+Forge proxy presigns require `signing_secret` and return structured `ProxyPresign` data. The proxy signature covers its format version, namespace, method, logical key, expiry, and upload-size ceiling. S3 native GET and PUT presigns are separate `NativePresign` values with required headers and constraints; native PUT cannot portably enforce a maximum body size. Both URL forms are bearer credentials: never log their query strings.
+
+Object lifecycle rules, retention and deletion protection, replication, legal hold, CDN behavior, public access, CORS, bucket policy, IAM, and KMS key administration are provider-owned. Configure and audit them in the object-storage provider; Forge does not mirror them into its database or claim that deleting Forge metadata changes those policies.
 
 ## Auth
 
@@ -282,8 +341,11 @@ Forge stores only hashes and never owns your users table.
 		const userId2 = await forge.validateSession(token);   // string | null
 
 		// one-time token: email the link, then consume it exactly once
-		const reset = await forge.createToken(userId, "password-reset", 900);
-		const owner = await forge.consumeToken(reset, "password-reset");   // string | null
+		const reset = await forge.createToken(userId, "password-reset", 900, Buffer.from("return=/settings"));
+		const consumed = await forge.consumeToken(reset, "password-reset"); // { userId, payload } | null
+
+		const apiKey = await forge.createApiKeyWith(userId, "automation", 30 * 86400, ["deploy"], { environment: "prod" });
+		const verified = await forge.verifyApiKey(apiKey.secret); // owner, expiry, scopes, metadata
 		```
 
 	</TabItem>
@@ -297,8 +359,8 @@ Forge stores only hashes and never owns your users table.
 		user_id2 = await forge.validate_session(token)   # str | None
 
 		# one-time token: email the link, then consume it exactly once
-		reset = await forge.create_token(user_id, "password-reset", 900)
-		owner = await forge.consume_token(reset, "password-reset")   # str | None
+		reset = await forge.create_token(user_id, "password-reset", 900, b"return=/settings")
+		consumed = await forge.consume_token(reset, "password-reset")  # TokenConsumption | None
 		```
 
 	</TabItem>
@@ -315,22 +377,18 @@ Forge stores only hashes and never owns your users table.
 		let session = forge.auth().validate_session(token.as_str()).await?; // Option<Session>
 
 		// one-time token: email the link, then consume it exactly once
-		let reset = forge.auth().create_token(&user_id, "password-reset", Duration::from_secs(900)).await?;
-		let owner = forge.auth().consume_token(reset.as_str(), "password-reset").await?; // Option<String>
+		let reset = forge.auth().create_token_with_payload(&user_id, "password-reset", Duration::from_secs(900), b"return=/settings".as_slice().into()).await?;
+		let consumed = forge.auth().consume_token_with_payload(reset.as_str(), "password-reset").await?;
 		```
 
 	</TabItem>
 </Tabs>
 
-Only the hash of a session token, API key, or one-time token is stored, and the
-plaintext is shown once. `validate_session` slides the idle deadline and returns
-nothing for an unknown, expired, or revoked token rather than erroring. After a
-password check passes, `needs_rehash` tells you whether to re-hash and upgrade an
-old hash quietly. One-time tokens are consumed atomically: the first `consume_token`
-with the right purpose deletes the token and returns its user id; anything else —
-wrong purpose, expired, already used — returns nothing, and a wrong purpose leaves a
-live token intact. Delivery stays yours: Forge mints and checks the token, your app
-sends the email or SMS. The `user_id` is whatever opaque id your app already uses.
+Only the hash of a session token, API key, or one-time token is stored, and plaintext credentials are shown once. `validate_session` slides the idle deadline and returns nothing for an unknown, expired, or revoked token rather than erroring. After a password check passes, call `needs_rehash`; when it returns true, hash the same verified plaintext again and replace the stored PHC string in the same login flow. This is how Argon2 parameter upgrades roll out without forced password resets, and the behavior is identical in all four languages.
+
+One-time tokens carry up to 4096 opaque bytes and are consumed atomically: the first consume with the right purpose deletes the token and returns both user ID and payload; wrong-purpose, expired, unknown, and already-used tokens return nothing, and a wrong purpose leaves a live token intact. API keys may expire and carry up to 32 bounded application-owned scopes plus 4096 bytes of metadata. Verification returns owner, expiry, scopes, and metadata in one lookup. Forge stores these facts but never interprets scopes or grants permission.
+
+Delivery and identity policy stay yours. Forge does not send email or SMS and does not own user tables, organization membership, permission policy, OAuth/OIDC providers, MFA workflows, or account recovery UX.
 
 ## Rate limit
 
@@ -381,6 +439,10 @@ and logs a warning, so an outage doesn't lock everyone out. Turn that off (per c
 or in `forge.toml`) for payment- or abuse-sensitive buckets. The policy lives in the
 call you make, the limit and the window, not in server config.
 
+Checks may consume any positive integer cost up to the bucket capacity; a zero cost is `Invalid`, and a cost above capacity is `Limit`. Forge counts abstract units only. Common policies count requests, batch items, rounded compute seconds, model tokens, storage bytes, or a shared per-tenant budget. Currency conversion, prices, invoices, and billing records stay in the application.
+
+When the final cost is unknown, reserve a conservative upper bound for at most one hour, then commit the actual cost or release it. Commit refunds unused units. Expiry and release refund the whole reservation. Repeating the same commit or release is idempotent; changing an already committed value or crossing commit and release fails with `Precondition`, so retries cannot double-charge or drive usage negative.
+
 ## Schedule
 
 Recurring cron jobs and one-off work at a future time. A schedule enqueues onto a
@@ -429,6 +491,18 @@ normal queue when it fires, so an ordinary worker drains it. Lineage: cron, Unix
 		// once, an hour from now
 		let when = SystemTime::now() + Duration::from_secs(3600);
 		forge.schedule().at(when, "reminders", payload.into(), ScheduleOpts::new()).await?;
+		```
+
+	</TabItem>
+	<TabItem label="Go" icon="seti:go">
+
+		```go
+		// Every day at midnight UTC. Catch up at most three recent missed runs.
+		err := forge.ScheduleCron(ctx, "nightly", "0 0 * * *", "reports", []byte("{}"),
+			forgelib.ScheduleOptions{MisfirePolicy: forgelib.MisfireCatchUp, MaxCatchUp: 3})
+
+		// Once, at a specific instant. time.Time is normalized to UTC.
+		jobID, err := forge.ScheduleAt(ctx, time.Now().Add(time.Hour), "reminders", payload, forgelib.ScheduleOptions{})
 		```
 
 	</TabItem>
@@ -530,16 +604,17 @@ background.
 	</TabItem>
 </Tabs>
 
-Nothing fires until something ticks the scheduler. Run the managed loop
-(`run_scheduler()` in Rust) or call `run_scheduler_once()` on an interval, as shown
-in [Operations](/operations/#the-scheduler). Ticking is safe on every replica; each
-due job is claimed once. Cron expressions are 5-field and UTC.
+Nothing fires until something ticks the scheduler. Run the managed loop (`run_scheduler()` in Rust) or call `run_scheduler_once()` on an interval, as shown in [Operations](/operations/#the-scheduler). Ticking is safe on every replica. Every occurrence gets a job ID derived from namespace, schedule name, and its UTC timestamp, so a retry cannot duplicate that occurrence.
+
+Cron expressions are always 5-field UTC. Absolute inputs are instants and are normalized to UTC before storage. Forge does not accept timezone names and therefore has no daylight-saving-time ambiguity; applications that need “09:00 Europe/Paris” calculate and register the desired UTC schedule themselves.
+
+Misfires are explicit per schedule. `run_once` is the default and dispatches only the most recent missed occurrence. `skip` drops missed occurrences. `catch_up` dispatches the most recent requested count in chronological order, with a hard maximum of 100, then advances to the next future occurrence. This cap applies after any length of downtime and prevents restart storms. One-shots use the same policy but can dispatch at most once.
+
+Named schedules can be inspected, paused, and resumed without deleting their configuration. Paused entries are excluded from due count and lag. Scheduler diagnostics report the oldest due lag, current due count, latest successful tick in UTC epoch milliseconds, and cumulative enqueue failures. Failed enqueue leaves the occurrence due for the next pass; successful or skipped occurrences advance atomically. These APIs schedule queue deliveries only. Dependencies, DAGs, compensation, human approval, and multi-step workflow state remain application concerns.
 
 ## Config and flags
 
-Runtime settings and boolean feature flags. Flags can be always on, always off, a
-percentage rollout, or an allow-list, evaluated per user. Lineage: 12-factor config
-and OpenFeature.
+Runtime settings and typed feature flags. Flags can be always on, always off, a percentage rollout, an allow-list, or a static JSON value with an application-defined stable variant. Lineage: 12-factor config and OpenFeature.
 
 <Tabs syncKey="lang">
 	<TabItem label="Node" icon="seti:javascript">
@@ -577,10 +652,36 @@ and OpenFeature.
 		```
 
 	</TabItem>
+	<TabItem label="Go" icon="seti:go">
+
+		```go
+		err := forgeClient.SetFlag(ctx, "new-ui", forge.FlagRule{Kind: forge.FlagPercent, Percent: 25})
+		if err != nil { return err }
+		on := forgeClient.Flag(ctx, "new-ui", false, userID)
+
+		err = forgeClient.ConfigSet(ctx, "max_upload_mb", []byte("25"))
+		raw, err := forgeClient.ConfigGet(ctx, "max_upload_mb")
+		```
+
+	</TabItem>
 </Tabs>
 
-`flag` never throws. If the flag is missing or the backend is down it returns the
-default you passed and logs why, so a flag check can't take down a request. Reads
-are cached in-process for about 30 seconds, so a change is visible everywhere within
-that window rather than instantly. An environment variable `FORGE_CFG_<KEY>`
-overrides a stored config value, which is useful for an ops override.
+`flag` never throws. If the flag is missing or the backend is down it returns the default you passed and records why, so a flag check cannot take down a request. `flag_details` adds canonical typed JSON, a stable variant, a stable reason, and an error category. Forge does not collect exposure or experiment analytics; the application decides consent, identity, sampling, and destination.
+
+The official provider adapters use the official OpenFeature SDK in every supported language: Rust enables the crate's `openfeature` feature and uses `forgelib::openfeature::ForgeProvider`; Node imports `ForgeProvider` from `forgelib/openfeature`; Python installs `forgelib[openfeature]` and imports `forgelib.openfeature.ForgeProvider`; Go imports `github.com/isala404/forge/bindings/go/openfeatureprovider`. Providers register no global hooks or evaluation context. OpenFeature owns hook ordering and passes merged invocation-local context to hooks. Each adapter exposes an application-scoped telemetry hook; the Node, Python, and Go adapters wrap the official OpenFeature OpenTelemetry hooks, while Rust's hook emits `feature_flag.evaluation` tracing events with `feature_flag.key`, provider, result value, stable variant/reason, context ID, and `error.type` where applicable.
+
+```rust
+use forgelib::openfeature::{ForgeProvider, OpenTelemetryHook};
+use open_feature::OpenFeature;
+
+let mut api = OpenFeature::default();
+api.set_provider(ForgeProvider::new(forge.clone())).await;
+api.add_hook(OpenTelemetryHook).await; // application chooses this global scope
+let client = api.create_client();
+```
+
+Use `get_many_raw` / `configGetMany` / `config_get_many` / `ConfigGetMany` and `flag_details_many` / `flagDetailsMany` / `flag_details_many` / `FlagDetailsMany` for startup reads. Each accepts at most 256 exact keys, preserves request order and duplicates, and the PostgreSQL implementation uses one query per bulk operation instead of one query per key.
+
+Snapshots capture only explicitly requested config values and already-evaluated flag requests. They are read-only, expire after 1–86,400 seconds, reject out-of-scope reads, cap their portable JSON form at 1 MiB, and never re-evaluate flags offline. `no_secrets` is an application assertion that captured config contains no secrets; `application_protected` means the application must encrypt and authenticate the encoded snapshot before it leaves the trusted server boundary. Forge never infers which config values are secret and never extends a stale snapshot.
+
+Reads are cached in-process for about 30 seconds, so a change is visible everywhere within that window rather than instantly. An environment variable `FORGE_CFG_<KEY>` overrides a stored config value, which is useful for an ops override.

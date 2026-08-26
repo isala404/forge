@@ -9,10 +9,10 @@ use crate::error::{ForgeError, Result};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use std::str::FromStr;
 
-/// Lowest supported `server_version_num` (PG 17): the supported floor. The SQL itself
-/// only needs PG 14 features (`SKIP LOCKED`, advisory locks, partial indexes,
-/// `gen_random_uuid`), but 17 is the oldest version we test and ship embedded.
-pub(crate) const MIN_SERVER_VERSION_NUM: i32 = 170_000;
+/// Supported PostgreSQL major, expressed as inclusive lower and exclusive upper
+/// `server_version_num` bounds.
+pub(crate) const MIN_SERVER_VERSION_NUM: i32 = 180_000;
+const MAX_SERVER_VERSION_NUM: i32 = 190_000;
 
 /// Returns a probed, ready pool, or a `ForgeError::Config` on any connection or version failure.
 pub(crate) async fn connect(db: &DatabaseConfig) -> Result<sqlx::PgPool> {
@@ -82,12 +82,16 @@ async fn verify_version(pool: &sqlx::PgPool) -> Result<()> {
                     conn_cause(&e)
                 ))
             })?;
-    if num < MIN_SERVER_VERSION_NUM {
+    if !is_supported_server_version(num) {
         return Err(ForgeError::config(format!(
-            "Postgres server_version_num={num} is too old; Forge requires >= {MIN_SERVER_VERSION_NUM} (PG 17)"
+            "Postgres server_version_num={num} is unsupported; Forge requires PostgreSQL 18"
         )));
     }
     Ok(())
+}
+
+fn is_supported_server_version(num: i32) -> bool {
+    (MIN_SERVER_VERSION_NUM..MAX_SERVER_VERSION_NUM).contains(&num)
 }
 
 /// Secret-safe rendering of a connection error (never echoes the DSN/password).
@@ -98,5 +102,18 @@ fn conn_cause(e: &sqlx::Error) -> String {
         sqlx::Error::PoolTimedOut => "connection pool timed out".to_string(),
         sqlx::Error::PoolClosed => "connection pool closed".to_string(),
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_supported_server_version;
+
+    #[test]
+    fn postgres_18_is_the_only_supported_floor() {
+        assert!(!is_supported_server_version(179_999));
+        assert!(is_supported_server_version(180_000));
+        assert!(is_supported_server_version(180_001));
+        assert!(!is_supported_server_version(190_000));
     }
 }

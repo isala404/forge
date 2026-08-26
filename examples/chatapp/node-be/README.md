@@ -52,7 +52,7 @@ bun run test           # vitest
 
 The suite boots the server in a child process on an ephemeral port against a live Postgres (it drops/creates `chatapp_node_test` on `127.0.0.1:5432`), then drives the GraphQL API over HTTP + graphql-ws. It covers signup/session, group chat visibility, live message delivery, typing, presence TTL expiry, attachment upload round-trip, unread increment/clear, `logoutAll` revocation, send-burst rate limiting, read receipts, disappearing-message expiry, the reactions feature flag, API-key auth, and `opsStats` (online + DLQ). It also asserts the served SDL (via introspection) equals `../schema.graphql` under a normalized comparison. No skips.
 
-The direct `reactions_v1` call keeps this example small. A production OpenFeature integration can install `@forgelib/openfeature-provider`, register `ForgeProvider` with the official server SDK, and attach `telemetryHook()` at client scope. Use `configGetMany`/`flagDetailsMany` for startup reads and reserve `configSnapshot` for explicitly expiring disconnected work.
+The direct `reactions_v1` call keeps this example small. A production OpenFeature integration can import `ForgeProvider` and `telemetryHook` from `forgelib/openfeature`, register the provider with the official server SDK, and attach the hook at client scope. Use `configGetMany`/`flagDetailsMany` for startup reads and reserve `configSnapshot` for explicitly expiring disconnected work.
 
 ## Docker
 

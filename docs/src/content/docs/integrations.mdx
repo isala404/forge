@@ -1,0 +1,383 @@
+---
+title: Integrations
+description: "Framework, deployment, MCP, CloudEvents, environment, and diagnostics recipes that keep protocol ownership in the application."
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+Forge is a library inside the process you already own. A framework recipe should inject one initialized handle, reject traffic until initialization succeeds, stop accepting traffic before closing Forge, and leave routing, authentication, protocol behavior, and process signals with the host. None of the recipes below add a framework dependency to a Forge core package.
+
+## HTTP framework lifecycle
+
+The canonical applications exercise Rocket, GraphQL Yoga, and FastAPI against real PostgreSQL. These smaller recipes show the ownership seam for other host styles.
+
+### Axum
+
+Put the cheap-to-clone `Forge` handle in router state. Axum owns the listener and shutdown future; Forge only drains its own workers and closes pools after the server stops accepting requests.
+
+```rust
+#[derive(Clone)]
+struct AppState { forge: forgelib::Forge }
+
+let forge = forgelib::Forge::init().await?;
+let app = axum::Router::new()
+    .route("/healthz", axum::routing::get(|| async { "ok" }))
+    .with_state(AppState { forge: forge.clone() });
+let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
+axum::serve(listener, app).with_graceful_shutdown(shutdown_signal()).await?;
+forge.close(std::time::Duration::from_secs(30)).await?;
+```
+
+### Hono
+
+Create Forge before `serve`, attach it through Hono variables or an application closure, and close the Node server before the Forge handle. Install the signal handler in the executable, never in a shared package.
+
+```ts
+const forge = await ForgeClient.init();
+const app = new Hono<{ Variables: { forge: ForgeClient } }>();
+app.use("*", async (c, next) => { c.set("forge", forge); await next(); });
+const server = serve({ fetch: app.fetch, port: 3000 });
+
+process.once("SIGTERM", () => {
+  server.close(async () => { await forge.close(30); process.exit(0); });
+});
+```
+
+### Express
+
+Express request augmentation is application code. A closure is often simpler than changing global request types.
+
+```ts
+const forge = await ForgeClient.init();
+const app = express();
+app.get("/profile/:id", async (req, res, next) => {
+  try { res.json(await forge.kv(`profile:${req.params.id}`).get()); }
+  catch (error) { next(error); }
+});
+const server = app.listen(3000);
+process.once("SIGTERM", () => server.close(async () => {
+  await forge.close(30);
+  process.exit(0);
+}));
+```
+
+### FastAPI
+
+FastAPI lifespan is the single initialization and shutdown boundary. Store the handle on `app.state`; dependencies may narrow it for handlers.
+
+```python
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    forge = await forgelib.ForgeClient.init()
+    app.state.forge = forge
+    try:
+        yield
+    finally:
+        await forge.close(30.0)
+
+app = FastAPI(lifespan=lifespan)
+
+def get_forge(request: Request) -> forgelib.ForgeClient:
+    return request.app.state.forge
+```
+
+### Django ASGI
+
+Django's request object does not own application lifespan. Wrap its ASGI callable once, initialize lazily under a lock for hosts that do not send lifespan events, and let a lifespan-aware host close the handle. Do not initialize a new pool in middleware per request.
+
+```python
+django_app = get_asgi_application()
+
+class ForgeASGI:
+    def __init__(self, app):
+        self.app, self.forge, self.lock = app, None, asyncio.Lock()
+
+    async def ready(self):
+        async with self.lock:
+            if self.forge is None:
+                self.forge = await forgelib.ForgeClient.init()
+        return self.forge
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "lifespan":
+            while True:
+                message = await receive()
+                if message["type"] == "lifespan.startup":
+                    await self.ready(); await send({"type": "lifespan.startup.complete"})
+                elif message["type"] == "lifespan.shutdown":
+                    if self.forge is not None: await self.forge.close(30.0)
+                    await send({"type": "lifespan.shutdown.complete"}); return
+        scope["forge"] = await self.ready()
+        await self.app(scope, receive, send)
+
+application = ForgeASGI(django_app)
+```
+
+### Go `net/http`
+
+Construct one handle, close the HTTP server with a deadline, then close Forge with the remaining process context.
+
+```go
+client, err := forge.InitDefault(ctx)
+if err != nil { log.Fatal(err) }
+mux := http.NewServeMux()
+mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })
+server := &http.Server{Addr: ":3000", Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+go func() { if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed { log.Fatal(err) } }()
+<-signals
+shutdown, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+defer cancel()
+_ = server.Shutdown(shutdown)
+_ = client.Close(shutdown)
+```
+
+## Deployment shapes
+
+Every production shape runs migrations as a separate deployment step, sets `auto_migrate = false`, and gives API, worker, scheduler, and migration processes independently measured pool sizes. A process runs only the loops it owns.
+
+| Shape | HTTP process | Background work | Migration ownership | Important constraint |
+| --- | --- | --- | --- | --- |
+| Container | One foreground server per container | Separate worker/scheduler containers from the same image | Release command or one-shot container | Do not run a process supervisor inside the image |
+| systemd | `forge-api.service` | `forge-worker.service` and optional `forge-scheduler.service` | Required `forge-migrate.service` oneshot | `TimeoutStopSec` must exceed the Forge drain deadline |
+| Kubernetes | Deployment with readiness/liveness probes | Separate Deployments, each with its own queue/loop | Pre-deploy Job, awaited before rollout | `terminationGracePeriodSeconds` must exceed drain time |
+| Serverless HTTP | Module-scoped client reused across warm requests | None inside request handlers | CI/CD job | Use external PostgreSQL/S3; no embedded PostgreSQL, filesystem blobs, workers, scheduler, or maintenance loop |
+| Dedicated worker | No listener required | One or more named queue workers | Same release migration job | Readiness may be reported to the host through its existing control channel |
+
+### Container commands
+
+Build one image with separate entry points. Keep secrets in the platform environment and interpolate them from `forge.toml`.
+
+```dockerfile
+FROM gcr.io/distroless/cc-debian13
+COPY app /app
+COPY forge.toml /forge.toml
+USER 65532:65532
+ENTRYPOINT ["/app"]
+CMD ["api"]
+```
+
+```sh
+/app migrate   # release job; exits non-zero unless every target is compatible
+/app api       # HTTP only
+/app worker emails
+/app scheduler
+```
+
+### systemd units
+
+```ini
+# forge-migrate.service
+[Service]
+Type=oneshot
+User=forge
+EnvironmentFile=/etc/forge/app.env
+WorkingDirectory=/srv/forge
+ExecStart=/srv/forge/app migrate
+
+# forge-api.service
+[Unit]
+Requires=forge-migrate.service
+After=network-online.target forge-migrate.service
+[Service]
+User=forge
+EnvironmentFile=/etc/forge/app.env
+WorkingDirectory=/srv/forge
+ExecStart=/srv/forge/app api
+Restart=on-failure
+TimeoutStopSec=40
+```
+
+Use sibling services for workers and the scheduler. `systemctl stop` sends the process signal; the executable stops dequeuing, drains for 30 seconds, closes Forge, and exits before `TimeoutStopSec`.
+
+### Kubernetes
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata: { name: forge-migrate-v1-1-0 }
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: example/app:1.1.0
+          args: ["migrate"]
+          envFrom: [{ secretRef: { name: forge-runtime } }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: forge-api }
+spec:
+  replicas: 3
+  selector: { matchLabels: { app: forge-api } }
+  template:
+    metadata: { labels: { app: forge-api } }
+    spec:
+      terminationGracePeriodSeconds: 40
+      containers:
+        - name: api
+          image: example/app:1.1.0
+          args: ["api"]
+          readinessProbe: { httpGet: { path: /readyz, port: 3000 } }
+          livenessProbe: { httpGet: { path: /healthz, port: 3000 } }
+          envFrom: [{ secretRef: { name: forge-runtime } }]
+```
+
+Deploy workers and the scheduler as separate Deployments using the same image and different arguments. Scale workers from queue depth and oldest-visible age, not CPU alone. Run one scheduler replica for efficiency or several for availability; PostgreSQL claims and deterministic occurrence IDs make concurrent ticks safe.
+
+## MCP server recipe
+
+The [Model Context Protocol SDK](https://github.com/modelcontextprotocol/typescript-sdk/blob/main/docs/server.md) owns discovery, schemas, transports, authentication context, cancellation, progress, resources, and protocol errors. Forge supplies ordinary application infrastructure behind tool handlers. This example uses the current TypeScript SDK shape; pin the SDK separately from Forge because its protocol release cadence is independent.
+
+```ts
+import { McpServer } from "@modelcontextprotocol/server";
+import * as z from "zod/v4";
+import { ForgeClient } from "forgelib";
+
+const forge = await ForgeClient.init();
+const renders = forge.queue<{ invocationId: string; actor: string; inputKey: string; traceparent?: string; audit: { tool: string; requestedAt: string } }>("mcp-render");
+const server = new McpServer({ name: "artifact-tools", version: "1.0.0" });
+
+// Wire this into the SDK transport's HTTP authentication hook. The SDK owns the
+// protocol auth result; Forge validates the application session behind it.
+async function authenticateMcp(request: Request) {
+  const header = request.headers.get("authorization");
+  const token = header?.startsWith("Bearer ") ? header.slice(7) : undefined;
+  const actor = token ? await forge.validateSession(token) : null;
+  return actor ? { clientId: actor, scopes: ["tools"], token } : null;
+}
+
+server.registerTool("start_render", {
+  description: "Queue an idempotent artifact render",
+  inputSchema: z.object({ invocationId: z.string().uuid(), inputKey: z.string().min(1) }),
+  annotations: { idempotentHint: true },
+}, async ({ invocationId, inputKey }, ctx) => {
+  const actor = ctx.http?.authInfo?.clientId;
+  if (!actor) return { content: [{ type: "text", text: "Authentication required" }], isError: true };
+  const decision = await forge.rateLimitCheck("mcp-tools", actor, 60, 60, false);
+  if (!decision.allowed) return { content: [{ type: "text", text: "Rate limit exceeded" }], isError: true };
+  if (ctx.mcpReq.signal.aborted) return { content: [{ type: "text", text: "Cancelled before enqueue" }], isError: true };
+  const traceparent = ctx.http?.req.headers.get("traceparent") ?? undefined;
+  await renders.enqueue({ invocationId, actor, inputKey, traceparent, audit: { tool: "start_render", requestedAt: new Date().toISOString() } }, { jobId: invocationId, traceContext: traceparent ? { traceparent } : undefined });
+  await ctx.mcpReq.log("info", { event: "tool_queued", invocationId, actor });
+  return { content: [{ type: "text", text: `Queued ${invocationId}` }], structuredContent: { invocationId, state: "queued" } };
+});
+
+server.registerTool("cancel_render", {
+  description: "Request cancellation of queued or running work",
+  inputSchema: z.object({ invocationId: z.string().uuid() }),
+  annotations: { idempotentHint: true },
+}, async ({ invocationId }) => {
+  const status = await renders.cancel(invocationId);
+  return { content: [{ type: "text", text: status ? status.state : "not found" }] };
+});
+
+server.registerTool("get_render", {
+  description: "Inspect work and return its artifact when ready",
+  inputSchema: z.object({ invocationId: z.string().uuid() }),
+  annotations: { readOnlyHint: true },
+}, async ({ invocationId }) => {
+  const status = await renders.status(invocationId);
+  if (!status || status.state !== "succeeded") return { content: [{ type: "text", text: status?.state ?? "not found" }] };
+  const key = `mcp-artifacts/${invocationId}`;
+  const download = await forge.blobPresignDownload(key, 300);
+  return { content: [{ type: "resource_link", uri: download.url, name: `${invocationId}.bin`, mimeType: "application/octet-stream" }] };
+});
+```
+
+The worker checks Forge's cooperative cancellation flag between expensive steps, writes the artifact to blob storage, and records immutable audit rows in an application-owned table or transactional outbox. The queue payload carries actor, invocation ID, input reference, and trace correlation, but it is not an audit log. A session token may authenticate the HTTP transport before the SDK builds `authInfo`; Forge does not reinterpret MCP authentication. Long work returns a job handle immediately instead of holding an HTTP request open. If the MCP SDK's experimental task contract becomes stable, an adapter may map that protocol task to the same queue job without changing Forge's queue semantics.
+
+## CloudEvents structured JSON
+
+`encodeCloudEvent` / `encode_cloud_event` / `EncodeCloudEvent` and the Rust `CloudEvent::encode` helper implement the CloudEvents 1.0 structured JSON envelope. Binary data always uses standard `data_base64`; decoding accepts both `data_base64` and standard JSON `data`, preserves extension attributes, rejects conflicting data members, and caps the envelope at 1 MiB. Transport bindings, batch format, delivery, retries, and event retention remain outside Forge.
+
+<Tabs syncKey="lang">
+	<TabItem label="Node" icon="seti:javascript">
+
+		```ts
+		const wire = encodeCloudEvent({
+		  id: job.id, source: "/workers/render", type: "com.example.rendered",
+		  datacontenttype: "application/pdf", data: pdf,
+		  extensions: { traceid },
+		});
+		const event = decodeCloudEvent(wire);
+		```
+
+	</TabItem>
+	<TabItem label="Python" icon="seti:python">
+
+		```python
+		wire = forgelib.encode_cloud_event({
+		    "id": job.id, "source": "/workers/render", "type": "com.example.rendered",
+		    "datacontenttype": "application/pdf", "data": pdf_bytes,
+		    "extensions": {"traceid": trace_id},
+		})
+		event = forgelib.decode_cloud_event(wire)
+		```
+
+	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		let mut event = forgelib::CloudEvent::new(job.id.to_string(), "/workers/render", "com.example.rendered");
+		event.data_content_type = Some("application/pdf".into());
+		event.data = Some(pdf);
+		let wire = event.encode()?;
+		```
+
+	</TabItem>
+	<TabItem label="Go" icon="seti:go">
+
+		```go
+		contentType := "application/pdf"
+		wire, err := forge.EncodeCloudEvent(forge.CloudEvent{
+			ID: job.ID, Source: "/workers/render", Type: "com.example.rendered",
+			DataContentType: &contentType, Data: pdf,
+		})
+		```
+
+	</TabItem>
+</Tabs>
+
+The supported profile follows the [CloudEvents JSON event format](https://github.com/cloudevents/spec/blob/main/cloudevents/formats/json-format.md). Use an official CloudEvents SDK when an application needs HTTP binary mode, Kafka bindings, batches, custom attribute types, or envelopes larger than this bounded helper.
+
+## Environment import and export
+
+The environment adapter takes explicit maps; it never enumerates or mutates the process environment and never logs values. Each logical config key declares ordered aliases used by common platforms. Import accepts one present value, accepts several aliases only when their values agree, and rejects ambiguous deployments. Export writes the first canonical name.
+
+```ts
+const mappings = [
+  { key: "database.url", names: ["DATABASE_URL", "POSTGRES_URL"] },
+  { key: "blob.bucket", names: ["S3_BUCKET", "AWS_S3_BUCKET"] },
+];
+const imported = importEnvConfig(process.env as Record<string, string>, mappings);
+for (const [key, value] of Object.entries(imported)) await forge.config(key).set(value);
+const deploymentEnv = exportEnvConfig(imported, mappings);
+```
+
+The same helpers are `import_env_config` / `export_env_config` in Python, `import_env_config` / `export_env_config` in Rust, and `ImportEnvConfig` / `ExportEnvConfig` in Go. Mappings are application configuration because aliases differ between providers and products. Secrets remain platform-owned; export returns a map for a trusted deployment tool and does not write a `.env` file.
+
+## Existing admin and observability surfaces
+
+Forge exposes structured diagnostics and Prometheus text but starts no admin server. Put them behind the application's existing operator authentication, a private listener, or a service-mesh policy. Do not expose backend messages publicly.
+
+```ts
+app.get("/internal/forge/diagnostics", requireOperator, async (_req, res) => {
+  const [runtime, scheduler] = await Promise.all([
+    forge.diagnostics(2),
+    forge.schedulerDiagnostics(),
+  ]);
+  res.json({ runtime, scheduler });
+});
+
+app.get("/internal/metrics", requireMetricsPrincipal, (_req, res) => {
+  res.type("text/plain; version=0.0.4").send(forge.renderPrometheus());
+});
+```
+
+For an existing OpenTelemetry stack, install the application's tracing subscriber/provider first. Forge spans flow into it; queue and outbox metadata preserve validated W3C trace context. Keep raw keys, principals, tool arguments, prompts, responses, and signed URLs out of metric labels and span attributes. Correlate them with bounded opaque IDs in application logs or audit storage instead.
+
+<Aside type="caution" title="Diagnostics are operator data">
+	`diagnostics` performs bounded live backend checks. Give it a short deadline, rate-limit it, and authenticate it independently of public health checks. `/healthz` should remain a cheap local liveness response; readiness may probe required backends with its own deadline.
+</Aside>

@@ -20,7 +20,9 @@ const (
 	ContractVersion = "1.1.0"
 	// DefaultNamespace is the unnamespaced profile. An explicit namespace is recommended
 	// whenever independent applications share one physical backend.
-	DefaultNamespace = ""
+	DefaultNamespace          = ""
+	minimumPostgresVersionNum = 180000
+	maximumPostgresVersionNum = 190000
 )
 
 // ErrorCode is stable across every Forge language package.
@@ -627,7 +629,20 @@ func connectPostgres(ctx context.Context, database DatabaseConfig, minimumConnec
 		pool.Close()
 		return nil, postgresError("init", err)
 	}
+	var serverVersion int
+	if err := pool.QueryRow(connectCtx, "SELECT current_setting('server_version_num')::int").Scan(&serverVersion); err != nil {
+		pool.Close()
+		return nil, errorWithCause(CodeConfig, "init", "postgres", "could not read the PostgreSQL server version", err)
+	}
+	if !supportedPostgresVersion(serverVersion) {
+		pool.Close()
+		return nil, forgeError(CodeConfig, "init", fmt.Sprintf("PostgreSQL server_version_num %d is unsupported; Forge requires PostgreSQL 18", serverVersion))
+	}
 	return pool, nil
+}
+
+func supportedPostgresVersion(version int) bool {
+	return version >= minimumPostgresVersionNum && version < maximumPostgresVersionNum
 }
 
 func validPrimitive(primitive Primitive) bool {

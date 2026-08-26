@@ -245,7 +245,7 @@ app.post("/api/rooms/:room/upload-url", async (c) => {
 
   const maxBytes = Number(await forge.configGet("max_upload_bytes")) || 10 * 1024 * 1024;
   const key = `media/${room}/${randomUUID()}`;
-  const uploadUrl = await forge.blobPresignUpload(key, 600, maxBytes);
+  const uploadUrl = (await forge.blobPresignUpload(key, 600, maxBytes)).url;
   return c.json({ key, uploadUrl, maxBytes });
 });
 ```

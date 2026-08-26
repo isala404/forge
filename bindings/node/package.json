@@ -23,6 +23,8 @@
     "README.md",
     "client.js",
     "client.d.ts",
+    "openfeature.js",
+    "openfeature.d.ts",
     "contract.generated.d.ts",
     "index.js",
     "index.d.ts",
@@ -32,6 +34,10 @@
     ".": {
       "types": "./client.d.ts",
       "default": "./client.js"
+    },
+    "./openfeature": {
+      "types": "./openfeature.d.ts",
+      "default": "./openfeature.js"
     }
   },
   "napi": {
@@ -50,9 +56,24 @@
     "build:debug": "napi build --platform"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3.7.3"
+    "@napi-rs/cli": "^3.7.3",
+    "@openfeature/core": "1.12.0",
+    "@openfeature/server-sdk": "1.23.0"
+  },
+  "peerDependencies": {
+    "@openfeature/server-sdk": ">=1.23.0 <2"
+  },
+  "peerDependenciesMeta": {
+    "@openfeature/server-sdk": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "@openfeature/open-telemetry-hooks": "1.0.0",
+    "@opentelemetry/api": "1.9.0",
+    "@opentelemetry/api-logs": "0.205.0"
   },
   "engines": {
-    "node": ">=20"
+    "node": "24.x"
   }
 }

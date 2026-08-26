@@ -1,0 +1,108 @@
+---
+title: Performance and scaling
+description: Repeatable Forge benchmarks, regression budgets, contention tests, pool sizing, and evidence gates for larger architecture.
+---
+
+Forge performance work starts with a report, not a topology. The repository owns a release-mode harness, JSON budget file, and checker. Budgets are regression ceilings on comparable hardware, not capacity promises for an application.
+
+## Run the backend harness
+
+The `smoke` profile uses 20 iterations, four concurrent tasks, and two PostgreSQL child processes. The `full` profile uses 500 iterations, 16 tasks, 1 MiB blobs, and four child processes. Both measure p95 queue round trips, queue throughput, same-subject rate-limit contention, blob put/get/delete transfer, maintenance sweeps, and allocator activity. PostgreSQL reports peak pool use and starts separate OS processes against one temporary database; this catches connection, row-lock, lease, and rate-limit contention that an async microbenchmark cannot.
+
+```bash
+cargo bench --bench performance -- --backend memory --profile full --output memory.json
+python3 tools/performance/check.py memory.json
+```
+
+For an installed PostgreSQL server, `PERF_DATABASE_URL` is a maintenance database whose user may create and drop databases. The harness creates a UUID-named database, migrates it, gives every child the same credential through its environment rather than command-line arguments, closes every pool, and force-drops only that generated database.
+
+```bash
+PERF_DATABASE_URL='postgres://postgres:postgres@127.0.0.1:5432/postgres' \
+  cargo bench --bench performance -- --backend postgres --profile full --output postgres.json
+python3 tools/performance/check.py postgres.json
+```
+
+Rust users can instead exercise Forge's embedded PostgreSQL build. `FORGE_PERF_EMBEDDED_DIR` defaults to `target/forge-perf-postgres`.
+
+```bash
+cargo bench --features embedded --bench performance -- \
+  --backend embedded --profile full --output postgres.json
+
+cargo bench --features embedded --bench performance -- \
+  --backend embedded-filesystem --profile full --output filesystem.json
+
+cargo bench --features embedded --bench performance -- \
+  --backend embedded-s3 --profile full --output s3.json
+```
+
+Filesystem blob measurements use the same temporary PostgreSQL database for Forge metadata and default to `target/forge-perf-blobs`. S3 measurements require a disposable bucket or prefix and use the same workload. The harness deletes every measured object; provider lifecycle policy remains a separate operator concern.
+
+```bash
+PERF_DATABASE_URL="$DATABASE_URL" cargo bench --bench performance -- \
+  --backend filesystem --profile full --output filesystem.json
+
+PERF_DATABASE_URL="$DATABASE_URL" PERF_S3_ENDPOINT=http://127.0.0.1:9000 \
+PERF_S3_BUCKET=forge-test PERF_S3_ACCESS_KEY=forge PERF_S3_SECRET_KEY=secret \
+  cargo bench --bench performance -- --backend s3 --profile full --output s3.json
+```
+
+The canonical ceilings live in `benchmarks/budgets.json`. Validate its coverage without running a workload with `python3 tools/performance/check.py --validate-only`. A benchmark regression must be reproduced on the same runner before changing a budget.
+
+## Measure language boundaries
+
+The boundary workload encodes and decodes the same small CloudEvents 1.0 value. It isolates package/runtime overhead from database latency and emits the same checked JSON report in every supported runtime. Run release or installed package artifacts rather than source-only substitutes.
+
+```bash
+cargo run --release --example performance_boundary -- --output rust.json
+node tools/performance/boundary.mjs --output node.json
+bun tools/performance/boundary.mjs --output bun.json
+python tools/performance/boundary.py --output python.json
+go -C bindings/go run ./cmd/perf-boundary --output go.json
+python3 tools/performance/check.py rust.json
+```
+
+Node/Bun require the binding's normal `npm run build`; Python requires the wheel or editable package installed into the selected interpreter. Go is native. The budget file names Rust, Node, Bun, Python, and Go separately so a fast core cannot hide a boundary regression.
+
+## Read the numbers correctly
+
+- Queue latency is enqueue, immediate lease, and acknowledgement. Throughput counts completed round trips, not bare inserts.
+- Rate-limit contention uses one bucket and subject. This intentionally serializes the hot row and exposes the worst common contention shape.
+- Blob throughput counts bytes written and read. It includes provider and network behavior for S3.
+- Allocation counts come from an instrumented system allocator in the benchmark executable. Forge production binaries do not install it.
+- Maintenance measures one complete idempotent sweep across the configured primitives.
+- PostgreSQL pool use samples checked-out connections every millisecond. Multi-process latency is elapsed wall time per worker iteration, with every process performing a rate-limit check and a complete queue round trip.
+
+Do not compare debug to release, smoke to full, local S3 to a hosted region, or different CPUs as if they were regressions. Preserve the JSON report with the runner, Forge revision, PostgreSQL/provider version, and hardware description when making a scaling decision.
+
+## Pool sizing
+
+PostgreSQL allocates resources from `max_connections`, so increasing it is not free. Keep an operator reserve of at least five connections or 10%, whichever is larger, and budget every Forge process explicitly. See PostgreSQL's [connection settings](https://www.postgresql.org/docs/current/runtime-config-connection.html).
+
+Use this deployment calculation:
+
+```text
+required server slots = operator reserve
+                      + sum(process replicas × configured pool max)
+                      + subscribed process replicas
+                      + migration job pool max while it runs
+```
+
+Each PostgreSQL Forge handle uses one pool slot for config invalidation. The first pub/sub subscription opens one additional dedicated server connection outside the pool, shared across that handle's topics. Start small, measure `forge_pool_connections{state="open|idle"}`, acquisition timeouts, database saturation, and handler concurrency, then raise one role at a time.
+
+| Process role | Starting pool | Reason |
+| --- | ---: | --- |
+| API | 4 | One config-listener slot plus three concurrent database operations; cap request concurrency separately. |
+| Worker | `min(worker concurrency, 8) + 1` | Handlers do not hold a connection for their whole runtime; the extra slot serves config invalidation. Measure actual overlapping Forge calls. |
+| Scheduler | 2 | One tick transaction plus config invalidation. Multiple replicas coordinate in PostgreSQL and do not need large pools. |
+| Listener | 2, plus one server slot | One pooled config listener, one publish/query slot, and the dedicated pub/sub connection outside the pool. |
+| Migration job | 2 | Forge requires two connections when startup migration is enabled. Run one bounded deployment job, then release both. |
+
+If a process owns several roles, use one Forge handle and size for overlapping work, not the sum of independent guesses. Separate databases or pools are justified only after the pool report and PostgreSQL wait events identify a hot primitive.
+
+## Architecture gates
+
+Forge keeps explicit batch enqueue/dequeue APIs, but it does not adapt batch size behind the caller. The measured smoke workload shows millisecond PostgreSQL round trips without evidence that hidden batching would improve the complete enqueue/lease/settle path. Revisit only when the full profile shows a sustained throughput miss and an experiment improves throughput by at least 25% while p95 latency stays within budget, per-item errors remain visible, and crash recovery is unchanged.
+
+Forge ships no partitioning migration. First record real row counts, `pg_total_relation_size`, retention-delete cost, autovacuum behavior, and query plans. Consider partitioning only when a Forge table reaches roughly 10 million live rows or 10 GiB and measurements show retention or index maintenance is the bottleneck. The partition key must align with deletion and every hot query before an expand/contract migration is proposed; table size alone is not proof.
+
+Forge routes no operations to read replicas. PostgreSQL hot standbys can lag and can cancel conflicting queries, so stale routing is a public consistency decision, not a pool flag. See PostgreSQL's [hot standby behavior](https://www.postgresql.org/docs/current/hot-standby.html). Only explicitly approximate queue depth/stats and explicitly stale config snapshots are candidates. KV reads, auth, config evaluation, rate limits, queue lease/settlement/status, schedules, migrations, and read-after-write blob metadata stay on the primary. Add replica configuration only after a read-heavy profile proves those candidate operations dominate and application tests accept bounded staleness.

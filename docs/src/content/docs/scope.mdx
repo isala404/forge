@@ -1,0 +1,56 @@
+---
+title: Scope and costs
+description: What Forge owns, what each hot path costs, and when to use a service directly.
+---
+
+Forge is an in-process infrastructure library for application backends. It gives Rust, JavaScript, Python, and Go applications the same bounded primitives while PostgreSQL remains the durable system of record. It does not own application domain tables, HTTP routing, authorization policy, signals, deployment, or a hosted control plane.
+
+## Ownership
+
+| Forge owns | The application owns |
+| --- | --- |
+| Primitive APIs and the cross-language contract | HTTP, RPC, GraphQL, MCP, and other protocol surfaces |
+| PostgreSQL and memory behavior, plus filesystem and S3 blob adapters | Business tables, domain transactions, and authorization policy |
+| Forge schema, migrations, validation, and runtime diagnostics | Deployment order, process signals, readiness routes, and pool budgets |
+| Queue leases, retry state, dead-letter operations, and managed worker mechanics | Worker handlers, side-effect idempotency, cancellation checks, and audit records |
+| Bounded CloudEvents, trace-context, environment, queue-envelope, and invalidation encodings | Transport delivery, telemetry export, secret storage, and retention policy |
+| Server-side config caches and invalidation publication | Frontend framework, browser cache, TanStack Query, WebSocket or SSE client, reconnect, and refetch logic |
+
+Forge may provide a server-side building block without owning the surrounding system. For example, it can lease a queue job, but the application writes the handler. It can publish an invalidation hint, but the application authenticates a transport connection and the client refetches authoritative state.
+
+## Partial adoption
+
+Use only the primitives the application needs. A normal PostgreSQL client still validates one coordinated Forge schema and opens one bounded system pool; unused primitives do no background work and have no feature-enable switches. A measured hot primitive can move to its own PostgreSQL target without changing its schema epoch or public contract. S3 may own large blob bytes while PostgreSQL continues to own Forge metadata and coordination.
+
+Memory mode is the explicit exception. It initializes without a database and keeps the same primitive APIs for tests and local development, but it is process-local, non-durable, and unsuitable for shared production coordination.
+
+## Hot-path costs
+
+| Operation | Normal backend work | Important contention or size cost |
+| --- | --- | --- |
+| KV get/set/CAS | One indexed read or write | Large values consume database I/O; values are bounded at 1 MiB |
+| Queue enqueue | One indexed insert, plus an idempotency lookup when an ID is supplied | Payloads are bounded at 256 KiB; put larger artifacts in blob storage |
+| Queue dequeue | A bounded claim query using row locks and `SKIP LOCKED` | Polling and worker concurrency must fit the queue pool |
+| Pub/sub | PostgreSQL `NOTIFY` or an in-process broadcast | Connected-only and at-most-once; payload is about 7 KiB |
+| Rate limit | One atomic bucket update | Hot subjects serialize on the same bucket row; fail-open is an application risk decision |
+| Session/token verification | One indexed hash lookup | Password hashing is intentionally CPU-expensive; rate-limit before verifying passwords |
+| Schedule tick | One bounded due-item claim and queue insert per occurrence | Run ticks on every replica; deterministic IDs prevent duplicate occurrences |
+| PostgreSQL blob | Metadata plus byte I/O through PostgreSQL | Fine for bounded ordinary objects; use S3 for large or streaming bytes |
+| S3 blob | PostgreSQL metadata plus provider request(s) | Multipart, provider latency, egress, lifecycle, and bucket policy remain provider concerns |
+| Config/flags | Cache hit or one indexed read | Notifications accelerate invalidation; TTL refresh is the correctness fallback |
+
+Pool sizing is a capacity decision, not a language default to increase casually. Count API replicas, workers, schedulers, listeners, migration jobs, and feature-specific pools against PostgreSQL's connection budget. Start with the conservative defaults, observe acquire latency and pool saturation, then change one measured bottleneck.
+
+## Durability boundary
+
+An operation is durable only after its backend confirms success. PostgreSQL commits rows transactionally; queue delivery remains at-least-once because a worker can crash after performing application work and before acknowledging. Pub/sub is never durable. Filesystem blob bytes and PostgreSQL metadata are two writes. S3 owns byte durability after its successful response, while Forge owns the corresponding metadata. The [semantics table](/semantics/) states the exact boundary for every primitive.
+
+## When direct use is better
+
+Use the underlying service or a dedicated product directly when its model is the product requirement rather than an implementation detail. Examples include Redis data structures Forge does not expose, Kafka-style durable ordered logs, SQS isolation at independent scale, provider-specific S3 lifecycle or legal-hold controls, OAuth/OIDC identity, a workflow engine, a synchronization engine, a billing ledger, vector search, or model routing. Do not force those requirements through KV, pub/sub, or queue merely to keep one dependency.
+
+Direct PostgreSQL tables are also the right answer for relational domain data, reporting joins, database constraints across business entities, and transactions owned by the application. Forge's transactional outbox is the bridge when one of those domain transactions must reliably enqueue work.
+
+## Supported backend admission
+
+A backend is supported only when its capabilities and limitations are explicit, its generated contract stays aligned, and the applicable conformance, fault, upgrade, observability, package, and documentation checks pass. Forge does not emulate a guarantee the provider cannot make. PostgreSQL and memory are the supported runtime profiles; PostgreSQL, memory, filesystem, and S3-compatible storage are the supported blob roles described in [Primitive semantics](/semantics/).

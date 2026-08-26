@@ -9,16 +9,61 @@ Forge runs inside your process. It doesn't start threads or daemons on its own, 
 the background work, the scheduler, and the maintenance sweep are loops you run. This
 page covers what to run and what to watch once Forge is behind real traffic.
 
-## The system database
+## Deploy migrations before the application
 
-At `init()` Forge connects to the database in `[postgres]`, takes a lock, and runs
-its migrations. It owns its `forge_*` tables and nothing else should write to them.
-Point it at a database or schema that's Forge's alone and keep your product tables
-separate.
+Forge owns the objects listed in [`contract/schema-ownership.json`](https://github.com/isala404/forge/blob/main/contract/schema-ownership.json). Point `[postgres]` at a database or schema reserved for Forge and do not write its objects directly.
 
-Because `init()` migrates, the system pool needs at least two connections: one holds
-the migration lock while another runs the SQL. That's the default, so it only
-matters if you lower `max_connections`.
+Development and test environments migrate automatically by default. Production defaults to `auto_migrate = false`, so application startup validates the schema and fails before serving traffic when migrations are pending, locked, incompatible, or drifted. Run the migration API as a deployment job first:
+
+<Tabs syncKey="lang">
+	<TabItem label="Node" icon="seti:javascript">
+
+		```ts
+		const reports = await ForgeClient.migrate();
+		for (const report of reports) console.error(report.target, report.state, report.message);
+		if (reports.some((report) => report.state !== "applied")) process.exit(1);
+		```
+
+	</TabItem>
+	<TabItem label="Python" icon="seti:python">
+
+		```python
+		reports = await forgelib.ForgeClient.migrate()
+		for report in reports:
+		    print(report.target, report.state, report.message)
+		if any(report.state != "applied" for report in reports):
+		    raise SystemExit(1)
+		```
+
+	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		let reports = Forge::migrate().await?;
+		for report in &reports {
+		    eprintln!("{}: {} ({})", report.target, report.state.as_str(), report.message);
+		}
+		anyhow::ensure!(reports.iter().all(|report| report.is_compatible()), "migration failed");
+		```
+
+	</TabItem>
+	<TabItem label="Go" icon="seti:go">
+
+		```go
+		reports, err := forge.Migrate(ctx)
+		if err != nil { return err }
+		for _, report := range reports {
+		    log.Printf("%s: %s (%s)", report.Target, report.State, report.Message)
+		    if report.State != "applied" { os.Exit(1) }
+		}
+		```
+
+	</TabItem>
+</Tabs>
+
+`migrationStatus`/`migration_status`/`MigrationStatus` is read-only and also reports the safe PostgreSQL session identity when another migrator owns the advisory lock. `validateSchema`/`validate_schema`/`ValidateSchema` checks migration history without taking the lock. Every distinct measured database target receives one report. `migration_lock_timeout_secs` bounds lock acquisition and defaults to 30 seconds.
+
+Forge starts from one `v001_schema` baseline. Unknown migration history and checksum drift are incompatible. Future schema changes append a migration; existing migration files remain immutable after release.
 
 ## Workers
 
@@ -34,7 +79,9 @@ shutdown.
 
 		await forge.worker<SendEmail>("emails", async (job) => {
 		  await send(job.payload);
-		});
+		}, { concurrency: 8, visibilitySeconds: 60, heartbeatSeconds: 15,
+		     retryBackoffSeconds: 0.25, drainDeadlineSeconds: 30,
+		     identity: "email-worker", signal: shutdown.signal, onError: report });
 		```
 
 	</TabItem>
@@ -42,7 +89,12 @@ shutdown.
 
 		```python
 		# leases, heartbeats, acks on return, nacks on exception
-		await forge.worker("emails", handle)
+		await forge.worker(
+		    "emails", handle, concurrency=8, visibility_seconds=60,
+		    heartbeat_seconds=15, retry_backoff_seconds=0.25,
+		    drain_deadline_seconds=30, identity="email-worker",
+		    stop=shutdown, on_error=report,
+		)
 		```
 
 	</TabItem>
@@ -52,18 +104,49 @@ shutdown.
 		// bounded concurrency, auto-heartbeat, ack on Ok / nack on Err, drains on shutdown
 		forge.worker("emails")
 		    .concurrency(8)
+		    .visibility_timeout(Duration::from_secs(60))
+		    .heartbeat_cadence(Duration::from_secs(15))
+		    .retry_backoff(Duration::from_millis(250))
+		    .grace(Duration::from_secs(30))
+		    .identity("email-worker")
+		    .on_error(report)
 		    .run(|job| async move { send(&job).await })  // returns Result<(), E>
 		    .await;
 		```
 
 	</TabItem>
+	<TabItem label="Go" icon="seti:go">
+
+		```go
+		err := forgeClient.RunWorker(ctx, "emails", handle, forge.WorkerOptions{
+			Concurrency: 8, Visibility: 60 * time.Second,
+			HeartbeatCadence: 15 * time.Second, RetryBackoff: 250 * time.Millisecond,
+			DrainDeadline: 30 * time.Second, Identity: "email-worker", OnError: report,
+		})
+		```
+
+	</TabItem>
 </Tabs>
 
-Run as many worker processes as you need; jobs are leased, so two workers never get
-the same job at once. A handler that crashes lets the lease expire and the job comes
-back, which is why handlers need to be safe to run twice. Jobs that exhaust their
-attempts move to `"<queue>.dlq"`, and `queueDepth("emails.dlq")` tells you how big
-that backlog is.
+The shared worker state machine is `polling → handling/heartbeating → settling → draining → stopped`. Cancellation stops polling first. If cancellation wins the same boundary as dequeue, the fresh lease is released without starting user code. Active handlers drain until the configured deadline, then receive the language-native cancellation mechanism and their leases are released. Lease loss cancels the stale handler and prevents it from acknowledging or extending the newer owner’s lease. Backend retry waits use bounded 80–120% jitter. Worker identity appears only in diagnostics and never as a default metric label.
+
+Run as many worker processes as you need; jobs are leased, so two workers never get the same job at once. A handler that crashes lets the lease expire and the job comes back, which is why handlers need to be safe to run twice. Jobs that exhaust their attempts move to `"<queue>.dlq"`. Queue depth reports visible, in-flight, delayed, and oldest-visible age. Default metrics cover dead-letter transitions, redrives, lease loss, handler outcomes, queue depth/age, and outbox backlog without job IDs, payloads, worker identities, or queue names as dimensions.
+
+Operator controls are typed library calls, not a second admin server. Batch enqueue returns per-item results; batch dequeue leases at most ten jobs with independent receipts. Pause/resume retains queued work and affects only new claims. Inspection, status filtering, counter-based throughput estimates, dead-letter redrive, and confirmed purge can be exposed through the application's existing admin authorization boundary.
+
+## Transactional outbox
+
+Use the versioned [`sql/forge_outbox_v1.sql`](https://github.com/isala404/forge/blob/main/sql/forge_outbox_v1.sql) contract when a domain change and queue enqueue must be atomic. Copy that application-owned table into the application’s migration, then insert its row with the application’s own PostgreSQL driver in the same transaction as the domain write. Forge does not migrate or own this table; grant the Forge runtime role `SELECT` and `UPDATE` on it.
+
+```sql
+BEGIN;
+UPDATE orders SET state = 'paid' WHERE id = $1;
+INSERT INTO app_forge_outbox_v1 (event_id, namespace, destination, payload)
+VALUES ($2, 'billing', 'receipts', convert_to($3, 'UTF8'));
+COMMIT;
+```
+
+Run one relay per replica with `runOutboxRelay` / `run_outbox_relay` / `run_outbox_relay_until` / `RunOutboxRelay`, passing the host language’s cancellation input. Claims use a bounded lease and `FOR UPDATE SKIP LOCKED`. The event UUID becomes the queue job UUID. A crash before enqueue leaves a reclaimable outbox row; a crash after enqueue but before marking the row dispatched repeats the deterministic enqueue and returns the same job ID; a crash after marking is complete. This is at-least-once relay processing with one effective queue row, not exactly-once handler execution. Invalid rows are retried with a bounded safe summary; payloads and trace baggage are never logged.
 
 ## The scheduler
 
@@ -118,7 +201,22 @@ same time.
 		```
 
 	</TabItem>
+	<TabItem label="Go" icon="seti:go">
+
+		```go
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			if _, err := forge.RunSchedulerOnce(ctx, 1000); err != nil { log.Printf("scheduler tick failed: %v", err) }
+			if err := forge.Maintain(ctx); err != nil { log.Printf("maintenance failed: %v", err) }
+			select { case <-ctx.Done(): return; case <-ticker.C: }
+		}
+		```
+
+	</TabItem>
 </Tabs>
+
+Use `schedulerDiagnostics` / `scheduler_diagnostics` / `Schedule::diagnostics` / `SchedulerDiagnostics` for alerts. `lag` is the age of the oldest unpaused due row, `dueCount` is the current backlog, `lastSuccessfulTick` advances only after a complete pass, and `enqueueFailures` is cumulative. Alert on sustained lag or a non-advancing successful tick rather than on one transient failure. Pause and resume operate on one named schedule and preserve its payload and policy for inspection.
 
 `maintain()` is the housekeeping sweep: it purges expired key/value rows and old
 finished jobs, reclaims leases left behind by crashed workers, drops stale rate-limit
@@ -137,45 +235,67 @@ have injected your own backend.
 
 ## Health checks
 
-`backendReport()` lists which provider backs each primitive, whether it's durable,
-and any caveats. It's a cheap, synchronous call that's handy on a health or status
-endpoint.
+Liveness and readiness are separate. `isLive()` / `is_live()` / `is_live` / `IsLive()` only reports whether the local handle is open. `probe()` / `Probe()` runs one real operation against every enabled backend under one total deadline and returns redacted status, latency, error category, and last-success time per backend. By default every backend decides readiness; pass an explicit readiness set when a dependency is intentionally optional.
+
+`diagnostics()` / `Diagnostics()` adds configuration, PostgreSQL version, migration state, runtime permissions, backend reachability, application/database clock skew, and unsafe-production-setting checks. It returns stable pass/warn/fail records with redacted messages. Applications expose or record this report through their existing deployment job, test suite, observability system, or authenticated admin surface; Forge does not create an unauthenticated diagnostics endpoint.
+
+`backendCapabilities()` lists which provider backs each primitive, whether it is durable, and any caveats. It is synchronous configuration inspection, not a health check.
 
 <Tabs syncKey="lang">
 	<TabItem label="Node" icon="seti:javascript">
 
 		```ts
-		const report = forge.backendReport();
+		const report = forge.backendCapabilities();
 		// [{ primitive, provider, durable, caveats }]
+
+		if (!forge.isLive()) return new Response("stopping", { status: 503 });
+		const health = await forge.probe(2);
 		```
 
 	</TabItem>
 	<TabItem label="Python" icon="seti:python">
 
 		```python
-		report = forge.backend_report()  # synchronous; do not await
+		report = forge.backend_capabilities()  # synchronous; do not await
 		# [BackendInfo(primitive, provider, durable, caveats), ...]
+
+		if not forge.is_live():
+		    return Response(status_code=503)
+		health = await forge.probe(deadline_seconds=2.0)
 		```
 
 	</TabItem>
 	<TabItem label="Rust" icon="seti:rust">
 
 		```rust
-		let report = forge.backend_report();
+		let report = forge.backend_capabilities();
 		// each entry: primitive, provider, durable, caveats
+
+		if !forge.is_live() { /* return 503 */ }
+		let health = forge.probe(ProbeOptions::default()).await?;
+		```
+
+	</TabItem>
+	<TabItem label="Go" icon="seti:go">
+
+		```go
+		report := forge.BackendCapabilities()
+		if !forge.IsLive() { /* return 503 */ }
+		health, err := forge.Probe(ctx, forgelib.ProbeOptions{Deadline: 2 * time.Second})
 		```
 
 	</TabItem>
 </Tabs>
 
+## Metrics and tracing
+
+Metrics belong to each Forge instance. `metricsSnapshot()` / `metrics_snapshot()` / `metrics_snapshot` / `MetricsSnapshot()` returns bounded samples, while `renderPrometheus()` / `render_prometheus()` / `render_prometheus` / `RenderPrometheus()` emits Prometheus text without installing a collector or starting an exporter. Operations, pool use, retries, queue and worker state, scheduler and maintenance work, config sources, blob transfers, authentication, rate-limit decisions, and outbox backlog use fixed low-cardinality labels. Raw keys, user IDs, paths, queue names, job IDs, topics, model names, error messages, bodies, prompts, model output, content, tokens, and signed URLs are never labels or span attributes.
+
+Queue and outbox propagation stores validated W3C `traceparent` and `tracestate` beside the payload. Baggage is empty by default and only explicit allow-listed keys cross the boundary. Forge creates producer, receive/process, settle, scheduler, relay, and blob spans with fixed semantic names when tracing is enabled. Applications remain responsible for model-call spans and may attach GenAI attributes through their OpenTelemetry instrumentation; Forge never inspects model payloads.
+
 ## Errors and retries
 
-Forge failures map onto a small set of errors, and each one tells you whether a
-retry might help. Only `Unavailable` (a transient backend outage) and a `Backend`
-error flagged retryable are worth retrying. `NotFound`, `Invalid`, `Limit`, and
-`Precondition` won't change on a retry, so handle them instead of looping. Error
-messages are written to be safe to surface; the raw cause stays out of the displayed
-text. The full table is in the [Reference](/reference/#errors).
+Forge failures carry the same code, retryable flag, safe message, operation, and optional backend identifier in Rust, JavaScript, Python, and Go. Only `Unavailable` and a `Backend` error explicitly marked retryable may be retried; worker and reconnect loops use that same rule. `Config`, `NotConfigured`, `NotFound`, `Invalid`, `Limit`, and `Precondition` require a changed request or refreshed state. The displayed message is safe and excludes raw database/provider errors, while the local cause chain remains available for debugging. The full table is in the [Reference](/reference/#errors).
 
 <Aside>
 	A rate-limit denial and an expired session are not errors. `rateLimitCheck`
@@ -217,6 +337,8 @@ and is not atomic with your application's SQL. A crash between them leaves a met
 row pointing at a missing file until the maintenance sweep reclaims it. Multiple
 replicas need a shared mount, since one replica can't read files another wrote to local
 disk.
+
+**S3 policy remains provider-owned.** Forge sends object bytes, web metadata, conditional request headers, provider-managed encryption headers, and multipart commands. Configure lifecycle expiration, retention, replication, versioning, object lock and legal hold, CDN caching and invalidation, CORS, public-access blocks, bucket policy, IAM, and KMS grants in the provider. Roll out those policies independently, verify them with provider tooling, and do not infer them from Forge `head` results.
 
 **Node `kvIncr` returns a JavaScript number.** The counter is an `i64` in the core, but
 JS numbers are `f64`, so a value past 2^53 loses precision on the way back. Real

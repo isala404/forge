@@ -2,7 +2,7 @@
 name = "forgelib"
 version = "1.1.0"
 edition = "2024"
-rust-version = "1.94"
+rust-version = "1.94.1"
 license = "MIT"
 repository = "https://github.com/isala404/forge"
 homepage = "https://isala404.github.io/forge/"
@@ -104,10 +104,20 @@ opentelemetry_sdk = { version = "0.32", optional = true, features = ["trace"] }
 opentelemetry-otlp = { version = "0.32", optional = true, default-features = false, features = ["http-json", "reqwest-rustls", "trace"] }
 tracing-opentelemetry = { version = "0.33", optional = true }
 tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter", "fmt"] }
-aws-config = "=1.8.18"
-aws-sdk-s3 = "=1.137.0"
-aws-credential-types = "=1.2.14"
-aws-smithy-types = { version = "=1.5.0", features = ["rt-tokio"] }
+aws-config = { version = "=1.11.0", default-features = false, features = [
+    "default-https-client",
+    "rt-tokio",
+    "credentials-process",
+    "sso",
+] }
+aws-sdk-s3 = { version = "=1.144.0", default-features = false, features = [
+    "sigv4a",
+    "http-1x",
+    "default-https-client",
+    "rt-tokio",
+] }
+aws-credential-types = "=1.3.0"
+aws-smithy-types = { version = "=1.6.2", features = ["rt-tokio"] }
 
 [dev-dependencies]
 tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "test-util"] }
@@ -134,7 +144,12 @@ todo = "deny"
 unimplemented = "deny"
 
 [profile.dev]
-debug = "line-tables-only"
+debug = 0
+incremental = false
+
+[profile.test]
+debug = 0
+incremental = false
 
 [profile.release]
 lto = true

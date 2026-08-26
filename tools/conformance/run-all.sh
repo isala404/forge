@@ -28,8 +28,13 @@ rm -f bindings/python/dist/*.whl
 # root Cargo.toml is the Rust lib, not a Python extension).
 (cd bindings/python && uvx --from 'maturin>=1.5,<2' maturin build -i python3 --out dist --quiet)
 uv venv tools/conformance/python/.venv --clear --quiet
+python_wheels=(bindings/python/dist/*.whl)
+if (( ${#python_wheels[@]} != 1 )); then
+  echo "expected exactly one Python wheel, found ${#python_wheels[@]}" >&2
+  exit 2
+fi
 uv pip install --python tools/conformance/python/.venv --quiet \
-  bindings/python/dist/*.whl 'psycopg[binary]'
+  "${python_wheels[0]}[openfeature]" 'psycopg[binary]'
 tools/conformance/python/.venv/bin/python tools/conformance/python/run.py
 
 echo "== conformance: all runners green =="

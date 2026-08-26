@@ -39,10 +39,10 @@ jobs:
           components: rustfmt, clippy
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26"
+          go-version-file: bindings/go/go.mod
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci
@@ -74,11 +74,6 @@ jobs:
         run: python3 tools/skill-check/check.py
       - name: unit tests (no database)
         run: cargo test
-      - name: official Node OpenFeature provider tests
-        working-directory: packages/openfeature-node
-        run: |
-          npm install --ignore-scripts --no-package-lock --legacy-peer-deps
-          npm test
       - name: complete database-free memory conformance
         run: cargo test --features conformance --test memory_conformance
       - name: lifecycle ownership guard
@@ -114,10 +109,10 @@ jobs:
           go-version-file: bindings/go/go.mod
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.2.22
+          bun-version: 1.4.0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -149,18 +144,15 @@ jobs:
           for report in rust.json node.json bun.json python.json go.json; do python3 tools/performance/check.py "$report"; done
 
   node-runtimes:
-    name: Node.js ${{ matrix.node }}
+    name: Node.js 24
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    strategy:
-      matrix:
-        node: [20, 22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node }}
+          node-version: "24"
       - run: npm ci --ignore-scripts --no-audit --no-fund
         working-directory: bindings/node
       - run: npm run build
@@ -183,11 +175,11 @@ jobs:
         working-directory: bindings/python
       - run: uv pip install --python .venv '.[openfeature]'
         working-directory: bindings/python
-      - run: .venv/bin/python -m unittest test/test_openfeature.py -v
+      - run: .venv/bin/python -m unittest discover -s test -p 'test_openfeature.py' -v
         working-directory: bindings/python
 
   bun-runtime:
-    name: Bun 1.2
+    name: Bun 1.4
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -195,7 +187,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.2.22
+          bun-version: 1.4.0
       - run: bun install --frozen-lockfile
         working-directory: bindings/node
       - run: bun run build
@@ -204,36 +196,26 @@ jobs:
         working-directory: bindings/node
 
   go-memory:
-    name: Go ${{ matrix.go }} · ${{ matrix.platform }}
-    runs-on: ${{ matrix.os }}
+    name: Go 1.27 · linux-amd64
+    runs-on: ubuntu-latest
     timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { go: "1.26", os: ubuntu-latest, platform: linux-amd64 }
-          - { go: "1.27", os: ubuntu-latest, platform: linux-amd64 }
-          - { go: "1.27", os: ubuntu-24.04-arm, platform: linux-arm64 }
-          - { go: "1.27", os: macos-14, platform: macos-arm64 }
-          - { go: "1.27", os: windows-latest, platform: windows-amd64 }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: ${{ matrix.go }}
+          go-version-file: bindings/go/go.mod
       - run: go test ./...
         working-directory: bindings/go
       - run: go test -race ./...
-        if: ${{ matrix.os != 'windows-latest' }}
         working-directory: bindings/go
 
   msrv:
-    name: MSRV (1.94)
+    name: MSRV (1.94.1)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.94
+      - uses: dtolnay/rust-toolchain@1.94.1
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: msrv
@@ -250,7 +232,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: embedded
-      # Downloads the pinned PG 17 binaries on a cache miss, then boots, migrates,
+      # Downloads the pinned PostgreSQL 18 binaries on a cache miss, then boots, migrates,
       # and re-boots a persistent embedded server.
       - run: cargo test --features embedded --test embedded
 
@@ -306,6 +288,7 @@ jobs:
         run: cargo install sqlx-cli --locked --version 0.9.0 --no-default-features --features rustls,postgres
       - name: Apply migrations
         run: |
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f src/migrations/bootstrap.sql
           for f in src/migrations/v*.sql; do
             psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"
           done
@@ -315,18 +298,13 @@ jobs:
         run: git diff --exit-code .sqlx/
 
   integration:
-    name: Integration (pg-tests, PG ${{ matrix.postgres }})
+    name: Integration (pg-tests, PostgreSQL 18)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     needs: [validate]
-    strategy:
-      fail-fast: false
-      matrix:
-        # 17 is the documented minimum server version; 18 is current.
-        postgres: [17, 18]
     services:
       postgres:
-        image: postgres:${{ matrix.postgres }}
+        image: postgres:18
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -359,7 +337,6 @@ jobs:
         run: go test -run Postgres ./...
         working-directory: bindings/go
       - name: native Go PostgreSQL race tests
-        if: ${{ matrix.postgres == 18 }}
         run: go test -race -run Postgres ./...
         working-directory: bindings/go
 
@@ -403,7 +380,7 @@ jobs:
           go-version-file: bindings/go/go.mod
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -501,7 +478,7 @@ jobs:
           save-if: "false"
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -518,4 +495,4 @@ jobs:
         run: npm test
         working-directory: bindings/node
       - name: python wrapper unit tests
-        run: python -m unittest discover -s bindings/python/test
+        run: tools/conformance/python/.venv/bin/python -m unittest discover -s bindings/python/test

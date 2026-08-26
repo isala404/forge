@@ -3,10 +3,10 @@
 #
 # The forgelib native addon is compiled here with napi-rs (needs Rust); the
 # repo-root .dockerignore strips committed *.node binaries, so we always rebuild it.
-FROM node:22-bookworm
+FROM node:24-bookworm
 
 RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal \
- && npm install -g bun
+ && npm install -g bun@1.4.0
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /src

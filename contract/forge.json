@@ -9,11 +9,11 @@
   },
   "languages": {
     "rust": {
-      "runtime_floor": "1.94",
+      "runtime_floor": "1.94.1",
       "package": "crates.io/forgelib"
     },
     "javascript": {
-      "runtime_floor": "Node.js 20 or Bun 1.2",
+      "runtime_floor": "Node.js 24 or Bun 1.4",
       "package": "npm/forgelib"
     },
     "python": {
@@ -21,7 +21,7 @@
       "package": "PyPI/forgelib"
     },
     "go": {
-      "runtime_floor": "1.26",
+      "runtime_floor": "1.27",
       "package": "github.com/isala404/forge/bindings/go"
     }
   },
