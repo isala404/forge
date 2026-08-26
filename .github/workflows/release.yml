@@ -245,8 +245,9 @@ jobs:
         run: |
           set -euo pipefail
           npm pack --ignore-scripts
+          tar -tzf "forgelib-${{ inputs.version }}.tgz" > package-contents.txt
           for platform in linux-x64-gnu linux-x64-musl linux-arm64-gnu darwin-arm64 win32-x64-msvc; do
-            tar -tzf "forgelib-${{ inputs.version }}.tgz" | grep -qx "package/forgelib.$platform.node"
+            grep -Fx "package/forgelib.$platform.node" package-contents.txt
           done
           mkdir package-smoke
           npm install --prefix package-smoke "./forgelib-${{ inputs.version }}.tgz" @openfeature/server-sdk@1.23.0
