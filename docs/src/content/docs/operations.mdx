@@ -312,15 +312,15 @@ an isolated pool, on its own server if you want, with no change to your code. Se
 
 ## Known limitations
 
-A few sharp edges worth knowing before they surprise you in production.
+These limits matter in production.
 
 **Queue receipts are process-local in Node and Python.** A receipt is only meaningful
 inside the process that dequeued the job: the binding holds the lease in an in-process
 map, so `queueAck`, `queueNack`, and `queueHeartbeat` must run in that same process.
 You can't hand a receipt to another worker or persist it and settle the job later. A
 job left unsettled is reclaimed the usual way, by lease expiry on the server, and
-redelivered. The Rust core carries the lease in the `Job` value itself and has no such
-restriction.
+redelivered. Rust and Go pass the backend lease receipt directly and do not have this
+binding-map restriction.
 
 **Rate limiting on `memory` counts per process.** Each process keeps its own buckets,
 so across replicas the limit is effectively multiplied by the replica count and every

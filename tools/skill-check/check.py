@@ -2,12 +2,13 @@
 """Drift guard for the forge-idiomatic-developer skill.
 
 The skill's whole value is that its method names are the *real* ones, so a stale name
-is worse than none. This checks every Node/Python method the skill names against the
-committed binding surface, and fails (exit 1) on any name that no longer exists.
+is worse than none. This checks every Node, Python, and Go method the skill names
+against the committed binding surface, and fails (exit 1) on any name that no longer
+exists.
 
 What counts as a "named method":
   * an inline code token written as `name()` (the reference tables use this form), and
-  * a `forge.NAME(` / `client.NAME(` call inside a ts/js or python fenced code block.
+  * a `forge.NAME(` / `client.NAME(` call inside a ts/js, python, or Go fenced code block.
 
 Rust uses namespaced accessors that do not map to a flat method list, so method-name
 checking skips Rust. A second set of semantic regression checks covers the
@@ -18,6 +19,7 @@ Sources of truth:
   * Python -> bindings/python/src/lib.rs (the PyO3 #[pymethods]) + package root helpers
     (the generated _generated.pyi only declares data classes, not client methods, so
     the PyO3 source is the real method surface.)
+  * Go     -> exported functions and methods in bindings/go/*.go
 """
 
 from __future__ import annotations
@@ -38,9 +40,15 @@ PY_SOURCES = [
     ROOT / "bindings" / "python" / "src" / "lib.rs",
     ROOT / "bindings" / "python" / "python" / "forgelib" / "__init__.py",
 ]
+GO_SOURCES = sorted(
+    path
+    for path in (ROOT / "bindings" / "go").glob("*.go")
+    if not path.name.endswith("_test.go")
+)
 
 NODE_FENCE_LANGS = {"ts", "tsx", "typescript", "js", "jsx", "javascript"}
 PY_FENCE_LANGS = {"python", "py"}
+GO_FENCE_LANGS = {"go", "golang"}
 
 # `word(` — any identifier at a call/definition site. An over-broad known set is safe:
 # it only ever adds unrelated names, never hides one that was removed or renamed.
@@ -65,17 +73,20 @@ def known_names(sources: list[Path]) -> set[str]:
     return names
 
 
-def load_known() -> tuple[set[str], set[str]]:
-    return known_names(NODE_SOURCES), known_names(PY_SOURCES)
+def load_known() -> tuple[set[str], set[str], set[str]]:
+    return known_names(NODE_SOURCES), known_names(PY_SOURCES), known_names(GO_SOURCES)
 
 
-def scan(md: Path, node: set[str], py: set[str], inline_scope: str) -> list[str]:
+def scan(
+    md: Path, node: set[str], py: set[str], go: set[str], inline_scope: str
+) -> list[str]:
     """Return a list of failure messages for one markdown file.
 
     `inline_scope` picks which set an inline `name()` token is checked against:
-    "node", "python", "any" (SKILL.md mixes both languages), or "skip" (rust.md, whose
-    inline tokens are namespaced accessors, not a flat method list). Fenced ts/python
-    `forge.NAME(` calls are always checked regardless of `inline_scope`.
+    "node", "python", "go", "any" (SKILL.md mixes languages), or "skip" (rust.md,
+    whose inline tokens are namespaced accessors, not a flat method list). Fenced
+    language-specific `forge.NAME(` calls are always checked regardless of
+    `inline_scope`.
     """
     problems: list[str] = []
     fence_lang: str | None = None
@@ -92,8 +103,15 @@ def scan(md: Path, node: set[str], py: set[str], inline_scope: str) -> list[str]
                     problems.append(f"{md.relative_to(ROOT)}:{lineno}: `{name}()` not a Node method")
                 elif inline_scope == "python" and name not in py:
                     problems.append(f"{md.relative_to(ROOT)}:{lineno}: `{name}()` not a Python method")
-                elif inline_scope == "any" and name not in node and name not in py:
-                    problems.append(f"{md.relative_to(ROOT)}:{lineno}: `{name}()` not a Node or Python method")
+                elif inline_scope == "go" and name not in go:
+                    problems.append(f"{md.relative_to(ROOT)}:{lineno}: `{name}()` not a Go method")
+                elif (
+                    inline_scope == "any"
+                    and name not in node
+                    and name not in py
+                    and name not in go
+                ):
+                    problems.append(f"{md.relative_to(ROOT)}:{lineno}: `{name}()` not a binding method")
             continue
 
         # inside a fenced block: check flat `forge.NAME(` / `client.NAME(` calls
@@ -101,6 +119,8 @@ def scan(md: Path, node: set[str], py: set[str], inline_scope: str) -> list[str]
             expected, label = node, "Node"
         elif fence_lang in PY_FENCE_LANGS:
             expected, label = py, "Python"
+        elif fence_lang in GO_FENCE_LANGS:
+            expected, label = go, "Go"
         else:
             continue  # rust/toml/sh: not machine-checked here
         for m in CLIENT_CALL.finditer(line):
@@ -163,6 +183,13 @@ def semantic_regressions() -> list[str]:
             "forge.pool() is the Forge system pool",
             "valid UTF-8 payload bytes of at most 7,000 bytes",
         ],
+        "go.md": [
+            "Go does not download an embedded PostgreSQL server",
+            "Settle with `job.Receipt`",
+            "Handlers must honor the context for bounded shutdown",
+            "valid UTF-8 payloads up to 7,000 bytes",
+            "NewMemoryForTesting",
+        ],
     }
     for name, phrases in required.items():
         text = files.get(name, "")
@@ -182,8 +209,8 @@ def semantic_regressions() -> list[str]:
 
 
 def main() -> int:
-    node, py = load_known()
-    if not node or not py:
+    node, py, go = load_known()
+    if not node or not py or not go:
         print("skill-check: could not read the binding sources", file=sys.stderr)
         return 2
 
@@ -194,6 +221,7 @@ def main() -> int:
         (SKILL_DIR / "references" / "node.md", "node"),
         (SKILL_DIR / "references" / "python.md", "python"),
         (SKILL_DIR / "references" / "rust.md", "skip"),  # inline tokens not checked
+        (SKILL_DIR / "references" / "go.md", "go"),
     ]
     problems: list[str] = []
     checked = 0
@@ -202,7 +230,7 @@ def main() -> int:
             problems.append(f"missing skill file: {md.relative_to(ROOT)}")
             continue
         checked += 1
-        problems.extend(scan(md, node, py, scope))
+        problems.extend(scan(md, node, py, go, scope))
     problems.extend(semantic_regressions())
 
     if problems:

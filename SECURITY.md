@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Forge supports the current `1.x` release line with security fixes. Pre-1.0 releases are unsupported once `1.0.0` is published.
+Forge supports the current `1.x` release line with security fixes. Pre-1.0 releases are unsupported.
 
 | Version | Supported |
 | --- | --- |
@@ -17,4 +17,4 @@ You should receive an acknowledgement within three business days. Confirmed issu
 
 ## Disclosure
 
-Security releases are published across the active Rust, Node.js, and Python packages under the same version. Advisories identify affected versions, mitigations, and the fixed release. Metadata-only reservation packages are not supported runtime bindings.
+Security releases are published across the active Rust, Node.js, Python, and Go packages under the same version. Advisories identify affected versions, mitigations, and the fixed release. Metadata-only reservation packages are not supported runtime bindings.

@@ -5,10 +5,13 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+const maxPubsubPayloadBytes = 7000
 
 type Subscription struct {
 	owner   *Forge
@@ -41,8 +44,11 @@ func (f *Forge) Publish(ctx context.Context, topic string, payload []byte) error
 	if topic == "" {
 		return forgeError(CodeInvalid, "pubsub.publish", "topic cannot be empty")
 	}
-	if len(payload) > 7168 {
+	if len(payload) > maxPubsubPayloadBytes {
 		return forgeError(CodeLimit, "pubsub.publish", "payload exceeds the notification limit")
+	}
+	if !utf8.Valid(payload) {
+		return forgeError(CodeInvalid, "pubsub.publish", "payload must be valid UTF-8")
 	}
 	if f.mode == ModePostgres {
 		_, err := f.postgres(PrimitivePubsub).Exec(ctx, "SELECT pg_notify($1, $2)", postgresChannel(f.namespace, topic), string(payload))

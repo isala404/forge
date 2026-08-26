@@ -51,7 +51,7 @@
     "ratelimit_reservation_seconds": 3600,
     "blob_buffered_bytes": 52428800,
     "blob_key_bytes": 1024,
-    "pubsub_payload_bytes": 7168,
+    "pubsub_payload_bytes": 7000,
     "invalidation_event_bytes": 4096,
     "invalidation_targets": 64,
     "scope_component_bytes": 255,

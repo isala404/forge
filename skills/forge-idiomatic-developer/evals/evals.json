@@ -3,10 +3,10 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "Build a production-minded Node.js HTTP service named Away Together for managing group trips. Use TypeScript, npm, and exactly forgelib@1.0.1. The product needs authentication, trips and roles, invitations, availability, itinerary, polls, shared expenses and settlements, tasks and packing, messages, attachments, and search. Use application-owned Postgres tables with migrations and constraints for relational domain data; use Forge for its infrastructure primitives. Include a worker, safe blob access, graceful shutdown, documentation, and unit and integration tests. Work until lint, typecheck, tests, and the production build pass.",
-      "expected_output": "A runnable backend service that follows the user's explicit relational-storage requirement while using the installed Forge 1.0.1 API correctly.",
+      "prompt": "Build a production-minded Node.js HTTP service named Away Together for managing group trips. Use TypeScript, npm, and exactly forgelib@1.1.0. The product needs authentication, trips and roles, invitations, availability, itinerary, polls, shared expenses and settlements, tasks and packing, messages, attachments, and search. Use application-owned Postgres tables with migrations and constraints for relational domain data; use Forge for its infrastructure primitives. Include a worker, safe blob access, graceful shutdown, documentation, and unit and integration tests. Work until lint, typecheck, tests, and the production build pass.",
+      "expected_output": "A runnable backend service that follows the user's explicit relational-storage requirement while using the installed Forge 1.1.0 API correctly.",
       "expectations": [
-        "The project pins and resolves forgelib 1.0.1 and verifies API use against that installed version",
+        "The project pins and resolves forgelib 1.1.0 and verifies API use against that installed version",
         "Relational domain data uses application-owned Postgres migrations rather than Forge internal tables",
         "Forge initialization, auth, queue, blob, scheduler, and shutdown behavior match the Node binding",
         "Queue effects are idempotent at the logical side-effect boundary, including fan-out",
@@ -59,11 +59,11 @@
     },
     {
       "id": 6,
-      "prompt": "A consumer project is pinned to forgelib@1.0.0, while the local Forge repository checkout is 1.0.1. Review its blob presign configuration and API usage. Explain which source is authoritative, how to handle behavior that changed between the releases, and what safe configuration works across both.",
-      "expected_output": "A version-aware review that follows the installed package while using a non-empty configuration independently of release validation.",
+      "prompt": "A consumer project is pinned to forgelib@1.0.1, while the local Forge repository checkout is 1.1.0. Review its blob presign configuration and API usage. Explain which source is authoritative, how to handle the declared 1.1 compatibility reset, and what safe configuration works across both.",
+      "expected_output": "A version-aware review that follows the installed 1.0.1 package and does not copy 1.1 API assumptions into it.",
       "expectations": [
-        "The installed 1.0.0 package is treated as authoritative for the consumer's runtime behavior",
-        "The answer identifies empty signing-secret rejection as a 1.0.1 change",
+        "The installed 1.0.1 package is treated as authoritative for the consumer's runtime behavior",
+        "The answer recognizes the declared 1.1 compatibility reset and checks installed declarations or source",
         "The recommended configuration has no empty fallback and is safe on both releases",
         "The response does not silently apply current-repository behavior to the older installed package"
       ]
@@ -77,6 +77,18 @@
         "Queue depth is described as approximate and point-in-time",
         "The dedup window is described as configurable with a 300-second default",
         "Built-in pub/sub payloads are described as valid UTF-8 with a 7,000-byte limit"
+      ]
+    },
+    {
+      "id": 8,
+      "prompt": "Review a Go Forge service whose worker uses context.Background(), manually acknowledges jobs inside RunWorker, assumes Forge downloads an embedded PostgreSQL server, and exits without waiting for Close. Show the smallest correct lifecycle and test setup.",
+      "expected_output": "A focused Go review using application-owned contexts, managed settlement, explicit PostgreSQL configuration, bounded shutdown, and deterministic memory tests.",
+      "expectations": [
+        "The application owns and cancels the worker context, and handlers honor it",
+        "RunWorker handles ack and nack from the handler result instead of manual settlement",
+        "The answer states that Go does not ship embedded PostgreSQL",
+        "Close is awaited with a bounded context after owned work stops",
+        "Tests use NewMemoryForTesting with injected clock or entropy instead of sleeping"
       ]
     }
   ]

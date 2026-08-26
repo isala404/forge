@@ -5,11 +5,7 @@ description: Cross-language method index, return types, the error taxonomy, and 
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 
-A compact map of the surface. The raw method names line up across languages: Rust
-groups them under an accessor and takes option structs, while Node and Python put
-each one on the client with plain arguments. Node and Python also expose native JSON
-handles from the main import (`forge.queue<T>("emails")`, `forge.queue("emails")`)
-so app payloads stay typed without a separate overlay.
+Here is the surface in one place. Rust groups methods under accessors and takes option structs. Node and Python put methods directly on the client with plain arguments. Go uses methods on its `Forge` handle. Node and Python also expose native JSON handles from the main import (`forge.queue<T>("emails")`, `forge.queue("emails")`) so application payloads stay typed without a separate overlay.
 
 ## Creating a client
 
@@ -43,6 +39,14 @@ so app payloads stay typed without a separate overlay.
 
 		// inject your own backend for one primitive, leave the rest on Postgres
 		let forge = forgelib::Forge::builder().kv(custom_kv).build().await?;
+		```
+
+	</TabItem>
+	<TabItem label="Go" icon="seti:go">
+
+		```go
+		forgeClient, err := forge.InitDefault(ctx)             // reads ./forge.toml
+		forgeClient2, err := forge.InitFrom(ctx, "path/forge.toml")
 		```
 
 	</TabItem>
@@ -100,17 +104,17 @@ Rust's `testing::TestDatabase::new()` creates and later drops one isolated Postg
 
 ### Key/value
 
-| Operation | Rust | Node | Python |
-| --- | --- | --- | --- |
-| Get | `kv().get` | `kvGet` | `kv_get` |
-| Set (TTL, NX, XX) | `kv().set` | `kvSet` | `kv_set` |
-| Get many | `kv().mget` | `kvMget` | `kv_mget` |
-| Increment | `kv().incr` | `kvIncr` | `kv_incr` |
-| Delete | `kv().delete` | `kvDelete` | `kv_delete` |
-| Exists | `kv().exists` | `kvExists` | `kv_exists` |
-| Set TTL | `kv().expire` | `kvExpire` | `kv_expire` |
-| Compare and swap | `kv().compare_and_swap` | `kvCompareAndSwap` | `kv_compare_and_swap` |
-| Prefix scan | `kv().scan` | `kvScan`, `kvScanPage` | `kv_scan`, `kv_scan_page` |
+| Operation | Rust | Node | Python | Go |
+| --- | --- | --- | --- | --- |
+| Get | `kv().get` | `kvGet` | `kv_get` | `KVGet` |
+| Set (TTL, NX, XX) | `kv().set` | `kvSet` | `kv_set` | `KVSet` |
+| Get many | `kv().mget` | `kvMget` | `kv_mget` | `KVMGet` |
+| Increment | `kv().incr` | `kvIncr` | `kv_incr` | `KVIncr` |
+| Delete | `kv().delete` | `kvDelete` | `kv_delete` | `KVDelete` |
+| Exists | `kv().exists` | `kvExists` | `kv_exists` | `KVExists` |
+| Set TTL | `kv().expire` | `kvExpire` | `kv_expire` | `KVExpire` |
+| Compare and swap | `kv().compare_and_swap` | `kvCompareAndSwap` | `kv_compare_and_swap` | `KVCompareAndSwap` |
+| Prefix scan | `kv().scan` | `kvScan`, `kvScanPage` | `kv_scan`, `kv_scan_page` | `KVScan` |
 
 ### Queue
 
@@ -135,77 +139,77 @@ Rust's `testing::TestDatabase::new()` creates and later drops one isolated Postg
 
 ### Pub/sub
 
-| Operation | Rust | Node | Python |
-| --- | --- | --- | --- |
-| Publish | `pubsub().publish` | `pubsubPublish` | `pubsub_publish` |
-| Subscribe | `pubsub().subscribe` | `pubsubSubscribe` | `pubsub_subscribe` |
-| Channel name | `pubsub().channel_for` | `pubsubChannel` | `pubsub_channel` |
+| Operation | Rust | Node | Python | Go |
+| --- | --- | --- | --- | --- |
+| Publish | `pubsub().publish` | `pubsubPublish` | `pubsub_publish` | `Publish` |
+| Subscribe | `pubsub().subscribe` | `pubsubSubscribe` | `pubsub_subscribe` | `Subscribe` |
+| Channel name | `pubsub().channel_for` | `pubsubChannel` | `pubsub_channel` | `PubsubChannel` |
 
 ### Blob
 
-| Operation | Rust | Node | Python |
-| --- | --- | --- | --- |
-| Put | `blob().put` | `blobPut`, `blobPutObject` | `blob_put`, `blob_put_object` |
-| Get | `blob().get` | `blobGet` | `blob_get` |
-| Head (metadata) | `blob().head` | `blobHead` | `blob_head` |
-| Delete | `blob().delete` | `blobDelete` | `blob_delete` |
-| List | `blob().list` | `blobList` | `blob_list` |
-| Presign download | `blob().presign_download` | `blobPresignDownload` | `blob_presign_download` |
-| Presign upload | `blob().presign_upload` | `blobPresignUpload` | `blob_presign_upload` |
+| Operation | Rust | Node | Python | Go |
+| --- | --- | --- | --- | --- |
+| Put | `blob().put` | `blobPut`, `blobPutObject` | `blob_put`, `blob_put_object` | `BlobPut` |
+| Get | `blob().get` | `blobGet` | `blob_get` | `BlobGet`, `BlobOpen` |
+| Head (metadata) | `blob().head` | `blobHead` | `blob_head` | `BlobHead` |
+| Delete | `blob().delete` | `blobDelete` | `blob_delete` | `BlobDelete` |
+| List | `blob().list` | `blobList` | `blob_list` | `BlobList` |
+| Presign download | `blob().presign_download` | `blobPresignDownload` | `blob_presign_download` | `BlobPresignDownload` |
+| Presign upload | `blob().presign_upload` | `blobPresignUpload` | `blob_presign_upload` | `BlobPresignUpload` |
 
 ### Auth
 
-| Operation | Rust | Node | Python |
-| --- | --- | --- | --- |
-| Hash password | `auth().hash_password` | `hashPassword` | `hash_password` |
-| Verify password | `auth().verify_password` | `verifyPassword` | `verify_password` |
-| Needs rehash | `auth().needs_rehash` | `needsRehash` | `needs_rehash` |
-| Create session | `auth().create_session` | `createSession` | `create_session` |
-| Validate session | `auth().validate_session` | `validateSession` | `validate_session` |
-| Revoke session | `auth().revoke_session` | `revokeSession` | `revoke_session` |
-| Create API key | `auth().create_api_key` | `createApiKey` | `create_api_key` |
-| Verify API key | `auth().verify_api_key` | `verifyApiKey` | `verify_api_key` |
-| Create one-time token | `auth().create_token` | `createToken` | `create_token` |
-| Consume one-time token | `auth().consume_token` | `consumeToken` | `consume_token` |
+| Operation | Rust | Node | Python | Go |
+| --- | --- | --- | --- | --- |
+| Hash password | `auth().hash_password` | `hashPassword` | `hash_password` | `HashPassword` |
+| Verify password | `auth().verify_password` | `verifyPassword` | `verify_password` | `VerifyPassword` |
+| Needs rehash | `auth().needs_rehash` | `needsRehash` | `needs_rehash` | `NeedsRehash` |
+| Create session | `auth().create_session` | `createSession` | `create_session` | `CreateSession` |
+| Validate session | `auth().validate_session` | `validateSession` | `validate_session` | `ValidateSession` |
+| Revoke session | `auth().revoke_session` | `revokeSession` | `revoke_session` | `RevokeSession` |
+| Create API key | `auth().create_api_key` | `createApiKey` | `create_api_key` | `CreateAPIKey` |
+| Verify API key | `auth().verify_api_key` | `verifyApiKey` | `verify_api_key` | `VerifyAPIKey` |
+| Create one-time token | `auth().create_token` | `createToken` | `create_token` | `CreateToken` |
+| Consume one-time token | `auth().consume_token` | `consumeToken` | `consume_token` | `ConsumeToken` |
 
 ### Rate limit
 
-| Operation | Rust | Node | Python |
-| --- | --- | --- | --- |
-| Check and consume | `ratelimit().check`, `check_with` | `rateLimitCheck` | `rate_limit_check` |
+| Operation | Rust | Node | Python | Go |
+| --- | --- | --- | --- | --- |
+| Check and consume | `ratelimit().check`, `check_with` | `rateLimitCheck` | `rate_limit_check` | `RateLimitCheck` |
 
 ### Schedule
 
-| Operation | Rust | Node | Python |
-| --- | --- | --- | --- |
-| Cron | `schedule().cron` | `scheduleCron` | `schedule_cron` |
-| One-off | `schedule().at` | `scheduleAt` | `schedule_at` |
-| Cancel | `schedule().cancel` | `scheduleCancel` | `schedule_cancel` |
-| List | `schedule().list` | `scheduleList` | `schedule_list` |
-| Tick once | `run_scheduler_once` | `runSchedulerOnce` | `run_scheduler_once` |
+| Operation | Rust | Node | Python | Go |
+| --- | --- | --- | --- | --- |
+| Cron | `schedule().cron` | `scheduleCron` | `schedule_cron` | `ScheduleCron` |
+| One-off | `schedule().at` | `scheduleAt` | `schedule_at` | `ScheduleAt` |
+| Cancel | `schedule().cancel` | `scheduleCancel` | `schedule_cancel` | `ScheduleCancel` |
+| List | `schedule().list` | `scheduleList` | `schedule_list` | `ScheduleList` |
+| Tick once | `run_scheduler_once` | `runSchedulerOnce` | `run_scheduler_once` | `RunSchedulerOnce` |
 
 ### Config and flags
 
-| Operation | Rust | Node | Python |
-| --- | --- | --- | --- |
-| Get value | `config().get_raw` | `configGet` | `config_get` |
-| Set value | `config().set_raw` | `configSet` | `config_set` |
-| Delete value | `config().delete_raw` | `configDelete` | `config_delete` |
-| Evaluate a flag | `config().flag` | `flag` | `flag` |
-| Set a flag | `config().set_flag` | `setFlagPercent`, `setFlagOn`, `setFlagOff`, `setFlagAllowList` | `set_flag_percent`, `set_flag_on`, `set_flag_off`, `set_flag_allow_list` |
-| Delete a flag | `config().delete_flag` | `deleteFlag` | `delete_flag` |
+| Operation | Rust | Node | Python | Go |
+| --- | --- | --- | --- | --- |
+| Get value | `config().get_raw` | `configGet` | `config_get` | `ConfigGet` |
+| Set value | `config().set_raw` | `configSet` | `config_set` | `ConfigSet` |
+| Delete value | `config().delete_raw` | `configDelete` | `config_delete` | `ConfigDelete` |
+| Evaluate a flag | `config().flag` | `flag` | `flag` | `Flag` |
+| Set a flag | `config().set_flag` | `setFlagPercent`, `setFlagOn`, `setFlagOff`, `setFlagAllowList` | `set_flag_percent`, `set_flag_on`, `set_flag_off`, `set_flag_allow_list` | `SetFlag` |
+| Delete a flag | `config().delete_flag` | `deleteFlag` | `delete_flag` | `DeleteFlag` |
 
 ### Client
 
-| Operation | Rust | Node | Python |
-| --- | --- | --- | --- |
-| Backend capabilities | `backend_capabilities` | `backendCapabilities` | `backend_capabilities` |
-| Liveness | `is_live` | `isLive` | `is_live` |
-| Readiness probe | `probe` | `probe` | `probe` |
-| Metrics snapshot | `metrics_snapshot` | `metricsSnapshot` | `metrics_snapshot` |
-| Prometheus text | `render_prometheus` | `renderPrometheus` | `render_prometheus` |
-| Scheduler loop | `run_scheduler` | (interval) | (interval) |
-| Maintenance sweep | `maintain` | `maintain` | `maintain` |
+| Operation | Rust | Node | Python | Go |
+| --- | --- | --- | --- | --- |
+| Backend capabilities | `backend_capabilities` | `backendCapabilities` | `backend_capabilities` | `BackendCapabilities` |
+| Liveness | `is_live` | `isLive` | `is_live` | `IsLive` |
+| Readiness probe | `probe` | `probe` | `probe` | `Probe` |
+| Metrics snapshot | `metrics_snapshot` | `metricsSnapshot` | `metrics_snapshot` | `MetricsSnapshot` |
+| Prometheus text | `render_prometheus` | `renderPrometheus` | `render_prometheus` | `RenderPrometheus` |
+| Scheduler loop | `run_scheduler` | (interval) | (interval) | (interval) |
+| Maintenance sweep | `maintain` | `maintain` | `maintain` | `Maintain` |
 
 ### Stateless interoperability helpers
 

@@ -14,6 +14,7 @@ Read the relevant sections of the language reference:
 - Node.js/TypeScript: [references/node.md](references/node.md)
 - Python: [references/python.md](references/python.md)
 - Rust: [references/rust.md](references/rust.md)
+- Go: [references/go.md](references/go.md)
 
 Read these only when they apply:
 
