@@ -19,15 +19,17 @@ export default defineConfig({
 			plugins: [
 				starlightLlmsTxt({
 					description:
-						'The standard library for agent-built SaaS. Eight backend primitives (kv, queue, pub/sub, blob, auth, rate limit, schedule, config/flags) on one Postgres connection, with the same API in Rust, Node, and Python.',
+						'A backend infrastructure library with eight bounded primitives and one contract across Rust, JavaScript on Node.js and Bun, Python, and Go.',
 					details:
-						'Forge is one library that gives an app eight backend primitives on a single Postgres database, with a memory backend for tests that passes the same conformance suite. To generate correct Forge code, install the forge-idiomatic-developer skill (`npx skills add isala404/forge`); the API is not in model training data.',
+						'Forge runs inside an application backend. PostgreSQL provides shared durable state, memory provides process-local test state, and filesystem or S3-compatible storage may hold blob bytes. Applications own protocols, authorization policy, deployment, observability export, and every frontend choice.',
 					// A human-readable index of the individual docs pages, alongside the
 					// generated full/abridged sets above.
 					optionalLinks: [
-						{ label: 'Quickstart', url: 'https://tryforge.dev/quickstart/', description: 'Install Forge, point it at Postgres, and make your first calls in Rust, Node, or Python.' },
+						{ label: 'Quickstart', url: 'https://tryforge.dev/quickstart/', description: 'Install Forge, choose a runtime profile, and make your first calls.' },
+						{ label: 'Scope and costs', url: 'https://tryforge.dev/scope/', description: 'Hot-path costs, durability boundaries, partial adoption, and when to use a service directly.' },
+						{ label: 'Primitive semantics', url: 'https://tryforge.dev/semantics/', description: 'Consistency, ordering, retry, outage, and multi-process guarantees for every primitive.' },
 						{ label: 'Primitives', url: 'https://tryforge.dev/primitives/', description: "The eight primitives, what each is for, and the methods you'll call." },
-						{ label: 'Recipes', url: 'https://tryforge.dev/recipes/', description: 'End-to-end patterns: auth flows, background jobs, live updates, file handling, scheduled work.' },
+						{ label: 'Recipes', url: 'https://tryforge.dev/recipes/', description: 'Backend patterns for auth, jobs, event transport, files, and scheduled work.' },
 						{ label: 'Configuration', url: 'https://tryforge.dev/configuration/', description: 'Every forge.toml setting, its default, and what it changes.' },
 						{ label: 'Operations', url: 'https://tryforge.dev/operations/', description: 'Running Forge in production: system database, workers, scheduler, health, durability, errors.' },
 						{ label: 'Reference', url: 'https://tryforge.dev/reference/', description: 'Cross-language method index, return types, the error taxonomy, and limits.' },
@@ -39,7 +41,7 @@ export default defineConfig({
 			],
 			title: 'Forge',
 			description:
-				'The standard library for agent-built SaaS. Eight backend primitives, one Postgres connection, the same API in Rust, Node, and Python.',
+				'Eight bounded backend primitives with one contract across Rust, JavaScript, Python, and Go.',
 			logo: {
 				light: './src/assets/logo-light.svg',
 				dark: './src/assets/logo-dark.svg',
@@ -68,14 +70,22 @@ export default defineConfig({
 				{
 					label: 'Guide',
 					items: [
+						{ slug: 'support' },
+						{ slug: 'scope' },
+						{ slug: 'semantics' },
+						{ slug: 'security' },
 						{ slug: 'primitives' },
 						{ slug: 'recipes' },
+						{ slug: 'integrations' },
 						{ slug: 'configuration' },
 						{ slug: 'operations' },
+						{ slug: 'performance' },
+						{ slug: 'event-delivery' },
 						{ slug: 'api-stability' },
 					],
 				},
 				{ label: 'Reference', slug: 'reference' },
+				{ label: 'Generated contract', slug: 'contract-reference-generated' },
 			],
 		}),
 	],

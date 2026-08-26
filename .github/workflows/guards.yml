@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26"
+          go-version-file: bindings/go/go.mod
       - name: client libraries match the core API contract
         run: python3 tools/api-contract/check.py
       - name: generated contract files are current

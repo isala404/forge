@@ -119,7 +119,7 @@ jobs:
     needs: quality
     services:
       postgres:
-        image: postgres:17
+        image: postgres:18
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -142,7 +142,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -245,8 +245,9 @@ jobs:
             tar -tzf "forgelib-${{ inputs.version }}.tgz" | grep -qx "package/forgelib.$platform.node"
           done
           mkdir package-smoke
-          npm install --prefix package-smoke "./forgelib-${{ inputs.version }}.tgz"
+          npm install --prefix package-smoke "./forgelib-${{ inputs.version }}.tgz" @openfeature/server-sdk@1.23.0
           node -e "require('./package-smoke/node_modules/forgelib')"
+          node -e "require('./package-smoke/node_modules/forgelib/openfeature')"
       - uses: actions/upload-artifact@v4
         with:
           name: release-npm

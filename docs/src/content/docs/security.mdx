@@ -1,0 +1,38 @@
+---
+title: Security guide
+description: Namespace, credential, signed URL, rate-limit, and untrusted-payload guidance.
+---
+
+Forge provides isolation mechanisms and bounded credential helpers. The application still authenticates requests, authorizes every resource action, owns HTTP security, and decides which failures may degrade safely.
+
+## Namespace selection
+
+Choose one stable namespace per application and environment, such as `billing.production`. Never derive the global namespace from an untrusted request, and never reuse a production namespace in staging or tests against the same backend. Namespaces prevent accidental key and row collisions; they do not prove that the current user may access a tenant, queue, blob, or token. Authorize first, then compose a bounded primitive-specific key with the scoped-key helpers.
+
+## Signed and presigned URLs
+
+Treat every signed URL as a bearer credential. Send it only to the authorized caller, use short expiries, keep query strings out of logs and traces, and bind proxy validation to the expected method, namespace, logical key, format version, expiry, and upload limit. Forge proxy upload signatures are the portable choice when the application must enforce a hard byte ceiling or perform application authorization at upload time. Native S3 presigned GET/PUT avoids proxying bytes but cannot promise a portable maximum PUT body size; enforce bucket policy and validate the uploaded object before making it authoritative.
+
+Signing secrets need independent production values and normal secret-manager rotation. Do not place them in `forge.toml`, source control, metrics, exception messages, or diagnostics. Access keys, session tokens, database URLs, API-key secrets, session tokens, one-time tokens, and native presigned query strings follow the same rule.
+
+## Sessions and cookies
+
+Forge session tokens are opaque bearer credentials stored as hashes. When carried in cookies, the host framework must set `Secure`, `HttpOnly`, and an appropriate `SameSite` value, scope `Path` and `Domain` narrowly, and apply CSRF defenses to state-changing requests. Rotate the session after authentication or privilege changes, revoke it on logout, and use both idle and absolute expiry. Do not put session tokens in URLs or browser-readable telemetry.
+
+Password hashing uses Argon2id and `needsRehash` identifies records that should be upgraded after a successful verification. Rate-limit before password verification so credential stuffing cannot turn the password hasher into an unbounded CPU endpoint. Account-recovery responses should not reveal whether an identity exists.
+
+## API keys and one-time tokens
+
+API-key secrets are returned once. Store only the displayed secret in the caller's secret store; Forge stores its hash. Give keys a bounded expiry, explicit scopes, and small non-secret metadata, then enforce owner and scopes in application policy after verification. Revocation and expiry must be handled as normal unauthenticated results.
+
+One-time tokens are purpose-scoped, expiring, hashed, and atomically consumed. Keep payloads small and non-secret; use them for opaque return state or record IDs, not authorization policy. A token for one purpose cannot be replayed for another, and a consumed token cannot be recovered.
+
+## Fail-open rate limits
+
+Fail-open means a limiter backend outage allows the request. It is reasonable for low-risk availability paths where denial would cause a larger incident, but unsafe for password guessing, expensive compute, quota enforcement, abuse-sensitive writes, or financial limits. Select the failure mode per policy and route, alert on limiter backend failures, and never describe a fail-open limit as an enforced security boundary.
+
+## Untrusted payloads
+
+KV values, queue bodies, pub/sub messages, blob metadata, config values, trace envelopes, and invalidation events are untrusted application input. Forge enforces byte and shape bounds, but the consumer must authenticate its source where relevant, validate its schema, avoid unsafe deserialization, and escape it for the output context. Queue handlers must be idempotent and must not execute payload strings as code, shell, SQL, templates, paths, or URLs without application validation. Use blob references for large queue artifacts and re-authorize access when resolving them.
+
+Default Forge telemetry excludes payloads, raw keys, identifiers, tokens, signed URLs, provider errors, and other high-cardinality content. Preserve that boundary in application spans and logs; opt-in model or user-content telemetry needs its own redaction and retention review.

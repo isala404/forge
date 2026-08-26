@@ -103,14 +103,11 @@ pub(super) fn sha256_base64(value: &str) -> Result<String> {
     check_sha256(value)?;
     let bytes = value.as_bytes();
     let mut decoded = Vec::with_capacity(32);
-    for pair in bytes.chunks_exact(2) {
-        let [high, low] = pair else {
-            return Err(ForgeError::invalid("invalid SHA-256 checksum"));
-        };
-        let high = (*high as char)
+    for &[high, low] in bytes.as_chunks::<2>().0 {
+        let high = (high as char)
             .to_digit(16)
             .ok_or_else(|| ForgeError::invalid("invalid SHA-256 checksum"))?;
-        let low = (*low as char)
+        let low = (low as char)
             .to_digit(16)
             .ok_or_else(|| ForgeError::invalid("invalid SHA-256 checksum"))?;
         decoded.push((high * 16 + low) as u8);

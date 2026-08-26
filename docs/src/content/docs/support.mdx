@@ -1,0 +1,26 @@
+---
+title: Support matrix
+description: Supported languages, runtimes, platforms, PostgreSQL versions, and package formats.
+---
+
+Forge 1.1 has four first-party language surfaces. Node.js and Bun use the same JavaScript package and contract; Bun is a tested runtime, not a separate binding.
+
+| Language | Runtime floor | CI versions | Package |
+| --- | --- | --- | --- |
+| Rust | 1.94.1 | 1.94.1 and stable | crates.io crate |
+| JavaScript | Node.js 24 or Bun 1.4 | Node.js 24; Bun 1.4 | npm package with native addon |
+| Python | 3.9 | 3.12 today; the release matrix expands to 3.9 through 3.14 before 1.1 ships | wheel and sdist on PyPI |
+| Go | 1.27 | 1.27 on Linux amd64 | Go module |
+
+| Surface | Supported matrix |
+| --- | --- |
+| PostgreSQL | 18 |
+| Linux | amd64 glibc, amd64 musl for Node, arm64 glibc |
+| macOS | arm64 |
+| Windows | amd64 |
+| Rust package | source crate |
+| JavaScript package | npm tarball plus platform native addon |
+| Python package | abi3 wheels plus sdist |
+| Go package | pure-Go source module; tested and supported on Linux amd64 |
+
+The declared runtime and PostgreSQL versions are release gates. A platform listed here is supported only when its packaged artifact installs and its smoke test passes.

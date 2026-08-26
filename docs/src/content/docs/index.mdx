@@ -1,9 +1,9 @@
 ---
-title: Forge
-description: The standard library for agent-built SaaS. Eight backend primitives on one Postgres connection, with the same API in Rust, Node, and Python.
+title: Forge backend infrastructure
+description: Eight bounded backend primitives with one contract across Rust, JavaScript, Python, and Go.
 template: splash
 hero:
-  tagline: One library for the plumbing every app needs. Eight backend primitives on a single Postgres connection, with the same API in Rust, Node, and Python.
+  tagline: Eight backend primitives with one versioned contract across Rust, JavaScript, Python, and Go.
   image:
     file: ../../assets/hero.svg
     alt: Eight primitives feeding into one Postgres connection
@@ -20,18 +20,16 @@ hero:
 
 import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-Every app needs the same plumbing, and the usual answer is a separate service for
-each piece: Redis for caching and sessions, a queue for background jobs, object
-storage for uploads, something for auth, a cron runner, a rate limiter. That's six
-things to provision, secure, mock in tests, and learn before you ship a feature.
-Forge gives you all of it in one library.
+Forge runs inside an application backend. It provides key/value storage, queues, pub/sub, blobs, authentication helpers, rate limits, schedules, and configuration through one contract. PostgreSQL is the shared durable backend; memory is the process-local test backend. Blob bytes may also use a filesystem or S3-compatible store.
+
+The application owns its HTTP or RPC framework, business tables, authorization policy, worker handlers, deployment, process signals, and telemetry export. Frontend frameworks, browser transports, client caches, WebSockets, SSE clients, and refetching are also application concerns. Forge ships no browser package.
 
 ## Eight primitives, one connection
 
 <CardGrid>
 	<LinkCard title="Key/value" href="/primitives/#key-value" description="Get, set, counters, compare-and-swap, prefix scan, TTLs. Lineage: Redis." />
 	<LinkCard title="Queue" href="/primitives/#queue" description="Background jobs with acks, retries, delays, dedup, and dead letters. Lineage: SQS." />
-	<LinkCard title="Pub/sub" href="/primitives/#pubsub" description="Live fan-out to connected clients for presence and updates. Lineage: Postgres LISTEN/NOTIFY." />
+	<LinkCard title="Pub/sub" href="/primitives/#pubsub" description="Connected-only backend fan-out with no retention or replay. Lineage: Postgres LISTEN/NOTIFY." />
 	<LinkCard title="Blob" href="/primitives/#blob" description="Put, get, delete, and presigned upload and download URLs. Lineage: S3." />
 	<LinkCard title="Auth" href="/primitives/#auth" description="argon2 password hashing, sessions, and API keys. Lineage: OWASP and PHC." />
 	<LinkCard title="Rate limit" href="/primitives/#rate-limit" description="Token-bucket or sliding-window checks with IETF headers." />
@@ -39,44 +37,36 @@ Forge gives you all of it in one library.
 	<LinkCard title="Config and flags" href="/primitives/#config-and-flags" description="Runtime settings and feature flags with percentage rollout." />
 </CardGrid>
 
-## Why Forge
+## Runtime boundary
 
 <CardGrid stagger>
-	<Card title="One library, not six services" icon="puzzle">
-		By default every primitive runs on one Postgres database, so there's nothing
-		else to provision or operate. When one piece needs to scale, move it onto its
-		own backend without changing your code.
+	<Card title="One coordinated schema" icon="puzzle">
+		PostgreSQL-backed primitives use one Forge-owned schema and bounded pools. A measured hot primitive can use a separate PostgreSQL target without changing the public contract.
 	</Card>
-	<Card title="The same API in three languages" icon="rocket">
-		Rust is the reference implementation. The Node and Python bindings wrap the
-		same core and are checked against the same conformance suite, so behavior
-		matches across all three.
+	<Card title="One contract in four languages" icon="rocket">
+		Rust, JavaScript, Python, and Go are checked against one versioned contract
+		and the same declarative conformance scenarios.
 	</Card>
-	<Card title="Test on memory, ship on Postgres" icon="approve-check">
-		The memory and Postgres backends pass the same conformance tests, so your
-		suite runs in-process with no database and still behaves the way production
-		will. Flip between them from an environment variable.
+	<Card title="Explicit backend differences" icon="approve-check">
+		Memory and PostgreSQL implement the same supported operations, while runtime capabilities report durability, process scope, notification, and blob differences.
 	</Card>
-	<Card title="Made to hand to an agent" icon="setting">
-		The API isn't in any model's training data. Install the companion skill and a
-		coding agent learns which primitive fits which task before it writes a line.
+	<Card title="Application-owned integration" icon="setting">
+		Forge does not install a web server, signal handler, metrics exporter, MCP server, or frontend adapter. The host application owns those boundaries.
 	</Card>
 </CardGrid>
 
-## Postgres is enough
+## Minimal PostgreSQL setup
 
 ```toml title="forge.toml"
 [postgres]
 url = "${DATABASE_URL:-postgres://localhost/myapp}"
 ```
 
-One connection string is the whole setup. `init()` reads `forge.toml`, runs Forge's
-own migrations, and hands you a client with all eight primitives on it. Omit any
-setting you don't need and Forge fills in production-safe defaults.
+`init()` reads `forge.toml` and returns one client. Development may run Forge migrations during initialization. Production startup validates the schema by default; run migrations as a separate deployment step before serving traffic.
 
 <CardGrid>
 	<LinkCard title="Quickstart" href="/quickstart/" description="Install Forge and make your first calls in five minutes." />
 	<LinkCard title="Tutorials" href="/tutorials/todo-app/" description="Build a to-do app, a URL shortener, and a chat app, step by step." />
 	<LinkCard title="Primitives" href="/primitives/" description="The eight building blocks, with the methods that matter for each." />
-	<LinkCard title="Recipes" href="/recipes/" description="Auth, background jobs, presigned uploads, and live updates from real apps." />
+	<LinkCard title="Semantics" href="/semantics/" description="Durability, ordering, retries, expiry, outages, and crash boundaries." />
 </CardGrid>

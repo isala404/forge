@@ -33,7 +33,7 @@ jobs:
     timeout-minutes: 45
     services:
       postgres:
-        image: postgres:17
+        image: postgres:18
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: forge
@@ -79,7 +79,7 @@ jobs:
     timeout-minutes: 60
     services:
       postgres:
-        image: postgres:17
+        image: postgres:18
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: forge
@@ -91,7 +91,12 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 20
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
       - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -108,7 +113,7 @@ jobs:
     timeout-minutes: 45
     services:
       postgres:
-        image: postgres:17
+        image: postgres:18
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: forge
@@ -133,12 +138,15 @@ jobs:
         working-directory: examples/linksapp/python-be
       - name: Start canonical backend
         run: |
-          (cd examples/linksapp/python-be && uv run uvicorn app.main:app --host 127.0.0.1 --port 9093 > /tmp/links-python.log 2>&1) &
+          .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 9093 > /tmp/links-python.log 2>&1 &
+          backend_pid=$!
+          trap 'kill "$backend_pid" 2>/dev/null || true; wait "$backend_pid" 2>/dev/null || true' EXIT
           for attempt in $(seq 1 60); do
             curl -fsS http://127.0.0.1:9093/healthz >/dev/null && exit 0
             sleep 2
           done
           exit 1
+        working-directory: examples/linksapp/python-be
       - name: Dump logs
         if: failure()
         run: tail -n 300 /tmp/links-python.log

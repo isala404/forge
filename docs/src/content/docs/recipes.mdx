@@ -5,10 +5,11 @@ description: "End-to-end patterns built from the example apps: auth flows, backg
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 
-These are the patterns that show up in the [example apps](https://github.com/isala404/forge/tree/main/examples)
-(a todo app, a URL shortener, and a chat app, each built three times on the Rust,
-Node, and Python bindings). The code is trimmed to the Forge calls so the shape is
-easy to lift into your own handlers.
+These are the patterns that show up in the [canonical examples](https://github.com/isala404/forge/tree/main/examples). Each language has one application example instead of parallel copies of every app. The code here shows all languages where comparison helps, trimmed to the Forge calls so the shape is easy to lift into your own handlers.
+
+## Production recipe index
+
+The deployment recipes live beside their operational guarantees: [migration jobs](/operations/#deploy-migrations-before-the-application), [managed workers and graceful shutdown](/operations/#workers), [transactional outbox delivery](/operations/#transactional-outbox), [liveness and readiness endpoints](/operations/#health-checks), and [Prometheus export](/operations/#metrics-and-tracing). Queue producers should supply a deterministic job ID for a business operation and make handlers safe to repeat; use the outbox when enqueue must agree with an application-owned SQL transaction. For blob uploads, use the Forge proxy signature when the server must enforce a hard body limit or application-specific authorization, and native S3 presigning when direct provider transfer is acceptable.
 
 ## Password auth
 
@@ -236,10 +237,10 @@ identically whether or not the email exists so the endpoint doesn't confirm acco
 		}
 
 		// reset handler: consume exactly once, then re-hash and revoke every session
-		const userId = await forge.consumeToken(token, "password-reset");
-		if (!userId) return c.json({ error: "link expired" }, 400);
-		await updatePasswordHash(userId, await forge.hashPassword(newPassword));
-		await forge.revokeAllSessions(userId);
+		const consumed = await forge.consumeToken(token, "password-reset");
+		if (!consumed) return c.json({ error: "link expired" }, 400);
+		await updatePasswordHash(consumed.userId, await forge.hashPassword(newPassword));
+		await forge.revokeAllSessions(consumed.userId);
 		```
 
 	</TabItem>
@@ -254,11 +255,11 @@ identically whether or not the email exists so the endpoint doesn't confirm acco
 		    await forge.queue("emails").enqueue({"to": email, "reset_link": link_for(token)})
 
 		# reset handler: consume exactly once, then re-hash and revoke every session
-		user_id = await forge.consume_token(token, "password-reset")
-		if not user_id:
+		consumed = await forge.consume_token(token, "password-reset")
+		if not consumed:
 		    raise HTTPException(400, "link expired")
-		await update_password_hash(user_id, await forge.hash_password(new_password))
-		await forge.revoke_all_sessions(user_id)
+		await update_password_hash(consumed.user_id, await forge.hash_password(new_password))
+		await forge.revoke_all_sessions(consumed.user_id)
 		```
 
 	</TabItem>
@@ -275,11 +276,11 @@ identically whether or not the email exists so the endpoint doesn't confirm acco
 		}
 
 		// reset handler: consume exactly once, then re-hash and revoke every session
-		let Some(user_id) = forge.auth().consume_token(token, "password-reset").await? else {
+		let Some(consumed) = forge.auth().consume_token_with_payload(token, "password-reset").await? else {
 		    return link_expired();
 		};
-		update_password_hash(&user_id, forge.auth().hash_password(&new_password).await?).await?;
-		forge.auth().revoke_all_sessions(&user_id).await?;
+		update_password_hash(&consumed.user_id, forge.auth().hash_password(&new_password).await?).await?;
+		forge.auth().revoke_all_sessions(&consumed.user_id).await?;
 		```
 
 	</TabItem>
@@ -368,23 +369,23 @@ for a managed version).
 	</TabItem>
 </Tabs>
 
-## Push live updates to the browser
+## Publish backend events through an application transport
 
-The worker that drains the clicks queue publishes the new total on a topic. An
-SSE route subscribes to that topic and forwards each message to the connected
-client, then drops the subscription when the client disconnects.
+The worker that drains the clicks queue publishes a bounded invalidation hint after the durable count changes. An application-owned SSE route subscribes to that topic and forwards each hint to a connected client, then drops the subscription when the client disconnects. The client refetches the count; it never treats the hint as authoritative state. WebSockets or another transport can use the same backend pattern.
 
 <Tabs syncKey="lang">
 	<TabItem label="Node" icon="seti:javascript">
 
 		```ts
-		// in the worker handler, after reading the new count
-		await forge.topic<{ slug: string; clicks: number }>(`clicks:${slug}`)
-		  .publish({ slug, clicks: total });
+		// in the worker handler, after committing the new count
+		await forge.pubsubPublish(`clicks:${slug}`, encodeInvalidationEvent({
+		  schema_version: 1, tags: [`links/${slug}`],
+		  query_keys: [["link", slug]], revision: String(total),
+		}).toString("utf8"));
 
 		// in the SSE route (Hono)
 		return streamSSE(c, async (stream) => {
-		  const events = await forge.topic<{ slug: string; clicks: number }>(`clicks:${slug}`)
+		  const events = await forge.topic<unknown>(`clicks:${slug}`)
 		    .subscribe();
 		  stream.onAbort(() => { void events.return?.(); });
 		  for await (const event of events) {
@@ -397,8 +398,12 @@ client, then drops the subscription when the client disconnects.
 	<TabItem label="Python" icon="seti:python">
 
 		```python
-		# in the worker handler, after reading the new count
-		await forge.topic(f"clicks:{slug}").publish({"slug": slug, "clicks": total})
+		# in the worker handler, after committing the new count
+		hint = encode_invalidation_event({
+		    "schema_version": 1, "tags": [f"links/{slug}"],
+		    "query_keys": [["link", slug]], "revision": str(total),
+		})
+		await forge.pubsub_publish(f"clicks:{slug}", hint.decode())
 
 		# in the SSE route (FastAPI)
 		async def live(slug: str):
@@ -415,9 +420,13 @@ client, then drops the subscription when the client disconnects.
 		```rust
 		use futures_util::StreamExt;
 
-		// in the worker handler, after reading the new count
-		forge.pubsub().publish(&format!("clicks:{slug}"),
-		    Bytes::from(json!({ "slug": slug, "clicks": total }).to_string())).await?;
+		// in the worker handler, after committing the new count
+		let hint = InvalidationEvent::new(
+		    vec![format!("links/{slug}")],
+		    vec![vec![json!("link"), json!(slug)]],
+		    Some(total.to_string()),
+		)?;
+		forge.pubsub().publish(&format!("clicks:{slug}"), Bytes::from(hint.encode()?)).await?;
 
 		// in the SSE route
 		let mut sub = forge.pubsub().subscribe(&format!("clicks:{slug}")).await?;
@@ -430,9 +439,7 @@ client, then drops the subscription when the client disconnects.
 </Tabs>
 
 <Aside>
-	Pub/sub only reaches connected clients, which is exactly right for a live
-	counter. The durable number lives in the key/value counter; the topic just
-	nudges open dashboards to refresh.
+	Pub/sub only reaches connected clients. The durable number lives in the key/value counter; the topic only tells open consumers to refresh. See [Event delivery](/event-delivery/) for transport limits and client ownership.
 </Aside>
 
 ## Store and serve a file
@@ -448,7 +455,7 @@ serve them, or hand the client a presigned link so it can fetch the file directl
 
 		const stored = await forge.blobGet(`qr/${slug}.svg`);   // string | null
 
-		const url = await forge.blobPresignDownload(`qr/${slug}.svg`, 3600);
+		const url = (await forge.blobPresignDownload(`qr/${slug}.svg`, 3600)).url;
 		```
 
 	</TabItem>
@@ -459,7 +466,7 @@ serve them, or hand the client a presigned link so it can fetch the file directl
 
 		stored = await forge.blob_get(f"qr/{slug}.svg")   # bytes | None
 
-		url = await forge.blob_presign_download(f"qr/{slug}.svg", 3600)
+		url = (await forge.blob_presign_download(f"qr/{slug}.svg", 3600)).url
 		```
 
 	</TabItem>
@@ -475,15 +482,13 @@ serve them, or hand the client a presigned link so it can fetch the file directl
 		let svg = forge.blob().get(&format!("qr/{slug}.svg")).await?;   // Option<Bytes>
 
 		let url = forge.blob()
-		    .presign_download(&format!("qr/{slug}.svg"), Duration::from_secs(3600)).await?;
+		    .presign_download(&format!("qr/{slug}.svg"), Duration::from_secs(3600)).await?.url;
 		```
 
 	</TabItem>
 </Tabs>
 
-Presigned links need a `signing_secret` set in `forge.toml`. For uploads, hand back
-a presigned upload URL capped at a `max_bytes` you choose and let the client PUT
-straight to it.
+Presigned links need a `signing_secret` set in `forge.toml`. For uploads, hand back the `.url` from the structured proxy presign result; the application proxy verifies its method, key, expiry, namespace, and `max_bytes` before accepting the body.
 
 ## Run work later
 

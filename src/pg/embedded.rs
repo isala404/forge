@@ -11,10 +11,8 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
-/// The Postgres major pinned for embedded servers. Kept on the oldest supported
-/// release (see `MIN_SERVER_VERSION_NUM`), not the newest, so an embedded data
-/// directory never needs a pg_upgrade when Forge updates.
-const EMBEDDED_PG_VERSION: &str = "=17";
+/// The PostgreSQL major pinned for embedded servers.
+const EMBEDDED_PG_VERSION: &str = "=18";
 
 /// The database Forge creates and connects to inside the embedded server.
 const EMBEDDED_DATABASE: &str = "forge";

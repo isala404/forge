@@ -12,6 +12,12 @@ import (
 	"time"
 )
 
+func TestPostgres18IsTheOnlySupportedFloor(t *testing.T) {
+	if supportedPostgresVersion(179999) || !supportedPostgresVersion(180000) || !supportedPostgresVersion(180001) || supportedPostgresVersion(190000) {
+		t.Fatal("only PostgreSQL 18 should be supported")
+	}
+}
+
 func TestHealthMetricsAndTraceContextArePerInstance(t *testing.T) {
 	first, err := NewMemory(Config{Environment: EnvironmentTest})
 	if err != nil {

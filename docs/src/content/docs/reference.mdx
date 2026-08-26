@@ -48,6 +48,54 @@ so app payloads stay typed without a separate overlay.
 	</TabItem>
 </Tabs>
 
+## Deterministic test clients
+
+The memory test factories inject a manual clock and seeded, non-cryptographic entropy. Advancing time drives KV TTLs, sessions and tokens, delayed jobs, retry availability, rate-limit refill, and schedules without sleeping. Never use seeded entropy for production credentials.
+
+<Tabs syncKey="lang">
+	<TabItem label="Node" icon="seti:javascript">
+
+		```ts
+		const config = '[forge]\nmode = "memory"\nenvironment = "test"\n';
+		const forge = await ForgeClient.initMemoryForTesting(config, Date.UTC(2026, 0, 1), 42);
+		forge.advanceTestClock(60); // seconds
+		```
+
+	</TabItem>
+	<TabItem label="Python" icon="seti:python">
+
+		```python
+		config = '[forge]\nmode = "memory"\nenvironment = "test"\n'
+		forge = await forgelib.ForgeClient.init_memory_for_testing(config, 1_767_225_600_000, 42)
+		forge.advance_test_clock(60.0)  # seconds
+		```
+
+	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+		```rust
+		let forge = forgelib::Forge::init_memory_for_testing(config, SystemTime::UNIX_EPOCH, 42).await?;
+		forge.advance_test_clock(Duration::from_secs(60))?;
+		```
+
+	</TabItem>
+	<TabItem label="Go" icon="seti:go">
+
+		```go
+		clock := forge.NewManualClock(time.Unix(0, 0))
+		client, err := forge.NewMemoryForTesting(config, forge.TestOptions{
+		    ManualClock: clock,
+		    Random: forge.NewSeededReader(42),
+		})
+		if err != nil { return err }
+		if err := client.AdvanceTestClock(time.Minute); err != nil { return err }
+		```
+
+	</TabItem>
+</Tabs>
+
+Rust's `testing::TestDatabase::new()` creates and later drops one isolated PostgreSQL database using the maintenance URL in `TEST_DATABASE_URL`; integration tests never reuse an application database. The repository's Node, Python, and Go conformance runners follow the same per-run isolation model. The CI integration job sets a sentinel that turns a missing database URL into failure rather than a skipped pass.
+
 ## Methods by primitive
 
 ### Key/value
@@ -66,15 +114,24 @@ so app payloads stay typed without a separate overlay.
 
 ### Queue
 
-| Operation | Rust | Node | Python |
-| --- | --- | --- | --- |
-| Enqueue | `queue().enqueue` | `queueEnqueue` | `queue_enqueue` |
-| Lease a job | `queue().dequeue` | `queueDequeue` | `queue_dequeue` |
-| Ack | `queue().ack` | `queueAck` | `queue_ack` |
-| Nack | `queue().nack` | `queueNack` | `queue_nack` |
-| Extend the lease | `queue().heartbeat` | `queueHeartbeat` | `queue_heartbeat` |
-| Depth | `queue().depth` | `queueDepth` | `queue_depth` |
-| Managed worker | `worker(name)` | `worker(name, handler)` | `worker(name, handler)` |
+| Operation | Rust | Node | Python | Go |
+| --- | --- | --- | --- | --- |
+| Enqueue | `queue().enqueue` | `queueEnqueue` | `queue_enqueue` | `Enqueue` |
+| Batch enqueue | `queue().enqueue_batch` | `queueEnqueueBatch` | `queue_enqueue_batch` | `EnqueueBatch` |
+| Lease a job | `queue().dequeue` | `queueDequeue` | `queue_dequeue` | `Dequeue` |
+| Batch lease | `queue().dequeue_batch` | `queueDequeueBatch` | `queue_dequeue_batch` | `DequeueBatch` |
+| Ack | `queue().ack` | `queueAck` | `queue_ack` | `Ack` |
+| Nack | `queue().nack` | `queueNack` | `queue_nack` | `Nack` |
+| Extend the lease | `queue().heartbeat` | `queueHeartbeat` | `queue_heartbeat` | `Heartbeat` |
+| Depth and oldest age | `queue().depth` | `queueDepth` | `queue_depth` | `Depth` |
+| Pause / resume | `queue().pause`, `resume` | `queuePause`, `queueResume` | `queue_pause`, `queue_resume` | `PauseQueue`, `ResumeQueue` |
+| Throughput stats | `queue().stats` | `queueStats` | `queue_stats` | `QueueStats` |
+| Inspect dead letters | `queue().dead_letters` | `queueDeadLetters` | `queue_dead_letters` | `DeadLetters` |
+| Redrive | `queue().redrive` | `queueRedrive` | `queue_redrive` | `Redrive` |
+| Purge dry-run / confirmed | `queue().purge_dead_letters_*` | `queuePurgeDeadLetters*` | `queue_purge_dead_letters*` | `PurgeDeadLetters*` |
+| Managed worker | `worker(name)` | `worker(name, handler)` | `worker(name, handler)` | `RunWorker` |
+| Outbox relay pass | `run_outbox_once` | `runOutboxOnce` | `run_outbox_once` | `RunOutboxOnce` |
+| Continuous outbox relay | `run_outbox_relay_until` | `runOutboxRelay` | `run_outbox_relay` | `RunOutboxRelay` |
 
 ### Pub/sub
 
@@ -142,9 +199,24 @@ so app payloads stay typed without a separate overlay.
 
 | Operation | Rust | Node | Python |
 | --- | --- | --- | --- |
-| Backend report | `backend_report` | `backendReport` | `backend_report` |
+| Backend capabilities | `backend_capabilities` | `backendCapabilities` | `backend_capabilities` |
+| Liveness | `is_live` | `isLive` | `is_live` |
+| Readiness probe | `probe` | `probe` | `probe` |
+| Metrics snapshot | `metrics_snapshot` | `metricsSnapshot` | `metrics_snapshot` |
+| Prometheus text | `render_prometheus` | `renderPrometheus` | `render_prometheus` |
 | Scheduler loop | `run_scheduler` | (interval) | (interval) |
 | Maintenance sweep | `maintain` | `maintain` | `maintain` |
+
+### Stateless interoperability helpers
+
+These functions need no initialized client and add no transport or deployment behavior. See [Integrations](/integrations/) for their bounded profile and recipes.
+
+| Operation | Rust | Node | Python | Go |
+| --- | --- | --- | --- | --- |
+| Encode CloudEvents 1.0 structured JSON | `CloudEvent::encode`, `encode_cloud_event` | `encodeCloudEvent` | `encode_cloud_event` | `EncodeCloudEvent` |
+| Decode CloudEvents 1.0 structured JSON | `CloudEvent::decode`, `decode_cloud_event` | `decodeCloudEvent` | `decode_cloud_event` | `DecodeCloudEvent` |
+| Import explicit environment aliases | `import_env_config` | `importEnvConfig` | `import_env_config` | `ImportEnvConfig` |
+| Export canonical environment names | `export_env_config` | `exportEnvConfig` | `export_env_config` | `ExportEnvConfig` |
 
 ## Native JSON handles
 
@@ -211,8 +283,12 @@ camelCase and times end in `Ms`.
 - **Job** (queue): `id`, `receipt`, `payload`, `attempt`, `maxAttempts`, plus the queue and lease deadline.
 - **QueueDepth**: `visible`, `inFlight`, `delayed`.
 - **BlobInfo** (head): `key`, `size`, `contentType`, `etag`, `lastModified`, `metadata`.
+- **BlobSummary** (list): `key`, `size`, opaque `etag`, `lastModified`; use head for content type and user metadata.
+- **ProxyPresign**: `url`, `method`, `key`, `expiresEpoch`, `maxBytes`, `signature`, `requiredHeaders`.
+- **NativePresign**: `url`, `method`, `expiresEpoch`, `requiredHeaders`, `constraints`; native PUT has no portable size ceiling.
 - **Session**: `userId`, `createdAt`, `expiresAt`.
-- **ApiKey** (on create): `id`, `secret` (shown once), `label`, `createdAt`.
+- **ApiKey** (on create): `id`, `secret` (shown once), `label`, `createdAt`, optional `expiresAt`, `scopes`, `metadata`.
+- **TokenConsumption**: `userId`, bounded opaque `payload`; returned atomically once.
 - **BackendInfo**: `primitive`, `provider`, `durable`, `caveats`.
 
 ## Errors
@@ -230,9 +306,7 @@ might succeed.
 | `Invalid` | no | A bad argument or malformed input. |
 | `Backend` | sometimes | Anything else, carrying its own retryable flag. |
 
-In Rust these are variants of `ForgeError` with an `is_retryable()` method. Node
-throws an `Error`. Python raises typed exceptions that subclass `forgelib.ForgeError`
-(`NotFound`, `Invalid`, `Limit`, `Precondition`, `Unavailable`, `Config`, `Backend`).
+In Rust these are variants of `ForgeError` with `code()`, `is_retryable()`, `operation()`, `backend_id()`, and a retained source chain. Node throws a structured `ForgeError` with `code`, `retryable`, `operation`, `backend`, `safeMessage`, and the normal `message`. Python raises typed subclasses of `forgelib.ForgeError` with the same fields. Go returns `*forge.Error` with the same stable metadata and an unwrapped local cause.
 
 <Aside>
 	Error messages are written so you can show or log them safely. The underlying
@@ -258,10 +332,7 @@ Oversized input is rejected with a `Limit` error rather than truncated.
 
 ## Custom backends
 
-Forge ships memory and Postgres for every primitive, plus filesystem for blob. If
-you need something else, like Redis or S3, implement that primitive's trait and
-inject it with the Rust builder. Every other primitive stays on its configured
-backend.
+Forge ships memory and PostgreSQL for every primitive, plus filesystem and S3-compatible storage for blob bytes. Rust may inject a custom primitive trait at compile time as an advanced extension. Other languages intentionally have no plugin loader or arbitrary backend injection.
 
 ```rust
 let forge = forgelib::Forge::builder()
@@ -282,5 +353,5 @@ npx skills add isala404/forge
 
 ## More
 
-- [Example apps](https://github.com/isala404/forge/tree/main/examples): a todo app, a URL shortener, and a chat app, each on all three bindings.
+- [Examples](https://github.com/isala404/forge/tree/main/examples): one canonical application example per language, kept small and run in CI.
 - [Source and issues](https://github.com/isala404/forge) on GitHub.

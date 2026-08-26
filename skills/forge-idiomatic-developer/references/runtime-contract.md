@@ -8,7 +8,7 @@ Read this reference for configuration, deployment, shared primitive behavior, er
 
 ```toml
 [postgres]
-# A non-empty URL wins. Otherwise embedded mode runs local Postgres 17 and persists
+# A non-empty URL wins. Otherwise embedded mode runs local PostgreSQL 18 and persists
 # its data in .forge/pg.
 url = "${DATABASE_URL:-}"
 embedded = true

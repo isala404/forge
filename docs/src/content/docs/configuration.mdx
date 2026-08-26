@@ -1,199 +1,129 @@
 ---
 title: Configuration
-description: Every forge.toml setting, its default, and what it changes. One file configures the whole runtime.
+description: One explicit runtime profile, one PostgreSQL-centered production model, and one database-free test model.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-`forge.toml` at your project root is the single source of configuration. `init()`
-reads it, builds the runtime, and migrates the system database. Anything you leave
-out keeps a production-safe default, so a real file can be as short as a connection
-string.
+`forge.toml` uses the same runtime-profile keys and naming in Rust, JavaScript, Python, and Go. `init()` reads `./forge.toml`; `initFrom`/`init_from`/`InitFrom` reads another path; `initFromString`/`init_from_string`/`init_from_str`/`InitFromString` parses TOML already held in memory. Unknown keys and missing environment variables fail before Forge makes network calls.
+
+## PostgreSQL profile
+
+PostgreSQL is the default and normal production profile. It owns Forge's durable metadata, coordination, leases, schedules, authentication records, configuration, shared rate limits, and—unless another blob byte store is selected—blob bytes.
 
 ```toml title="forge.toml"
+[forge]
+mode = "postgres"
+environment = "production"
+namespace = "myapp"
+
 [postgres]
-# The database Forge owns. Required.
-url = "${DATABASE_URL:-postgres://localhost/myapp}"
+url = "${DATABASE_URL}"
 max_connections = 10
 acquire_timeout_secs = 30
+auto_migrate = false
+migration_lock_timeout_secs = 30
 statement_timeout_ms = 15000
 lock_timeout_ms = 5000
 idle_in_transaction_timeout_ms = 15000
 
-[forge]
-# Prefix every key, name, and channel so several apps can share one database.
-namespace = ""
-
-[backends]
-# "postgres" (durable, shared) or "memory" (in-process, for tests).
-default = "${FORGE_BACKEND:-postgres}"
-
 [queue]
-dedup_window_secs = 300      # 5 minutes
-retention_secs = 604800      # 7 days
+dedup_window_secs = 300
+payload_retention_secs = 86400
+terminal_retention_secs = 604800
+succeeded_retention_secs = 604800
+dead_retention_secs = 2592000
+cancelled_retention_secs = 604800
 
 [ratelimit]
 fail_open = true
 
 [blob]
-backend = "postgres"         # "postgres", "fs", or "memory"
-# Include only when using presigned URLs. Missing/empty secrets fail loudly.
+backend = "postgres"
 signing_secret = "${FORGE_BLOB_SIGNING_SECRET}"
 base_url = "/api/files"
 ```
 
-An unknown key is an error rather than a silent typo, so a misspelled setting fails
-loudly at startup.
+Queue payload bytes and terminal status have separate retention clocks. Payload retention defaults to one day. Succeeded, dead, and cancelled status each default to seven days and can be tuned independently; `terminal_retention_secs` sets all three before an individual override.
 
-## Environment variables
+Normal initialization requires a reachable PostgreSQL service, usable credentials, and a compatible Forge schema. Development and test default `auto_migrate` to true; production defaults it to false. With automatic migration disabled, initialization performs a read-only schema validation and tells the operator to run the migration API when the schema is pending, locked, incompatible, or drifted. Applications use whichever primitives they need; there is no feature-enable matrix and no configuration-driven plugin loader.
 
-Any string value can read the environment. `${VAR}` substitutes the variable, and
-`${VAR:-default}` falls back to `default` when it isn't set. This is how one file
-serves both tests and production: point the backend at `memory` from the environment
-in tests and `postgres` in production, with the same `forge.toml`.
+Forge requires PostgreSQL 18. The system pool defaults to ten connections and requires at least two while startup migrations are enabled; validation-only initialization can use one. `acquire_timeout_secs` and `migration_lock_timeout_secs` are seconds. The three server-side timeouts are milliseconds and accept `0` to use PostgreSQL's unlimited default.
 
-```toml
-[postgres]
-url = "${DATABASE_URL:-postgres://localhost/myapp}"
+### Embedded PostgreSQL
 
-[backends]
-default = "${FORGE_BACKEND:-postgres}"   # FORGE_BACKEND=memory in tests
-```
-
-A `${VAR}` with no value and no default is a hard error, so a missing secret stops
-startup instead of quietly resolving to an empty string. Interpolation only runs on
-string values, so numbers and booleans (the timeouts, `fail_open`) are written as
-plain literals.
-
-## Postgres
-
-The system database is the one Forge fully owns. It creates its `forge_*` tables
-there and runs its migrations at startup. Give it its own database or schema and
-keep your product tables elsewhere.
-
-Forge supports Postgres 17 and newer.
-
-| Key | Default | What it does |
-| --- | --- | --- |
-| `url` | required* | Connection string for the database Forge owns. (*Or set `embedded`.) |
-| `embedded` | `false` | Provision an embedded Postgres when no `url` is set. See below. |
-| `embedded_dir` | `.forge/pg` | Where the embedded server keeps its data, relative to the working directory. |
-| `max_connections` | `10` | Pool size. At least 2, since a migration holds one connection while another runs the SQL. |
-| `acquire_timeout_secs` | `30` | Seconds to wait for a free connection before erroring. |
-| `statement_timeout_ms` | `15000` | Server-side statement timeout for runtime queries. `0` disables it. |
-| `lock_timeout_ms` | `5000` | Server-side lock timeout. `0` disables it. |
-| `idle_in_transaction_timeout_ms` | `15000` | Server-side idle-in-transaction timeout. `0` disables it. |
-
-<Aside>
-	Watch the units. The three server-side timeouts are in milliseconds, while
-	`acquire_timeout_secs` and the queue windows are in seconds. Setting a millisecond
-	timeout to `0` removes that ceiling.
-</Aside>
-
-### Embedded Postgres
-
-For local development without installing Postgres, let Forge run one for you:
-
-```toml title="forge.toml"
-[postgres]
-embedded = true
-```
-
-`init()` downloads the Postgres 17 binaries once per machine (to
-`~/.theseus/postgresql`), boots a server on a free port, and connects to it. Data
-persists in `embedded_dir` across restarts; the server stops when the process's
-last Forge handle is dropped.
-
-A non-empty `url` wins over `embedded`, so one file covers both modes:
-
-```toml title="forge.toml"
-[postgres]
-url = "${DATABASE_URL:-}"   # deploys against $DATABASE_URL when set...
-embedded = true             # ...and runs embedded when it isn't
-```
-
-If your app keeps its own tables on the same database, build your pool from
-`forge.postgresUrl()` / `forge.postgres_url()` (Rust also has `forge.pool()`) —
-that is the only way to reach an embedded server's runtime-minted connection
-string.
-
-The Node and Python packages ship with this built in. In Rust it's behind the
-`embedded` cargo feature:
-
-```toml title="Cargo.toml"
-forgelib = { version = "1", features = ["embedded"] }
-```
-
-<Aside type="caution">
-	Embedded mode is for development and single-machine apps: one process owns the
-	server, and anything needing the first boot's download needs network access. For
-	production replicas, point `url` at a managed Postgres.
-</Aside>
-
-## Backends
-
-Every non-blob primitive runs on one of two backends. `postgres` is durable and
-shared across processes and replicas. `memory` keeps state in this process only, so
-it's fast and needs no database, but it's lost on restart and not shared. Memory is
-meant for tests; the two pass the same conformance suite.
-
-Set a `default` for everything, then override individual primitives as needed.
-
-| Key | Default | What it does |
-| --- | --- | --- |
-| `default` | `"postgres"` | Backend for any primitive without its own entry. |
-| `kv` `queue` `auth` `config` `ratelimit` `schedule` `pubsub` | inherits `default` | Override one primitive. `"postgres"` or `"memory"`. |
-| `blob` | inherits `default` | `"postgres"` or `"memory"` here. For the filesystem backend, set it under `[blob]`. |
-
-<Aside type="caution">
-	`pubsub` and `ratelimit` lean on cross-process delivery, so running them on
-	`memory` outside of tests logs a warning. In a multi-replica deployment they
-	should be on `postgres`.
-</Aside>
-
-## Namespaces
-
-`namespace` prefixes every key, queue name, topic, and stored row so multiple apps
-can share one database without colliding. It's empty by default, which means no
-prefixing. The only rule is that it can't contain a colon, which Forge reserves as
-its separator.
+Local Rust, Node, and Python development can run a real embedded PostgreSQL server:
 
 ```toml
 [forge]
-namespace = "${APP_NAME:-}"
+mode = "postgres"
+environment = "development"
+
+[postgres]
+url = "${DATABASE_URL:-}"
+embedded = true
+embedded_dir = ".forge/pg"
 ```
 
-## Blob storage
+A non-empty URL wins; otherwise Forge starts the embedded server. The Rust package requires the `embedded` feature. Go intentionally uses the system PostgreSQL profile or explicit memory profile and does not download an embedded server. Embedded state is durable on that machine but is not a multi-replica production deployment.
 
-Blob bytes can live in Postgres, on the local filesystem, or in memory. The metadata
-always stays in Postgres regardless.
+## Database-free memory profile
 
-| Key | Default | What it does |
+Memory is one complete runtime variant, not eight independent backend switches:
+
+```toml
+[forge]
+mode = "memory"
+environment = "test"
+namespace = "unit-test"
+```
+
+Memory initialization creates no pool, starts no embedded service, runs no migration, and requires no PostgreSQL URL. Every primitive keeps the same public API, so tests do not branch around Forge. A declared production environment rejects memory unless `allow_memory_in_production = true` is written explicitly.
+
+| Property | PostgreSQL | Memory |
 | --- | --- | --- |
-| `backend` | `"postgres"` | Where object bytes go: `"postgres"`, `"fs"`, or `"memory"`. |
-| `fs_root` | none | Directory for bytes when `backend = "fs"`. Required for that backend. |
-| `signing_secret` | none | HMAC secret that turns on presigned URLs. CRUD works without it. |
-| `base_url` | `"/api/files"` | URL prefix your presigned links point at, where your app serves them. |
+| Restart persistence | Durable | Lost on process exit |
+| Sharing | Processes and replicas | One process |
+| Pub/sub | Cross-process LISTEN/NOTIFY, connected subscribers only | In-process subscribers only |
+| Rate-limit scope | Shared | Process-local |
+| PostgreSQL accessor | Pool/credential-bearing URL | `NOT_CONFIGURED` |
 
-The filesystem backend keeps large files out of the database, but a write is no
-longer atomic with your app's SQL and multiple replicas need a shared mount.
+`backendCapabilities()` / `backend_capabilities()` / `BackendCapabilities()` provides one provider line per primitive without performing a health check. Use `probe()` / `Probe()` for bounded live readiness checks.
 
-## Queue and rate limit
+<Aside type="caution">
+Memory mode is not a production cache tier and does not silently fall back from PostgreSQL. A PostgreSQL outage makes initialization fail.
+</Aside>
 
-A couple of primitives have their own knobs.
+## Blob bytes
 
-| Key | Default | What it does |
-| --- | --- | --- |
-| `queue.dedup_window_secs` | `300` | How long a repeated `dedup_id` is treated as the same job. |
-| `queue.retention_secs` | `604800` | How long finished jobs are kept before the maintenance sweep removes them. |
-| `ratelimit.fail_open` | `true` | Whether a limiter backend outage allows the request (and warns) instead of failing it. Set `false` for sensitive buckets. |
+`blob.backend = "postgres"` keeps bytes and metadata in PostgreSQL, which preserves the default “Postgres is enough” deployment. `blob.backend = "fs"` stores bytes below `blob.fs_root` while PostgreSQL retains Forge's durable metadata; use it only with a shared mount when multiple replicas must see the same objects. The explicit memory profile selects memory blob storage automatically. S3-compatible storage is the intentional production backend for large bytes, but it does not replace Forge's system PostgreSQL responsibilities.
 
-## A separate database per feature
+```toml title="forge.toml · S3-compatible blob bytes"
+[blob]
+backend = "s3"
+bucket = "my-app-production"
+region = "us-east-1"
+prefix = "forge"
+path_style = false
+connect_timeout_secs = 3
+request_timeout_secs = 30
+max_retries = 3
+signing_secret = "${FORGE_BLOB_SIGNING_SECRET}"
 
-A primitive can run on its own Postgres database, isolated from the rest, for
-bulkheading or because one piece (say the queue) needs different capacity. Add a
-`[databases.<feature>]` table where `<feature>` is one of the eight primitive names.
-Only `url` is required; the pool settings inherit the top-level `[postgres]` values.
+# Omit endpoint for AWS S3. Set it, and usually path_style = true, for MinIO/R2/etc.
+# endpoint = "https://object-storage.example.com"
+
+# Omit static credentials to use the standard AWS credential chain.
+# access_key = "${S3_ACCESS_KEY}"
+# secret_key = "${S3_SECRET_KEY}"
+# session_token = "${S3_SESSION_TOKEN}"
+```
+
+Initialization performs `HeadBucket` followed by create-and-abort multipart operations. This verifies bucket access and required permissions without leaving a permanent object. Access keys, secret keys, session tokens, and presigned URL query strings are credentials and must remain out of logs and traces.
+
+## Measured database isolation
+
+A hot primitive can use a separate PostgreSQL target without changing its schema version or public behavior:
 
 ```toml
 [databases.queue]
@@ -201,5 +131,47 @@ url = "${QUEUE_DATABASE_URL}"
 max_connections = 20
 ```
 
-That feature gets its own pool, and Forge migrates each distinct database at startup
-like it does the system one. Your application code doesn't change.
+Every distinct target receives the same coordinated Forge migration history. This is a measured pool/server bulkhead, not an independently versioned primitive database.
+
+## Namespaces and environment interpolation
+
+`forge.namespace` scopes all keys, queues, rows, topics, schedules, caches, notifications, signing operations, maintenance work, and authentication records. It is case-sensitive, immutable after `init`, not normalized, and may contain at most 128 bytes using ASCII letters, digits, `.`, `_`, and `-`. Empty means the unnamespaced profile and must not share a backend with an application that expects isolation.
+
+Namespacing prevents accidental collisions; it does not authenticate a caller or authorize access. Applications make authorization decisions before calling Forge. The `scopeKvKey` / `scope_kv_key` / `ScopeKVKey` family composes bounded application, tenant, user, and resource names separately for KV keys, blob keys, rate-limit subjects, and topics without installing a hidden universal tenant context.
+
+### Application scopes
+
+The v1 helpers require all four components in one call. They validate 1–255 UTF-8 bytes, reject control characters, and check the selected primitive's complete backend-safe limit before any Forge backend call. Length-prefixed UTF-8 components make delimiters unambiguous, and `parseScopedName` / `parse_scoped_name` / `ParseScopedName` recovers the four components.
+
+```rust
+let key = forgelib::scope_kv_key("billing", "tenant-7", "user-42", "invoice:9")?;
+let parsed = forgelib::parse_scoped_name(&key)?;
+```
+
+```ts
+import { scopeKvKey, parseScopedName } from "forgelib";
+const key = scopeKvKey("billing", "tenant-7", "user-42", "invoice:9");
+const parsed = parseScopedName(key);
+```
+
+```python
+key = forgelib.scope_kv_key("billing", "tenant-7", "user-42", "invoice:9")
+parsed = forgelib.parse_scoped_name(key)
+```
+
+```go
+key, err := forge.ScopeKVKey("billing", "tenant-7", "user-42", "invoice:9")
+parsed, err := forge.ParseScopedName(key)
+```
+
+These helpers produce names, not permissions. Authorize `tenant-7`, `user-42`, and the invoice in application code before calling Forge; parsing a key proves only that it is well formed. Queue names, authentication identities, config keys, schedules, and other primitives remain independently named because one hidden tenant prefix would create incorrect authorization assumptions.
+
+String values accept `${VAR}` and `${VAR:-default}`; a missing variable without a default is an error, and interpolation cannot inject TOML structure. Environment interpolation and `FORGE_CFG_*` config overrides are captured deterministically when the process initializes. Changing the host environment afterward does not mutate a running Forge instance; write dynamic values through the config API instead.
+
+Never log `postgresUrl()`/`postgres_url()`/`PostgresURL()`: it returns a credential-bearing DSN. In memory mode the same accessor returns `NOT_CONFIGURED`.
+
+## Lifecycle
+
+Applications own process signals. On shutdown, stop accepting requests and call `close` with a deadline. Close is idempotent, stops new work, wakes subscriptions, closes dedicated listeners and pools, and stops an embedded server. Native Rust and Go workers stop dequeuing and drain handlers within their configured grace; after grace they cancel or abort supervisors and release or expire leases. JavaScript and Python userland workers cancel active handlers and release leases immediately; JavaScript handlers can inspect `job.signal`, while Python handlers receive task cancellation and can inspect `job.cancelled`. Forge never installs SIGINT or SIGTERM handlers.
+
+Rust's trait-injection builder remains an advanced compile-time extension for custom backends. It is not exposed as portable configuration, dynamic discovery, or a plugin loader; new first-party backends require evidence and a complete conformance story.

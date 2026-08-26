@@ -1,0 +1,141 @@
+---
+title: Event delivery
+description: Publish bounded invalidation hints from Forge and deliver them through application-owned transports.
+---
+
+import { Aside, TabItem, Tabs } from '@astrojs/starlight/components';
+
+Forge is a backend library. It can encode a bounded invalidation hint and publish it from the server, but it does not own an application's HTTP routes, WebSockets, server-sent events, browser cache, or client-side refetching.
+
+The usual flow is simple. The backend commits authoritative state, publishes a hint, and an application-owned transport forwards that hint to connected clients. A client that cares about the hint fetches authoritative state again. Loss, duplication, delay, and reordering must not change correctness.
+
+## Invalidation event v1
+
+The canonical schema is [`contract/invalidation-v1.schema.json`](https://github.com/isala404/forge/blob/main/contract/invalidation-v1.schema.json). A version-1 event has application-defined `tags`, application-defined `query_keys` fragments, an optional opaque `revision`, and no authoritative state payload.
+
+```json
+{
+  "schema_version": 1,
+  "tags": ["links/user-42"],
+  "query_keys": [["links", { "owner": "user-42" }]],
+  "revision": "184467"
+}
+```
+
+The encoded event is at most 4096 bytes. It has at most 32 unique tags, 32 query-key fragments, and 64 total targets. Tags are at most 128 UTF-8 bytes. A fragment has 1 to 8 parts, at most three nested JSON levels, 16 items per container, and 32 total nodes. A revision is at most 256 UTF-8 bytes. Version-1 decoders enforce the total byte limit and ignore unknown additive fields. They reject unknown schema versions.
+
+Use tags for coarse invalidation. A tag such as `invoices/account-42` is an application identifier, not a cache patch instruction. A query-key fragment is also only an input to application code. Forge does not infer client queries from URLs, response payloads, or database records.
+
+<Aside type="caution">
+An invalidation event is not a change event. It carries no row, patch, deletion, authorization decision, or executable instruction. Re-authorize every read that follows it.
+</Aside>
+
+## Publish after durable commit
+
+Each server runtime exposes the same encoder. Publish the encoded hint only after the authoritative transaction commits. Forge pub/sub reaches connected subscribers at most once and has no replay cursor, so a reconnect begins with an authoritative read.
+
+<Tabs syncKey="lang">
+	<TabItem label="Node" icon="seti:javascript">
+
+```ts
+import { encodeInvalidationEvent } from "forgelib";
+
+await forge.pubsubPublish("account:42", encodeInvalidationEvent({
+  schema_version: 1,
+  tags: ["invoices/account-42"],
+  query_keys: [["invoices", { account: "42" }]],
+  revision: committedRevision,
+}));
+```
+
+	</TabItem>
+	<TabItem label="Python" icon="seti:python">
+
+```python
+from forgelib import encode_invalidation_event
+
+await forge.pubsub_publish("account:42", encode_invalidation_event({
+    "schema_version": 1,
+    "tags": ["invoices/account-42"],
+    "query_keys": [["invoices", {"account": "42"}]],
+    "revision": committed_revision,
+}))
+```
+
+	</TabItem>
+	<TabItem label="Rust" icon="seti:rust">
+
+```rust
+use forgelib::{Bytes, InvalidationEvent};
+use serde_json::json;
+
+let event = InvalidationEvent::new(
+    vec!["invoices/account-42".into()],
+    vec![vec![json!("invoices"), json!({ "account": "42" })]],
+    Some(committed_revision),
+)?;
+forge.pubsub().publish("account:42", Bytes::from(event.encode()?)).await?;
+```
+
+	</TabItem>
+	<TabItem label="Go" icon="seti:go">
+
+```go
+revision := committedRevision
+payload, err := forge.EncodeInvalidationEvent(forge.InvalidationEvent{
+    SchemaVersion: 1,
+    Tags: []string{"invoices/account-42"},
+    QueryKeys: [][]any{{"invoices", map[string]any{"account": "42"}}},
+    Revision: &revision,
+})
+if err != nil { return err }
+return client.Publish(ctx, "account:42", payload)
+```
+
+	</TabItem>
+</Tabs>
+
+## Connect an application transport
+
+Keep the transport route inside Hono, Axum, FastAPI, Django, Go `net/http`, or the application's existing framework. Before opening a subscription, authenticate the session, authorize the allowed topic, verify the request origin, and reserve one of a bounded number of connections for that principal. Do not accept an arbitrary Forge topic from a path or query parameter.
+
+The adapter should have a fixed topic allowlist, global and per-principal connection limits, heartbeats with write deadlines, and a bounded outbound buffer. Close slow consumers instead of accumulating messages. Release the Forge subscription and the connection slot on disconnect. Routing, cookies, CSRF protection, CORS, serialization, proxy buffering, idle timeouts, and deployment behavior remain application-owned.
+
+```ts
+// Hono SSE shape. authenticateAndAuthorize returns a server-selected topic.
+const subscription = await limits.open(c.req.raw, async () => {
+  checkOrigin(c.req.header("Origin"));
+  const principal = await authenticate(c.req.raw);
+  return authorizeInvalidationTopic(principal, c.req.param("resource"));
+});
+
+return streamSSE(c, async (stream) => {
+  const events = await forge.topic<unknown>(subscription.topic).subscribe();
+  stream.onAbort(() => { void events.return?.(); subscription.release(); });
+  for await (const raw of withHeartbeatAndTimeout(events, 15_000)) {
+    await writeWithDeadline(stream, { event: "forge-invalidation-v1", data: JSON.stringify(raw) });
+  }
+});
+```
+
+```python
+# FastAPI WebSocket shape. Accept only after every application check passes.
+check_origin(websocket.headers.get("origin"))
+principal = await authenticate(websocket)
+topic = authorize_invalidation_topic(principal, websocket.path_params["resource"])
+slot = connection_limits.reserve(principal.id)
+await websocket.accept()
+try:
+    async for raw in bounded_with_heartbeat(forge.topic(topic).subscribe(), max_buffer=32):
+        await asyncio.wait_for(websocket.send_json(raw), timeout=5)
+finally:
+    slot.release()
+```
+
+The same ownership applies to Axum WebSocket and Go HTTP/SSE routes. Extract the authenticated principal in middleware, map an allowed resource to a server-selected topic, reserve a slot, stream through a bounded channel, time out writes and heartbeats, and clean up on cancellation.
+
+## Client ownership
+
+Applications choose their frontend framework, transport client, cache, and refetch policy. This includes React, Vue, TanStack Query, native mobile clients, WebSocket reconnect behavior, SSE retry behavior, optimistic updates, offline persistence, and browser cache lifetime. Forge ships no client adapter for these choices.
+
+On initial connection and every reconnect, fetch authoritative state before trusting later hints. Map tags and `query_keys` fragments only inside application code. Keep the fan-out bounded, ignore unknown targets, and re-authorize each fetch. A client cache may collapse duplicate hints or compare opaque revisions, but it must remain correct if it receives no hint at all.
